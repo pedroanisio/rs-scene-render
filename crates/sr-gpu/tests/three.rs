@@ -216,3 +216,24 @@ fn visible_dome_renders_without_any_draws() {
     let bg = at(&px, 64, 64);
     assert!((bg[1] - 0.5).abs() < 0.02 && (bg[2] - 0.75).abs() < 0.02 && bg[3] == 1.0, "{bg:?}");
 }
+
+#[test]
+fn splats_beside_the_camera_are_culled() {
+    // just in front of the camera but far to the side: a tiny depth gives a footprint larger than the frame,
+    // which must not paint the frame (3DGS frustum culling with a guard band)
+    let Some(mut eng) = engine() else { return };
+    let sc0 = scene(Vec::new(), Vec::new());
+    let eye = sc0.cam.view.inverse().transform_point3(Vec3::ZERO);
+    let s = sr_3d::Splats {
+        pos: vec![[eye.x + 500.0, eye.y, eye.z + 20.0]],
+        scale: vec![[60.0, 60.0, 60.0]],
+        rot: vec![[0.0, 0.0, 0.0, 1.0]],
+        color: vec![[1.0, 1.0, 1.0, 0.9]],
+        basis: Mat4::IDENTITY,
+    };
+    let gpu = eng.upload_splats(&s);
+    let mut sc = sc0;
+    sc.splats.push(SplatDraw { gpu, model: Mat4::IDENTITY, opacity: 1.0 });
+    let px = eng.render_now(&sc, None);
+    assert_eq!(at(&px, 64, 64)[3], 0.0, "the off-frame splat must not cover the frame");
+}

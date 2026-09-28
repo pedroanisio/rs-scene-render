@@ -38,6 +38,11 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
     let v = fr.view * world;
     o.clip = vec4(0.0, 0.0, 2.0, 1.0);
     if (v.z <= fr.post.z) { return o; }
+    // frustum cull with a guard band, as 3D Gaussian Splatting does: a splat just in front of the camera
+    // but far to the side has a tiny depth, so its footprint would be huge and cover the whole frame
+    let c0 = fr.view_proj * world;
+    let ndc = c0.xy / c0.w;
+    if (abs(ndc.x) > 1.3 || abs(ndc.y) > 1.3) { return o; }
     // project the 3D covariance: Σ' = J W Σ Wᵀ Jᵀ
     let cov = mat3x3<f32>(
         vec3(sp.cov_a.x, sp.cov_a.y, sp.cov_a.z),
