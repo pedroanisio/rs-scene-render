@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Object stop-motion: a 12 fps replacement sequence on a 24 fps timeline, holding the last
+     drawn frame where the capture has gaps (frames 6..9 are missing on disk). -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="1" background="#000000"/>
+  <assets>
+    <imageSequence id="spin" src="{MEDIA}/spin_%04d.png" first="1" last="9" missingFrame="hold" fps="12" width="4" height="4"/>
+  </assets>
+  <composition>
+    <layer id="puppet" asset="spin" x="0" y="0" scaleX="160" scaleY="90"/>
+  </composition>
+</scene>

@@ -1,0 +1,526 @@
+{
+  "version": 1,
+  "about": "Reference-clip evidence: each case is a probe of one technique a reference clip depends on. The outcome is measured, never declared: tools/evidence.py renders the scene in --strict mode, runs the pixel checks and classifies the case. 'expect' records the last accepted outcome so a change in either direction fails the run.",
+  "cases": [
+    {
+      "id": "stopmotion-holds",
+      "reference": "Object stop-motion (PES-style replacement animation)",
+      "technique": "imageSequence at 12 fps on a 24 fps timeline, missingFrame=hold",
+      "scene": "scenes/stopmotion-holds.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 320,
+          "y": 180,
+          "rgb": "#280000",
+          "tol": 0.02,
+          "why": "frame 1 at t=0"
+        },
+        {
+          "type": "color",
+          "t": 0.0417,
+          "x": 320,
+          "y": 180,
+          "rgb": "#280000",
+          "tol": 0.02,
+          "why": "12 fps on twos: frame 1 holds for two 24 fps frames"
+        },
+        {
+          "type": "color",
+          "t": 0.0875,
+          "x": 320,
+          "y": 180,
+          "rgb": "#500000",
+          "tol": 0.02,
+          "why": "frame 2 from t=1/12"
+        },
+        {
+          "type": "color",
+          "t": 0.2542,
+          "x": 320,
+          "y": 180,
+          "rgb": "#A00000",
+          "tol": 0.02,
+          "why": "frame 4 from t=3/12"
+        },
+        {
+          "type": "color",
+          "t": 0.6667,
+          "x": 320,
+          "y": 180,
+          "rgb": "#C80000",
+          "tol": 0.02,
+          "why": "frames 6-9 are missing: frame 5, the last on disk, holds"
+        }
+      ]
+    },
+    {
+      "id": "splat-object",
+      "reference": "Captured real-world objects (photogrammetry / Gaussian splats)",
+      "technique": "mesh format=splat drawn by the splat rasteriser",
+      "scene": "scenes/splat-object.scene.xml",
+      "generate": {
+        "ring.splat": "splat_ring"
+      },
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#000000",
+          "tol": 0.03,
+          "min": 0.01,
+          "why": "the splats cover part of the frame"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.0,
+            1.0
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "the object turns"
+        }
+      ]
+    },
+    {
+      "id": "softbody-jelly",
+      "reference": "Squash-and-stretch motion graphics",
+      "technique": "softBody kind=jelly under gravity with frame bounds",
+      "scene": "scenes/softbody-jelly.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            270,
+            20,
+            100,
+            100
+          ],
+          "rgb": "#40C080",
+          "tol": 0.08,
+          "min": 0.8,
+          "why": "the jelly starts where it is authored"
+        },
+        {
+          "type": "coverage",
+          "t": 2.5,
+          "region": [
+            200,
+            240,
+            240,
+            120
+          ],
+          "rgb": "#40C080",
+          "tol": 0.08,
+          "min": 0.1,
+          "why": "it has fallen to the floor"
+        },
+        {
+          "type": "coverage",
+          "t": 2.5,
+          "region": [
+            270,
+            20,
+            100,
+            100
+          ],
+          "rgb": "#40C080",
+          "tol": 0.08,
+          "max": 0.05,
+          "why": "and left its start position"
+        }
+      ]
+    },
+    {
+      "id": "rigid-particles-fields",
+      "reference": "Physics-driven motion graphics (bodies, fire, sparks, fields)",
+      "technique": "rigidBody, particleEmitter presets and a vortex forceField",
+      "scene": "scenes/rigid-particles-fields.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            100,
+            20,
+            30,
+            30
+          ],
+          "rgb": "#E06090",
+          "tol": 0.08,
+          "min": 0.8,
+          "why": "the body starts where it is authored"
+        },
+        {
+          "type": "coverage",
+          "t": 2.0,
+          "region": [
+            100,
+            20,
+            30,
+            30
+          ],
+          "rgb": "#E06090",
+          "tol": 0.08,
+          "max": 0.1,
+          "why": "and has fallen"
+        },
+        {
+          "type": "coverage",
+          "t": 1.5,
+          "region": [
+            60,
+            200,
+            200,
+            160
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.05,
+          "min": 0.02,
+          "why": "the fire emits"
+        },
+        {
+          "type": "changes",
+          "t": [
+            1.0,
+            1.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "the simulation moves"
+        }
+      ]
+    },
+    {
+      "id": "cinematic-pbr",
+      "reference": "Cinematic product / CG shots",
+      "technique": "PBR metals, shadowed spot light, a glass pane in front of the set (z < 0) over a 2D band, depth of field",
+      "scene": "scenes/cinematic-pbr.scene.xml",
+      "expect": "wrong",
+      "bench": true,
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            160,
+            160,
+            320,
+            120
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.05,
+          "min": 0.3,
+          "why": "the 3D set draws"
+        },
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "rgb": "#FFFFFF",
+          "tol": 0.12,
+          "min": 0.0005,
+          "why": "the chrome spheres catch specular highlights"
+        },
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            200,
+            20,
+            240,
+            100
+          ],
+          "rgb": "#F0B030",
+          "tol": 0.03,
+          "max": 0.5,
+          "why": "the glass pane in front tints the band behind it"
+        },
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            200,
+            112,
+            240,
+            30
+          ],
+          "rgb": "#F0B030",
+          "tol": 0.05,
+          "max": 0.6,
+          "why": "the back row of spheres shows through the glass over the band"
+        },
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            0,
+            0,
+            120,
+            140
+          ],
+          "rgb": "#F0B030",
+          "tol": 0.03,
+          "min": 0.95,
+          "why": "the band is untouched outside the glass"
+        }
+      ],
+      "known": "object3D depth z is also used as 2D paint order (sr-eval program.rs sorts siblings by z truncated to i32); the glass at z=-60 moves the whole shared 3D pass under the 2D band. The Python engine excludes object3D and camera from paint order."
+    },
+    {
+      "id": "object3d-depth-order",
+      "reference": "Any clip mixing 2D layers with 3D objects that come towards camera",
+      "technique": "object3D at z < 0 (in front of the 2D plane) after a full-frame 2D layer",
+      "scene": "scenes/object3d-depth-order.scene.xml",
+      "expect": "wrong",
+      "known": "Same defect as cinematic-pbr: object3D z (a depth in scene units) is sorted as 2D paint order, so z < 0 paints the 3D pass before the 2D layer.",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 100,
+          "y": 90,
+          "rgb": "#00FF00",
+          "tol": 0.1,
+          "why": "a sphere at z=0 draws over the 2D layer painted before it"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 220,
+          "y": 90,
+          "rgb": "#00FF00",
+          "tol": 0.1,
+          "why": "a sphere at z=-100 (nearer the camera) also draws over it"
+        }
+      ]
+    },
+    {
+      "id": "gltf-character",
+      "reference": "Character animation (Animist-style imported rigs)",
+      "technique": "glTF import with a named animationClip",
+      "scene": "scenes/gltf-character.scene.xml",
+      "generate": {
+        "walker.glb": "gltf_walker"
+      },
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.03,
+          "min": 0.005,
+          "why": "the model draws"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.0,
+            1.0
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "the clip moves it"
+        }
+      ]
+    },
+    {
+      "id": "shadertoy-look",
+      "reference": "Shader-driven looks (Shadertoy ports)",
+      "technique": "effect type=shader with a mainImage() Shadertoy source",
+      "scene": "scenes/shadertoy-look.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "not_color",
+          "t": 0.5,
+          "x": 320,
+          "y": 180,
+          "rgb": "#FF0000",
+          "tol": 0.05,
+          "why": "the shader changes the input"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.5,
+            1.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.02,
+          "why": "iTime animates it"
+        }
+      ]
+    },
+    {
+      "id": "animated-z",
+      "reference": "Layered 2D animation that re-stacks elements over time",
+      "technique": "animate property=z on overlapping layers",
+      "scene": "scenes/animated-z.scene.xml",
+      "expect": "wrong",
+      "known": "Paint order is fixed when the frame graph is compiled; animated z is evaluated but does not re-sort.",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.5,
+          "x": 300,
+          "y": 180,
+          "rgb": "#0000FF",
+          "tol": 0.02,
+          "why": "before t=1 blue (z=5) is over red (z=0)"
+        },
+        {
+          "type": "color",
+          "t": 1.5,
+          "x": 300,
+          "y": 180,
+          "rgb": "#FF0000",
+          "tol": 0.02,
+          "why": "after t=1 red (z=10) is over blue"
+        }
+      ]
+    },
+    {
+      "id": "broken-shader",
+      "reference": "Any clip depending on a custom shader",
+      "technique": "effect type=shader whose source fails to compile",
+      "scene": "scenes/broken-shader.scene.xml",
+      "expect": "degraded",
+      "known": "The effect passes the input through and the renderer reports it.",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.5,
+          "x": 320,
+          "y": 180,
+          "rgb": "#FF0000",
+          "tol": 0.02,
+          "why": "the input passes through"
+        }
+      ]
+    },
+    {
+      "id": "ocio-pipeline",
+      "reference": "Studio-graded footage (OCIO / ACES pipelines)",
+      "technique": "colorManagement ocioConfig",
+      "scene": "scenes/ocio-pipeline.scene.xml",
+      "generate": {
+        "config.ocio": "ocio_stub"
+      },
+      "expect": "degraded",
+      "known": "No OpenColorIO library is linked; the built-in looks and tone mappers apply and the renderer reports it.",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.5,
+          "x": 320,
+          "y": 180,
+          "rgb": "#808080",
+          "tol": 0.02,
+          "why": "the built-in pipeline still renders"
+        }
+      ]
+    },
+    {
+      "id": "fluid",
+      "reference": "Liquid / smoke simulation",
+      "technique": "grid or particle fluid solver",
+      "scene": null,
+      "expect": "gap",
+      "known": "sr-sim has rigid bodies, soft bodies, particles and force fields; there is no fluid solver."
+    },
+    {
+      "id": "flocking",
+      "reference": "Swarms and crowds",
+      "technique": "boids / agent steering",
+      "scene": null,
+      "expect": "gap",
+      "known": "Particles respond to fields only; no neighbour-aware steering."
+    },
+    {
+      "id": "erosion-slime",
+      "reference": "Generative growth (erosion, slime-mould trails)",
+      "technique": "agent + diffusion-decay trail maps",
+      "scene": null,
+      "expect": "gap",
+      "known": "No feedback-buffer simulation primitive."
+    },
+    {
+      "id": "clay-3d",
+      "reference": "3D claymation look",
+      "technique": "SDF sculpting, fingerprint displacement, subsurface",
+      "scene": null,
+      "expect": "gap",
+      "known": "Meshes are imported or primitive; no sculpting, displacement maps or subsurface scattering."
+    },
+    {
+      "id": "path-tracing",
+      "reference": "Offline-quality global illumination",
+      "technique": "path-traced lighting",
+      "scene": null,
+      "expect": "gap",
+      "known": "The 3D renderer is a rasteriser with shadow maps; no path tracer."
+    },
+    {
+      "id": "fbx-animation",
+      "reference": "Rigs delivered as FBX",
+      "technique": "FBX animation stacks",
+      "scene": null,
+      "expect": "gap",
+      "known": "FBX geometry imports; animation stacks are not imported. Convert to glTF."
+    },
+    {
+      "id": "usd-binary",
+      "reference": "USD pipeline assets",
+      "technique": "binary USD (usdc / usdz with crate files)",
+      "scene": null,
+      "expect": "gap",
+      "known": "Only text USDA (and usdz holding USDA) is read."
+    }
+  ]
+}

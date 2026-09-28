@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Reordering by animated z: red starts under blue and must be on top from t = 1. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="2" background="#000000"/>
+  <composition>
+    <shape id="red" shape="rect" x="200" y="100" width="200" height="160" fill="#FF0000" z="0">
+      <animate property="z"><key time="0" value="0" interpolation="hold"/><key time="1" value="10"/></animate>
+    </shape>
+    <shape id="blue" shape="rect" x="240" y="100" width="200" height="160" fill="#0000FF" z="5"/>
+  </composition>
+</scene>

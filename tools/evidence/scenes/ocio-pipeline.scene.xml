@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Studio colour pipeline delegated to an OpenColorIO config. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="1" background="#000000"/>
+  <colorManagement ocioConfig="config.ocio"/>
+  <composition>
+    <shape id="card" shape="rect" x="0" y="0" width="640" height="360" fill="#808080"/>
+  </composition>
+</scene>

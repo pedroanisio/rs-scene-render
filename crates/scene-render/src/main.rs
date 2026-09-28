@@ -20,7 +20,7 @@ Examples:
   scene-render eval promo.scene.xml --bench
   scene-render explain C21
 
-Exit status: 0 valid, 1 invalid (or warnings with --deny-warnings), 2 usage or I/O error.";
+Exit status: 0 valid, 1 invalid (or warnings with --deny-warnings; render/encode: anything\nnot rendered as authored with --strict), 2 usage or I/O error.";
 
 /// Validate and inspect scene-render 1.1 documents.
 ///
@@ -178,6 +178,11 @@ enum Command {
         /// Print per-frame renderer statistics as JSON lines on stderr.
         #[arg(long)]
         stats: bool,
+        /// Exit 1 if anything was not rendered as authored: unsupported content, shader fallbacks
+        /// (pass-through effects, crossfaded transitions), evaluator warnings or, when encoding,
+        /// accessibility findings. Output files are still written.
+        #[arg(long)]
+        strict: bool,
     },
     /// Render the document's outputs (or one ad-hoc output) to finished files.
     Encode {
@@ -223,6 +228,11 @@ enum Command {
         /// Print each report as JSON.
         #[arg(long)]
         json: bool,
+        /// Exit 1 if anything was not rendered as authored: unsupported content, shader fallbacks
+        /// (pass-through effects, crossfaded transitions), evaluator warnings or, when encoding,
+        /// accessibility findings. Output files are still written.
+        #[arg(long)]
+        strict: bool,
     },
     /// Simulate the document's physics and write its cache file (physics@cache).
     Simulate {
@@ -714,6 +724,7 @@ fn render(
     bit_depth: u8,
     bench: bool,
     stats: bool,
+    strict: bool,
     out: &mut Out,
 ) -> std::io::Result<ExitCode> {
     let text = match std::fs::read_to_string(file) {
@@ -746,6 +757,7 @@ fn render(
     for w in ev.warnings() {
         out.diagnostic(file, &lines, w)?;
     }
+    let eval_warnings = ev.warnings().len();
     let gpu = match sr_gpu::Gpu::new() {
         Ok(g) => g,
         Err(e) => {
@@ -858,8 +870,13 @@ fn render(
             writeln!(out.w, "wrote {} (t = {:.4} s, {} draws)", path.display(), g.time, frame.stats.draws)?;
         }
     }
+    let problems = unsupported.len() + eval_warnings;
     for u in unsupported {
         writeln!(out.w, "note: not rendered yet: {u}")?;
+    }
+    if strict && problems > 0 {
+        eprintln!("error: --strict: {problems} item(s) not rendered as authored (see the notes and warnings above)");
+        return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -893,6 +910,7 @@ fn encode(
     codec: Option<String>,
     opts: sr_deliver::Options,
     json: bool,
+    strict: bool,
     out: &mut Out,
 ) -> std::io::Result<ExitCode> {
     let text = match std::fs::read_to_string(file) {
@@ -961,6 +979,14 @@ fn encode(
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
             Ok(r) => {
+                let problems = r.unsupported.len() + r.accessibility.len();
+                if strict && problems > 0 {
+                    eprintln!(
+                        "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content or accessibility findings)",
+                        o.path
+                    );
+                    failed = true;
+                }
                 if json {
                     writeln!(out.w, "{}", serde_json::to_string(&r).expect("serialisable"))?;
                     continue;
@@ -987,6 +1013,9 @@ fn encode(
                 }
                 for u in &r.unsupported {
                     writeln!(out.w, "  note: not rendered yet: {u}")?;
+                }
+                for a in &r.accessibility {
+                    writeln!(out.w, "  accessibility: {a}")?;
                 }
             }
             Err(e) => {
@@ -1025,6 +1054,7 @@ fn main() -> ExitCode {
             data,
             bench,
             stats,
+            strict,
         } => {
             let opts =
                 sr_eval::EvalOptions { variant, layout, params, row: row.map(|r| (data, r)), ..Default::default() };
@@ -1033,7 +1063,7 @@ fn main() -> ExitCode {
                 (None, Some((a, b))) => (a..b).collect(),
                 (None, None) => Vec::new(),
             };
-            render(&file, list, time, opts, output, bit_depth.parse().unwrap_or(8), bench, stats, &mut out)
+            render(&file, list, time, opts, output, bit_depth.parse().unwrap_or(8), bench, stats, strict, &mut out)
         }
         Command::Encode {
             file,
@@ -1050,6 +1080,7 @@ fn main() -> ExitCode {
             row,
             data,
             json,
+            strict,
         } => {
             let opts = sr_deliver::Options {
                 out_dir,
@@ -1061,7 +1092,7 @@ fn main() -> ExitCode {
                 params,
                 row: row.map(|r| (data, r)),
             };
-            encode(&file, &outputs, path, codec, opts, json, &mut out)
+            encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
         }
         Command::Simulate { file, output } => simulate(&file, output, &mut out),
         Command::Explain { code } => explain(code.as_deref(), &mut out),

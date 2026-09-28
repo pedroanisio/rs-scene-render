@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Character playback: an imported glTF with a named animation clip ("walk"). -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="2" background="#101418"/>
+  <assets>
+    <mesh id="char" src="walker.glb" format="glb"/>
+  </assets>
+  <composition>
+    <object3D id="hero" primitive="mesh" mesh="char" x="320" y="180" z="0" animationClip="walk"/>
+  </composition>
+  <lights>
+    <light id="sky" type="ambient" intensity="0.6"/>
+    <light id="sun" type="directional" intensity="3"/>
+  </lights>
+</scene>

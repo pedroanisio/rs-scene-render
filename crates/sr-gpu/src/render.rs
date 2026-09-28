@@ -85,6 +85,10 @@ pub struct RenderStats {
     pub splats: u64,
     /// WCAG contrast ratio of burned-in text against the backdrop behind it (node id or "captions").
     pub contrast: Vec<(String, f64)>,
+    /// Text layers drawn inside an isolated group (offscreen), where the inline probe cannot
+    /// see the final backdrop; delivery measures them by rendering the frame with and without
+    /// the layer (`Renderer::contrast_with_without`).
+    pub contrast_unprobed: Vec<String>,
 }
 
 struct Cmd {
@@ -1361,7 +1365,7 @@ impl Renderer {
             );
             return;
         }
-        let probe = self.text_probe_start(plan, ctx, i, space, cmds);
+        let probe = self.text_probe_start(plan, ctx, i, space, cmds, root_hash);
         self.dispatch_kind(plan, ctx, i, space, op, blend, seed, cmds, root_hash, iso_op);
         if let Some(at) = probe {
             self.text_probe_end(plan, ctx, i, space, cmds, at);

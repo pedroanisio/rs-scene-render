@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 3D objects over a 2D layer: both spheres are painted after the red card, one on the 2D plane
+     (z = 0) and one nearer the camera (z = -100); both must cover the card. -->
+<scene version="1.1">
+  <project width="320" height="180" fps="24" duration="1" background="#000000"/>
+  <materials>
+    <material id="m" baseColor="#00FF00" roughness="1"/>
+  </materials>
+  <composition>
+    <shape id="card" shape="rect" x="0" y="0" width="320" height="180" fill="#FF0000"/>
+    <group id="left">
+      <object3D id="flat" primitive="sphere" radius="30" x="100" y="90" z="0" material="m"/>
+    </group>
+    <group id="right">
+      <object3D id="near" primitive="sphere" radius="20" x="220" y="90" z="-100" material="m"/>
+    </group>
+  </composition>
+  <lights>
+    <light id="a" type="ambient" intensity="1"/>
+  </lights>
+</scene>

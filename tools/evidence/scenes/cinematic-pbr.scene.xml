@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Cinematic product shot: shadowed chrome spheres, a glass pane in front of the set refracting the
+     2D band painted before it, depth of field. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="2" background="#101418"/>
+  <materials>
+    <material id="m-chrome" baseColor="#D8D8E0" metallic="1" roughness="0.25" clearcoat="0.5"/>
+    <material id="m-floor" baseColor="#607080" roughness="0.8"/>
+    <material id="m-glass" transmission="1" roughness="0.05" ior="1.5" thickness="30"/>
+  </materials>
+  <composition>
+    <shape id="band" shape="rect" x="0" y="0" width="640" height="150" fill="#F0B030"/>
+    <camera id="cam" fov="45" x="320" y="140" z="-640" pitch="-6" depthOfField="true" fStop="2" focusTarget="balls" focalLength="50"/>
+    <object3D id="floor" primitive="plane" width="3000" height="3000" x="320" y="300" z="300" rotationX="-90" material="m-floor"/>
+    <object3D id="balls" primitive="sphere" radius="30" segments="48" instances="5" x="320" y="240" z="200" material="m-chrome"/>
+    <object3D id="glass" primitive="box" width="240" height="140" depth="20" x="320" y="150" z="-60" material="m-glass"/>
+  </composition>
+  <lights>
+    <light id="sky" type="ambient" intensity="0.15"/>
+    <light id="key" type="spot" x="200" y="-200" z="-100" pitch="-50" yaw="30" spotAngle="70" intensity="600" castShadow="true" shadowMapSize="1024" range="3000"/>
+  </lights>
+</scene>

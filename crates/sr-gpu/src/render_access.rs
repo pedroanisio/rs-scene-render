@@ -33,12 +33,20 @@ impl Renderer {
         i: usize,
         space: &Space,
         cmds: &mut Vec<Cmd>,
+        root_hash: u64,
     ) -> Option<usize> {
-        if !self.contrast_probe
-            || !self.is_root_space(ctx, space)
-            || !self.is_text_layer(ctx, &ctx.g.nodes[i])
-            || !ctx.g.nodes[i].draw
-        {
+        if !self.contrast_probe || !self.is_text_layer(ctx, &ctx.g.nodes[i]) || !ctx.g.nodes[i].draw {
+            return None;
+        }
+        // `root_hash` is 0 exactly when emitting into an offscreen (isolated groups, masks,
+        // mattes, effects and transitions all emit with 0; frame roots pass their subtree hash).
+        // An unsized isolated group shares the frame's space, so the space alone cannot tell.
+        if root_hash == 0 || !self.is_root_space(ctx, space) {
+            // inside an isolated group: the backdrop here is not what the viewer sees
+            let id = ctx.g.nodes[i].id.to_string();
+            if !plan.stats.contrast_unprobed.contains(&id) {
+                plan.stats.contrast_unprobed.push(id);
+            }
             return None;
         }
         self.flush_vec(plan, cmds);
@@ -159,6 +167,11 @@ impl Renderer {
     pub(super) fn measure_contrast(&self, snapshot: &Tex, frame: &Tex, r: [u32; 4]) -> Option<f64> {
         let before = self.read_rect(snapshot, r);
         let after = self.read_rect(frame, r);
+        self.contrast_of(&before, &after)
+    }
+
+    /// Contrast of the pixels that changed between `before` (backdrop) and `after` (with text).
+    fn contrast_of(&self, before: &[[f32; 4]], after: &[[f32; 4]]) -> Option<f64> {
         let lb: Vec<f64> = before.iter().map(|p| self.luminance(*p)).collect();
         let la: Vec<f64> = after.iter().map(|p| self.luminance(*p)).collect();
         let delta: Vec<f64> = lb.iter().zip(&la).map(|(a, b)| (a - b).abs()).collect();
@@ -177,6 +190,31 @@ impl Renderer {
         }
         let (t, bg) = (t / n, bg / n);
         Some((t.max(bg) + 0.05) / (t.min(bg) + 0.05))
+    }
+
+    /// Contrast of one text layer as the viewer sees it, for text the inline probe cannot reach
+    /// (inside isolated groups, masks, mattes or effects): renders the frame with and without the
+    /// node and measures the pixels it changes — their colour with the node is the text, without
+    /// it the backdrop. `None` when the node is not in the frame or changes nothing.
+    pub fn contrast_with_without(
+        &mut self,
+        g: &sr_eval::FrameGraph,
+        p: &sr_eval::Program,
+        node_id: &str,
+        sub: &mut dyn FnMut(f64) -> sr_eval::FrameGraph,
+    ) -> Option<f64> {
+        let k = g.nodes.iter().position(|n| &*n.id == node_id)?;
+        let probe = std::mem::replace(&mut self.contrast_probe, false);
+        // read each frame back before the next render: frame targets may be pooled
+        let with = self.render_with(g, p, Some(&mut *sub)).texture;
+        let [w, h] = with.size;
+        let after = self.read_rect(&with, [0, 0, w, h]);
+        let mut hidden = g.clone();
+        hidden.nodes[k].draw = false;
+        let without = self.render_with(&hidden, p, Some(&mut *sub)).texture;
+        let before = self.read_rect(&without, [0, 0, w, h]);
+        self.contrast_probe = probe;
+        self.contrast_of(&before, &after)
     }
 
     /// Display-referred linear sRGB of each cell of a 48 × 27 grid over a frame (flash analysis).
