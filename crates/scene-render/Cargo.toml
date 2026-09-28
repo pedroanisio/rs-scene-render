@@ -1,0 +1,30 @@
+[package]
+name = "scene-render"
+description = "scene-render command-line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scene-render"
+path = "src/main.rs"
+
+[dependencies]
+sr-model.workspace = true
+sr-eval.workspace = true
+sr-gpu.workspace = true
+sr-media.workspace = true
+sr-deliver.workspace = true
+image.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+image.workspace = true

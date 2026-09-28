@@ -1,0 +1,19 @@
+[package]
+name = "sr-deliver"
+description = "scene-render delivery: audio mix, render-to-encode pipeline, outputs, stills and destinations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sr-model.workspace = true
+sr-eval.workspace = true
+sr-gpu.workspace = true
+sr-text.workspace = true
+sr-media.workspace = true
+sr-audio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true

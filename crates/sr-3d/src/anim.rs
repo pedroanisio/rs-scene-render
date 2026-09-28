@@ -1,0 +1,167 @@
+//! Animation sampling, morph targets and skinning (on the CPU, per frame).
+
+use glam::{Mat4, Quat, Vec3};
+
+use crate::{Animation, Interp, Model, Path, Trs, Vertex};
+
+fn key_span(times: &[f32], t: f32) -> (usize, usize, f32, f32) {
+    let n = times.len();
+    if n == 0 || t <= times[0] {
+        return (0, 0, 0.0, 0.0);
+    }
+    if t >= times[n - 1] {
+        return (n - 1, n - 1, 0.0, 0.0);
+    }
+    let i = times.partition_point(|&x| x <= t) - 1;
+    let dt = times[i + 1] - times[i];
+    (i, i + 1, if dt > 0.0 { (t - times[i]) / dt } else { 0.0 }, dt)
+}
+
+/// Samples `width` floats of channel values at time `t`.
+fn sample(interp: Interp, times: &[f32], values: &[f32], width: usize, t: f32, rotation: bool) -> Vec<f32> {
+    let (a, b, u, dt) = key_span(times, t);
+    let cubic = interp == Interp::CubicSpline;
+    let stride = if cubic { width * 3 } else { width };
+    let at = |k: usize, part: usize| -> &[f32] {
+        let o = k * stride + if cubic { part * width } else { 0 };
+        values.get(o..o + width).unwrap_or(&[])
+    };
+    let va = at(a, 1);
+    let vb = at(b, 1);
+    if va.len() < width || vb.len() < width {
+        return vec![0.0; width];
+    }
+    let mut out: Vec<f32> = match interp {
+        Interp::Step => va.to_vec(),
+        Interp::Linear if rotation => {
+            let q = Quat::from_slice(va).slerp(Quat::from_slice(vb), u);
+            q.to_array().to_vec()
+        }
+        Interp::Linear => (0..width).map(|k| va[k] + (vb[k] - va[k]) * u).collect(),
+        Interp::CubicSpline => {
+            let (out_a, in_b) = (at(a, 2), at(b, 0));
+            let (u2, u3) = (u * u, u * u * u);
+            let (h00, h10, h01, h11) = (2.0 * u3 - 3.0 * u2 + 1.0, u3 - 2.0 * u2 + u, -2.0 * u3 + 3.0 * u2, u3 - u2);
+            (0..width)
+                .map(|k| {
+                    h00 * va[k]
+                        + h10 * dt * out_a.get(k).unwrap_or(&0.0)
+                        + h01 * vb[k]
+                        + h11 * dt * in_b.get(k).unwrap_or(&0.0)
+                })
+                .collect()
+        }
+    };
+    if rotation {
+        let q = Quat::from_slice(&out).normalize();
+        out = q.to_array().to_vec();
+    }
+    out
+}
+
+/// Node transforms and morph weights of `model` at `t` seconds into `anim` (rest pose when `None`).
+pub fn pose(model: &Model, anim: Option<&Animation>, t: f32) -> (Vec<Trs>, Vec<Vec<f32>>) {
+    let mut locals: Vec<Trs> = model.nodes.iter().map(|n| n.local).collect();
+    let mut weights: Vec<Vec<f32>> = model.nodes.iter().map(|n| n.weights.clone()).collect();
+    if let Some(a) = anim {
+        for ch in &a.channels {
+            let Some(l) = locals.get_mut(ch.node) else { continue };
+            match ch.path {
+                Path::Translation => l.t = Vec3::from_slice(&sample(ch.interp, &ch.times, &ch.values, 3, t, false)),
+                Path::Scale => l.s = Vec3::from_slice(&sample(ch.interp, &ch.times, &ch.values, 3, t, false)),
+                Path::Rotation => l.r = Quat::from_slice(&sample(ch.interp, &ch.times, &ch.values, 4, t, true)),
+                Path::Weights => {
+                    let keys = ch.times.len().max(1);
+                    let per = ch.values.len() / keys / if ch.interp == Interp::CubicSpline { 3 } else { 1 };
+                    weights[ch.node] = sample(ch.interp, &ch.times, &ch.values, per, t, false);
+                }
+            }
+        }
+    }
+    (locals, weights)
+}
+
+/// One primitive to draw: its model-space matrix and, when deformed, its vertices.
+pub struct DrawItem {
+    pub node: usize,
+    pub prim: usize,
+    /// Model space (before `Model::basis`); identity for skinned vertices, which are already in model space.
+    pub matrix: Mat4,
+    pub vertices: Option<Vec<Vertex>>,
+}
+
+/// Every primitive instance of the model at a pose, with morphs and skinning applied.
+pub fn draw_list(model: &Model, locals: &[Trs], weights: &[Vec<f32>], morph_override: Option<&[f32]>) -> Vec<DrawItem> {
+    let world = model.world_matrices(locals);
+    let mut out = Vec::new();
+    for (ni, node) in model.nodes.iter().enumerate() {
+        for &pi in &node.primitives {
+            let prim = &model.primitives[pi];
+            let w: &[f32] = morph_override.unwrap_or(&weights[ni]);
+            let morphed = !prim.morphs.is_empty() && w.iter().any(|x| x.abs() > 1e-6);
+            let skinned = node.skin.is_some()
+                && prim.joints.len() == prim.vertices.len()
+                && prim.weights.len() == prim.vertices.len();
+            if !morphed && !skinned {
+                out.push(DrawItem { node: ni, prim: pi, matrix: world[ni], vertices: None });
+                continue;
+            }
+            let mut vs = prim.vertices.clone();
+            if morphed {
+                for (k, target) in prim.morphs.iter().enumerate() {
+                    let wk = w.get(k).copied().unwrap_or(0.0);
+                    if wk == 0.0 {
+                        continue;
+                    }
+                    for (i, v) in vs.iter_mut().enumerate() {
+                        if let Some(d) = target.dpos.get(i) {
+                            v.pos.iter_mut().zip(d).for_each(|(p, dp)| *p += dp * wk);
+                        }
+                        if let Some(d) = target.dnormal.get(i) {
+                            v.normal.iter_mut().zip(d).for_each(|(n, dn)| *n += dn * wk);
+                        }
+                    }
+                }
+            }
+            let mut matrix = world[ni];
+            if skinned {
+                let skin = &model.skins[node.skin.unwrap_or(0)];
+                let joints: Vec<Mat4> = skin
+                    .joints
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &j)| {
+                        world.get(j).copied().unwrap_or(Mat4::IDENTITY)
+                            * skin.inverse_bind.get(k).copied().unwrap_or(Mat4::IDENTITY)
+                    })
+                    .collect();
+                for (i, v) in vs.iter_mut().enumerate() {
+                    let (js, ws) = (prim.joints[i], prim.weights[i]);
+                    let sum: f32 = ws.iter().sum();
+                    let mut m = Mat4::ZERO;
+                    for k in 0..4 {
+                        if ws[k] > 0.0 {
+                            m +=
+                                joints.get(js[k] as usize).copied().unwrap_or(Mat4::IDENTITY) * (ws[k] / sum.max(1e-6));
+                        }
+                    }
+                    if sum <= 0.0 {
+                        m = Mat4::IDENTITY;
+                    }
+                    v.pos = m.transform_point3(Vec3::from(v.pos)).into();
+                    v.normal = m.transform_vector3(Vec3::from(v.normal)).normalize_or_zero().into();
+                    let t =
+                        m.transform_vector3(Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2])).normalize_or_zero();
+                    v.tangent = [t.x, t.y, t.z, v.tangent[3]];
+                }
+                matrix = Mat4::IDENTITY;
+            } else {
+                for v in vs.iter_mut() {
+                    v.normal = Vec3::from(v.normal).normalize_or_zero().into();
+                }
+            }
+            out.push(DrawItem { node: ni, prim: pi, matrix, vertices: Some(vs) });
+        }
+    }
+    out
+}

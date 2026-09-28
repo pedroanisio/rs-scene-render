@@ -1,0 +1,15 @@
+[package]
+name = "sr-vector"
+description = "scene-render geometry kernel: paths, shapes, strokes, trim, modifiers, deformers, rigs, tracking, SVG and Lottie import, tile encoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+usvg = { version = "0.48", default-features = false }
+miniz_oxide = "0.8"

@@ -1,0 +1,40 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # GPU tests run on Mesa lavapipe, the software Vulkan driver the goldens were made with
+      SR_GPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      # FFmpeg decodes and encodes media; curl delivers to destinations
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 ffmpeg curl fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo test --release --test perf
+      - run: cargo build --release && target/release/scene-render eval tests/corpus/valid/kitchen-sink.scene.xml --bench
+      - run: python3 tools/gate3.py /tmp/gate3 && target/release/scene-render render /tmp/gate3/gate3.scene.xml --bench --frames 0..3
+      # a one-second gate-4 run: four decoded 1080p60 layers, mixed audio, H.264 + AAC
+      - run: python3 tools/gate4.py /tmp/gate4 --duration 1 && target/release/scene-render encode /tmp/gate4/gate4.scene.xml --hw software --end 0.25
+      - run: ffprobe -v error -show_entries stream=codec_name -of csv=p=0 /tmp/gate4/gate4.mp4 | grep -qx h264
+      # a short gate-5 run: 2,000 stroked shapes with trim paths and a 30-bone skinned rig
+      - run: python3 tools/gate5.py /tmp/gate5 --duration 1 && target/release/scene-render encode /tmp/gate5/gate5.scene.xml --hw software --end 0.1
+      - run: ffprobe -v error -show_entries stream=codec_name -of csv=p=0 /tmp/gate5/gate5.mp4 | grep -qx h264
+      - run: python3 tools/gate6.py /tmp/gate6 --duration 1 && target/release/scene-render encode /tmp/gate6/gate6.scene.xml --hw software --end 0.1
+      - run: ffprobe -v error -show_entries stream=codec_name -of csv=p=0 /tmp/gate6/gate6.mp4 | grep -qx h264
+      # gate 7: 8 effects, a transition and 16-sample motion blur on two moving layers
+      - run: python3 tools/gate7.py /tmp/gate7 --duration 1 && target/release/scene-render render /tmp/gate7/gate7.scene.xml --bench --frames 0..4
+      # gate 8: 207,936 triangles, 4 shadowed spot lights, transmission and depth of field at 1080p
+      - run: python3 tools/gate8.py /tmp/gate8 --duration 1 && target/release/scene-render render /tmp/gate8/gate8.scene.xml --bench --frames 0..4
+      # gate 9: 200 rigid bodies, two soft bodies and three emitters at 1080p
+      - run: python3 tools/gate9.py /tmp/gate9 --duration 2 && target/release/scene-render render /tmp/gate9/gate9.scene.xml --bench --frames 60..64
+      # release gate: fuzz the parser, evaluator and expression compiler (the full gate runs 86400 s)
+      - run: cargo run --release -p sr-fuzz -- --seconds 600
+      - run: pip install lxml
+      - run: python3 tools/build_corpus.py && git diff --exit-code tests/corpus
+      - run: cargo build --release && python3 tools/oracle_diff.py 2000 1

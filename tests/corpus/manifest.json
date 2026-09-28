@@ -1,0 +1,368 @@
+{
+  "invalid": {
+    "a01-missing-file.scene.xml": [
+      "A01"
+    ],
+    "a02-generated-cache.scene.xml": [
+      "A02"
+    ],
+    "a02-hash-mismatch.scene.xml": [
+      "A02"
+    ],
+    "a04-sequence-frames.scene.xml": [
+      "A04"
+    ],
+    "c1.scene.xml": [
+      "C1"
+    ],
+    "c10.scene.xml": [
+      "C10"
+    ],
+    "c11.scene.xml": [
+      "C11"
+    ],
+    "c12.scene.xml": [
+      "C12"
+    ],
+    "c13-exponent.scene.xml": [
+      "C13"
+    ],
+    "c13.scene.xml": [
+      "C13"
+    ],
+    "c14.scene.xml": [
+      "C14"
+    ],
+    "c15-reverse-literal.scene.xml": [
+      "C15"
+    ],
+    "c15.scene.xml": [
+      "C15"
+    ],
+    "c16.scene.xml": [
+      "C16"
+    ],
+    "c17.scene.xml": [
+      "C17"
+    ],
+    "c18.scene.xml": [
+      "C18"
+    ],
+    "c19.scene.xml": [
+      "C19"
+    ],
+    "c2.scene.xml": [
+      "C2"
+    ],
+    "c20.scene.xml": [
+      "C20"
+    ],
+    "c21.scene.xml": [
+      "C21"
+    ],
+    "c22.scene.xml": [
+      "C22"
+    ],
+    "c23.scene.xml": [
+      "C23"
+    ],
+    "c24.scene.xml": [
+      "C24"
+    ],
+    "c25.scene.xml": [
+      "C25"
+    ],
+    "c26.scene.xml": [
+      "C26"
+    ],
+    "c27.scene.xml": [
+      "C27"
+    ],
+    "c28.scene.xml": [
+      "C28"
+    ],
+    "c29.scene.xml": [
+      "C29"
+    ],
+    "c3.scene.xml": [
+      "C3"
+    ],
+    "c30.scene.xml": [
+      "C30"
+    ],
+    "c31.scene.xml": [
+      "C31"
+    ],
+    "c32.scene.xml": [
+      "C32"
+    ],
+    "c33.scene.xml": [
+      "C33"
+    ],
+    "c34.scene.xml": [
+      "C34"
+    ],
+    "c35.scene.xml": [
+      "C35"
+    ],
+    "c36.scene.xml": [
+      "C36"
+    ],
+    "c37.scene.xml": [
+      "C37"
+    ],
+    "c38-exponent.scene.xml": [
+      "C38"
+    ],
+    "c38.scene.xml": [
+      "C38"
+    ],
+    "c39.scene.xml": [
+      "C39"
+    ],
+    "c4.scene.xml": [
+      "C4"
+    ],
+    "c40.scene.xml": [
+      "C40"
+    ],
+    "c41.scene.xml": [
+      "C41"
+    ],
+    "c42.scene.xml": [
+      "C42"
+    ],
+    "c43.scene.xml": [
+      "C43"
+    ],
+    "c44.scene.xml": [
+      "C44"
+    ],
+    "c5.scene.xml": [
+      "C5"
+    ],
+    "c6.scene.xml": [
+      "C6"
+    ],
+    "c7.scene.xml": [
+      "C7"
+    ],
+    "c8.scene.xml": [
+      "C8"
+    ],
+    "c9.scene.xml": [
+      "C9"
+    ],
+    "r1.scene.xml": [
+      "R1"
+    ],
+    "r10.scene.xml": [
+      "R10"
+    ],
+    "r11.scene.xml": [
+      "R11"
+    ],
+    "r12.scene.xml": [
+      "R12"
+    ],
+    "r13.scene.xml": [
+      "R13"
+    ],
+    "r14.scene.xml": [
+      "R14"
+    ],
+    "r15-video-without-audio.scene.xml": [
+      "R15"
+    ],
+    "r15.scene.xml": [
+      "R15"
+    ],
+    "r16.scene.xml": [
+      "R16"
+    ],
+    "r17.scene.xml": [
+      "R17"
+    ],
+    "r18.scene.xml": [
+      "R18"
+    ],
+    "r19.scene.xml": [
+      "R19"
+    ],
+    "r2.scene.xml": [
+      "R2"
+    ],
+    "r20.scene.xml": [
+      "R20"
+    ],
+    "r21-key.scene.xml": [
+      "R21"
+    ],
+    "r21.scene.xml": [
+      "R21"
+    ],
+    "r22-style.scene.xml": [
+      "R22"
+    ],
+    "r22.scene.xml": [
+      "R22"
+    ],
+    "r23.scene.xml": [
+      "R23"
+    ],
+    "r24-activeColor.scene.xml": [
+      "R24-activeColor"
+    ],
+    "r24-background.scene.xml": [
+      "R24-background"
+    ],
+    "r24-color.scene.xml": [
+      "R24-color"
+    ],
+    "r24-fill.scene.xml": [
+      "R24-fill"
+    ],
+    "r24-highlight.scene.xml": [
+      "R24-highlight"
+    ],
+    "r24-paint.scene.xml": [
+      "R24-paint"
+    ],
+    "r24-stroke.scene.xml": [
+      "R24-stroke"
+    ],
+    "r24-strokeColor.scene.xml": [
+      "R24-strokeColor"
+    ],
+    "r25-activeColor.scene.xml": [
+      "R25-activeColor"
+    ],
+    "r25-background.scene.xml": [
+      "R25-background"
+    ],
+    "r25-color.scene.xml": [
+      "R25-color"
+    ],
+    "r25-fill.scene.xml": [
+      "R25-fill"
+    ],
+    "r25-highlight.scene.xml": [
+      "R25-highlight"
+    ],
+    "r25-paint.scene.xml": [
+      "R25-paint"
+    ],
+    "r25-stroke.scene.xml": [
+      "R25-stroke"
+    ],
+    "r25-strokeColor.scene.xml": [
+      "R25-strokeColor"
+    ],
+    "r3.scene.xml": [
+      "R3"
+    ],
+    "r4.scene.xml": [
+      "R4"
+    ],
+    "r5.scene.xml": [
+      "R5"
+    ],
+    "r6-duplicate.scene.xml": [
+      "R6"
+    ],
+    "r6.scene.xml": [
+      "R6"
+    ],
+    "r7.scene.xml": [
+      "R7"
+    ],
+    "r8.scene.xml": [
+      "R8"
+    ],
+    "r9.scene.xml": [
+      "R9"
+    ],
+    "s01-root.scene.xml": [
+      "S01"
+    ],
+    "s02-out-of-order.scene.xml": [
+      "S02"
+    ],
+    "s02-unknown-element.scene.xml": [
+      "S02"
+    ],
+    "s03-empty-animate.scene.xml": [
+      "S03"
+    ],
+    "s03-missing-child.scene.xml": [
+      "S03"
+    ],
+    "s04-unknown-attribute.scene.xml": [
+      "S04"
+    ],
+    "s05-missing-attribute.scene.xml": [
+      "S05"
+    ],
+    "s06-bound.scene.xml": [
+      "S06"
+    ],
+    "s06-colour.scene.xml": [
+      "S06"
+    ],
+    "s06-double.scene.xml": [
+      "S06"
+    ],
+    "s06-enum.scene.xml": [
+      "S06"
+    ],
+    "s06-idrefs-empty.scene.xml": [
+      "S06"
+    ],
+    "s06-integer.scene.xml": [
+      "S06"
+    ],
+    "s06-length.scene.xml": [
+      "S06"
+    ],
+    "s06-pattern-fps.scene.xml": [
+      "S06"
+    ],
+    "s07-text.scene.xml": [
+      "S07"
+    ],
+    "s09-duplicate-id.scene.xml": [
+      "S09"
+    ],
+    "s10-dangling-idref.scene.xml": [
+      "S10"
+    ],
+    "v1-sections.scene.xml": [
+      "V1"
+    ],
+    "v2-outputs.scene.xml": [
+      "V2"
+    ],
+    "v3-elements.scene.xml": [
+      "V3"
+    ],
+    "v4-assets.scene.xml": [
+      "V4"
+    ]
+  },
+  "valid": {
+    "kitchen-sink.scene.xml": [],
+    "minimal.scene.xml": [],
+    "version-1.0.scene.xml": []
+  },
+  "warnings": {
+    "a03-remote.scene.xml": [
+      "A03"
+    ],
+    "a04-sequence-hold.scene.xml": [
+      "A04"
+    ],
+    "w01-non-finite.scene.xml": [
+      "W01"
+    ]
+  }
+}

@@ -1,0 +1,2612 @@
+//! Templating and instantiation.
+//!
+//! [`build`] runs once per variant and layout. It clones the typed scene,
+//! resolves parameters (defaults, variant sets, data rows, command-line
+//! values), applies binds and overrides, substitutes `{{placeholders}}`,
+//! and expands the composition into a flat tree of instantiated nodes:
+//! repeats become one copy per item, instances and includes become
+//! containers holding scoped clones of their symbols. It then compiles every
+//! animation element into slots, channels, expressions and links, orders
+//! them by dependency, and places nodes in time.
+
+#![allow(clippy::type_complexity)]
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use sr_model::diag::{Diagnostic, Loc};
+use sr_model::element::{children, walk, walk_mut, AttrValue, Element};
+use sr_model::model::{self as m, Node};
+use sr_model::values::{Color, Fps, Length};
+use sr_model::xsd::COMPLEX_TYPES;
+use sr_model::Document;
+
+use crate::channel::{Channel, ChannelSpec, Lookup};
+use crate::curve::{self, Ease, KeyParams};
+use crate::data;
+use crate::expr::vm::{self, Band, Code, Resolver, V};
+use crate::path::MotionPath;
+use crate::value::{PropKind, Value};
+
+/// Selections and inputs for one evaluation program.
+#[derive(Debug, Clone, Default)]
+pub struct EvalOptions {
+    /// Variant id to apply.
+    pub variant: Option<String>,
+    /// Layout id to render (frame size and overrides).
+    pub layout: Option<String>,
+    /// `--param id=value` values; they win over every other source.
+    pub params: Vec<(String, String)>,
+    /// Data row for batch rendering: data source id (first source when `None`) and row index.
+    pub row: Option<(Option<String>, usize)>,
+    /// Audio analysis for `audioAmplitude()`, `beat()` and `audio:` links.
+    pub analysis: Analysis,
+}
+
+/// Per-track audio analysis, filled by the media pipeline (Batch 4).
+#[derive(Debug, Clone, Default)]
+pub struct Analysis {
+    /// Frames per second of the envelopes.
+    pub fps: f64,
+    /// Envelopes by audio track id: full, low, mid, high in [0, 1].
+    pub tracks: HashMap<String, [Vec<f32>; 4]>,
+    /// Detected beat times in seconds, when a beat grid names an audio source.
+    pub beats: Option<Vec<f64>>,
+}
+
+impl Analysis {
+    /// Amplitude of `track` in `band` at time `t` (linear between envelope frames).
+    pub fn amplitude(&self, track: &str, band: Band, t: f64) -> f64 {
+        let Some(env) = self.tracks.get(track) else { return 0.0 };
+        let e = &env[match band {
+            Band::Full => 0,
+            Band::Low => 1,
+            Band::Mid => 2,
+            Band::High => 3,
+        }];
+        if e.is_empty() || self.fps <= 0.0 {
+            return 0.0;
+        }
+        let x = (t * self.fps).max(0.0);
+        let i = (libm::floor(x) as usize).min(e.len() - 1);
+        let j = (i + 1).min(e.len() - 1);
+        let f = (x - i as f64).clamp(0.0, 1.0);
+        e[i] as f64 + (e[j] as f64 - e[i] as f64) * f
+    }
+}
+
+// ------------------------------------------------------------------ program data
+
+/// Maps a container's timeline to its children's timeline.
+#[derive(Debug, Clone)]
+pub enum Clock {
+    /// Children share the container's timeline.
+    Same,
+    /// `child = origin + (t − origin − offset) · scale` (group timeOffset/timeScale, repeat stagger).
+    Affine {
+        /// Scaling origin.
+        origin: f64,
+        /// Offset.
+        offset: f64,
+        /// Scale.
+        scale: f64,
+    },
+    /// Symbol or include clock.
+    Media(Box<MediaClock>),
+}
+
+/// Local-to-source time mapping of layers and instances.
+#[derive(Debug, Clone)]
+pub struct MediaClock {
+    /// Node start on its timeline.
+    pub start: f64,
+    /// Playback rate (speed / timeStretch).
+    pub rate: f64,
+    /// Source in-point.
+    pub clip_in: f64,
+    /// Source length after clipIn, when known.
+    pub len: Option<f64>,
+    /// Extra plays.
+    pub loops: u64,
+    /// Play backwards.
+    pub reverse: bool,
+    /// Local time after which the source stops advancing.
+    pub freeze_at: Option<f64>,
+    /// timeRemap channel (local time → source seconds).
+    pub remap: Option<Channel>,
+}
+
+impl MediaClock {
+    /// Source time at timeline time `t`.
+    pub fn map(&self, t: f64) -> f64 {
+        let mut local = t - self.start;
+        if let Some(f) = self.freeze_at {
+            local = local.min(f);
+        }
+        if let Some(r) = &self.remap {
+            return r.eval(local).as_num().unwrap_or(0.0);
+        }
+        let mut s = local * self.rate;
+        if let Some(len) = self.len.filter(|l| *l > 0.0) {
+            if self.loops > 0 {
+                let total = len * (self.loops + 1) as f64;
+                s = if s >= total {
+                    len
+                } else if s < 0.0 {
+                    s
+                } else {
+                    s % len
+                };
+            }
+            if self.reverse {
+                s = len - s;
+            }
+        } else if self.reverse {
+            s = -s;
+        }
+        self.clip_in + s
+    }
+}
+
+/// Transform properties read every frame.
+#[derive(Debug, Clone, Copy)]
+pub struct Tf {
+    /// x, y, anchorX, anchorY.
+    pub pos: [Length; 4],
+    /// rotation, scaleX, scaleY, skewX, skewY, opacity, zDepth, rotationX, rotationY.
+    pub num: [f64; 9],
+}
+
+/// Indices of transform properties in `Tf`.
+pub mod tfi {
+    pub const X: usize = 0;
+    pub const Y: usize = 1;
+    pub const AX: usize = 2;
+    pub const AY: usize = 3;
+    pub const ROT: usize = 0;
+    pub const SX: usize = 1;
+    pub const SY: usize = 2;
+    pub const KX: usize = 3;
+    pub const KY: usize = 4;
+    pub const OPACITY: usize = 5;
+    pub const ZDEPTH: usize = 6;
+    pub const RX: usize = 7;
+    pub const RY: usize = 8;
+}
+
+const TF_NUM: [&str; 9] =
+    ["rotation", "scaleX", "scaleY", "skewX", "skewY", "opacity", "zDepth", "rotationX", "rotationY"];
+const TF_POS: [&str; 4] = ["x", "y", "anchorX", "anchorY"];
+const ALIASES: [(&str, [&str; 2]); 4] = [
+    ("position", ["x", "y"]),
+    ("scale", ["scaleX", "scaleY"]),
+    ("anchor", ["anchorX", "anchorY"]),
+    ("skew", ["skewX", "skewY"]),
+];
+
+/// Where a transform property's per-frame value comes from.
+#[derive(Debug, Clone, Default)]
+pub struct TfSlots {
+    /// Slots for x, y, anchorX, anchorY (component 0/1 of an alias pair when `pair` is set).
+    pub pos: [Option<(u32, Option<u8>)>; 4],
+    /// Slots for the numeric transform properties.
+    pub num: [Option<(u32, Option<u8>)>; 9],
+}
+
+/// A motion path attached to a node.
+#[derive(Debug, Clone)]
+pub struct Motion {
+    /// Path.
+    pub path: MotionPath,
+    /// Start time (node timeline).
+    pub start: f64,
+    /// End time; the node end when absent.
+    pub end: Option<f64>,
+    /// Progress curve.
+    pub ease: Ease,
+    /// Rotate along the tangent.
+    pub auto_orient: bool,
+    /// Degrees added to the tangent angle.
+    pub orient_offset: f64,
+    /// Arc-length parameterisation.
+    pub constant_speed: bool,
+    /// Slot of an animated `progress`, when present.
+    pub progress: Option<u32>,
+}
+
+/// Instantiated node kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kind {
+    /// A leaf or plain container.
+    Plain,
+    /// One copy generated by a repeat.
+    RepeatCopy {
+        /// Copy number.
+        index: u32,
+        /// Number of copies.
+        count: u32,
+    },
+    /// A transition element (index into `Program::transitions`).
+    Transition(u32),
+}
+
+/// An instantiated node.
+#[derive(Debug, Clone)]
+pub struct InstNode {
+    /// Effective id (instance and repeat scopes joined with '/').
+    pub id: Arc<str>,
+    /// Scope its children's ids live in.
+    pub scope: Arc<str>,
+    /// XML element name (`copy` for repeat copies).
+    pub name: &'static str,
+    /// The element after overrides, without child nodes.
+    pub elem: Arc<Node>,
+    /// Kind.
+    pub kind: Kind,
+    /// Container in the tree.
+    pub parent: Option<u32>,
+    /// Children in paint order (z, then document order).
+    pub children: Vec<u32>,
+    /// Document the node comes from (0 = main).
+    pub doc: u16,
+    /// Start on its timeline.
+    pub start: f64,
+    /// End on its timeline (exclusive).
+    pub end: Option<f64>,
+    /// Visible from (transition handles may start it before `start`).
+    pub vis_start: f64,
+    /// Visible until (transition handles may extend it past `end`).
+    pub vis_end: Option<f64>,
+    /// Clock for the children.
+    pub clock: Clock,
+    /// Source clock (layers).
+    pub media: Option<MediaClock>,
+    /// Static transform.
+    pub tf: Tf,
+    /// Animated transform sources.
+    pub tf_slots: TfSlots,
+    /// Stacking order among siblings.
+    pub z: i32,
+    /// `@threeD`.
+    pub three_d: bool,
+    /// `@matteVisible`.
+    pub matte_visible: bool,
+    /// `@visible`.
+    pub visible: bool,
+    /// Condition expression.
+    pub cond: Option<u32>,
+    /// `@parent` node.
+    pub parent_link: Option<u32>,
+    /// `@matte` node.
+    pub matte: Option<u32>,
+    /// Repeat copy transform: dx, dy, rotation, scale, opacity factor.
+    pub copy: Option<[f64; 5]>,
+    /// Motion path.
+    pub motion: Option<Motion>,
+    /// Box for percentage lengths of the children, when the node defines one.
+    pub box_size: Option<[Length; 2]>,
+    /// Asset key (namespaced for includes).
+    pub asset: Option<Arc<str>>,
+    /// Resolved text for layers of text assets.
+    pub text: Option<Arc<str>>,
+    /// Slots owned by the node.
+    pub slots: Vec<u32>,
+    /// Element targets inside the node (masks, modifiers, …).
+    pub parts: Vec<u32>,
+    /// Element seed.
+    pub seed: u64,
+    /// Nearest repeat copy: (index, count, variable, item).
+    pub repeat: Option<(u32, u32, Arc<str>, V)>,
+    /// Fit, crop and flip of a layer.
+    pub fit: Option<crate::layout::FitSpec>,
+    /// Intrinsic size of a layer's asset.
+    pub asset_size: Option<[f64; 2]>,
+    /// Asset element name (`image`, `video`, `generator`, …).
+    pub asset_kind: Option<&'static str>,
+    /// Shape width and height.
+    pub shape_size: Option<[Length; 2]>,
+    /// Automatic layout of the children.
+    pub layout: Option<crate::layout::LayoutSpec>,
+    /// Responsive alignment.
+    pub align: Option<crate::layout::AlignSpec>,
+    /// Children in document order (layout order).
+    pub doc_children: Vec<u32>,
+    /// Clip children to the box.
+    pub clip: bool,
+}
+
+/// Who owns a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Owner {
+    /// A node's own attribute.
+    Node(u32),
+    /// An element target.
+    Element(u32),
+}
+
+/// One property with its value sources.
+#[derive(Debug, Clone)]
+pub struct Slot {
+    /// Owner.
+    pub owner: Owner,
+    /// Property name.
+    pub prop: Arc<str>,
+    /// Kind.
+    pub kind: PropKind,
+    /// Static value.
+    pub base: Value,
+    /// Keyframe channels in document order.
+    pub channels: Vec<u32>,
+    /// Expression.
+    pub expr: Option<u32>,
+    /// Link.
+    pub link: Option<u32>,
+    /// Node whose timeline drives the slot; `None` for the composition timeline.
+    pub time_node: Option<u32>,
+}
+
+/// An element with animated properties that is not a node.
+#[derive(Debug, Clone)]
+pub struct ElemTarget {
+    /// Key: its id, or owner-relative path such as `mask[0]`.
+    pub key: Arc<str>,
+    /// Element name.
+    pub name: &'static str,
+    /// Owning node, if inside one.
+    pub node: Option<u32>,
+    /// Static attribute kinds and values.
+    pub attrs: Vec<(&'static str, PropKind, Value)>,
+    /// Slots.
+    pub slots: Vec<u32>,
+}
+
+/// A compiled expression.
+#[derive(Debug, Clone)]
+pub struct ExprInst {
+    /// Bytecode.
+    pub code: Code,
+    /// Slot it computes, or `None` for node conditions.
+    pub slot: Option<u32>,
+    /// Owning node.
+    pub node: Option<u32>,
+    /// Seed for random and noise.
+    pub seed: u64,
+}
+
+/// Link sources.
+#[derive(Debug, Clone)]
+pub enum LinkSource {
+    /// Another property.
+    Prop(u32),
+    /// A parameter.
+    Param(V),
+    /// An audio envelope.
+    Audio(String, Band),
+    /// Marker progress: 0 before, ramps over the duration, 1 after.
+    Marker(f64, f64),
+}
+
+/// A compiled link.
+#[derive(Debug, Clone)]
+pub struct LinkInst {
+    /// Source.
+    pub source: LinkSource,
+    /// Scale.
+    pub scale: f64,
+    /// Offset.
+    pub offset: f64,
+    /// Lower clamp.
+    pub min: Option<f64>,
+    /// Upper clamp.
+    pub max: Option<f64>,
+    /// Delay in seconds.
+    pub delay: f64,
+    /// Moving-average window in seconds.
+    pub smoothing: f64,
+}
+
+/// A transition window between nodes.
+#[derive(Debug, Clone)]
+pub struct TransitionInst {
+    /// Transition node, or `None` for sequence auto-transitions.
+    pub node: Option<u32>,
+    /// Type literal.
+    pub kind: Arc<str>,
+    /// Outgoing node.
+    pub from: Option<u32>,
+    /// Incoming node.
+    pub to: Option<u32>,
+    /// Window on the siblings' timeline.
+    pub window: (f64, f64),
+    /// Progress curve.
+    pub ease: Ease,
+    /// Container whose timeline the window lives on.
+    pub container: Option<u32>,
+}
+
+/// A beat grid.
+#[derive(Debug, Clone, Copy)]
+pub struct BeatGrid {
+    /// Beats per minute.
+    pub bpm: f64,
+    /// Time of beat 0.
+    pub offset: f64,
+    /// Beats per bar.
+    pub per_bar: u64,
+}
+
+/// Everything evaluation needs, built once.
+#[derive(Debug)]
+pub struct Program {
+    /// The templated main scene.
+    pub scene: m::Scene,
+    /// Included documents: namespace and templated scene.
+    pub includes: Vec<(Arc<str>, m::Scene)>,
+    /// Frame rate.
+    pub fps: Fps,
+    /// Duration in seconds.
+    pub duration: f64,
+    /// Frame size (layout size when a layout is selected).
+    pub size: [f64; 2],
+    /// Project seed.
+    pub seed: u64,
+    /// Nodes; roots are the composition children.
+    pub nodes: Vec<InstNode>,
+    /// Root nodes in document order.
+    pub roots: Vec<u32>,
+    /// Slots.
+    pub slots: Vec<Slot>,
+    /// Slot evaluation order (dependencies first).
+    pub order: Vec<u32>,
+    /// Channels.
+    pub channels: Vec<Channel>,
+    /// Expressions.
+    pub exprs: Vec<ExprInst>,
+    /// Links.
+    pub links: Vec<LinkInst>,
+    /// Element targets.
+    pub elements: Vec<ElemTarget>,
+    /// Transitions.
+    pub transitions: Vec<TransitionInst>,
+    /// Marker times (including generated `beat.N`/`bar.N` on demand).
+    pub markers: HashMap<String, f64>,
+    /// Beat grid.
+    pub beat: Option<BeatGrid>,
+    /// Parameter values.
+    pub params: HashMap<String, V>,
+    /// Audio analysis.
+    pub analysis: Analysis,
+    /// Asset key → (document index, asset id).
+    pub assets: HashMap<Arc<str>, (u16, String)>,
+    /// Safe-area insets (top, right, bottom, left) as fractions of the frame.
+    pub safe_area: [f64; 4],
+    /// Base directory of each document (0 = main, then includes).
+    pub base_dirs: Vec<PathBuf>,
+    /// Warnings.
+    pub warnings: Vec<Diagnostic>,
+    /// Tracking data by id.
+    pub tracks: HashMap<String, Arc<crate::rig::TrackEntry>>,
+    /// Skin weights of skeletons with `@weights`, by skeleton id.
+    pub skins: HashMap<Arc<str>, Arc<crate::eval::SkinWeights>>,
+}
+
+// ------------------------------------------------------------------ helpers
+
+fn attr_num(e: &dyn Element, n: &str) -> Option<f64> {
+    match e.get_attr(n)? {
+        AttrValue::Num(x) => Some(x),
+        _ => None,
+    }
+}
+
+fn attr_str(e: &dyn Element, n: &str) -> Option<String> {
+    match e.get_attr(n)? {
+        AttrValue::Str(s) => Some(s),
+        AttrValue::Tokens(t) => Some(t.join(" ")),
+        other => Some(other.to_string()),
+    }
+}
+
+fn attr_bool(e: &dyn Element, n: &str) -> Option<bool> {
+    match e.get_attr(n)? {
+        AttrValue::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
+fn attr_len(e: &dyn Element, n: &str) -> Option<Length> {
+    match e.get_attr(n)? {
+        AttrValue::Length(l) => Some(l),
+        AttrValue::Num(x) => Some(Length::px(x)),
+        _ => None,
+    }
+}
+
+fn err(code: &str, msg: impl Into<String>, loc: Loc, path: impl Into<String>) -> Diagnostic {
+    Diagnostic::error(code, msg, loc, path)
+}
+
+fn tokens_of(scene: &m::Scene) -> HashMap<String, [f64; 4]> {
+    let mut raw: HashMap<String, String> = HashMap::new();
+    if let Some(s) = &scene.styles {
+        for c in &s.children {
+            if let m::StylesChild::Token(t) = c {
+                raw.entry(t.name.clone()).or_insert_with(|| t.value.clone());
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for name in raw.keys() {
+        let mut cur = name.clone();
+        for _ in 0..8 {
+            let Some(v) = raw.get(&cur) else { break };
+            match <Color as sr_model::parse::ParseValue>::parse_value(v.trim()) {
+                Ok(Color::Rgba(c)) => {
+                    out.insert(name.clone(), [c.r as f64, c.g as f64, c.b as f64, c.a as f64]);
+                    break;
+                }
+                Ok(Color::Token(t)) => cur = t,
+                Err(_) => break,
+            }
+        }
+    }
+    out
+}
+
+fn markers_of(scene: &m::Scene) -> (HashMap<String, f64>, Option<BeatGrid>) {
+    let mut mk = HashMap::new();
+    let mut grid = None;
+    if let Some(ms) = &scene.markers {
+        for c in &ms.children {
+            match c {
+                m::MarkersChild::Marker(x) => {
+                    if let Some(id) = &x.id {
+                        mk.insert(id.clone(), x.time);
+                    }
+                }
+                m::MarkersChild::BeatGrid(b) => {
+                    grid.get_or_insert(BeatGrid { bpm: b.bpm.get(), offset: b.offset, per_bar: b.beats_per_bar });
+                }
+            }
+        }
+    }
+    (mk, grid)
+}
+
+/// Marker time including generated `beat.N` and `bar.N` ids of the beat grid.
+pub fn marker_time(markers: &HashMap<String, f64>, grid: Option<BeatGrid>, id: &str) -> Option<f64> {
+    if let Some(t) = markers.get(id) {
+        return Some(*t);
+    }
+    let g = grid?;
+    let (kind, n) = id.split_once('.')?;
+    let n: f64 = n.parse::<u64>().ok()? as f64;
+    let beat = 60.0 / g.bpm;
+    match kind {
+        "beat" => Some(g.offset + n * beat),
+        "bar" => Some(g.offset + n * beat * g.per_bar as f64),
+        _ => None,
+    }
+}
+
+/// Substitutes `{{name}}` and `{{name.field}}` using `lookup`; unknown names are kept.
+pub fn substitute(s: &str, lookup: &dyn Fn(&str) -> Option<String>, unknown: &mut dyn FnMut(&str)) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        match after.find("}}") {
+            Some(j) => {
+                let name = after[..j].trim();
+                match lookup(name) {
+                    Some(v) => out.push_str(&v),
+                    None => {
+                        unknown(name);
+                        out.push_str(&rest[i..i + 2 + j + 2]);
+                    }
+                }
+                rest = &after[j + 2..];
+            }
+            None => {
+                out.push_str(&rest[i..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn lookup_value(params: &HashMap<String, V>, name: &str) -> Option<V> {
+    let (root, field) = match name.split_once('.') {
+        Some((r, f)) => (r, Some(f)),
+        None => (name, None),
+    };
+    let v = params.get(root)?;
+    match field {
+        None => Some(v.clone()),
+        Some(f) => match v {
+            V::Obj(o) => o.get(f).cloned(),
+            _ => None,
+        },
+    }
+}
+
+// ------------------------------------------------------------------ parameters
+
+fn load_data(ds: &m::DataSource, base: &Path) -> Result<Vec<V>, String> {
+    let text = match &ds.src {
+        Some(src) => {
+            let p = match sr_model::assets::resolve(src, base) {
+                sr_model::assets::Resolved::Local(p) => p,
+                sr_model::assets::Resolved::Remote(s) => {
+                    return Err(format!("{s} data sources are not fetched; use a local file"))
+                }
+            };
+            std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?
+        }
+        None => ds.value.clone(),
+    };
+    data::parse(ds.format, &text)
+}
+
+struct ParamDef<'a> {
+    p: &'a m::Param,
+}
+
+fn convert_param(def: &ParamDef, raw: &str, fps: Fps, asset_ids: &HashSet<String>) -> Result<V, String> {
+    let p = def.p;
+    use m::ParamKind as K;
+    let v = match p.r#type {
+        K::String | K::Enum | K::Color | K::Asset => V::Str(raw.into()),
+        K::Number => {
+            let n = sr_model::xsd::parse_xsd_double(raw.trim())
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| format!("{raw:?} is not a number"))?;
+            V::Num(n)
+        }
+        K::Boolean => match raw.trim() {
+            "true" | "1" => V::Bool(true),
+            "false" | "0" => V::Bool(false),
+            _ => return Err(format!("{raw:?} is not a boolean")),
+        },
+        K::Time => {
+            let t = raw.trim();
+            if let Ok(tc) = <sr_model::values::Timecode as sr_model::parse::ParseValue>::parse_value(t) {
+                V::Num(tc.to_seconds(fps).map_err(|e| e.to_string())?)
+            } else {
+                V::Num(
+                    sr_model::xsd::parse_xsd_double(t)
+                        .filter(|n| n.is_finite())
+                        .ok_or_else(|| format!("{raw:?} is not a time in seconds or HH:MM:SS:FF"))?,
+                )
+            }
+        }
+        K::List => data::parse_list(raw),
+    };
+    match p.r#type {
+        K::Number | K::Time => {
+            let n = v.num();
+            if let Some(lo) = p.min.filter(|lo| n < *lo) {
+                return Err(format!("{n} is below the minimum {lo}"));
+            }
+            if let Some(hi) = p.max.filter(|hi| n > *hi) {
+                return Err(format!("{n} is above the maximum {hi}"));
+            }
+        }
+        K::Color => {
+            <Color as sr_model::parse::ParseValue>::parse_value(raw.trim()).map_err(|e| e.to_string())?;
+        }
+        K::Asset => {
+            if !asset_ids.contains(raw.trim()) {
+                return Err(format!("{raw:?} is not an asset id"));
+            }
+        }
+        K::Enum => {
+            let opts: Vec<&str> =
+                p.options.as_deref().unwrap_or("").split(',').map(str::trim).filter(|o| !o.is_empty()).collect();
+            if !opts.is_empty() && !opts.contains(&raw) {
+                return Err(format!("{raw:?} is not one of: {}", opts.join(", ")));
+            }
+        }
+        _ => {}
+    }
+    if matches!(p.r#type, K::String | K::Enum) {
+        if let Some(max) = p.max_length {
+            let n = raw.chars().count() as u64;
+            if n > max {
+                return Err(format!("{n} characters exceed maxLength {max}"));
+            }
+        }
+        if let Some(pat) = &p.pattern {
+            let re = regex::Regex::new(&format!("^(?:{pat})$"))
+                .map_err(|e| format!("pattern {pat:?} does not compile: {e}"))?;
+            if !re.is_match(raw) {
+                return Err(format!("{raw:?} does not match the pattern {pat:?}"));
+            }
+        }
+    }
+    Ok(v)
+}
+
+fn param_string(v: &V) -> String {
+    match v {
+        V::Arr(a) => a.iter().map(V::to_js_string).collect::<Vec<_>>().join(","),
+        other => other.to_js_string(),
+    }
+}
+
+fn apply_override(
+    scene: &mut m::Scene,
+    target: &str,
+    property: &str,
+    value: &str,
+    loc: Loc,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let mut found = false;
+    let mut error = None;
+    walk_mut(scene, &mut |e| {
+        if !found && e.element_id() == Some(target) {
+            found = true;
+            if let Err(x) = e.set_attr(property, value) {
+                error = Some(x.to_string());
+            }
+        }
+    });
+    if !found {
+        diags.push(err("E05", format!("{what}: no element has id {target:?}"), loc, target));
+    } else if let Some(e) = error {
+        diags.push(err("E06", format!("{what} of {target:?}: {e}"), loc, target));
+    }
+}
+
+/// Resolved parameters and the templated scene.
+struct Templated {
+    scene: m::Scene,
+    params: HashMap<String, V>,
+    size: [f64; 2],
+}
+
+fn template(
+    doc: &Document,
+    opts: &EvalOptions,
+    diags: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+) -> Templated {
+    let mut scene = doc.scene.clone();
+    let fps = scene.project.fps;
+    let mut raw: HashMap<String, Option<String>> = HashMap::new();
+    let mut defs: Vec<m::Param> = Vec::new();
+    let mut variants: HashMap<String, m::Variant> = HashMap::new();
+    let mut sources: Vec<m::DataSource> = Vec::new();
+    let mut binds: Vec<m::Bind> = Vec::new();
+    if let Some(p) = &scene.parameters {
+        for c in &p.children {
+            match c {
+                m::ParametersChild::Param(x) => {
+                    raw.insert(x.id.clone(), x.default.clone());
+                    defs.push(x.clone());
+                }
+                m::ParametersChild::Variant(v) => {
+                    variants.insert(v.id.clone(), v.clone());
+                }
+                m::ParametersChild::Data(d) => sources.push(d.clone()),
+                m::ParametersChild::Bind(b) => binds.push(b.clone()),
+            }
+        }
+    }
+    let variant = match &opts.variant {
+        Some(id) => match variants.get(id) {
+            Some(v) => Some(v.clone()),
+            None => {
+                let known: Vec<&str> = variants.keys().map(String::as_str).collect();
+                diags.push(err(
+                    "E10",
+                    format!(
+                        "no variant {id:?}; variants: {}",
+                        if known.is_empty() { "none".into() } else { known.join(", ") }
+                    ),
+                    Loc::default(),
+                    "/scene/parameters",
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(v) = &variant {
+        for c in &v.children {
+            if let m::VariantChild::Set(s) = c {
+                raw.insert(s.param.clone(), Some(s.value.clone()));
+            }
+        }
+    }
+    if let Some((data_id, row)) = &opts.row {
+        let ds = match data_id {
+            Some(id) => sources.iter().find(|d| &d.id == id),
+            None => sources.first(),
+        };
+        match ds {
+            None => diags.push(err(
+                "E09",
+                format!("no data source {}", data_id.as_deref().unwrap_or("(none declared)")),
+                Loc::default(),
+                "/scene/parameters",
+            )),
+            Some(ds) => match load_data(ds, doc.base_dir()) {
+                Err(e) => diags.push(err("E09", format!("data source {:?}: {e}", ds.id), ds.loc, ds.id.as_str())),
+                Ok(rows) => match rows.get(*row) {
+                    None => diags.push(err(
+                        "E09",
+                        format!("data source {:?} has {} rows; row {row} does not exist", ds.id, rows.len()),
+                        ds.loc,
+                        ds.id.as_str(),
+                    )),
+                    Some(V::Obj(o)) => {
+                        for (k, v) in o.iter() {
+                            if raw.contains_key(k) {
+                                raw.insert(k.clone(), Some(param_string(v)));
+                            }
+                        }
+                    }
+                    Some(_) => diags.push(err(
+                        "E09",
+                        format!("row {row} of {:?} is not a record", ds.id),
+                        ds.loc,
+                        ds.id.as_str(),
+                    )),
+                },
+            },
+        }
+    }
+    for (k, v) in &opts.params {
+        if raw.contains_key(k) {
+            raw.insert(k.clone(), Some(v.clone()));
+        } else {
+            let hint = crate::suggest(k, raw.keys().map(String::as_str))
+                .map(|s| format!("; did you mean {s:?}?"))
+                .unwrap_or_default();
+            diags.push(err(
+                "E07",
+                format!("--param {k}: the document declares no parameter {k:?}{hint}"),
+                Loc::default(),
+                "/scene/parameters",
+            ));
+        }
+    }
+    let asset_ids: HashSet<String> =
+        scene.assets.iter().flat_map(|a| a.children.iter()).filter_map(|c| c.id().map(str::to_string)).collect();
+    let mut params = HashMap::new();
+    for d in &defs {
+        match raw.get(&d.id).cloned().flatten() {
+            Some(r) => match convert_param(&ParamDef { p: d }, &r, fps, &asset_ids) {
+                Ok(v) => {
+                    params.insert(d.id.clone(), v);
+                }
+                Err(e) => diags.push(err("E07", format!("param {:?}: {e}", d.id), d.loc, d.id.as_str())),
+            },
+            None => {
+                if d.required {
+                    diags.push(
+                        err("E08", format!("param {:?} is required and has no value", d.id), d.loc, d.id.as_str())
+                            .with_help(format!("pass --param {}=<value>, or set it in a variant or data row", d.id)),
+                    );
+                }
+                params
+                    .insert(d.id.clone(), if d.r#type == m::ParamKind::String { V::Str("".into()) } else { V::Undef });
+            }
+        }
+    }
+    // data sources are also visible to repeat/@over through params
+    for ds in &sources {
+        match load_data(ds, doc.base_dir()) {
+            Ok(rows) => {
+                params.entry(ds.id.clone()).or_insert(V::Arr(rows.into()));
+            }
+            Err(e) => diags.push(err("E09", format!("data source {:?}: {e}", ds.id), ds.loc, ds.id.as_str())),
+        }
+    }
+    for b in &binds {
+        let Some(v) = params.get(&b.param) else { continue };
+        let mut s = param_string(v);
+        if let Some(map) = &b.map {
+            for pair in map.split(';') {
+                if let Some((from, to)) = pair.split_once('=') {
+                    if from.trim() == s {
+                        s = to.trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+        apply_override(&mut scene, &b.target, &b.property, &s, b.loc, "bind", diags);
+    }
+    if let Some(v) = &variant {
+        for c in &v.children {
+            if let m::VariantChild::Override(o) = c {
+                apply_override(&mut scene, &o.target, &o.property, &o.value, o.loc, "variant override", diags);
+            }
+        }
+    }
+    let mut size = [scene.project.width as f64, scene.project.height as f64];
+    if let Some(l) = &opts.layout {
+        match scene.layouts.as_ref().and_then(|ls| ls.layouts.iter().find(|x| &x.id == l)).cloned() {
+            Some(layout) => {
+                size = [layout.width as f64, layout.height as f64];
+                for o in &layout.overrides {
+                    apply_override(&mut scene, &o.target, &o.property, &o.value, o.loc, "layout override", diags);
+                }
+            }
+            None => diags.push(err("E10", format!("no layout {l:?}"), Loc::default(), "/scene/layouts")),
+        }
+    }
+    // {{placeholder}} substitution in text-bearing attributes
+    let mut repeat_vars: HashSet<String> = ["index".to_string(), "count".to_string()].into();
+    walk(&scene, &mut |e| {
+        if e.element_name() == "repeat" {
+            if let Some(v) = attr_str(e, "var") {
+                repeat_vars.insert(v);
+            }
+        }
+    });
+    let lookup = |name: &str| lookup_value(&params, name).map(|v| param_string(&v));
+    walk_mut(&mut scene, &mut |e| {
+        let loc = e.loc();
+        let mut unknown = |name: &str| {
+            let root = name.split('.').next().unwrap_or(name);
+            if !repeat_vars.contains(root) {
+                warnings.push(Diagnostic::warning(
+                    "E16",
+                    format!("{{{{{name}}}}} names no parameter; the text is left unchanged"),
+                    loc,
+                    name,
+                ));
+            }
+        };
+        for a in ["text", "data", "tex", "value", "label", "prompt"] {
+            if let Some(AttrValue::Str(s)) = e.get_attr(a) {
+                if s.contains("{{")
+                    && matches!(
+                        e.element_name(),
+                        "text"
+                            | "textAssetType"
+                            | "object3D"
+                            | "object3DType"
+                            | "code"
+                            | "codeAssetType"
+                            | "formula"
+                            | "formulaAssetType"
+                            | "meta"
+                            | "metaType"
+                            | "word"
+                            | "wordType"
+                    )
+                {
+                    let n = substitute(&s, &lookup, &mut unknown);
+                    let _ = e.set_attr(a, &n);
+                }
+            }
+        }
+        if let Some(t) = e.text() {
+            if t.contains("{{") && matches!(e.element_name(), "span" | "spanType") {
+                let n = substitute(t, &lookup, &mut unknown);
+                e.set_text(n);
+            }
+        }
+    });
+    Templated { scene, params, size }
+}
+
+// ------------------------------------------------------------------ builder
+
+struct DocCtx {
+    scene: Arc<m::Scene>,
+    ns: Arc<str>,
+    base: PathBuf,
+    tokens: HashMap<String, [f64; 4]>,
+    markers: HashMap<String, f64>,
+    grid: Option<BeatGrid>,
+    duration: f64,
+    size: [f64; 2],
+}
+
+#[derive(Clone)]
+struct Ctx {
+    scope: Arc<str>,
+    doc: u16,
+    repeat: Option<(u32, u32, Arc<str>, V)>,
+    stack: Vec<String>,
+}
+
+struct Builder {
+    docs: Vec<DocCtx>,
+    nodes: Vec<InstNode>,
+    slots: Vec<Slot>,
+    slot_ix: HashMap<(Owner, Arc<str>), u32>,
+    channels: Vec<Channel>,
+    exprs: Vec<ExprInst>,
+    links: Vec<LinkInst>,
+    elements: Vec<ElemTarget>,
+    transitions: Vec<TransitionInst>,
+    ids: HashMap<Arc<str>, u32>,
+    diags: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
+    /// (slot or None for a condition, owning node, source, seed, location, scope, document)
+    pending_expr: Vec<(Option<u32>, Option<u32>, String, u64, Loc, Arc<str>, u16)>,
+    pending_link: Vec<(u32, m::Link, Option<u32>, Arc<str>, u16)>,
+    project_seed: u64,
+    params: HashMap<String, V>,
+    assets: HashMap<Arc<str>, (u16, String)>,
+    analysis_tracks: HashSet<String>,
+}
+
+fn strip(n: &Node) -> Node {
+    let mut n = n.clone();
+    match &mut n {
+        Node::Group(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
+        Node::Sequence(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
+        Node::Repeat(r) => r.children.retain(|c| !matches!(c, m::RepeatChild::Node(_))),
+        _ => {}
+    }
+    n
+}
+
+fn node_children(n: &Node) -> Vec<Node> {
+    n.child_nodes().cloned().collect()
+}
+
+const ANIM: [&str; 4] = ["animate", "expression", "motionPath", "link"];
+
+fn scoped(scope: &str, id: &str) -> Arc<str> {
+    if scope.is_empty() {
+        id.into()
+    } else {
+        format!("{scope}/{id}").into()
+    }
+}
+
+impl Builder {
+    fn doc(&self, i: u16) -> &DocCtx {
+        &self.docs[i as usize]
+    }
+
+    fn marker(&self, doc: u16, id: &str) -> Option<f64> {
+        let d = self.doc(doc);
+        marker_time(&d.markers, d.grid, id)
+    }
+
+    /// Resolves an id from `scope` outward.
+    fn resolve(&self, scope: &str, id: &str) -> Option<u32> {
+        let mut s = scope.to_string();
+        loop {
+            let key = if s.is_empty() { id.to_string() } else { format!("{s}/{id}") };
+            if let Some(&n) = self.ids.get(key.as_str()) {
+                return Some(n);
+            }
+            if s.is_empty() {
+                return None;
+            }
+            s = match s.rfind('/') {
+                Some(i) => s[..i].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
+    fn media_len(&self, doc: u16, asset: &str) -> Option<f64> {
+        let a = self.doc(doc).scene.assets.as_ref()?.children.iter().find(|c| c.id() == Some(asset))?;
+        match a {
+            m::AssetsChild::Video(v) => Some(v.duration.get()),
+            m::AssetsChild::ImageSequence(s) => {
+                let frames = ((s.last - s.first) as f64 / s.step as f64).floor() + 1.0;
+                Some(frames.max(0.0) / s.fps.as_f64())
+            }
+            _ => None,
+        }
+    }
+
+    fn instantiate(&mut self, list: &[Node], parent: Option<u32>, ctx: &Ctx) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut tcount = 0;
+        for n in list {
+            let name = n.element_name();
+            let id: Arc<str> = match n.id() {
+                Some(id) => scoped(&ctx.scope, id),
+                None => {
+                    tcount += 1;
+                    let p = parent.map(|p| self.nodes[p as usize].id.to_string()).unwrap_or_default();
+                    format!("{p}~{name}{tcount}").into()
+                }
+            };
+            let idx = self.nodes.len() as u32;
+            let e: &dyn Element = n;
+            let tf = Tf {
+                pos: TF_POS.map(|p| attr_len(e, p).unwrap_or(Length::px(0.0))),
+                num: [
+                    attr_num(e, "rotation").unwrap_or(0.0),
+                    attr_num(e, "scaleX").unwrap_or(1.0),
+                    attr_num(e, "scaleY").unwrap_or(1.0),
+                    attr_num(e, "skewX").unwrap_or(0.0),
+                    attr_num(e, "skewY").unwrap_or(0.0),
+                    attr_num(e, "opacity").unwrap_or(1.0),
+                    attr_num(e, "zDepth").unwrap_or(0.0),
+                    attr_num(e, "rotationX").unwrap_or(0.0),
+                    attr_num(e, "rotationY").unwrap_or(0.0),
+                ],
+            };
+            let mut start = attr_num(e, "start").unwrap_or(0.0);
+            if let Some(mk) = attr_str(e, "startMarker") {
+                start += self.marker(ctx.doc, &mk).unwrap_or(0.0);
+            }
+            let mut end = attr_num(e, "end");
+            if let Some(mk) = attr_str(e, "endMarker") {
+                end = Some(self.marker(ctx.doc, &mk).unwrap_or(0.0) + end.unwrap_or(0.0));
+            }
+            let seed = attr_num(e, "seed").map(|s| s as u64).unwrap_or_else(|| crate::rng::hash_str(&id));
+            let asset_ref = match name {
+                "layer" => attr_str(e, "asset"),
+                // 3D objects reference mesh assets
+                "object3D" => attr_str(e, "mesh"),
+                _ => None,
+            };
+            let asset = asset_ref.map(|a| {
+                let ns = &self.doc(ctx.doc).ns;
+                let key: Arc<str> = if ns.is_empty() { a.as_str().into() } else { format!("{ns}/{a}").into() };
+                self.assets.insert(key.clone(), (ctx.doc, a));
+                key
+            });
+            if name == "particleEmitter" {
+                // sprites and emission masks are image assets too
+                for r in [attr_str(e, "sprite"), attr_str(e, "emitterAsset")].into_iter().flatten() {
+                    let ns = &self.doc(ctx.doc).ns;
+                    let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                    self.assets.insert(key, (ctx.doc, r));
+                }
+            }
+            let node = InstNode {
+                id: id.clone(),
+                scope: ctx.scope.clone(),
+                name,
+                elem: Arc::new(strip(n)),
+                kind: Kind::Plain,
+                parent,
+                children: Vec::new(),
+                doc: ctx.doc,
+                start,
+                end,
+                vis_start: f64::NAN,
+                vis_end: None,
+                clock: Clock::Same,
+                media: None,
+                tf,
+                tf_slots: TfSlots::default(),
+                z: attr_num(e, "z").unwrap_or(0.0) as i32,
+                three_d: attr_bool(e, "threeD").unwrap_or(false),
+                matte_visible: attr_bool(e, "matteVisible").unwrap_or(false),
+                visible: attr_bool(e, "visible").unwrap_or(true)
+                    && (name != "camera" || attr_bool(e, "active").unwrap_or(true)),
+                cond: None,
+                parent_link: None,
+                matte: None,
+                copy: None,
+                motion: None,
+                box_size: None,
+                asset,
+                text: None,
+                slots: Vec::new(),
+                parts: Vec::new(),
+                seed,
+                repeat: ctx.repeat.clone(),
+                fit: None,
+                asset_size: None,
+                asset_kind: None,
+                shape_size: None,
+                layout: None,
+                align: None,
+                doc_children: Vec::new(),
+                clip: attr_bool(e, "clip").unwrap_or(false),
+            };
+            self.nodes.push(node);
+            self.statics(idx, n, ctx.doc);
+            if n.id().is_some() {
+                self.ids.insert(id.clone(), idx);
+            }
+            out.push(idx);
+            match n {
+                Node::Group(g) => {
+                    self.group_clock(idx, g.time_offset, g.time_scale.get());
+                    self.nodes[idx as usize].box_size = g.width.zip(g.height).map(|(w, h)| [w, h]);
+                    let kids = node_children(n);
+                    let c = self.instantiate(&kids, Some(idx), ctx);
+                    self.nodes[idx as usize].children = c;
+                }
+                Node::Sequence(s) => {
+                    self.group_clock(idx, s.time_offset, s.time_scale.get());
+                    self.nodes[idx as usize].box_size = s.width.zip(s.height).map(|(w, h)| [w, h]);
+                    let kids = node_children(n);
+                    let c = self.instantiate(&kids, Some(idx), ctx);
+                    self.nodes[idx as usize].children = c;
+                    self.place_sequence(idx, s);
+                }
+                Node::Repeat(r) => self.repeat(idx, r, n, ctx),
+                Node::Instance(i) => self.instance(idx, i, ctx),
+                Node::Include(i) => self.include(idx, i, ctx),
+                Node::Layer(l) => self.layer_clock(idx, l, ctx),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Static layout, fit and size data of a node.
+    fn statics(&mut self, idx: u32, n: &Node, doc: u16) {
+        use crate::layout::{AlignSpec, FitSpec, LayoutSpec};
+        let e: &dyn Element = n;
+        let align = {
+            let x =
+                attr_str(e, "alignX").and_then(|v| <m::AlignX as sr_model::parse::ParseValue>::parse_value(&v).ok());
+            let y =
+                attr_str(e, "alignY").and_then(|v| <m::AlignY as sr_model::parse::ParseValue>::parse_value(&v).ok());
+            (x.is_some() || y.is_some()).then(|| AlignSpec {
+                x,
+                y,
+                to: attr_str(e, "alignTo")
+                    .and_then(|v| <m::AlignTo as sr_model::parse::ParseValue>::parse_value(&v).ok())
+                    .unwrap_or(m::AlignTo::Parent),
+                margin: attr_len(e, "margin").unwrap_or(Length::px(0.0)),
+            })
+        };
+        let layout = match n {
+            Node::Group(g) if g.layout != m::GroupLayout::None => Some(LayoutSpec {
+                kind: g.layout,
+                gap: g.gap,
+                padding: g.padding,
+                justify: g.justify,
+                align_items: g.align_items,
+                columns: g.grid_columns as u32,
+            }),
+            Node::Sequence(g) if g.layout != m::GroupLayout::None => Some(LayoutSpec {
+                kind: g.layout,
+                gap: g.gap,
+                padding: g.padding,
+                justify: g.justify,
+                align_items: g.align_items,
+                columns: g.grid_columns as u32,
+            }),
+            _ => None,
+        };
+        let shape_size = match n {
+            Node::Shape(s) => Some([s.width, s.height]),
+            _ => None,
+        };
+        let (mut asset_size, mut asset_kind, mut fit) = (None, None, None);
+        if let Node::Layer(l) = n {
+            if let Some(a) = self
+                .doc(doc)
+                .scene
+                .assets
+                .as_ref()
+                .and_then(|a| a.children.iter().find(|c| c.id() == Some(l.asset.as_str())))
+            {
+                asset_kind = Some(a.element_name());
+                let wh = |w: Option<f64>, h: Option<f64>| w.zip(h).map(|(w, h)| [w, h]);
+                asset_size = match a {
+                    m::AssetsChild::Image(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Video(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::ImageSequence(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Text(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Vector(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Lottie(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Generator(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Chart(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Audiogram(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Code(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Formula(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Generated(x) => wh(x.width.map(|v| v as f64), x.height.map(|v| v as f64)),
+                    _ => None,
+                };
+            }
+            fit = Some(FitSpec {
+                fit: l.fit,
+                box_w: l.box_width,
+                box_h: l.box_height,
+                focus: [l.focus_x.get(), l.focus_y.get()],
+                crop: [l.crop_left.get(), l.crop_top.get(), l.crop_right.get(), l.crop_bottom.get()],
+                flip: [l.flip_x, l.flip_y],
+            });
+        }
+        let node = &mut self.nodes[idx as usize];
+        node.align = align;
+        node.layout = layout;
+        node.shape_size = shape_size;
+        node.asset_size = asset_size;
+        node.asset_kind = asset_kind;
+        node.fit = fit;
+    }
+
+    fn group_clock(&mut self, idx: u32, offset: f64, scale: f64) {
+        let node = &mut self.nodes[idx as usize];
+        if offset != 0.0 || scale != 1.0 {
+            node.clock = Clock::Affine { origin: node.start, offset, scale };
+        }
+    }
+
+    fn layer_clock(&mut self, idx: u32, l: &m::Layer, ctx: &Ctx) {
+        let len = self
+            .media_len(ctx.doc, &l.asset)
+            .map(|full| (l.clip_out.unwrap_or(full) - l.clip_in).max(0.0))
+            .or(l.clip_out.map(|o| (o - l.clip_in).max(0.0)));
+        let rate = l.speed / l.time_stretch.get();
+        let mut remap = None;
+        for c in &l.children {
+            if let m::LayerChild::TimeRemap(tr) = c {
+                let spec = ChannelSpec {
+                    keys: &tr.keys,
+                    default: tr.default_interpolation,
+                    before: m::Extrapolation::Hold,
+                    after: m::Extrapolation::Hold,
+                    additive: false,
+                    time_base: m::TimeBase::Local,
+                    kind: PropKind::Number(Default::default()),
+                };
+                match Channel::compile(&spec, &DocLookup { b: self, doc: ctx.doc }) {
+                    Ok(ch) => remap = Some(ch),
+                    Err(e) => {
+                        self.diags.push(err("E04", format!("timeRemap of {:?}: {e}", l.id), tr.loc, l.id.as_str()))
+                    }
+                }
+            }
+        }
+        let start = self.nodes[idx as usize].start;
+        let clock = MediaClock {
+            start,
+            rate,
+            clip_in: l.clip_in,
+            len,
+            loops: l.r#loop,
+            reverse: l.reverse,
+            freeze_at: l.freeze_at,
+            remap,
+        };
+        let node = &mut self.nodes[idx as usize];
+        if node.end.is_none() && clock.remap.is_none() {
+            if let Some(len) = clock.len.filter(|_| rate != 0.0) {
+                node.end = Some(start + len * (clock.loops + 1) as f64 / rate.abs());
+            }
+        }
+        node.media = Some(clock);
+        // layer text with per-copy placeholders
+        let asset_text = self.doc(ctx.doc).scene.assets.as_ref().and_then(|a| {
+            a.children.iter().find_map(|c| match c {
+                m::AssetsChild::Text(t) if t.id == l.asset => t.text.clone(),
+                _ => None,
+            })
+        });
+        if let Some(t) = asset_text {
+            let text = if t.contains("{{") {
+                let rp = ctx.repeat.clone();
+                let params = &self.params;
+                let look = |name: &str| -> Option<String> {
+                    if let Some((i, c, var, item)) = &rp {
+                        let (root, field) = name.split_once('.').map(|(a, b)| (a, Some(b))).unwrap_or((name, None));
+                        match root {
+                            "index" => return Some(i.to_string()),
+                            "count" => return Some(c.to_string()),
+                            r if r == &**var => {
+                                return match (field, item) {
+                                    (None, v) => Some(param_string(v)),
+                                    (Some(f), V::Obj(o)) => o.get(f).map(param_string),
+                                    _ => None,
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                    lookup_value(params, name).map(|v| param_string(&v))
+                };
+                substitute(&t, &look, &mut |_| {})
+            } else {
+                t
+            };
+            self.nodes[idx as usize].text = Some(text.into());
+        }
+    }
+
+    fn repeat(&mut self, idx: u32, r: &m::Repeat, n: &Node, ctx: &Ctx) {
+        let items: Vec<V> = match (&r.count, &r.over) {
+            (Some(c), _) => (0..*c).map(|k| V::Num((r.from + k * r.step) as f64)).collect(),
+            (None, Some(over)) => match self.params.get(over) {
+                Some(V::Arr(a)) => a.iter().skip(r.from as usize).step_by(r.step.max(1) as usize).cloned().collect(),
+                _ => {
+                    self.diags.push(err(
+                        "E10",
+                        format!("repeat {:?}: @over {over:?} is not a list parameter or data source", r.id),
+                        r.loc,
+                        r.id.as_str(),
+                    ));
+                    Vec::new()
+                }
+            },
+            _ => Vec::new(),
+        };
+        let kids = node_children(n);
+        let count = items.len() as u32;
+        let mut copies = Vec::new();
+        let rid = self.nodes[idx as usize].id.clone();
+        let var: Arc<str> = r.var.as_str().into();
+        for (k, item) in items.into_iter().enumerate() {
+            let k = k as u32;
+            let cid: Arc<str> = format!("{rid}[{k}]").into();
+            let cidx = self.nodes.len() as u32;
+            let mut copy = self.nodes[idx as usize].clone();
+            copy.id = cid.clone();
+            copy.name = "copy";
+            copy.kind = Kind::RepeatCopy { index: k, count };
+            copy.parent = Some(idx);
+            copy.children = Vec::new();
+            copy.start = 0.0;
+            copy.end = None;
+            copy.tf = Tf { pos: [Length::px(0.0); 4], num: [0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] };
+            copy.tf_slots = TfSlots::default();
+            copy.z = 0;
+            copy.visible = true;
+            copy.box_size = None;
+            copy.slots = Vec::new();
+            copy.parts = Vec::new();
+            let kf = k as f64;
+            copy.copy = Some([
+                kf * r.offset_x,
+                kf * r.offset_y,
+                kf * r.rotation_step,
+                libm::pow(r.scale_step.get(), kf),
+                (1.0 - kf * r.opacity_step.get()).max(0.0),
+            ]);
+            copy.clock = if r.time_step != 0.0 {
+                Clock::Affine { origin: 0.0, offset: kf * r.time_step, scale: 1.0 }
+            } else {
+                Clock::Same
+            };
+            copy.repeat = Some((k, count, var.clone(), item.clone()));
+            copy.seed = crate::rng::hash_str(&cid);
+            copy.cond = None;
+            copy.align = None;
+            copy.layout = None;
+            copy.fit = None;
+            copy.asset_size = None;
+            copy.asset_kind = None;
+            copy.shape_size = None;
+            copy.clip = false;
+            self.nodes.push(copy);
+            self.ids.insert(cid.clone(), cidx);
+            let cctx = Ctx { scope: cid.clone(), repeat: Some((k, count, var.clone(), item)), ..ctx.clone() };
+            let c = self.instantiate(&kids, Some(cidx), &cctx);
+            self.nodes[cidx as usize].children = c;
+            copies.push(cidx);
+        }
+        self.nodes[idx as usize].children = copies;
+    }
+
+    fn apply_scoped_overrides(&mut self, nodes: &mut [Node], overrides: &[m::Override], owner: &str) {
+        for o in overrides {
+            let mut found = false;
+            let mut error = None;
+            for n in nodes.iter_mut() {
+                walk_mut(n, &mut |e| {
+                    if !found && e.element_id() == Some(o.target.as_str()) {
+                        found = true;
+                        if let Err(x) = e.set_attr(&o.property, &o.value) {
+                            error = Some(x.to_string());
+                        }
+                    }
+                });
+            }
+            if !found {
+                self.diags.push(err(
+                    "E05",
+                    format!("override in {owner:?}: no element {:?} inside it", o.target),
+                    o.loc,
+                    owner,
+                ));
+            } else if let Some(e) = error {
+                self.diags.push(err("E06", format!("override of {:?} in {owner:?}: {e}", o.target), o.loc, owner));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn symbol_clock(
+        &mut self,
+        idx: u32,
+        len: f64,
+        speed: f64,
+        clip_in: f64,
+        loops: u64,
+        reverse: bool,
+        remap: Option<Channel>,
+    ) {
+        let start = self.nodes[idx as usize].start;
+        let len = (len - clip_in).max(0.0);
+        let clock = MediaClock { start, rate: speed, clip_in, len: Some(len), loops, reverse, freeze_at: None, remap };
+        let node = &mut self.nodes[idx as usize];
+        if node.end.is_none() && clock.remap.is_none() && speed != 0.0 {
+            node.end = Some(start + len * (loops + 1) as f64 / speed.abs());
+        }
+        node.clock = Clock::Media(Box::new(clock));
+    }
+
+    fn instance(&mut self, idx: u32, inst: &m::Instance, ctx: &Ctx) {
+        let doc = self.doc(ctx.doc).scene.clone();
+        let Some(sym) = doc.symbols.as_ref().and_then(|s| s.symbols.iter().find(|x| x.id == inst.symbol)) else {
+            return;
+        };
+        let key = format!("{}#{}", ctx.doc, sym.id);
+        if ctx.stack.contains(&key) {
+            self.diags.push(err(
+                "E13",
+                format!("instance {:?} instantiates symbol {:?} inside itself", inst.id, sym.id),
+                inst.loc,
+                &*self.nodes[idx as usize].id,
+            ));
+            return;
+        }
+        let mut kids = sym.children.clone();
+        let overrides: Vec<m::Override> = inst
+            .children
+            .iter()
+            .filter_map(|c| if let m::InstanceChild::Override(o) = c { Some(o.clone()) } else { None })
+            .collect();
+        let id = self.nodes[idx as usize].id.clone();
+        self.apply_scoped_overrides(&mut kids, &overrides, &id);
+        let mut remap = None;
+        for c in &inst.children {
+            if let m::InstanceChild::TimeRemap(tr) = c {
+                let spec = ChannelSpec {
+                    keys: &tr.keys,
+                    default: tr.default_interpolation,
+                    before: m::Extrapolation::Hold,
+                    after: m::Extrapolation::Hold,
+                    additive: false,
+                    time_base: m::TimeBase::Local,
+                    kind: PropKind::Number(Default::default()),
+                };
+                match Channel::compile(&spec, &DocLookup { b: self, doc: ctx.doc }) {
+                    Ok(ch) => remap = Some(ch),
+                    Err(e) => self.diags.push(err(
+                        "E04",
+                        format!("timeRemap of {:?}: {e}", inst.id),
+                        tr.loc,
+                        inst.id.as_str(),
+                    )),
+                }
+            }
+        }
+        let dur = sym.duration.map(|d| d.get()).unwrap_or(self.doc(ctx.doc).duration);
+        self.symbol_clock(idx, dur, inst.speed, inst.clip_in, inst.r#loop, inst.reverse, remap);
+        let size = self.doc(ctx.doc).size;
+        self.nodes[idx as usize].box_size = Some([
+            Length::px(sym.width.map(|w| w as f64).unwrap_or(size[0])),
+            Length::px(sym.height.map(|h| h as f64).unwrap_or(size[1])),
+        ]);
+        let mut stack = ctx.stack.clone();
+        stack.push(key);
+        let cctx = Ctx { scope: id, stack, ..ctx.clone() };
+        let c = self.instantiate(&kids, Some(idx), &cctx);
+        self.nodes[idx as usize].children = c;
+    }
+
+    fn include(&mut self, idx: u32, inc: &m::Include, ctx: &Ctx) {
+        let base = self.doc(ctx.doc).base.clone();
+        let path = match sr_model::assets::resolve(&inc.src, &base) {
+            sr_model::assets::Resolved::Local(p) => p,
+            sr_model::assets::Resolved::Remote(s) => {
+                self.diags.push(err(
+                    "E12",
+                    format!("include {:?}: {s} URIs are not fetched", inc.id),
+                    inc.loc,
+                    inc.id.as_str(),
+                ));
+                return;
+            }
+        };
+        let key = format!("file:{}", path.display());
+        if ctx.stack.contains(&key) || ctx.stack.len() > 16 {
+            self.diags.push(err(
+                "E13",
+                format!("include {:?} includes {} inside itself", inc.id, path.display()),
+                inc.loc,
+                inc.id.as_str(),
+            ));
+            return;
+        }
+        let doc = match sr_model::load_file(&path, &sr_model::LoadOptions::without_assets()) {
+            Ok(d) => d,
+            Err(e) => {
+                let first = e
+                    .report()
+                    .and_then(|r| r.diagnostics.iter().find(|d| d.is_error()))
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_else(|| format!(": {e}"));
+                self.diags.push(err(
+                    "E12",
+                    format!("include {:?}: {} is not a valid document{first}", inc.id, path.display()),
+                    inc.loc,
+                    inc.id.as_str(),
+                ));
+                return;
+            }
+        };
+        let mut sub_d = Vec::new();
+        let mut sub_w = Vec::new();
+        let t = template(&doc, &EvalOptions::default(), &mut sub_d, &mut sub_w);
+        let ns = self.nodes[idx as usize].id.clone();
+        let (mut kids, dur, size) = match &inc.symbol {
+            Some(s) => match t.scene.symbols.as_ref().and_then(|x| x.symbols.iter().find(|y| &y.id == s)) {
+                Some(sym) => (
+                    sym.children.clone(),
+                    sym.duration.map(|d| d.get()).unwrap_or(t.scene.project.duration.get()),
+                    [
+                        sym.width.map(|w| w as f64).unwrap_or(t.size[0]),
+                        sym.height.map(|h| h as f64).unwrap_or(t.size[1]),
+                    ],
+                ),
+                None => {
+                    self.diags.push(err(
+                        "E12",
+                        format!("include {:?}: {} has no symbol {s:?}", inc.id, path.display()),
+                        inc.loc,
+                        inc.id.as_str(),
+                    ));
+                    return;
+                }
+            },
+            None => (t.scene.composition.children.clone(), t.scene.project.duration.get(), t.size),
+        };
+        let overrides: Vec<m::Override> = inc
+            .children
+            .iter()
+            .filter_map(|c| if let m::IncludeChild::Override(o) = c { Some(o.clone()) } else { None })
+            .collect();
+        self.apply_scoped_overrides(&mut kids, &overrides, &ns);
+        let (markers, grid) = markers_of(&t.scene);
+        let doc_ix = self.docs.len() as u16;
+        self.docs.push(DocCtx {
+            tokens: tokens_of(&t.scene),
+            scene: Arc::new(t.scene),
+            ns: ns.clone(),
+            base: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            markers,
+            grid,
+            duration: dur,
+            size,
+        });
+        self.symbol_clock(idx, dur, 1.0, 0.0, 0, false, None);
+        self.nodes[idx as usize].box_size = Some([Length::px(size[0]), Length::px(size[1])]);
+        let mut stack = ctx.stack.clone();
+        stack.push(key);
+        let cctx = Ctx { scope: ns, doc: doc_ix, stack, repeat: ctx.repeat.clone() };
+        let c = self.instantiate(&kids, Some(idx), &cctx);
+        self.nodes[idx as usize].children = c;
+    }
+
+    fn intrinsic(&self, n: u32) -> Option<f64> {
+        let node = &self.nodes[n as usize];
+        node.end.map(|e| e - node.start)
+    }
+
+    fn place_sequence(&mut self, idx: u32, s: &m::Sequence) {
+        let kids = self.nodes[idx as usize].children.clone();
+        let mut cursor = self.nodes[idx as usize].start;
+        let mut placed: Vec<u32> = Vec::new();
+        for &k in &kids {
+            if self.nodes[k as usize].name == "transition" {
+                continue;
+            }
+            let own = self.nodes[k as usize].start;
+            let d = self.intrinsic(k);
+            let has_marker = attr_str(&*self.nodes[k as usize].elem, "startMarker").is_some();
+            if !has_marker {
+                let new_start = cursor + own;
+                let delta = new_start - own;
+                self.shift(k, delta);
+            }
+            let node = &self.nodes[k as usize];
+            cursor = match d {
+                Some(d) => node.start + d + s.time_gap,
+                None => f64::INFINITY,
+            };
+            placed.push(k);
+        }
+        if let Some(kind) = &s.transition {
+            // auto-transitions at junctions without an explicit transition
+            let explicit: HashSet<(Option<String>, Option<String>)> = kids
+                .iter()
+                .filter(|k| self.nodes[**k as usize].name == "transition")
+                .map(|k| {
+                    let e = &*self.nodes[*k as usize].elem;
+                    (attr_str(e, "from"), attr_str(e, "to"))
+                })
+                .collect();
+            for w in placed.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let ida = self.nodes[a as usize].elem.id().map(str::to_string);
+                let idb = self.nodes[b as usize].elem.id().map(str::to_string);
+                if explicit.contains(&(ida, idb)) {
+                    continue;
+                }
+                let cut = self.nodes[b as usize].start;
+                let d = s.transition_duration.get();
+                self.transitions.push(TransitionInst {
+                    node: None,
+                    kind: kind.as_str().into(),
+                    from: Some(a),
+                    to: Some(b),
+                    window: (cut - d / 2.0, cut + d / 2.0),
+                    ease: curve::EASE_IN_OUT,
+                    container: Some(idx),
+                });
+            }
+        }
+    }
+
+    /// Moves a node in time, keeping its media clock aligned.
+    fn shift(&mut self, k: u32, delta: f64) {
+        if delta == 0.0 {
+            return;
+        }
+        let n = &mut self.nodes[k as usize];
+        n.start += delta;
+        if let Some(e) = &mut n.end {
+            *e += delta;
+        }
+        if let Some(mc) = &mut n.media {
+            mc.start += delta;
+        }
+        match &mut n.clock {
+            Clock::Media(mc) => mc.start += delta,
+            Clock::Affine { origin, .. } => *origin += delta,
+            Clock::Same => {}
+        }
+    }
+
+    // ---------------------------------------------------------- slots
+
+    fn slot(&mut self, owner: Owner, prop: &str) -> Result<u32, String> {
+        let key = (owner, Arc::<str>::from(prop));
+        if let Some(&s) = self.slot_ix.get(&key) {
+            return Ok(s);
+        }
+        let (kind, base, time_node) = match owner {
+            Owner::Node(n) => {
+                let node = &self.nodes[n as usize];
+                let e: &dyn Element = &*node.elem;
+                let tokens = &self.doc(node.doc).tokens;
+                let tok = |t: &str| tokens.get(t).copied();
+                if let Some((_, [a, b])) = ALIASES.iter().find(|(al, _)| *al == prop) {
+                    if !e.declares(a) {
+                        return Err(format!("<{}> has no property '{prop}'", node.name));
+                    }
+                    let va = e.get_attr(a).map(|x| PropKind::Length { positive: false }.from_attr(&x, &tok));
+                    let vb = e.get_attr(b).map(|x| PropKind::Length { positive: false }.from_attr(&x, &tok));
+                    let l = |v: Option<Value>, d: f64| match v {
+                        Some(Value::Len(l)) => l,
+                        Some(Value::Num(x)) => Length::px(x),
+                        _ => Length::px(d),
+                    };
+                    let d = if prop == "scale" { 1.0 } else { 0.0 };
+                    (PropKind::Pair, Value::Pair([l(va, d), l(vb, d)]), node.parent)
+                } else {
+                    let decl = COMPLEX_TYPES[e.xsd_type()].attr(prop).ok_or_else(|| {
+                        let hint = crate::suggest(
+                            prop,
+                            COMPLEX_TYPES[e.xsd_type()]
+                                .attrs
+                                .iter()
+                                .map(|a| a.name)
+                                .chain(["position", "scale", "anchor", "skew"]),
+                        )
+                        .map(|s| format!("; did you mean '{s}'?"))
+                        .unwrap_or_default();
+                        format!("<{}> has no property '{prop}'{hint}", node.name)
+                    })?;
+                    let kind = PropKind::of_simple_type(decl.ty);
+                    let base = e.get_attr(prop).map(|a| kind.from_attr(&a, &tok)).unwrap_or(kind.neutral());
+                    (kind, base, node.parent)
+                }
+            }
+            Owner::Element(t) => {
+                let el = &self.elements[t as usize];
+                let (kind, base) =
+                    el.attrs.iter().find(|(n, _, _)| *n == prop).map(|(_, k, v)| (*k, v.clone())).ok_or_else(|| {
+                        let hint = crate::suggest(prop, el.attrs.iter().map(|a| a.0))
+                            .map(|s| format!("; did you mean '{s}'?"))
+                            .unwrap_or_default();
+                        format!("<{}> has no property '{prop}'{hint}", el.name)
+                    })?;
+                (kind, base, el.node)
+            }
+        };
+        // node slots live on the node's own timeline, which is its container's child timeline
+        let time_node = match owner {
+            Owner::Node(n) => self.nodes[n as usize].parent.map(|_| n).or(Some(n)),
+            Owner::Element(_) => time_node,
+        };
+        let i = self.slots.len() as u32;
+        self.slots.push(Slot {
+            owner,
+            prop: key.1.clone(),
+            kind,
+            base,
+            channels: Vec::new(),
+            expr: None,
+            link: None,
+            time_node,
+        });
+        self.slot_ix.insert(key, i);
+        match owner {
+            Owner::Node(n) => self.nodes[n as usize].slots.push(i),
+            Owner::Element(t) => self.elements[t as usize].slots.push(i),
+        }
+        Ok(i)
+    }
+}
+
+/// Element-target attribute snapshot: (name, (kind, value)).
+fn snapshot(e: &dyn Element, tokens: &HashMap<String, [f64; 4]>) -> Vec<(&'static str, PropKind, Value)> {
+    let tok = |t: &str| tokens.get(t).copied();
+    COMPLEX_TYPES[e.xsd_type()]
+        .attrs
+        .iter()
+        .map(|a| {
+            let kind = PropKind::of_simple_type(a.ty);
+            let v = e.get_attr(a.name).map(|x| kind.from_attr(&x, &tok)).unwrap_or(kind.neutral());
+            (a.name, kind, v)
+        })
+        .collect()
+}
+
+struct DocLookup<'b> {
+    b: &'b Builder,
+    doc: u16,
+}
+
+impl Lookup for DocLookup<'_> {
+    fn token(&self, name: &str) -> Option<[f64; 4]> {
+        self.b.doc(self.doc).tokens.get(name).copied()
+    }
+    fn marker(&self, id: &str) -> Option<f64> {
+        self.b.marker(self.doc, id)
+    }
+}
+
+impl Builder {
+    fn add_element(&mut self, key: Arc<str>, e: &dyn Element, node: Option<u32>, doc: u16) -> u32 {
+        let i = self.elements.len() as u32;
+        let attrs = snapshot(e, &self.doc(doc).tokens);
+        self.elements.push(ElemTarget { key, name: e.element_name(), node, attrs, slots: Vec::new() });
+        i
+    }
+
+    /// Compiles the animation children of `e` onto `owner`.
+    fn animate(&mut self, owner: Owner, e: &dyn Element, node: Option<u32>, doc: u16, scope: &Arc<str>, who: &str) {
+        for c in children(e) {
+            match c.element_name() {
+                "animate" => {
+                    let a = c.as_any().downcast_ref::<m::Animate>().expect("animate");
+                    let slot = match self.slot(owner, &a.property) {
+                        Ok(s) => s,
+                        Err(msg) => {
+                            self.diags.push(err("E02", format!("animate on {who:?}: {msg}"), a.loc, who));
+                            continue;
+                        }
+                    };
+                    let spec = ChannelSpec {
+                        keys: &a.keys,
+                        default: a.default_interpolation,
+                        before: a.extrapolate_before,
+                        after: a.extrapolate_after,
+                        additive: a.additive,
+                        time_base: a.time_base,
+                        kind: self.slots[slot as usize].kind,
+                    };
+                    match Channel::compile(&spec, &DocLookup { b: self, doc }) {
+                        Ok(ch) => {
+                            self.channels.push(ch);
+                            let ci = (self.channels.len() - 1) as u32;
+                            self.slots[slot as usize].channels.push(ci);
+                        }
+                        Err(msg) => self.diags.push(err(
+                            "E04",
+                            format!("animate {:?} on {who:?}: {msg}", a.property),
+                            a.loc,
+                            who,
+                        )),
+                    }
+                }
+                "expression" => {
+                    let x = c.as_any().downcast_ref::<m::Expression>().expect("expression");
+                    if !x.enabled {
+                        continue;
+                    }
+                    match self.slot(owner, &x.property) {
+                        Ok(slot) => {
+                            let base_seed = node.map(|n| self.nodes[n as usize].seed).unwrap_or(0);
+                            let seed = x.seed.unwrap_or_else(|| {
+                                crate::rng::hash(&[
+                                    base_seed,
+                                    crate::rng::hash_str(&x.property),
+                                    crate::rng::hash_str(who),
+                                ])
+                            });
+                            self.pending_expr.push((
+                                Some(slot),
+                                node,
+                                x.value.clone(),
+                                seed,
+                                x.loc,
+                                scope.clone(),
+                                doc,
+                            ));
+                        }
+                        Err(msg) => self.diags.push(err("E02", format!("expression on {who:?}: {msg}"), x.loc, who)),
+                    }
+                }
+                "link" => {
+                    let l = c.as_any().downcast_ref::<m::Link>().expect("link");
+                    match self.slot(owner, &l.property) {
+                        Ok(slot) => self.pending_link.push((slot, l.clone(), node, scope.clone(), doc)),
+                        Err(msg) => self.diags.push(err("E02", format!("link on {who:?}: {msg}"), l.loc, who)),
+                    }
+                }
+                "motionPath" => {
+                    let mp = c.as_any().downcast_ref::<m::MotionPath>().expect("motionPath");
+                    let Owner::Node(n) = owner else {
+                        self.diags.push(err(
+                            "E02",
+                            format!("motionPath on {who:?}: only nodes follow motion paths"),
+                            mp.loc,
+                            who,
+                        ));
+                        continue;
+                    };
+                    let path = match MotionPath::parse(&mp.path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.diags.push(err(
+                                "E15",
+                                format!("motionPath on {who:?}: {} at offset {}", e.message, e.offset),
+                                mp.loc,
+                                who,
+                            ));
+                            continue;
+                        }
+                    };
+                    let mut progress = None;
+                    for a in &mp.animates {
+                        if a.property != "progress" {
+                            self.diags.push(err(
+                                "E02",
+                                format!("motionPath on {who:?}: only 'progress' can be animated, not {:?}", a.property),
+                                a.loc,
+                                who,
+                            ));
+                            continue;
+                        }
+                        let spec = ChannelSpec {
+                            keys: &a.keys,
+                            default: a.default_interpolation,
+                            before: a.extrapolate_before,
+                            after: a.extrapolate_after,
+                            additive: a.additive,
+                            time_base: a.time_base,
+                            kind: PropKind::Number(crate::value::Range {
+                                lo: Some((0.0, false)),
+                                hi: Some((1.0, false)),
+                                integer: false,
+                            }),
+                        };
+                        match Channel::compile(&spec, &DocLookup { b: self, doc }) {
+                            Ok(ch) => {
+                                let key: Arc<str> = format!("{who}/motionPath").into();
+                                let el = self.elements.len() as u32;
+                                self.elements.push(ElemTarget {
+                                    key,
+                                    name: "motionPath",
+                                    node: Some(n),
+                                    attrs: vec![("progress", spec.kind, Value::Num(0.0))],
+                                    slots: Vec::new(),
+                                });
+                                let s = self.slot(Owner::Element(el), "progress").expect("declared");
+                                self.channels.push(ch);
+                                self.slots[s as usize].channels.push((self.channels.len() - 1) as u32);
+                                progress = Some(s);
+                            }
+                            Err(msg) => self.diags.push(err(
+                                "E04",
+                                format!("motionPath progress on {who:?}: {msg}"),
+                                a.loc,
+                                who,
+                            )),
+                        }
+                    }
+                    self.nodes[n as usize].motion = Some(Motion {
+                        path,
+                        start: mp.start,
+                        end: mp.end,
+                        ease: curve::resolve(mp.interpolation, &KeyParams::default()),
+                        auto_orient: mp.auto_orient,
+                        orient_offset: mp.orient_offset,
+                        constant_speed: mp.constant_speed,
+                        progress,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Element targets for animated non-node descendants of a node.
+    fn parts(&mut self, n: u32) {
+        let elem = self.nodes[n as usize].elem.clone();
+        let (doc, scope, id) =
+            (self.nodes[n as usize].doc, self.nodes[n as usize].scope.clone(), self.nodes[n as usize].id.clone());
+        let mut stack: Vec<(&dyn Element, String)> = vec![(&*elem as &dyn Element, id.to_string())];
+        while let Some((e, path)) = stack.pop() {
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for c in children(e) {
+                let name = c.element_name();
+                if ANIM.contains(&name) || matches!(name, "timeRemap" | "override") || Node::ELEMENTS.contains(&name) {
+                    continue;
+                }
+                let k = counts.entry(name).or_default();
+                let key = format!("{path}/{name}[{k}]");
+                *k += 1;
+                if children(c).iter().any(|g| ANIM.contains(&g.element_name())) {
+                    let t = self.add_element(key.as_str().into(), c, Some(n), doc);
+                    self.nodes[n as usize].parts.push(t);
+                    self.animate(Owner::Element(t), c, Some(n), doc, &scope, &key);
+                }
+                stack.push((c, key));
+            }
+        }
+    }
+
+    /// Element targets outside the composition (paints, effects, lights, …).
+    fn globals(&mut self) {
+        let scene = self.docs[0].scene.clone();
+        let mut stack: Vec<(&dyn Element, String)> = Vec::new();
+        for c in children(&*scene) {
+            if !matches!(c.element_name(), "compositionType" | "symbolsType" | "parametersType") {
+                stack.push((c, c.element_name().to_string()));
+            }
+        }
+        let root: Arc<str> = "".into();
+        while let Some((e, path)) = stack.pop() {
+            let key = e.element_id().map(str::to_string).unwrap_or(path);
+            if children(e).iter().any(|g| ANIM.contains(&g.element_name())) {
+                let t = self.add_element(key.as_str().into(), e, None, 0);
+                self.animate(Owner::Element(t), e, None, 0, &root, &key);
+            }
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for c in children(e) {
+                let name = c.element_name();
+                if ANIM.contains(&name) {
+                    continue;
+                }
+                let k = counts.entry(name).or_default();
+                stack.push((c, format!("{key}/{name}[{k}]")));
+                *k += 1;
+            }
+        }
+    }
+
+    fn resolve_links(&mut self) {
+        for n in 0..self.nodes.len() {
+            let node = &self.nodes[n];
+            let e: &dyn Element = &*node.elem;
+            let scope = node.scope.clone();
+            let (parent_attr, matte_attr, id) =
+                (attr_str(e, "parent"), attr_str(e, "matte").filter(|_| node.name != "transition"), node.id.clone());
+            if let Some(p) = parent_attr {
+                match self.resolve(&scope, &p) {
+                    Some(t) => self.nodes[n].parent_link = Some(t),
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("{id:?}: @parent {p:?} is not a node of the composition"),
+                        e.loc(),
+                        &*id,
+                    )),
+                }
+            }
+            if let Some(mt) = matte_attr {
+                self.nodes[n].matte = self.resolve(&scope, &mt);
+            }
+        }
+        // cycles through @parent
+        for start in 0..self.nodes.len() {
+            let mut seen = HashSet::new();
+            let mut cur = start as u32;
+            while let Some(p) = self.nodes[cur as usize].parent_link {
+                if !seen.insert(cur) || p as usize == start {
+                    let id = self.nodes[start].id.clone();
+                    let loc = self.nodes[start].elem.loc();
+                    if !self.diags.iter().any(|d| d.code == "E11" && d.path == *id) {
+                        self.diags.push(err("E11", format!("{id:?}: @parent forms a cycle"), loc, &*id));
+                    }
+                    self.nodes[start].parent_link = None;
+                    break;
+                }
+                cur = p;
+            }
+        }
+    }
+
+    fn transitions(&mut self) {
+        for n in 0..self.nodes.len() {
+            if self.nodes[n].name != "transition" {
+                continue;
+            }
+            let Node::Transition(t) = &*self.nodes[n].elem.clone() else { continue };
+            let scope = self.nodes[n].scope.clone();
+            let from = t.from.as_ref().and_then(|f| self.resolve(&scope, f));
+            let to = t.to.as_ref().and_then(|x| self.resolve(&scope, x));
+            let cut = match (from, to) {
+                (_, Some(b)) => self.nodes[b as usize].start,
+                (Some(a), None) => self.nodes[a as usize].end.unwrap_or(f64::INFINITY),
+                (None, None) => continue,
+            };
+            let d = t.duration.get();
+            let window = match t.alignment {
+                m::TransitionAlignment::Center => (cut - d / 2.0, cut + d / 2.0),
+                m::TransitionAlignment::End => (cut - d, cut),
+                m::TransitionAlignment::Start => (cut, cut + d),
+            };
+            let ti = self.transitions.len() as u32;
+            self.transitions.push(TransitionInst {
+                node: Some(n as u32),
+                kind: t.r#type.as_str().into(),
+                from,
+                to,
+                window,
+                ease: curve::resolve(t.curve, &KeyParams::default()),
+                container: self.nodes[n].parent,
+            });
+            self.nodes[n].kind = Kind::Transition(ti);
+            self.nodes[n].start = window.0;
+            self.nodes[n].end = Some(window.1);
+        }
+    }
+
+    fn compile_pending(&mut self) {
+        for (slot, node, src, seed, loc, scope, doc) in std::mem::take(&mut self.pending_expr) {
+            let who = match (slot, node) {
+                (Some(s), _) => self.slot_name(s),
+                (None, Some(n)) => format!("{}@condition", self.nodes[n as usize].id),
+                _ => "expression".into(),
+            };
+            let mut res = ExprResolver { b: self, scope, doc };
+            match vm::compile(&src, &mut res) {
+                Ok(code) => {
+                    self.exprs.push(ExprInst { code, slot, node, seed });
+                    let i = (self.exprs.len() - 1) as u32;
+                    match slot {
+                        Some(s) => self.slots[s as usize].expr = Some(i),
+                        None => {
+                            if let Some(n) = node {
+                                self.nodes[n as usize].cond = Some(i);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let excerpt: String = src.chars().skip(e.offset.saturating_sub(10)).take(30).collect();
+                    self.diags.push(err(
+                        "E01",
+                        format!("{who}: {} (near {:?})", e.message, excerpt.trim()),
+                        loc,
+                        who.as_str(),
+                    ));
+                }
+            }
+        }
+        for (slot, l, _node, scope, doc) in std::mem::take(&mut self.pending_link) {
+            let who = self.slot_name(slot);
+            let source = if let Some(p) = l.source.strip_prefix("param:") {
+                match self.params.get(p) {
+                    Some(v) => Some(LinkSource::Param(v.clone())),
+                    None => {
+                        self.diags.push(err("E14", format!("link on {who}: no parameter {p:?}"), l.loc, who.as_str()));
+                        None
+                    }
+                }
+            } else if let Some(a) = l.source.strip_prefix("audio:") {
+                let (track, band) = a.split_once(':').unwrap_or((a, "full"));
+                match Band::parse(band) {
+                    Some(b) => {
+                        self.analysis_tracks.insert(track.to_string());
+                        Some(LinkSource::Audio(track.to_string(), b))
+                    }
+                    None => {
+                        self.diags.push(err(
+                            "E14",
+                            format!("link on {who}: unknown band {band:?}; use low, mid, high or full"),
+                            l.loc,
+                            who.as_str(),
+                        ));
+                        None
+                    }
+                }
+            } else if let Some(mk) = l.source.strip_prefix("marker:") {
+                let dur = self.doc(doc).scene.markers.iter().flat_map(|m| m.children.iter()).find_map(|c| match c {
+                    m::MarkersChild::Marker(x) if x.id.as_deref() == Some(mk) => Some(x.duration.get()),
+                    _ => None,
+                });
+                match self.marker(doc, mk) {
+                    Some(t) => Some(LinkSource::Marker(t, dur.unwrap_or(0.0))),
+                    None => {
+                        self.diags.push(err("E14", format!("link on {who}: no marker {mk:?}"), l.loc, who.as_str()));
+                        None
+                    }
+                }
+            } else {
+                let mut res = ExprResolver { b: self, scope, doc };
+                match res.prop(&l.source) {
+                    Ok(s) => Some(LinkSource::Prop(s)),
+                    Err(e) => {
+                        self.diags.push(err(
+                            "E14",
+                            format!("link on {who}: {e}; a source is nodeId.property, param:name, audio:track[:band] or marker:id"),
+                            l.loc,
+                            who.as_str(),
+                        ));
+                        None
+                    }
+                }
+            };
+            if let Some(source) = source {
+                self.links.push(LinkInst {
+                    source,
+                    scale: l.scale,
+                    offset: l.offset,
+                    min: l.min,
+                    max: l.max,
+                    delay: l.delay,
+                    smoothing: l.smoothing.get(),
+                });
+                self.slots[slot as usize].link = Some((self.links.len() - 1) as u32);
+            }
+        }
+    }
+
+    fn slot_name(&self, s: u32) -> String {
+        let slot = &self.slots[s as usize];
+        let owner = match slot.owner {
+            Owner::Node(n) => self.nodes[n as usize].id.to_string(),
+            Owner::Element(e) => self.elements[e as usize].key.to_string(),
+        };
+        format!("{owner}.{}", slot.prop)
+    }
+
+    /// Topological order of slots; reports cycles.
+    fn order(&mut self) -> Vec<u32> {
+        let n = self.slots.len();
+        let mut deps: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for (i, s) in self.slots.iter().enumerate() {
+            if let Some(x) = s.expr {
+                deps[i].extend(self.exprs[x as usize].code.deps.iter().copied());
+            }
+            if let Some(l) = s.link {
+                if let LinkSource::Prop(p) = self.links[l as usize].source {
+                    deps[i].push(p);
+                }
+            }
+            if let Owner::Node(nd) = s.owner {
+                // a motion progress slot feeds the node transform, not other slots
+                let _ = nd;
+            }
+        }
+        let mut indeg = vec![0usize; n];
+        let mut users: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for (i, d) in deps.iter().enumerate() {
+            for &p in d {
+                if p as usize != i {
+                    indeg[i] += 1;
+                    users[p as usize].push(i as u32);
+                } else {
+                    indeg[i] += 1;
+                }
+            }
+        }
+        let mut ready: Vec<u32> = (0..n as u32).filter(|&i| indeg[i as usize] == 0).collect();
+        ready.reverse();
+        let mut out = Vec::with_capacity(n);
+        while let Some(i) = ready.pop() {
+            out.push(i);
+            for &u in &users[i as usize] {
+                indeg[u as usize] -= 1;
+                if indeg[u as usize] == 0 {
+                    ready.push(u);
+                }
+            }
+        }
+        if out.len() < n {
+            let stuck: Vec<u32> = (0..n as u32).filter(|&i| indeg[i as usize] > 0).collect();
+            // walk one cycle for the message
+            let mut cycle = vec![stuck[0]];
+            let mut cur = stuck[0];
+            for _ in 0..n {
+                let Some(&next) = deps[cur as usize].iter().find(|d| indeg[**d as usize] > 0) else { break };
+                if let Some(pos) = cycle.iter().position(|c| *c == next) {
+                    cycle.drain(..pos);
+                    cycle.push(next);
+                    break;
+                }
+                cycle.push(next);
+                cur = next;
+            }
+            let names: Vec<String> = cycle.iter().map(|s| self.slot_name(*s)).collect();
+            let s0 = stuck[0];
+            let loc = match self.slots[s0 as usize].owner {
+                Owner::Node(nd) => self.nodes[nd as usize].elem.loc(),
+                Owner::Element(_) => Loc::default(),
+            };
+            self.diags.push(err(
+                "E03",
+                format!("properties depend on each other in a cycle: {}", names.join(" → ")),
+                loc,
+                names[0].as_str(),
+            ));
+            out.extend(stuck);
+        }
+        out
+    }
+
+    fn fill_tf_slots(&mut self) {
+        for i in 0..self.nodes.len() {
+            let mut t = TfSlots::default();
+            for &s in &self.nodes[i].slots {
+                let p = &*self.slots[s as usize].prop;
+                if let Some(k) = TF_POS.iter().position(|x| *x == p) {
+                    t.pos[k] = Some((s, None));
+                }
+                if let Some(k) = TF_NUM.iter().position(|x| *x == p) {
+                    t.num[k] = Some((s, None));
+                }
+            }
+            for &s in &self.nodes[i].slots {
+                match &*self.slots[s as usize].prop {
+                    "position" => {
+                        t.pos[tfi::X] = Some((s, Some(0)));
+                        t.pos[tfi::Y] = Some((s, Some(1)));
+                    }
+                    "anchor" => {
+                        t.pos[tfi::AX] = Some((s, Some(0)));
+                        t.pos[tfi::AY] = Some((s, Some(1)));
+                    }
+                    "scale" => {
+                        t.num[tfi::SX] = Some((s, Some(0)));
+                        t.num[tfi::SY] = Some((s, Some(1)));
+                    }
+                    "skew" => {
+                        t.num[tfi::KX] = Some((s, Some(0)));
+                        t.num[tfi::KY] = Some((s, Some(1)));
+                    }
+                    _ => {}
+                }
+            }
+            self.nodes[i].tf_slots = t;
+        }
+    }
+}
+
+struct ExprResolver<'b> {
+    b: &'b mut Builder,
+    scope: Arc<str>,
+    doc: u16,
+}
+
+impl Resolver for ExprResolver<'_> {
+    fn prop(&mut self, path: &str) -> Result<u32, String> {
+        let (id, prop) = path.rsplit_once('.').ok_or_else(|| format!("prop({path:?}) needs \"id.property\""))?;
+        if let Some(n) = self.b.resolve(&self.scope, id) {
+            return self.b.slot(Owner::Node(n), prop);
+        }
+        if let Some(t) = self.b.elements.iter().position(|e| &*e.key == id) {
+            return self.b.slot(Owner::Element(t as u32), prop);
+        }
+        // a static element outside the composition
+        let scene = self.b.docs[self.doc as usize].scene.clone();
+        let mut found = None;
+        walk(&*scene, &mut |e| {
+            if found.is_none() && e.element_id() == Some(id) {
+                found = Some(e);
+            }
+        });
+        match found {
+            Some(e) => {
+                let t = self.b.add_element(id.into(), e, None, self.doc);
+                self.b.slot(Owner::Element(t), prop)
+            }
+            None => {
+                let hint = crate::suggest(id, self.b.ids.keys().map(|k| &**k))
+                    .map(|s| format!("; did you mean {s:?}?"))
+                    .unwrap_or_default();
+                Err(format!("no element has id {id:?}{hint}"))
+            }
+        }
+    }
+
+    fn marker(&mut self, id: &str) -> Option<f64> {
+        self.b.marker(self.doc, id)
+    }
+}
+
+/// Builds the evaluation program for a validated document.
+pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Report> {
+    let mut diags = Vec::new();
+    let mut warnings = Vec::new();
+    let t = template(doc, opts, &mut diags, &mut warnings);
+    let duration = t.scene.project.duration.get();
+    let (markers, grid) = markers_of(&t.scene);
+    let scene = Arc::new(t.scene);
+    let mut b = Builder {
+        docs: vec![DocCtx {
+            tokens: tokens_of(&scene),
+            scene: scene.clone(),
+            ns: "".into(),
+            base: doc.base_dir().to_path_buf(),
+            markers: markers.clone(),
+            grid,
+            duration,
+            size: t.size,
+        }],
+        nodes: Vec::new(),
+        slots: Vec::new(),
+        slot_ix: HashMap::new(),
+        channels: Vec::new(),
+        exprs: Vec::new(),
+        links: Vec::new(),
+        elements: Vec::new(),
+        transitions: Vec::new(),
+        ids: HashMap::new(),
+        diags,
+        warnings,
+        pending_expr: Vec::new(),
+        pending_link: Vec::new(),
+        project_seed: scene.project.seed,
+        params: t.params,
+        assets: HashMap::new(),
+        analysis_tracks: HashSet::new(),
+    };
+    let root = Ctx { scope: "".into(), doc: 0, repeat: None, stack: Vec::new() };
+    let roots = b.instantiate(&scene.composition.children, None, &root);
+    b.transitions();
+    b.resolve_links();
+    for n in 0..b.nodes.len() as u32 {
+        let node = &b.nodes[n as usize];
+        if node.name == "copy" {
+            continue;
+        }
+        let (elem, doc_ix, scope, id) = (node.elem.clone(), node.doc, node.scope.clone(), node.id.clone());
+        b.animate(Owner::Node(n), &*elem, Some(n), doc_ix, &scope, &id);
+        b.parts(n);
+        if let Some(c) = attr_str(&*elem, "condition") {
+            let seed = b.nodes[n as usize].seed;
+            b.pending_expr.push((None, Some(n), c, seed, elem.loc(), scope.clone(), doc_ix));
+        }
+    }
+    b.globals();
+    b.compile_pending();
+    let order = b.order();
+    b.fill_tf_slots();
+    // transition handles: extend visibility of the nodes on both sides
+    let windows: Vec<(Option<u32>, Option<u32>, (f64, f64))> =
+        b.transitions.iter().map(|t| (t.from, t.to, t.window)).collect();
+    let mut handles: HashMap<u32, (f64, f64)> = HashMap::new();
+    for (from, to, (w0, w1)) in windows {
+        if let Some(f) = from {
+            handles
+                .entry(f)
+                .and_modify(|h| h.1 = if h.1.is_nan() { w1 } else { h.1.max(w1) })
+                .or_insert((f64::NAN, w1));
+        }
+        if let Some(tn) = to {
+            handles
+                .entry(tn)
+                .and_modify(|h| h.0 = if h.0.is_nan() { w0 } else { h.0.min(w0) })
+                .or_insert((w0, f64::NAN));
+        }
+    }
+    let mut vis = vec![(f64::NAN, f64::NAN); b.nodes.len()];
+    for (k, (s, e)) in handles {
+        vis[k as usize] = (s, e);
+    }
+    let tracks = crate::rig::load_tracks(&scene, &b.docs[0].base, &mut b.diags);
+    let skin_dirs: Vec<std::path::PathBuf> = b.docs.iter().map(|d| d.base.clone()).collect();
+    let skins = crate::rig::load_skins(&b.nodes, &skin_dirs, &mut b.diags);
+    let errors: Vec<Diagnostic> = b.diags.iter().filter(|d| d.is_error()).cloned().collect();
+    if !errors.is_empty() {
+        let mut r = sr_model::Report { diagnostics: b.diags };
+        r.diagnostics.extend(b.warnings);
+        return Err(r);
+    }
+    let mut warnings = b.warnings;
+    warnings.extend(b.diags);
+    for (i, node) in b.nodes.iter_mut().enumerate() {
+        node.vis_start = node.start;
+        node.vis_end = node.end;
+        let (s, e) = vis[i];
+        if !s.is_nan() {
+            node.vis_start = s.min(node.start);
+        }
+        if !e.is_nan() && e.is_finite() {
+            node.vis_end = Some(node.end.map_or(e, |x| x.max(e)));
+        }
+    }
+    let zs: Vec<i32> = b.nodes.iter().map(|n| n.z).collect();
+    for node in b.nodes.iter_mut() {
+        node.doc_children = node.children.clone();
+        node.children.sort_by_key(|&k| zs[k as usize]);
+    }
+    let mut roots = roots;
+    roots.sort_by_key(|&k| zs[k as usize]);
+    let includes = b.docs.iter().skip(1).map(|d| (d.ns.clone(), (*d.scene).clone())).collect();
+    let safe_area = {
+        let sid = opts
+            .layout
+            .as_ref()
+            .and_then(|l| {
+                scene
+                    .layouts
+                    .as_ref()
+                    .and_then(|ls| ls.layouts.iter().find(|x| &x.id == l))
+                    .and_then(|x| x.safe_area.clone())
+            })
+            .or_else(|| scene.project.safe_area.clone());
+        match sid
+            .and_then(|id| scene.safe_areas.as_ref().and_then(|s| s.safe_areas.iter().find(|a| a.id == id)).cloned())
+        {
+            Some(a) => {
+                let p = crate::layout::preset_insets(a.preset);
+                [
+                    a.top.map(|v| v.get()).unwrap_or(p[0]),
+                    a.right.map(|v| v.get()).unwrap_or(p[1]),
+                    a.bottom.map(|v| v.get()).unwrap_or(p[2]),
+                    a.left.map(|v| v.get()).unwrap_or(p[3]),
+                ]
+            }
+            None => [0.0; 4],
+        }
+    };
+    let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
+    Ok(Program {
+        base_dirs,
+        safe_area,
+        scene: (*scene).clone(),
+        includes,
+        fps: scene.project.fps,
+        duration,
+        size: t.size,
+        seed: b.project_seed,
+        nodes: b.nodes,
+        roots,
+        slots: b.slots,
+        order,
+        channels: b.channels,
+        exprs: b.exprs,
+        links: b.links,
+        elements: b.elements,
+        transitions: b.transitions,
+        markers,
+        beat: grid,
+        params: b.params,
+        analysis: opts.analysis.clone(),
+        assets: b.assets,
+        warnings,
+        tracks,
+        skins,
+    })
+}

@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: C4 -->
+<!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
+<scene version="1.1">
+  <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
+           workingColorSpace="acescg" safeArea="broadcast" timecodeStart="01:00:00;00" quality="final"/>
+  <metadata>
+    <meta name="title" value="Kitchen sink"/>
+    <accessibility/>
+  </metadata>
+  <parameters>
+    <param id="headline" type="string" default="Hello"/>
+    <param id="items" type="list" default="a,b,c"/>
+    <param id="accent" type="color" default="#ff8800"/>
+    <data id="rows" src="../media/rows.json" sha256="ac3a594a307153cb9d4ca2934f57f95a0ad560391aa1862d430206e48d78e699"/>
+    <bind param="headline" target="title" property="text"/>
+    <variant id="dark">
+      <set param="accent" value="#222222"/>
+      <override target="title" property="size" value="96"/>
+    </variant>
+  </parameters>
+  <styles>
+    <token name="bg" value="#101418"/>
+    <token name="brand" value="1,0.5,0"/>
+    <textStyle id="heading" size="72" color="var(--brand)" weight="700" fontAsset="inter"/>
+    <textStyle id="caption-style" basedOn="heading" size="36"/>
+  </styles>
+  <colorManagement>
+    <look id="warm" src="../media/grade.cube"/>
+  </colorManagement>
+  <output id="master" path="out/master.mov" codec="prores" proresProfile="4444" alpha="true" start="0" end="12"/>
+  <output id="social" path="out/social.mp4" codec="h264" layout="square" variant="dark" burnCaptions="en">
+    <poster path="out/poster.png" time="1"/>
+  </output>
+  <layouts>
+    <layout id="square" width="1080" height="1080" safeArea="broadcast">
+      <override target="title" property="x" value="50%"/>
+    </layout>
+  </layouts>
+  <safeAreas>
+    <safeArea id="broadcast" preset="custom" top="0.05" right="0.05" bottom="0.05" left="0.05"/>
+  </safeAreas>
+  <assets>
+    <image id="logo" src="../media/logo.png" width="16" height="16" sha256="53c1ebdaf73c3d3d069adff257fffbc7b99486e30b42c37cb485ec0bced63cca">
+      <representation name="thumb" src="../media/texture.png" sha256="a8401cc8932a308c8afec292ffa5d55a44c8ecee132fa20d8ba0d7539b92f27c"/>
+    </image>
+    <video id="clip" src="../media/clip.mp4" width="1920" height="1080" fps="24000/1001" duration="10" hasAudio="true"/>
+    <imageSequence id="spin" src="../media/spin_%04d.png" first="1" last="5" fps="12" width="4" height="4"/>
+    <audio id="music" src="../media/music.wav" sha256="4872b61c768dff943f9e021453d816f06e35adc8edd88ef183301f03e31b94a5"/>
+    <text id="title" text="{{headline}}" width="1600" height="200" size="72" style="heading" minSize="24" maxSize="96" letterSpacing="2"/>
+    <text id="rich" width="800" height="100" size="40">
+      <span color="#ffffff">Rich </span>
+      <span color="url(#sunset)" fontStyle="italic">text</span>
+    </text>
+    <vector id="badge" shape="star" width="200" height="200" fill="url(#sunset)" stroke="var(--brand)" strokeWidth="4"/>
+    <vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z" width="10" height="10"/>
+    <mesh id="robot" src="../media/robot.glb" format="glb"/>
+    <lottie id="intro" src="../media/intro.json" width="512" height="512">
+      <slot id="headline" value="Hi"/>
+    </lottie>
+    <font id="inter" src="../media/inter.ttf" family="Inter" sha256="c207f52b40a7470bac99ec03cc8882fb74e68853e9be7020bb7a8e3dfd2f8eb9"/>
+    <generator id="noise" kind="fractal-noise" width="512" height="512">
+      <animate property="evolution">
+        <key time="0" value="0"/>
+        <key time="12" value="360" interpolation="cubic-bezier" bezier="0.25,0.1,0.25,1"/>
+      </animate>
+    </generator>
+    <chart id="sales" kind="bar" width="800" height="400">
+      <series name="2026" values="1 2 3.5 4"/>
+    </chart>
+    <audiogram id="wave" source="music" width="800" height="120"/>
+    <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
+    <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
+    <generated id="voiceover" kind="speech" provider="acme-tts" model="v2" prompt="Welcome" voice="warm" language="en-US" cache="../media/voice.wav" cacheSha256="a7c8762ed87de244999d54dd968928d4fc415edcbb2d0b9497c0960b1754a977"/>
+  </assets>
+  <paints>
+    <linearGradient id="sunset" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" color="#ff5500"/>
+      <stop offset="0.5" color="var(--brand)"/>
+      <stop offset="1" color="#220044"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" color="#ffffff"/>
+      <stop offset="1" color="#ffffff00"/>
+    </radialGradient>
+    <meshGradient id="mesh" rows="2" cols="2">
+      <point row="0" col="0" color="#ff0000"/>
+      <point row="1" col="1" color="#0000ff"/>
+    </meshGradient>
+    <pattern id="checker" asset="logo"/>
+  </paints>
+  <materials>
+    <material id="chrome" metallic="1" roughness="0.2" baseColorMap="../media/texture.png"/>
+  </materials>
+  <symbols>
+    <symbol id="card" width="400" height="300">
+      <shape id="card-bg" shape="rounded-rect" width="400" height="300" fill="var(--bg)"/>
+      <layer id="card-logo" asset="logo" x="20" y="20"/>
+    </symbol>
+  </symbols>
+  <markers>
+    <marker id="drop" time="4.2" label="Beat drop"/>
+    <beatGrid bpm="120"/>
+  </markers>
+  <tracking>
+    <trackData id="face" src="../media/track.json" kind="face" sha256="b7aed599be13ebed2ab97b6b45fb21cd19d0b69bb47513b22b6ebabc059f5f36"/>
+  </tracking>
+  <composition>
+    <camera id="cam" projection="perspective" focusTarget="hero" target="hero"/>
+    <group id="hero" x="50%" y="50%" effects="glow-fx grade" startMarker="drop">
+      <mask type="path"/>
+      <layer id="bg" asset="clip" fit="cover" boxWidth="1920" boxHeight="1080" audioBus="fx"/>
+      <layer id="title-layer" asset="title" matte="bg" parent="hero">
+        <textAnimator preset="typewriter"/>
+        <animate property="opacity">
+          <key time="0" value="0"/>
+          <key time="0.5" value="1" interpolation="steps" steps="4"/>
+          <key time="1" value="1" marker="drop"/>
+        </animate>
+      </layer>
+      <layer id="spinner" asset="spin">
+        <timeRemap>
+          <key time="0" value="0"/>
+          <key time="1" value="0.4"/>
+        </timeRemap>
+      </layer>
+      <shape id="ring" shape="ellipse" width="300" height="300" stroke="url(#glow)" strokeWidth="8" trimEnd="0.5">
+        <shapeModifier type="repeater"/>
+      </shape>
+    </group>
+    <sequence id="seq">
+      <layer id="shot-a" asset="logo" end="4"/>
+      <transition id="xf" type="crossfade" from="shot-a" to="shot-b"/>
+      <layer id="shot-b" asset="badge" start="4"/>
+    </sequence>
+    <instance id="card-1" symbol="card" fit="contain" boxWidth="400" boxHeight="300">
+      <override target="card-logo" property="asset" value="icon"/>
+    </instance>
+    <repeat id="list" over="rows">
+      <layer id="row-text" asset="title"/>
+    </repeat>
+    <repeat id="grid" count="3">
+      <shape id="dot" shape="ellipse" width="20" height="20" fill="#ffffff"/>
+    </repeat>
+    <object3D id="bot" primitive="mesh" mesh="robot" material="chrome"/>
+    <particleEmitter id="sparks" color="#ffcc00">
+      <burst time="4.2" count="50"/>
+    </particleEmitter>
+    <adjustment id="grade-all" effects="grade"/>
+    <include id="lower" src="../media/lower-third.scene.xml"/>
+    <skeleton id="rig">
+      <bone id="root-bone"/>
+    </skeleton>
+    <layer id="tracked" asset="logo">
+      <transformConstraint type="track" target="face"/>
+    </layer>
+  </composition>
+  <lights>
+    <light id="key" type="directional"/>
+    <light id="dome" type="dome" environment="../media/studio.hdr"/>
+  </lights>
+  <effects>
+    <effect id="glow-fx" type="glow" lights="key dome"/>
+    <effect id="grade" type="lut" src="../media/grade.cube"/>
+  </effects>
+  <physics>
+    <forceField id="gravity" type="directional"/>
+    <constraint id="pin1" type="pin" a="sparks" x="0" y="0"/>
+  </physics>
+  <audioMix>
+    <audioTrack id="music-track" asset="music" bus="fx" duckUnder="vo-track"/>
+    <audioTrack id="vo-track" asset="voiceover"/>
+    <audioTrack id="clip-audio" asset="clip"/>
+    <bus id="fx"/>
+    <master/>
+  </audioMix>
+  <captions>
+    <captionTrack id="en" language="en-US" safeArea="broadcast">
+      <cue start="0" end="1.5">
+        <word start="0" end="0.5" text="Welcome"/>
+      </cue>
+    </captionTrack>
+    <captionTrack id="auto" language="en" transcribe="vo-track" cache="../media/transcript.vtt" cacheSha256="44856296552580d04ebfa293ec4a3a5bf07cb1556b07d3e475d875b1eb16e594"/>
+  </captions>
+</scene>

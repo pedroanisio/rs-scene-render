@@ -1,0 +1,22 @@
+[package]
+name = "sr-eval"
+description = "scene-render evaluation engine: templating, timing, animation curves and expressions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sr-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+libm.workspace = true
+sr-vector.workspace = true
+sr-sim = { path = "../sr-sim" }
+image.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

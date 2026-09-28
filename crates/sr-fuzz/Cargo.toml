@@ -1,0 +1,10 @@
+[package]
+name = "sr-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mutation fuzzing of the scene-render parser, validator, evaluator and expression compiler"
+
+[dependencies]
+sr-model.workspace = true
+sr-eval.workspace = true

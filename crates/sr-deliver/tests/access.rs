@@ -1,0 +1,114 @@
+//! Batch 9 accessibility: flash analysis, text contrast and required captions.
+
+use sr_deliver::access::{FlashDetector, COLS, ROWS};
+
+fn frame(v: [f64; 3], cells: Option<usize>) -> Vec<[f64; 3]> {
+    (0..COLS * ROWS).map(|k| if cells.map(|n| k < n).unwrap_or(true) { v } else { [0.0; 3] }).collect()
+}
+
+fn run(fps: f64, secs: f64, hz: f64, on: [f64; 3], cells: Option<usize>) -> FlashDetector {
+    let mut d = FlashDetector::default();
+    let n = (fps * secs) as usize;
+    for k in 0..n {
+        let t = k as f64 / fps;
+        let lit = ((t * hz * 2.0).floor() as u64) % 2 == 0;
+        d.push(t, &frame(if lit { on } else { [0.0; 3] }, cells));
+    }
+    d
+}
+
+#[test]
+fn flash_thresholds() {
+    let fast = run(30.0, 2.0, 15.0, [1.0; 3], None);
+    assert!(fast.general_frames > 0 && fast.verdict().is_some(), "15 Hz full-frame flicker fails");
+    let slow = run(30.0, 3.0, 1.0, [1.0; 3], None);
+    assert_eq!(slow.general_frames, 0, "1 Hz passes");
+    let small = run(30.0, 2.0, 15.0, [1.0; 3], Some(20));
+    assert_eq!(small.general_frames, 0, "a 20-cell stripe covers at most 16 of a 10° field's 144 cells, under 25 %");
+    let band = run(30.0, 2.0, 15.0, [1.0; 3], Some(COLS * 3));
+    assert!(band.general_frames > 0, "three full rows cover 48 of 144 cells, over 25 %");
+    let red = run(30.0, 2.0, 10.0, [0.9, 0.02, 0.02], None);
+    assert!(red.red_frames > 0, "saturated red flicker fails the red test");
+    // a dim flicker below the 10 % luminance swing is harmless
+    let dim = run(30.0, 2.0, 15.0, [0.05; 3], None);
+    assert_eq!(dim.general_frames, 0);
+}
+
+fn fixtures() -> Option<std::path::PathBuf> {
+    let ok = std::process::Command::new(sr_media::ffmpeg())
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: FFmpeg missing");
+        return None;
+    }
+    let d = std::env::temp_dir().join(format!("sr-access-{}", std::process::id()));
+    std::fs::create_dir_all(d.join("out")).unwrap();
+    Some(d)
+}
+
+fn doc(dir: &std::path::Path, access: &str, body: &str) -> sr_model::Document {
+    let xml = format!(
+        r##"<scene version="1.1"><project width="64" height="64" fps="30" duration="2" background="#000000"/><metadata>{access}</metadata><output id="o" path="out/a.mp4" codec="h264" preset="ultrafast" audio="false"/><composition>{body}</composition></scene>"##
+    );
+    let path = dir.join("access.scene.xml");
+    std::fs::write(&path, xml).unwrap();
+    sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"))
+}
+
+fn flicker() -> String {
+    let keys: String = (0..=60)
+        .map(|k| format!(r#"<key time="{}" value="{}" interpolation="hold"/>"#, k as f64 / 30.0, k % 2))
+        .collect();
+    format!(
+        r##"<shape id="flash" shape="rect" width="64" height="64" fill="#FFFFFF"><animate property="opacity">{keys}</animate></shape>"##
+    )
+}
+
+fn deliver(d: &sr_model::Document) -> Result<sr_deliver::pipeline::Report, sr_deliver::DeliverError> {
+    let gpu = sr_gpu::Gpu::new().ok();
+    let opts = sr_deliver::Options { hardware: sr_media::encode::Hardware::Software, ..Default::default() };
+    sr_deliver::deliver(d, &d.scene.outputs[0], gpu.as_ref(), &opts, &mut |_, _| {})
+}
+
+#[test]
+fn delivery_runs_the_checks() {
+    let Some(dir) = fixtures() else { return };
+    if sr_gpu::Gpu::new().is_err() {
+        return;
+    }
+    // flashing fails with flashCheck="error" and is reported with "warn"
+    let err = deliver(&doc(&dir, r#"<accessibility flashCheck="error"/>"#, &flicker())).unwrap_err();
+    assert!(matches!(err, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("flashCheck")), "{err}");
+    let r = deliver(&doc(&dir, r#"<accessibility flashCheck="warn"/>"#, &flicker())).unwrap();
+    assert!(r.accessibility.iter().any(|m| m.contains("flashCheck")), "{:?}", r.accessibility);
+    // contrast: white on black passes, dark grey on black fails
+    let text = r##"<layer id="t" asset="label" x="4" y="16"/>"##;
+    let assets = |c: &str| {
+        format!(
+            r##"<assets><text id="label" text="AB" width="56" height="32" size="28" color="{c}" font="DejaVu Sans"/></assets>"##
+        )
+    };
+    let with = |c: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="64" fps="30" duration="0.2" background="#000000"/><metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata><output id="o" path="out/c.mp4" codec="h264" preset="ultrafast" audio="false"/>{}<composition>{}</composition></scene>"##,
+            assets(c),
+            text
+        );
+        let path = dir.join("contrast.scene.xml");
+        std::fs::write(&path, xml).unwrap();
+        sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"))
+    };
+    let ok = deliver(&with("#FFFFFF")).unwrap();
+    assert!(ok.accessibility.is_empty(), "{:?}", ok.accessibility);
+    let low = deliver(&with("#303030")).unwrap_err();
+    assert!(
+        matches!(low, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck") && m.contains('t')),
+        "{low}"
+    );
+    // required captions
+    let r = deliver(&doc(&dir, r#"<accessibility flashCheck="off" requireCaptions="true"/>"#, ""));
+    assert!(matches!(r, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("requireCaptions")));
+}

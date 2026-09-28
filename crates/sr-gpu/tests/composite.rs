@@ -1,0 +1,559 @@
+mod common;
+use common::*;
+
+#[test]
+fn background_and_image_placement() {
+    let d = doc(r##"background="#0000FF""##, "", r#"<layer id="a" asset="red" x="8" y="4" scaleX="2" scaleY="2"/>"#);
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 0, 0, [0.0, 0.0, 1.0, 1.0], 1e-3);
+    assert_px(&r, 10, 6, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 15, 11, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 17, 6, [0.0, 0.0, 1.0, 1.0], 1e-3);
+    assert_eq!(r.stats.draws, 2);
+}
+
+#[test]
+fn opacity_rotation_and_anchor() {
+    let d = doc(
+        r##"background="#0000FF""##,
+        "",
+        r#"<layer id="a" asset="red" x="4" y="4" opacity="0.5"/>
+           <layer id="q" asset="quad" x="40" y="16" anchorX="1" anchorY="1" scaleX="8" scaleY="8" rotation="90"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 5, 5, [0.5, 0.0, 0.5, 1.0], 2e-3);
+    // quad.png: red TL, green TR, blue BL, white BR; rotated 90° clockwise → blue TL, red TR, white BL, green BR
+    assert_px(&r, 34, 10, [0.0, 0.0, 1.0, 1.0], 2e-3);
+    assert_px(&r, 45, 10, [1.0, 0.0, 0.0, 1.0], 2e-3);
+    assert_px(&r, 34, 21, [1.0, 1.0, 1.0, 1.0], 2e-3);
+    assert_px(&r, 45, 21, [0.0, 1.0, 0.0, 1.0], 2e-3);
+}
+
+/// CPU reference for B(Cb, Cs) with opaque source and backdrop (W3C
+/// Compositing and Blending Level 1 plus the After Effects modes).
+fn reference(mode: &str, b: [f32; 3], s: [f32; 3]) -> [f32; 4] {
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let clip = |c: [f32; 3]| {
+        let l = lum(c);
+        let n = c.iter().cloned().fold(f32::MAX, f32::min);
+        let x = c.iter().cloned().fold(f32::MIN, f32::max);
+        let mut c = c;
+        if n < 0.0 {
+            c = c.map(|v| l + (v - l) * l / (l - n));
+        }
+        if x > 1.0 {
+            c = c.map(|v| l + (v - l) * (1.0 - l) / (x - l));
+        }
+        c
+    };
+    let set_lum = |c: [f32; 3], l: f32| {
+        let d = l - lum(c);
+        clip(c.map(|v| v + d))
+    };
+    let sat = |c: [f32; 3]| c.iter().cloned().fold(f32::MIN, f32::max) - c.iter().cloned().fold(f32::MAX, f32::min);
+    let set_sat = |c: [f32; 3], s: f32| {
+        let mx = c.iter().cloned().fold(f32::MIN, f32::max);
+        let mn = c.iter().cloned().fold(f32::MAX, f32::min);
+        if mx > mn {
+            c.map(|v| (v - mn) * s / (mx - mn))
+        } else {
+            [0.0; 3]
+        }
+    };
+    let sep = |f: &dyn Fn(f32, f32) -> f32| [f(b[0], s[0]), f(b[1], s[1]), f(b[2], s[2]), 1.0];
+    let overlay = |b: f32, s: f32| if b <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) };
+    let dodge = |b: f32, s: f32| {
+        if b == 0.0 {
+            0.0
+        } else if s >= 1.0 {
+            1.0
+        } else {
+            (b / (1.0 - s)).min(1.0)
+        }
+    };
+    let burn = |b: f32, s: f32| {
+        if b >= 1.0 {
+            1.0
+        } else if s <= 0.0 {
+            0.0
+        } else {
+            1.0 - ((1.0 - b) / s).min(1.0)
+        }
+    };
+    let rgb1 = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
+    match mode {
+        "normal" | "dissolve" | "alpha-add" => rgb1(s),
+        "add" | "linear-dodge" => sep(&|b, s| b + s),
+        "plus-lighter" => sep(&|b, s| (b + s).min(1.0)),
+        "multiply" => sep(&|b, s| b * s),
+        "screen" => sep(&|b, s| b + s - b * s),
+        "overlay" => sep(&overlay),
+        "difference" => sep(&|b, s| (b - s).abs()),
+        "exclusion" => sep(&|b, s| b + s - 2.0 * b * s),
+        "subtract" => sep(&|b, s| (b - s).max(0.0)),
+        "divide" => sep(&|b, s| b / s),
+        "darken" => sep(&f32::min),
+        "lighten" => sep(&f32::max),
+        "darker-color" => rgb1(if lum(s) < lum(b) { s } else { b }),
+        "lighter-color" => rgb1(if lum(s) > lum(b) { s } else { b }),
+        "color-dodge" => sep(&dodge),
+        "color-burn" => sep(&burn),
+        "linear-burn" => sep(&|b, s| (b + s - 1.0).max(0.0)),
+        "soft-light" => sep(&|b, s| {
+            if s <= 0.5 {
+                b - (1.0 - 2.0 * s) * b * (1.0 - b)
+            } else {
+                let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { b.sqrt() };
+                b + (2.0 * s - 1.0) * (d - b)
+            }
+        }),
+        "hard-light" => sep(&|b, s| overlay(s, b)),
+        "linear-light" => sep(&|b, s| (b + 2.0 * s - 1.0).clamp(0.0, 1.0)),
+        "vivid-light" => sep(&|b, s| if s <= 0.5 { burn(b, 2.0 * s) } else { dodge(b, 2.0 * (s - 0.5)) }),
+        "pin-light" => sep(&|b, s| if s <= 0.5 { b.min(2.0 * s) } else { b.max(2.0 * s - 1.0) }),
+        "hard-mix" => sep(&|b, s| if b + s >= 1.0 { 1.0 } else { 0.0 }),
+        "hue" => rgb1(set_lum(set_sat(s, sat(b)), lum(b))),
+        "saturation" => rgb1(set_lum(set_sat(b, sat(s)), lum(b))),
+        "color" => rgb1(set_lum(s, lum(b))),
+        "luminosity" => rgb1(set_lum(b, lum(s))),
+        "stencil-alpha" | "behind" => rgb1(b),
+        "stencil-luma" => rgb1(b.map(|v| v * lum(s)))
+            .map(|v| v)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| if i == 3 { lum(s) } else { v })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap(),
+        "silhouette-alpha" => [0.0; 4],
+        "silhouette-luma" => {
+            let k = 1.0 - lum(s);
+            [b[0] * k, b[1] * k, b[2] * k, k]
+        }
+        other => panic!("no reference for {other}"),
+    }
+}
+
+#[test]
+fn all_blend_modes_match_the_reference_formulas() {
+    let all: Vec<&str> = sr_model::model::Blend::ALL.iter().map(|b| b.as_str()).collect();
+    assert_eq!(all.len(), 35);
+    // the stencil modes clear the whole frame outside their layer, so they get their own frames
+    let modes: Vec<&str> = all.iter().copied().filter(|m| !m.starts_with("stencil")).collect();
+    // one 4×4 layer per mode, in a row, over a coloured background
+    let body: String = modes
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            format!(r#"<layer id="l{i}" asset="src" x="{}" y="{}" blend="{m}"/>"#, (i % 16) * 4, (i / 16) * 4)
+        })
+        .collect();
+    let d = doc(r##"width="64" height="12" background="#4080C0""##, "", &body);
+    let Some(r) = render(&d) else { return };
+    let b = [lin8(0x40), lin8(0x80), lin8(0xC0)];
+    let s = [lin8(200), lin8(100), lin8(50)];
+    let mut failures = Vec::new();
+    for (i, m) in modes.iter().enumerate() {
+        let got = r.at((i as u32 % 16) * 4 + 1, (i as u32 / 16) * 4 + 1);
+        let want = reference(m, b, s);
+        let tol: Vec<f32> = want.iter().map(|w| 3e-3 * w.abs().max(1.0)).collect();
+        if !(0..4).all(|k| (got[k] - want[k]).abs() <= tol[k]) {
+            failures.push(format!("{m}: got {got:?}, want {want:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(r.stats.backdrop_copies >= 31, "{:?}", r.stats);
+    for m in ["stencil-alpha", "stencil-luma"] {
+        let d = doc(r##"background="#4080C0""##, "", &format!(r#"<layer id="s" asset="src" blend="{m}"/>"#));
+        let r = render(&d).unwrap();
+        assert_px(&r, 1, 1, reference(m, b, s), 3e-3);
+        assert_px(&r, 20, 20, [0.0; 4], 1e-4);
+    }
+}
+
+#[test]
+fn stencil_alpha_cuts_the_backdrop_outside_the_layer() {
+    let d = doc(
+        r##"background="#FFFFFF""##,
+        "",
+        r#"<layer id="s" asset="red" x="8" y="8" scaleX="2" scaleY="2" blend="stencil-alpha"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 10, 10, [1.0; 4], 1e-3);
+    assert_px(&r, 40, 20, [0.0; 4], 1e-3);
+}
+
+#[test]
+fn partial_alpha_uses_the_general_compositing_formula() {
+    // half.png: white at alpha 128/255 over the background with multiply:
+    // co = (1 − αs)·Cb + αs·B(Cb, Cs), backdrop opaque
+    let d = doc(
+        r##"background="#4080C0""##,
+        "",
+        r#"<layer id="a" asset="half" blend="multiply"/><layer id="b" asset="half" x="8" blend="screen"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let a = 128.0 / 255.0;
+    let b = [lin8(0x40), lin8(0x80), lin8(0xC0)];
+    let m: Vec<f32> = b.iter().map(|&cb| (1.0 - a) * cb + a * cb * 1.0).collect();
+    assert_px(&r, 1, 1, [m[0], m[1], m[2], 1.0], 3e-3);
+    let sc: Vec<f32> = b.iter().map(|&cb| (1.0 - a) * cb + a * (cb + 1.0 - cb)).collect();
+    assert_px(&r, 9, 1, [sc[0], sc[1], sc[2], 1.0], 3e-3);
+}
+
+#[test]
+fn dissolve_keeps_a_random_fraction_of_pixels() {
+    let d = doc(
+        r##"width="64" height="64" background="#000000""##,
+        "",
+        r#"<layer id="a" asset="white" scaleX="16" scaleY="16" opacity="0.5" blend="dissolve"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let on = r.px.iter().filter(|p| p[0] > 0.99).count();
+    let off = r.px.iter().filter(|p| p[0] < 0.01).count();
+    assert_eq!(on + off, 64 * 64, "dissolve is binary");
+    assert!((on as f64 / 4096.0 - 0.5).abs() < 0.05, "{on}");
+}
+
+#[test]
+fn masks_combine_modes_invert_and_feather() {
+    // mask coordinates are in the layer's local space: the 4×4 image box, drawn at 4× scale
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="a" asset="white" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="2" height="4"/>
+           </layer>
+           <layer id="b" asset="white" x="20" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="2" height="4" invert="true"/>
+           </layer>
+           <layer id="c" asset="white" x="40" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="4" height="4" feather="2"/>
+           </layer>
+           <layer id="d" asset="white" x="0" y="16" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="4" height="4"/>
+             <mask type="ellipse" x="0" y="0" width="4" height="4" mode="subtract"/>
+           </layer>
+           <layer id="e" asset="white" x="20" y="16" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="1" height="4" mode="add"/>
+             <mask type="rect" x="3" y="0" width="1" height="4" mode="add"/>
+           </layer>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 4, 4, [1.0; 4], 1e-3);
+    assert_px(&r, 10, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 24, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 30, 4, [1.0; 4], 1e-3);
+    // feather 2 local units: a ramp one local unit (4 pixels) either side of the edge
+    let edge = r.at(40, 8)[0];
+    let centre = r.at(48, 8)[0];
+    assert!(edge > 0.3 && edge < 0.7, "feathered edge {edge}");
+    assert!(centre > 0.99, "centre {centre}");
+    // rect minus ellipse: corners stay, centre removed
+    assert_px(&r, 0, 16, [1.0; 4], 2e-2);
+    assert_px(&r, 8, 24, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    // two added strips
+    assert_px(&r, 22, 20, [1.0; 4], 1e-3);
+    assert_px(&r, 28, 20, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 34, 20, [1.0; 4], 1e-3);
+}
+
+#[test]
+fn polygon_star_and_path_masks() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="a" asset="white" scaleX="4" scaleY="4">
+             <mask type="path" path="M0 0 L4 0 L0 4 Z"/>
+           </layer>
+           <layer id="b" asset="white" x="20" scaleX="4" scaleY="4">
+             <mask type="star" x="0" y="0" width="4" height="4" points="5" innerRadius="0.75"/>
+           </layer>
+           <layer id="c" asset="white" x="40" scaleX="4" scaleY="4">
+             <mask type="path" path="M0 0 H4 V4 H0 Z M1 1 H3 V3 H1 Z" fillRule="evenodd"/>
+           </layer>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 2, 2, [1.0; 4], 1e-3);
+    assert_px(&r, 13, 13, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 28, 8, [1.0; 4], 1e-3);
+    assert_px(&r, 21, 15, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 41, 1, [1.0; 4], 1e-3);
+    assert_px(&r, 48, 8, [0.0, 0.0, 0.0, 1.0], 1e-3);
+}
+
+#[test]
+fn alpha_and_luma_mattes() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="m" asset="red" x="0" y="0" scaleX="2" scaleY="4"/>
+           <layer id="a" asset="white" scaleX="4" scaleY="4" matte="m"/>
+           <layer id="lm" asset="gray" x="20" scaleX="4" scaleY="4"/>
+           <layer id="b" asset="white" x="20" scaleX="4" scaleY="4" matte="lm" matteMode="luma"/>
+           <layer id="ci" asset="white" x="40" scaleX="2" scaleY="4"/>
+           <layer id="c" asset="white" x="40" scaleX="4" scaleY="4" matte="ci" matteMode="alpha-inverted"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 2, 2, [1.0; 4], 1e-3);
+    assert_px(&r, 12, 2, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    let g = lin8(128);
+    assert_px(&r, 22, 2, [g, g, g, 1.0], 3e-3);
+    assert_px(&r, 42, 2, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 52, 2, [1.0; 4], 1e-3);
+}
+
+#[test]
+fn isolated_groups_composite_as_one_layer() {
+    let body = |iso: bool| {
+        format!(
+            r#"<group id="g" opacity="0.5" isolate="{iso}" width="64" height="32">
+                 <layer id="a" asset="white" scaleX="4" scaleY="4"/>
+                 <layer id="b" asset="white" x="8" scaleX="4" scaleY="4"/>
+               </group>"#
+        )
+    };
+    let Some(iso) = render(&doc(r##"background="#000000""##, "", &body(true))) else { return };
+    let flat = render(&doc(r##"background="#000000""##, "", &body(false))).unwrap();
+    // overlap region (8..16): isolated = 0.5, pass-through = 0.75
+    assert_px(&iso, 12, 4, [0.5, 0.5, 0.5, 1.0], 3e-3);
+    assert_px(&flat, 12, 4, [0.75, 0.75, 0.75, 1.0], 3e-3);
+    assert_px(&iso, 4, 4, [0.5, 0.5, 0.5, 1.0], 3e-3);
+    // a multiply group blends its composite, not each child
+    let d = doc(
+        r##"background="#FFFFFF""##,
+        "",
+        r#"<group id="g" blend="multiply" width="64" height="32"><layer id="a" asset="gray" scaleX="4" scaleY="4"/></group>"#,
+    );
+    let r = render(&d).unwrap();
+    let g = lin8(128);
+    assert_px(&r, 4, 4, [g, g, g, 1.0], 3e-3);
+}
+
+#[test]
+fn masks_apply_to_groups_without_a_box() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<group id="g" x="8" y="0"><mask type="rect" x="0" y="0" width="8" height="32"/>
+             <layer id="a" asset="white" scaleX="8" scaleY="8"/></group>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 12, 4, [1.0; 4], 1e-3);
+    assert_px(&r, 20, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
+}
+
+#[test]
+fn clipped_instance_and_moved_group_reuse_the_offscreen() {
+    let d = doc(
+        r##"background="#000000""##,
+        r#"<symbols><symbol id="s" width="8" height="8"><layer id="big" asset="white" scaleX="4" scaleY="4"/></symbol></symbols>"#,
+        r#"<instance id="i" symbol="s" x="4" y="4">
+             <animate property="x"><key time="0" value="4"/><key time="2" value="44"/></animate>
+           </instance>"#,
+    );
+    let Some(a) = render_times(&d, &[0.0]) else { return };
+    // the symbol box clips the 16×16 child to 8×8
+    assert_px(&a, 6, 6, [1.0; 4], 1e-3);
+    assert_px(&a, 14, 6, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    let b = render_times(&d, &[0.0, 1.0]).unwrap();
+    assert_px(&b, 26, 6, [1.0; 4], 1e-3);
+    assert_px(&b, 6, 6, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert!(b.stats.cache_hits >= 1, "moving an instance reuses its offscreen: {:?}", b.stats);
+}
+
+#[test]
+fn unchanged_frames_restore_the_root_prefix() {
+    let d = doc(
+        r##"background="#202020""##,
+        "",
+        r#"<layer id="bg1" asset="white" scaleX="16" scaleY="8" opacity="0.2"/>
+           <layer id="bg2" asset="red" x="16" scaleX="4" scaleY="4" blend="screen"/>
+           <layer id="mover" asset="red" x="0" y="20"><animate property="x"><key time="0" value="0"/><key time="2" value="60"/></animate></layer>"#,
+    );
+    let Some(r) = render_times(&d, &[0.0, 0.1, 0.2]) else { return };
+    // background + two static layers restored; only the mover draws
+    assert_eq!(r.stats.prefix_restored, 3, "{:?}", r.stats);
+    assert_eq!(r.stats.draws, 1);
+    let fresh = render_times(&d, &[0.2]).unwrap();
+    assert_eq!(fresh.px, r.px, "restored frames are identical to fresh renders");
+}
+
+#[test]
+fn gradients_interpolate_in_the_requested_space() {
+    let paints = |space: &str| {
+        format!(
+            r##"<paints><linearGradient id="g" interpolationSpace="{space}" dither="false"><stop offset="0" color="#000000"/><stop offset="1" color="#FFFFFF"/></linearGradient></paints>"##
+        )
+    };
+    let Some(lin) = render(&doc(r#"background="url(#g)""#, &paints("linear"), "")) else { return };
+    let ok = render(&doc(r#"background="url(#g)""#, &paints("oklab"), "")).unwrap();
+    let srgb = render(&doc(r#"background="url(#g)""#, &paints("srgb"), "")).unwrap();
+    // pixel 31.5/64 ≈ t 0.4922
+    let t = 31.5 / 64.0;
+    assert!((lin.at(31, 16)[0] - t).abs() < 3e-3, "{:?}", lin.at(31, 16));
+    assert!((srgb.at(31, 16)[0] - srgb_to_linear(t)).abs() < 3e-3, "{:?}", srgb.at(31, 16));
+    // oklab: L is linear in t, and Y = L³ for greys
+    assert!((ok.at(31, 16)[0] - t.powi(3)).abs() < 3e-3, "{:?}", ok.at(31, 16));
+    // radial and conic
+    let d = doc(
+        r#"background="url(#r)""#,
+        r##"<paints><radialGradient id="r" dither="false"><stop offset="0" color="#FFFFFF"/><stop offset="1" color="#000000"/></radialGradient></paints>"##,
+        "",
+    );
+    let r = render(&d).unwrap();
+    assert!(r.at(32, 16)[0] > 0.9 && r.at(0, 0)[0] < 1e-3);
+    let d = doc(
+        r#"background="url(#c)""#,
+        r##"<paints><conicGradient id="c" dither="false"><stop offset="0" color="#000000"/><stop offset="1" color="#FFFFFF"/></conicGradient></paints>"##,
+        "",
+    );
+    let c = render(&d).unwrap();
+    // right of centre is a quarter turn clockwise from the top; left is three quarters
+    assert!(
+        (c.at(60, 16)[0] - 0.25).abs() < 0.03 && (c.at(4, 16)[0] - 0.75).abs() < 0.03,
+        "{:?} {:?}",
+        c.at(60, 16),
+        c.at(4, 16)
+    );
+}
+
+#[test]
+fn mesh_gradient_corners() {
+    let d = doc(
+        r#"background="url(#m)""#,
+        r##"<paints><meshGradient id="m" interpolationSpace="linear">
+              <point row="0" col="0" color="#FF0000"/><point row="0" col="1" color="#00FF00"/>
+              <point row="1" col="0" color="#0000FF"/><point row="1" col="1" color="#FFFFFF"/>
+            </meshGradient></paints>"##,
+        "",
+    );
+    let Some(r) = render(&d) else { return };
+    assert!(r.at(0, 0)[0] > 0.95 && r.at(63, 0)[1] > 0.95 && r.at(0, 31)[2] > 0.95);
+    let c = r.at(32, 16);
+    assert!((c[0] - 0.5).abs() < 0.05 && (c[1] - 0.5).abs() < 0.05, "{c:?}");
+}
+
+#[test]
+fn generators_render_deterministically() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="c" asset="checker"/><layer id="n" asset="noise" x="20"/><layer id="s" asset="solid" x="40"/>"#,
+    );
+    let Some(a) = render(&d) else { return };
+    assert_px(&a, 1, 1, [1.0; 4], 1e-3);
+    assert_px(&a, 5, 1, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&a, 5, 5, [1.0; 4], 1e-3);
+    assert_px(&a, 41, 1, [0.0, 1.0, 0.0, 1.0], 1e-3);
+    let b = render(&d).unwrap();
+    let noise_a: Vec<_> = (20..36).map(|x| a.at(x, 8)).collect();
+    let noise_b: Vec<_> = (20..36).map(|x| b.at(x, 8)).collect();
+    assert_eq!(noise_a, noise_b);
+    assert!(
+        noise_a.iter().any(|p| p[0] > 0.05) && noise_a.iter().any(|p| (p[0] - noise_a[0][0]).abs() > 0.01),
+        "noise varies"
+    );
+}
+
+#[test]
+fn layers_in_2_5d_project_and_sort_by_depth() {
+    let d = doc(
+        r##"width="64" height="64" background="#000000""##,
+        "",
+        r#"<layer id="flat" asset="white" x="32" y="32" anchorX="2" anchorY="2" scaleX="8" scaleY="8" threeD="true" rotationY="60"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let row: Vec<bool> = (0..64).map(|x| r.at(x, 32)[0] > 0.5).collect();
+    let width = row.iter().filter(|&&b| b).count();
+    // 32 px wide at 60° → about 16 px, perspective keeps it near that
+    assert!((13..=19).contains(&width), "projected width {width}");
+    // depth sort: the nearer (negative z, still in front of the eye at z ≈ −88.8) red layer covers the farther white one regardless of order
+    let d = doc(
+        r##"width="64" height="64" background="#000000""##,
+        "",
+        r#"<layer id="near" asset="red" x="16" y="16" scaleX="8" scaleY="8" threeD="true" zDepth="-50"/>
+           <layer id="far" asset="white" x="16" y="16" scaleX="8" scaleY="8" threeD="true" zDepth="100"/>"#,
+    );
+    let r = render(&d).unwrap();
+    assert_px(&r, 30, 30, [1.0, 0.0, 0.0, 1.0], 1e-3);
+}
+
+#[test]
+fn fit_cover_contain_and_blur_fill() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="cover" asset="wide" fit="cover" boxWidth="16" boxHeight="16"/>
+           <layer id="contain" asset="wide" x="20" fit="contain" boxWidth="16" boxHeight="16"/>
+           <layer id="blur" asset="wide" x="40" fit="contain-blur" boxWidth="16" boxHeight="16"/>
+           <layer id="flip" asset="wide" x="0" y="20" flipX="true"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    // cover shows the middle half of the 2:1 image: red on the left, blue on the right
+    assert_px(&r, 2, 8, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 13, 8, [0.0, 0.0, 1.0, 1.0], 1e-3);
+    // contain letterboxes: 16×8 content centred vertically
+    assert_px(&r, 22, 1, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 22, 8, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    // contain-blur fills the bars with a blurred cover of the same image
+    let bar = r.at(48, 1);
+    assert!(bar[0] > 0.05 || bar[2] > 0.05, "blur fill {bar:?}");
+    // flipX puts blue on the left
+    assert_px(&r, 1, 21, [0.0, 0.0, 1.0, 1.0], 1e-3);
+}
+
+#[test]
+fn flex_layout_positions_rendered_layers() {
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<group id="row" width="64" height="32" layout="row" gap="4" justify="center" alignItems="center">
+             <layer id="a" asset="red"/><layer id="b" asset="red"/><layer id="c" asset="red"/>
+           </group>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    // 3×4 + 2×4 = 20 wide, centred: starts at 22; vertically at 14
+    for x in [22, 30, 38] {
+        assert_px(&r, x + 1, 15, [1.0, 0.0, 0.0, 1.0], 1e-3);
+        assert_px(&r, x + 5, 15, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    }
+}
+
+#[test]
+fn image_sequences_follow_source_time() {
+    let d = doc(r##"background="#000000""##, "", r#"<layer id="s" asset="seq" scaleX="4" scaleY="4"/>"#);
+    let Some(a) = render_times(&d, &[0.0]) else { return };
+    let b = render_times(&d, &[0.15]).unwrap();
+    assert!((a.at(1, 1)[0] - lin8(80)).abs() < 3e-3);
+    assert!((b.at(1, 1)[0] - lin8(160)).abs() < 3e-3);
+}
+
+#[test]
+fn working_spaces_and_non_linear_compositing() {
+    // ACEScg working space: sRGB red decodes into AP1 and displays back as red
+    let d = doc(
+        r##"workingColorSpace="acescg" background="#000000""##,
+        "",
+        r#"<layer id="a" asset="red" scaleX="4" scaleY="4"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let p = r.at(2, 2);
+    assert!((p[0] - 0.6131).abs() < 3e-3 && (p[1] - 0.0702).abs() < 3e-3, "AP1 red {p:?}");
+    let rgba = r.renderer.to_srgb8(&[p]);
+    assert!(rgba[0] >= 254 && rgba[1] <= 1 && rgba[2] <= 1, "{rgba:?}");
+    // linearLight=false blends encoded values: 50 % red over blue is (0.5, 0, 0.5) encoded
+    let d = doc(r##"linearLight="false" background="#0000FF""##, "", r#"<layer id="a" asset="red" opacity="0.5"/>"#);
+    let r = render(&d).unwrap();
+    assert_px(&r, 1, 1, [0.5, 0.0, 0.5, 1.0], 3e-3);
+    assert_eq!(r.renderer.to_srgb8(&[r.at(1, 1)])[..3], [128, 0, 128]);
+}
+
+#[test]
+fn no_content_is_left_to_later_batches() {
+    // Batch 9 closed the last deferred node kind: particle emitters draw
+    let d = doc(r##"background="#000000""##, "", r##"<particleEmitter id="sparks" preset="sparks" x="32" y="16"/>"##);
+    let Some(r) = render_times(&d, &[1.0]) else { return };
+    assert!(r.stats.unsupported.iter().all(|u| !u.contains("Batch")), "{:?}", r.stats.unsupported);
+    assert!(r.px.iter().any(|p| p[0] > 0.1), "sparks drawn");
+}

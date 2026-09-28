@@ -1,0 +1,30 @@
+[package]
+name = "sr-gpu"
+description = "scene-render GPU compositor: FrameGraph to linear-light RGBA16F frames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sr-model.workspace = true
+sr-eval.workspace = true
+sr-media.workspace = true
+sr-vector.workspace = true
+sr-text.workspace = true
+sr-3d = { path = "../sr-3d" }
+glam = { version = "0.30", features = ["bytemuck"] }
+wgpu = { workspace = true, features = ["glsl"] }
+roxmltree.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+image.workspace = true
+thiserror.workspace = true
+libm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+sha2.workspace = true

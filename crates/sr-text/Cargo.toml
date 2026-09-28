@@ -1,0 +1,21 @@
+[package]
+name = "sr-text"
+description = "scene-render typography and data graphics: fonts, shaping, layout, text animators, captions, charts, audiograms, codes and formulas"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sr-vector.workspace = true
+libm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+roxmltree = "0.21"
+rustybuzz = "0.20"
+fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "fontconfig"] }
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
+hyphenation = { version = "0.8", default-features = false, features = ["embed_en-us"] }
+rxing = { version = "0.9", default-features = false, features = ["encoders", "qrcode", "datamatrix", "pdf417", "oned", "encoding_rs"] }

@@ -1,0 +1,48 @@
+[workspace]
+members = ["crates/sr-model", "crates/sr-eval", "crates/sr-gpu", "crates/sr-media", "crates/sr-audio", "crates/sr-deliver", "crates/sr-vector", "crates/sr-text", "crates/sr-3d", "crates/sr-sim", "crates/sr-fuzz", "crates/scene-render"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+sr-model = { path = "crates/sr-model" }
+sr-eval = { path = "crates/sr-eval" }
+libm = "0.2"
+sr-gpu = { path = "crates/sr-gpu" }
+sr-media = { path = "crates/sr-media" }
+sr-audio = { path = "crates/sr-audio" }
+sr-deliver = { path = "crates/sr-deliver" }
+sr-vector = { path = "crates/sr-vector" }
+sr-text = { path = "crates/sr-text" }
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+half = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+roxmltree = "0.20"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+thiserror = "2"
+rayon = "1"
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.5"
+anstream = "0.6"
+anstyle = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
