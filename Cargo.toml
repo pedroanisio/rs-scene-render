@@ -22,7 +22,7 @@ wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 roxmltree = "0.20"
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
 sha2 = "0.10"
