@@ -219,7 +219,7 @@
       "reference": "Cinematic product / CG shots",
       "technique": "PBR metals, shadowed spot light, a glass pane in front of the set (z < 0) over a 2D band, depth of field",
       "scene": "scenes/cinematic-pbr.scene.xml",
-      "expect": "wrong",
+      "expect": "native",
       "bench": true,
       "checks": [
         {
@@ -292,16 +292,14 @@
           "min": 0.95,
           "why": "the band is untouched outside the glass"
         }
-      ],
-      "known": "object3D depth z is also used as 2D paint order (sr-eval program.rs sorts siblings by z truncated to i32); the glass at z=-60 moves the whole shared 3D pass under the 2D band. The Python engine excludes object3D and camera from paint order."
+      ]
     },
     {
       "id": "object3d-depth-order",
       "reference": "Any clip mixing 2D layers with 3D objects that come towards camera",
       "technique": "object3D at z < 0 (in front of the 2D plane) after a full-frame 2D layer",
       "scene": "scenes/object3d-depth-order.scene.xml",
-      "expect": "wrong",
-      "known": "Same defect as cinematic-pbr: object3D z (a depth in scene units) is sorted as 2D paint order, so z < 0 paints the 3D pass before the 2D layer.",
+      "expect": "native",
       "checks": [
         {
           "type": "color",
@@ -315,11 +313,11 @@
         {
           "type": "color",
           "t": 0.0,
-          "x": 220,
+          "x": 254,
           "y": 90,
           "rgb": "#00FF00",
           "tol": 0.1,
-          "why": "a sphere at z=-100 (nearer the camera) also draws over it"
+          "why": "a sphere at z=-100 (nearer the camera, so perspective moves it out to x≈254) also draws over it"
         }
       ]
     },
@@ -402,8 +400,7 @@
       "reference": "Layered 2D animation that re-stacks elements over time",
       "technique": "animate property=z on overlapping layers",
       "scene": "scenes/animated-z.scene.xml",
-      "expect": "wrong",
-      "known": "Paint order is fixed when the frame graph is compiled; animated z is evaluated but does not re-sort.",
+      "expect": "native",
       "checks": [
         {
           "type": "color",

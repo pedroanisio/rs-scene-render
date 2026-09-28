@@ -286,3 +286,60 @@ fn motion_blurred_3d_objects_share_one_pass() {
     let edge = r.at(64, 64 - 24);
     assert!(edge[1] > edge[0], "the far sphere shows around the near one: {edge:?}");
 }
+
+#[test]
+fn objects_in_front_of_the_2d_plane_draw_over_earlier_layers() {
+    // object3D z is a depth: z < 0 is nearer the camera (the eye is at z = -111 here), not lower
+    // in the paint order
+    let mats = r##"<material id="green" baseColor="#00FF00" roughness="1"/>"##;
+    let body = r#"<layer id="bg" asset="red" scaleX="32" scaleY="32"/>
+        <object3D id="near" primitive="sphere" radius="16" x="64" y="64" z="-40" material="green"/>"#;
+    let Some(r) = render(&scene("", mats, body, r#"<light id="a" type="ambient" intensity="1"/>"#)) else { return };
+    let c = r.at(64, 64);
+    assert!(c[1] > 0.5 && c[0] < 0.2, "the near sphere covers the layer: {c:?}");
+}
+
+#[test]
+fn glass_in_front_of_the_2d_plane_refracts_the_layers_behind_it() {
+    // a tinted pane nearer the camera than the 2D plane: the backdrop shows through, tinted,
+    // so the pixel is neither the bare backdrop nor missing the backdrop
+    let mats =
+        r##"<material id="glass" baseColor="#8080FF" transmission="1" roughness="0.05" ior="1.5" thickness="5"/>"##;
+    let body = r#"<layer id="bg" asset="white" scaleX="32" scaleY="32"/>
+        <object3D id="g" primitive="box" width="60" height="60" depth="5" x="64" y="64" z="-50" material="glass"/>"#;
+    let lights = r#"<light id="sun" type="directional" intensity="1" yaw="45"/>"#;
+    let Some(r) = render(&scene("", mats, body, lights)) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    let c = r.at(64, 64);
+    let edge = r.at(4, 4);
+    assert!(edge[0] > 0.95 && edge[1] > 0.95 && edge[2] > 0.95, "backdrop outside the pane: {edge:?}");
+    assert!(c[2] > c[0] + 0.1 && c[0] > 0.2, "the pane tints the backdrop blue: {c:?}");
+}
+
+#[test]
+fn reused_render_targets_leave_no_trace_between_frames() {
+    // the 3D pass keeps its targets between calls; a frame rendered after others (shadows,
+    // transmission and depth of field all on, the object moving) matches a cold render
+    let mats = r##"<material id="chrome" baseColor="#D0D0D8" metallic="1" roughness="0.3"/>
+        <material id="glass" transmission="1" roughness="0.05" ior="1.5" thickness="5"/>"##;
+    let body = r#"<layer id="bg" asset="checker" scaleX="8" scaleY="8"/>
+        <camera id="cam" fov="60" x="64" y="64" z="-111" depthOfField="true" fStop="1.4" focusTarget="ball"/>
+        <object3D id="ball" primitive="sphere" radius="20" x="64" y="64" z="40" material="chrome">
+          <animate property="x"><key time="0" value="30"/><key time="2" value="100"/></animate>
+        </object3D>
+        <object3D id="pane" primitive="box" width="50" height="50" depth="4" x="64" y="64" z="-20" material="glass"/>"#;
+    let lights = r#"<light id="key" type="spot" x="64" y="-100" z="-100" pitch="-45" spotAngle="60" intensity="400" castShadow="true" range="2000"/>"#;
+    let d = scene("", mats, body, lights);
+    let Some(cold) = render_times(&d, &[1.0]) else { return };
+    let warm = render_times(&d, &[0.0, 1.9, 0.4, 1.0]).unwrap();
+    assert!(problems(&warm).is_empty(), "{:?}", problems(&warm));
+    let diff = cold
+        .px
+        .iter()
+        .zip(&warm.px)
+        .map(|(a, b)| (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max))
+        .fold(0.0, f32::max);
+    assert!(diff < 1e-4, "warm frame differs from a cold one by {diff}");
+    let moved = render_times(&d, &[0.0]).unwrap();
+    assert!(cold.px != moved.px, "the scene must change between the frames compared");
+}

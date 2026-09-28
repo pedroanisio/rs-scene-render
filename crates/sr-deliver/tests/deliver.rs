@@ -80,7 +80,10 @@ const SCENE: &str = r##"<scene version="1.1">
 </scene>"##;
 
 fn doc(dir: &std::path::Path, xml: &str) -> sr_model::Document {
-    let path = dir.join("scene.xml");
+    // tests run in parallel in one shared directory: each document gets its own file
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("scene-{n}.xml"));
     std::fs::write(&path, xml).unwrap();
     sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"))
 }

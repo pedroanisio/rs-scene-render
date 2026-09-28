@@ -310,6 +310,7 @@ struct PipeKey {
 /// GPU state of the 3D renderer.
 pub struct ThreeEngine {
     device: Arc<wgpu::Device>,
+    targets: Arc<std::sync::Mutex<TargetPool>>,
     queue: Arc<wgpu::Queue>,
     main_mod: wgpu::ShaderModule,
     bgl_frame: wgpu::BindGroupLayout,
@@ -411,6 +412,49 @@ const PREMUL: wgpu::BlendState = wgpu::BlendState {
         operation: wgpu::BlendOperation::Add,
     },
 };
+
+/// Render targets of [`ThreeEngine::render`] kept between calls. Each is a large dedicated
+/// allocation, and creating and dropping them every frame cost more CPU time than the rest of the
+/// pass (gate 8). A target is lent for one call and returned at its end; the encoder orders the
+/// passes of successive calls, so reuse is safe, and targets unused for a while are dropped.
+#[derive(Default)]
+struct TargetPool {
+    free: HashMap<TargetKey, Vec<(wgpu::Texture, u64)>>,
+    lent: Vec<(TargetKey, wgpu::Texture)>,
+    calls: u64,
+}
+
+type TargetKey = ([u32; 2], wgpu::TextureFormat, u32, u32, u32, &'static str);
+
+/// Calls a pooled target may go unused before it is freed.
+const POOL_KEEP: u64 = 64;
+
+impl TargetPool {
+    fn take(&mut self, device: &wgpu::Device, key: TargetKey) -> wgpu::Texture {
+        let t = match self.free.get_mut(&key).and_then(|v| v.pop()) {
+            Some((t, _)) => t,
+            None => {
+                let (size, format, mips, samples, layers, label) = key;
+                texture(device, size, format, mips, samples, layers, label)
+            }
+        };
+        self.lent.push((key, t.clone()));
+        t
+    }
+
+    /// Returns the targets lent during this call and frees those unused for [`POOL_KEEP`] calls.
+    fn end_call(&mut self) {
+        self.calls += 1;
+        let now = self.calls;
+        for (k, t) in self.lent.drain(..) {
+            self.free.entry(k).or_default().push((t, now));
+        }
+        self.free.retain(|_, v| {
+            v.retain(|(_, used)| now - used <= POOL_KEEP);
+            !v.is_empty()
+        });
+    }
+}
 
 fn texture(
     device: &wgpu::Device,
@@ -685,6 +729,7 @@ impl ThreeEngine {
             ..Default::default()
         });
         let mut eng = ThreeEngine {
+            targets: Default::default(),
             white: Arc::new(TexGpu {
                 view: texture(d, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1, 1, 1, "white")
                     .create_view(&Default::default()),
@@ -1026,6 +1071,10 @@ impl ThreeEngine {
     ) {
         let d = self.device.clone();
         let size = [scene.size[0].max(1), scene.size[1].max(1)];
+        let targets = self.targets.clone();
+        let pool = |size: [u32; 2], format, mips, samples, layers, label| {
+            targets.lock().unwrap_or_else(|e| e.into_inner()).take(&d, (size, format, mips, samples, layers, label))
+        };
         for cull in [true, false] {
             for blend in [false, true] {
                 for write in [false, true] {
@@ -1198,8 +1247,7 @@ impl ThreeEngine {
             shadow_mats.iter().map(|m| m.to_cols_array_2d()).collect()
         };
         let smat_buf = buf(bytemuck::cast_slice(&mats), wgpu::BufferUsages::STORAGE, "three-shadow-mats");
-        let shadow =
-            texture(&d, [map_size, map_size], wgpu::TextureFormat::Depth32Float, 1, 1, layers, "three-shadows");
+        let shadow = pool([map_size, map_size], wgpu::TextureFormat::Depth32Float, 1, 1, layers, "three-shadows");
         let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1307,12 +1355,12 @@ impl ThreeEngine {
             }],
         });
         // ------------------------------------------------ targets
-        let color_ms = texture(&d, size, FORMAT, 1, MSAA, 1, "three-color-ms").create_view(&Default::default());
-        let depth_ms = texture(&d, size, wgpu::TextureFormat::Depth32Float, 1, MSAA, 1, "three-depth-ms")
+        let color_ms = pool(size, FORMAT, 1, MSAA, 1, "three-color-ms").create_view(&Default::default());
+        let depth_ms = pool(size, wgpu::TextureFormat::Depth32Float, 1, MSAA, 1, "three-depth-ms")
             .create_view(&Default::default());
-        let resolved_t = texture(&d, size, FORMAT, 1, 1, 1, "three-resolved");
+        let resolved_t = pool(size, FORMAT, 1, 1, 1, "three-resolved");
         let resolved = resolved_t.create_view(&Default::default());
-        let dummy_shadow = texture(&d, [1, 1], wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-no-shadows");
+        let dummy_shadow = pool([1, 1], wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-no-shadows");
         let dummy_shadow_view = dummy_shadow.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1430,8 +1478,8 @@ impl ThreeEngine {
             }
             draw_list(&mut rp, &opaque, self, false);
         }
-        let no_tiles = texture(&d, [1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles")
-            .create_view(&Default::default());
+        let no_tiles =
+            pool([1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles").create_view(&Default::default());
         let post_bind3 = |src: &wgpu::TextureView, aux: &wgpu::TextureView, tiles: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("three-post"),
@@ -1475,7 +1523,7 @@ impl ThreeEngine {
         if !trans.is_empty() {
             let mips = 32 - size[0].max(size[1]).leading_zeros();
             let mips = mips.min(8);
-            let sc = texture(&d, size, FORMAT, mips, 1, 1, "three-scene-color");
+            let sc = pool(size, FORMAT, mips, 1, 1, "three-scene-color");
             let lvl = |k: u32| {
                 sc.create_view(&wgpu::TextureViewDescriptor {
                     base_mip_level: k,
@@ -1483,7 +1531,7 @@ impl ThreeEngine {
                     ..Default::default()
                 })
             };
-            let black = texture(&d, [1, 1], FORMAT, 1, 1, 1, "three-black").create_view(&Default::default());
+            let black = pool([1, 1], FORMAT, 1, 1, 1, "three-black").create_view(&Default::default());
             let under = post_bind(&resolved, backdrop.unwrap_or(&black));
             post_pass(enc, &self.under_pipe, &under, &lvl(0));
             for k in 1..mips {
@@ -1581,7 +1629,7 @@ impl ThreeEngine {
             splat_binds.push((sb, sp.gpu.n));
         }
         // ------------------------------------------------ transmissive, splats, blended
-        let depth_t = texture(&d, size, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-depth");
+        let depth_t = pool(size, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-depth");
         let depth_view = depth_t.create_view(&Default::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1645,9 +1693,9 @@ impl ThreeEngine {
         }
         let pb = if scene.dof.is_some() {
             let tsize = [size[0].div_ceil(16), size[1].div_ceil(16)];
-            let a = texture(&d, tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-tiles")
-                .create_view(&Default::default());
-            let b = texture(&d, tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-dilated")
+            let a =
+                pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
+            let b = pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-dilated")
                 .create_view(&Default::default());
             post_pass(enc, &self.tile_max_pipe, &post_bind(&resolved, &depth_view), &a);
             post_pass(enc, &self.tile_dilate_pipe, &post_bind(&resolved, &a), &b);
@@ -1656,6 +1704,7 @@ impl ThreeEngine {
             post_bind(&resolved, &depth_view)
         };
         post_pass(enc, &self.dof_pipe, &pb, out);
+        self.targets.lock().unwrap_or_else(|e| e.into_inner()).end_call();
         self.stats = stats;
     }
 }

@@ -6,6 +6,7 @@
 //! expressions), then transforms, opacity and activity into the flat,
 //! paint-ordered FrameGraph.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::ser::{SerializeMap, Serializer};
@@ -818,6 +819,18 @@ impl<'p> Frame<'p> {
         }
     }
 
+    /// Siblings in this frame's paint order: document order stably sorted by the current `z`
+    /// (an integer property, so its animated value is already rounded).
+    fn stacked(&self, doc: &[u32]) -> Cow<'p, [u32]> {
+        let z = |k: u32| {
+            let n = &self.p.nodes[k as usize];
+            n.z_slot.and_then(|s| self.values[s as usize].as_num()).filter(|z| z.is_finite()).map_or(n.z, |z| z as i32)
+        };
+        let mut v = doc.to_vec();
+        v.sort_by_key(|&k| z(k));
+        Cow::Owned(v)
+    }
+
     fn props(&self, slots: &[u32]) -> Props {
         Props(slots.iter().map(|&s| (self.p.slots[s as usize].prop.clone(), self.values[s as usize].clone())).collect())
     }
@@ -932,7 +945,8 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         if node.layout.is_some() || node.children.iter().any(|&k| p.nodes[k as usize].align.is_some()) {
             f.arrange(&node.doc_children, node.layout.as_ref().map(|l| (l, own_box)), cbox, world);
         }
-        for &k in &node.children {
+        let kids = if node.restack { f.stacked(&node.doc_children) } else { Cow::Borrowed(&node.children[..]) };
+        for &k in kids.iter() {
             visit(f, o, k, Some(ix), depth + 1, cbox, (world, wop), draw);
         }
     }
@@ -960,7 +974,8 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         let doc_roots = p.roots.clone();
         f.arrange(&doc_roots, None, p.size, Affine::IDENTITY);
     }
-    for &r in &p.roots {
+    let roots = if p.restack_roots { f.stacked(&p.doc_roots) } else { Cow::Borrowed(&p.roots[..]) };
+    for &r in roots.iter() {
         visit(&mut f, &mut out, r, None, 0, p.size, (Affine::IDENTITY, 1.0), true);
     }
 

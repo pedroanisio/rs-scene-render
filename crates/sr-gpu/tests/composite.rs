@@ -557,3 +557,31 @@ fn no_content_is_left_to_later_batches() {
     assert!(r.stats.unsupported.iter().all(|u| !u.contains("Batch")), "{:?}", r.stats.unsupported);
     assert!(r.px.iter().any(|p| p[0] > 0.1), "sparks drawn");
 }
+
+#[test]
+fn animated_z_restacks_with_warm_caches() {
+    // red rises from under green to over it at t = 1; the group repeats it inside an isolated
+    // offscreen. Frames alternate so every cache sees both orders.
+    let pair = |p: &str| {
+        format!(
+            r##"<shape id="{p}r" shape="rect" x="0" y="0" width="16" height="16" fill="#FF0000">
+                  <animate property="z"><key time="0" value="0" interpolation="hold"/><key time="1" value="2"/></animate>
+                </shape>
+                <shape id="{p}g" shape="rect" x="0" y="0" width="16" height="16" fill="#00FF00" z="1"/>"##
+        )
+    };
+    let body = format!(r#"{}<group id="iso" x="32" isolate="true">{}</group>"#, pair("a"), pair("b"));
+    let d = doc("", "", &body);
+    let (green, red) = ([0.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    for (ts, want) in [
+        (&[0.5][..], green),
+        (&[1.5][..], red),
+        (&[0.5, 1.5][..], red),
+        (&[1.5, 0.5][..], green),
+        (&[0.5, 1.5, 0.5, 1.5][..], red),
+    ] {
+        let Some(r) = render_times(&d, ts) else { return };
+        assert_px(&r, 8, 8, want, 1e-3);
+        assert_px(&r, 40, 8, want, 1e-3);
+    }
+}
