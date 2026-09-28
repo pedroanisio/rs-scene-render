@@ -347,7 +347,6 @@ pub struct ThreeEngine {
     /// Splats keyed by the caller.
     pub splat_cache: HashMap<String, Arc<SplatGpu>>,
     next_key: u64,
-    mat_buf: Option<wgpu::Buffer>,
     ies_rows: HashMap<usize, usize>,
     /// Statistics of the last render.
     pub stats: Stats3,
@@ -724,7 +723,6 @@ impl ThreeEngine {
             envs: HashMap::new(),
             splat_cache: HashMap::new(),
             next_key: 1,
-            mat_buf: None,
             ies_rows: HashMap::new(),
             stats: Stats3::default(),
         };
@@ -1283,19 +1281,11 @@ impl ThreeEngine {
             pad(&mut mat_bytes, &[0u8; 16]);
         }
         let obj_buf = buf(&obj_bytes, wgpu::BufferUsages::UNIFORM, "three-objects");
-        // the material buffer persists so cached bind groups stay valid
-        let need = mat_bytes.len() as u64;
-        if self.mat_buf.as_ref().map(|b| b.size() < need).unwrap_or(true) {
-            self.mat_buf = Some(d.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("three-materials"),
-                size: need.next_power_of_two().max(4096),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.mat_binds.clear();
-        }
-        let mat_buf = self.mat_buf.clone().expect("material buffer");
-        self.queue.write_buffer(&mat_buf, 0, &mat_bytes);
+        // one material buffer per render, like the object buffer: several 3D passes can be recorded before a
+        // single submit, and rewriting a shared buffer with queue.write_buffer would hand every pass the data of
+        // the last one. Bind groups reference this buffer, so the cache lives for this render only.
+        let mat_buf = buf(&mat_bytes, wgpu::BufferUsages::UNIFORM, "three-materials");
+        self.mat_binds.clear();
         for (i, dr) in scene.draws.iter().enumerate() {
             preps[i].key = self.mat_bind(&dr.maps, &mat_buf);
         }
