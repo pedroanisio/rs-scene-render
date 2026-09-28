@@ -26,6 +26,7 @@ pub mod material;
 pub mod mtlx;
 
 pub mod prim;
+pub mod usdc;
 
 use glam::{Mat4, Quat, Vec3};
 

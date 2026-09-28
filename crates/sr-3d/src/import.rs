@@ -969,6 +969,8 @@ enum UV {
     Path(String),
     Ident(String),
     List(Vec<UV>),
+    /// `{ time: value, … }` of a `.timeSamples` attribute.
+    Samples(Vec<(f64, UV)>),
 }
 
 impl UV {
@@ -1004,6 +1006,8 @@ impl Prim {
 struct Usda<'a> {
     s: &'a [u8],
     i: usize,
+    /// Time-sampled attributes seen.
+    sampled: usize,
 }
 
 impl Usda<'_> {
@@ -1107,6 +1111,32 @@ impl Usda<'_> {
                 }
                 UV::List(items)
             }
+            Some(b'{') => {
+                self.i += 1;
+                let mut samples = Vec::new();
+                loop {
+                    match self.peek() {
+                        Some(b'}') => {
+                            self.i += 1;
+                            break;
+                        }
+                        Some(b',') => self.i += 1,
+                        None => break,
+                        _ => {
+                            let before = self.i;
+                            let t = self.word().trim_end_matches(':').parse::<f64>().unwrap_or(0.0);
+                            if self.peek() == Some(b':') {
+                                self.i += 1;
+                            }
+                            samples.push((t, self.value()));
+                            if self.i == before {
+                                self.i += 1;
+                            }
+                        }
+                    }
+                }
+                UV::Samples(samples)
+            }
             Some(b'"') | Some(b'\'') => UV::Str(self.string()),
             Some(b'<') => {
                 let st = self.i + 1;
@@ -1202,7 +1232,18 @@ impl Usda<'_> {
                     if self.peek() == Some(b'=') {
                         self.i += 1;
                         let v = self.value();
-                        out.attrs.push((name, v));
+                        match (name.strip_suffix(".timeSamples"), v) {
+                            // without a default, an attribute takes its first sample
+                            (Some(base), UV::Samples(samples)) => {
+                                self.sampled += 1;
+                                if out.get(base).is_none() {
+                                    if let Some((_, first)) = samples.into_iter().next() {
+                                        out.attrs.insert(0, (base.to_string(), first));
+                                    }
+                                }
+                            }
+                            (_, v) => out.attrs.push((name, v)),
+                        }
                     }
                     if self.peek() == Some(b'(') {
                         self.skip_group(b'(', b')');
@@ -1251,24 +1292,119 @@ fn prim_matrix(p: &Prim) -> Mat4 {
     m
 }
 
-/// Loads USDA text, or USDZ archives containing USDA. Binary `.usdc` crates are not supported.
+/// A crate layer as the prim tree the USDA parser builds: prims by path with their type, each
+/// attribute's default (or, without one, its first time sample) and each relationship's first
+/// target; stage metadata gives the up axis and metres per unit.
+fn usdc_prims(data: &[u8], warnings: &mut Vec<String>) -> Result<(Prim, bool, f32), String> {
+    use crate::usdc::{SpecKind, Val};
+    let specs = crate::usdc::read(data)?;
+    let uv = |v: &Val| -> Option<UV> {
+        Some(match v {
+            Val::Bool(b) => UV::Num(*b as u8 as f64),
+            Val::Nums(n) if n.len() == 1 => UV::Num(n[0]),
+            Val::Nums(n) | Val::Array(n) => UV::List(n.iter().map(|&x| UV::Num(x)).collect()),
+            Val::Token(t) => UV::Ident(t.clone()),
+            Val::Str(t) | Val::Asset(t) => UV::Str(t.clone()),
+            Val::Tokens(t) => UV::List(t.iter().map(|x| UV::Ident(x.clone())).collect()),
+            Val::Paths(p) => UV::Path(p.first()?.clone()),
+            _ => return None,
+        })
+    };
+    let (mut up_z, mut mpu) = (false, 0.01f32);
+    let mut prims: std::collections::HashMap<String, Prim> = Default::default();
+    let mut order: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let mut sampled = 0usize;
+    for sp in &specs {
+        match sp.kind {
+            SpecKind::PseudoRoot | SpecKind::Prim => {
+                if sp.kind == SpecKind::PseudoRoot {
+                    up_z = matches!(sp.get("upAxis"), Some(Val::Token(t)) if t == "Z");
+                    if let Some(Val::Nums(n)) = sp.get("metersPerUnit") {
+                        mpu = n.first().copied().unwrap_or(0.01) as f32;
+                    }
+                }
+                let kind = match sp.get("typeName") {
+                    Some(Val::Token(t)) => t.clone(),
+                    _ => String::new(),
+                };
+                let path = if sp.path == "/" { String::new() } else { sp.path.clone() };
+                if let Some(Val::Tokens(kids)) = sp.get("primChildren") {
+                    order.insert(path.clone(), kids.clone());
+                }
+                let p = prims.entry(path.clone()).or_default();
+                p.kind = kind;
+                p.path = path;
+            }
+            SpecKind::Attribute | SpecKind::Relationship => {
+                let Some((owner, name)) = sp.path.rsplit_once('.') else { continue };
+                let value = if sp.kind == SpecKind::Relationship {
+                    sp.get("targetPaths")
+                } else {
+                    sp.get("default").or_else(|| match sp.get("timeSamples") {
+                        Some(Val::TimeSamples(ts)) => ts.first().map(|(_, v)| {
+                            sampled += 1;
+                            v
+                        }),
+                        _ => None,
+                    })
+                };
+                if let Some(v) = value.and_then(uv) {
+                    let owner = if owner == "/" { String::new() } else { owner.to_string() };
+                    prims.entry(owner).or_default().attrs.push((name.to_string(), v));
+                }
+            }
+            SpecKind::Other => {}
+        }
+    }
+    if sampled > 0 {
+        warnings.push(sampled_warning(sampled));
+    }
+    fn build(
+        path: &str,
+        prims: &mut std::collections::HashMap<String, Prim>,
+        order: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Prim {
+        let mut p = prims.remove(path).unwrap_or_default();
+        for name in order.get(path).cloned().unwrap_or_default() {
+            let child = format!("{path}/{name}");
+            if prims.contains_key(&child) {
+                p.children.push(build(&child, prims, order));
+            }
+        }
+        p
+    }
+    Ok((build("", &mut prims, &order), up_z, mpu))
+}
+
+/// Loads USD: USDA text, binary USDC crates, or USDZ archives holding either (their first
+/// layer). The meshes, their transforms and UsdPreviewSurface materials are imported.
 pub fn usd(path: &Path) -> Result<Model, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    let text: Vec<u8> = if data.starts_with(b"PK") {
+    let layer: Vec<u8> = if data.starts_with(b"PK") {
         let entries = sr_vector::zip::entries(&data)?;
-        match entries.iter().find(|(n, _)| n.ends_with(".usda")) {
+        match entries.iter().find(|(n, _)| n.ends_with(".usda") || n.ends_with(".usdc") || n.ends_with(".usd")) {
             Some((_, b)) => b.clone(),
-            None if entries.iter().any(|(n, _)| n.ends_with(".usdc") || n.ends_with(".usd")) => {
-                return Err("the USDZ holds binary USD (usdc), which is not supported; export USDA".into())
-            }
             None => return Err("the USDZ holds no USD layer".into()),
         }
-    } else if data.starts_with(b"PXR-USDC") {
-        return Err("binary USD (usdc) is not supported; export USDA".into());
     } else {
         data
     };
-    let mut parser = Usda { s: &text, i: 0 };
+    let mut warnings = Vec::new();
+    let (root, up_z, mpu) = if layer.starts_with(b"PXR-USDC") {
+        usdc_prims(&layer, &mut warnings)?
+    } else {
+        usda_prims(&layer, &mut warnings)
+    };
+    usd_model(root, up_z, mpu, warnings)
+}
+
+fn sampled_warning(n: usize) -> String {
+    format!("{n} time-sampled attribute(s) use their first sample; USD animation is not imported")
+}
+
+/// Parses USDA text into its prim tree, up axis and metres per unit.
+fn usda_prims(text: &[u8], warnings: &mut Vec<String>) -> (Prim, bool, f32) {
+    let mut parser = Usda { s: text, i: 0, sampled: 0 };
     // stage metadata: #usda 1.0 ( upAxis = "Z" metersPerUnit = 0.01 )
     let mut up_z = false;
     let mut mpu = 0.01f32;
@@ -1294,7 +1430,14 @@ pub fn usd(path: &Path) -> Result<Model, String> {
     }
     let mut root = Prim::default();
     parser.body("", &mut root);
-    let mut m = Model::default();
+    if parser.sampled > 0 {
+        warnings.push(sampled_warning(parser.sampled));
+    }
+    (root, up_z, mpu)
+}
+
+fn usd_model(root: Prim, up_z: bool, mpu: f32, warnings: Vec<String>) -> Result<Model, String> {
+    let mut m = Model { warnings, ..Default::default() };
     let axis = if up_z { Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2) } else { Mat4::IDENTITY };
     m.basis = Y_UP_METRES * Mat4::from_scale(Vec3::splat(mpu)) * axis;
     // materials: prim path → UsdPreviewSurface inputs
