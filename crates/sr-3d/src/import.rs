@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::material::srgb_to_linear;
 use crate::{
@@ -685,7 +685,41 @@ pub fn splat(data: &[u8]) -> Result<Splats, String> {
 
 // ---------------------------------------------------------------- FBX
 
-/// Loads FBX through ufbx, converted to Y-up metres.
+/// ufbx's row-major 3×4 matrix as a glam matrix.
+fn fbx_mat(w: &ufbx::Matrix) -> Mat4 {
+    Mat4::from_cols_array(&[
+        w.m00 as f32,
+        w.m10 as f32,
+        w.m20 as f32,
+        0.0,
+        w.m01 as f32,
+        w.m11 as f32,
+        w.m21 as f32,
+        0.0,
+        w.m02 as f32,
+        w.m12 as f32,
+        w.m22 as f32,
+        0.0,
+        w.m03 as f32,
+        w.m13 as f32,
+        w.m23 as f32,
+        1.0,
+    ])
+}
+
+fn fbx_trs(t: &ufbx::Transform) -> Trs {
+    let (v, q, s) = (t.translation, t.rotation, t.scale);
+    Trs {
+        t: Vec3::new(v.x as f32, v.y as f32, v.z as f32),
+        r: glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize(),
+        s: Vec3::new(s.x as f32, s.y as f32, s.z as f32),
+    }
+}
+
+/// Loads FBX through ufbx, converted to Y-up metres: the node hierarchy, meshes with their
+/// materials, skins (clusters become joints, `geometry_to_bone` their inverse bind), blend shapes
+/// (morph targets) and every animation stack, baked by ufbx into linear keys (pivots, pre- and
+/// post-rotations and rotation orders resolved) with blend-channel weights as morph weights.
 pub fn fbx(path: &Path) -> Result<Model, String> {
     let opts = ufbx::LoadOpts {
         target_axes: ufbx::CoordinateAxes {
@@ -716,8 +750,55 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
         mat_index.insert(mat.element.typed_id, m.materials.len());
         m.materials.push(ImportedMaterial { name: mat.element.name.to_string(), params, maps: Default::default() });
     }
+    // every node, parents first (ufbx lists them in depth order), so the hierarchy animates
+    let node_of: std::collections::HashMap<u32, usize> =
+        scene.nodes.iter().enumerate().map(|(i, n)| (n.element.typed_id, i)).collect();
     for node in scene.nodes.iter() {
+        m.nodes.push(Node {
+            name: node.element.name.to_string(),
+            parent: node.parent.as_ref().and_then(|p| node_of.get(&p.element.typed_id).copied()),
+            local: fbx_trs(&node.local_transform),
+            ..Default::default()
+        });
+    }
+    // blend channels by element id: (node, morph index)
+    let mut channel_of: std::collections::HashMap<u32, (usize, usize)> = Default::default();
+    for (ni, node) in scene.nodes.iter().enumerate() {
         let Some(mesh) = node.mesh.as_ref() else { continue };
+        let skin = mesh.skin_deformers.first();
+        if mesh.skin_deformers.len() > 1 {
+            m.warnings.push(format!(
+                "{}: only the first of {} skins is used",
+                node.element.name,
+                mesh.skin_deformers.len()
+            ));
+        }
+        // skinned vertices stay in geometry space (the clusters bind from there); others move into node space
+        let geo = if skin.is_some() { Mat4::IDENTITY } else { fbx_mat(&node.geometry_to_node) };
+        let geo_n = Mat3::from_mat4(geo).inverse().transpose();
+        // morph targets: one per blend channel, offsets by logical vertex
+        let mut morphs: Vec<std::collections::HashMap<u32, (Vec3, Vec3)>> = Vec::new();
+        let mut weights = Vec::new();
+        for bd in mesh.blend_deformers.iter() {
+            for ch in bd.channels.iter() {
+                let Some(shape) = ch.target_shape.as_ref() else { continue };
+                if ch.keyframes.len() > 1 {
+                    m.warnings.push(format!(
+                        "{}: in-between blend shapes of {} use the full shape only",
+                        node.element.name, ch.element.name
+                    ));
+                }
+                let mut offs = std::collections::HashMap::new();
+                for (k, &vi) in shape.offset_vertices.iter().enumerate() {
+                    let d = shape.position_offsets[k];
+                    let n = shape.normal_offsets.get(k).map(|n| Vec3::new(n.x as f32, n.y as f32, n.z as f32));
+                    offs.insert(vi, (Vec3::new(d.x as f32, d.y as f32, d.z as f32), n.unwrap_or(Vec3::ZERO)));
+                }
+                channel_of.insert(ch.element.element_id, (ni, morphs.len()));
+                morphs.push(offs);
+                weights.push(ch.weight as f32);
+            }
+        }
         let mut tri = vec![0u32; mesh.max_face_triangles * 3];
         // one primitive per material slot
         let slots = mesh.materials.len().max(1);
@@ -728,6 +809,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             let p = &mut prims[slot];
             for &ix in &tri[..n * 3] {
                 let ix = ix as usize;
+                let vi = mesh.vertex_indices[ix];
                 let pos = mesh.vertex_position[ix];
                 let nrm = if mesh.vertex_normal.exists {
                     mesh.vertex_normal[ix]
@@ -735,13 +817,35 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
                     ufbx::Vec3 { x: 0.0, y: 0.0, z: 0.0 }
                 };
                 let uv = if mesh.vertex_uv.exists { mesh.vertex_uv[ix] } else { ufbx::Vec2 { x: 0.0, y: 0.0 } };
+                let pos = geo.transform_point3(Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32));
+                let nrm = geo_n * Vec3::new(nrm.x as f32, nrm.y as f32, nrm.z as f32);
                 p.indices.push(p.vertices.len() as u32);
                 p.vertices.push(Vertex {
-                    pos: [pos.x as f32, pos.y as f32, pos.z as f32],
-                    normal: [nrm.x as f32, nrm.y as f32, nrm.z as f32],
+                    pos: pos.into(),
+                    normal: nrm.into(),
                     uv: [uv.x as f32, 1.0 - uv.y as f32],
                     tangent: [1.0, 0.0, 0.0, 1.0],
                 });
+                if p.morphs.len() < morphs.len() {
+                    p.morphs.resize_with(morphs.len(), Default::default);
+                }
+                for (k, offs) in morphs.iter().enumerate() {
+                    let (dp, dn) = offs.get(&vi).copied().unwrap_or((Vec3::ZERO, Vec3::ZERO));
+                    p.morphs[k].dpos.push(geo.transform_vector3(dp).into());
+                    p.morphs[k].dnormal.push((geo_n * dn).into());
+                }
+                if let Some(sk) = skin {
+                    let sv = &sk.vertices[vi as usize];
+                    let (mut js, mut ws) = ([0u16; 4], [0f32; 4]);
+                    // ufbx sorts each vertex's weights by decreasing weight: keep the four largest
+                    for k in 0..(sv.num_weights as usize).min(4) {
+                        let w = &sk.weights[sv.weight_begin as usize + k];
+                        js[k] = w.cluster_index as u16;
+                        ws[k] = w.weight as f32;
+                    }
+                    p.joints.push(js);
+                    p.weights.push(ws);
+                }
             }
         }
         let mut list = Vec::new();
@@ -754,37 +858,106 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             m.primitives.push(p);
             list.push(m.primitives.len() - 1);
         }
-        let w = node.geometry_to_world;
-        let mat = Mat4::from_cols_array(&[
-            w.m00 as f32,
-            w.m10 as f32,
-            w.m20 as f32,
-            0.0,
-            w.m01 as f32,
-            w.m11 as f32,
-            w.m21 as f32,
-            0.0,
-            w.m02 as f32,
-            w.m12 as f32,
-            w.m22 as f32,
-            0.0,
-            w.m03 as f32,
-            w.m13 as f32,
-            w.m23 as f32,
-            1.0,
-        ]);
-        let (s, r, t) = mat.to_scale_rotation_translation();
-        m.nodes.push(Node {
-            name: node.element.name.to_string(),
-            local: Trs { t, r, s },
-            primitives: list,
-            ..Default::default()
-        });
+        if let Some(sk) = skin {
+            m.skins.push(Skin {
+                joints: sk
+                    .clusters
+                    .iter()
+                    .map(|c| c.bone_node.as_ref().and_then(|b| node_of.get(&b.element.typed_id).copied()).unwrap_or(ni))
+                    .collect(),
+                inverse_bind: sk.clusters.iter().map(|c| fbx_mat(&c.geometry_to_bone)).collect(),
+            });
+            m.nodes[ni].skin = Some(m.skins.len() - 1);
+        }
+        m.nodes[ni].primitives = list;
+        m.nodes[ni].weights = weights;
     }
-    if !scene.anim_stacks.is_empty() {
-        m.warnings.push("FBX animation stacks are not imported; export the animation as glTF".into());
+    for stack in scene.anim_stacks.iter() {
+        let opts = ufbx::BakeOpts { trim_start_time: true, ..Default::default() };
+        let baked = match ufbx::bake_anim(&scene, &stack.anim, opts) {
+            Ok(b) => b,
+            Err(e) => {
+                m.warnings.push(format!("animation {}: {:?}", stack.element.name, e.description));
+                continue;
+            }
+        };
+        let mut channels = Vec::new();
+        for bn in baked.nodes.iter() {
+            let Some(&node) = node_of.get(&bn.typed_id) else { continue };
+            let t3 = |keys: &ufbx::List<ufbx::BakedVec3>, path| Channel {
+                node,
+                path,
+                interp: Interp::Linear,
+                times: keys.iter().map(|k| k.time as f32).collect(),
+                values: keys.iter().flat_map(|k| [k.value.x as f32, k.value.y as f32, k.value.z as f32]).collect(),
+            };
+            channels.push(t3(&bn.translation_keys, AnimPath::Translation));
+            channels.push(t3(&bn.scale_keys, AnimPath::Scale));
+            channels.push(Channel {
+                node,
+                path: AnimPath::Rotation,
+                interp: Interp::Linear,
+                times: bn.rotation_keys.iter().map(|k| k.time as f32).collect(),
+                values: bn
+                    .rotation_keys
+                    .iter()
+                    .flat_map(|k| [k.value.x as f32, k.value.y as f32, k.value.z as f32, k.value.w as f32])
+                    .collect(),
+            });
+        }
+        // blend-channel weights (DeformPercent, 0–100): one weights channel per mesh node on the
+        // union of the key times, each morph interpolated linearly
+        let mut per_node: std::collections::BTreeMap<usize, Vec<MorphKeys>> = Default::default();
+        for el in baked.elements.iter() {
+            let Some(&(node, k)) = channel_of.get(&el.element_id) else { continue };
+            for prop in el.props.iter() {
+                if &*prop.name == "DeformPercent" {
+                    let keys = prop.keys.iter().map(|x| (x.time as f32, x.value.x as f32 / 100.0)).collect();
+                    per_node.entry(node).or_default().push((k, keys));
+                }
+            }
+        }
+        for (node, morphs) in per_node {
+            let mut times: Vec<f32> = morphs.iter().flat_map(|(_, keys)| keys.iter().map(|k| k.0)).collect();
+            times.sort_by(f32::total_cmp);
+            times.dedup();
+            let defaults = m.nodes[node].weights.clone();
+            let mut values = Vec::with_capacity(times.len() * defaults.len());
+            for &t in &times {
+                let mut w = defaults.clone();
+                for (k, keys) in &morphs {
+                    if let Some(slot) = w.get_mut(*k) {
+                        *slot = lerp_keys(keys, t);
+                    }
+                }
+                values.extend(w);
+            }
+            channels.push(Channel { node, path: AnimPath::Weights, interp: Interp::Linear, times, values });
+        }
+        channels.retain(|c| !c.times.is_empty());
+        let duration = if baked.playback_duration > 0.0 {
+            baked.playback_duration
+        } else {
+            baked.key_time_max - baked.key_time_min.min(0.0)
+        };
+        m.animations.push(Animation { name: stack.element.name.to_string(), channels, duration: duration as f32 });
     }
     Ok(m)
+}
+
+/// A morph index with its (time, weight) keys.
+type MorphKeys = (usize, Vec<(f32, f32)>);
+
+/// Linear interpolation of (time, value) keys, held beyond the ends.
+fn lerp_keys(keys: &[(f32, f32)], t: f32) -> f32 {
+    match keys.iter().position(|k| k.0 > t) {
+        None => keys.last().map_or(0.0, |k| k.1),
+        Some(0) => keys[0].1,
+        Some(i) => {
+            let (a, b) = (keys[i - 1], keys[i]);
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0).max(1e-9)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- USD

@@ -348,3 +348,63 @@ fn materialx_standard_surface() {
     assert_eq!(m.base_color_map.as_deref(), Some(std::path::Path::new("/assets/tex/wood.png")));
     assert!(mtlx::parse("<materialx/>", std::path::Path::new(".")).is_err());
 }
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+/// Bounding box and centroid of the distinct vertex positions of every named mesh node, in the
+/// model's own space (Y-up metres), with the model posed at `t` in `clip`.
+fn posed(m: &sr_3d::Model, clip: Option<&sr_3d::Animation>, t: f32) -> std::collections::BTreeMap<String, [Vec3; 3]> {
+    let (locals, weights) = anim::pose(m, clip, t);
+    let mut pts: std::collections::BTreeMap<String, std::collections::BTreeSet<[i64; 3]>> = Default::default();
+    for item in anim::draw_list(m, &locals, &weights, None) {
+        let vs = item.vertices.as_ref().unwrap_or(&m.primitives[item.prim].vertices);
+        let set = pts.entry(m.nodes[item.node].name.clone()).or_default();
+        for v in vs {
+            let p = item.matrix.transform_point3(Vec3::from(v.pos));
+            set.insert([p.x, p.y, p.z].map(|c| (c as f64 * 1e4).round() as i64));
+        }
+    }
+    pts.into_iter()
+        .map(|(name, set)| {
+            let ps: Vec<Vec3> = set.iter().map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32) / 1e4).collect();
+            let lo = ps.iter().fold(Vec3::splat(f32::MAX), |a, b| a.min(*b));
+            let hi = ps.iter().fold(Vec3::splat(f32::MIN), |a, b| a.max(*b));
+            let c = ps.iter().copied().sum::<Vec3>() / ps.len() as f32;
+            (name, [lo, hi, c])
+        })
+        .collect()
+}
+
+#[test]
+fn fbx_animation_stacks_skins_and_blend_shapes() {
+    // tools/fixtures/make_fbx_rig.py: Blender's evaluated vertices are the reference
+    let Asset::Model(m) = import::load(&fixture("rig.fbx"), None).unwrap() else { panic!() };
+    assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    assert_eq!(m.animations.len(), 1, "{:?}", m.animations.iter().map(|a| &a.name).collect::<Vec<_>>());
+    let clip = &m.animations[0];
+    assert!((clip.duration - 1.0).abs() < 1e-3, "{}", clip.duration);
+    assert_eq!(m.skins.len(), 1);
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("rig.expected.json")).unwrap()).unwrap();
+    let v3 = |v: &serde_json::Value| {
+        Vec3::new(v[0].as_f64().unwrap() as f32, v[1].as_f64().unwrap() as f32, v[2].as_f64().unwrap() as f32)
+    };
+    for (key, t) in [("0.0", 0.0), ("0.5", 0.5), ("1.0", 1.0)] {
+        let got = posed(&m, Some(clip), t);
+        for (name, w) in want[key].as_object().unwrap() {
+            let [lo, hi, c] = got.get(name).unwrap_or_else(|| panic!("no mesh node {name}: {:?}", got.keys()));
+            for (what, g, e) in
+                [("min", lo, v3(&w["min"])), ("max", hi, v3(&w["max"])), ("centroid", c, v3(&w["centroid"]))]
+            {
+                assert!((*g - e).abs().max_element() < 2e-3, "{name} {what} at t = {t}: {g} vs Blender {e}");
+            }
+        }
+    }
+    // past the end the last pose holds
+    let (end, after) = (posed(&m, Some(clip), 1.0), posed(&m, Some(clip), 3.0));
+    for (name, e) in &end {
+        assert!((after[name][2] - e[2]).abs().max_element() < 1e-4, "{name}");
+    }
+}
