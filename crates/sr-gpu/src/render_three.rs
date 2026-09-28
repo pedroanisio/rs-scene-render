@@ -1205,7 +1205,6 @@ impl Renderer {
     }
 
     /// Whether node `i` starts a 3D run (or draws alone) and, if so, emits the run as one layer.
-    #[allow(clippy::too_many_arguments)]
     /// The 3D objects that share node `i`'s parent and render together in one pass (one depth buffer, one
     /// environment dome). Motion blur accumulates this whole pass over the shutter, driven by its first member:
     /// rendering blurred objects one pass each would repaint the dome over the objects drawn before them.
@@ -1219,6 +1218,7 @@ impl Renderer {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn three_run(
         &mut self,
         plan: &mut Plan,
