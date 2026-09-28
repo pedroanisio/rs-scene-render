@@ -254,11 +254,16 @@ fn register_fonts(tc: &mut TextCache, p: &Program) {
         return;
     }
     tc.font_assets.insert(String::new(), None);
+    // fonts are referenced by text styles (fontAsset), never by layers, so they are not in the program's
+    // asset table: read them from the documents themselves
     let mut found = Vec::new();
-    for (key, (doc, _)) in p.assets.iter() {
-        let base = p.base_dirs.get(*doc as usize).cloned().unwrap_or_default();
-        if let Some((AssetsChild::Font(f), _)) = asset_of(p, key) {
-            found.push((key.to_string(), resolve_path(&f.src, &base).map(|x| (x, f.collection_index as u32))));
+    let docs = std::iter::once(&p.scene).chain(p.includes.iter().map(|i| &i.1));
+    for (doc, scene) in docs.enumerate() {
+        let base = p.base_dirs.get(doc).cloned().unwrap_or_default();
+        for c in scene.assets.iter().flat_map(|a| a.children.iter()) {
+            if let (AssetsChild::Font(f), Some(id)) = (c, c.id()) {
+                found.push((id.to_string(), resolve_path(&f.src, &base).map(|x| (x, f.collection_index as u32))));
+            }
         }
     }
     let lib = tc.lib();

@@ -114,3 +114,34 @@ fn text_animators_move_variable_font_axes() {
     let (a, b) = (sum(&regular, 0, 0, 200, 100, 0), sum(&bold, 0, 0, 200, 100, 0));
     assert!(b > a * 1.2, "wght 700 inks more than the default 400: {b} vs {a}");
 }
+
+#[test]
+fn font_assets_are_loaded_even_though_no_layer_references_them() {
+    // <font> assets are referenced from text (fontAsset), never by layers; they must still be loaded, not
+    // silently replaced by the default family. A monospaced "i" is several times wider than a proportional one.
+    let mono = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    if !std::path::Path::new(mono).exists() {
+        return;
+    }
+    let ink_right = |attrs: &str| {
+        let d = doc_text(
+            &format!(
+                r##"<font id="fm" src="{mono}" family="DejaVu Sans Mono"/><text id="t" text="iiiiiiiiii" width="460" height="60" size="40" color="#FFFFFF" {attrs}/>"##
+            ),
+            "",
+            r#"<layer id="lt" asset="t" x="0" y="0"/>"#,
+            480,
+            64,
+        );
+        let r = render(&d)?;
+        assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+        (0..480u32).rev().find(|&x| (0..64).any(|y| r.at(x, y)[0] > 0.5))
+    };
+    let (Some(prop), Some(mono_w)) = (ink_right(r#"font="DejaVu Sans""#), ink_right(r#"fontAsset="fm""#)) else {
+        return;
+    };
+    assert!(
+        mono_w as f32 > prop as f32 * 1.8,
+        "fontAsset must select the monospaced file: {mono_w} vs proportional {prop}"
+    );
+}
