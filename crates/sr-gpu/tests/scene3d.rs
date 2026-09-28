@@ -264,3 +264,25 @@ fn look_at_constraints_aim_lights() {
     let (a, b) = (lum(off.at(64, 64)), lum(on.at(64, 64)));
     assert!(b > a * 5.0 + 0.05, "aimed at the sphere: {b} vs {a}");
 }
+
+#[test]
+fn motion_blurred_3d_objects_share_one_pass() {
+    // two overlapping spheres, both moving under motion blur; the near red one is listed first. Blurred objects
+    // used to render one pass each and composite in document order, so the far green one painted over it.
+    let mats = r##"<material id="rm" baseColor="#FF0000" roughness="0.6"/><material id="gm" baseColor="#00FF00" roughness="0.6"/>"##;
+    let body = r#"<object3D id="near" primitive="sphere" radius="14" x="64" y="64" z="-30" material="rm">
+            <animate property="x"><key time="0" value="60"/><key time="4" value="68"/></animate></object3D>
+        <object3D id="far" primitive="sphere" radius="40" x="64" y="64" z="60" material="gm">
+            <animate property="x"><key time="0" value="68"/><key time="4" value="60"/></animate></object3D>"#;
+    let mut d = scene("", mats, body, "");
+    d.scene.project.motion_blur = true;
+    d.scene.project.motion_blur_samples = 4;
+    d.scene.project.shutter_angle = 180.0;
+    let Some(r) = render_sub(&d, 1.0) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert!(r.stats.subframes >= 4, "motion blur ran: {}", r.stats.subframes);
+    let c = r.at(64, 64);
+    assert!(c[0] > c[1] * 3.0, "the near red sphere occludes the far green one: {c:?}");
+    let edge = r.at(64, 64 - 24);
+    assert!(edge[1] > edge[0], "the far sphere shows around the near one: {edge:?}");
+}

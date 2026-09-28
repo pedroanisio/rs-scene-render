@@ -1206,6 +1206,19 @@ impl Renderer {
 
     /// Whether node `i` starts a 3D run (or draws alone) and, if so, emits the run as one layer.
     #[allow(clippy::too_many_arguments)]
+    /// The 3D objects that share node `i`'s parent and render together in one pass (one depth buffer, one
+    /// environment dome). Motion blur accumulates this whole pass over the shutter, driven by its first member:
+    /// rendering blurred objects one pass each would repaint the dome over the objects drawn before them.
+    pub(super) fn three_members(g: &FrameGraph, i: usize) -> Vec<usize> {
+        let parent = g.nodes[i].parent;
+        g.nodes
+            .iter()
+            .enumerate()
+            .filter(|(j, m)| m.kind == "object3D" && m.parent == parent && visible3(g, *j))
+            .map(|(j, _)| j)
+            .collect()
+    }
+
     pub(super) fn three_run(
         &mut self,
         plan: &mut Plan,
@@ -1218,24 +1231,8 @@ impl Renderer {
     ) {
         let g = ctx.g;
         let n = &g.nodes[i];
-        let visible = |j: usize| g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true);
-        let alone = self.sampling || (ctx.sub.is_some() && self.motion_blur_on(ctx, i));
-        let members: Vec<usize> = if alone {
-            vec![i]
-        } else {
-            g.nodes
-                .iter()
-                .enumerate()
-                .filter(|(j, m)| {
-                    m.kind == "object3D"
-                        && m.parent == n.parent
-                        && visible(*j)
-                        && !(ctx.sub.is_some() && self.motion_blur_on(ctx, *j))
-                })
-                .map(|(j, _)| j)
-                .collect()
-        };
-        if members.first() != Some(&i) || !visible(i) {
+        let members = Self::three_members(g, i);
+        if members.first() != Some(&i) || !visible3(g, i) {
             return;
         }
         let frame = [g.size[0] as f32, g.size[1] as f32];
@@ -1436,4 +1433,8 @@ impl Renderer {
         let hash = h(&[root_hash, sr_eval::rng::hash_str(&n.id), hf(ctx.g.time), pf.pos.len() as u64, 0x5a17]);
         self.composite(plan, ctx, i, space, op, tex, [0.0, 0.0, w, hgt], cmds, hash);
     }
+}
+
+fn visible3(g: &FrameGraph, j: usize) -> bool {
+    g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true)
 }

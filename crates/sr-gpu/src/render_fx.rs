@@ -1003,6 +1003,11 @@ impl Renderer {
         let Some(sub) = ctx.sub else { return false };
         let g = ctx.g;
         let n = &g.nodes[i];
+        let three = n.kind == "object3D";
+        if three && Self::three_members(g, i).first() != Some(&i) {
+            // drawn, and blurred, with the pass of the first object that shares its parent
+            return true;
+        }
         let pr = &ctx.p.scene.project;
         let fps = fps_of(ctx.p);
         let angle = pr.shutter_angle;
@@ -1023,7 +1028,8 @@ impl Renderer {
             ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt()
         });
         let moved = moved.fold(0.0f64, f64::max);
-        let own_motion = moved >= 0.5;
+        // a 3D pass moves whenever its camera or any member does; its 2D box says nothing about that
+        let own_motion = three || moved >= 0.5;
         if pr.adaptive_motion_blur && !own_motion {
             // a group whose own transform is still lets moving children blur themselves
             return false;
