@@ -425,12 +425,13 @@ impl Working {
     }
 
     /// A document colour literal into the stored working representation.
-    /// Literals are working-space values encoded with the space's own
-    /// transfer (sRGB for `srgb`, none for linear spaces such as ACEScg).
+    /// Literals are display sRGB whatever the working space (scene-render
+    /// conventions 1.4): decoded with the sRGB transfer, converted from sRGB
+    /// primaries to the working space, then stored. `#808080` therefore
+    /// displays as 128 in `srgb` and `linear-srgb` scenes alike.
     pub fn from_literal(&self, c: [f64; 4]) -> [f64; 4] {
-        let t = default_transfer(self.space);
-        let lin = [decode(t, c[0]), decode(t, c[1]), decode(t, c[2]), c[3]];
-        self.store(lin)
+        let d = |v: f64| decode(Transfer::Srgb, v);
+        self.from_linear_srgb([d(c[0]), d(c[1]), d(c[2]), c[3]])
     }
 }
 
