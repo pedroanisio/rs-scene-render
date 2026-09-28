@@ -717,12 +717,29 @@ impl<'p> Frame<'p> {
             };
         }
         if let Some([w, h]) = node.shape_size {
+            let (w, h) = (self.live_len(n, "width", w), self.live_len(n, "height", h));
             return (Some([resolve_len(w, bx[0], fs), resolve_len(h, bx[1], fs)]), None);
         }
         if let Some([w, h]) = node.box_size {
+            let (w, h) = (self.live_len(n, "width", w), self.live_len(n, "height", h));
             return (Some([resolve_len(w, bx[0], fs), resolve_len(h, bx[1], fs)]), None);
         }
         (None, None)
+    }
+
+    /// The current value of an animated length property of node `n` (width, height), else `base`.
+    fn live_len(&self, n: u32, prop: &str, base: Length) -> Length {
+        let p = self.p;
+        p.nodes[n as usize]
+            .slots
+            .iter()
+            .find(|&&s| &*p.slots[s as usize].prop == prop)
+            .and_then(|&s| match &self.values[s as usize] {
+                Value::Len(l) => Some(*l),
+                Value::Num(x) => Some(Length::px(*x)),
+                _ => None,
+            })
+            .unwrap_or(base)
     }
 
     fn active(&mut self, n: u32) -> bool {

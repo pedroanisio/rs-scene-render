@@ -1868,6 +1868,38 @@ fn snapshot(e: &dyn Element, tokens: &HashMap<String, [f64; 4]>) -> Vec<(&'stati
         .collect()
 }
 
+/// Numeric `<param name value>` children of shader effects and transitions, as animatable properties:
+/// `<animate property="NAME">` then drives the uniform of the same name, as in the Python engine.
+fn shader_params(e: &dyn Element, known: &[(&'static str, PropKind, Value)]) -> Vec<(&'static str, PropKind, Value)> {
+    const NUM: PropKind = PropKind::Number(crate::value::Range { lo: None, hi: None, integer: false });
+    sr_model::element::children(e)
+        .into_iter()
+        .filter(|c| c.element_name() == "param")
+        .filter_map(|c| {
+            let name = c.get_attr("name")?.to_string();
+            if known.iter().any(|(n, _, _)| *n == name) {
+                return None;
+            }
+            let v: f64 = c.get_attr("value")?.to_string().trim().parse().ok()?;
+            Some((intern(&name), NUM, Value::Num(v)))
+        })
+        .collect()
+}
+
+/// Param names live as long as the process; each distinct name is stored once.
+fn intern(s: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut set = NAMES.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(&n) = set.get(s) {
+        return n;
+    }
+    let n: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    set.insert(n);
+    n
+}
+
 struct DocLookup<'b> {
     b: &'b Builder,
     doc: u16,
@@ -1885,7 +1917,12 @@ impl Lookup for DocLookup<'_> {
 impl Builder {
     fn add_element(&mut self, key: Arc<str>, e: &dyn Element, node: Option<u32>, doc: u16) -> u32 {
         let i = self.elements.len() as u32;
-        let attrs = snapshot(e, &self.doc(doc).tokens);
+        let mut attrs = snapshot(e, &self.doc(doc).tokens);
+        // effects and transitions report their schema type name
+        if matches!(e.element_name(), "effect" | "effectType" | "transition" | "transitionType") {
+            let params = shader_params(e, &attrs);
+            attrs.extend(params);
+        }
         self.elements.push(ElemTarget { key, name: e.element_name(), node, attrs, slots: Vec::new() });
         i
     }
