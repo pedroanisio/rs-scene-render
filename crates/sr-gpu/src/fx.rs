@@ -108,21 +108,50 @@ pub struct Pass {
     pub additive: bool,
     /// Clear `out` first (additive accumulation starts from zero).
     pub clear: bool,
+    /// A custom GLSL program with its own bindings (then `entry` and the fixed inputs are unused).
+    pub custom: Option<Box<crate::shader::CustomBind>>,
+}
+
+impl Pass {
+    /// A custom program writing `out`.
+    pub fn custom(bind: crate::shader::CustomBind, out: Arc<Tex>) -> Pass {
+        Pass {
+            entry: Entry::Copy,
+            params: Params::default(),
+            src: out.clone(),
+            aux: Aux::None,
+            aux2: None,
+            lut: None,
+            out,
+            additive: false,
+            clear: true,
+            custom: Some(Box::new(bind)),
+        }
+    }
 }
 
 /// Pipelines, samplers and caches.
 pub struct FxEngine {
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
+    pub(crate) device: Arc<wgpu::Device>,
+    pub(crate) queue: Arc<wgpu::Queue>,
     bgl: wgpu::BindGroupLayout,
     layout: wgpu::PipelineLayout,
-    module: wgpu::ShaderModule,
+    pub(crate) module: wgpu::ShaderModule,
     pipes: HashMap<(Entry, bool), wgpu::RenderPipeline>,
     custom: HashMap<u64, Result<wgpu::ShaderModule, String>>,
-    samp: wgpu::Sampler,
+    pub(crate) samp: wgpu::Sampler,
     dummy2: wgpu::TextureView,
     dummy3: wgpu::TextureView,
     luts: HashMap<String, Result<Arc<Lut3>, String>>,
+    /// Custom GLSL programs by source hash (see `shader`).
+    pub(crate) programs: HashMap<u64, Result<Arc<crate::shader::CustomPipe>, String>>,
+    /// Persistent ISF buffers by effect instance (latest), their state at the start of the
+    /// current frame, and checkpoints by frame.
+    pub(crate) feedback: HashMap<String, crate::shader::Feedback>,
+    pub(crate) feedback_frame: (i64, HashMap<String, crate::shader::Feedback>),
+    pub(crate) checkpoints: std::collections::BTreeMap<i64, HashMap<String, crate::shader::Feedback>>,
+    /// Images uploaded for shader samplers, by path.
+    pub(crate) images: HashMap<std::path::PathBuf, Arc<Tex>>,
 }
 
 impl FxEngine {
@@ -217,6 +246,11 @@ impl FxEngine {
             dummy2,
             dummy3,
             luts: HashMap::new(),
+            programs: HashMap::new(),
+            feedback: HashMap::new(),
+            feedback_frame: (i64::MIN, HashMap::new()),
+            checkpoints: std::collections::BTreeMap::new(),
+            images: HashMap::new(),
         }
     }
 
@@ -273,6 +307,11 @@ impl FxEngine {
         use wgpu::util::DeviceExt;
         let mut n = 0;
         for p in passes {
+            if let Some(c) = &p.custom {
+                self.record_custom(enc, c, &p.out);
+                n += 1;
+                continue;
+            }
             let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("fx params"),
                 contents: bytemuck::bytes_of(&p.params),
@@ -724,6 +763,8 @@ pub fn load_lut(path: &Path) -> Result<(u32, Vec<[f32; 3]>), String> {
 pub struct Cx<'a> {
     /// Offscreen pixels per document pixel of the node.
     pub px: f64,
+    /// Output pixels per document pixel (the render scale, without the node's own transform).
+    pub scale: f64,
     /// Node-local direction → offscreen direction (2×2, column-major a, b, c, d).
     pub lin: [f64; 4],
     /// Node-local px → offscreen uv.
@@ -742,6 +783,20 @@ pub struct Cx<'a> {
     pub lights: Vec<[f32; 4]>,
     pub working: Working,
     pub base: &'a Path,
+    /// Frames per second of the composition.
+    pub fps: f64,
+    /// Seconds since the node started.
+    pub local_time: f64,
+    /// Offscreen origin in frame pixels, GL orientation (bottom-left).
+    pub offset: [f64; 2],
+    /// Frame size in pixels.
+    pub frame_size: [f64; 2],
+    /// The node the effect runs on (keys persistent ISF buffers).
+    pub node: String,
+    /// Named sampler inputs (nodes, image assets) covering the offscreen, stored working premultiplied.
+    pub named: HashMap<String, Arc<Tex>>,
+    /// The audio mix, when the render has one (ISF audio inputs).
+    pub audio: Option<Arc<crate::shader::AudioSignals>>,
 }
 
 /// Collects passes and the textures they use.
@@ -865,6 +920,7 @@ impl Builder<'_> {
             out: out.clone(),
             additive: false,
             clear: true,
+            custom: None,
         });
         out
     }
@@ -1509,18 +1565,7 @@ impl Builder<'_> {
                 v[1] = v4(c);
                 self.simple(Entry::Morph, if kind == "stroke" { 1 } else { 2 }, v, input, Aux::None)
             }
-            "shader" => {
-                let src = a.str("src").ok_or("shader needs @src")?;
-                let path = match sr_model::assets::resolve(&src, cx.base) {
-                    sr_model::assets::Resolved::Local(p) => p,
-                    _ => return Err(format!("{src}: only local shader files are supported")),
-                };
-                let code = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                let params = params_of(e);
-                let (glsl, v) = wrap_glsl(&code, false, &params, [t as f32, amount as f32, w as f32, h as f32])?;
-                let entry = self.eng.custom(&glsl).map_err(|er| format!("{}: {er}", path.display()))?;
-                self.run(entry, [0; 4], v, input, Aux::None, None, None, size)
-            }
+            "shader" => return self.shader_effect(e, a, input, cx),
             other => return Err(format!("effect type {other} is not drawn")),
         })
     }
@@ -1568,6 +1613,7 @@ impl Builder<'_> {
             out: acc.clone(),
             additive: true,
             clear: first,
+            custom: None,
         });
     }
 
@@ -1597,14 +1643,16 @@ impl Builder<'_> {
         a: &Attrs,
         color: [f64; 4],
         shader: Option<(String, &Path)>,
+        velocity: f64,
+        cx: Option<&Cx>,
     ) -> Result<Arc<Tex>, String> {
         let size = from.size;
         if kind == "shader" {
             let (code, path) = shader.ok_or("transition type=\"shader\" needs @shader")?;
-            let params = params_of(e);
-            let (glsl, v) = wrap_glsl(&code, true, &params, [p as f32, 0.0, size[0] as f32, size[1] as f32])?;
-            let entry = self.eng.custom(&glsl).map_err(|er| format!("{}: {er}", path.display()))?;
-            return Ok(self.run(entry, [0; 4], v, from, Aux::Tex(to.clone()), None, None, size));
+            let cx = cx.ok_or("shader transitions need a context")?;
+            return self
+                .shader_transition(&code, from, to, luma, p, velocity, e, a, cx)
+                .map_err(|er| format!("{}: {er}", path.display()));
         }
         const KINDS: [&str; 34] = [
             "cut",

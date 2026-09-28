@@ -248,6 +248,12 @@ pub struct Renderer {
     pub max_texture: u32,
     /// Preferred asset representation (`proxy`, …); the asset's own `src` otherwise.
     pub representation: Option<String>,
+    /// The audio mix for shader audio inputs (set by the delivery pipeline).
+    pub audio: Option<Arc<crate::shader::AudioSignals>>,
+    /// Whether the scene's shaders keep persistent ISF buffers (decided on the first render).
+    persistent_isf: Option<bool>,
+    /// The frame rendered last (ISF feedback replays on a seek).
+    last_frame: Option<i64>,
 }
 
 fn h(words: &[u64]) -> u64 {
@@ -519,6 +525,9 @@ impl Renderer {
             text: Default::default(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
+            audio: None,
+            persistent_isf: None,
+            last_frame: None,
         }
     }
 
@@ -2130,7 +2139,42 @@ impl Renderer {
 
     /// Renders a frame; `provider` evaluates the scene at other times for
     /// motion blur and time effects (without it they draw unblurred and are reported).
+    ///
+    /// Scenes whose shaders keep persistent ISF buffers replay the frames before `g.frame`
+    /// (from the latest checkpoint) when it does not follow the previous render, so their
+    /// feedback is the same whichever frame is rendered first.
     pub fn render_with(
+        &mut self,
+        g: &FrameGraph,
+        p: &Program,
+        mut provider: Option<&mut dyn FnMut(f64) -> FrameGraph>,
+    ) -> Frame {
+        let persistent =
+            *self.persistent_isf.get_or_insert_with(|| crate::shader::has_persistent(p, &Self::base_dir(p)));
+        let fps = {
+            let f = &p.scene.project.fps;
+            (f.num as f64 / f.den.max(1) as f64).max(1e-6)
+        };
+        let interval = fps.round().max(1.0) as i64;
+        if persistent && self.last_frame != Some(g.frame) && self.last_frame != Some(g.frame - 1) {
+            if let Some(pv) = provider.as_mut() {
+                let start = self.fx.restore(g.frame - 1);
+                for k in start..g.frame {
+                    let gk = pv(k as f64 / fps);
+                    let _ = self.render_graph(&gk, p, Some(&mut **pv));
+                    self.fx.checkpoint(k, interval);
+                }
+            }
+        }
+        let out = self.render_graph(g, p, provider);
+        self.last_frame = Some(g.frame);
+        if persistent {
+            self.fx.checkpoint(g.frame, interval);
+        }
+        out
+    }
+
+    fn render_graph(
         &mut self,
         g: &FrameGraph,
         p: &Program,

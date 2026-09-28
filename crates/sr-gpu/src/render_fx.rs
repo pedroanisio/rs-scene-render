@@ -57,7 +57,6 @@ const UNBOUNDED: &[&str] = &[
     "vignette",
     "echo",
     "posterize-time",
-    "shader",
     "light-sweep",
     "fractal-noise",
 ];
@@ -116,6 +115,7 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
         }
         "rgb-split" => a.num("offsetX", 8.0).abs().max(a.num("offsetY", 8.0).abs()),
         "pixel-motion-blur" => 64.0,
+        "shader" => crate::shader::padding(e as &dyn Element),
         _ => 0.0,
     }
 }
@@ -492,6 +492,7 @@ impl Renderer {
         };
         Cx {
             px,
+            scale: Xf(space.xform.0).max_scale().max(1e-6),
             lin: [ta.0[0], ta.0[1], ta.0[2], ta.0[3]],
             to_uv,
             center,
@@ -503,6 +504,13 @@ impl Renderer {
             lights: Vec::new(),
             working: self.working,
             base,
+            fps: fps_of(ctx.p),
+            local_time: n.local_time,
+            offset: [0.0, 0.0],
+            frame_size: ctx.g.size,
+            node: n.id.to_string(),
+            named: HashMap::new(),
+            audio: self.audio.clone(),
         }
     }
 
@@ -534,6 +542,19 @@ impl Renderer {
         rect: [f64; 4],
     ) -> Option<Arc<Tex>> {
         let id = a.str("source")?;
+        self.node_texture(plan, ctx, &id, space, rect, true)
+    }
+
+    /// A node rendered over the offscreen `rect` (`report`: note an unknown id).
+    fn node_texture(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        id: &str,
+        space: &Space,
+        rect: [f64; 4],
+        report: bool,
+    ) -> Option<Arc<Tex>> {
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
         if let Some(j) = ctx.g.nodes.iter().position(|n| *n.id == *id) {
             let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
@@ -545,10 +566,48 @@ impl Renderer {
             plan.jobs.push(Job::draws(tex.clone(), true, c, false));
             return Some(tex);
         }
-        plan.stats
-            .unsupported
-            .push(format!("effect source {id}: must name a node (place an image asset on a hidden layer)"));
+        if report {
+            plan.stats
+                .unsupported
+                .push(format!("effect source {id}: must name a node (place an image asset on a hidden layer)"));
+        }
         None
+    }
+
+    /// Named sampler inputs of a shader effect: `<param>` values naming a node (rendered over
+    /// the offscreen) or an image asset (at its own size).
+    fn shader_samplers(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        e: &m::Effect,
+        space: &Space,
+        rect: [f64; 4],
+    ) -> HashMap<String, Arc<Tex>> {
+        let mut out = HashMap::new();
+        for (name, value) in crate::shader::param_map(e as &dyn Element) {
+            let value = value.trim().to_string();
+            if value.is_empty() || name == "padding" {
+                continue;
+            }
+            if ctx.g.nodes.iter().any(|n| *n.id == *value) {
+                if let Some(t) = self.node_texture(plan, ctx, &value, space, rect, false) {
+                    out.insert(name, t);
+                }
+                continue;
+            }
+            let Some((a, doc)) = self.asset(ctx.p, &value) else { continue };
+            if let AssetsChild::Image(i) = a {
+                let base = ctx.p.base_dirs.get(doc).cloned().unwrap_or_default();
+                let (src, cs, tf) = self.representation(&i.representations, &i.src, i.color_space, i.transfer);
+                if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(src, &base) {
+                    if let Some(t) = self.image(path, cs, tf, i.alpha) {
+                        out.insert(name, t);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Applies node `i`'s effects. Returns true when the node was handled (drawn or invisible).
@@ -576,7 +635,13 @@ impl Renderer {
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
         let attrs: Vec<Attrs> =
             effs.iter().map(|e| Attrs { e: *e as &dyn Element, props: element_props(g, &e.id) }).collect();
-        let pad: f64 = effs.iter().zip(&attrs).map(|(e, a)| reach(e, a)).sum::<f64>() * px;
+        // custom shaders take `padding` in document pixels at the render scale (not the node's)
+        let render_scale = Xf(space.xform.0).max_scale().max(1e-6);
+        let pad: f64 = effs
+            .iter()
+            .zip(&attrs)
+            .map(|(e, a)| reach(e, a) * if e.r#type.as_str() == "shader" { render_scale } else { px })
+            .sum();
         let bounded = n.kind == "layer" && ctx.kids[i].is_empty() && n.size.is_some() && pad.is_finite();
         let mut rect = [0.0, 0.0, fw, fh];
         if bounded {
@@ -589,11 +654,15 @@ impl Renderer {
                 x1 = x1.max(q[0]);
                 y1 = y1.max(q[1]);
             }
+            // custom shaders see the Python engine's tile: the layer's pixels with a 2 px margin,
+            // reaching up to 64 px past the frame (their resolution and uv depend on it)
+            let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
+            let (m, lo, hx, hy) = if shader { (2.0, -64.0, fw + 64.0, fh + 64.0) } else { (1.0, 0.0, fw, fh) };
             rect = [
-                (x0 - pad - 1.0).floor().max(0.0),
-                (y0 - pad - 1.0).floor().max(0.0),
-                (x1 + pad + 1.0).ceil().min(fw),
-                (y1 + pad + 1.0).ceil().min(fh),
+                (x0 - pad - m).floor().max(lo),
+                (y0 - pad - m).floor().max(lo),
+                (x1 + pad + m).ceil().min(hx),
+                (y1 + pad + m).ceil().min(hy),
             ];
         }
         if rect[2] - rect[0] < 1.0 || rect[3] - rect[1] < 1.0 {
@@ -765,13 +834,18 @@ impl Renderer {
                 cur = out;
                 continue;
             }
-            let source = if a.str("source").is_some() && matches!(kind, "displacement-map" | "difference-key") {
-                self.effect_source(plan, ctx, a, space, rect)
-            } else {
-                None
-            };
+            let source =
+                if a.str("source").is_some() && matches!(kind, "displacement-map" | "difference-key" | "shader") {
+                    self.effect_source(plan, ctx, a, space, rect)
+                } else {
+                    None
+                };
+            let named = if kind == "shader" { self.shader_samplers(plan, ctx, e, space, rect) } else { HashMap::new() };
             let mut cx = self.cx_for(ctx, i, inner, [0.0, 0.0, w, hgt], &to_uv, &color, &gradient, &base);
             cx.source = source;
+            cx.named = named;
+            cx.offset = [rect[0], space.size[1] as f64 - rect[3]];
+            cx.frame_size = [space.size[0] as f64, space.size[1] as f64];
             cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, w) } else { Vec::new() };
             let mut b = self.builder(plan);
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
@@ -808,6 +882,7 @@ impl Renderer {
             out: target.clone(),
             additive: false,
             clear: true,
+            custom: None,
         });
         let (passes, temps, problems) =
             (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
@@ -1128,35 +1203,68 @@ impl Renderer {
             None => None,
         };
         let base = Self::base_dir(ctx.p);
+        let mut kind = if tr.elem.is_some() { tr.kind.to_string() } else { "crossfade".to_string() };
         let shader = match a.str("shader") {
-            Some(src) => match sr_model::assets::resolve(&src, &base) {
-                sr_model::assets::Resolved::Local(path) => match std::fs::read_to_string(&path) {
-                    Ok(code) => Some((code, path)),
-                    Err(err) => {
-                        plan.stats.unsupported.push(format!("transition shader {}: {err}", path.display()));
-                        None
-                    }
-                },
-                _ => {
-                    plan.stats.unsupported.push(format!("transition shader {src}: only local files are supported"));
+            Some(src) if kind == "shader" => match crate::glsl::load_source(&src, &base) {
+                Ok((code, _)) => {
+                    Some((code, std::path::PathBuf::from(if src.starts_with("data:") { "data:" } else { &src })))
+                }
+                Err(err) => {
+                    plan.stats.unsupported.push(format!("transition shader {src}: {err}; crossfade"));
                     None
                 }
             },
-            None => None,
+            _ => None,
         };
-        let kind = if tr.elem.is_some() { tr.kind.to_string() } else { "crossfade".to_string() };
+        if kind == "shader" && shader.is_none() {
+            if a.str("shader").is_none() {
+                plan.stats.unsupported.push("transition type='shader' without @shader; crossfade".to_string());
+            }
+            kind = "crossfade".to_string();
+        }
+        let to_uv = |p: [f64; 2]| [p[0] / space.size[0] as f64, p[1] / space.size[1] as f64];
+        let (working, tokens) = (self.working, self.tokens.clone());
+        let colorf = move |v: &Value| -> Option<[f64; 4]> {
+            match v {
+                Value::Color(c) => Some(working.from_literal(*c)),
+                Value::Str(s) if s.starts_with("token:") => tokens.get(&s[6..]).map(|c| working.from_literal(*c)),
+                _ => None,
+            }
+        };
+        let gradient = |_: &Value| None;
+        let lead_ix = lead;
+        let mut cx = self.cx_for(
+            ctx,
+            lead_ix,
+            space,
+            [0.0, 0.0, space.size[0] as f64, space.size[1] as f64],
+            &to_uv,
+            &colorf,
+            &gradient,
+            &base,
+        );
+        cx.frame_size = [space.size[0] as f64, space.size[1] as f64];
         let mut b = self.builder(plan);
-        let r = b.transition(
+        let mut r = b.transition(
             &kind,
             &sides[0],
             &sides[1],
-            luma,
+            luma.clone(),
             tr.progress,
             e,
             &a,
             color,
             shader.as_ref().map(|(c, p)| (c.clone(), p.as_path())),
+            tr.velocity,
+            Some(&cx),
         );
+        if kind == "shader" && r.is_err() {
+            // a failing shader (compile error) renders as a crossfade, like the Python engine
+            if let Err(msg) = &r {
+                b.problems.push(msg.clone());
+            }
+            r = b.transition("crossfade", &sides[0], &sides[1], luma, tr.progress, e, &a, color, None, 0.0, None);
+        }
         let (passes, temps, problems) =
             (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
         Self::finish_builder(plan, passes, temps, problems, &g.nodes[lead].id);

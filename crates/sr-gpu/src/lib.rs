@@ -4,6 +4,7 @@
 
 pub mod color;
 pub mod fx;
+pub mod glsl;
 pub mod golden;
 pub mod gpu;
 pub mod output;
@@ -12,6 +13,7 @@ pub mod particles;
 pub mod raster;
 pub mod render;
 pub mod resources;
+pub mod shader;
 pub mod text;
 pub mod three;
 pub mod types;

@@ -238,6 +238,9 @@ pub struct FrameTransition {
     pub to: Option<u32>,
     /// Eased progress in [0, 1].
     pub progress: f64,
+    /// d(eased progress)/dt in 1/s (0 when unknown).
+    #[serde(default)]
+    pub velocity: f64,
     /// Animated transition parameters.
     pub props: Props,
     /// The transition element (static attributes), when the transition is authored.
@@ -977,6 +980,17 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             continue;
         }
         let u = if w1 > w0 { (tt - w0) / (w1 - w0) } else { 1.0 };
+        // central difference of the eased curve (the Python engine's `velocity`)
+        let velocity = if w1 > w0 {
+            let (lo, hi) = ((u - 1e-3).max(0.0), (u + 1e-3).min(1.0));
+            if hi > lo {
+                (tr.ease.apply(hi) - tr.ease.apply(lo)) / (hi - lo) / (w1 - w0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         let props = match tr.node {
             Some(n) => f.props(&p.nodes[n as usize].slots),
             None => Props::default(),
@@ -986,6 +1000,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             from: tr.from.and_then(|x| out.out_ix[x as usize]),
             to: tr.to.and_then(|x| out.out_ix[x as usize]),
             progress: tr.ease.apply(u).clamp(0.0, 1.0),
+            velocity,
             props,
             elem: tr.node.map(|n| p.nodes[n as usize].elem.clone()),
         });

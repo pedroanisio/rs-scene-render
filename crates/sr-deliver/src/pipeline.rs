@@ -437,6 +437,13 @@ pub fn deliver(
         let mut renderer = Renderer::new(gpu.clone(), p);
         renderer.representation = representation.clone();
         renderer.burn_captions = output.burn_captions.clone();
+        if let Some(sa) = &scene_audio {
+            let mut channels: std::collections::HashMap<String, std::sync::Arc<Vec<Vec<f32>>>> =
+                sa.mixed.nodes.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))).collect();
+            channels.insert("master".into(), std::sync::Arc::new(sa.mixed.master.clone()));
+            renderer.audio =
+                Some(std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: sa.mix.rate as f64, channels }));
+        }
         let mut video = Video {
             ev: &ev,
             renderer,

@@ -2099,6 +2099,7 @@ dependencies = [
  "libm",
  "naga",
  "pollster",
+ "regex",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
