@@ -1302,6 +1302,12 @@ impl Renderer {
         let seed = sr_eval::rng::hash_str(&n.id) as u32;
         let has_kids = !kids[i].is_empty();
         if Self::isolated(n, has_kids, !bare) {
+            // fully transparent: nothing to draw, and rendering the content now would cache an empty
+            // offscreen (children draw at world opacity / container opacity) under a hash that
+            // leaves out the container's own opacity, so a later fade-in would never show it
+            if n.world_opacity <= 0.0 {
+                return;
+            }
             let sized = n.size.filter(|s| s[0] >= 1.0 && s[1] >= 1.0 && s[0] <= 8192.0 && s[1] <= 8192.0);
             let (inner, quad_local) = match sized {
                 Some([w, hh]) => {

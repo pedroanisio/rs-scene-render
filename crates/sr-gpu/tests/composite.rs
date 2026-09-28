@@ -585,3 +585,26 @@ fn animated_z_restacks_with_warm_caches() {
         assert_px(&r, 40, 8, want, 1e-3);
     }
 }
+
+#[test]
+fn isolated_content_fading_in_from_zero_is_not_cached_empty() {
+    // an instance (always isolated) and an isolated group fade in from opacity 0; the frame at 0
+    // must not leave an empty offscreen in the cache for the later frames
+    let d = doc(
+        "",
+        r##"<symbols><symbol id="card" width="16" height="16"><shape id="bg" shape="rect" width="16" height="16" fill="#00FF00"/></symbol></symbols>"##,
+        r##"<instance id="i" symbol="card" x="0" y="0" opacity="0">
+              <animate property="opacity"><key time="0.5" value="0"/><key time="1" value="1"/></animate>
+            </instance>
+            <group id="g" x="32" y="0" isolate="true" opacity="0">
+              <shape id="s" shape="rect" width="16" height="16" fill="#00FF00"/>
+              <animate property="opacity"><key time="0.5" value="0"/><key time="1" value="1"/></animate>
+            </group>"##,
+    );
+    let green = [0.0, 1.0, 0.0, 1.0];
+    for ts in [&[1.5][..], &[0.0, 1.5][..], &[0.0, 0.7, 1.5][..]] {
+        let Some(r) = render_times(&d, ts) else { return };
+        assert_px(&r, 8, 8, green, 1e-3);
+        assert_px(&r, 40, 8, green, 1e-3);
+    }
+}
