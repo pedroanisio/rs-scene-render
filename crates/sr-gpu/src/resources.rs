@@ -71,6 +71,8 @@ pub fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32;
 #[derive(Default)]
 pub struct Pool {
     free: HashMap<[u32; 2], Vec<Arc<Tex>>>,
+    /// Sizes requested since the last `trim`.
+    wanted: std::collections::HashSet<[u32; 2]>,
     /// Textures created since the renderer started.
     pub created: usize,
 }
@@ -78,11 +80,25 @@ pub struct Pool {
 impl Pool {
     /// A texture of `size`, reused when one is free.
     pub fn get(&mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2]) -> Arc<Tex> {
+        self.wanted.insert(size);
         if let Some(t) = self.free.get_mut(&size).and_then(Vec::pop) {
             return t;
         }
         self.created += 1;
         Arc::new(create(device, layout, size, 1, "offscreen"))
+    }
+
+    /// Frees the textures of every size not requested since the last call. Sizes that follow moving
+    /// content (motion-blur and effect bounds) change from frame to frame and would otherwise
+    /// accumulate without bound over a long render.
+    pub fn trim(&mut self) {
+        let wanted = std::mem::take(&mut self.wanted);
+        self.free.retain(|size, _| wanted.contains(size));
+    }
+
+    /// Textures held for reuse.
+    pub fn held(&self) -> usize {
+        self.free.values().map(Vec::len).sum()
     }
 
     /// Returns a texture to the pool.

@@ -2143,6 +2143,11 @@ impl Renderer {
     /// Scenes whose shaders keep persistent ISF buffers replay the frames before `g.frame`
     /// (from the latest checkpoint) when it does not follow the previous render, so their
     /// feedback is the same whichever frame is rendered first.
+    /// Offscreen textures held for reuse between frames.
+    pub fn pooled_textures(&self) -> usize {
+        self.pool.held()
+    }
+
     pub fn render_with(
         &mut self,
         g: &FrameGraph,
@@ -2285,6 +2290,7 @@ impl Renderer {
         self.generators.retain(|k, _| used.contains(&format!("gen:{k}")));
         self.video_frames.retain(|k, _| used.contains(&format!("video:{k}")));
         self.used = used;
+        self.pool.trim();
         Frame { texture: frame, stats }
     }
 

@@ -438,3 +438,26 @@ fn every_effect_type_draws() {
         assert!(r.px.iter().all(|p| p.iter().all(|v| v.is_finite())), "{kind}: non-finite pixels");
     }
 }
+
+#[test]
+fn texture_pool_stays_bounded_over_a_long_motion_blurred_render() {
+    // a sized layer that moves and scales: its motion-blur bounds, and so its temporary texture size, change
+    // every frame. Pooled textures of sizes no longer requested must be freed, or a long render runs out of
+    // GPU memory.
+    let body = r#"<layer id="m" asset="white" x="8" y="8"><animate property="x"><key time="0" value="0"/><key time="4" value="90"/></animate>
+        <animate property="scaleX"><key time="0" value="2"/><key time="4" value="9"/></animate>
+        <animate property="scaleY"><key time="0" value="2"/><key time="4" value="7"/></animate></layer>"#;
+    let d = doc_with(r##"background="#00000000" motionBlur="true" motionBlurSamples="4""##, "", body, "");
+    let Some(gpu) = gpu() else { return };
+    let ev = sr_eval::Evaluator::new(&d, &sr_eval::EvalOptions::default()).unwrap();
+    let mut r = sr_gpu::Renderer::new(gpu, ev.program());
+    let mut held = Vec::new();
+    for k in 0..40 {
+        let g = ev.evaluate(k as f64 * 0.1);
+        let mut sub = |st: f64| ev.evaluate(st);
+        let _ = r.render_with(&g, ev.program(), Some(&mut sub));
+        held.push(r.pooled_textures());
+    }
+    let max = *held.iter().max().unwrap();
+    assert!(max <= 12, "pooled textures stay bounded: {held:?}");
+}
