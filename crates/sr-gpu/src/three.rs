@@ -1278,7 +1278,8 @@ impl ThreeEngine {
             pad(&mut obj_bytes, &[0u8; 16]);
         }
         if mat_bytes.is_empty() {
-            pad(&mut mat_bytes, &[0u8; 16]);
+            // the dome still binds a material slot when nothing else is drawn
+            pad(&mut mat_bytes, &[0u8; std::mem::size_of::<MaterialU>()]);
         }
         let obj_buf = buf(&obj_bytes, wgpu::BufferUsages::UNIFORM, "three-objects");
         // one material buffer per render, like the object buffer: several 3D passes can be recorded before a
@@ -1288,6 +1289,10 @@ impl ThreeEngine {
         self.mat_binds.clear();
         for (i, dr) in scene.draws.iter().enumerate() {
             preps[i].key = self.mat_bind(&dr.maps, &mat_buf);
+        }
+        if preps.is_empty() {
+            let none: Maps = Default::default();
+            self.mat_bind(&none, &mat_buf);
         }
         let obj_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("three-object"),

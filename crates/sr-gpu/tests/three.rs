@@ -202,3 +202,17 @@ fn dome_lights_and_fills_the_background() {
     let c = at(&px, 64, 64);
     assert!((c[0] - 0.5).abs() < 0.12, "a white diffuse sphere in a uniform 0.5 dome reflects ≈0.5: {c:?}");
 }
+
+#[test]
+fn visible_dome_renders_without_any_draws() {
+    // a pass that draws only the environment (every object culled or outside its time range) still needs a
+    // material binding for the dome; materials are bound per render, so none is left over from earlier passes
+    let Some(mut eng) = engine() else { return };
+    let env = sr_3d::env::Equirect { width: 64, height: 32, rgb: vec![[0.25, 0.5, 0.75]; 64 * 32] };
+    let gpu = eng.upload_env(&env);
+    let mut s = scene(Vec::new(), Vec::new());
+    s.env = Some(Env3 { env: gpu, intensity: 1.0, rotation: 0.0, visible: true });
+    let px = eng.render_now(&s, None);
+    let bg = at(&px, 64, 64);
+    assert!((bg[1] - 0.5).abs() < 0.02 && (bg[2] - 0.75).abs() < 0.02 && bg[3] == 1.0, "{bg:?}");
+}
