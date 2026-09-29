@@ -242,6 +242,34 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Fill the caches of generated media and transcribed captions through their providers,
+    /// and pin their SHA-256 in the document.
+    ///
+    /// Providers: whisper (whisper.cpp), piper, audioforge, the cloud services openai and
+    /// elevenlabs (with --allow-cloud), or any `scene-render-provider-NAME` program speaking
+    /// the JSON protocol. Unchanged targets are never made again.
+    Resolve {
+        /// Scene document (its cacheSha256 attributes are rewritten in place).
+        file: PathBuf,
+        /// Report what is stale and change nothing; exit 1 if anything is.
+        #[arg(long)]
+        check: bool,
+        /// Make every target again.
+        #[arg(long)]
+        force: bool,
+        /// Only these ids (repeatable).
+        #[arg(long, value_name = "ID")]
+        only: Vec<String>,
+        /// Allow providers that send prompts to a cloud service.
+        #[arg(long)]
+        allow_cloud: bool,
+        /// Do not read or write the shared result store.
+        #[arg(long)]
+        no_store: bool,
+        /// Print the results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Describe a diagnostic code, or list every code.
     Explain {
         /// Code such as S06, C21 or R24-fill; omit to list all codes.
@@ -455,6 +483,49 @@ fn simulate(file: &Path, output: Option<PathBuf>, out: &mut Out) -> std::io::Res
     writeln!(out.w, "wrote {} ({} bytes)", target.display(), bytes.len())?;
     writeln!(out.w, "cacheSha256=\"{sha}\"")?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn resolve(file: &Path, o: &sr_resolve::Options, json: bool, out: &mut Out) -> std::io::Result<ExitCode> {
+    use sr_resolve::Status;
+    let rows = match sr_resolve::resolve(file, o) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    if json {
+        writeln!(out.w, "{}", serde_json::to_string_pretty(&rows).unwrap_or_default())?;
+    } else {
+        for r in &rows {
+            let (label, color) = match r.status {
+                Status::UpToDate => ("up to date", AnsiColor::Green),
+                Status::Pinned => ("pinned", AnsiColor::Green),
+                Status::Restored => ("restored", AnsiColor::Green),
+                Status::Made => ("made", AnsiColor::Green),
+                Status::Stale => ("stale", AnsiColor::Yellow),
+                Status::Error => ("error", AnsiColor::Red),
+            };
+            let st = style(color, true);
+            let sha = r.sha256.as_deref().map(|s| &s[..12.min(s.len())]).unwrap_or("");
+            write!(out.w, "{st}{label:>10}{st:#}  {} ({}, {})  {}", r.id, r.element, r.provider, r.cache)?;
+            if !sha.is_empty() {
+                write!(out.w, "  {sha}…")?;
+            }
+            writeln!(out.w)?;
+            if !r.message.is_empty() {
+                writeln!(out.w, "            {}", r.message)?;
+            }
+            for n in &r.notes {
+                writeln!(out.w, "            note: {n}")?;
+            }
+        }
+        if rows.is_empty() {
+            writeln!(out.w, "nothing to resolve: no <generated> assets or transcribed caption tracks")?;
+        }
+    }
+    let failed = rows.iter().any(|r| r.status == Status::Error || (o.check && r.status == Status::Stale));
+    Ok(if failed { ExitCode::from(1) } else { ExitCode::SUCCESS })
 }
 
 fn inspect(file: &Path, json: bool, no_assets: bool, out: &mut Out) -> std::io::Result<ExitCode> {
@@ -1095,6 +1166,10 @@ fn main() -> ExitCode {
             encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
         }
         Command::Simulate { file, output } => simulate(&file, output, &mut out),
+        Command::Resolve { file, check, force, only, allow_cloud, no_store, json } => {
+            let o = sr_resolve::Options { check, force, only, allow_cloud, store: no_store.then(PathBuf::new) };
+            resolve(&file, &o, json, &mut out)
+        }
         Command::Explain { code } => explain(code.as_deref(), &mut out),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "scene-render", &mut std::io::stdout());

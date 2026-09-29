@@ -14,6 +14,7 @@ target/release/scene-render render promo.scene.xml --time 2.5 -o frame.png
 target/release/scene-render render promo.scene.xml --frames 0..250 -o out/frame_%04d.png
 target/release/scene-render encode promo.scene.xml                       # every <output>
 target/release/scene-render encode promo.scene.xml -o preview.mp4 --representation proxy
+target/release/scene-render resolve promo.scene.xml                      # make generated media and captions
 target/release/scene-render explain C21
 ```
 
@@ -486,6 +487,45 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 
 **Schema extension.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R24–R26 and C45 are rs-scene-render extensions of `schema/scene-render-1.1.xsd` and `.sch`, marked as such. Other scene-render 1.1 implementations may not recognise them.
 
+## Generated media and transcription
+
+A document names provider-made media as `<generated>` assets and transcribed captions as `<captionTrack transcribe="…">`. Rendering never calls a provider; it reads the cache and refuses it unless its SHA-256 equals `cacheSha256`, so a render is repeatable. `scene-render resolve` (the `sr-resolve` crate) is the step that makes those caches.
+
+```xml
+<generated id="vo" kind="speech" provider="piper" model="en_US-lessac-medium"
+           prompt="Twelve months, three launches." cache="gen/vo.wav" cacheSha256="0000…"/>
+<generated id="bed" kind="music" provider="audioforge" model="bed/documentary-airy"
+           prompt="duration=auto bpm=96" seed="7" cache="gen/bed.wav" cacheSha256="0000…"/>
+…
+<captionTrack id="subs" language="en-US" transcribe="voice" model="base.en"
+              cache="gen/subs.json" cacheSha256="0000…"/>
+```
+
+**What a run does.**
+- Each target becomes a request whose key hashes what decides the result: provider, model, prompt, voice, language, seed, size, frame rate, duration, the audio format, where the asset plays and, for a transcription, the input audio. Paths and ids are not part of it.
+- A target is up to date when the sidecar `<cache>.resolve.json` records the same key and the cache's digest, and `cacheSha256` matches. If only the attribute is wrong, it is re-pinned. Otherwise the result comes from the store (`SR_RESOLVE_STORE`, default `~/.cache/scene-render/resolve`), where every result is kept by key, so the same request in another document or after a clean checkout costs nothing. Only when neither has it does the provider run. `--force` ignores both, and `--no-store` leaves the store alone.
+- Generated media come first, so captions can transcribe speech made in the same run. A transcriber hears the track as it plays in the scene's mix (placement, trims, speed, loops, volume and effects), as a mono WAV from composition time 0, so the word times it returns are composition times.
+- `cacheSha256` is rewritten in the document's text; comments, layout and every other attribute stay as they were. Placeholder digests (all zeros) are the usual starting point.
+- `--check` makes and writes nothing and exits 1 when anything is stale, for CI.
+
+**Providers.**
+- `whisper`, the default transcriber: whisper.cpp's `whisper-cli` (`SR_WHISPER`, else `PATH`). `model` names a ggml model (`base.en`, `small`, `large-v3`) found in `SR_WHISPER_MODELS` or the `models/` folder of the whisper.cpp tree, or is a path. Audio is resampled to 16 kHz, `language` and `prompt` pass through, and the tokens are joined into words timed by dynamic time warping (`--dtw`), which whisper.cpp offers for the standard models.
+- `piper`, local speech: `model` is a voice, found as `<model>.onnx` in `SR_PIPER_VOICES` or `~/.local/share/piper`, or a path; a numeric `voice` picks a speaker. piper samples noise, so two runs differ slightly, and the pinned cache keeps the one the document uses.
+- `audioforge`, music and sound effects from AudioForge's cue library (`SR_AUDIOFORGE`, else `PATH`): `model` is the cue, `prompt` its parameters, `seed` the performance seed. `duration=auto` fills the project after the track that plays it starts, and the audio format follows `audioMix`.
+- `openai` (speech with `/audio/speech`, images with `/images/generations`) and `elevenlabs` (speech) send the prompt to a cloud service, so they run only with `--allow-cloud`. They need `OPENAI_API_KEY` or `ELEVENLABS_API_KEY`, and `OPENAI_BASE_URL` and `ELEVENLABS_BASE_URL` point them at compatible servers. Requests go through `curl`, with the key in curl's configuration on standard input rather than on a command line.
+- Any other name runs the program in `SR_PROVIDER_<NAME>` or a `scene-render-provider-<name>` on `PATH`, which also overrides a built-in of that name. The program reads one JSON request on standard input (kind, provider, model, prompt, voice, language, seed, size, duration, the audio format, the timeline, the output path with the cache's extension, a scratch folder and, for transcription, the input WAV) and answers `{"ok": true, "version": "…"}` or `{"ok": false, "error": "…"}` as the last line of its output. A transcriber writes `{"segments": [{"start", "end", "text", "words": [{"start", "end", "text"}]}]}`. `scene-render-provider-example`, built with the crate, implements the protocol as a reference.
+- A result whose extension differs from what the provider makes is converted by FFmpeg.
+
+**Schema extension.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are rs-scene-render extensions that other scene-render 1.1 implementations may not recognise.
+
+**Tests.**
+- With the example provider: speech and its captions are made and pinned, the captions start where the track plays, the document validates afterwards with nothing else changed, and a second run makes nothing.
+- A changed prompt is stale under `--check`, which writes nothing, and resolving remakes the speech and the captions that heard it; a hand-edited digest is re-pinned.
+- The store restores deleted caches without the provider, and `--force` and `--only` behave as described.
+- Images, a refused cloud provider, and an unknown provider.
+- OpenAI speech and images against a local HTTP server, checking the key header and the request bodies.
+- When installed: piper speech captioned by whisper.cpp (the words are found, in order, after the track's start), and an AudioForge cue at the mix's sample rate.
+
 ## Reference-clip evidence
 
 `tools/evidence.py [OUT_DIR] [--bin PATH] [--case ID]… [--bench]` measures how far the engine is from a set of reference clips instead of asserting it. Each case in `tools/evidence/cases.json` names a reference style and one technique it depends on, and either a probe scene in `tools/evidence/scenes/` or none. The harness writes the probe (generating any asset it needs: a Gaussian-splat torus, an animated glTF, an OCIO config), renders the frames its checks name with `render --strict`, compares pixels (a colour at a point, the share of a region near or away from a colour, the change of a region between two times) and classifies the case:
@@ -538,6 +578,8 @@ The animated-`z` and `object3D` depth cases cover the paint-order rule under [ev
 
 `scene-render simulate FILE [-o CACHE]` writes the physics cache and prints its `cacheSha256`.
 
+`scene-render resolve FILE [--check] [--force] [--only ID…] [--allow-cloud] [--no-store] [--json]` makes the caches of generated media and transcribed captions and pins their `cacheSha256` in the document (see [Generated media and transcription](#generated-media-and-transcription)). Exit status is 1 when a target fails, or under `--check` when one is stale.
+
 `scene-render encode FILE [--output ID…] [-o PATH [--codec CODEC]] [--out-dir DIR] [--representation NAME] [--hw auto|software|nvenc|videotoolbox|vaapi|qsv|amf] [--start T] [--end T] [--no-upload] [--param ID=VALUE] [--row N [--data ID]] [--json] [--strict]` renders every `<output>` of the document, or those named with `--output`, including posters, thumbnails and destinations. `-o` replaces them with one ad-hoc output whose codec follows the extension (`.mp4` H.264, `.mov` ProRes, `.mxf` DNxHR, `.mkv` FFV1, `.webm` VP9, `.gif`, `.webp`, `.png` APNG or, with `%d`, a PNG sequence, `.jpg`, `.exr` and `.tif` sequences, `.wav`, `.m4a` and `.mp3` audio-only) unless `--codec` names one. Relative paths resolve against `--out-dir`, else the document's directory. Each output reports its files, encoder, frame rate achieved, stage timings, loudness, content not rendered yet and accessibility findings; `--strict` exits with status 1 when any output has either; `--json` prints the report as one JSON object per output. Progress goes to standard error on a terminal.
 
 ## Layout
@@ -576,6 +618,9 @@ crates/sr-media/src/        probe, decode (video look-ahead, audio), encode (cod
 crates/sr-geo/src/          data (GeoJSON, TopoJSON, KML, GPX), sphere (spherical geometry), clip (antimeridian,
                             small circle, rectangle, rejoin), project (projections, resampling, fit), view (map
                             camera, fly-to)
+crates/sr-resolve/src/      the resolve step: protocol (requests, keys), doc (in-place attribute edits), providers
+                            (whisper, piper, audioforge, openai, elevenlabs, external programs), and
+                            bin/example_provider (the reference provider)
 crates/sr-audio/src/        layout, dsp, effects, loudness, mix, analysis, wav
 crates/sr-sim/src/          physics (Rapier world, joints, checkpoints), soft, particles, fields, timeline, flock,
                             fluid, slime, erosion, rng
@@ -607,4 +652,5 @@ tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_
 - **Simulation and accessibility:** free fall against ½gt², resting on the floor, bit-exact replay in any order, pendulum length and breaking welds, kinematic following and field forces, jelly and pinned cloth, particle counts, bursts, caps, floors and preroll; from documents, a falling layer, sparks with identical pixels under seeking, rain streaks, a landing jelly layer, reported constraint problems and the physics cache with its digest; validation of the soft-body substep limit; the flash detector at 15 Hz, 1 Hz, small areas, red and dim flicker, and delivery failing on flashes, low contrast and missing captions; `simulate` on the CLI; flocks, fluids, slime and erosion, clay meshing, screen-space lighting, cascaded shadows and path tracing as described in their sections; and a short fuzzing campaign on every test run.
 - **Still images:** every lossless format decoded to its exact pattern, HEIC within 3 steps of libheif, EXIF orientation, linear-light formats, the embedded colour descriptions each file reports, ICC-tagged images within 1/255 of LittleCMS, the declared-space override, a CMYK profile reported, an animated GIF played as video.
 - **Maps:** TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, and `geo()` placing a layer; the reference rules R24–R26 and C45.
+- **Resolve:** request keys, in-place attribute edits, prompt splitting and base64, whisper.cpp tokens joined into timed words, AudioForge's automatic duration, and the end-to-end runs described in [Generated media and transcription](#generated-media-and-transcription).
 - **CLI:** validate, inspect, eval, render, encode and explain end to end.

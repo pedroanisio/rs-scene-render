@@ -227,13 +227,14 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                 } else {
                     format!("@{} of <{ename}>: file {shown} does not exist (resolved to {})", c.attr, c.path.display())
                 };
+                let resolvable = matches!(ename, "generated" | "captionTrack") && c.attr == "cache";
                 out.push(Diagnostic {
                     severity: c.missing,
                     code: c.missing_code.into(),
                     message: msg,
                     loc,
                     path,
-                    help: None,
+                    help: resolvable.then(|| "run `scene-render resolve` to make the cache and pin its digest".into()),
                 });
                 continue;
             }
@@ -272,7 +273,11 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                     attr_loc(c.node, c.hash_attr),
                     path,
                 )
-                .with_help("the file changed since the digest was recorded; regenerate it or update the digest"),
+                .with_help(if matches!(ename, "generated" | "captionTrack") {
+                    "run `scene-render resolve` to make the cache and pin its digest"
+                } else {
+                    "the file changed since the digest was recorded; regenerate it or update the digest"
+                }),
             ),
             Err(e) => out.push(Diagnostic::error("A05", format!("cannot read {shown}: {e}"), loc, path)),
         }

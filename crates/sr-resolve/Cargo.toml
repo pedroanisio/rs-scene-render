@@ -1,32 +1,25 @@
 [package]
-name = "scene-render"
-description = "scene-render command-line tool"
+name = "sr-resolve"
+description = "scene-render resolve: fills the caches of generated media and transcriptions through providers, and pins their digests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-publish.workspace = true
-
-[[bin]]
-name = "scene-render"
-path = "src/main.rs"
 
 [dependencies]
 sr-model.workspace = true
 sr-eval.workspace = true
-sr-gpu.workspace = true
+sr-audio.workspace = true
 sr-media.workspace = true
 sr-deliver.workspace = true
-sr-resolve.workspace = true
-image.workspace = true
-clap.workspace = true
-clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-anstream.workspace = true
-anstyle.workspace = true
 sha2.workspace = true
+image.workspace = true
+
+[[bin]]
+name = "scene-render-provider-example"
+path = "src/bin/example_provider.rs"
 
 [dev-dependencies]
 serde_json.workspace = true

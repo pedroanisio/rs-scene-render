@@ -1061,8 +1061,9 @@
       Media produced by an external generator (text-to-speech, image, video or
       music model, transcription). The renderer never calls the provider while
       rendering: it reads @cache and fails unless the file's SHA-256 equals
-      @cacheSha256. A separate "resolve" step may fill the cache from
-      @provider/@model/@prompt/@seed. This keeps renders deterministic.
+      @cacheSha256. `scene-render resolve` fills the cache from
+      @provider/@model/@prompt/@voice/@seed and pins @cacheSha256. This keeps
+      renders deterministic.
     </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="kind" use="required">
@@ -2952,7 +2953,8 @@
     <xs:annotation><xs:documentation>
       Captions from inline cues, a subtitle file (@src), or a transcription of
       audio track @transcribe. Transcriptions are read from @cache (verified by
-      @cacheSha256) so renders stay deterministic. mode=burn draws them into the
+      @cacheSha256) so renders stay deterministic; `scene-render resolve` writes
+      the cache from the track as it plays in the mix, in composition time. mode=burn draws them into the
       picture using @preset and @style; sidecar writes a file next to each output.
     </xs:documentation></xs:annotation>
     <xs:sequence><xs:element name="cue" type="cueType" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
@@ -2975,6 +2977,18 @@
     <xs:attribute name="transcribe" type="xs:IDREF"/>
     <xs:attribute name="cache" type="xs:anyURI"/>
     <xs:attribute name="cacheSha256" type="sha256Type"/>
+    <xs:attribute name="provider" type="xs:string" default="whisper">
+      <xs:annotation><xs:documentation>
+        rs-scene-render extension: the transcriber `scene-render resolve` runs to fill @cache
+        (whisper: whisper.cpp; or any provider program). Rendering only reads the cache.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="model" type="xs:string" default="base">
+      <xs:annotation><xs:documentation>rs-scene-render extension: the transcriber's model (whisper: tiny, base, small, medium, large-v3, with .en for English-only; or a model file).</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="prompt" type="xs:string">
+      <xs:annotation><xs:documentation>rs-scene-render extension: text that primes the transcriber (names, spellings, vocabulary).</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="mode" default="burn">
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="burn"/><xs:enumeration value="sidecar"/><xs:enumeration value="both"/>

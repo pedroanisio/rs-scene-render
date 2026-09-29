@@ -2130,6 +2130,7 @@ dependencies = [
  "sr-gpu",
  "sr-media",
  "sr-model",
+ "sr-resolve",
 ]
 
 [[package]]
@@ -2405,6 +2406,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "sr-resolve"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sr-audio",
+ "sr-deliver",
+ "sr-eval",
+ "sr-media",
+ "sr-model",
 ]
 
 [[package]]
