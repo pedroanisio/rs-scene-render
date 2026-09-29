@@ -438,8 +438,15 @@ impl<'r> Compiler<'r> {
                 self.scopes.last_mut().unwrap().insert(name.clone(), r);
             }
             Stmt::Assign(name, op, e, at) => {
-                let Some(r) = self.lookup(name) else {
-                    return Err(CompileError { message: format!("'{name}' is not a declared variable"), offset: *at });
+                // Assigning an undeclared name declares it (CONVENTIONS 5.1); it lives in the
+                // outermost scope so it stays visible after the block that assigned it.
+                let r = match self.lookup(name) {
+                    Some(r) => r,
+                    None => {
+                        let r = self.reg(*at)?;
+                        self.scopes[0].insert(name.clone(), r);
+                        r
+                    }
                 };
                 let v = self.expr(e)?;
                 match op {
@@ -1324,6 +1331,14 @@ mod tests {
     }
 
     #[test]
+    fn bare_assignment_declares() {
+        assert_eq!(eval("t0 = 1.5; x = time - t0\n x * 2"), V::Num(1.0));
+        assert_eq!(eval("if (time > 1) { k = 3 } k"), V::Num(3.0));
+        assert_eq!(eval("[4, 5, 6][index - 1]"), V::Num(5.0));
+        assert_eq!(eval("[4, 5, 6][index + 1]"), V::Undef);
+    }
+
+    #[test]
     fn compile_errors() {
         for (src, msg) in [
             ("tim + 1", "did you mean 'time'"),
@@ -1334,7 +1349,6 @@ mod tests {
             ("clamp(1, 2)", "takes 3 arguments"),
             ("loopOut('bounce')", "unknown loop type"),
             ("audioAmplitude('m', 'bass')", "unknown audio band"),
-            ("x = 1", "not a declared variable"),
             ("Math.TAU", "not a constant"),
             ("value.map(1)", "only built-in functions"),
         ] {
