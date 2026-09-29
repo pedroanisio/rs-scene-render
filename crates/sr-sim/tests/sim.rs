@@ -222,6 +222,31 @@ fn soft_bodies_keep_shape_and_hang_from_pins() {
     assert!(sr_sim::soft::substeps(1.0e-6, 1.0e6, 256, 1.0 / 120.0) > 4096);
 }
 
+#[test]
+fn cloth_shears_and_bends_more_easily_than_jelly() {
+    // conventions 5.10: cloth shear springs are 0.15 k and bend springs 0.02 k; a cantilever pinned
+    // along its left column droops further as cloth than as jelly with the same stiffness
+    let droop = |kind: SoftKind| {
+        let spec = SoftSpec {
+            kind,
+            rows: 5,
+            cols: 5,
+            rest: lattice(200.0, 100.0, 200.0, 200.0, 5, 5),
+            mass: 0.5,
+            stiffness: 300.0,
+            damping: 0.3,
+            pressure: 0.0,
+            pinned: (0..25).map(|k| k % 5 == 0).collect(),
+            self_collision: false,
+        };
+        let mut w = world(vec![], vec![], vec![spec], Bounds::None);
+        let f = w.frame_at(2.0, &mut Still(vec![]));
+        f.softs[0][4][1] - 100.0
+    };
+    let (cloth, jelly) = (droop(SoftKind::Cloth), droop(SoftKind::Jelly));
+    assert!(cloth > jelly * 2.0 + 2.0, "cloth droops {cloth} px, jelly {jelly} px");
+}
+
 struct Here;
 
 impl EmitterDriver for Here {

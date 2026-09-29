@@ -535,6 +535,9 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
                     };
                     let (rows, cols) =
                         (num(c, "rows", 4.0).clamp(2.0, 16.0) as usize, num(c, "cols", 4.0).clamp(2.0, 16.0) as usize);
+                    // jelly and cloth: a lattice of (rows + 1) × (cols + 1) points (conventions 5.10, D7);
+                    // a rope is one chain of `cols` points
+                    let (rows, cols) = if kind == SoftKind::Rope { (rows, cols) } else { (rows + 1, cols + 1) };
                     let mut rest_local = Vec::with_capacity(rows * cols);
                     for i in 0..rows {
                         for j in 0..cols {

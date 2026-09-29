@@ -45,7 +45,8 @@ pub fn substeps(spec_mass: f64, stiffness: f64, nodes: usize, step: f64) -> u64 
 pub struct SoftState {
     pub pos: Vec<[f64; 2]>,
     pub vel: Vec<[f64; 2]>,
-    springs: Vec<(usize, usize, f64)>,
+    /// (a, b, rest length, stiffness as a fraction of the body's).
+    springs: Vec<(usize, usize, f64, f64)>,
     boundary: Vec<usize>,
     area0: f64,
 }
@@ -68,9 +69,11 @@ impl SoftState {
         let (r, c) = (spec.rows, spec.cols);
         let idx = |i: usize, j: usize| i * c + j;
         let mut springs = Vec::new();
-        let add = |a: usize, b: usize, springs: &mut Vec<(usize, usize, f64)>| {
-            springs.push((a, b, dist(spec.rest[a], spec.rest[b])))
+        let add = |a: usize, b: usize, k: f64, springs: &mut Vec<(usize, usize, f64, f64)>| {
+            springs.push((a, b, dist(spec.rest[a], spec.rest[b]), k))
         };
+        // cloth: shear springs at 0.15 k and bend springs at 0.02 k, so it drapes (conventions 5.10)
+        let shear = if spec.kind == SoftKind::Cloth { 0.15 } else { 1.0 };
         let pos: Vec<[f64; 2]> = if spec.kind == SoftKind::Rope {
             // the chain runs along the centre row
             let mid: Vec<[f64; 2]> = (0..c)
@@ -80,28 +83,28 @@ impl SoftState {
                 })
                 .collect();
             for j in 0..c.saturating_sub(1) {
-                springs.push((j, j + 1, dist(mid[j], mid[j + 1])));
+                springs.push((j, j + 1, dist(mid[j], mid[j + 1]), 1.0));
             }
             mid
         } else {
             for i in 0..r {
                 for j in 0..c {
                     if j + 1 < c {
-                        add(idx(i, j), idx(i, j + 1), &mut springs);
+                        add(idx(i, j), idx(i, j + 1), 1.0, &mut springs);
                     }
                     if i + 1 < r {
-                        add(idx(i, j), idx(i + 1, j), &mut springs);
+                        add(idx(i, j), idx(i + 1, j), 1.0, &mut springs);
                     }
                     if i + 1 < r && j + 1 < c {
-                        add(idx(i, j), idx(i + 1, j + 1), &mut springs);
-                        add(idx(i, j + 1), idx(i + 1, j), &mut springs);
+                        add(idx(i, j), idx(i + 1, j + 1), shear, &mut springs);
+                        add(idx(i, j + 1), idx(i + 1, j), shear, &mut springs);
                     }
                     if spec.kind == SoftKind::Cloth {
                         if j + 2 < c {
-                            add(idx(i, j), idx(i, j + 2), &mut springs);
+                            add(idx(i, j), idx(i, j + 2), 0.02, &mut springs);
                         }
                         if i + 2 < r {
-                            add(idx(i, j), idx(i + 2, j), &mut springs);
+                            add(idx(i, j), idx(i + 2, j), 0.02, &mut springs);
                         }
                     }
                 }
@@ -135,7 +138,8 @@ impl SoftState {
         let m = (spec.mass / n.max(1) as f64).max(1e-9);
         let subs = substeps(spec.mass, spec.stiffness, n, dt).min(4096);
         let h = dt / subs as f64;
-        let c_crit = 2.0 * (spec.stiffness * m).sqrt() * spec.damping;
+        // each spring's damping coefficient is damping · 2√(k m) for its own k
+        let c_crit = 2.0 * m.sqrt() * spec.damping;
         let pinned = |k: usize| -> bool {
             if spec.kind == SoftKind::Rope {
                 // a pinned column pins its chain point
@@ -151,12 +155,13 @@ impl SoftState {
                 let a = accel(self.pos[k], self.vel[k]);
                 *f = [a[0] * m, a[1] * m];
             }
-            for &(a, b, rest) in &self.springs {
+            for &(a, b, rest, kf) in &self.springs {
                 let d = [self.pos[b][0] - self.pos[a][0], self.pos[b][1] - self.pos[a][1]];
                 let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
                 let u = [d[0] / len, d[1] / len];
                 let rv = (self.vel[b][0] - self.vel[a][0]) * u[0] + (self.vel[b][1] - self.vel[a][1]) * u[1];
-                let mag = spec.stiffness * (len - rest) + c_crit * rv;
+                let k = spec.stiffness * kf;
+                let mag = k * (len - rest) + c_crit * k.sqrt() * rv;
                 force[a][0] += u[0] * mag;
                 force[a][1] += u[1] * mag;
                 force[b][0] -= u[0] * mag;

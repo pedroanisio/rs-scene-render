@@ -674,13 +674,15 @@ pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) {
 }
 
 /// P01: a soft body whose stable integration needs more than 4096 substeps per
-/// `physics@fixedStep` (spring-mass lattice: ⌈fixedStep · √(8 k / m)⌉ with m the mass per node).
+/// `physics@fixedStep` (spring-mass lattice: ⌈fixedStep · √(8 k / m)⌉ with m the mass per node;
+/// jelly and cloth have (rows + 1) × (cols + 1) nodes, a rope `cols`).
 fn physics_limits(root: Node, out: &mut Vec<Diagnostic>) {
     let num = |n: Node, a: &str, d: f64| n.attribute(a).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(d);
     let step =
         root.children().find(|c| is(*c, "physics")).map(|p| num(p, "fixedStep", 1.0 / 120.0)).unwrap_or(1.0 / 120.0);
     for n in root.descendants().filter(|n| is(*n, "softBody")) {
-        let nodes = num(n, "rows", 4.0).max(1.0) * num(n, "cols", 4.0).max(1.0);
+        let (rows, cols) = (num(n, "rows", 4.0).max(1.0), num(n, "cols", 4.0).max(1.0));
+        let nodes = if n.attribute("kind") == Some("rope") { cols } else { (rows + 1.0) * (cols + 1.0) };
         let m = (num(n, "mass", 1.0) / nodes).max(1e-12);
         let k = num(n, "stiffness", 20.0);
         let sub = (step * (8.0 * k / m).sqrt()).ceil();

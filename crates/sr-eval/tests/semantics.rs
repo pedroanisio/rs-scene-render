@@ -622,3 +622,16 @@ fn force_fields_are_in_metres_per_second_squared_with_y_up() {
     let out = fall(r#"<forceField id="f" type="radial" x="900" y="275" strength="2" radius="3" falloff="0"/>"#);
     assert!((out[0] - 500.0).abs() < 1e-6, "outside the radius: {out:?}");
 }
+
+#[test]
+fn soft_body_lattices_have_rows_plus_one_by_cols_plus_one_points() {
+    // conventions 5.10 and D7: rows × cols cells
+    let d = doc_after(
+        "",
+        r#"<layer id="c" asset="img"><softBody kind="cloth" rows="3" cols="5" pin="top"/></layer>"#,
+        r#"<physics/>"#,
+    );
+    let f = eval(&d, 0.5);
+    let w = node(&f, "c").soft.clone().expect("a soft lattice");
+    assert_eq!((w.rows, w.cols, w.offsets.len()), (4, 6, 24));
+}
