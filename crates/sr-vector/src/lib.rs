@@ -8,6 +8,7 @@
 //! because they are geometry evaluated on the CPU.
 
 pub mod arap;
+pub mod d24;
 pub mod deform;
 pub mod geom;
 pub mod lottie;

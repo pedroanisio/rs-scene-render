@@ -551,11 +551,28 @@ impl Page {
     }
 }
 
-/// Splits cues into pages of at most `max_lines` lines of `max_chars` characters and `max_words` words.
-pub fn paginate(cues: &[Cue], max_words: Option<usize>, max_chars: usize, max_lines: usize) -> Vec<Page> {
+/// Splits cues into pages of at most `max_lines` lines of `max_chars` characters and `max_words`
+/// words (the Python renderer's pagination, CONVENTIONS 5.12): the first page starts with its
+/// cue, later ones with their first word, and each lasts until the next page starts (the
+/// last until the cue ends). `one_word` gives every word its own page (the one-word preset).
+pub fn paginate(
+    cues: &[Cue],
+    max_words: Option<usize>,
+    max_chars: usize,
+    max_lines: usize,
+    one_word: bool,
+) -> Vec<Page> {
     let mut pages = Vec::new();
     for (ci, c) in cues.iter().enumerate() {
-        let words = timed_words(c);
+        let words: Vec<Word> = timed_words(c).into_iter().filter(|w| !w.text.is_empty()).collect();
+        if one_word {
+            for (i, w) in words.iter().enumerate() {
+                let start = if i == 0 { c.start } else { c.start.max(w.start) };
+                let end = words.get(i + 1).map(|n| n.start).unwrap_or(c.end);
+                pages.push(Page { start, end, lines: vec![vec![w.clone()]], cue: ci });
+            }
+            continue;
+        }
         let mut lines: Vec<Vec<Word>> = Vec::new();
         let mut cur: Vec<Word> = Vec::new();
         let mut len = 0;
@@ -573,19 +590,12 @@ pub fn paginate(cues: &[Cue], max_words: Option<usize>, max_chars: usize, max_li
         if !cur.is_empty() {
             lines.push(cur);
         }
-        for chunk in lines.chunks(max_lines.max(1)) {
-            let start = chunk.first().and_then(|l| l.first()).map(|w| w.start).unwrap_or(c.start);
-            let end = chunk.last().and_then(|l| l.last()).map(|w| w.end).unwrap_or(c.end);
-            pages.push(Page {
-                start: start.max(c.start),
-                end: end.min(c.end).max(start),
-                lines: chunk.to_vec(),
-                cue: ci,
-            });
-        }
-        // the last page holds until the cue ends
-        if let Some(pg) = pages.last_mut() {
-            pg.end = c.end;
+        let groups: Vec<&[Vec<Word>]> = lines.chunks(max_lines.max(1)).collect();
+        for (i, g) in groups.iter().enumerate() {
+            let first = |g: &[Vec<Word>]| g.first().and_then(|l| l.first()).map(|w| w.start).unwrap_or(c.start);
+            let start = if i == 0 { c.start } else { first(g) };
+            let end = groups.get(i + 1).map(|n| first(n)).unwrap_or(c.end);
+            pages.push(Page { start, end: end.max(start), lines: g.to_vec(), cue: ci });
         }
     }
     pages
@@ -686,76 +696,101 @@ impl Preset {
     }
 }
 
-/// Per-glyph effects of a caption page at time `t`, for a layout of `page.text()`.
+/// Page-level motion of the fade and slide presets at time `t`: (opacity, downward offset in em).
+pub fn page_motion(preset: Preset, page: &Page, t: f64) -> (f64, f64) {
+    match preset {
+        Preset::Fade => (((t - page.start) / 0.15).min((page.end - t) / 0.15).min(1.0), 0.0),
+        Preset::Slide => {
+            let u = ((t - page.start) / 0.25).min(1.0);
+            let e = 1.0 - (1.0 - u).powi(3);
+            (e, 0.4 * (1.0 - e))
+        }
+        _ => (1.0, 0.0),
+    }
+}
+
+fn bounce_out(x: f64) -> f64 {
+    let (n1, d1) = (7.5625, 2.75);
+    if x < 1.0 / d1 {
+        n1 * x * x
+    } else if x < 2.0 / d1 {
+        let x = x - 1.5 / d1;
+        n1 * x * x + 0.75
+    } else if x < 2.5 / d1 {
+        let x = x - 2.25 / d1;
+        n1 * x * x + 0.9375
+    } else {
+        let x = x - 2.625 / d1;
+        n1 * x * x + 0.984375
+    }
+}
+
+/// Per-glyph effects of a caption page at time `t`, for a layout of `page.text()`
+/// (the Python renderer's caption presets, CONVENTIONS 5.12). The active word is the last
+/// word that has started (it stays active through the gap before the next). Karaoke lights
+/// each word as a whole: from its start its fill cross-fades to `active` over its duration.
 pub fn effects(preset: Preset, lay: &Layout, page: &Page, t: f64, active: &Paint) -> Vec<GlyphFx> {
     let words = page.words();
     let em = lay.styles.first().map(|s| s.size).unwrap_or(40.0);
-    let current = words.iter().rposition(|w| w.start <= t).unwrap_or(0);
+    let current = if preset == Preset::OneWord { Some(0) } else { words.iter().rposition(|w| w.start <= t + 1e-9) };
+    let (alpha, dy) = page_motion(preset, page, t);
+    // word boxes on their lines: scale pivots (centre of the box, middle of the line box)
+    let mut boxes: std::collections::HashMap<(usize, usize), (f64, f64, f64)> = Default::default();
+    for g in &lay.glyphs {
+        let lr = lay.lines.get(g.line).map(|l| l.rect).unwrap_or([0.0; 4]);
+        let b = boxes.entry((g.line, g.word)).or_insert((f64::INFINITY, f64::NEG_INFINITY, lr[1] + lr[3] * 0.5));
+        b.0 = b.0.min(g.x.min(g.x + g.advance));
+        b.1 = b.1.max(g.x.max(g.x + g.advance));
+    }
     lay.glyphs
         .iter()
         .map(|g| {
-            let mut fx = GlyphFx::default();
+            let mut fx = GlyphFx { opacity: alpha, xf: Xf::translate(0.0, dy * em), ..Default::default() };
             let Some(w) = words.get(g.word) else { return fx };
             let wi = g.word;
-            let started = t >= w.start;
-            let is_cur =
-                wi == current && t < w.end.max(w.start + 1e-3) + 1e-9 || (wi == current && wi + 1 == words.len());
-            let k = ((t - w.start) / (w.end - w.start).max(1e-3)).clamp(0.0, 1.0);
-            let anchor = sr_vector::geom::p(g.x + g.advance * 0.5, g.y - em * 0.35);
+            let started = t >= w.start - 1e-9;
+            let is_cur = Some(wi) == current;
+            let q = ((t - w.start) / (w.end - w.start).max(1e-3)).clamp(0.0, 1.0);
+            let pivot = boxes.get(&(g.line, wi)).map(|b| ((b.0 + b.1) * 0.5, b.2)).unwrap_or((g.x, g.y));
             let scale_about = |s: f64| {
-                Xf::translate(anchor.x, anchor.y).mul(&Xf::scale(s, s)).mul(&Xf::translate(-anchor.x, -anchor.y))
+                Xf::translate(pivot.0, pivot.1 + dy * em).mul(&Xf::scale(s, s)).mul(&Xf::translate(-pivot.0, -pivot.1))
+            };
+            let light = |fx: &mut GlyphFx, k: f64| {
+                fx.fill = Some(active.clone());
+                fx.fill_mix = k;
             };
             match preset {
-                Preset::OneWord => fx.hidden = wi != current,
-                Preset::Karaoke => {
-                    // fill sweeps through the word's characters as it is sung
-                    let first = lay.glyphs.iter().filter(|x| x.word == wi).map(|x| x.ch).min().unwrap_or(g.ch);
-                    let last = lay.glyphs.iter().filter(|x| x.word == wi).map(|x| x.ch).max().unwrap_or(g.ch);
-                    let pos = (g.ch - first) as f64 / (last - first + 1) as f64;
-                    fx.fill = Some(active.clone());
-                    fx.fill_mix = if !started {
-                        0.0
-                    } else if k >= 1.0 || wi < current || k > pos {
-                        1.0
-                    } else {
-                        0.0
-                    };
+                Preset::Karaoke if started => light(&mut fx, if t >= w.end { 1.0 } else { q }),
+                Preset::Highlight if is_cur => light(&mut fx, 1.0),
+                Preset::BoxedWord if is_cur && !lay.chars.get(g.ch).is_some_and(|c| c.is_whitespace()) => {
+                    fx.highlight = Some(crate::glyph::Highlight {
+                        paint: active.clone(),
+                        fraction: 1.0,
+                        unit: wi,
+                        pad: 0.12 * em,
+                        radius: 0.18 * em,
+                    })
                 }
-                Preset::Highlight => {
-                    fx.fill = Some(active.clone());
-                    fx.fill_mix = is_cur as u8 as f64;
+                Preset::Pop if is_cur => {
+                    light(&mut fx, 1.0);
+                    let u = ((t - w.start) / 0.25).clamp(0.0, 1.0);
+                    fx.xf = scale_about(1.0 + 0.15 * libm::sin(std::f64::consts::PI * u));
                 }
-                Preset::Pop => {
-                    if is_cur {
-                        let s = 1.0 + 0.2 * libm::sin(std::f64::consts::PI * (k * 2.0).min(1.0));
-                        fx.xf = scale_about(s);
-                        fx.fill = Some(active.clone());
-                        fx.fill_mix = 1.0;
-                    }
+                Preset::Enlarge if is_cur => {
+                    light(&mut fx, 1.0);
+                    let u = ((t - w.start) / 0.1).min(1.0);
+                    fx.xf = scale_about(1.0 + 0.2 * (1.0 - (1.0 - u).powi(3)));
                 }
-                Preset::Enlarge => {
-                    if is_cur {
-                        fx.xf = scale_about(1.3);
-                        fx.fill = Some(active.clone());
-                        fx.fill_mix = 1.0;
-                    }
-                }
+                Preset::Typewriter if !started => fx.opacity = 0.0,
                 Preset::Bounce => {
-                    if is_cur {
-                        fx.xf = Xf::translate(0.0, -0.2 * em * libm::sin(std::f64::consts::PI * k));
+                    if !started {
+                        fx.opacity = 0.0;
+                    } else {
+                        let u = ((t - w.start) / 0.35).min(1.0);
+                        if u < 1.0 {
+                            fx.xf = Xf::translate(0.0, dy * em - 0.3 * em * (1.0 - bounce_out(u)));
+                        }
                     }
-                }
-                Preset::Fade => fx.opacity = ((t - w.start) / 0.15).clamp(0.0, 1.0),
-                Preset::Slide => {
-                    let a = ((t - w.start) / 0.2).clamp(0.0, 1.0);
-                    fx.opacity = a;
-                    fx.xf = Xf::translate(0.0, 0.3 * em * (1.0 - a));
-                }
-                Preset::Typewriter => {
-                    let first = lay.glyphs.iter().filter(|x| x.word == wi).map(|x| x.ch).min().unwrap_or(g.ch);
-                    let last = lay.glyphs.iter().filter(|x| x.word == wi).map(|x| x.ch).max().unwrap_or(g.ch);
-                    let pos = (g.ch - first) as f64 / (last - first + 1) as f64;
-                    fx.hidden = !started || (wi == current && pos > k);
                 }
                 _ => {}
             }

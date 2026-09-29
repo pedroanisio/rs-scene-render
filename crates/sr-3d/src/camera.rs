@@ -182,49 +182,9 @@ pub fn coc_scale(focal_mm: f32, f_stop: f32, sensor_mm: f32, width_px: f32) -> f
     (focal_mm * focal_mm / f_stop.max(0.1)) * (width_px / sensor_mm.max(1e-3)) / 10.0
 }
 
-fn hash(n: i64, seed: u64) -> f32 {
-    let mut x = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03);
-    x ^= x >> 31;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 29;
-    (x >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
-}
-
-/// 1D gradient-free value noise in [−1, 1], smooth.
-fn noise1(t: f64, seed: u64) -> f32 {
-    let i = t.floor();
-    let f = (t - i) as f32;
-    let u = f * f * (3.0 - 2.0 * f);
-    let (a, b) = (hash(i as i64, seed), hash(i as i64 + 1, seed));
-    a + (b - a) * u
-}
-
-fn fbm(t: f64, octaves: u32, seed: u64) -> f32 {
-    let (mut v, mut amp, mut freq, mut norm) = (0.0, 1.0, 1.0, 0.0);
-    for o in 0..octaves.max(1) {
-        v += noise1(t * freq, seed.wrapping_add(o as u64 * 1013)) * amp;
-        norm += amp;
-        amp *= 0.5;
-        freq *= 2.0;
-    }
-    v / norm
-}
-
-/// Camera shake at time `t`: (x, y offset in scene units, roll in degrees, zoom factor).
-pub fn shake(
-    amplitude: f32,
-    frequency: f32,
-    rotation: f32,
-    zoom_amount: f32,
-    octaves: u32,
-    seed: u64,
-    t: f64,
-) -> (f32, f32, f32, f32) {
-    let tt = t * frequency as f64;
-    (
-        fbm(tt, octaves, seed) * amplitude,
-        fbm(tt, octaves, seed ^ 0x5bd1_e995) * amplitude,
-        fbm(tt, octaves, seed ^ 0x1b87_3593) * rotation,
-        1.0 + fbm(tt, octaves, seed ^ 0xcc9e_2d51) * zoom_amount,
-    )
+/// Camera shake (D24) from its four fractal noise values N₀…N₃ (channels 0 to 3 at
+/// frequency · t): (x, y offset in scene units, roll in degrees, zoom factor). The camera
+/// moves amplitude · N₀ right and amplitude · N₁ down, rolls rotation · N₂ and zooms by 1 + zoom · N₃.
+pub fn shake(amplitude: f32, rotation: f32, zoom_amount: f32, n: [f64; 4]) -> (f32, f32, f32, f32) {
+    (n[0] as f32 * amplitude, n[1] as f32 * amplitude, n[2] as f32 * rotation, 1.0 + n[3] as f32 * zoom_amount)
 }

@@ -260,10 +260,23 @@ fn partial_alpha_uses_the_general_compositing_formula() {
     assert_px(&r, 9, 1, [sc[0], sc[1], sc[2], 1.0], 3e-3);
 }
 
+/// The C renderer's dissolve hash of a frame pixel and the project seed (D14; CONVENTIONS 5.19).
+fn dissolve_hash(x: u32, y: u32, seed: u64) -> f32 {
+    let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^= h >> 33;
+    (h >> 40) as f32 / 16777216.0
+}
+
 #[test]
 fn dissolve_keeps_a_random_fraction_of_pixels() {
+    // a seed above 2^32 exercises both words of the GPU's 64-bit arithmetic
+    let seed = 12_345_678_901_234u64;
     let d = doc(
-        r##"width="64" height="64" background="#000000""##,
+        &format!(r##"width="64" height="64" background="#000000" seed="{seed}""##),
         "",
         r#"<layer id="a" asset="white" scaleX="16" scaleY="16" opacity="0.5" blend="dissolve"/>"#,
     );
@@ -272,6 +285,12 @@ fn dissolve_keeps_a_random_fraction_of_pixels() {
     let off = r.px.iter().filter(|p| p[0] < 0.01).count();
     assert_eq!(on + off, 64 * 64, "dissolve is binary");
     assert!((on as f64 / 4096.0 - 0.5).abs() < 0.05, "{on}");
+    // exactly the pixels whose hash is below the layer's alpha
+    for y in 0..64 {
+        for x in 0..64 {
+            assert_eq!(r.at(x, y)[0] > 0.5, dissolve_hash(x, y, seed) < 0.5, "pixel ({x}, {y})");
+        }
+    }
 }
 
 #[test]

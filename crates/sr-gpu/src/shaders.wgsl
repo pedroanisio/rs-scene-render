@@ -371,8 +371,8 @@ fn shade(v: VOut) -> vec4<f32> {
     cov = cov * clamp(mv, 0.0, 1.0);
   }
   c = c * cov;
-  if (d.blend == 1u) {                                                   // dissolve
-    let r = hash2(pixel, d.seed);
+  if (d.blend == 1u) {                                                   // dissolve (D14, C's hash)
+    let r = dissolve_hash(pixel.x, pixel.y, vec2(globals.seed, globals.pad0));
     if (c.a > 0.0 && r < c.a) { c = vec4(c.rgb / c.a, 1.0); } else { c = vec4(0.0); }
   }
   return c;
@@ -404,7 +404,9 @@ struct Gen {
   seed: u32,
   paint_a: u32,
   paint_b: u32,
-  pad: u32,
+  seed_hi: u32,
+  grain: vec4<u32>,
+  perm: array<vec4<u32>, 64>,
 };
 
 @group(3) @binding(0) var<uniform> gen: Gen;
@@ -421,18 +423,114 @@ fn vs_full(@builtin(vertex_index) i: u32) -> GOut {
   return o;
 }
 
-fn ghash3(p: vec3<i32>) -> f32 {
-  return hash2(vec2<u32>(bitcast<u32>(p.x) * 73856093u ^ bitcast<u32>(p.z) * 83492791u, bitcast<u32>(p.y) * 19349663u), gen.seed);
+// Noise kinds of the Python renderer (CONVENTIONS 5.18) over D24 draws (5.19): improved
+// Perlin noise with the gradient table of scenerender/assets/generator.py over a
+// permutation of D24 draws, and lattice values U(seed, k, pack(i, j)).
+
+var<private> GRAD3: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
+  vec3(1.0, 1.0, 0.0), vec3(-1.0, 1.0, 0.0), vec3(1.0, -1.0, 0.0), vec3(-1.0, -1.0, 0.0),
+  vec3(1.0, 0.0, 1.0), vec3(-1.0, 0.0, 1.0), vec3(1.0, 0.0, -1.0), vec3(-1.0, 0.0, -1.0),
+  vec3(0.0, 1.0, 1.0), vec3(0.0, -1.0, 1.0), vec3(0.0, 1.0, -1.0), vec3(0.0, -1.0, -1.0),
+  vec3(1.0, 1.0, 0.0), vec3(0.0, -1.0, 1.0), vec3(-1.0, 1.0, 0.0), vec3(0.0, -1.0, -1.0));
+
+fn gperm(i: i32) -> i32 {
+  let k = bitcast<u32>(i) & 255u;
+  return i32(gen.perm[k >> 2u][k & 3u]);
 }
 
-fn vnoise(p: vec3<f32>) -> f32 {
-  let i = vec3<i32>(floor(p));
-  let f = fract(p);
+fn ggrad(h: i32, d: vec3<f32>) -> f32 {
+  return dot(GRAD3[u32(gperm(h)) & 15u], d);
+}
+
+fn gperlin3(p: vec3<f32>) -> f32 {
+  let fl = floor(p);
+  let X = i32(fl.x) & 255; let Y = i32(fl.y) & 255; let Z = i32(fl.z) & 255;
+  let f = p - fl;
   let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-  var acc = 0.0;
-  let a = mix(mix(ghash3(i), ghash3(i + vec3(1, 0, 0)), u.x), mix(ghash3(i + vec3(0, 1, 0)), ghash3(i + vec3(1, 1, 0)), u.x), u.y);
-  let b = mix(mix(ghash3(i + vec3(0, 0, 1)), ghash3(i + vec3(1, 0, 1)), u.x), mix(ghash3(i + vec3(0, 1, 1)), ghash3(i + vec3(1, 1, 1)), u.x), u.y);
-  return mix(a, b, u.z);
+  let A = gperm(X) + Y; let B = gperm(X + 1) + Y;
+  let AA = gperm(A) + Z; let AB = gperm(A + 1) + Z; let BA = gperm(B) + Z; let BB = gperm(B + 1) + Z;
+  let x1 = mix(ggrad(AA, f), ggrad(BA, f - vec3(1.0, 0.0, 0.0)), u.x);
+  let x2 = mix(ggrad(AB, f - vec3(0.0, 1.0, 0.0)), ggrad(BB, f - vec3(1.0, 1.0, 0.0)), u.x);
+  let x3 = mix(ggrad(AA + 1, f - vec3(0.0, 0.0, 1.0)), ggrad(BA + 1, f - vec3(1.0, 0.0, 1.0)), u.x);
+  let x4 = mix(ggrad(AB + 1, f - vec3(0.0, 1.0, 1.0)), ggrad(BB + 1, f - vec3(1.0, 1.0, 1.0)), u.x);
+  return mix(mix(x1, x2, u.y), mix(x3, x4, u.y), u.z);
+}
+
+// Octave k at 2^k with weight 0.5^k, offset by (17.3 k, 5.1 k) and z · (1 + k / 2); normalised.
+fn gfbm(x: f32, y: f32, z: f32, octaves: u32) -> f32 {
+  var total = 0.0; var amp = 1.0; var norm = 0.0;
+  for (var o = 0u; o < max(octaves, 1u) && o < 16u; o = o + 1u) {
+    let f = exp2(f32(o));
+    total = total + amp * gperlin3(vec3(x * f + 17.3 * f32(o), y * f + 5.1 * f32(o), z * (1.0 + 0.5 * f32(o))));
+    norm = norm + amp;
+    amp = amp * 0.5;
+  }
+  return total / norm;
+}
+
+// U(seed, k, pack(i, j)).
+fn glattice(seed: vec2<u32>, i: i32, j: i32, k: u32) -> f32 {
+  return d24_unit(seed, vec2(k, 0u), d24_pack(i, j, 0));
+}
+
+fn is_noise_kind(k: u32) -> bool {
+  return k == 2u || k == 3u || k == 4u || k == 8u || k == 9u;
+}
+
+// The noise kinds' field in [0, 1] at asset position p (1 shows paint, 0 paint2).
+fn noise_field(p: vec2<f32>) -> f32 {
+  let seed = vec2(gen.seed, gen.seed_hi);
+  let s = max(gen.scale, 1e-6);
+  let a = radians(gen.angle);
+  let c = gen.size * 0.5;
+  let d = p - c;
+  let r = vec2(d.x * cos(a) + d.y * sin(a), -d.x * sin(a) + d.y * cos(a));
+  let con = gen.contrast;
+  switch (gen.kind) {
+    case 2u, 3u: {                                                                // noise, fractal noise
+      let oct = select(gen.octaves, 1u, gen.kind == 2u);
+      let n = gfbm(r.x / s, r.y / s, gen.evolution, oct);
+      let v = 0.5 + n * select(0.85, 0.65, oct == 1u);
+      return clamp(0.5 + (v - 0.5) * con, 0.0, 1.0);
+    }
+    case 4u: {                                                                    // cells (Worley F1)
+      let q = r / s;
+      let ci = vec2<i32>(floor(q));
+      let e = gen.evolution;
+      var best = 9.0;
+      for (var dj = -1; dj <= 1; dj = dj + 1) {
+        for (var di = -1; di <= 1; di = di + 1) {
+          let ii = ci.x + di; let jj = ci.y + dj;
+          let h1 = glattice(seed, ii, jj, 1u); let h2 = glattice(seed, ii, jj, 2u);
+          let fp = vec2(f32(ii) + 0.5 + 0.4 * sin(6.2831853 * (h1 + e * (0.5 + 0.5 * h2))),
+                        f32(jj) + 0.5 + 0.4 * cos(6.2831853 * (h2 + e * (0.5 + 0.5 * h1))));
+          best = min(best, length(q - fp));
+        }
+      }
+      return clamp(0.5 + (clamp(best, 0.0, 1.0) - 0.5) * con, 0.0, 1.0);
+    }
+    case 8u: {                                                                    // film grain: per frame
+      let g = max(0.25, s / 100.0);
+      let i = i32(floor(p.x / g)); let j = i32(floor(p.y / g));
+      let fs = gen.grain.xy;
+      let u = (glattice(fs, i, j, 1u) + glattice(fs, i, j, 2u) + glattice(fs, i, j, 3u)) / 3.0;
+      return clamp(0.5 + (u - 0.5) * 2.0 * con, 0.0, 1.0);
+    }
+    default: {                                                                    // light rays
+      let diag = length(gen.size);
+      let dir = vec2(-sin(a), cos(a));
+      let o = c - dir * diag * 0.75;
+      let v = p - o;
+      let dist = length(v) + 1e-9;
+      let cos_t = dot(v, dir) / dist;
+      let theta = atan2(v.x * dir.y - v.y * dir.x, dot(v, dir));
+      let n = gfbm(theta * diag * 0.75 / s, 3.7, gen.evolution, 3u);
+      let rays = pow(clamp(0.5 + n * 1.6, 0.0, 1.0), 2.0);
+      let cone = pow(clamp(cos_t, 0.0, 1.0), 6.0);
+      let fall = clamp(1.2 - (dist - diag * 0.25) / (diag * 1.3), 0.0, 1.0);
+      return clamp(rays * cone * fall * (0.6 + 0.8 * con), 0.0, 1.0);
+    }
+  }
 }
 
 fn rotate(p: vec2<f32>, deg: f32) -> vec2<f32> {
@@ -456,6 +554,15 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
   let p = v.pos.xy;
   let a = gen_paint(gen.paint_a, p, pixel);
   let b = gen_paint(gen.paint_b, p, pixel);
+  if (is_noise_kind(gen.kind)) {
+    // paint2 → paint by the field, premultiplied in display sRGB (as the Python renderer's
+    // 8-bit surfaces mix)
+    let pa = vec4(to_space(a.rgb, 1u) * a.a, a.a);
+    let pb = vec4(to_space(b.rgb, 1u) * b.a, b.a);
+    let m = mix(pb, pa, noise_field(p));
+    if (m.a <= 0.0) { return vec4(0.0); }
+    return vec4(from_space(m.rgb / m.a, 1u) * m.a, m.a);
+  }
   let s = max(gen.scale, 1e-3);
   var t = 0.0;
   switch (gen.kind) {
@@ -465,28 +572,6 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
       let dir = rotate(vec2(1.0, 0.0), gen.angle);
       let ext = abs(dir.x) * gen.size.x * 0.5 + abs(dir.y) * gen.size.y * 0.5;
       t = clamp(dot(p - c, dir) / max(ext, 1e-3) * 0.5 + 0.5, 0.0, 1.0);
-    }
-    case 2u: { t = vnoise(vec3(rotate(p, gen.angle) / s, gen.evolution / 360.0)); }   // noise
-    case 3u: {                                                                    // fractal noise
-      var amp = 0.5; var freq = 1.0; var sum = 0.0; var norm = 0.0;
-      for (var o = 0u; o < min(gen.octaves, 12u); o = o + 1u) {
-        sum = sum + amp * vnoise(vec3(rotate(p, gen.angle) / s * freq, gen.evolution / 360.0 + f32(o) * 17.0));
-        norm = norm + amp; amp = amp * 0.5; freq = freq * 2.0;
-      }
-      t = sum / max(norm, 1e-6);
-    }
-    case 4u: {                                                                    // cells (Worley F1)
-      let q = rotate(p, gen.angle) / s;
-      let cell = floor(q);
-      var best = 10.0;
-      for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-          let c = vec3<i32>(i32(cell.x) + x, i32(cell.y) + y, i32(floor(gen.evolution / 360.0)));
-          let jitter = vec2(ghash3(c), ghash3(c + vec3(0, 0, 7)));
-          best = min(best, length(cell + vec2(f32(x), f32(y)) + jitter - q));
-        }
-      }
-      t = clamp(best, 0.0, 1.0);
     }
     // The patterns (CONVENTIONS 5.18, the Python renderer's): pattern space has its origin at the
     // asset's centre, turns clockwise by `angle` and scrolls along its x by `evolution` periods.
@@ -503,16 +588,6 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
     case 7u: {                                                                    // stripes: period 2 × `scale`, paint first
       let q = pattern_space(p, 2.0 * s) / (2.0 * s);
       t = select(0.0, 1.0, fract(q.x) >= 0.5);
-    }
-    case 8u: {                                                                    // film grain, changes with evolution
-      t = hash2(pixel, gen.seed ^ u32(gen.evolution * 997.0));
-    }
-    case 9u: {                                                                    // light rays from the centre
-      let d = p - gen.size * 0.5;
-      let ang = atan2(d.y, d.x) + radians(gen.angle);
-      let r = vnoise(vec3(ang * s * 0.05, 0.0, gen.evolution / 360.0));
-      let fall = clamp(1.0 - length(d) / max(length(gen.size) * 0.5, 1.0), 0.0, 1.0);
-      t = 1.0 - r * fall;
     }
     default: {}
   }

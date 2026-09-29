@@ -514,6 +514,7 @@ impl Renderer {
             node: n.id.to_string(),
             named: HashMap::new(),
             audio: self.audio.clone(),
+            seed: self.seed,
         }
     }
 
@@ -1202,7 +1203,7 @@ impl Renderer {
         }
         let lead = tr.to.or(tr.from).map(|x| x as usize).unwrap_or(0);
         let Some(elem) = tr.elem.clone() else {
-            // sequence auto-transitions carry no element: a plain crossfade
+            // sequence auto-transitions carry no element: the type with default attributes
             let empty = sr_eval::Props::default();
             self.transition_pass(plan, ctx, tr, None, &empty, sides, space, lead, cmds, root_hash);
             return;
@@ -1240,7 +1241,8 @@ impl Renderer {
             None => None,
         };
         let base = Self::base_dir(ctx.p);
-        let mut kind = if tr.elem.is_some() { tr.kind.to_string() } else { "crossfade".to_string() };
+        // sequence junctions carry the sequence's @transition type (D19)
+        let mut kind = tr.kind.to_string();
         let shader = match a.str("shader") {
             Some(src) if kind == "shader" => match crate::glsl::load_source(&src, &base) {
                 Ok((code, _)) => {

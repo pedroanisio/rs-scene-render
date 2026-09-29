@@ -260,6 +260,8 @@ pub struct Renderer {
     persistent_isf: Option<bool>,
     /// The frame rendered last (ISF feedback replays on a seek).
     last_frame: Option<i64>,
+    /// The project seed (D24 draws default to it).
+    pub(crate) seed: u64,
 }
 
 fn h(words: &[u64]) -> u64 {
@@ -381,7 +383,9 @@ impl Renderer {
         });
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compositor"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("common.wgsl"), include_str!("shaders.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("common.wgsl"), include_str!("d24.wgsl"), include_str!("shaders.wgsl")).into(),
+            ),
         });
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite"),
@@ -460,8 +464,9 @@ impl Renderer {
         let from_srgb = color::convert(m::ColorSpace::LinearSrgb, working.space);
         let g = Globals {
             linear_light: working.linear as u32,
+            // the project seed as a u64 (low, high) for D24 draws
             seed: program.seed as u32,
-            pad: [0; 2],
+            pad: [(program.seed >> 32) as u32, 0],
             to_srgb: types::mat3(&to_srgb),
             from_srgb: types::mat3(&from_srgb),
         };
@@ -488,6 +493,7 @@ impl Renderer {
         let (gpu_device, gpu_queue) = (gpu.device.clone(), gpu.queue.clone());
         let raster = Raster::new(&gpu.device);
         Renderer {
+            seed: program.seed,
             tokens: token_table(&program.scene),
             gpu,
             over,
@@ -839,19 +845,31 @@ impl Renderer {
         };
         let (ia, ib) = (paint_index(&pa, plan), paint_index(&pb, plan));
         let kind = m::GeneratorAssetKind::ALL.iter().position(|k| *k == gen.kind).unwrap_or(0) as u32;
-        let seed = gen.seed.unwrap_or_else(|| sr_eval::rng::hash_str(key)) ^ p.seed;
+        // D24 draws with the Python renderer's generator seed (CONVENTIONS 5.18, 5.19)
+        let seed = sr_eval::rng::element_seed(p.seed, &gen.id, gen.seed, "generator");
+        let evolution = num("evolution", gen.evolution);
+        let frame = libm::floor(g.time * p.fps.as_f64() + 1e-6) as i64;
+        let grain = (seed as i64)
+            .wrapping_add(frame.wrapping_mul(7919))
+            .wrapping_add((evolution * 1000.0).round_ties_even() as i64 * 104_729) as u64;
+        let mut perm = [[0u32; 4]; 64];
+        for (i, v) in sr_eval::rng::permutation(seed, 0, 256).into_iter().enumerate() {
+            perm[i / 4][i % 4] = v as u32;
+        }
         let u = Gen {
             size: [w as f32, hgt as f32],
             kind,
             octaves: num("octaves", gen.octaves as f64) as u32,
             scale: num("scale", gen.scale.get()) as f32,
-            evolution: num("evolution", gen.evolution) as f32,
+            evolution: evolution as f32,
             contrast: num("contrast", gen.contrast) as f32,
             angle: num("angle", gen.angle) as f32,
             seed: seed as u32,
             paint_a: ia,
             paint_b: ib,
-            pad: 0,
+            seed_hi: (seed >> 32) as u32,
+            grain: [grain as u32, (grain >> 32) as u32, 0, 0],
+            perm,
         };
         let pd = |i: u32| {
             let d = plan.paints.paints[i as usize];

@@ -169,8 +169,49 @@ pub trait Host {
     fn beat(&mut self) -> f64;
     /// Uniform random in [0, 1) for a call site and component.
     fn random(&mut self, site: u32, component: u32) -> f64;
-    /// Noise seed of this expression.
+    /// Noise seed of this expression (D25 `seed`: the expression's `@seed`, else the project's).
     fn noise_seed(&mut self) -> u64;
+    /// D25 noise channel of the property the expression computes: [`property_channel`].
+    fn noise_channel(&mut self) -> u64 {
+        OTHER_CHANNEL
+    }
+}
+
+/// Noise channel of a property-less expression (text selectors, conditions).
+pub const OTHER_CHANNEL: u64 = 8;
+
+/// D25's property channel for `wiggle` and `random`: the position of the property in
+/// D25's list (x, y, rotation, scaleX, scaleY, anchorX, anchorY, opacity), else 8 + the
+/// CRC-32 of its name (as the Python renderer numbers them).
+pub fn property_channel(prop: &str) -> u64 {
+    match prop {
+        "x" => 0,
+        "y" => 1,
+        "rotation" => 2,
+        "scaleX" => 3,
+        "scaleY" => 4,
+        "anchorX" => 5,
+        "anchorY" => 6,
+        "opacity" => 7,
+        _ => OTHER_CHANNEL + rng::crc32(prop.as_bytes()) as u64,
+    }
+}
+
+thread_local! {
+    /// The permutation of multi-dimensional `noise` for the last seed.
+    static PERM: std::cell::RefCell<(u64, Vec<usize>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// `noise(x, y, z)` with y or z: improved Perlin noise over the permutation of 256 D24 draws
+/// of channel 7 (the Python renderer's choice; D25 defines only the 1D form).
+fn noise3(seed: u64, x: f64, y: f64, z: f64) -> f64 {
+    PERM.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.1.is_empty() || p.0 != seed {
+            *p = (seed, rng::permutation(seed, 7, 256));
+        }
+        rng::perlin3(&p.1, x, y, z)
+    })
 }
 
 /// Compile-time name resolution.
@@ -1053,16 +1094,18 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
                 Some(v) => v.num(),
                 None => host.var(Var::Time).num(),
             };
-            let seed = host.noise_seed();
+            let (seed, channel) = (host.noise_seed(), host.noise_channel());
             let value = host.var(Var::Value);
             let base = value.components().unwrap_or_else(|| vec![0.0]);
             let amps = amp.components().unwrap_or_else(|| vec![0.0]);
+            // D25: value + amp · Σ multᵏ N(seed, channel · 1024 + k, t · freq · 2ᵏ) / Σ multᵏ;
+            // component i of an array value uses channel + i · 2¹⁶
             let out: Vec<f64> = base
                 .iter()
                 .enumerate()
                 .map(|(i, b)| {
                     let a = if amps.len() == 1 { amps[0] } else { amps.get(i).copied().unwrap_or(0.0) };
-                    b + a * rng::fbm1(rng::hash(&[seed, i as u64]), t * freq, octaves, mult)
+                    b + a * rng::weighted_octaves(seed, channel + ((i as u64) << 16), t * freq, octaves, mult)
                 })
                 .collect();
             if matches!(value, V::Arr(_)) {
@@ -1077,11 +1120,12 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             for a in args {
                 c.extend(a.components().unwrap_or_default());
             }
-            V::Num(match c.len() {
-                0 => 0.0,
-                1 => rng::noise1(seed, c[0]),
-                2 => rng::noise2(seed, c[0], c[1]),
-                _ => rng::noise3(seed, c[0], c[1], c[2]),
+            // D25: N(seed, 7, x); with a non-zero y or z, 3D Perlin noise
+            let at = |k: usize| c.get(k).copied().unwrap_or(0.0);
+            V::Num(if at(1) == 0.0 && at(2) == 0.0 {
+                rng::noise(seed, 7, at(0))
+            } else {
+                noise3(seed, at(0), at(1), at(2))
             })
         }
         Random | MathRandom => match args.len() {
@@ -1325,9 +1369,20 @@ mod tests {
         let r = eval("random(10, 20)").num();
         assert!((10.0..20.0).contains(&r));
         assert_eq!(eval("random(10, 20)"), eval("random(10, 20)"), "deterministic");
-        let w = eval("wiggle(2, 30)");
+        // D25 over D24 noise (seed 1, the test host's channel 8, component k on channel
+        // 8 + k · 2¹⁶); golden values that the Python renderer's noise.py reproduces
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let w = eval("wiggle(1.3, 30)");
         let V::Arr(w) = w else { panic!() };
-        assert!((w[0].num() - 10.0).abs() <= 30.0 && w[0].num() != 10.0);
+        close(w[0].num(), 4.2630009694359075);
+        close(w[1].num(), 11.282444351709492);
+        let V::Arr(w) = eval("wiggle(1.3, 30, 3, 0.7)") else { panic!() };
+        close(w[0].num(), 8.501919830169559);
+        close(w[1].num(), 14.411410556518367);
+        close(eval("noise(0.3)").num(), -0.5599620552733947);
+        // with a y: improved Perlin noise over the permutation of channel 7
+        close(eval("noise(0.3, 0.7)").num(), 0.28006378512);
+        assert_eq!(eval("wiggle(2, 30)"), V::nums(&[10.0, 20.0]), "D24 noise is zero at integers");
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::resources::{Pool, Tex, FORMAT};
 use crate::vector::Attrs;
 
 /// The WGSL of every built-in pass.
-pub const WGSL: &str = concat!(include_str!("transfer.wgsl"), "\n", include_str!("effects.wgsl"));
+pub const WGSL: &str =
+    concat!(include_str!("transfer.wgsl"), "\n", include_str!("d24.wgsl"), "\n", include_str!("effects.wgsl"));
 
 /// Gradient stops: (offset, straight stored working RGBA).
 pub type Stops = Vec<(f64, [f64; 4])>;
@@ -459,6 +460,29 @@ impl FxEngine {
     }
 }
 
+impl FxEngine {
+    /// A texels.len()×1 data texture of f16 values (integers up to 2048 are exact).
+    pub fn data_table(&self, pool: &mut Pool, bgl1: &wgpu::BindGroupLayout, texels: &[[f32; 4]]) -> Arc<Tex> {
+        let w = texels.len().max(1) as u32;
+        let t = pool.get(&self.device, bgl1, [w, 1]);
+        let mut bytes: Vec<u8> =
+            texels.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
+        bytes.resize(w as usize * 8, 0);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &t.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: w, height: 1, depth_or_array_layers: 1 },
+        );
+        t
+    }
+}
+
 /// Parses and validates GLSL with naga, returning its errors as text.
 pub fn check_glsl(src: &str) -> Result<(), String> {
     use wgpu::naga;
@@ -800,6 +824,24 @@ pub struct Cx<'a> {
     pub named: HashMap<String, Arc<Tex>>,
     /// The audio mix, when the render has one (ISF audio inputs).
     pub audio: Option<Arc<crate::shader::AudioSignals>>,
+    /// The project seed (seeded effects draw from D24 with per-element seeds derived from it).
+    pub seed: u64,
+}
+
+/// The seed of an effect's D24 draws (the Python renderer's `Params.rng`): the CRC-32
+/// element seed of the project seed, the effect's id and @seed, with the seed's value as a
+/// Python float prints (`0.0` when absent, `7.0` for seed="7") as the purpose.
+pub fn effect_seed(project: u64, e: &dyn Element, seed: Option<f64>) -> u64 {
+    let v = seed.unwrap_or(0.0);
+    let purpose = if v.fract() == 0.0 && v.abs() < 1e16 { format!("{v:.1}") } else { format!("{v}") };
+    sr_eval::rng::element_seed(project, e.element_id().unwrap_or(""), seed.map(|v| v as u64), &purpose)
+}
+
+/// A named parameter: the effect's (animated) attribute, else a `<param>` child, else `default`.
+fn param(e: &dyn Element, a: &Attrs, name: &str, default: f64) -> f64 {
+    a.opt(name)
+        .or_else(|| params_of(e).into_iter().find(|p| p.0 == name).and_then(|p| p.1.first().map(|v| *v as f64)))
+        .unwrap_or(default)
 }
 
 /// Collects passes and the textures they use.
@@ -1030,7 +1072,12 @@ impl Builder<'_> {
         };
         let big = |r: f64| if r <= 4.0 * px + 1e-9 { w.min(h) * 0.5 } else { r };
         let mut v = [[0.0f32; 4]; 8];
-        let color_op = |b: &mut Self, op: u32, v: [[f32; 4]; 8], aux: Aux| b.simple(Entry::Color, op, v, input, aux);
+        // seeded ops read the effect's D24 seed from i.yz
+        let es = effect_seed(cx.seed, e, a.opt("seed"));
+        let ids = |op: u32| [op, es as u32, (es >> 32) as u32, 0];
+        let color_op = |b: &mut Self, op: u32, v: [[f32; 4]; 8], aux: Aux| {
+            b.run(Entry::Color, ids(op), v, input, aux, None, None, input.size)
+        };
         Ok(match kind {
             "blur" => self.blur(input, r),
             "glow" | "bloom" | "halation" => {
@@ -1290,16 +1337,30 @@ impl Builder<'_> {
                 color_op(self, 20, v, Aux::None)
             }
             "film-grain" => {
-                v[0] = [amount as f32 * 0.5, (sz.max(1.0) * px) as f32, seed + (cx.frame % 997) as f32 * 1.37, 0.0];
-                color_op(self, 21, v, Aux::None)
+                // the Python renderer's grain (CONVENTIONS 5.19): D24 normals per sample, drawn from the
+                // effect's seed with the frame as the channel, blurred by σ = (size − 1) / 2 px,
+                // weighted by (4v(1 − v))^response per channel in linear light
+                let sigma = ((sz * px - 1.0) / 2.0).max(0.0);
+                let response = param(e, a, "response", 0.5).max(0.01);
+                let strength = ["red", "green", "blue"].map(|c| param(e, a, c, 1.0) as f32);
+                let frame = cx.frame.max(0) as f32;
+                v[0] = [(0.05 * amount) as f32, 0.0, frame, 0.0];
+                v[1] = [strength[0], strength[1], strength[2], response as f32];
+                let ids = [21, es as u32, (es >> 32) as u32, 0];
+                if sigma < 0.4 {
+                    self.run(Entry::Color, ids, v, input, Aux::None, None, None, input.size)
+                } else {
+                    let field =
+                        self.run(Entry::Color, [75, ids[1], ids[2], 0], v, input, Aux::None, None, None, input.size);
+                    let blurred = self.blur(&field, 2.0 * sigma);
+                    v[0][3] = (2.0 * std::f64::consts::PI.sqrt() * sigma).max(1.0) as f32;
+                    self.run(Entry::Color, ids, v, input, Aux::Tex(blurred), None, None, input.size)
+                }
             }
             "noise" => {
-                v[0] = [
-                    amount as f32 * 0.2,
-                    seed + (cx.frame % 997) as f32 * 1.37,
-                    (a.num("saturation", 1.0) == 0.0) as u8 as f32,
-                    0.0,
-                ];
+                // D24 uniforms in [-1, 1) per sample on the frame's channel, times amount, in display values
+                let mono = a.str("channel").is_some_and(|c| c != "rgb") || a.num("saturation", 1.0) == 0.0;
+                v[0] = [amount as f32, cx.frame.max(0) as f32, if mono { 1.0 } else { 3.0 }, 0.0];
                 color_op(self, 22, v, Aux::None)
             }
             "spill-suppress" => {
@@ -1391,6 +1452,57 @@ impl Builder<'_> {
                 ];
                 color_op(self, 74, v, Aux::None)
             }
+            "glitch" => {
+                // the Python renderer's glitch (CONVENTIONS 5.19): D24 draws of the effect's seed
+                // on the frame's channel — rows shifted sideways, then blocks copied from the
+                // input, channel delay and quantisation
+                let amount_px = amount * px;
+                if amount_px == 0.0 {
+                    return Ok(input.clone());
+                }
+                let frame = cx.frame.max(0) as u64;
+                let (wi, hi) = (input.size[0] as f64, input.size[1] as f64);
+                let size_px = sz * px;
+                let rows_h = (size_px.round_ties_even()).max(1.0);
+                let count = (param(e, a, "blocks", 8.0).round_ties_even().max(1.0) as usize).min(256);
+                let mut n = 0u64;
+                let mut draw = || {
+                    let u = sr_eval::rng::d24_unit(es, frame, n);
+                    n += 1;
+                    u
+                };
+                let mut texels = Vec::with_capacity(count * 3);
+                let split = |v: f64| [(v as u32 >> 8) as f32, (v as u32 & 255) as f32];
+                for _ in 0..count {
+                    let bw = (0.03 + 0.17 * draw()) * wi;
+                    let bw = bw.round_ties_even().min(wi).max(1.0);
+                    let bh = (size_px * (1.0 + 3.0 * draw())).round_ties_even().min(hi).max(1.0);
+                    let mut int = |hi_excl: f64| (hi_excl * draw()).floor();
+                    let (x, y) = (int(wi - bw + 1.0), int(hi - bh + 1.0));
+                    let (sx, sy) = (int(wi - bw + 1.0), int(hi - bh + 1.0));
+                    let [a0, a1] = split(x);
+                    let [b0, b1] = split(y);
+                    let [c0, c1] = split(bw);
+                    let [d0, d1] = split(bh);
+                    let [e0, e1] = split(sx);
+                    let [f0, f1] = split(sy);
+                    texels.extend([[a0, a1, b0, b1], [c0, c1, d0, d1], [e0, e1, f0, f1]]);
+                }
+                let table = self.eng.data_table(self.pool, self.bgl1, &texels);
+                self.temps.push(table.clone());
+                let weight = amount.abs().min(1.0);
+                v[0] = [amount_px as f32, rows_h as f32, weight as f32, count as f32];
+                v[1] = [frame as f32, (hi / rows_h).ceil() as f32, 0.0, 0.0];
+                let ids = [76, es as u32, (es >> 32) as u32, 0];
+                let moved = self.run(Entry::Color, ids, v, input, Aux::Tex(table), None, None, input.size);
+                v[0] = [
+                    (amount_px * param(e, a, "channelDelay", 0.5)) as f32,
+                    param(e, a, "quantization", 32.0).round_ties_even().max(2.0) as f32,
+                    0.0,
+                    0.0,
+                ];
+                self.run(Entry::Color, [77, 0, 0, 0], v, &moved, Aux::None, None, None, input.size)
+            }
             "displacement-map"
             | "turbulent-displace"
             | "wave-warp"
@@ -1407,7 +1519,6 @@ impl Builder<'_> {
             | "mosaic"
             | "chromatic-aberration"
             | "rgb-split"
-            | "glitch"
             | "vhs" => {
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 v[7] = [t as f32, 0.0, 0.0, 0.0];
@@ -1508,21 +1619,12 @@ impl Builder<'_> {
                         v[0] = [o[0] * w as f32, o[1] * h as f32, 0.0, 0.0];
                         15
                     }
-                    "glitch" => {
-                        v[0] = [
-                            amount.clamp(0.0, 1.0) as f32,
-                            seed,
-                            (t * a.num("frequency", 1.0) * 12.0).floor() as f32,
-                            (if sz > 1.0 { sz } else { 16.0 } * px) as f32,
-                        ];
-                        16
-                    }
                     _ => {
-                        v[0] = [amount.clamp(0.0, 2.0) as f32, t as f32, seed, 0.0];
+                        v[0] = [amount.clamp(0.0, 2.0) as f32, t as f32, cx.frame.max(0) as f32, 0.0];
                         17
                     }
                 };
-                self.simple(Entry::Warp, op, v, input, aux)
+                self.run(Entry::Warp, ids(op), v, input, aux, None, None, input.size)
             }
             "sharpen" => {
                 v[0] = [amount as f32, 0.0, 0.0, 0.0];
@@ -1664,7 +1766,12 @@ impl Builder<'_> {
         velocity: f64,
         cx: Option<&Cx>,
     ) -> Result<Arc<Tex>, String> {
-        let size = from.size;
+        // a missing side is a 1×1 transparent texture: the frame is the other side's size
+        let size = if from.size[0] as u64 * from.size[1] as u64 >= to.size[0] as u64 * to.size[1] as u64 {
+            from.size
+        } else {
+            to.size
+        };
         if kind == "shader" {
             let (code, path) = shader.ok_or("transition type=\"shader\" needs @shader")?;
             let cx = cx.ok_or("shader transitions need a context")?;
@@ -1719,7 +1826,14 @@ impl Builder<'_> {
         let mut v = [[0.0f32; 4]; 8];
         v[0] = [p as f32, a.num("softness", 0.1) as f32, a.num("angle", 0.0).to_radians() as f32, dir];
         v[1] = v4(color);
-        v[2] = [if a.num("motionBlur", 1.0) != 0.0 { 8.0 } else { 1.0 }, 0.0, 0.0, 0.0];
+        let blur = !matches!(a.str("motionBlur").as_deref(), Some("false" | "0"));
+        v[2] = [if blur { 8.0 } else { 1.0 }, 0.0, 0.0, 0.0];
+        // D24 seed of the seeded types (glitch, light-leak), as bits: the transition's CRC-32 seed
+        let ts = cx.map(|c| {
+            sr_eval::rng::element_seed(c.seed, e.element_id().unwrap_or(""), None, &format!("transition:{kind}"))
+        });
+        let ts = ts.unwrap_or(0);
+        v[3] = [f32::from_bits(ts as u32), f32::from_bits((ts >> 32) as u32), 0.0, 0.0];
         let has_luma = luma.is_some();
         Ok(self.run(Entry::Trans, [k as u32, has_luma as u32, 0, 0], v, from, Aux::Tex(to.clone()), luma, None, size))
     }

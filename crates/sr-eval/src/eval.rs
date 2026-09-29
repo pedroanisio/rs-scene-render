@@ -270,6 +270,9 @@ pub struct FrameGraph {
     /// Problems found while simulating (physics, particles), reported by the renderer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+    /// The project seed (D24's default for seeded behaviour such as camera shake).
+    #[serde(skip)]
+    pub seed: u64,
 }
 
 struct Frame<'p> {
@@ -539,13 +542,22 @@ impl Host for ExprHost<'_, '_> {
     }
 
     fn random(&mut self, site: u32, component: u32) -> f64 {
+        // D25: splitmix64 hash of (seed, frame, call site, property), as D24's lattice hash
+        // with the frame as the channel; an array's component k adds k · 2⁴⁸
         let frame = libm::floor(self.t * self.p.fps.as_f64() + 1e-9) as i64;
-        rng::Stream::new(self.p.seed, self.p.exprs[self.expr as usize].seed, 0x7261_6e64)
-            .at(frame, ((site as u64) << 20) | component as u64)
+        let index = site as u64 + (self.noise_channel() << 32) + ((component as u64) << 48);
+        rng::d24_unit(self.noise_seed(), frame as u64, index)
     }
 
     fn noise_seed(&mut self) -> u64 {
-        rng::hash(&[self.p.seed, self.p.exprs[self.expr as usize].seed])
+        self.p.exprs[self.expr as usize].seed
+    }
+
+    fn noise_channel(&mut self) -> u64 {
+        match self.slot {
+            Some(s) => vm::property_channel(&self.p.slots[s as usize].prop),
+            None => vm::OTHER_CHANNEL,
+        }
     }
 }
 
@@ -976,6 +988,12 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             }
         }
     }
+    // a luma transition's matte sibling is not drawn itself (D19)
+    for tr in &p.transitions {
+        if let Some(m) = tr.matte.and_then(|m| out.out_ix[m as usize]) {
+            hidden[m as usize] = true;
+        }
+    }
     for (i, h) in hidden.into_iter().enumerate() {
         if h {
             out.nodes[i].draw = false;
@@ -1050,6 +1068,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         camera,
         elements,
         problems: Vec::new(),
+        seed: p.seed,
     }
 }
 

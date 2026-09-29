@@ -183,6 +183,33 @@ fn expressions_read_values_other_properties_and_params() {
     assert_ne!(o1, o2, "random changes per frame");
 }
 
+/// CONVENTIONS 5.19 / D24–D25: golden values computed from the definition by an
+/// independent reference (project seed 1, fps 10; t = 2.35 is frame 23).
+#[test]
+fn seeded_expression_functions_follow_d24() {
+    let d = doc(
+        "",
+        r#"<layer id="a" asset="img"><expression property="x">random() * 1000 + random()</expression>
+             <expression property="opacity">random()</expression>
+             <expression property="rotation" seed="42">wiggle(1.3, 45)</expression>
+             <expression property="y">noise(time)</expression></layer>"#,
+    );
+    let f = eval(&d, 2.35);
+    let num = |p: &str| match node(&f, "a").props.get(p) {
+        Some(Value::Len(l)) => l.value,
+        Some(Value::Num(v)) => *v,
+        v => panic!("{p}: {v:?}"),
+    };
+    let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    // random(): U(seed, frame, call site + property · 2³²), x is property 0, opacity 7
+    close(num("x"), 0.17434605957409266 * 1000.0 + 0.7491476051172039);
+    close(num("opacity"), 0.34971312971882773);
+    // wiggle: 45 · N(@seed, rotation (2) · 1024, t · 1.3)
+    close(num("rotation"), -4.964403823776934);
+    // noise(x) = N(project seed, 7, x)
+    close(num("y"), -0.45242441356928065);
+}
+
 #[test]
 fn expression_cycles_and_compile_errors() {
     let d = doc(
@@ -465,6 +492,28 @@ fn transitions_and_mattes() {
     let m = node(&w, "m");
     assert!(m.is_matte && !m.draw);
     assert_eq!(node(&w, "u").matte, Some(w.nodes.iter().position(|n| &*n.id == "m").unwrap() as u32));
+}
+
+/// D19 (CONVENTIONS 5.17): the cut is from's end, the matte sibling of a luma transition
+/// is not drawn, and a sequence junction happens at the outgoing child's end.
+#[test]
+fn transition_cut_is_the_outgoing_end() {
+    let d = doc(
+        "",
+        r#"<layer id="a" asset="img" end="2"/><layer id="b" asset="img" start="2.5"/><layer id="m" asset="img"/>
+        <transition type="luma" from="a" to="b" duration="1" curve="linear" matte="m"/>"#,
+    );
+    let f = eval(&d, 2.0);
+    assert!(close(f.transitions[0].progress, 0.5), "{}", f.transitions[0].progress);
+    assert!(!node(&f, "m").draw, "the matte is not drawn itself");
+    let s = doc(
+        "",
+        r#"<sequence id="s" transition="wipe" transitionDuration="1" timeGap="0.5">
+        <layer id="a" asset="img" end="2"/><layer id="b" asset="img" end="2"/></sequence>"#,
+    );
+    let f = eval(&s, 2.0);
+    assert_eq!(&*f.transitions[0].kind, "wipe");
+    assert!(close(f.transitions[0].progress, 0.5), "{}", f.transitions[0].progress);
 }
 
 #[test]

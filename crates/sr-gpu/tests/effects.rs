@@ -299,6 +299,35 @@ fn transitions_mid_way() {
     assert_px(&dip, 52, 10, [0.0, 1.0, 0.0, 1.0], 3e-2);
 }
 
+/// CONVENTIONS 5.17: D19's coordinates in frame pixels, at p = ½ with no softness (b is
+/// blue at x ≥ 32, a is red; the frame is 64 × 32 with its centre at (32, 16)).
+#[test]
+fn transitions_follow_d19_coordinates() {
+    let Some(_) = gpu() else { return };
+    let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    let at = |kind: &str, extra: &str, x: u32, y: u32| {
+        let r = render_times(&transition_doc(kind, &format!(r#"softness="0" {extra}"#)), &[2.0]).unwrap();
+        r.at(x, y)
+    };
+    // circle-open (and iris): b within half the half-diagonal (35.8 px) of the centre
+    for kind in ["circle-open", "iris"] {
+        assert!(close(at(kind, "", 46, 16), blue, 3e-2), "{kind} inside");
+        assert!(close(at(kind, "", 52, 16), red, 3e-2), "{kind} outside");
+    }
+    // circle-close: a stays inside the closing circle
+    assert!(close(at("circle-close", "", 46, 16), red, 3e-2));
+    assert!(close(at("circle-close", "", 52, 16), blue, 3e-2));
+    // clock-wipe: clockwise from 12 o'clock, so the right half first
+    assert!(close(at("clock-wipe", "", 52, 20), blue, 3e-2));
+    // radial-wipe from @angle = 90 (6 o'clock), clockwise: the left half first
+    assert!(close(at("radial-wipe", r#"angle="90""#, 52, 20), red, 3e-2));
+    // barn-door along the travel: half of the span around the centre line
+    assert!(close(at("barn-door", "", 46, 10), blue, 3e-2));
+    assert!(close(at("barn-door", "", 52, 10), red, 3e-2));
+    // additive-dissolve: both at full strength, clamped at 1
+    assert!(close(at("additive-dissolve", "", 52, 10), [1.0, 0.0, 1.0, 1.0], 3e-2));
+}
+
 #[test]
 fn custom_glsl_effect_and_transition() {
     let dir = fixtures();

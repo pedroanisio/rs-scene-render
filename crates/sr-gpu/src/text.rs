@@ -378,7 +378,7 @@ impl Host for UnitHost {
     fn var(&mut self, v: Var) -> V {
         V::Num(match v {
             Var::Time => self.t,
-            Var::Frame => (self.t * self.fps).round(),
+            Var::Frame => libm::floor(self.t * self.fps + 1e-9),
             Var::TextIndex | Var::Index => self.index,
             Var::TextTotal | Var::Count => self.total,
             Var::Seed => self.seed as f64,
@@ -406,10 +406,16 @@ impl Host for UnitHost {
         0.0
     }
     fn random(&mut self, site: u32, component: u32) -> f64 {
-        sr_eval::rng::hash(&[self.seed, site as u64, component as u64, self.index as u64]) as f64 / u64::MAX as f64
+        // D25: (seed, frame, call site + property · 2³², the "selector" property)
+        let frame = libm::floor(self.t * self.fps + 1e-9) as i64 as u64;
+        let index = site as u64 + (self.noise_channel() << 32) + ((component as u64) << 48);
+        sr_eval::rng::d24_unit(self.seed, frame, index)
     }
     fn noise_seed(&mut self) -> u64 {
         self.seed
+    }
+    fn noise_channel(&mut self) -> u64 {
+        vm::property_channel("selector")
     }
 }
 
@@ -436,6 +442,14 @@ fn animators(
     let mut path = None;
     let (mut ai, mut pi) = (0, 0);
     let bx = [0.0, 0.0, lay.size[0], lay.size[1]];
+    // scramble letters: the layer's own seed for "scramble" xor the sum of the animators' @seed
+    let node_seed = (Attrs { e, props: None }).opt("seed").map(|v| v as u64);
+    let own_seeds = children(e)
+        .into_iter()
+        .filter(|c| is(*c, "textAnimator"))
+        .map(|c| (Attrs { e: c, props: None }).opt("seed").map(|v| v as u64).unwrap_or(0))
+        .fold(0u64, u64::wrapping_add);
+    let scramble_seed = sr_eval::rng::element_seed(cx.p.seed, &n.id, node_seed, "scramble") ^ own_seeds;
     for c in children(e) {
         if is(c, "textPath") {
             let key = format!("{}/{}[{pi}]", n.id, c.element_name());
@@ -487,20 +501,40 @@ fn animators(
             "span" => Unit::Span,
             _ => Unit::Char,
         };
-        let seed = a.opt("seed").map(|v| v as u64).unwrap_or_else(|| hash_str(&key));
+        // D24 draws with the Python renderer's per-element seeds: CRC-32 of the project seed,
+        // the element's id and @seed, and the purpose
+        let own = a.opt("seed").map(|v| v as u64);
+        let el_seed = |purpose: &str| sr_eval::rng::element_seed(cx.p.seed, "", own, purpose);
+        let seed = el_seed("order");
         let amount = a.num("amount", 100.0);
         let t = n.local_time;
-        let selector = match s("selector").as_str() {
-            "wiggly" => Selector::Wiggly { amount, rate: a.num("wiggleRate", 2.0), seed },
+        // a nested <expression property="selector"> makes an expression selector
+        let nested = children(c).into_iter().any(|x| {
+            is(x, "expression") && x.get_attr("property").map(|v| v.to_string()).as_deref() == Some("selector")
+        });
+        let kind = if nested { "expression".to_string() } else { s("selector") };
+        let selector = match kind.as_str() {
+            "wiggly" => Selector::Wiggly { amount, rate: a.num("wiggleRate", 2.0), seed: el_seed("wiggly") & 0xffff },
             "expression" => {
                 // the amount expression evaluated per unit with textIndex/textTotal
                 let src = children(c)
                     .into_iter()
                     .find(|x| {
                         is(*x, "expression")
-                            && x.get_attr("property").map(|v| v.to_string()).as_deref() == Some("amount")
+                            && matches!(
+                                x.get_attr("property").map(|v| v.to_string()).as_deref(),
+                                Some("selector" | "amount")
+                            )
                     })
-                    .and_then(|x| x.text().map(str::to_string));
+                    .map(|x| {
+                        // D25 seed: the expression's @seed, else the project's
+                        let xs = Attrs { e: x, props: None }.opt("seed").map(|v| v as u64).unwrap_or(cx.p.seed);
+                        (x.text().map(str::to_string), xs)
+                    });
+                let (src, xseed) = match src {
+                    Some((s, xs)) => (s, xs),
+                    None => (None, cx.p.seed),
+                };
                 let code = src.and_then(|src| {
                     tc.exprs
                         .entry(src.clone())
@@ -521,7 +555,7 @@ fn animators(
                                             fps: cx.p.fps.as_f64(),
                                             index: i as f64 + 1.0,
                                             total: total as f64,
-                                            seed,
+                                            seed: xseed,
                                         },
                                         &mut regs,
                                     )
@@ -532,7 +566,7 @@ fn animators(
                     }
                     None => {
                         cx.unsupported.push(format!(
-                            "{}: textAnimator expression selector needs a valid <expression property=\"amount\">",
+                            "{}: textAnimator expression selector needs a valid <expression property=\"selector\">",
                             n.id
                         ));
                         Selector::Values(vec![amount; total])
@@ -596,8 +630,14 @@ fn animators(
             .str("preset")
             .and_then(|p| Preset::parse(&p))
             .map(|k| (k, a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0)));
+        if props.fill.is_none() && preset.is_some_and(|p| p.0 == Preset::Karaoke) {
+            // the default karaoke fill, resolved like a document colour so that it mixes with the text's
+            props.fill = (cx.paint)(&Value::Color(animate::KARAOKE), bx);
+        }
         out.push(Animator {
             unit,
+            // the model fills XSD defaults, so the default values read as "not given"
+            unit_set: unit != Unit::Char,
             role: a.str("span"),
             selector,
             props,
@@ -608,12 +648,51 @@ fn animators(
             },
             preset,
             stagger: a.opt("stagger"),
-            overlap: a.num("overlap", 0.0),
-            seed,
+            overlap: a.opt("overlap").filter(|o| *o != 0.0),
+            seed: scramble_seed,
         });
     }
     let _ = roles;
     (out, path)
+}
+
+/// Applies `counter` and `scramble` presets to the paragraph's text before layout: every
+/// number (in the span with the animator's role, if any) counts up from 0, cubic-out over
+/// the preset's duration, and scrambled characters show their random letters.
+fn substitutions(cx: &Cx, para: &mut Para, anims: &[Animator]) {
+    let t = cx.n.local_time;
+    for c in children(&*cx.n.elem) {
+        if !is(c, "textAnimator") || c.get_attr("preset").map(|v| v.to_string()).as_deref() != Some("counter") {
+            continue;
+        }
+        let a = Attrs { e: c, props: None };
+        let (start, dur) = (a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0));
+        let Some(k) = animate::counter_progress(start, dur, a.num("amount", 100.0), t) else {
+            continue;
+        };
+        let role = a.str("span");
+        for r in &mut para.runs {
+            if role.is_none() || r.role == role {
+                r.text = animate::counter_text(&r.text, k);
+            }
+        }
+    }
+    for a in anims {
+        let Some((Preset::Scramble, start, dur)) = a.preset else { continue };
+        let mut chars: Vec<char> = Vec::new();
+        let mut run_of: Vec<usize> = Vec::new();
+        for (k, r) in para.runs.iter().enumerate() {
+            chars.extend(r.text.chars());
+            run_of.resize(chars.len(), k);
+        }
+        let pick = |i: usize| a.role.is_none() || para.runs[run_of[i]].role == a.role;
+        let out = animate::scramble_text(&chars, &pick, a, start, dur, t);
+        let mut it = out.into_iter();
+        for r in &mut para.runs {
+            let n = r.text.chars().count();
+            r.text = it.by_ref().take(n).collect();
+        }
+    }
 }
 
 fn unit_count(lay: &Layout, unit: Unit) -> ((), usize) {
@@ -670,10 +749,15 @@ pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild
     let tol = cx.tol;
     Some(match a {
         AssetsChild::Text(t) => {
-            let (para, decor, roles) = para_of(tc, cx, t);
+            let (mut para, decor, roles) = para_of(tc, cx, t);
+            let (anims, on_path) = {
+                // the animators as far as they do not depend on the layout
+                let pre = cached_layout(tc, layout_key(key, &para), &para);
+                animators(tc, cx, &pre, &roles)
+            };
+            substitutions(cx, &mut para, &anims);
             let lk = layout_key(key, &para);
             let lay = cached_layout(tc, lk, &para);
-            let (anims, on_path) = animators(tc, cx, &lay, &roles);
             let lib = tc.lib();
             let (mut fx, clip_lines) = if anims.is_empty() {
                 (Vec::new(), Vec::new())
@@ -956,6 +1040,7 @@ fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
         tr.max_words_per_line.map(|x| x as usize),
         tr.max_chars_per_line as usize,
         tr.max_lines as usize,
+        at.str("preset").as_deref() == Some("one-word"),
     );
     let mode = at.str("mode").unwrap_or_default();
     Ok(Track {
@@ -1018,17 +1103,25 @@ pub fn caption_scene(
         let width = len_px(&tr.width, frame[0], frame);
         let (cxp, cyp) = (len_px(&tr.x, frame[0], frame), len_px(&tr.y, frame[1], frame));
         let bx = [0.0, 0.0, width, frame[1]];
-        let size = (frame[1] * 0.055).max(12.0);
+        // CONVENTIONS 5.12: the Python renderer's default style (4.4 % of the frame height,
+        // white DejaVu Sans at its regular weight, line height 1.2)
+        let size = (frame[1] * 0.044 * 100.0).round() / 100.0;
         let default = Style {
             size,
-            weight: 700,
-            color: Some(Paint::Solid { rgba: [1.0; 4], srgb: false }),
-            shadow: Some(([0.0, 0.0, 0.0, 0.8], 0.0, size * 0.06, size * 0.12)),
+            families: vec!["DejaVu Sans".into()],
+            // resolved like document colours, so that karaoke cross-fades mix like with like
+            color: paint(&Value::Color([1.0; 4]), bx),
             ..Default::default()
         };
         let fonts = std::mem::take(&mut tc.font_assets);
         let cue_style = tr.cues.get(page.cue).and_then(|c| c.style.clone());
-        let st = style_for(p, cue_style.as_deref().or(tr.style.as_deref()), default, &base, paint, tokens, &fonts, bx);
+        let mut st =
+            style_for(p, cue_style.as_deref().or(tr.style.as_deref()), default, &base, paint, tokens, &fonts, bx);
+        let size = st.size;
+        if tr.preset == captions::Preset::Classic && st.shadow.is_none() && st.stroke.is_none() {
+            // classic adds a soft drop shadow to a style with neither shadow nor stroke
+            st.shadow = Some(([0.0, 0.0, 0.0, 0.8], 0.0, size * 0.04, size * 0.12));
+        }
         let active_st =
             tr.active_style.as_deref().map(|id| style_for(p, Some(id), st.clone(), &base, paint, tokens, &fonts, bx));
         tc.font_assets = fonts;
@@ -1036,25 +1129,36 @@ pub fn caption_scene(
             .as_ref()
             .and_then(|s| s.color.clone())
             .or_else(|| tr.active_color.as_ref().and_then(|v| paint(v, bx)))
-            .unwrap_or(Paint::Solid { rgba: [1.0, 0.83, 0.0, 1.0], srgb: true });
-        let boxed = matches!(tr.preset, captions::Preset::BoxedLine | captions::Preset::BoxedWord);
+            .or_else(|| paint(&Value::Color([1.0, 212.0 / 255.0, 0.0, 1.0]), bx))
+            .unwrap_or(Paint::Solid { rgba: [1.0, 212.0 / 255.0, 0.0, 1.0], srgb: true });
+        let boxed = tr.preset == captions::Preset::BoxedLine;
         let para = Para {
             runs: vec![Run { text: page.text(), style: 0, role: None }],
             styles: vec![st],
-            opts: Opts { width, align: Align::Center, emoji_color: false, ..Default::default() },
+            // lines break where the pagination put them, never at the width
+            opts: Opts {
+                width,
+                align: Align::Center,
+                wrap: Wrap::None,
+                emoji_color: false,
+                line_height: 1.2,
+                ..Default::default()
+            },
         };
         let lay = cached_layout(tc, layout_key(&format!("caption:{}", tr.id), &para), &para);
         let decor = Decor {
-            background: boxed.then_some(Paint::Solid { rgba: [0.0, 0.0, 0.0, 0.65], srgb: true }),
-            mode: if tr.preset == captions::Preset::BoxedWord { BgMode::Word } else { BgMode::Line },
-            padding: size * 0.18,
-            radius: size * 0.15,
+            background: boxed.then_some(Paint::Solid { rgba: [0.0, 0.0, 0.0, 0xB3 as f64 / 255.0], srgb: true }),
+            mode: BgMode::Line,
+            padding: size * 0.25,
+            radius: size * 0.2,
         };
         let fx = captions::effects(tr.preset, &lay, page, t, &active);
+        if fx.iter().all(|f| f.opacity <= 0.0) {
+            continue;
+        }
         let d = glyph::draw(tc.lib(), &lay, Some(&fx), &decor, 0.1);
-        // (x, y) is the centre of the caption block's bottom edge
-        let hgt = lay.lines.last().map(|l| l.rect[1] + l.rect[3]).unwrap_or(0.0);
-        scene.extend(d.scene.transformed(&Xf::translate(cxp - width * 0.5, cyp - hgt)));
+        // (x, y) is the centre of the caption block's top edge
+        scene.extend(d.scene.transformed(&Xf::translate(cxp - width * 0.5, cyp)));
         hsh = sr_eval::rng::hash(&[hsh, hash_str(&tr.id), (t * 1000.0) as u64, page.start.to_bits()]);
     }
     (!scene.cmds.is_empty()).then_some((scene, hsh))

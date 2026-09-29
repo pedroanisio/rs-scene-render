@@ -234,15 +234,15 @@ impl Renderer {
             if t < sa.num("start", 0.0) || sa.opt("end").map(|e| t >= e).unwrap_or(false) {
                 continue;
             }
-            let seed = sa.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
+            // D24: four fractal channels at frequency · t, with @seed or the project's seed
+            let seed = sa.opt("seed").map(|s| s as u64).unwrap_or(g.seed);
+            let (f, oct) = (sa.num("frequency", 2.0), sa.num("octaves", 2.0).max(1.0) as u32);
+            let noise = [0, 1, 2, 3].map(|k| sr_eval::rng::fractal(seed, k, f * t, oct));
             let (dx, dy, droll, dz) = camera::shake(
                 sa.num("amplitude", 10.0) as f32,
-                sa.num("frequency", 2.0) as f32,
                 sa.num("rotation", 0.0) as f32,
                 sa.num("zoom", 0.0) as f32,
-                sa.num("octaves", 2.0) as u32,
-                seed,
-                t,
+                noise,
             );
             cp.offset += Vec3::new(dx, dy, 0.0);
             cp.roll += droll;
