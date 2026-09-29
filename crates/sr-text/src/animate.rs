@@ -118,7 +118,7 @@ pub struct Props {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub z_depth: Option<f64>,
-    /// Percent (100 = unchanged).
+    /// Factors (1 = unchanged), as on nodes (CONVENTIONS 5.23).
     pub scale: Option<f64>,
     pub scale_x: Option<f64>,
     pub scale_y: Option<f64>,
@@ -539,7 +539,7 @@ fn preset(a: &Animator, kind: Preset, start: f64, dur: f64, n: usize, t: f64, em
         }
         Spin => {
             pr.rotation = Some(-180.0);
-            pr.scale = Some(30.0);
+            pr.scale = Some(0.3);
             pr.opacity = Some(0.0);
         }
         Ascend => {
@@ -556,7 +556,7 @@ fn preset(a: &Animator, kind: Preset, start: f64, dur: f64, n: usize, t: f64, em
         Karaoke => pr.fill = Some(Paint::Solid { rgba: KARAOKE, srgb: true }),
         TrackingIn => {
             // +500 thousandths of an em
-            pr.tracking = Some(0.5 * em);
+            pr.tracking = Some(500.0);
             pr.opacity = Some(0.0);
         }
         MaskReveal => pr.y = Some(1.1 * em),
@@ -655,6 +655,8 @@ pub fn counter_progress(start: f64, dur: f64, amount: f64, t: f64) -> Option<f64
 
 #[derive(Clone)]
 struct Acc {
+    /// Uniform scale factor (scale), times sx and sy (scaleX, scaleY).
+    sc: f64,
     dx: f64,
     dy: f64,
     z: f64,
@@ -689,6 +691,7 @@ struct Acc {
 impl Default for Acc {
     fn default() -> Acc {
         Acc {
+            sc: 1.0,
             dx: 0.0,
             dy: 0.0,
             z: 0.0,
@@ -752,6 +755,10 @@ pub fn scramble_text(
         }
     }
     out
+}
+
+fn gl_style(lay: &Layout, g: usize) -> usize {
+    lay.glyphs[g].style
 }
 
 /// Per-glyph effects of `anims` at layer time `t`; `counter` text replaces digits for the counter preset.
@@ -828,21 +835,22 @@ pub fn apply(
             if s.abs() < 1e-6 && s_op.abs() < 1e-6 {
                 continue;
             }
+            // the Python renderer's combine: additive offsets add (replace moves toward the value),
+            // factors multiply by 1 + (v − 1)·s (replace moves toward the value)
             let add = |cur: &mut f64, v: Option<f64>| {
                 if let Some(v) = v {
                     match a.combine {
-                        Combine::Replace => *cur = v * s,
-                        _ => *cur += v * s,
+                        Combine::Replace => *cur += (v - *cur) * s,
+                        Combine::Multiply => *cur *= 1.0 + (v - 1.0) * s,
+                        Combine::Add => *cur += v * s,
                     }
                 }
             };
-            let fac = |cur: &mut f64, v: Option<f64>, unit_scale: f64| {
+            let fac = |cur: &mut f64, v: Option<f64>, s: f64| {
                 if let Some(v) = v {
-                    let f = 1.0 + (v / unit_scale - 1.0) * s;
                     match a.combine {
-                        Combine::Add => *cur += f - 1.0,
-                        Combine::Multiply => *cur *= f,
-                        Combine::Replace => *cur = f,
+                        Combine::Replace => *cur += (v - *cur) * s,
+                        _ => *cur *= 1.0 + (v - 1.0) * s,
                     }
                 }
             };
@@ -854,6 +862,7 @@ pub fn apply(
             add(&mut ag.ry, props.rotation_y);
             add(&mut ag.skew, props.skew);
             add(&mut ag.sw, props.stroke_width);
+            // thousandths of an em (CONVENTIONS 5.23), accumulated along the line below
             add(&mut ag.tracking, props.tracking);
             add(&mut ag.line_sp, props.line_spacing);
             add(&mut ag.shift, props.baseline_shift);
@@ -864,19 +873,11 @@ pub fn apply(
             if props.anchor_y.is_some() {
                 ag.ay = props.anchor_y.unwrap_or(0.0);
             }
-            fac(&mut ag.sx, props.scale.or(props.scale_x), 100.0);
-            fac(&mut ag.sy, props.scale.or(props.scale_y), 100.0);
-            {
-                let s = s_op;
-                if let Some(v) = props.opacity {
-                    let f = 1.0 + (v - 1.0) * s;
-                    match a.combine {
-                        Combine::Add => ag.op += f - 1.0,
-                        Combine::Multiply => ag.op *= f,
-                        Combine::Replace => ag.op = f,
-                    }
-                }
-            }
+            // scale, scaleX and scaleY are factors (5.23); the unit's x scale is scale · scaleX
+            fac(&mut ag.sc, props.scale, s);
+            fac(&mut ag.sx, props.scale_x, s);
+            fac(&mut ag.sy, props.scale_y, s);
+            fac(&mut ag.op, props.opacity, s_op);
             if let Some(b) = props.blur {
                 ag.blur += (b * s).max(0.0);
             }
@@ -898,7 +899,7 @@ pub fn apply(
         let mut run = 0.0;
         for g in l.glyphs.clone() {
             shift_x[g] = run;
-            run += acc[g].tracking;
+            run += acc[g].tracking / 1000.0 * lay.styles[gl_style(lay, g)].size;
         }
         for g in l.glyphs.clone() {
             shift_x[g] -= run * lay.align_shift;
@@ -909,8 +910,8 @@ pub fn apply(
         let (px, py) = a.pivot.unwrap_or((gl.x + gl.advance * 0.5, gl.y));
         let anchor = p(px + a.ax, py + a.ay);
         let persp = 1000.0 / (1000.0 + a.z).max(1.0);
-        let sx = a.sx * libm::cos(a.ry.to_radians()) * persp;
-        let sy = a.sy * libm::cos(a.rx.to_radians()) * persp;
+        let sx = a.sc * a.sx * libm::cos(a.ry.to_radians()) * persp;
+        let sy = a.sc * a.sy * libm::cos(a.rx.to_radians()) * persp;
         let xf = Xf::translate(anchor.x + a.dx + shift_x[g], anchor.y + a.dy + a.line_sp * gl.line as f64 - a.shift)
             .mul(&Xf::rotate(a.rot))
             .mul(&Xf::skew(a.skew, 0.0))

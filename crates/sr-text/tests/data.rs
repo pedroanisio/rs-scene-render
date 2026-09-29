@@ -376,3 +376,21 @@ fn charts_codes_formulas_audiograms() {
     let _ = glyph::GlyphFx::default();
     let _ = Decor::default();
 }
+
+/// CONVENTIONS 5.23: an animator's scale is a factor and its tracking thousandths of an em.
+#[test]
+fn animator_units() {
+    let mut lib = lib();
+    let l = lay(&mut lib, &[("abc", None)]);
+    let roles = vec![None];
+    let em = l.styles[0].size;
+    let a = Animator { props: Props { tracking: Some(1000.0), ..Default::default() }, ..Default::default() };
+    let (fx, _) = animate::apply(&lib, &l, &roles, &[a], 0.0);
+    for (k, f) in fx.iter().enumerate() {
+        assert!((f.xf.0[4] - k as f64 * em).abs() < 1e-9, "glyph {k} moves {} (em {em})", f.xf.0[4]);
+    }
+    let a =
+        Animator { props: Props { scale: Some(2.0), scale_x: Some(1.5), ..Default::default() }, ..Default::default() };
+    let (fx, _) = animate::apply(&lib, &l, &roles, &[a], 0.0);
+    assert!((fx[0].xf.0[0] - 3.0).abs() < 1e-9 && (fx[0].xf.0[3] - 2.0).abs() < 1e-9, "{:?}", fx[0].xf);
+}
