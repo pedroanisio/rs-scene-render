@@ -406,7 +406,9 @@ impl Host for UnitHost {
         0.0
     }
     fn random(&mut self, site: u32, component: u32) -> f64 {
-        sr_eval::rng::hash(&[self.seed, site as u64, component as u64, self.index as u64]) as f64 / u64::MAX as f64
+        // D25's random with the unit index in place of the frame and no property (channel 8)
+        let index = site as u64 + (sr_eval::expr::vm::OTHER_CHANNEL << 32) + ((component as u64) << 48);
+        sr_eval::rng::d24_unit(self.seed, self.index as u64, index)
     }
     fn noise_seed(&mut self) -> u64 {
         self.seed

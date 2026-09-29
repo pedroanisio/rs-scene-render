@@ -1970,14 +1970,8 @@ impl Builder {
                     }
                     match self.slot(owner, &x.property) {
                         Ok(slot) => {
-                            let base_seed = node.map(|n| self.nodes[n as usize].seed).unwrap_or(0);
-                            let seed = x.seed.unwrap_or_else(|| {
-                                crate::rng::hash(&[
-                                    base_seed,
-                                    crate::rng::hash_str(&x.property),
-                                    crate::rng::hash_str(who),
-                                ])
-                            });
+                            // D25 `seed`: the expression's @seed, else the project's
+                            let seed = x.seed.unwrap_or(self.project_seed);
                             self.pending_expr.push((
                                 Some(slot),
                                 node,
@@ -2531,7 +2525,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         b.animate(Owner::Node(n), &*elem, Some(n), doc_ix, &scope, &id);
         b.parts(n);
         if let Some(c) = attr_str(&*elem, "condition") {
-            let seed = b.nodes[n as usize].seed;
+            let seed = b.project_seed;
             b.pending_expr.push((None, Some(n), c, seed, elem.loc(), scope.clone(), doc_ix));
         }
     }
