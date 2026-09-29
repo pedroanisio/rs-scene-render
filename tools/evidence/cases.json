@@ -217,7 +217,7 @@
     {
       "id": "cinematic-pbr",
       "reference": "Cinematic product / CG shots",
-      "technique": "PBR metals, shadowed spot light, a glass pane in front of the set (z < 0) over a 2D band, depth of field",
+      "technique": "PBR metals, shadowed spot light, a clear glass pane in front of the set (z < 0) refracting the 2D band painted before it, depth of field",
       "scene": "scenes/cinematic-pbr.scene.xml",
       "expect": "native",
       "bench": true,
@@ -251,18 +251,29 @@
           "why": "the chrome spheres catch specular highlights"
         },
         {
-          "type": "coverage",
+          "type": "edge_shift",
           "t": 1.0,
-          "region": [
-            200,
+          "rgb": "#F0B030",
+          "tol": 0.1,
+          "inside": [
+            150,
+            200
+          ],
+          "outside": [
             20,
-            240,
             100
           ],
+          "min": 1.0,
+          "why": "the glass pane refracts the band behind it: the band's edge seen through the pane is displaced"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 170,
+          "y": 60,
           "rgb": "#F0B030",
-          "tol": 0.03,
-          "max": 0.5,
-          "why": "the glass pane in front tints the band behind it"
+          "tol": 0.06,
+          "why": "clear glass keeps the band's colour (at most Fresnel's loss)"
         },
         {
           "type": "coverage",

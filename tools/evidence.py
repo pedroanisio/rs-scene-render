@@ -156,6 +156,16 @@ def run_check(c, frames):
         frac = float((near if "rgb" in c else ~near).mean())
         ok = frac >= c.get("min", 0.0) and frac <= c.get("max", 1.0)
         return ok, round(frac, 4)
+    if kind == "edge_shift":
+        # the lowest row of `rgb` per column, inside vs outside a column range: refraction moves an edge
+        px = frames[c["t"]][:, :, :3]
+        near = np.abs(px - rgb(c["rgb"])).max(axis=2) <= c["tol"]
+
+        def edge(cols):
+            rows = [np.nonzero(near[:, x])[0] for x in range(*cols)]
+            return float(np.median([r.max() for r in rows if len(r)])) if any(len(r) for r in rows) else float("nan")
+        shift = abs(edge(c["inside"]) - edge(c["outside"]))
+        return shift >= c["min"], round(shift, 2)
     if kind == "changes":
         a, b = (region(frames[t], c["region"]) for t in c["t"])
         delta = float(np.abs(a - b).mean())
