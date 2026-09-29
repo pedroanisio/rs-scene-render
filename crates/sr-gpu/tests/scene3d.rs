@@ -468,3 +468,82 @@ fn screen_space_reflections_mirror_objects_in_glossy_floors() {
     assert!(gain > 0.05, "reflection of the red ball: {gain}");
     assert!((lum3(on.at(10, 120)) - lum3(off.at(10, 120))).abs() < 0.03, "empty floor unchanged");
 }
+
+fn traced(cam_extra: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    let body = format!(r#"<camera id="cam" fov="60" x="64" y="64" z="-110.85" {cam_extra}/>{body}"#);
+    scene("", mats, &body, lights)
+}
+
+const PT: &str = r#"renderer="pathtrace" pathSamples="64" maxBounces="4" denoise="false""#;
+
+#[test]
+fn path_tracing_matches_the_rasteriser_where_both_are_exact() {
+    // a grey (linear 0.5) diffuse sphere; (1) lit by ambient light only it is a white furnace:
+    // every path leaves after one bounce, so it returns albedo × ambient like the rasteriser;
+    // (2) lit by a directional light only, both evaluate the same BRDF
+    let mats = r##"<material id="g" baseColor="#BCBCBC" roughness="1"/>"##;
+    let body = r#"<object3D id="s" primitive="sphere" radius="30" segments="96" x="64" y="64" z="0" material="g"/>"#;
+    for lights in [
+        r#"<light id="a" type="ambient" intensity="1"/>"#,
+        r#"<light id="sun" type="directional" intensity="2" yaw="30" pitch="-40"/>"#,
+    ] {
+        let Some(r) = render(&traced("", mats, body, lights)) else { return };
+        let p = render(&traced(PT, mats, body, lights)).unwrap();
+        assert!(problems(&p).is_empty(), "{:?}", problems(&p));
+        for (x, y) in [(64, 64), (54, 54), (74, 60), (64, 80)] {
+            let (a, b) = (r.at(x, y), p.at(x, y));
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 0.03 + 0.04 * a[c],
+                    "{lights} at ({x}, {y}): raster {a:?} vs traced {b:?}"
+                );
+            }
+            assert!((b[3] - 1.0).abs() < 1e-3, "covered");
+        }
+        assert_eq!(p.at(2, 2)[3], 0.0, "a primary miss is transparent");
+    }
+}
+
+#[test]
+fn path_tracing_is_deterministic_and_shadows_and_refracts() {
+    let mats = r##"<material id="w" baseColor="#D0D0D0" roughness="0.9"/><material id="gl" transmission="1" roughness="0.02" ior="1.5"/>"##;
+    let body = r#"<layer id="bg" asset="red" scaleX="32" scaleY="32"/>
+        <object3D id="floor" primitive="box" width="300" height="4" depth="300" x="64" y="102" z="100" material="w"/>
+        <object3D id="ball" primitive="sphere" radius="14" segments="48" x="40" y="70" z="20" material="w"/>
+        <object3D id="pane" primitive="sphere" radius="16" segments="64" x="96" y="50" z="-10" material="gl"/>"#;
+    let lights = r#"<light id="sun" type="directional" intensity="2" pitch="-80" castShadow="true"/>"#;
+    let Some(a) = render(&traced(PT, mats, body, lights)) else { return };
+    let b = render(&traced(PT, mats, body, lights)).unwrap();
+    assert!(a.px == b.px, "the same frame twice");
+    // under the ball (the sun is nearly overhead) the floor is in shadow
+    let under = lum(a.at(40, 96));
+    let open = lum(a.at(10, 110));
+    assert!(under < open * 0.5, "shadow {under} vs open floor {open}");
+    // through the glass the red layer behind shows, refracted: red, not black
+    let g = a.at(96, 50);
+    assert!(g[0] > 0.3 && g[0] > g[1] * 2.0, "through glass: {g:?}");
+}
+
+#[test]
+fn path_tracing_denoiser_smooths_noise_and_keeps_the_mean() {
+    // a floor under a sphere-area light at 4 samples: soft, noisy light; the à-trous filter
+    // lowers the pixel-to-pixel variation and keeps the average
+    let mats = r##"<material id="w" baseColor="#C0C0C0" roughness="0.9"/>"##;
+    let body = r#"<object3D id="floor" primitive="box" width="400" height="4" depth="400" x="64" y="102" z="100" material="w"/>
+        <object3D id="ball" primitive="sphere" radius="12" segments="32" x="64" y="84" z="40" material="w"/>"#;
+    let lights = r#"<light id="l" type="sphere-area" x="64" y="20" z="20" radius="25" intensity="60" castShadow="true" range="2000"/>"#;
+    let cam = |dn: bool| format!(r#"renderer="pathtrace" pathSamples="4" maxBounces="3" denoise="{dn}""#);
+    let Some(noisy) = render(&traced(&cam(false), mats, body, lights)) else { return };
+    let clean = render(&traced(&cam(true), mats, body, lights)).unwrap();
+    let region: Vec<(u32, u32)> = (104..124).flat_map(|y| (20..108).map(move |x| (x, y))).collect();
+    let stats = |r: &Rendered| {
+        let v: Vec<f32> = region.iter().map(|&(x, y)| lum(r.at(x, y))).collect();
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let tv = region.windows(2).map(|w| (lum(r.at(w[0].0, w[0].1)) - lum(r.at(w[1].0, w[1].1))).abs()).sum::<f32>()
+            / v.len() as f32;
+        (mean, tv)
+    };
+    let ((m0, tv0), (m1, tv1)) = (stats(&noisy), stats(&clean));
+    assert!(tv1 < tv0 * 0.5, "variation {tv0} -> {tv1}");
+    assert!((m1 - m0).abs() < 0.05 * m0, "mean {m0} -> {m1}");
+}

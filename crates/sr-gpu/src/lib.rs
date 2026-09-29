@@ -11,6 +11,7 @@ pub mod ocio;
 pub mod output;
 pub mod paint;
 pub mod particles;
+pub mod pathtrace;
 pub mod raster;
 pub mod render;
 pub mod resources;

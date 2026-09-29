@@ -61,6 +61,8 @@ pub(super) struct CamExtras {
     /// Screen-space ambient occlusion (radius, intensity) and reflections.
     pub ao: Option<[f32; 2]>,
     pub ssr: bool,
+    /// Path tracing (camera renderer="pathtrace").
+    pub path: Option<crate::pathtrace::PathOpts>,
 }
 
 /// The blobs of a clay object at this frame: static attributes, overridden by the animated
@@ -165,7 +167,7 @@ impl Renderer {
     /// The frame camera (the active camera node, else the default 2.5D camera).
     pub(super) fn camera3(&self, g: &FrameGraph, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
         let mut cp = CameraParams::default();
-        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0, ao: None, ssr: false };
+        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0, ao: None, ssr: false, path: None };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
         let (mut sensor, mut fstop, mut focus, mut blades, mut dof_on, mut focus_target) =
             (36.0f32, 2.8f32, 1000.0f32, 0u32, false, None);
@@ -177,6 +179,13 @@ impl Renderer {
                 ex.ao = Some([a.num("aoRadius", 40.0) as f32, a.num("aoIntensity", 1.0) as f32]);
             }
             ex.ssr = flag(&a, "screenSpaceReflections", false);
+            if a.str("renderer").as_deref() == Some("pathtrace") {
+                ex.path = Some(crate::pathtrace::PathOpts {
+                    samples: a.num("pathSamples", 64.0).clamp(1.0, 65536.0) as u32,
+                    bounces: a.num("maxBounces", 4.0).clamp(1.0, 64.0) as u32,
+                    denoise: flag(&a, "denoise", true),
+                });
+            }
             cp.fov = a.num("fov", 60.0) as f32;
             if let Some(f) = a.opt("focalLength") {
                 cp.fov = camera::fov_of_lens(f as f32, sensor);
@@ -1367,7 +1376,22 @@ impl Renderer {
             encode_srgb: !self.working.linear,
             ao: ex.ao,
             ssr: ex.ssr,
+            path: None,
         };
+        let mut scene = scene;
+        if let Some(opts) = ex.path {
+            if scene.cam.orthographic || scene.clip_fix != Mat4::IDENTITY {
+                plan.stats.unsupported.push(format!(
+                    "{}: path tracing needs a perspective camera over the whole frame; rasterised instead",
+                    n.id
+                ));
+            } else {
+                plan.stats
+                    .unsupported
+                    .extend(crate::pathtrace::notes(&scene).into_iter().map(|m| format!("{}: {m}", n.id)));
+                scene.path = Some(opts);
+            }
+        }
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);
         let out = self.temp(plan, space.size);

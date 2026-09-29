@@ -31,6 +31,7 @@ fn scene(draws: Vec<Draw3>, lights: Vec<Light3>) -> Scene3 {
         encode_srgb: false,
         ao: None,
         ssr: false,
+        path: None,
     }
 }
 

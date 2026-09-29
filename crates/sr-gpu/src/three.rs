@@ -33,6 +33,8 @@ pub struct MeshGpu {
     pub vbuf: wgpu::Buffer,
     pub ibuf: wgpu::Buffer,
     pub count: u32,
+    /// The vertices and indices on the CPU (the path tracer builds its BVH from them).
+    pub cpu: Arc<(Vec<Vertex>, Vec<u32>)>,
     /// Object-space bounds.
     pub lo: Vec3,
     pub hi: Vec3,
@@ -70,6 +72,14 @@ pub enum MeshSrc {
 }
 
 impl MeshSrc {
+    /// The vertices this draw uses (deformed ones when deformed) and the mesh's indices.
+    pub fn cpu(&self) -> (&[Vertex], &[u32]) {
+        match self {
+            MeshSrc::Cached(m) => (&m.cpu.0, &m.cpu.1),
+            MeshSrc::Deformed(v, m) => (v, &m.cpu.1),
+        }
+    }
+
     fn mesh(&self) -> &MeshGpu {
         match self {
             MeshSrc::Cached(m) | MeshSrc::Deformed(_, m) => m,
@@ -185,6 +195,8 @@ pub struct Scene3 {
     pub ao: Option<[f32; 2]>,
     /// Screen-space reflections.
     pub ssr: bool,
+    /// Path trace instead of rasterising.
+    pub path: Option<crate::pathtrace::PathOpts>,
 }
 
 /// Counters for statistics and tests.
@@ -331,6 +343,8 @@ pub struct ThreeEngine {
     bgl_obj: wgpu::BindGroupLayout,
     bgl_splat: wgpu::BindGroupLayout,
     bgl_ssr: wgpu::BindGroupLayout,
+    /// Path-tracing pipelines, built on first use.
+    pt: Option<crate::pathtrace::PtGpu>,
     /// Depth and normal prepass pipelines (by culling).
     pre_pipes: [wgpu::RenderPipeline; 2],
     ssao_pipe: wgpu::RenderPipeline,
@@ -845,6 +859,7 @@ impl ThreeEngine {
             bgl_obj,
             bgl_splat,
             bgl_ssr,
+            pt: None,
             pre_pipes,
             ssao_pipe,
             ao_blur_pipe,
@@ -984,7 +999,14 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        Arc::new(MeshGpu { vbuf, ibuf, count: indices.len() as u32, lo, hi })
+        Arc::new(MeshGpu {
+            vbuf,
+            ibuf,
+            count: indices.len() as u32,
+            cpu: Arc::new((vertices.to_vec(), indices.to_vec())),
+            lo,
+            hi,
+        })
     }
 
     /// Prefilters and uploads an environment.
@@ -1188,6 +1210,32 @@ impl ThreeEngine {
         backdrop: Option<&wgpu::TextureView>,
         out: &wgpu::TextureView,
     ) {
+        if let Some(opts) = scene.path {
+            let data = crate::pathtrace::build(scene);
+            if self.pt.is_none() {
+                self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
+            }
+            let env_view = scene.env.as_ref().map(|e| &e.env.view).unwrap_or(&self.black_env);
+            let inputs = crate::pathtrace::PtInputs {
+                env: env_view,
+                backdrop,
+                black: &self.black_env,
+                sampler: &self.repeat_smp,
+            };
+            crate::pathtrace::render(
+                self.pt.as_ref().expect("built"),
+                &self.device,
+                enc,
+                scene,
+                &data,
+                opts,
+                &inputs,
+                out,
+            );
+            self.stats =
+                Stats3 { draws: scene.draws.len(), triangles: data.tri_mat.len() as u64, ..Default::default() };
+            return;
+        }
         let d = self.device.clone();
         let size = [scene.size[0].max(1), scene.size[1].max(1)];
         let targets = self.targets.clone();
