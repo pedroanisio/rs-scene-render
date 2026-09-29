@@ -595,7 +595,14 @@ fn animators(
         let preset = a
             .str("preset")
             .and_then(|p| Preset::parse(&p))
-            .map(|k| (k, a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0)));
+            // presetStart is on the layer's clock (its parent's timeline), by default the layer's start
+            .map(|k| {
+                (
+                    k,
+                    a.opt("presetStart").unwrap_or(n.timeline_time - n.local_time),
+                    a.opt("presetDuration").unwrap_or(1.0),
+                )
+            });
         out.push(Animator {
             unit,
             role: a.str("span"),
@@ -678,7 +685,7 @@ pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild
             let (mut fx, clip_lines) = if anims.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
-                animate::apply(lib, &lay, &roles, &anims, cx.n.local_time)
+                animate::apply(lib, &lay, &roles, &anims, cx.n.timeline_time)
             };
             if let Some(op) = &on_path {
                 let pf = animate::on_path(&lay, op);
