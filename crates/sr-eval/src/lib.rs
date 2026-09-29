@@ -98,6 +98,14 @@ impl Evaluator {
         g
     }
 
+    /// Whether frames depend on a simulation (physics, particles, agents). Simulated state
+    /// is stepped in time order under a lock, so such a document must be evaluated
+    /// serially; without one, [`Evaluator::evaluate`] is a pure function of `t` and frames
+    /// may be evaluated in any order or on any thread.
+    pub fn has_simulation(&self) -> bool {
+        self.sim.is_some()
+    }
+
     /// Simulates the document's physics to its end and returns a physics cache file
     /// (`physics@cache`; its SHA-256 goes in `cacheSha256`).
     pub fn physics_cache(&self) -> Result<Vec<u8>, String> {
