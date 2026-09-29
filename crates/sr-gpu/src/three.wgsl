@@ -227,13 +227,12 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     var radiance = li.color.rgb;
     var a = s.rough * s.rough;
     if (ty == 0u) {
-        // ambient: a uniform environment of this radiance, reflected by the diffuse and specular lobes
-        // alike (split sum, as the dome), so metals reflect it too (conventions 5.20)
+        // ambient (conventions 5.20): dielectrics take it diffusely, albedo × radiance; metals reflect it
+        // as a uniform environment of this radiance (split sum, as the dome), in proportion to metalness
         let nv = max(dot(s.n, s.v), 1e-3);
         let lut = textureSampleLevel(brdf_lut, clamp_smp, vec2(nv, s.rough), 0.0).rg;
-        let fr_avg = s.f0 + (1.0 - s.f0) * pow(1.0 - nv, 5.0);
-        let diff = s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * (vec3(1.0) - fr_avg) * li.flags.x;
-        let spec = (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight * li.flags.y;
+        let diff = s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * li.flags.x;
+        let spec = (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight * s.metallic * li.flags.y;
         return (diff + spec) * radiance * s.occlusion;
     }
     if (ty == 1u) {

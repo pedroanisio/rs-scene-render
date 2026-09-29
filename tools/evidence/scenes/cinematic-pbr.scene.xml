@@ -12,7 +12,11 @@
     <shape id="band" shape="rect" x="0" y="0" width="640" height="150" fill="#F0B030"/>
     <camera id="cam" fov="45" x="320" y="140" z="-640" pitch="-6" depthOfField="true" fStop="2" focusTarget="balls" focalLength="50"/>
     <object3D id="floor" primitive="plane" width="3000" height="3000" x="320" y="300" z="300" rotationX="-90" material="m-floor"/>
-    <object3D id="balls" primitive="sphere" radius="30" segments="48" instances="5" x="320" y="240" z="200" material="m-chrome"/>
+    <!-- five copies placed by index (conventions 5.2: copies have no implicit layout): 3 behind, 2 in front -->
+    <object3D id="balls" primitive="sphere" radius="30" segments="48" instances="5" x="320" y="240" z="200" material="m-chrome">
+      <expression property="x">320 + (index % 3 - 1) * 75</expression>
+      <expression property="y">240 + (Math.floor(index / 3) - 0.5) * 75</expression>
+    </object3D>
     <object3D id="glass" primitive="box" width="240" height="140" depth="20" x="320" y="150" z="-60" material="m-glass"/>
   </composition>
   <lights>
