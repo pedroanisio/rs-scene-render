@@ -186,6 +186,9 @@ pub struct Layout {
     /// Styles at the laid-out size.
     pub styles: Vec<Style>,
     pub vertical: bool,
+    /// Share of a width change that moves a line's start: 0 for start (and justified)
+    /// alignment, ½ for centre, 1 for end (mirrored in right-to-left paragraphs).
+    pub align_shift: f64,
 }
 
 /// A glyph on a line: face, glyph, advance, x and y offsets, character, style, vertical.
@@ -333,6 +336,12 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
         Dir::Auto => None,
     };
     let bidi = BidiInfo::new(&text, default);
+    let rtl = bidi.paragraphs.first().is_some_and(|p| p.level.is_rtl());
+    out.align_shift = match (o.align, rtl) {
+        (Align::Center, _) => 0.5,
+        (Align::End, false) | (Align::Start | Align::Justify, true) => 1.0,
+        _ => 0.0,
+    };
     let level = |i: usize| bidi.levels.get(byte_of[i]).copied().unwrap_or(Level::ltr());
     // items and shaping
     let mut shaped: Vec<Vec<Shaped>> = Vec::new();

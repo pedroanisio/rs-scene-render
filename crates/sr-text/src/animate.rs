@@ -169,6 +169,8 @@ pub enum Selector {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Animator {
     pub unit: Unit,
+    /// `unit` was given explicitly (it overrides a preset's unit).
+    pub unit_set: bool,
     /// Restrict to the span with this role.
     pub role: Option<String>,
     pub selector: Selector,
@@ -178,8 +180,8 @@ pub struct Animator {
     pub preset: Option<(Preset, f64, f64)>,
     /// Preset per-unit delay, seconds.
     pub stagger: Option<f64>,
-    /// Preset overlap between units, 0–1.
-    pub overlap: f64,
+    /// Preset overlap between units, 0–1 (the preset's own when `None`).
+    pub overlap: Option<f64>,
     pub seed: u64,
 }
 
@@ -187,6 +189,7 @@ impl Default for Animator {
     fn default() -> Animator {
         Animator {
             unit: Unit::Char,
+            unit_set: false,
             role: None,
             selector: Selector::Range {
                 percent: true,
@@ -205,17 +208,10 @@ impl Default for Animator {
             combine: Combine::Add,
             preset: None,
             stagger: None,
-            overlap: 0.0,
+            overlap: None,
             seed: 0,
         }
     }
-}
-
-fn hash(seed: u64, a: u64, b: u64) -> f64 {
-    let mut z = seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
 }
 
 fn smooth(x: f64) -> f64 {
@@ -223,13 +219,38 @@ fn smooth(x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
-fn ease_out_back(x: f64) -> f64 {
-    let c1 = 1.70158;
-    let c3 = c1 + 1.0;
-    1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
+/// Easing curves of the preset table (the Penner curves of the Python renderer's `curves.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ease {
+    Linear,
+    QuadIn,
+    QuadOut,
+    CubicOut,
+    ExpoOut,
+    BackOut,
+    BounceOut,
 }
 
-fn ease_out_bounce(x: f64) -> f64 {
+impl Ease {
+    /// Eased progress at `u` in [0, 1].
+    pub fn at(self, u: f64) -> f64 {
+        let out = |f: fn(f64) -> f64| 1.0 - f(1.0 - u);
+        match self {
+            Ease::Linear => u,
+            Ease::QuadIn => u * u,
+            Ease::QuadOut => out(|v| v * v),
+            Ease::CubicOut => out(|v| v * v * v),
+            Ease::ExpoOut => out(|v| if v == 0.0 { 0.0 } else { libm::pow(2.0, 10.0 * v - 10.0) }),
+            Ease::BackOut => out(|v| {
+                let c1 = 1.70158;
+                (c1 + 1.0) * v * v * v - c1 * v * v
+            }),
+            Ease::BounceOut => bounce_out(u),
+        }
+    }
+}
+
+fn bounce_out(x: f64) -> f64 {
     let (n1, d1) = (7.5625, 2.75);
     if x < 1.0 / d1 {
         n1 * x * x
@@ -286,17 +307,20 @@ fn units(lay: &Layout, unit: Unit, role_span: Option<&dyn Fn(usize) -> bool>) ->
     }
 }
 
+/// Position of unit `i` of `n` in the selection order: forward i, reverse n − 1 − i,
+/// center-out 2·|i − c|, edges-in n − 1 − 2·|i − c| (c the middle index), random the rank
+/// of the D24 draw U(seed, 0, i).
 fn order_index(i: usize, n: usize, order: Order, seed: u64) -> f64 {
     let c = (n as f64 - 1.0) * 0.5;
     match order {
         Order::Forward => i as f64,
         Order::Reverse => (n - 1 - i) as f64,
-        Order::CenterOut => (i as f64 - c).abs() * 2.0 * (n as f64 - 1.0) / (n as f64 - 1.0).max(1.0) * 0.5,
-        Order::EdgesIn => (c - (i as f64 - c).abs()) * 2.0 * 0.5,
+        Order::CenterOut => (i as f64 - c).abs() * 2.0,
+        Order::EdgesIn => (n as f64 - 1.0) - (i as f64 - c).abs() * 2.0,
         Order::Random => {
-            let mut v: Vec<(f64, usize)> = (0..n).map(|k| (hash(seed, k as u64, 7), k)).collect();
-            v.sort_by(|a, b| a.0.total_cmp(&b.0));
-            v.iter().position(|x| x.1 == i).unwrap_or(i) as f64
+            let key = |k: usize| (sr_vector::d24::d24_unit(seed, 0, k as u64), k);
+            let own = key(i);
+            (0..n).filter(|&k| key(k) < own).count() as f64
         }
     }
 }
@@ -305,7 +329,8 @@ fn range_amount(sel: &Selector, i: usize, n: usize, t: f64) -> f64 {
     match sel {
         Selector::Values(v) => v.get(i).copied().unwrap_or(0.0) / 100.0,
         Selector::Wiggly { amount, rate, seed } => {
-            sr_vector::modifiers::smooth_noise(*seed, i as u64, t * rate) * amount / 100.0
+            // D24 noise, one channel per unit
+            sr_vector::d24::noise(*seed, i as u64, t * rate) * amount / 100.0
         }
         Selector::Range {
             percent,
@@ -352,86 +377,147 @@ fn range_amount(sel: &Selector, i: usize, n: usize, t: f64) -> f64 {
     }
 }
 
-/// Expands a preset: per-unit amounts, properties and unit.
-fn preset(
-    a: &Animator,
-    kind: Preset,
-    start: f64,
-    dur: f64,
-    n: usize,
-    t: f64,
-    em: f64,
-) -> (Unit, Vec<f64>, Props, bool) {
+/// How a preset times its units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Unit p shows from start + p·D/M on, without a fade.
+    Step,
+    /// Units rest in the offset state until their window starts: s = 1 − ease(q).
+    In,
+    /// s = ease(q).
+    Out,
+    /// s = sin(2π(1.5·(t − start) − p/8)), faded in and out over 10 % of D.
+    Wave,
+    /// Hidden before the start; then unrevealed units show seeded random letters.
+    Scramble,
+    /// Numbers count up (text substitution before layout, [`counter_text`]).
+    Counter,
+}
+
+/// The preset table (CONVENTIONS 5.11: the Python renderer's `text_animators.py` PRESETS):
+/// unit, timing mode, ease and overlap.
+fn table(kind: Preset) -> (Unit, Mode, Ease, f64) {
+    use Ease::*;
+    use Mode::*;
     use Preset::*;
-    let dur = dur.max(1e-6);
-    let base_unit = match kind {
-        WordByWord | Ascend | Highlight => Unit::Word,
-        LineByLine | MaskReveal => Unit::Line,
-        _ => Unit::Char,
+    match kind {
+        Typewriter => (Unit::Char, Step, Linear, 0.0),
+        FadeIn => (Unit::Char, In, QuadOut, 0.6),
+        FadeOut => (Unit::Char, Out, QuadIn, 0.6),
+        WordByWord => (Unit::Word, Step, Linear, 0.0),
+        LetterByLetter => (Unit::Char, In, CubicOut, 0.5),
+        LineByLine => (Unit::Line, In, CubicOut, 0.3),
+        SlideUp | SlideDown | SlideLeft | SlideRight => (Unit::Word, In, CubicOut, 0.5),
+        Pop => (Unit::Word, In, BackOut, 0.5),
+        ScaleIn => (Unit::Word, In, CubicOut, 0.5),
+        BlurIn => (Unit::Word, In, CubicOut, 0.6),
+        Preset::Wave => (Unit::Char, Mode::Wave, Linear, 0.0),
+        Bounce => (Unit::Char, In, BounceOut, 0.6),
+        Spin => (Unit::Char, In, CubicOut, 0.5),
+        Ascend => (Unit::Char, In, ExpoOut, 0.8),
+        Shift => (Unit::Char, In, ExpoOut, 0.7),
+        Preset::Scramble => (Unit::Char, Mode::Scramble, Linear, 0.0),
+        Preset::Counter => (Unit::Char, Mode::Counter, CubicOut, 0.0),
+        Karaoke | Highlight => (Unit::Word, Out, Linear, 0.0),
+        TrackingIn => (Unit::Char, In, ExpoOut, 0.85),
+        MaskReveal => (Unit::Line, In, CubicOut, 0.3),
+    }
+}
+
+/// Default karaoke fill, #FFD400.
+pub const KARAOKE: [f64; 4] = [1.0, 212.0 / 255.0, 0.0, 1.0];
+/// Default highlight box paint, #FFD40059.
+const HIGHLIGHT: [f64; 4] = [1.0, 212.0 / 255.0, 0.0, 89.0 / 255.0];
+
+/// A preset expanded for one frame.
+struct Expanded {
+    unit: Unit,
+    /// Selection per unit.
+    amounts: Vec<f64>,
+    /// Selection per unit of the opacity offset when its ease differs (pop, bounce).
+    opacity: Option<Vec<f64>>,
+    props: Props,
+    /// Clip each unit to its line box (mask-reveal).
+    clip: bool,
+    /// Highlight box paint (the highlight preset).
+    highlight: Option<Paint>,
+}
+
+/// Expands a preset for `n` units at layer time `t` (em: the text size).
+fn preset(a: &Animator, kind: Preset, start: f64, dur: f64, n: usize, t: f64, em: f64) -> Expanded {
+    use Preset::*;
+    let (unit0, mode, ease, overlap0) = table(kind);
+    let unit = if a.unit_set { a.unit } else { unit0 };
+    let (order, amount) = match &a.selector {
+        Selector::Range { order, amount, .. } => (*order, amount / 100.0),
+        _ => (Order::Forward, 1.0),
     };
-    let unit = if a.unit != Unit::Char { a.unit } else { base_unit };
-    let default_overlap = match kind {
-        Typewriter | WordByWord => 0.0,
-        FadeIn | FadeOut | ScaleIn | BlurIn => 0.5,
-        TrackingIn => 1.0,
-        LineByLine => 0.3,
-        _ => 0.35,
-    };
-    let overlap = if a.overlap > 0.0 { a.overlap } else { default_overlap };
-    let nf = n.max(1) as f64;
-    let progress = |i: usize| -> f64 {
-        match a.stagger {
-            Some(st) => ((t - start - i as f64 * st) / dur).clamp(0.0, 1.0),
-            None => {
-                let pp = (t - start) / dur;
-                let w = 1.0 + overlap * (nf - 1.0);
-                ((pp * (nf - 1.0 + w) - i as f64) / w).clamp(0.0, 1.0)
-            }
+    let pos: Vec<f64> = (0..n).map(|i| order_index(i, n, order, a.seed)).collect();
+    let slots = pos.iter().fold(0.0f64, |m, p| m.max(*p)) + 1.0;
+    let big_d = dur;
+    let o = a.overlap.unwrap_or(overlap0).clamp(0.0, 1.0);
+    // a unit lasts d and starts (1 − o)·d after the previous one; @stagger sets that step
+    let (d, step) = match a.stagger {
+        Some(st) => (if o < 1.0 { st / (1.0 - o) } else { big_d }, st),
+        None => {
+            let d = big_d / (1.0 + (slots - 1.0) * (1.0 - o));
+            (d, d * (1.0 - o))
         }
     };
-    let hard = matches!(kind, Typewriter | WordByWord);
-    let amounts: Vec<f64> = (0..n)
-        .map(|i| {
-            let pi = progress(i);
-            match kind {
-                FadeOut => smooth(pi),
-                Wave => {
-                    let pp = (t - start) / dur;
-                    if (0.0..=1.0).contains(&pp) {
-                        libm::sin(std::f64::consts::TAU * (pp * 2.0 - i as f64 / nf))
-                    } else {
-                        0.0
-                    }
-                }
-                Pop => 1.0 - ease_out_back(pi),
-                Bounce => 1.0 - ease_out_bounce(pi),
-                Karaoke | Highlight => {
-                    if matches!(kind, Highlight) {
-                        // the current unit only
-                        let pp = ((t - start) / dur).clamp(0.0, 1.0) * nf;
-                        let d = (pp - (i as f64 + 0.5)).abs();
-                        (1.0 - d).clamp(0.0, 1.0)
-                    } else {
-                        pi
-                    }
-                }
-                _ if hard => {
-                    if pi < 1.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                _ => 1.0 - smooth(pi),
+    let q = |p: f64| -> f64 {
+        if d > 0.0 {
+            ((t - start - p * step) / d).clamp(0.0, 1.0)
+        } else if t >= start + p * step {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    let sel = |e: Ease, p: f64| -> f64 {
+        let v = e.at(q(p));
+        if mode == Mode::In {
+            1.0 - v
+        } else {
+            v
+        }
+    };
+    let st = big_d / slots.max(1.0);
+    let mut amounts: Vec<f64> = match mode {
+        Mode::Step => pos.iter().map(|p| if t >= start + p * st - 1e-9 { 0.0 } else { 1.0 }).collect(),
+        Mode::Wave => {
+            if t < start || t > start + big_d {
+                vec![0.0; n]
+            } else {
+                let env =
+                    ((t - start) / (0.1 * big_d).max(1e-9)).min((start + big_d - t) / (0.1 * big_d).max(1e-9)).min(1.0);
+                pos.iter().map(|p| libm::sin(std::f64::consts::TAU * (1.5 * (t - start) - p / 8.0)) * env).collect()
             }
-        })
-        .collect();
+        }
+        // hidden before the start; the letters are substituted before layout ([`scramble_text`])
+        Mode::Scramble => vec![if t < start { 1.0 } else { 0.0 }; n],
+        Mode::Counter => vec![0.0; n],
+        Mode::In | Mode::Out => pos.iter().map(|p| sel(ease, *p)).collect(),
+    };
+    for v in &mut amounts {
+        *v *= amount;
+    }
+    // the opacity of pop and bounce eases on its own curve
+    let opacity = match kind {
+        Pop => Some(Ease::CubicOut),
+        Bounce => Some(Ease::QuadOut),
+        _ => None,
+    }
+    .map(|e| pos.iter().map(|p| sel(e, *p) * amount).collect());
     let mut pr = Props::default();
     match kind {
-        Typewriter | FadeIn | FadeOut | WordByWord | LetterByLetter => pr.opacity = Some(0.0),
+        Typewriter | FadeIn | FadeOut | WordByWord => pr.opacity = Some(0.0),
+        LetterByLetter => {
+            pr.opacity = Some(0.0);
+            pr.y = Some(0.15 * em);
+        }
         LineByLine => {
             pr.opacity = Some(0.0);
-            pr.y = Some(0.3 * em);
+            pr.y = Some(0.4 * em);
         }
         SlideUp | SlideDown | SlideLeft | SlideRight => {
             pr.opacity = Some(0.0);
@@ -442,51 +528,50 @@ fn preset(
                 _ => pr.x = Some(-em),
             }
         }
-        Pop => pr.scale = Some(0.0),
-        ScaleIn => {
+        Pop | ScaleIn => {
             pr.scale = Some(0.0);
             pr.opacity = Some(0.0);
         }
         BlurIn => {
-            pr.blur = Some(12.0);
+            pr.blur = Some(0.35 * em);
             pr.opacity = Some(0.0);
         }
         Wave => pr.y = Some(-0.25 * em),
-        Bounce => pr.y = Some(-em),
+        Bounce => {
+            pr.y = Some(-em);
+            pr.opacity = Some(0.0);
+        }
         Spin => {
             pr.rotation = Some(-180.0);
-            pr.scale = Some(50.0);
+            pr.scale = Some(30.0);
             pr.opacity = Some(0.0);
         }
         Ascend => {
-            pr.y = Some(em);
+            pr.y = Some(0.5 * em);
             pr.opacity = Some(0.0);
         }
         Shift => {
-            pr.x = Some(-0.5 * em);
+            pr.x = Some(-0.4 * em);
             pr.opacity = Some(0.0);
         }
-        Scramble => pr.char_offset = Some(1.0),
-        Counter => {}
-        Karaoke => {
-            pr.fill = Some(a.props.fill.clone().unwrap_or(Paint::Solid { rgba: [1.0, 0.83, 0.0, 1.0], srgb: true }))
-        }
-        Highlight => {
-            pr.fill = Some(a.props.fill.clone().unwrap_or(Paint::Solid { rgba: [1.0, 0.83, 0.0, 1.0], srgb: true }));
-            pr.scale = Some(110.0);
-        }
+        // scramble hides every unit before its start
+        Scramble => pr.opacity = Some(0.0),
+        Counter | Highlight => {}
+        Karaoke => pr.fill = Some(Paint::Solid { rgba: KARAOKE, srgb: true }),
         TrackingIn => {
+            // +500 thousandths of an em
             pr.tracking = Some(0.5 * em);
             pr.opacity = Some(0.0);
         }
-        MaskReveal => pr.y = Some(1.2 * em),
+        MaskReveal => pr.y = Some(1.1 * em),
     }
-    // explicit animator values override the preset's
+    // explicit animator values override the preset's (the highlight preset reads @fill as its box paint)
     let o = &a.props;
     macro_rules! over {
         ($($f:ident),*) => { $( if o.$f.is_some() { pr.$f = o.$f.clone(); } )* };
     }
     over!(
+        variation,
         x,
         y,
         z_depth,
@@ -508,7 +593,68 @@ fn preset(
         anchor_x,
         anchor_y
     );
-    (unit, amounts, pr, matches!(kind, MaskReveal))
+    let highlight = (kind == Highlight).then(|| o.fill.clone().unwrap_or(Paint::Solid { rgba: HIGHLIGHT, srgb: true }));
+    if kind != Highlight && o.fill.is_some() {
+        pr.fill = o.fill.clone();
+    }
+    Expanded { unit, amounts, opacity, props: pr, clip: kind == MaskReveal, highlight }
+}
+
+/// The text shown by `counter` presets: every number in `text` (digits with thousands
+/// commas and decimals) scaled by `k`, keeping its decimals and its commas.
+pub fn counter_text(text: &str, k: f64) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            let c = text[i..].chars().next().unwrap_or(' ');
+            out.push(c);
+            i += c.len_utf8();
+            continue;
+        }
+        let s = i;
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b',') {
+            i += 1;
+        }
+        if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        let num = &text[s..i];
+        let dec = num.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+        let v = num.replace(',', "").parse::<f64>().unwrap_or(0.0) * k;
+        let digits = format!("{v:.dec$}");
+        if num.contains(',') {
+            let (int, frac) = digits.split_once('.').map(|(a, b)| (a, Some(b))).unwrap_or((&digits, None));
+            let (sign, int) = int.strip_prefix('-').map(|x| ("-", x)).unwrap_or(("", int));
+            let mut g = String::new();
+            for (j, c) in int.chars().enumerate() {
+                if j > 0 && (int.len() - j) % 3 == 0 {
+                    g.push(',');
+                }
+                g.push(c);
+            }
+            out.push_str(sign);
+            out.push_str(&g);
+            if let Some(f) = frac {
+                out.push('.');
+                out.push_str(f);
+            }
+        } else {
+            out.push_str(&digits);
+        }
+    }
+    out
+}
+
+/// The progress of a `counter` preset at layer time `t`: cubic-out over the duration,
+/// times @amount; `None` once the numbers show their own value.
+pub fn counter_progress(start: f64, dur: f64, amount: f64, t: f64) -> Option<f64> {
+    let e = Ease::CubicOut.at(((t - start) / dur.max(1e-9)).clamp(0.0, 1.0)) * amount / 100.0;
+    (e < 1.0).then_some(e)
 }
 
 #[derive(Clone)]
@@ -538,6 +684,10 @@ struct Acc {
     ax: f64,
     ay: f64,
     clip_line: bool,
+    /// Highlight box: paint, fraction, unit.
+    highlight: Option<(Paint, f64, usize)>,
+    /// Pivot: the centre of the glyph's unit box on its line (the last animator that moved it).
+    pivot: Option<(f64, f64)>,
 }
 
 impl Default for Acc {
@@ -566,8 +716,46 @@ impl Default for Acc {
             ax: 0.0,
             ay: 0.0,
             clip_line: false,
+            highlight: None,
+            pivot: None,
         }
     }
+}
+
+/// The text shown by a `scramble` preset at layer time `t`: from `start` on, character
+/// unit p (in `order`; newlines are not units) stays scrambled until start + (p + 1)·D/M,
+/// showing a random letter or digit that changes 20 times per second ([`scramble_char`]).
+/// `pick(i)` says whether character i belongs to the animated span.
+pub fn scramble_text(
+    chars: &[char],
+    pick: &dyn Fn(usize) -> bool,
+    a: &Animator,
+    start: f64,
+    dur: f64,
+    t: f64,
+) -> Vec<char> {
+    let mut out = chars.to_vec();
+    if t < start {
+        return out;
+    }
+    let order = match &a.selector {
+        Selector::Range { order, .. } => *order,
+        _ => Order::Forward,
+    };
+    let units: Vec<usize> = (0..chars.len()).filter(|&i| chars[i] != '\n' && pick(i)).collect();
+    let n = units.len();
+    let pos: Vec<f64> = (0..n).map(|k| order_index(k, n, order, a.seed)).collect();
+    let slots = pos.iter().fold(0.0f64, |m, p| m.max(*p)) + 1.0;
+    let st = dur / slots.max(1.0);
+    let tick = libm::floor(t * 20.0) as i64;
+    for (k, &i) in units.iter().enumerate() {
+        if t < start + (pos[k] + 1.0) * st {
+            if let Some(c) = scramble_char(chars[i], a.seed, tick, i) {
+                out[i] = c;
+            }
+        }
+    }
+    out
 }
 
 /// Per-glyph effects of `anims` at layer time `t`; `counter` text replaces digits for the counter preset.
@@ -582,34 +770,60 @@ pub fn apply(
     let n = lay.glyphs.len();
     let mut acc = vec![Acc::default(); n];
     let em = lay.styles.first().map(|s| s.size).unwrap_or(32.0);
-    let mut counter: Option<(f64, f64)> = None;
     for a in anims {
         let role_fn = a.role.as_ref().map(|r| {
             let r = r.clone();
             move |span: usize| -> bool { roles.get(span).and_then(|x| x.as_deref()) == Some(r.as_str()) }
         });
         let role_ok: Option<&dyn Fn(usize) -> bool> = role_fn.as_ref().map(|f| f as &dyn Fn(usize) -> bool);
-        let (unit, amounts, props, clip) = match a.preset {
+        let ex = match a.preset {
+            // counters substitute the text before layout
+            Some((Preset::Counter, ..)) => continue,
             Some((kind, start, dur)) => {
-                let (u0, _, _, _) = preset(a, kind, start, dur, 1, t, em);
-                let (_, cnt) = units(lay, u0, role_ok);
-                if kind == Preset::Counter {
-                    let pp = ((t - start) / dur.max(1e-6)).clamp(0.0, 1.0);
-                    counter = Some((smooth(pp), 0.0));
-                }
+                let unit = if a.unit_set { a.unit } else { table(kind).0 };
+                let (_, cnt) = units(lay, unit, role_ok);
                 preset(a, kind, start, dur, cnt, t, em)
             }
             None => {
                 let (_, cnt) = units(lay, a.unit, role_ok);
                 let v: Vec<f64> = (0..cnt).map(|i| range_amount(&a.selector, i, cnt, t)).collect();
-                (a.unit, v, a.props.clone(), false)
+                Expanded {
+                    unit: a.unit,
+                    amounts: v,
+                    opacity: None,
+                    props: a.props.clone(),
+                    clip: false,
+                    highlight: None,
+                }
             }
         };
+        let (unit, amounts, props, clip) = (ex.unit, &ex.amounts, &ex.props, ex.clip);
         let (map, _) = units(lay, unit, role_ok);
+        // unit boxes per line: x extent, and the line box's vertical centre
+        let mut boxes: std::collections::HashMap<(usize, usize), (f64, f64, f64)> = Default::default();
+        for (g, gl) in lay.glyphs.iter().enumerate() {
+            let Some(u) = map[g] else { continue };
+            let lr = lay.lines.get(gl.line).map(|l| l.rect).unwrap_or([0.0; 4]);
+            let b = boxes.entry((gl.line, u)).or_insert((f64::INFINITY, f64::NEG_INFINITY, lr[1] + lr[3] * 0.5));
+            b.0 = b.0.min(gl.x.min(gl.x + gl.advance));
+            b.1 = b.1.max(gl.x.max(gl.x + gl.advance));
+        }
         for (g, ag) in acc.iter_mut().enumerate() {
             let Some(u) = map[g] else { continue };
+            if let Some(b) = boxes.get(&(lay.glyphs[g].line, u)) {
+                ag.pivot = Some(((b.0 + b.1) * 0.5, b.2));
+            }
             let s = amounts.get(u).copied().unwrap_or(0.0);
-            if s == 0.0 && !clip {
+            if let Some(hp) = &ex.highlight {
+                if s > 1e-4 {
+                    ag.highlight = Some((hp.clone(), s.min(1.0), u));
+                }
+            }
+            if clip {
+                ag.clip_line = true;
+            }
+            let s_op = ex.opacity.as_ref().and_then(|o| o.get(u).copied()).unwrap_or(s);
+            if s.abs() < 1e-6 && s_op.abs() < 1e-6 {
                 continue;
             }
             let add = |cur: &mut f64, v: Option<f64>| {
@@ -650,7 +864,17 @@ pub fn apply(
             }
             fac(&mut ag.sx, props.scale.or(props.scale_x), 100.0);
             fac(&mut ag.sy, props.scale.or(props.scale_y), 100.0);
-            fac(&mut ag.op, props.opacity, 1.0);
+            {
+                let s = s_op;
+                if let Some(v) = props.opacity {
+                    let f = 1.0 + (v - 1.0) * s;
+                    match a.combine {
+                        Combine::Add => ag.op += f - 1.0,
+                        Combine::Multiply => ag.op *= f,
+                        Combine::Replace => ag.op = f,
+                    }
+                }
+            }
             if let Some(b) = props.blur {
                 ag.blur += (b * s).max(0.0);
             }
@@ -664,12 +888,9 @@ pub fn apply(
             if let Some(f) = &props.stroke {
                 ag.stroke = Some((f.clone(), s.clamp(0.0, 1.0)));
             }
-            if clip {
-                ag.clip_line = true;
-            }
         }
     }
-    // tracking accumulates along each line, spreading from the line centre
+    // tracking accumulates along each line, which keeps its alignment
     let mut shift_x = vec![0.0; n];
     for l in &lay.lines {
         let mut run = 0.0;
@@ -678,12 +899,13 @@ pub fn apply(
             run += acc[g].tracking;
         }
         for g in l.glyphs.clone() {
-            shift_x[g] -= run * 0.5;
+            shift_x[g] -= run * lay.align_shift;
         }
     }
     let mut out = Vec::with_capacity(n);
     for (g, (gl, a)) in lay.glyphs.iter().zip(&acc).enumerate() {
-        let anchor = p(gl.x + gl.advance * 0.5 + a.ax, gl.y + a.ay);
+        let (px, py) = a.pivot.unwrap_or((gl.x + gl.advance * 0.5, gl.y));
+        let anchor = p(px + a.ax, py + a.ay);
         let persp = 1000.0 / (1000.0 + a.z).max(1.0);
         let sx = a.sx * libm::cos(a.ry.to_radians()) * persp;
         let sy = a.sy * libm::cos(a.rx.to_radians()) * persp;
@@ -709,15 +931,10 @@ pub fn apply(
             fx.stroke_mix = *m;
         }
         fx.stroke_width = a.sw;
+        fx.highlight = a.highlight.clone();
         let off = a.char_off.round() as i64;
         let ch = lay.chars.get(gl.ch).copied().unwrap_or(' ');
-        let ch2 = if let Some((k, _)) = counter {
-            counter_char(lay, gl.ch, k)
-        } else if off != 0 {
-            Some(offset_char(ch, off))
-        } else {
-            None
-        };
+        let ch2 = if off != 0 { Some(offset_char(ch, off)) } else { None };
         if let Some(c2) = ch2.filter(|c| *c != ch) {
             fx.gid = lib.with_face(gl.face, &[], |f| f.glyph_index(c2).map(|x| x.0)).flatten();
         }
@@ -738,25 +955,20 @@ pub fn offset_char(c: char, off: i64) -> char {
     }
 }
 
-/// The digit shown at character `ci` while the first number in the text counts up to its value.
-fn counter_char(lay: &Layout, ci: usize, k: f64) -> Option<char> {
-    let chars = &lay.chars;
-    let start = chars.iter().position(|c| c.is_ascii_digit())?;
-    let mut end = start;
-    while end < chars.len()
-        && (chars[end].is_ascii_digit()
-            || ((chars[end] == ',' || chars[end] == '.') && chars.get(end + 1).is_some_and(|c| c.is_ascii_digit())))
-    {
-        end += 1;
-    }
-    if ci < start || ci >= end || !chars[ci].is_ascii_digit() {
+/// A scrambled character: a letter of the same case or a digit, drawn from D24 as
+/// pool[⌊U(seed, tick, character index) · |pool|⌋]; other characters are kept.
+fn scramble_char(c: char, seed: u64, tick: i64, ci: usize) -> Option<char> {
+    let pool: &[u8] = if c.is_uppercase() {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    } else if c.is_ascii_digit() {
+        b"0123456789"
+    } else if c.is_alphabetic() {
+        b"abcdefghijklmnopqrstuvwxyz"
+    } else {
         return None;
-    }
-    let digits: String = chars[start..end].iter().filter(|c| c.is_ascii_digit()).collect();
-    let value: f64 = digits.parse().ok()?;
-    let shown = format!("{:0width$}", (value * k).round() as u64, width = digits.len());
-    let pos = chars[start..=ci].iter().filter(|c| c.is_ascii_digit()).count() - 1;
-    shown.chars().nth(pos)
+    };
+    let u = sr_vector::d24::d24_unit(seed, tick as u64, ci as u64);
+    Some(pool[((u * pool.len() as f64) as usize).min(pool.len() - 1)] as char)
 }
 
 /// Text on a path (`textPath`).

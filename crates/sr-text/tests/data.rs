@@ -111,16 +111,57 @@ fn presets_and_selectors() {
     for (g, f) in l2.glyphs.iter().zip(&fx) {
         assert_eq!(f.opacity < 0.5, g.span == 1);
     }
-    // counter counts digits up
-    let l3 = lay(&mut lib, &[("1000", None)]);
-    let a = Animator { preset: Some((Preset::Counter, 0.0, 1.0)), ..Default::default() };
-    let (fx, _) = animate::apply(&lib, &l3, &roles, &[a], 0.0);
-    assert!(fx[0].gid.is_some() && fx[1..].iter().all(|f| f.gid.is_none()), "at t=0 the counter shows 0000");
-    let a = Animator { preset: Some((Preset::Counter, 0.0, 1.0)), ..Default::default() };
-    assert!(
-        animate::apply(&lib, &l3, &roles, &[a], 1.0).0.iter().all(|f| f.gid.is_none()),
-        "at the end it shows the value"
-    );
+    // counter: numbers count up from 0 before layout, keeping decimals and thousands commas
+    assert_eq!(animate::counter_text("Count 1,234.50 and 7", 0.5), "Count 617.25 and 4");
+    assert_eq!(animate::counter_text("12,000,000", 0.5), "6,000,000");
+    let k = animate::counter_progress(0.0, 1.0, 100.0, 0.5).unwrap();
+    assert!((k - 0.875).abs() < 1e-12, "cubic-out");
+    assert_eq!(animate::counter_text("1234", k), "1080");
+    assert_eq!(animate::counter_progress(0.0, 1.0, 100.0, 1.0), None, "at the end the text shows its value");
+}
+
+/// CONVENTIONS 5.11: the preset table (unit, mode, ease, overlap) of the Python renderer.
+#[test]
+fn preset_table_timing() {
+    let mut lib = lib();
+    let l = lay(&mut lib, &[("ab cd ef", None)]);
+    let roles = vec![None];
+    let at = |p: Preset, t: f64| {
+        let a = Animator { preset: Some((p, 0.0, 1.0)), ..Default::default() };
+        animate::apply(&lib, &l, &roles, &[a], t).0
+    };
+    // word-by-word: three word slots of 1/3 s each, no fade
+    let fx = at(Preset::WordByWord, 0.5);
+    let op: Vec<f64> = fx.iter().map(|f| f.opacity).collect();
+    assert_eq!(op, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]);
+    // fade-in: 8 character slots, overlap 0.6, d = 1 / (1 + 7 · 0.4), quad-out
+    let d = 1.0 / (1.0 + 7.0 * 0.4);
+    let fx = at(Preset::FadeIn, 0.3);
+    for (i, f) in fx.iter().enumerate() {
+        let q = ((0.3 - i as f64 * d * 0.4) / d).clamp(0.0, 1.0);
+        let e = 1.0 - (1.0 - q) * (1.0 - q);
+        assert!((f.opacity - e).abs() < 1e-9, "{i}: {} != {e}", f.opacity);
+    }
+    // karaoke: word units, linear, overlap 0: the second word is half lit at t = 0.5
+    let fx = at(Preset::Karaoke, 0.5);
+    assert!((fx[0].fill_mix - 1.0).abs() < 1e-9 && (fx[3].fill_mix - 0.5).abs() < 1e-9 && fx[6].fill.is_none());
+    // highlight: a box per word wiping in, no fill change
+    let fx = at(Preset::Highlight, 0.5);
+    assert!(fx[0].fill.is_none() && fx[3].highlight.as_ref().is_some_and(|h| (h.1 - 0.5).abs() < 1e-9));
+    // scramble: hidden before its start, then the unrevealed characters are random letters
+    let a = Animator { preset: Some((Preset::Scramble, 1.0, 1.0)), ..Default::default() };
+    assert!(animate::apply(&lib, &l, &roles, &[a.clone()], 0.5).0.iter().all(|f| f.opacity == 0.0));
+    let chars: Vec<char> = "ab cd ef".chars().collect();
+    let s: String = animate::scramble_text(&chars, &|_| true, &a, 1.0, 1.0, 1.5).into_iter().collect();
+    assert_eq!(&s[..4], "ab c", "the first four slots are revealed");
+    assert!(s[4..].chars().all(|c| c == ' ' || c.is_ascii_lowercase()) && &s[4..] != "d ef");
+    // wave: y = −0.25 em · sin(2π(1.5 t − p/8)) · envelope
+    let fx = at(Preset::Wave, 0.5);
+    let em = l.styles[0].size;
+    for (i, f) in fx.iter().enumerate().filter(|(i, _)| chars[*i] != ' ') {
+        let y = -0.25 * em * (std::f64::consts::TAU * (0.75 - i as f64 / 8.0)).sin();
+        assert!((f.xf.0[5] - y).abs() < 1e-6, "{i}");
+    }
 }
 
 #[test]

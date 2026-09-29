@@ -489,7 +489,8 @@ fn animators(
             "span" => Unit::Span,
             _ => Unit::Char,
         };
-        let seed = a.opt("seed").map(|v| v as u64).unwrap_or_else(|| hash_str(&key));
+        // D24: @seed, else the project's seed
+        let seed = a.opt("seed").map(|v| v as u64).unwrap_or(cx.p.seed);
         let amount = a.num("amount", 100.0);
         let t = n.local_time;
         let selector = match s("selector").as_str() {
@@ -598,8 +599,14 @@ fn animators(
             .str("preset")
             .and_then(|p| Preset::parse(&p))
             .map(|k| (k, a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0)));
+        if props.fill.is_none() && preset.is_some_and(|p| p.0 == Preset::Karaoke) {
+            // the default karaoke fill, resolved like a document colour so that it mixes with the text's
+            props.fill = (cx.paint)(&Value::Color(animate::KARAOKE), bx);
+        }
         out.push(Animator {
             unit,
+            // the model fills XSD defaults, so the default values read as "not given"
+            unit_set: unit != Unit::Char,
             role: a.str("span"),
             selector,
             props,
@@ -610,12 +617,51 @@ fn animators(
             },
             preset,
             stagger: a.opt("stagger"),
-            overlap: a.num("overlap", 0.0),
+            overlap: a.opt("overlap").filter(|o| *o != 0.0),
             seed,
         });
     }
     let _ = roles;
     (out, path)
+}
+
+/// Applies `counter` and `scramble` presets to the paragraph's text before layout: every
+/// number (in the span with the animator's role, if any) counts up from 0, cubic-out over
+/// the preset's duration, and scrambled characters show their random letters.
+fn substitutions(cx: &Cx, para: &mut Para, anims: &[Animator]) {
+    let t = cx.n.local_time;
+    for c in children(&*cx.n.elem) {
+        if !is(c, "textAnimator") || c.get_attr("preset").map(|v| v.to_string()).as_deref() != Some("counter") {
+            continue;
+        }
+        let a = Attrs { e: c, props: None };
+        let (start, dur) = (a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0));
+        let Some(k) = animate::counter_progress(start, dur, a.num("amount", 100.0), t) else {
+            continue;
+        };
+        let role = a.str("span");
+        for r in &mut para.runs {
+            if role.is_none() || r.role == role {
+                r.text = animate::counter_text(&r.text, k);
+            }
+        }
+    }
+    for a in anims {
+        let Some((Preset::Scramble, start, dur)) = a.preset else { continue };
+        let mut chars: Vec<char> = Vec::new();
+        let mut run_of: Vec<usize> = Vec::new();
+        for (k, r) in para.runs.iter().enumerate() {
+            chars.extend(r.text.chars());
+            run_of.resize(chars.len(), k);
+        }
+        let pick = |i: usize| a.role.is_none() || para.runs[run_of[i]].role == a.role;
+        let out = animate::scramble_text(&chars, &pick, a, start, dur, t);
+        let mut it = out.into_iter();
+        for r in &mut para.runs {
+            let n = r.text.chars().count();
+            r.text = it.by_ref().take(n).collect();
+        }
+    }
 }
 
 fn unit_count(lay: &Layout, unit: Unit) -> ((), usize) {
@@ -672,10 +718,15 @@ pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild
     let tol = cx.tol;
     Some(match a {
         AssetsChild::Text(t) => {
-            let (para, decor, roles) = para_of(tc, cx, t);
+            let (mut para, decor, roles) = para_of(tc, cx, t);
+            let (anims, on_path) = {
+                // the animators as far as they do not depend on the layout
+                let pre = cached_layout(tc, layout_key(key, &para), &para);
+                animators(tc, cx, &pre, &roles)
+            };
+            substitutions(cx, &mut para, &anims);
             let lk = layout_key(key, &para);
             let lay = cached_layout(tc, lk, &para);
-            let (anims, on_path) = animators(tc, cx, &lay, &roles);
             let lib = tc.lib();
             let (mut fx, clip_lines) = if anims.is_empty() {
                 (Vec::new(), Vec::new())

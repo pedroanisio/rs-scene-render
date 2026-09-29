@@ -72,6 +72,9 @@ pub struct GlyphFx {
     /// Variable-font axis targets, reached by `variation_mix` from the style's values.
     pub variation: Vec<([u8; 4], f32)>,
     pub variation_mix: f64,
+    /// Highlight box behind the glyph's unit (the highlight preset): paint, the fraction
+    /// of the unit's width it covers from its start, and the unit.
+    pub highlight: Option<(Paint, f64, usize)>,
 }
 
 impl Default for GlyphFx {
@@ -89,6 +92,7 @@ impl Default for GlyphFx {
             blur: 0.0,
             variation: Vec::new(),
             variation_mix: 0.0,
+            highlight: None,
         }
     }
 }
@@ -433,6 +437,29 @@ fn draw_glyphs(lib: &FontLib, lay: &Layout, fx: Option<&[GlyphFx]>, decor: &Deco
                 tol,
             );
             k = j;
+        }
+    }
+    // animator highlight boxes: each unit's extent on its line, wiped in from its start
+    if let Some(fx) = fx {
+        for l in &lay.lines {
+            let mut k = l.glyphs.start;
+            while k < l.glyphs.end {
+                let Some((paint, frac, unit)) = &fx.get(k).and_then(|f| f.highlight.as_ref()) else {
+                    k += 1;
+                    continue;
+                };
+                let mut j = k;
+                while j < l.glyphs.end && fx.get(j).and_then(|f| f.highlight.as_ref()).is_some_and(|h| h.2 == *unit) {
+                    j += 1;
+                }
+                let (a, b) = (&lay.glyphs[k], &lay.glyphs[j - 1]);
+                let (x0, x1) = (a.x.min(b.x), (a.x + a.advance).max(b.x + b.advance));
+                let w = (x1 - x0) * frac.min(1.0);
+                let hx = if a.x > b.x { x1 - w } else { x0 }; // right to left: from the right
+                let path = shapes::rect(hx, l.rect[1], w, l.rect[3], [0.0; 4]).transform(&fx[k].xf);
+                s.fill(&path, FillRule::NonZero, paint.clone(), 1.0, tol);
+                k = j;
+            }
         }
     }
     // glyph placement
