@@ -795,7 +795,8 @@ fn tile_all(scene: &Scene, size: [u32; 2], cache: &mut TileCache) -> (Vec<Option
     for a in got.iter().flatten() {
         (nt, np, nr) = (nt + a.tiles.len(), np + a.pieces.len(), nr + a.rows.len());
     }
-    let mut arena = TileArena { tiles: Vec::with_capacity(nt), pieces: Vec::with_capacity(np), rows: Vec::with_capacity(nr) };
+    let mut arena =
+        TileArena { tiles: Vec::with_capacity(nt), pieces: Vec::with_capacity(np), rows: Vec::with_capacity(nr) };
     let pre = got
         .iter()
         .map(|a| {

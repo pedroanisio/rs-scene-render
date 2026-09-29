@@ -837,7 +837,7 @@ mod tests {
             Arc::new(Source { layout: Layout::Stereo, planar: vec![tone(220.0, 0.6, 3.0), tone(330.0, 0.5, 3.0)] });
         let frames = (20.0 * fps) as usize + 1;
         let times: Vec<Option<f64>> =
-            (0..frames).map(|k| k as f64 / fps).map(|t| (15.5..16.5).contains(&t).then(|| t - 15.5)).collect();
+            (0..frames).map(|k| k as f64 / fps).map(|t| (15.5..16.5).contains(&t).then_some(t - 15.5)).collect();
         let ramp: Vec<f64> = (0..frames).map(|k| 0.2 + 0.8 * (k as f64 / frames as f64)).collect();
         let sweep: Vec<f64> = (0..frames).map(|k| (k as f64 / 40.0).sin()).collect();
         let mut early = track("early", mono.clone(), timeline(1.0));

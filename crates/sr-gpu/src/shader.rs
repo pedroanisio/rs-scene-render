@@ -677,10 +677,9 @@ impl Builder<'_> {
         let built = match self.eng.sources.get(&key) {
             Some(r) => r.clone(),
             None => {
-                let r = glsl::load_source(&src, cx.base)
-                    .and_then(|(code, dir)| {
-                        glsl::build_effect(&code).map(|p| Arc::new((p, dir, sr_eval::rng::hash_str(&code))))
-                    });
+                let r = glsl::load_source(&src, cx.base).and_then(|(code, dir)| {
+                    glsl::build_effect(&code).map(|p| Arc::new((p, dir, sr_eval::rng::hash_str(&code))))
+                });
                 self.eng.sources.insert(key, r.clone());
                 r
             }
@@ -771,7 +770,7 @@ impl Builder<'_> {
             }
             for (name, spec) in h.get("IMPORTED").and_then(|v| v.as_object()).into_iter().flatten() {
                 let Some(path) = spec.get("PATH").and_then(|p| p.as_str()) else { continue };
-                match self.image(Path::new(path), &dir, &working) {
+                match self.image(Path::new(path), dir, &working) {
                     Ok(t) => {
                         let t = self.space_in(&t, None, &space, &working);
                         textures.insert(name.clone(), t);
