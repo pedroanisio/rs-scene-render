@@ -498,6 +498,7 @@ impl Renderer {
             lin: [ta.0[0], ta.0[1], ta.0[2], ta.0[3]],
             to_uv,
             center,
+            content: None,
             time: ctx.g.time,
             frame: ctx.g.frame,
             color,
@@ -514,6 +515,33 @@ impl Renderer {
             named: HashMap::new(),
             audio: self.audio.clone(),
         }
+    }
+
+    /// The box of node `i`'s content in `space`'s pixels: the union of the boxes of the node and its
+    /// sized descendants. None when nothing has a size.
+    fn content_box(ctx: &Ctx, i: usize, space: &Space) -> Option<[f64; 4]> {
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        let mut stack = vec![i];
+        while let Some(k) = stack.pop() {
+            let n = &ctx.g.nodes[k];
+            if let Some(s) = n.size {
+                let ta = space.xform.then(&n.world);
+                for p in [[0.0, 0.0], [s[0], 0.0], [s[0], s[1]], [0.0, s[1]]] {
+                    let q = ta.apply(p);
+                    b = [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])];
+                }
+            }
+            stack.extend(ctx.kids[k].iter().copied());
+        }
+        // the Python renderer's tiles: each box grown by 2 px to whole pixels, within 64 px of the target
+        let (w, h) = (space.size[0] as f64, space.size[1] as f64);
+        let b = [
+            (b[0] - 2.0).floor().max(-64.0),
+            (b[1] - 2.0).floor().max(-64.0),
+            (b[2] + 2.0).ceil().min(w + 64.0),
+            (b[3] + 2.0).ceil().min(h + 64.0),
+        ];
+        (b[2] > b[0] && b[3] > b[1]).then_some(b)
     }
 
     /// Point lights referenced by an effect, as uv position, intensity and radius.
@@ -844,6 +872,7 @@ impl Renderer {
                 };
             let named = if kind == "shader" { self.shader_samplers(plan, ctx, e, space, rect) } else { HashMap::new() };
             let mut cx = self.cx_for(ctx, i, inner, [0.0, 0.0, w, hgt], &to_uv, &color, &gradient, &base);
+            cx.content = Self::content_box(ctx, i, inner);
             cx.source = source;
             cx.named = named;
             cx.offset = [rect[0], space.size[1] as f64 - rect[3]];

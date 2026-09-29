@@ -598,11 +598,11 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             return acc / 16.0;
         }
         case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner (CONVENTIONS 5.18)
-            // red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach; outside
-            // the frame is transparent
-            let pc = c * d;
+            // red magnifies by 1 − l and blue by 1 + l about the centre v1.xy (px), l = amount / reach
+            // (v1.z px, the distance to the input's farthest corner); outside the input is transparent
+            let pc = v[1].xy;
             let x = in.uv * d;
-            let l = v[0].x / max(max(length(pc), length(d - pc)), 1.0);
+            let l = v[0].x / max(v[1].z, 1.0);
             let r = St((pc + (x - pc) / max(1.0 - l, 0.01)) / d);
             let g = S(in.uv);
             let b = St((pc + (x - pc) / max(1.0 + l, 0.01)) / d);

@@ -771,6 +771,9 @@ pub struct Cx<'a> {
     pub to_uv: &'a dyn Fn([f64; 2]) -> [f64; 2],
     /// Default centre (uv).
     pub center: [f64; 2],
+    /// The effect's input in offscreen pixels (x0, y0, x1, y1): the node's content box, or the whole
+    /// offscreen (adjustment layers, unknown extents).
+    pub content: Option<[f64; 4]>,
     pub time: f64,
     pub frame: i64,
     /// A colour value → straight stored working RGBA.
@@ -1488,7 +1491,16 @@ impl Builder<'_> {
                         }
                     }
                     "chromatic-aberration" => {
+                        // CONVENTIONS 5.18: `amount` pixels at the input's farthest corner from its centre;
+                        // the input is the node's content box (the frame for adjustment layers)
+                        let b = cx.content.unwrap_or([0.0, 0.0, w, h]);
+                        let c = match (a.opt("centerX"), a.opt("centerY")) {
+                            (None, None) => [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5],
+                            _ => [center[0] * w, center[1] * h],
+                        };
+                        let reach = (c[0] - b[0]).hypot(c[1] - b[1]).max((b[2] - c[0]).hypot(b[3] - c[1])).max(1.0);
                         v[0] = [(amount * px) as f32, 0.0, 0.0, 0.0];
+                        v[1] = [c[0] as f32, c[1] as f32, reach as f32, 0.0];
                         14
                     }
                     "rgb-split" => {
