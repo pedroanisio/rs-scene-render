@@ -1871,12 +1871,10 @@ impl Builder<'_> {
                 let avg = self.run(Entry::Trans, [34, 0, 0, 0], v, &base, Aux::None, None, None, blocks);
                 return Ok(self.run(Entry::Trans, [35, 0, 0, 0], v, &avg, Aux::None, None, None, size));
             }
-            "glitch" | "light-leak" => {
-                if !x.table.is_empty() {
-                    let t = self.eng.data_table(self.pool, self.bgl1, &x.table);
-                    self.temps.push(t.clone());
-                    aux2 = Some(t);
-                }
+            "glitch" | "light-leak" if !x.table.is_empty() => {
+                let t = self.eng.data_table(self.pool, self.bgl1, &x.table);
+                self.temps.push(t.clone());
+                aux2 = Some(t);
             }
             _ => {}
         }
