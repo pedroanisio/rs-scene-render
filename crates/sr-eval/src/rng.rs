@@ -14,7 +14,10 @@ pub fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-pub use sr_vector::d24::{d24_hash, d24_unit, fractal, index2, index3, noise, splitmix64, weighted_octaves};
+pub use sr_vector::d24::{
+    crc32, d24_hash, d24_unit, element_seed, fractal, gaussian, noise, pack, perlin3, permutation, splitmix64,
+    weighted_octaves,
+};
 
 /// Hashes a sequence of words into one.
 #[inline]

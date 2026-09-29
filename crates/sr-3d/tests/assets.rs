@@ -326,8 +326,8 @@ fn lights_environments_and_cameras() {
     let right = camera::resolve(&camera::CameraParams { yaw: 30.0, ..Default::default() }, 100.0, 100.0);
     assert!(right.view.inverse().transform_vector3(Vec3::Z).x > 0.4);
     assert!((camera::fov_of_lens(camera::lens_of_fov(39.6, 36.0), 36.0) - 39.6).abs() < 1e-3);
-    let (x, _, _, z) = camera::shake(10.0, 2.0, 0.0, 0.0, 2, 7, 0.37);
-    assert!(x.abs() <= 10.0 && z == 1.0);
+    let (x, y, r, z) = camera::shake(10.0, 5.0, 0.0, [0.5, -0.25, 0.1, 0.3]);
+    assert_eq!((x, y, r, z), (5.0, -2.5, 0.5, 1.0));
 }
 
 #[test]

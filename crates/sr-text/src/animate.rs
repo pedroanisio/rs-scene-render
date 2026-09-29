@@ -308,8 +308,8 @@ fn units(lay: &Layout, unit: Unit, role_span: Option<&dyn Fn(usize) -> bool>) ->
 }
 
 /// Position of unit `i` of `n` in the selection order: forward i, reverse n − 1 − i,
-/// center-out 2·|i − c|, edges-in n − 1 − 2·|i − c| (c the middle index), random the rank
-/// of the D24 draw U(seed, 0, i).
+/// center-out 2·|i − c|, edges-in n − 1 − 2·|i − c| (c the middle index), random entry i of
+/// the D24 permutation of channel 0 ([`sr_vector::d24::permutation`]).
 fn order_index(i: usize, n: usize, order: Order, seed: u64) -> f64 {
     let c = (n as f64 - 1.0) * 0.5;
     match order {
@@ -317,11 +317,7 @@ fn order_index(i: usize, n: usize, order: Order, seed: u64) -> f64 {
         Order::Reverse => (n - 1 - i) as f64,
         Order::CenterOut => (i as f64 - c).abs() * 2.0,
         Order::EdgesIn => (n as f64 - 1.0) - (i as f64 - c).abs() * 2.0,
-        Order::Random => {
-            let key = |k: usize| (sr_vector::d24::d24_unit(seed, 0, k as u64), k);
-            let own = key(i);
-            (0..n).filter(|&k| key(k) < own).count() as f64
-        }
+        Order::Random => sr_vector::d24::permutation(seed, 0, n).get(i).copied().unwrap_or(i) as f64,
     }
 }
 
@@ -329,8 +325,8 @@ fn range_amount(sel: &Selector, i: usize, n: usize, t: f64) -> f64 {
     match sel {
         Selector::Values(v) => v.get(i).copied().unwrap_or(0.0) / 100.0,
         Selector::Wiggly { amount, rate, seed } => {
-            // D24 noise, one channel per unit
-            sr_vector::d24::noise(*seed, i as u64, t * rate) * amount / 100.0
+            // D24 noise N(seed, 0, t · rate + 7.31 · i)
+            sr_vector::d24::noise(*seed, 0, t * rate + i as f64 * 7.31) * amount / 100.0
         }
         Selector::Range {
             percent,
@@ -448,11 +444,11 @@ fn preset(a: &Animator, kind: Preset, start: f64, dur: f64, n: usize, t: f64, em
     use Preset::*;
     let (unit0, mode, ease, overlap0) = table(kind);
     let unit = if a.unit_set { a.unit } else { unit0 };
-    let (order, amount) = match &a.selector {
-        Selector::Range { order, amount, .. } => (*order, amount / 100.0),
-        _ => (Order::Forward, 1.0),
+    let (order, amount, order_seed) = match &a.selector {
+        Selector::Range { order, amount, seed, .. } => (*order, amount / 100.0, *seed),
+        _ => (Order::Forward, 1.0, 0),
     };
-    let pos: Vec<f64> = (0..n).map(|i| order_index(i, n, order, a.seed)).collect();
+    let pos: Vec<f64> = (0..n).map(|i| order_index(i, n, order, order_seed)).collect();
     let slots = pos.iter().fold(0.0f64, |m, p| m.max(*p)) + 1.0;
     let big_d = dur;
     let o = a.overlap.unwrap_or(overlap0).clamp(0.0, 1.0);
@@ -738,13 +734,13 @@ pub fn scramble_text(
     if t < start {
         return out;
     }
-    let order = match &a.selector {
-        Selector::Range { order, .. } => *order,
-        _ => Order::Forward,
+    let (order, order_seed) = match &a.selector {
+        Selector::Range { order, seed, .. } => (*order, *seed),
+        _ => (Order::Forward, 0),
     };
     let units: Vec<usize> = (0..chars.len()).filter(|&i| chars[i] != '\n' && pick(i)).collect();
     let n = units.len();
-    let pos: Vec<f64> = (0..n).map(|k| order_index(k, n, order, a.seed)).collect();
+    let pos: Vec<f64> = (0..n).map(|k| order_index(k, n, order, order_seed)).collect();
     let slots = pos.iter().fold(0.0f64, |m, p| m.max(*p)) + 1.0;
     let st = dur / slots.max(1.0);
     let tick = libm::floor(t * 20.0) as i64;
@@ -962,7 +958,7 @@ pub fn offset_char(c: char, off: i64) -> char {
 }
 
 /// A scrambled character: a letter of the same case or a digit, drawn from D24 as
-/// pool[⌊U(seed, tick, character index) · |pool|⌋]; other characters are kept.
+/// pool[⌊U(seed, character index, tick) · |pool|⌋]; other characters are kept.
 fn scramble_char(c: char, seed: u64, tick: i64, ci: usize) -> Option<char> {
     let pool: &[u8] = if c.is_uppercase() {
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -973,7 +969,7 @@ fn scramble_char(c: char, seed: u64, tick: i64, ci: usize) -> Option<char> {
     } else {
         return None;
     };
-    let u = sr_vector::d24::d24_unit(seed, tick as u64, ci as u64);
+    let u = sr_vector::d24::d24_unit(seed, ci as u64, tick as u64);
     Some(pool[((u * pool.len() as f64) as usize).min(pool.len() - 1)] as char)
 }
 

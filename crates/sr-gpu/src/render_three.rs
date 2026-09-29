@@ -128,6 +128,7 @@ impl Renderer {
     /// The frame camera (the active camera node, else the default 2.5D camera).
     pub(super) fn camera3(&self, g: &FrameGraph, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
         let mut cp = CameraParams::default();
+        let g_seed = self.seed;
         let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0 };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
         let (mut sensor, mut fstop, mut focus, mut blades, mut dof_on, mut focus_target) =
@@ -163,15 +164,15 @@ impl Renderer {
                 if t < sa.num("start", 0.0) || sa.opt("end").map(|e| t >= e).unwrap_or(false) {
                     continue;
                 }
-                let seed = sa.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
+                // D24: four fractal channels at frequency · t, with @seed or the project's seed
+                let seed = sa.opt("seed").map(|s| s as u64).unwrap_or(g_seed);
+                let (f, oct) = (sa.num("frequency", 2.0), sa.num("octaves", 2.0).max(1.0) as u32);
+                let noise = [0, 1, 2, 3].map(|k| sr_eval::rng::fractal(seed, k, f * t, oct));
                 let (dx, dy, droll, dz) = camera::shake(
                     sa.num("amplitude", 10.0) as f32,
-                    sa.num("frequency", 2.0) as f32,
                     sa.num("rotation", 0.0) as f32,
                     sa.num("zoom", 0.0) as f32,
-                    sa.num("octaves", 2.0) as u32,
-                    seed,
-                    t,
+                    noise,
                 );
                 cp.offset += Vec3::new(dx, dy, 0.0);
                 cp.roll += droll;

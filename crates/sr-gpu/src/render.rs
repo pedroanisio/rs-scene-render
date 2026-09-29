@@ -254,6 +254,8 @@ pub struct Renderer {
     persistent_isf: Option<bool>,
     /// The frame rendered last (ISF feedback replays on a seek).
     last_frame: Option<i64>,
+    /// The project seed (D24 draws default to it).
+    pub(crate) seed: u64,
 }
 
 fn h(words: &[u64]) -> u64 {
@@ -476,6 +478,7 @@ impl Renderer {
         let (gpu_device, gpu_queue) = (gpu.device.clone(), gpu.queue.clone());
         let raster = Raster::new(&gpu.device);
         Renderer {
+            seed: program.seed,
             tokens: token_table(&program.scene),
             gpu,
             over,

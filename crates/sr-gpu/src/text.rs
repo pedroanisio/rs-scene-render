@@ -378,7 +378,7 @@ impl Host for UnitHost {
     fn var(&mut self, v: Var) -> V {
         V::Num(match v {
             Var::Time => self.t,
-            Var::Frame => (self.t * self.fps).round(),
+            Var::Frame => libm::floor(self.t * self.fps + 1e-9),
             Var::TextIndex | Var::Index => self.index,
             Var::TextTotal | Var::Count => self.total,
             Var::Seed => self.seed as f64,
@@ -406,12 +406,16 @@ impl Host for UnitHost {
         0.0
     }
     fn random(&mut self, site: u32, component: u32) -> f64 {
-        // D25's random with the unit index in place of the frame and no property (channel 8)
-        let index = site as u64 + (sr_eval::expr::vm::OTHER_CHANNEL << 32) + ((component as u64) << 48);
-        sr_eval::rng::d24_unit(self.seed, self.index as u64, index)
+        // D25: (seed, frame, call site + property · 2³², the "selector" property)
+        let frame = libm::floor(self.t * self.fps + 1e-9) as i64 as u64;
+        let index = site as u64 + (self.noise_channel() << 32) + ((component as u64) << 48);
+        sr_eval::rng::d24_unit(self.seed, frame, index)
     }
     fn noise_seed(&mut self) -> u64 {
         self.seed
+    }
+    fn noise_channel(&mut self) -> u64 {
+        vm::property_channel("selector")
     }
 }
 
@@ -438,6 +442,14 @@ fn animators(
     let mut path = None;
     let (mut ai, mut pi) = (0, 0);
     let bx = [0.0, 0.0, lay.size[0], lay.size[1]];
+    // scramble letters: the layer's own seed for "scramble" xor the sum of the animators' @seed
+    let node_seed = (Attrs { e, props: None }).opt("seed").map(|v| v as u64);
+    let own_seeds = children(e)
+        .into_iter()
+        .filter(|c| is(*c, "textAnimator"))
+        .map(|c| (Attrs { e: c, props: None }).opt("seed").map(|v| v as u64).unwrap_or(0))
+        .fold(0u64, u64::wrapping_add);
+    let scramble_seed = sr_eval::rng::element_seed(cx.p.seed, &n.id, node_seed, "scramble") ^ own_seeds;
     for c in children(e) {
         if is(c, "textPath") {
             let key = format!("{}/{}[{pi}]", n.id, c.element_name());
@@ -489,21 +501,40 @@ fn animators(
             "span" => Unit::Span,
             _ => Unit::Char,
         };
-        // D24: @seed, else the project's seed
-        let seed = a.opt("seed").map(|v| v as u64).unwrap_or(cx.p.seed);
+        // D24 draws with the Python renderer's per-element seeds: CRC-32 of the project seed,
+        // the element's id and @seed, and the purpose
+        let own = a.opt("seed").map(|v| v as u64);
+        let el_seed = |purpose: &str| sr_eval::rng::element_seed(cx.p.seed, "", own, purpose);
+        let seed = el_seed("order");
         let amount = a.num("amount", 100.0);
         let t = n.local_time;
-        let selector = match s("selector").as_str() {
-            "wiggly" => Selector::Wiggly { amount, rate: a.num("wiggleRate", 2.0), seed },
+        // a nested <expression property="selector"> makes an expression selector
+        let nested = children(c).into_iter().any(|x| {
+            is(x, "expression") && x.get_attr("property").map(|v| v.to_string()).as_deref() == Some("selector")
+        });
+        let kind = if nested { "expression".to_string() } else { s("selector") };
+        let selector = match kind.as_str() {
+            "wiggly" => Selector::Wiggly { amount, rate: a.num("wiggleRate", 2.0), seed: el_seed("wiggly") & 0xffff },
             "expression" => {
                 // the amount expression evaluated per unit with textIndex/textTotal
                 let src = children(c)
                     .into_iter()
                     .find(|x| {
                         is(*x, "expression")
-                            && x.get_attr("property").map(|v| v.to_string()).as_deref() == Some("amount")
+                            && matches!(
+                                x.get_attr("property").map(|v| v.to_string()).as_deref(),
+                                Some("selector" | "amount")
+                            )
                     })
-                    .and_then(|x| x.text().map(str::to_string));
+                    .map(|x| {
+                        // D25 seed: the expression's @seed, else the project's
+                        let xs = Attrs { e: x, props: None }.opt("seed").map(|v| v as u64).unwrap_or(cx.p.seed);
+                        (x.text().map(str::to_string), xs)
+                    });
+                let (src, xseed) = match src {
+                    Some((s, xs)) => (s, xs),
+                    None => (None, cx.p.seed),
+                };
                 let code = src.and_then(|src| {
                     tc.exprs
                         .entry(src.clone())
@@ -524,7 +555,7 @@ fn animators(
                                             fps: cx.p.fps.as_f64(),
                                             index: i as f64 + 1.0,
                                             total: total as f64,
-                                            seed,
+                                            seed: xseed,
                                         },
                                         &mut regs,
                                     )
@@ -535,7 +566,7 @@ fn animators(
                     }
                     None => {
                         cx.unsupported.push(format!(
-                            "{}: textAnimator expression selector needs a valid <expression property=\"amount\">",
+                            "{}: textAnimator expression selector needs a valid <expression property=\"selector\">",
                             n.id
                         ));
                         Selector::Values(vec![amount; total])
@@ -618,7 +649,7 @@ fn animators(
             preset,
             stagger: a.opt("stagger"),
             overlap: a.opt("overlap").filter(|o| *o != 0.0),
-            seed,
+            seed: scramble_seed,
         });
     }
     let _ = roles;
