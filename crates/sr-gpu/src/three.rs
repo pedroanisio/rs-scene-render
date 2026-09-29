@@ -46,7 +46,10 @@ pub struct TexGpu {
 
 /// A prefiltered environment on the GPU.
 pub struct EnvGpu {
+    /// Prefiltered radiance for lighting (roughness by mip).
     pub view: wgpu::TextureView,
+    /// The visible sky at the source's resolution.
+    pub sky: wgpu::TextureView,
     pub mips: u32,
     pub sh: [[f32; 3]; 9],
 }
@@ -138,8 +141,8 @@ pub struct Light3 {
 pub struct Env3 {
     pub env: Arc<EnvGpu>,
     pub intensity: f32,
-    /// Radians about y.
-    pub rotation: f32,
+    /// Environment → world rotation: the dome's yaw, pitch and roll (conventions 5.5).
+    pub rotation: Mat4,
     pub visible: bool,
 }
 
@@ -202,6 +205,7 @@ struct FrameU {
     post: [f32; 4],
     lens: [f32; 4],
     sh: [[f32; 4]; 9],
+    env_rot: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -477,6 +481,7 @@ impl ThreeEngine {
                 tex_entry(9, VS_FS, F, D2, false),
                 tex_entry(10, VS_FS, F, D2, false),
                 smp_entry(11, VS_FS, filt),
+                tex_entry(12, VS_FS, F, D2, false),
             ],
             "three-frame",
         );
@@ -838,6 +843,7 @@ impl ThreeEngine {
 
     /// Prefilters and uploads an environment.
     pub fn upload_env(&self, eq: &sr_3d::env::Equirect) -> Arc<EnvGpu> {
+        // lighting uses a 512-wide prefiltered chain; the visible sky keeps the source's resolution
         let base = eq.width.clamp(64, 512).next_power_of_two().min(512);
         let levels = (base.trailing_zeros() as usize).saturating_sub(2).clamp(2, 7);
         let pf = sr_3d::env::prefilter(eq, base, levels);
@@ -846,7 +852,24 @@ impl ThreeEngine {
             let data: Vec<u16> = px.iter().flat_map(|p| half4(*p)).collect();
             self.write_tex(&t, k as u32, [*w, *h], bytemuck::cast_slice(&data), 8);
         }
-        Arc::new(EnvGpu { view: t.create_view(&Default::default()), mips: levels as u32, sh: pf.sh })
+        let cap = self.device.limits().max_texture_dimension_2d.min(8192);
+        let resized;
+        let src = if eq.width > cap || eq.height > cap {
+            let w = cap.min(eq.width * cap / eq.height.max(1)).max(1);
+            resized = eq.resized(w, (eq.height * w / eq.width).max(1));
+            &resized
+        } else {
+            eq
+        };
+        let sky = texture(&self.device, [src.width, src.height], FORMAT, 1, 1, 1, "sky");
+        let data: Vec<u16> = src.rgb.iter().flat_map(|p| half4([p[0], p[1], p[2], 1.0])).collect();
+        self.write_tex(&sky, 0, [src.width, src.height], bytemuck::cast_slice(&data), 8);
+        Arc::new(EnvGpu {
+            view: t.create_view(&Default::default()),
+            sky: sky.create_view(&Default::default()),
+            mips: levels as u32,
+            sh: pf.sh,
+        })
     }
 
     /// Uploads splats: position and opacity, the covariance R S Sᵀ Rᵀ, colour.
@@ -1170,7 +1193,7 @@ impl ThreeEngine {
                 env.map(|e| e.intensity).unwrap_or(0.0),
             ],
             params2: [
-                env.map(|e| e.rotation).unwrap_or(0.0),
+                0.0,
                 env.map(|e| e.visible as u32 as f32).unwrap_or(0.0),
                 env.is_some() as u32 as f32,
                 env.map(|e| e.env.mips as f32).unwrap_or(1.0),
@@ -1184,6 +1207,7 @@ impl ThreeEngine {
                 0.0,
             ],
             sh,
+            env_rot: env.map(|e| e.rotation.transpose()).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
         };
         let buf = |data: &[u8], usage: wgpu::BufferUsages, label: &str| {
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
@@ -1313,6 +1337,7 @@ impl ThreeEngine {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
+        let sky_view = env.map(|e| &e.env.sky).unwrap_or(&self.black_env);
         let frame_bind_with =
             |scene_color: &wgpu::TextureView, env_view: &wgpu::TextureView, shadow_view: &wgpu::TextureView| {
                 d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1331,6 +1356,7 @@ impl ThreeEngine {
                         wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&ies_view) },
                         wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(scene_color) },
                         wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
+                        wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sky_view) },
                     ],
                 })
             };

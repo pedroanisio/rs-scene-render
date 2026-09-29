@@ -10,4 +10,5 @@
 @group(0) @binding(9) var ies_tex: texture_2d<f32>;
 @group(0) @binding(10) var scene_color: texture_2d<f32>;
 @group(0) @binding(11) var clamp_smp: sampler;
+@group(0) @binding(12) var sky_tex: texture_2d<f32>;
 

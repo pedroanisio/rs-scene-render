@@ -40,6 +40,14 @@ pub fn fixtures() -> PathBuf {
         save("gray.png", 4, 4, &|_, _| [128, 128, 128, 255]);
         save("src.png", 4, 4, &|_, _| [200, 100, 50, 255]);
         save("white.png", 4, 4, &|_, _| [255, 255, 255, 255]);
+        // equirect: grey, with a red patch at the centre column (+z) within ±17° of the horizon
+        save("sky.png", 64, 32, &|x, y| {
+            if (29..35).contains(&x) && (13..19).contains(&y) {
+                [255, 0, 0, 255]
+            } else {
+                [128, 128, 128, 255]
+            }
+        });
         for k in 1..=3u8 {
             save(&format!("seq_{k:04}.png"), 2, 2, &|_, _| [k * 80, 0, 0, 255]);
         }

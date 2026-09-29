@@ -194,7 +194,7 @@ fn dome_lights_and_fills_the_background() {
         vec![draw(&eng, &sphere, Vec3::new(64.0, 64.0, 0.0), MaterialParams { roughness: 1.0, ..Default::default() })],
         Vec::new(),
     );
-    s.env = Some(Env3 { env: gpu, intensity: 1.0, rotation: 0.0, visible: true });
+    s.env = Some(Env3 { env: gpu, intensity: 1.0, rotation: Mat4::IDENTITY, visible: true });
     let px = eng.render_now(&s, None);
     let bg = at(&px, 2, 2);
     assert!((bg[0] - 0.5).abs() < 0.02 && bg[3] == 1.0, "{bg:?}");
@@ -210,7 +210,7 @@ fn visible_dome_renders_without_any_draws() {
     let env = sr_3d::env::Equirect { width: 64, height: 32, rgb: vec![[0.25, 0.5, 0.75]; 64 * 32] };
     let gpu = eng.upload_env(&env);
     let mut s = scene(Vec::new(), Vec::new());
-    s.env = Some(Env3 { env: gpu, intensity: 1.0, rotation: 0.0, visible: true });
+    s.env = Some(Env3 { env: gpu, intensity: 1.0, rotation: Mat4::IDENTITY, visible: true });
     let px = eng.render_now(&s, None);
     let bg = at(&px, 64, 64);
     assert!((bg[1] - 0.5).abs() < 0.02 && (bg[2] - 0.75).abs() < 0.02 && bg[3] == 1.0, "{bg:?}");

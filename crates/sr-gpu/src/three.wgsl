@@ -290,18 +290,21 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     return out * radiance * nl;
 }
 
-fn env_sample(dir: vec3<f32>, level: f32) -> vec3<f32> {
-    let d = normalize(dir);
-    let u = (atan2(d.x, d.z) + PI + fr.params2.x) / (2.0 * PI);
+// Equirect coordinates of a world direction: the image's centre column is the dome's +z (conventions 5.5).
+fn env_uv(dir: vec3<f32>) -> vec2<f32> {
+    let d = normalize((fr.env_rot * vec4(dir, 0.0)).xyz);
+    let u = (atan2(d.x, d.z) + PI) / (2.0 * PI);
     let v = acos(clamp(-d.y, -1.0, 1.0)) / PI;
-    return textureSampleLevel(env_tex, env_smp, vec2(u, v), level).rgb * fr.params.w;
+    return vec2(u, v);
+}
+
+fn env_sample(dir: vec3<f32>, level: f32) -> vec3<f32> {
+    return textureSampleLevel(env_tex, env_smp, env_uv(dir), level).rgb * fr.params.w;
 }
 
 fn sh_irradiance(n: vec3<f32>) -> vec3<f32> {
-    // basis in the orientation of env.rs (rotation about y applied to the normal)
-    let c = cos(-fr.params2.x);
-    let s = sin(-fr.params2.x);
-    let d = vec3(c * n.x + s * n.z, n.y, -s * n.x + c * n.z);
+    // basis in the environment's own orientation (env.rs)
+    let d = normalize((fr.env_rot * vec4(n, 0.0)).xyz);
     var r = fr.sh[0].rgb * 0.282095;
     r += fr.sh[1].rgb * 0.488603 * d.y + fr.sh[2].rgb * 0.488603 * d.z + fr.sh[3].rgb * 0.488603 * d.x;
     r += fr.sh[4].rgb * 1.092548 * d.x * d.y + fr.sh[5].rgb * 1.092548 * d.y * d.z + fr.sh[6].rgb * 0.315392 * (3.0 * d.z * d.z - 1.0);
@@ -468,6 +471,6 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> BgOut {
 fn fs_dome(i: BgOut) -> @location(0) vec4<f32> {
     let far = fr.inv_view_proj * vec4(i.ndc, 0.0001, 1.0);
     let dir = far.xyz / far.w - fr.eye.xyz;
-    return vec4(env_sample(dir, 0.0), 1.0);
+    return vec4(textureSampleLevel(sky_tex, env_smp, env_uv(dir), 0.0).rgb * fr.params.w, 1.0);
 }
 

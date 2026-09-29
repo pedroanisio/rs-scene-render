@@ -802,7 +802,7 @@ impl Renderer {
                     env = Some(Env3 {
                         env: e,
                         intensity: scale * color[1].max(color[0]).max(color[2]),
-                        rotation: (a.num("yaw", 0.0) as f32).to_radians(),
+                        rotation: Mat4::from_quat(world.to_scale_rotation_translation().1),
                         visible: flag(&a, "environmentVisible", false),
                     });
                 }

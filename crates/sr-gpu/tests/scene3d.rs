@@ -286,6 +286,27 @@ fn parented_cameras_are_placed_in_their_parents_frame() {
 }
 
 #[test]
+fn the_dome_turns_by_its_yaw_and_pitch_and_decodes_srgb() {
+    let dome = |angles: &str| {
+        let lights = format!(r#"<light id="sky" type="dome" environment="sky.png" environmentVisible="true" {angles}/>"#);
+        render(&scene("", "", r#"<object3D id="s" primitive="sphere" radius="1" x="0" y="0" z="-500"/>"#, &lights))
+    };
+    let red = |p: [f32; 4]| p[0] > 0.5 && p[1] < 0.1;
+    let Some(r) = dome("") else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert!(red(r.at(64, 64)), "the image centre is +z: {:?}", r.at(64, 64));
+    // 8-bit sky: code 128 is sRGB-decoded
+    let g = r.at(10, 64);
+    assert!((g[1] - lin8(128)).abs() < 0.02, "{g:?} vs {}", lin8(128));
+    // positive yaw turns the environment towards +x: the patch (±17°) moves right by 30°
+    let r = dome(r#"yaw="30""#).unwrap();
+    assert!(!red(r.at(64, 64)) && red(r.at(120, 64)) && !red(r.at(10, 64)));
+    // positive pitch turns it up by 20°: tan(20°)·110.85 ≈ 40 px above the centre
+    let r = dome(r#"pitch="20""#).unwrap();
+    assert!(!red(r.at(64, 64)) && red(r.at(64, 24)), "{:?} {:?}", r.at(64, 64), r.at(64, 24));
+}
+
+#[test]
 fn look_at_constraints_aim_lights() {
     let body = r#"<object3D id="s" primitive="sphere" radius="30" x="64" y="64" z="0"/>"#;
     // a narrow spot to the left, pointing straight ahead (+z): it misses the sphere unless aimed

@@ -15,7 +15,7 @@ struct Frame {
     screen: vec4<f32>,
     // exposure multiplier, light count, tiles x, env intensity
     params: vec4<f32>,
-    // env rotation (rad), env visible, has env, env mip count
+    // unused, env visible, has env, env mip count
     params2: vec4<f32>,
     // coc scale, focus depth, max coc px, blades
     dof: vec4<f32>,
@@ -24,6 +24,8 @@ struct Frame {
     // focal length (px), unused ×3
     lens: vec4<f32>,
     sh: array<vec4<f32>, 9>,
+    // world → environment rotation of the dome
+    env_rot: mat4x4<f32>,
 };
 
 struct Light {
