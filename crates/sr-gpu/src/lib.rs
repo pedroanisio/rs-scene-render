@@ -7,6 +7,7 @@ pub mod fx;
 pub mod glsl;
 pub mod golden;
 pub mod gpu;
+pub mod ocio;
 pub mod output;
 pub mod paint;
 pub mod particles;

@@ -1311,16 +1311,56 @@ impl Renderer {
     /// Scene-referred finishing: looks (LUT or ASC CDL), exposure and tone mapping on the frame.
     pub(super) fn finishing(&mut self, plan: &mut Plan, p: &Program, frame: &Arc<Tex>) {
         let Some(cm) = p.scene.color_management.as_ref() else { return };
-        if cm.ocio_config.is_some() {
-            plan.stats.unsupported.push("colorManagement/@ocioConfig: no OpenColorIO library is linked; the built-in looks and tone mappers apply instead".into());
-        }
         let base = Self::base_dir(p);
         let working = self.working;
+        // an OCIO config replaces the tone mapper with its display and view; a <look> with neither
+        // a LUT nor CDL values names a look of the config by its id
+        let ocio_look = |l: &m::Look| {
+            cm.ocio_config.is_some()
+                && l.src.is_none()
+                && l.slope.is_none()
+                && l.offset.is_none()
+                && l.power.is_none()
+                && l.saturation == 1.0
+        };
+        let mut notes = Vec::new();
+        let ocio = cm.ocio_config.as_ref().map(|src| {
+            let config = if src.starts_with("ocio://") {
+                src.clone()
+            } else {
+                match sr_model::assets::resolve(src, &base) {
+                    sr_model::assets::Resolved::Local(path) => path.display().to_string(),
+                    _ => return Err("only local configs and ocio:// built-in configs are supported".to_string()),
+                }
+            };
+            let looks: Vec<String> = cm
+                .looks
+                .iter()
+                .flatten()
+                .filter(|id| cm.look_list.iter().any(|l| &l.id == *id && ocio_look(l)))
+                .cloned()
+                .collect();
+            let key =
+                format!("ocio:{config}|{}|{}|{}|{}", working.space.as_str(), cm.display, cm.view, looks.join(","));
+            self.fx.lut_with(&key, || {
+                crate::ocio::bake(&config, working.space, &cm.display, &cm.view, &looks).map(|b| {
+                    notes.extend(b.notes);
+                    (crate::ocio::SIZE, b.table)
+                })
+            })
+        });
+        // the display's code values decode as the (first) output encodes them
+        let (out_space, out_transfer) = p
+            .scene
+            .outputs
+            .first()
+            .map(|o| (o.color_space, o.transfer))
+            .unwrap_or((m::ColorSpace::Srgb, m::Transfer::Auto));
         let mut b = self.builder(plan);
         let mut cur = frame.clone();
         let mut problems = Vec::new();
         for id in cm.looks.iter().flatten() {
-            let Some(look) = cm.look_list.iter().find(|l| &l.id == id) else { continue };
+            let Some(look) = cm.look_list.iter().find(|l| &l.id == id && !ocio_look(l)) else { continue };
             let mixv = look.mix.get();
             if let Some(src) = &look.src {
                 let path = match sr_model::assets::resolve(src, &base) {
@@ -1370,7 +1410,19 @@ impl Renderer {
             v[0][0] = cm.exposure as f32;
             cur = b.color(&cur, 7, v);
         }
+        let mut ocio_applied = false;
+        match ocio {
+            Some(Ok(lut)) => {
+                problems.extend(notes);
+                cur = b.lut_pass_between(&cur, lut, m::Transfer::Acescct, out_space, out_transfer, working);
+                ocio_applied = true;
+            }
+            Some(Err(e)) => problems
+                .push(format!("colorManagement/@ocioConfig: {e}; the built-in looks and tone mappers apply instead")),
+            None => {}
+        }
         let tm = match cm.tone_mapping.as_str() {
+            _ if ocio_applied => None,
             "aces" | "aces2" => Some(0.0),
             "agx" => Some(1.0),
             "filmic" => Some(2.0),

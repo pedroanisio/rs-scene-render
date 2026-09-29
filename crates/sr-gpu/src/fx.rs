@@ -405,6 +405,19 @@ impl FxEngine {
         self.luts[&key].clone()
     }
 
+    /// A 3D LUT made by `load` (cached by `key`, with its error).
+    pub fn lut_with(
+        &mut self,
+        key: &str,
+        load: impl FnOnce() -> Result<(u32, Vec<[f32; 3]>), String>,
+    ) -> Result<Arc<Lut3>, String> {
+        if !self.luts.contains_key(key) {
+            let r = load().map(|(n, data)| Arc::new(self.upload_lut(n, &data)));
+            self.luts.insert(key.to_string(), r);
+        }
+        self.luts[key].clone()
+    }
+
     /// Uploads an n³ table (red fastest).
     pub fn upload_lut(&self, n: u32, data: &[[f32; 3]]) -> Lut3 {
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1590,6 +1603,35 @@ impl Builder<'_> {
         v[1] = [mi[1][0] as f32, mi[1][1] as f32, mi[1][2] as f32, 0.0];
         v[2] = [mi[2][0] as f32, mi[2][1] as f32, mi[2][2] as f32, 0.0];
         v[7] = [tf as f32, 0.0, 0.0, 0.0];
+        let size = input.size;
+        self.run(Entry::Color, [24, 0, 0, 0], v, input, Aux::None, None, Some(lut), size)
+    }
+
+    /// A LUT indexed by `input_transfer` of each working channel whose entries are code values
+    /// of `output_space` and `output_transfer` (a display transform): encodes, looks up and
+    /// decodes the result back to working colour.
+    pub fn lut_pass_between(
+        &mut self,
+        input: &Arc<Tex>,
+        lut: Arc<Lut3>,
+        input_transfer: m::Transfer,
+        output_space: m::ColorSpace,
+        output_transfer: m::Transfer,
+        working: Working,
+    ) -> Arc<Tex> {
+        let mi = color::convert(output_space, working.space);
+        let tf = color::transfer_id(input_transfer);
+        let tf_out = color::transfer_id(color::resolve(output_space, output_transfer));
+        let mut v = [[0.0f32; 4]; 8];
+        v[0] = [1.0, lut.size as f32, 0.0, 0.0];
+        for r in 0..3 {
+            let mut row = [0.0f32; 3];
+            row[r] = 1.0;
+            v[4 + r] = [row[0], row[1], row[2], mi[0][r] as f32];
+        }
+        v[1] = [mi[1][0] as f32, mi[1][1] as f32, mi[1][2] as f32, 0.0];
+        v[2] = [mi[2][0] as f32, mi[2][1] as f32, mi[2][2] as f32, 0.0];
+        v[7] = [tf as f32, 0.0, tf_out as f32 + 1.0, 0.0];
         let size = input.size;
         self.run(Entry::Color, [24, 0, 0, 0], v, input, Aux::None, None, Some(lut), size)
     }

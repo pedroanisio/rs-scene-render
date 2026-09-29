@@ -35,6 +35,7 @@ HERE = os.path.join(ROOT, "tools", "evidence")
 PLACEHOLDERS = {
     "{MEDIA}": os.path.join(ROOT, "tests", "corpus", "media"),
     "{SHADERS}": os.path.join(ROOT, "crates", "sr-gpu", "tests", "shaders"),
+    "{FIXTURES3D}": os.path.join(ROOT, "crates", "sr-3d", "tests", "fixtures"),
 }
 OUTCOMES = ("native", "degraded", "wrong", "error", "gap")
 

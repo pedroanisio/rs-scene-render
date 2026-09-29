@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An FBX rig from Blender: a skinned bar bending on a two-bone armature, a parented spinner and
+     a shape key, played from its animation stack. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="1" background="#101418"/>
+  <assets>
+    <mesh id="rig" src="{FIXTURES3D}/rig.fbx" format="fbx"/>
+  </assets>
+  <composition>
+    <object3D id="hero" primitive="mesh" mesh="rig" x="320" y="250" z="200" animationClip="Scene"/>
+  </composition>
+  <lights>
+    <light id="sky" type="ambient" intensity="0.6"/>
+    <light id="sun" type="directional" intensity="3"/>
+  </lights>
+</scene>

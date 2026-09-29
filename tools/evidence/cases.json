@@ -444,22 +444,19 @@
     {
       "id": "ocio-pipeline",
       "reference": "Studio-graded footage (OCIO / ACES pipelines)",
-      "technique": "colorManagement ocioConfig",
+      "technique": "colorManagement ocioConfig: OCIO's ACES CG config, ACES 2.0 SDR view",
       "scene": "scenes/ocio-pipeline.scene.xml",
-      "generate": {
-        "config.ocio": "ocio_stub"
-      },
-      "expect": "degraded",
-      "known": "No OpenColorIO library is linked; the built-in looks and tone mappers apply and the renderer reports it.",
+      "expect": "native",
+      "known": "Needs OpenColorIO's ociobakelut (pip install opencolorio) on PATH or in SR_OCIOBAKELUT; without it the case is degraded.",
       "checks": [
         {
           "type": "color",
           "t": 0.5,
           "x": 320,
           "y": 180,
-          "rgb": "#808080",
-          "tol": 0.02,
-          "why": "the built-in pipeline still renders"
+          "rgb": "#626262",
+          "tol": 0.01,
+          "why": "mid gray through ACES 2.0 SDR is OCIO's 0.3861 (98/255)"
         }
       ]
     },
@@ -506,18 +503,64 @@
     {
       "id": "fbx-animation",
       "reference": "Rigs delivered as FBX",
-      "technique": "FBX animation stacks",
-      "scene": null,
-      "expect": "gap",
-      "known": "FBX geometry imports; animation stacks are not imported. Convert to glTF."
+      "technique": "FBX animation stack (skinned, baked by ufbx)",
+      "scene": "scenes/fbx-animation.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.03,
+          "min": 0.005,
+          "why": "the rig draws"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.0,
+            0.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "the stack animates it (clips loop, so t = 0.5 within the 1 s clip)"
+        }
+      ]
     },
     {
       "id": "usd-binary",
       "reference": "USD pipeline assets",
-      "technique": "binary USD (usdc / usdz with crate files)",
-      "scene": null,
-      "expect": "gap",
-      "known": "Only text USDA (and usdz holding USDA) is read."
+      "technique": "binary USD (usdc) in a USDZ package",
+      "scene": "scenes/usd-binary.scene.xml",
+      "expect": "degraded",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.03,
+          "min": 0.005,
+          "why": "the meshes draw"
+        }
+      ],
+      "known": "The stage's time-sampled translate takes its first sample and is reported: USD animation is not imported."
     }
   ]
 }
