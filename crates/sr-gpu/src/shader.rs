@@ -601,8 +601,17 @@ impl Builder<'_> {
     }
 
     fn internal(&mut self, name: &str, code: &str) -> Arc<CustomPipe> {
-        let p = glsl::build_effect(code).unwrap_or_else(|e| panic!("internal shader {name}: {e}"));
-        self.eng.program(&p).unwrap_or_else(|e| panic!("internal shader {name}: {e}"))
+        let key = (format!("internal:{name}"), std::path::PathBuf::new());
+        let built = match self.eng.sources.get(&key) {
+            Some(r) => r.clone(),
+            None => {
+                let r = glsl::build_effect(code).map(|p| Arc::new((p, std::path::PathBuf::new(), 0)));
+                self.eng.sources.insert(key, r.clone());
+                r
+            }
+        };
+        let p = built.unwrap_or_else(|e| panic!("internal shader {name}: {e}"));
+        self.eng.program(&p.0).unwrap_or_else(|e| panic!("internal shader {name}: {e}"))
     }
 
     /// A transparent 1×1 texture.
@@ -664,9 +673,20 @@ impl Builder<'_> {
     /// image assets, stored working premultiplied, row 0 on top).
     pub fn shader_effect(&mut self, e: &dyn Element, a: &Attrs, input: &Arc<Tex>, cx: &Cx) -> Result<Arc<Tex>, String> {
         let src = a.str("src").ok_or("effect type='shader' without @src; passed through")?;
-        let (code, dir) = glsl::load_source(&src, cx.base)?;
-        let program = glsl::build_effect(&code)?;
-        let pipe = self.eng.program(&program).map_err(|e| format!("GLSL compile/link failed; passed through.\n{e}"))?;
+        let key = (src.to_string(), cx.base.to_path_buf());
+        let built = match self.eng.sources.get(&key) {
+            Some(r) => r.clone(),
+            None => {
+                let r = glsl::load_source(&src, cx.base)
+                    .and_then(|(code, dir)| {
+                        glsl::build_effect(&code).map(|p| Arc::new((p, dir, sr_eval::rng::hash_str(&code))))
+                    });
+                self.eng.sources.insert(key, r.clone());
+                r
+            }
+        }?;
+        let (program, dir, code_hash) = (&built.0, &built.1, built.2);
+        let pipe = self.eng.program(program).map_err(|e| format!("GLSL compile/link failed; passed through.\n{e}"))?;
         let space = match Space::parse(a.str("space").as_deref()) {
             Some(s) => s,
             None => {
@@ -797,7 +817,7 @@ impl Builder<'_> {
         let mut defaults = program.defaults.clone();
         defaults.entry("iMouse".into()).or_insert_with(|| "0".into());
         defaults.entry("iSampleRate".into()).or_insert_with(|| "48000".into());
-        let program = Program { defaults, ..program };
+        let program = Program { defaults, ..program.clone() };
         let seed = match a.opt("seed") {
             Some(s) if e.get_attr("seed").is_some() => s,
             _ => (sr_eval::rng::hash_str(&format!("{}:shader", e.element_id().unwrap_or(""))) % 65536) as f64,
@@ -851,7 +871,7 @@ impl Builder<'_> {
             .filter(|p| p.get("PERSISTENT").and_then(|v| v.as_bool()).unwrap_or(false))
             .filter_map(|p| p.get("TARGET").and_then(|t| t.as_str()).map(String::from))
             .collect();
-        let key = format!("{}|{}|{}", e.element_id().unwrap_or(""), cx.node, sr_eval::rng::hash_str(&code));
+        let key = format!("{}|{}|{}", e.element_id().unwrap_or(""), cx.node, code_hash);
         if !persistent.is_empty() {
             // every read within a frame sees the history as it stood when the frame began
             if let Some(fb) = self.eng.feedback_at(&key, cx.frame) {

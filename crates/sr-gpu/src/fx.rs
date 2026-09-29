@@ -146,6 +146,9 @@ pub struct FxEngine {
     luts: HashMap<String, Result<Arc<Lut3>, String>>,
     /// Custom GLSL programs by source hash (see `shader`).
     pub(crate) programs: HashMap<u64, Result<Arc<crate::shader::CustomPipe>, String>>,
+    /// Built effect programs by (`src`, base directory): source loading and the GLSL rewrite
+    /// run once per effect source, not once per frame.
+    pub(crate) sources: HashMap<(String, std::path::PathBuf), Result<Arc<(crate::glsl::Program, std::path::PathBuf, u64)>, String>>,
     /// Persistent ISF buffers by effect instance (latest), their state at the start of the
     /// current frame, and checkpoints by frame.
     pub(crate) feedback: HashMap<String, crate::shader::Feedback>,
@@ -248,6 +251,7 @@ impl FxEngine {
             dummy3,
             luts: HashMap::new(),
             programs: HashMap::new(),
+            sources: HashMap::new(),
             feedback: HashMap::new(),
             feedback_frame: (i64::MIN, HashMap::new()),
             checkpoints: std::collections::BTreeMap::new(),
