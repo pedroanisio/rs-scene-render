@@ -16,6 +16,7 @@
 //! ```
 
 #![forbid(unsafe_code)]
+pub mod agents;
 pub mod channel;
 pub mod codes;
 pub mod curve;

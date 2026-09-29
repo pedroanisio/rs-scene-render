@@ -207,6 +207,8 @@ pub struct Renderer {
     working: Working,
     tokens: HashMap<String, [f64; 4]>,
     images: HashMap<String, Option<Arc<Tex>>>,
+    /// The last uploaded picture of each grid simulation: (content key, texture).
+    sim_textures: HashMap<Arc<str>, (u64, Arc<Tex>)>,
     generators: HashMap<u64, Arc<Tex>>,
     subtree: HashMap<String, (u64, Arc<Tex>)>,
     used: std::collections::HashSet<String>,
@@ -495,6 +497,7 @@ impl Renderer {
             dummy,
             working,
             images: HashMap::new(),
+            sim_textures: HashMap::new(),
             generators: HashMap::new(),
             subtree: HashMap::new(),
             used: Default::default(),
@@ -587,6 +590,69 @@ impl Renderer {
             Some(r) => (r.src.as_str(), r.color_space.unwrap_or(space), r.transfer.unwrap_or(transfer)),
             None => (src, space, transfer),
         }
+    }
+
+    /// Draws a grid simulation's picture over the node's box.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_sim_image(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        i: usize,
+        space: &Space,
+        op: f64,
+        blend: u32,
+        seed: u32,
+        cmds: &mut Vec<Cmd>,
+        root_hash: u64,
+    ) {
+        let n = &ctx.g.nodes[i];
+        let (Some(img), Some([bw, bh])) = (n.sim_image.clone(), n.size) else { return };
+        let tex = match self.sim_textures.get(&n.id) {
+            Some((k, t)) if *k == img.key => t.clone(),
+            _ => {
+                let working = self.working;
+                let px: Vec<[f32; 4]> = img
+                    .rgba
+                    .iter()
+                    .map(|p| {
+                        let a = p[3] as f64;
+                        if a <= 0.0 {
+                            return [0.0; 4];
+                        }
+                        let c = working.from_linear_srgb([p[0] as f64 / a, p[1] as f64 / a, p[2] as f64 / a, a]);
+                        [(c[0] * a) as f32, (c[1] * a) as f32, (c[2] * a) as f32, a as f32]
+                    })
+                    .collect();
+                let d = resources::Decoded { levels: resources::mips(img.width, img.height, px) };
+                let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "simulation"));
+                self.sim_textures.insert(n.id.clone(), (img.key, t.clone()));
+                t
+            }
+        };
+        let d = Draw {
+            opacity: op as f32,
+            blend,
+            src_kind: src::TEXTURE,
+            seed,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        let hash = h(&[root_hash, sr_eval::rng::hash_str(&n.id), img.key, hf(op), 0x5157]);
+        self.draw_cmd(
+            plan,
+            ctx,
+            i,
+            space,
+            d,
+            [0.0, 0.0, bw, bh],
+            [0.0, 0.0, 1.0, 1.0],
+            &n.world,
+            tex,
+            cmds,
+            hash,
+            false,
+        );
     }
 
     fn solid_texture(&mut self, rgba: [f32; 4]) -> Arc<Tex> {
@@ -1140,6 +1206,14 @@ impl Renderer {
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             props,
             n.soft.as_ref().map(|s| h(&s.offsets.iter().flat_map(|o| o.map(hf)).collect::<Vec<u64>>())).unwrap_or(5),
+            // simulated content changes without the node's own attributes changing
+            n.sim_image.as_ref().map(|s| s.key).unwrap_or(6),
+            n.particles
+                .as_ref()
+                .map(|p| {
+                    h(&p.pos.iter().chain(&p.vel).flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>())
+                })
+                .unwrap_or(7),
         ])
     }
 
@@ -1543,7 +1617,8 @@ impl Renderer {
                     Err(e) => plan.stats.errors.push(format!("{}: {e}", n.id)),
                 }
             }
-            "particleEmitter" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
+            "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
+            "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
             "object3D" => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}

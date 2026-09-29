@@ -1222,6 +1222,11 @@ impl Builder {
                 clip: attr_bool(e, "clip").unwrap_or(false),
             };
             self.nodes.push(node);
+            if matches!(name, "flock" | "fluid" | "slime" | "erosion") {
+                // simulations draw in their width × height box
+                let (w, h) = (attr_num(e, "width").unwrap_or(1.0), attr_num(e, "height").unwrap_or(1.0));
+                self.nodes[idx as usize].box_size = Some([Length::px(w), Length::px(h)]);
+            }
             self.statics(idx, n, ctx.doc);
             if n.id().is_some() {
                 self.ids.insert(id.clone(), idx);

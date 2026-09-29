@@ -202,9 +202,12 @@ pub struct FrameNode {
     /// Soft-body lattice displacement (Batch 9), in node space.
     #[serde(skip)]
     pub soft: Option<Arc<crate::sim::SoftWarp>>,
-    /// Live particles of an emitter (Batch 9), in frame space.
+    /// Live particles of an emitter (Batch 9) or agents of a flock, in frame space.
     #[serde(skip)]
     pub particles: Option<Arc<crate::sim::ParticleFrame>>,
+    /// The picture of a grid simulation (fluid, slime, erosion), filling the node's box.
+    #[serde(skip)]
+    pub sim_image: Option<Arc<crate::agents::SimImage>>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -938,6 +941,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             skin: None,
             soft: None,
             particles: None,
+            sim_image: None,
             elem: node.elem.clone(),
         });
         let own_box = node.box_size.map(|[w, h]| [resolve_len(w, bx[0], p.size), resolve_len(h, bx[1], p.size)]);
