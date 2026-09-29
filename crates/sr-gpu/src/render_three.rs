@@ -161,7 +161,11 @@ impl Renderer {
             let n = &g.nodes[j];
             return Some(match n.kind {
                 "object3D" => Self::world3(g, lights, j, depth),
-                "camera" => Self::pose_world(g, lights, &*n.elem, &attrs(n), depth),
+                // the camera as it looks: its pose, look-at target and shake
+                "camera" => {
+                    let cp = Self::cam_params(g, lights, j, depth);
+                    camera::resolve(&cp, g.size[0] as f32, g.size[1] as f32).view.inverse()
+                }
                 _ => embed(&n.world),
             });
         }
@@ -178,11 +182,73 @@ impl Renderer {
 
     /// World position of a node for look-at and focus targets.
     fn target_point(g: &FrameGraph, lights: &[m::Light], id: &str) -> Option<Vec3> {
+        Self::world_point(g, lights, id, 0)
+    }
+
+    fn world_point(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Vec3> {
         if let Some(n) = g.nodes.iter().find(|m| &*m.id == id).filter(|n| !matches!(n.kind, "object3D" | "camera")) {
             let p = n.world.apply(n.anchor);
             return Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32));
         }
-        Some(Self::world_of(g, lights, id, 0)?.transform_point3(Vec3::ZERO))
+        Some(Self::world_of(g, lights, id, depth)?.transform_point3(Vec3::ZERO))
+    }
+
+    /// Horizontal field of view of a camera node: `fov`, or `focalLength` over `sensorWidth`.
+    fn cam_fov(a: &Attrs) -> f32 {
+        match a.opt("focalLength") {
+            Some(f) => camera::fov_of_lens(f as f32, a.num("sensorWidth", 36.0) as f32),
+            None => a.num("fov", 60.0) as f32,
+        }
+    }
+
+    /// Camera inputs of camera node `ci`: projection, pose (in its parent's frame when parented),
+    /// look-at target and shake.
+    fn cam_params(g: &FrameGraph, lights: &[m::Light], ci: usize, depth: u32) -> CameraParams {
+        let n = &g.nodes[ci];
+        let a = attrs(n);
+        let mut cp = CameraParams {
+            fov: Self::cam_fov(&a),
+            orthographic: a.str("projection").as_deref() == Some("orthographic"),
+            ortho_height: a.opt("orthoHeight").map(|v| v as f32),
+            near: a.num("near", 0.1) as f32,
+            far: a.num("far", 10000.0) as f32,
+            // absolute scene position; the defaults put the eye at the frame's top-left corner on z = 0
+            position: Some(Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32)),
+            yaw: a.num("yaw", 0.0) as f32,
+            pitch: a.num("pitch", 0.0) as f32,
+            roll: a.num("roll", 0.0) as f32,
+            // a parented camera's position and angles are in its parent's frame (conventions 5.4)
+            frame: Self::parent_world(g, lights, &*n.elem, depth),
+            ..Default::default()
+        };
+        if let Some(t) = a.str("target").filter(|_| depth < 32) {
+            cp.target = Self::world_point(g, lights, &t, depth + 1);
+        }
+        // shake children
+        for c in sr_model::element::children(&*n.elem) {
+            if c.element_name() != "shake" {
+                continue;
+            }
+            let sa = Attrs { e: c, props: None };
+            let t = n.local_time;
+            if t < sa.num("start", 0.0) || sa.opt("end").map(|e| t >= e).unwrap_or(false) {
+                continue;
+            }
+            let seed = sa.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
+            let (dx, dy, droll, dz) = camera::shake(
+                sa.num("amplitude", 10.0) as f32,
+                sa.num("frequency", 2.0) as f32,
+                sa.num("rotation", 0.0) as f32,
+                sa.num("zoom", 0.0) as f32,
+                sa.num("octaves", 2.0) as u32,
+                seed,
+                t,
+            );
+            cp.offset += Vec3::new(dx, dy, 0.0);
+            cp.roll += droll;
+            cp.fov = (cp.fov / dz.max(0.05)).clamp(0.1, 179.0);
+        }
+        cp
     }
 
     /// The frame camera (the active camera node, else the default 2.5D camera).
@@ -197,49 +263,8 @@ impl Renderer {
             let n = &g.nodes[ci as usize];
             let a = attrs(n);
             sensor = a.num("sensorWidth", 36.0) as f32;
-            cp.fov = a.num("fov", 60.0) as f32;
-            if let Some(f) = a.opt("focalLength") {
-                cp.fov = camera::fov_of_lens(f as f32, sensor);
-            }
-            focal_mm = camera::lens_of_fov(cp.fov, sensor);
-            cp.orthographic = a.str("projection").as_deref() == Some("orthographic");
-            cp.ortho_height = a.opt("orthoHeight").map(|v| v as f32);
-            cp.near = a.num("near", 0.1) as f32;
-            cp.far = a.num("far", 10000.0) as f32;
-            // absolute scene position; the defaults put the eye at the frame's top-left corner on z = 0
-            cp.position = Some(Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32));
-            cp.yaw = a.num("yaw", 0.0) as f32;
-            cp.pitch = a.num("pitch", 0.0) as f32;
-            cp.roll = a.num("roll", 0.0) as f32;
-            // a parented camera's position and angles are in its parent's frame (conventions 5.4)
-            cp.frame = Self::parent_world(g, lights, &*n.elem, 0);
-            if let Some(t) = a.str("target") {
-                cp.target = Self::target_point(g, lights, &t);
-            }
-            // shake children
-            for c in sr_model::element::children(&*n.elem) {
-                if c.element_name() != "shake" {
-                    continue;
-                }
-                let sa = Attrs { e: c, props: None };
-                let t = n.local_time;
-                if t < sa.num("start", 0.0) || sa.opt("end").map(|e| t >= e).unwrap_or(false) {
-                    continue;
-                }
-                let seed = sa.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
-                let (dx, dy, droll, dz) = camera::shake(
-                    sa.num("amplitude", 10.0) as f32,
-                    sa.num("frequency", 2.0) as f32,
-                    sa.num("rotation", 0.0) as f32,
-                    sa.num("zoom", 0.0) as f32,
-                    sa.num("octaves", 2.0) as u32,
-                    seed,
-                    t,
-                );
-                cp.offset += Vec3::new(dx, dy, 0.0);
-                cp.roll += droll;
-                cp.fov = (cp.fov / dz.max(0.05)).clamp(0.1, 179.0);
-            }
+            focal_mm = camera::lens_of_fov(Self::cam_fov(&a), sensor);
+            cp = Self::cam_params(g, lights, ci as usize, 0);
             ex.exposure = 2f32.powf(a.num("exposure", 0.0) as f32);
             ex.lens_k1 = a.num("lensDistortion", 0.0) as f32;
             dof_on = flag(&a, "depthOfField", false);
