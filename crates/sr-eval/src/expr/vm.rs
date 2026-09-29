@@ -175,6 +175,12 @@ pub trait Host {
     fn noise_channel(&mut self) -> u64 {
         OTHER_CHANNEL
     }
+    /// Where a longitude/latitude lands on the map asset `map` now (map pixels), and whether it
+    /// is visible there; `None` without such a map.
+    fn geo(&mut self, map: &str, lon: f64, lat: f64) -> Option<([f64; 2], bool)> {
+        let _ = (map, lon, lat);
+        None
+    }
 }
 
 /// Noise channel of a property-less expression (text selectors, conditions).
@@ -277,6 +283,8 @@ pub enum Func {
     Atan2,
     Hypot,
     MathRandom,
+    Geo,
+    GeoVisible,
 }
 
 impl Func {
@@ -337,6 +345,8 @@ impl Func {
             "Math.atan2" => (Atan2, 2, 2),
             "Math.hypot" => (Hypot, 0, MANY),
             "Math.random" => (MathRandom, 0, 0),
+            "geo" => (Geo, 3, 3),
+            "geoVisible" => (GeoVisible, 3, 3),
             _ => return None,
         })
     }
@@ -376,6 +386,8 @@ pub const FUNCTION_NAMES: &[&str] = &[
     "parseFloat",
     "String",
     "isNaN",
+    "geo",
+    "geoVisible",
 ];
 
 type Reg = u16;
@@ -1196,6 +1208,14 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             V::Num(host.audio(&args[0].to_js_string(), band))
         }
         Beat => V::Num(host.beat()),
+        Geo | GeoVisible => {
+            let r = host.geo(&args[0].to_js_string(), args[1].num(), args[2].num());
+            match (f, r) {
+                (Geo, Some((q, _))) => V::Arr(Arc::from([V::Num(q[0]), V::Num(q[1])])),
+                (Geo, None) => V::Arr(Arc::from([V::Num(f64::NAN), V::Num(f64::NAN)])),
+                (_, r) => V::Num(r.is_some_and(|r| r.1) as u8 as f64),
+            }
+        }
         Length => {
             let a = args[0].components().unwrap_or_default();
             let v: Vec<f64> = match args.get(1) {

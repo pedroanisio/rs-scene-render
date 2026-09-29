@@ -7,6 +7,8 @@
 //! * [`VideoDecoder`] delivers frame-accurate planar frames by index, with a
 //!   background look-ahead ring so sequential access never waits on seeks.
 //! * [`decode_audio`] returns interleaved `f32` samples at a chosen rate.
+//! * [`still`] decodes still images of every common format, upright, with
+//!   their embedded colour profile.
 //! * [`encode`] builds and runs encoder command lines for every codec and
 //!   container of the schema, with hardware encoder selection.
 //!
@@ -16,8 +18,11 @@
 
 pub mod decode;
 pub mod encode;
+pub mod heif;
+pub mod icc;
 pub mod probe;
 pub mod spherical;
+pub mod still;
 
 pub use decode::{decode_audio, AudioData, PixelLayout, Plane, VideoDecoder, VideoFrame};
 pub use probe::{probe, MediaInfo};

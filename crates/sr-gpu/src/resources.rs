@@ -113,31 +113,123 @@ impl Pool {
 pub struct Decoded {
     /// Levels, largest first: (width, height, RGBA f32 premultiplied).
     pub levels: Vec<(u32, u32, Vec<[f32; 4]>)>,
+    /// Why an embedded colour profile could not be honoured, when it could not.
+    pub note: Option<String>,
 }
 
-/// Decodes an image file into the working space.
+/// How the values of a file become light: the colour space and transfer the document declares,
+/// or the file's own profile.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Coding {
+    /// A named space and transfer (declared, or an embedded description that matches one).
+    Named(ColorSpace, Transfer),
+    /// A matrix/TRC ICC profile that matches no named space: linear RGB → XYZ (D65) and tone curves.
+    Profile(color::M3, Box<[sr_media::icc::Curve; 3]>),
+}
+
+/// The H.273 colour primaries as a named space.
+fn cicp_space(p: u16) -> Option<ColorSpace> {
+    Some(match p {
+        1 => ColorSpace::Srgb,
+        9 => ColorSpace::Rec2020,
+        11 => ColorSpace::DciP3,
+        12 => ColorSpace::DisplayP3,
+        _ => return None,
+    })
+}
+
+/// The H.273 transfer characteristics as a transfer.
+fn cicp_transfer(t: u16) -> Option<Transfer> {
+    Some(match t {
+        1 | 6 | 14 | 15 => Transfer::Bt1886,
+        4 => Transfer::Gamma22,
+        8 => Transfer::Linear,
+        13 => Transfer::Srgb,
+        16 => Transfer::Pq,
+        18 => Transfer::Hlg,
+        _ => return None,
+    })
+}
+
+/// The named space and transfer an ICC profile equals, if any, within the rounding of ICC's
+/// fixed-point colorants and 16-bit curves.
+fn named_profile(p: &sr_media::icc::Profile, m: &color::M3) -> Option<(ColorSpace, Transfer)> {
+    let space = if p.gray {
+        ColorSpace::Srgb
+    } else {
+        *[ColorSpace::Srgb, ColorSpace::DisplayP3, ColorSpace::Rec2020, ColorSpace::DciP3].iter().find(|s| {
+            let n = color::to_xyz_d65(**s);
+            (0..3).all(|i| (0..3).all(|j| (n[i][j] - m[i][j]).abs() < 3e-3))
+        })?
+    };
+    let transfer = *[Transfer::Srgb, Transfer::Linear, Transfer::Gamma22, Transfer::Bt1886, Transfer::Gamma26]
+        .iter()
+        .find(|t| {
+        p.curves
+            .iter()
+            .all(|c| (0..=32).all(|i| (c.eval(i as f64 / 32.0) - color::decode(**t, i as f64 / 32.0)).abs() < 2e-3))
+    })?;
+    Some((space, transfer))
+}
+
+/// Chooses the coding of a decoded still: its embedded description when `embedded` and usable,
+/// else the declared one. A linear-light format (EXR, HDR) with `transfer="auto"` is linear.
+pub fn coding(still: &sr_media::still::Still, space: ColorSpace, transfer: Transfer, embedded: bool) -> Coding {
+    use sr_media::still::Colour;
+    let declared = || {
+        let t = if transfer == Transfer::Auto && still.linear { Transfer::Linear } else { transfer };
+        Coding::Named(space, t)
+    };
+    if !embedded || space == ColorSpace::Raw {
+        return declared();
+    }
+    match &still.colour {
+        Colour::Cicp(p, t) => match (cicp_space(*p), cicp_transfer(*t)) {
+            (Some(s), Some(t)) => Coding::Named(s, t),
+            (Some(s), None) => Coding::Named(s, transfer),
+            (None, Some(t)) => Coding::Named(space, t),
+            (None, None) => declared(),
+        },
+        Colour::Icc(p) => {
+            let m = color::mul(&color::icc_d50_to_d65(), &p.to_xyz_d50);
+            match named_profile(p, &m) {
+                Some((s, t)) => Coding::Named(s, t),
+                None => Coding::Profile(m, Box::new(p.curves.clone())),
+            }
+        }
+        Colour::Unknown | Colour::Unsupported(_) => declared(),
+    }
+}
+
+/// Decodes an image file into the working space. `embedded` lets the file's own colour profile
+/// (ICC, or H.273 code points) take precedence over `space` and `transfer`.
 pub fn decode_image(
     path: &Path,
     space: ColorSpace,
     transfer: Transfer,
     alpha: AlphaMode,
+    embedded: bool,
     working: &Working,
     max_dim: u32,
 ) -> Result<Decoded, String> {
-    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    decode_dynamic(img, space, transfer, alpha, working, max_dim)
+    let still = sr_media::still::open(path)?;
+    let coding = coding(&still, space, transfer, embedded);
+    let mut d = decode_dynamic(still.image, &coding, alpha, working, max_dim)?;
+    if let (sr_media::still::Colour::Unsupported(why), true) = (&still.colour, embedded) {
+        d.note = Some(format!("embedded colour profile not used ({why}); colorSpace applies"));
+    }
+    Ok(d)
 }
 
 /// Decodes an encoded image held in memory (bitmap glyphs).
 pub fn decode_image_bytes(bytes: &[u8], working: &Working, max_dim: u32) -> Result<Decoded, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-    decode_dynamic(img, ColorSpace::Srgb, Transfer::Auto, AlphaMode::Auto, working, max_dim)
+    decode_dynamic(img, &Coding::Named(ColorSpace::Srgb, Transfer::Auto), AlphaMode::Auto, working, max_dim)
 }
 
 fn decode_dynamic(
     img: image::DynamicImage,
-    space: ColorSpace,
-    transfer: Transfer,
+    coding: &Coding,
     alpha: AlphaMode,
     working: &Working,
     max_dim: u32,
@@ -154,15 +246,19 @@ fn decode_dynamic(
         );
     }
     let (w, h) = rgba.dimensions();
-    let t = color::resolve(space, transfer);
-    let m = color::convert(space, working.space);
-    let mut lut = [0f64; 65536];
-    let use_lut = !matches!(t, Transfer::Linear);
-    if use_lut {
-        for (i, v) in lut.iter_mut().enumerate() {
-            *v = color::decode(t, i as f64 / 65535.0);
+    let table = |f: &dyn Fn(f64) -> f64| -> Vec<f64> { (0..65536).map(|i| f(i as f64 / 65535.0)).collect() };
+    // Per-channel decoding tables (none when the values are already linear) and the matrix to the working space.
+    let (luts, m): (Option<[std::sync::Arc<Vec<f64>>; 3]>, color::M3) = match coding {
+        Coding::Named(space, transfer) => {
+            let t = color::resolve(*space, *transfer);
+            let lut = (t != Transfer::Linear).then(|| std::sync::Arc::new(table(&|v| color::decode(t, v))));
+            (lut.map(|l| [l.clone(), l.clone(), l]), color::convert(*space, working.space))
         }
-    }
+        Coding::Profile(to_xyz, curves) => {
+            let l = (**curves).clone().map(|c| std::sync::Arc::new(table(&|v| c.eval(v))));
+            (Some(l), color::mul(&color::inv(&color::to_xyz_d65(working.space)), to_xyz))
+        }
+    };
     let premultiplied_in = alpha == AlphaMode::Premultiplied;
     let ignore_alpha = alpha == AlphaMode::None;
     let px: Vec<[f32; 4]> = rgba
@@ -173,13 +269,16 @@ fn decode_dynamic(
             if premultiplied_in && a > 0.0 {
                 c = c.map(|v| v / a);
             }
-            let lin = if use_lut { c.map(|v| lut[(v.clamp(0.0, 1.0) * 65535.0).round() as usize]) } else { c };
+            let lin = match &luts {
+                Some(l) => [0, 1, 2].map(|k| l[k][(c[k].clamp(0.0, 1.0) * 65535.0).round() as usize]),
+                None => c,
+            };
             let wv = color::apply(&m, lin);
             let stored = working.store([wv[0], wv[1], wv[2], a]);
             [(stored[0] * a) as f32, (stored[1] * a) as f32, (stored[2] * a) as f32, a as f32]
         })
         .collect();
-    Ok(Decoded { levels: mips(w, h, px) })
+    Ok(Decoded { levels: mips(w, h, px), note: None })
 }
 
 /// Box-filtered mip chain.

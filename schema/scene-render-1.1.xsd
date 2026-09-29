@@ -134,6 +134,17 @@
       <xs:enumeration value="raw"/>
     </xs:restriction>
   </xs:simpleType>
+  <xs:simpleType name="colorProfileType">
+    <xs:annotation><xs:documentation>
+      Which colour description of a still image file applies. embedded: an ICC profile
+      (matrix/TRC) or H.273 code points (HEIF nclx, ICC cicp) in the file take precedence over
+      colorSpace and transfer, which apply to files without one. declared: colorSpace and
+      transfer always apply (data textures, mis-tagged files).
+    </xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="embedded"/><xs:enumeration value="declared"/>
+    </xs:restriction>
+  </xs:simpleType>
   <xs:simpleType name="transferType">
     <xs:restriction base="xs:string">
       <xs:enumeration value="auto"/><xs:enumeration value="srgb"/>
@@ -364,7 +375,9 @@
       loopIn/loopOut(type, n), linear/ease/easeIn/easeOut(t, t0, t1, v0, v1),
       clamp, lerp, smoothstep, spring(t, stiffness, damping, mass),
       audioAmplitude(trackId[, band]), beat(), markerTime(id), textIndex,
-      textTotal. random and noise are seeded; no I/O or wall clock exists.
+      textTotal, geo(mapId, lon, lat) (where a place lands on a map asset now, in map
+      pixels) and geoVisible(mapId, lon, lat) (1 on the near side of a globe and inside the
+      map frame, else 0). random and noise are seeded; no I/O or wall clock exists.
     </xs:documentation></xs:annotation>
     <xs:simpleContent>
       <xs:extension base="expressionString">
@@ -712,6 +725,7 @@
     <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
     <xs:attribute name="colorSpace" type="colorSpaceType" default="srgb"/>
     <xs:attribute name="transfer" type="transferType" default="auto"/>
+    <xs:attribute name="colorProfile" type="colorProfileType" default="embedded"/>
     <xs:attribute name="alpha" type="alphaModeType" default="auto"/>
     <xs:attribute name="layer" type="xs:string">
       <xs:annotation><xs:documentation>Layer or channel set inside multi-layer files (PSD layer, EXR part).</xs:documentation></xs:annotation>
@@ -755,6 +769,7 @@
     <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
     <xs:attribute name="colorSpace" type="colorSpaceType" default="srgb"/>
     <xs:attribute name="transfer" type="transferType" default="auto"/>
+    <xs:attribute name="colorProfile" type="colorProfileType" default="embedded"/>
     <xs:attribute name="alpha" type="alphaModeType" default="auto"/>
     <xs:attribute name="missingFrame" default="error">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -1070,6 +1085,187 @@
     <xs:attribute name="duration" type="positiveDecimal"/>
     <xs:attribute name="license" type="xs:string"/>
   </xs:complexType>
+  <!-- ===================================================== maps -->
+  <xs:simpleType name="projectionType">
+    <xs:annotation><xs:documentation>
+      Map projections (d3-geo formulas). Cylindrical, pseudo-cylindrical and conic projections
+      cut the globe along the antimeridian opposite the centre; orthographic and the azimuthal
+      projections clip to the visible cap (the near hemisphere for orthographic).
+      web-mercator is spherical Mercator with MapLibre zoom levels (a 512-pixel world at zoom 0).
+    </xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="mercator"/><xs:enumeration value="web-mercator"/>
+      <xs:enumeration value="equirectangular"/><xs:enumeration value="equal-earth"/>
+      <xs:enumeration value="natural-earth"/><xs:enumeration value="albers"/>
+      <xs:enumeration value="lambert-conformal"/><xs:enumeration value="orthographic"/>
+      <xs:enumeration value="stereographic"/><xs:enumeration value="azimuthal-equal-area"/>
+      <xs:enumeration value="azimuthal-equidistant"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="geoAssetType">
+    <xs:annotation><xs:documentation>
+      Geographic data: GeoJSON, TopoJSON, KML or GPX (format from the extension, then the
+      content). @object picks one TopoJSON object (all objects by default). Polygon edges are
+      great-circle arcs; rings wound either way are accepted (a polygon larger than a
+      hemisphere is turned round).
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI" use="required"/>
+    <xs:attribute name="format" default="auto">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="auto"/><xs:enumeration value="geojson"/><xs:enumeration value="topojson"/>
+        <xs:enumeration value="kml"/><xs:enumeration value="gpx"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="object" type="xs:string"/>
+    <xs:attributeGroup ref="assetProvenance"/>
+  </xs:complexType>
+  <xs:complexType name="featureStyleType">
+    <xs:annotation><xs:documentation>
+      Overrides the style of the features of a geoLayer whose key (the layer's @keyBy property)
+      equals @key; animatable, so single countries can light up.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="key" type="xs:string" use="required"/>
+    <xs:attribute name="fill" type="paintType"/>
+    <xs:attribute name="stroke" type="paintType"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+  </xs:complexType>
+  <xs:complexType name="geoLayerType">
+    <xs:annotation><xs:documentation>
+      The features of a geo asset: polygons filled and stroked, lines stroked (drawn on by
+      @progress), points as dots. @filter keeps features whose property equals (prop=value) or
+      differs from (prop!=value) a value. Choropleth: @fillBy names a numeric property mapped
+      through @domain (data range by default) and @scale onto @palette (colours interpolated in
+      sRGB; quantize picks one colour per equal step); features without a value use @noData.
+      @label names a property drawn at each feature's centre.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="featureStyle" type="featureStyleType"/>
+      <xs:group ref="animationElements"/>
+    </xs:choice>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="geo" type="xs:IDREF" use="required"/>
+    <xs:attribute name="filter" type="xs:string"/>
+    <xs:attribute name="fill" type="paintType" default="#D9D9D9"/>
+    <xs:attribute name="stroke" type="paintType"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="fillBy" type="xs:string"/>
+    <xs:attribute name="palette" type="xs:string"/>
+    <xs:attribute name="domain" type="numberListType"/>
+    <xs:attribute name="scale" default="linear">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="linear"/><xs:enumeration value="log"/><xs:enumeration value="sqrt"/>
+        <xs:enumeration value="quantize"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="noData" type="paintType"/>
+    <xs:attribute name="keyBy" type="xs:string" default="id"/>
+    <xs:attribute name="label" type="xs:string"/>
+    <xs:attribute name="textStyle" type="xs:IDREF"/>
+    <xs:attribute name="pointRadius" type="nonNegativeDecimal" default="3"/>
+    <xs:attribute name="progress" type="unitDecimal" default="1"/>
+  </xs:complexType>
+  <xs:complexType name="graticuleType">
+    <xs:annotation><xs:documentation>Meridians and parallels every @step degrees.</xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="step" type="positiveDecimal" default="10"/>
+    <xs:attribute name="stroke" type="paintType" default="#FFFFFF40"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+  </xs:complexType>
+  <xs:complexType name="pinType">
+    <xs:annotation><xs:documentation>
+      A marker at a longitude and latitude, with an optional label beside it; hidden on the far
+      side of a globe or outside the frame.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="lon" type="xs:double" use="required"/>
+    <xs:attribute name="lat" type="xs:double" use="required"/>
+    <xs:attribute name="radius" type="nonNegativeDecimal" default="6"/>
+    <xs:attribute name="fill" type="paintType" default="#FF3B30"/>
+    <xs:attribute name="stroke" type="paintType" default="#FFFFFF"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="2"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="label" type="xs:string"/>
+    <xs:attribute name="textStyle" type="xs:IDREF"/>
+    <xs:attribute name="labelDx" type="xs:double" default="10"/>
+    <xs:attribute name="labelDy" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="routeType">
+    <xs:annotation><xs:documentation>
+      A path along great circles through @points ("lon,lat lon,lat …") or the lines of @geo,
+      drawn on by @progress measured along the ground, so it advances at constant ground speed
+      whatever the projection; @headRadius puts a dot at its tip.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="points" type="xs:string"/>
+    <xs:attribute name="geo" type="xs:IDREF"/>
+    <xs:attribute name="filter" type="xs:string"/>
+    <xs:attribute name="progress" type="unitDecimal" default="1"/>
+    <xs:attribute name="stroke" type="paintType" default="#FFFFFF"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="3"/>
+    <xs:attribute name="dash" type="numberListType"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="headRadius" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="headFill" type="paintType"/>
+  </xs:complexType>
+  <xs:complexType name="flyToType">
+    <xs:annotation><xs:documentation>
+      A camera move to a centre and zoom beginning at @begin (composition seconds), along van
+      Wijk and Nuij's smooth zoom-and-pan path; @rho is its curvature (how far out it zooms)
+      and @duration defaults to the path's natural length. The first move starts from the
+      map's own centerLon/centerLat/zoom; each later one from the previous target. Once a move
+      has begun it decides centre and zoom (animate rotation freely).
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="begin" type="xs:double" use="required"/>
+    <xs:attribute name="duration" type="durationType"/>
+    <xs:attribute name="lon" type="xs:double" use="required"/>
+    <xs:attribute name="lat" type="xs:double" use="required"/>
+    <xs:attribute name="zoom" type="xs:double" default="0"/>
+    <xs:attribute name="rho" type="positiveDecimal" default="1.4142135623730951"/>
+    <xs:attribute name="easing" type="curveType" default="ease-in-out"/>
+  </xs:complexType>
+  <xs:complexType name="mapAssetType">
+    <xs:annotation><xs:documentation>
+      A projected map drawn as vectors: geoLayer, graticule, route and pin children paint in
+      document order over @background (the globe or world outline filled), with @outline
+      stroking that outline. zoom counts doublings from the fitted view: zoom 0 shows @fit
+      (the whole sphere when absent) inside the frame less @fitPadding, centred on
+      centerLon/centerLat (default: the middle of the fit target). centerLon, centerLat, zoom
+      and rotation (degrees, clockwise on screen) are animatable; flyTo children make smooth
+      camera moves. Tilt a map in perspective with its layer's 3D rotation.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="geoLayer" type="geoLayerType"/>
+      <xs:element name="graticule" type="graticuleType"/>
+      <xs:element name="route" type="routeType"/>
+      <xs:element name="pin" type="pinType"/>
+      <xs:element name="flyTo" type="flyToType"/>
+      <xs:group ref="animationElements"/>
+    </xs:choice>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="width" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="projection" type="projectionType" default="equal-earth"/>
+    <xs:attribute name="parallels" type="numberListType"/>
+    <xs:attribute name="centerLon" type="xs:double"/>
+    <xs:attribute name="centerLat" type="xs:double"/>
+    <xs:attribute name="zoom" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="fit" type="xs:IDREFS"/>
+    <xs:attribute name="fitPadding" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="background" type="paintType"/>
+    <xs:attribute name="outline" type="paintType"/>
+    <xs:attribute name="outlineWidth" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="precision" type="positiveDecimal" default="0.7071"/>
+  </xs:complexType>
   <xs:complexType name="assetsType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="image" type="imageAssetType"/>
@@ -1087,6 +1283,8 @@
       <xs:element name="code" type="codeAssetType"/>
       <xs:element name="formula" type="formulaAssetType"/>
       <xs:element name="generated" type="generatedAssetType"/>
+      <xs:element name="geo" type="geoAssetType"/>
+      <xs:element name="map" type="mapAssetType"/>
     </xs:choice>
   </xs:complexType>
 

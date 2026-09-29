@@ -145,6 +145,10 @@ CASES = [
     ("r22", ["R22"], sub('basedOn="heading"', 'basedOn="title"')),
     ("r22-style", ["R22"], sub('size="72" style="heading"', 'size="72" style="logo"')),
     ("r23", ["R23"], sub('fontAsset="inter"', 'fontAsset="logo"')),
+    ("r24", ["R24"], sub('<geoLayer geo="places"', '<geoLayer geo="logo"')),
+    ("r25", ["R25"], sub('<route geo="places"', '<route geo="logo"')),
+    ("r26", ["R26"], sub('fit="places"', 'fit="places logo"')),
+    ("c45", ["C45"], sub('<route points="0,0 20,20"', '<route')),
 ]
 for attr, anchor, repl in [
     ("fill", 'shape="rounded-rect" width="400" height="300" fill="var(--bg)"', 'shape="rounded-rect" width="400" height="300" fill="url(#logo)"'),

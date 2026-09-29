@@ -198,7 +198,7 @@ pub(crate) fn image_path(p: &Program, key: &str) -> Result<std::path::PathBuf, S
 
 fn alpha_points(p: &Program, key: &str, limit: usize) -> Result<(Vec<[f64; 2]>, [f64; 2]), String> {
     let path = image_path(p, key)?;
-    let img = image::open(&path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgba8();
+    let img = sr_media::still::open(&path)?.image.to_rgba8();
     let (w, h) = img.dimensions();
     let all: Vec<[f64; 2]> = img
         .enumerate_pixels()

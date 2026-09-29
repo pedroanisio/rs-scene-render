@@ -215,6 +215,8 @@ pub struct Renderer {
     working: Working,
     tokens: HashMap<String, [f64; 4]>,
     images: HashMap<String, Option<Arc<Tex>>>,
+    /// Image files whose embedded colour profile could not be honoured, and why.
+    image_notes: HashMap<std::path::PathBuf, String>,
     /// The last uploaded picture of each grid simulation: (content key, texture).
     sim_textures: HashMap<Arc<str>, (u64, Arc<Tex>)>,
     generators: HashMap<u64, Arc<Tex>>,
@@ -520,6 +522,7 @@ impl Renderer {
             dummy,
             working,
             images: HashMap::new(),
+            image_notes: HashMap::new(),
             sim_textures: HashMap::new(),
             generators: HashMap::new(),
             subtree: HashMap::new(),
@@ -587,13 +590,20 @@ impl Renderer {
         space: m::ColorSpace,
         transfer: m::Transfer,
         alpha: m::AlphaMode,
+        embedded: bool,
     ) -> Option<Arc<Tex>> {
-        let key = format!("{}|{space}|{transfer}|{alpha}", path.display());
+        let key = format!("{}|{space}|{transfer}|{alpha}|{embedded}", path.display());
         if let Some(t) = self.images.get(&key) {
             return t.clone();
         }
-        let t = match resources::decode_image(&path, space, transfer, alpha, &self.working, self.max_texture) {
-            Ok(d) => Some(Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "image"))),
+        let t = match resources::decode_image(&path, space, transfer, alpha, embedded, &self.working, self.max_texture)
+        {
+            Ok(d) => {
+                if let Some(note) = &d.note {
+                    self.image_notes.insert(path.clone(), note.clone());
+                }
+                Some(Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "image")))
+            }
             Err(_) => None,
         };
         self.images.insert(key, t.clone());
@@ -648,7 +658,7 @@ impl Renderer {
                         [(c[0] * a) as f32, (c[1] * a) as f32, (c[2] * a) as f32, a as f32]
                     })
                     .collect();
-                let d = resources::Decoded { levels: resources::mips(img.width, img.height, px) };
+                let d = resources::Decoded { levels: resources::mips(img.width, img.height, px), note: None };
                 let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "simulation"));
                 self.sim_textures.insert(n.id.clone(), (img.key, t.clone()));
                 t
@@ -684,7 +694,7 @@ impl Renderer {
         if let Some(Some(t)) = self.images.get(&key) {
             return t.clone();
         }
-        let d = resources::Decoded { levels: vec![(1, 1, vec![rgba])] };
+        let d = resources::Decoded { levels: vec![(1, 1, vec![rgba])], note: None };
         let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "solid"));
         self.images.insert(key, Some(t.clone()));
         t
@@ -700,9 +710,18 @@ impl Renderer {
                 let (src, space, transfer) = self.representation(&i.representations, &i.src, i.color_space, i.transfer);
                 match sr_model::assets::resolve(src, &base) {
                     sr_model::assets::Resolved::Local(path) => {
-                        let t = self.image(path.clone(), space, transfer, i.alpha);
+                        let t = self.image(
+                            path.clone(),
+                            space,
+                            transfer,
+                            i.alpha,
+                            i.color_profile == sr_model::model::ColorProfile::Embedded,
+                        );
                         if t.is_none() {
                             plan.stats.errors.push(format!("{}: cannot read image {}", n.id, path.display()));
+                        }
+                        if let Some(note) = self.image_notes.get(&path) {
+                            plan.stats.unsupported.push(format!("{}: {}: {note}", n.id, path.display()));
                         }
                         t
                     }
@@ -722,7 +741,13 @@ impl Renderer {
                     let file = sr_model::assets::sequence_frame(&s.src, frame)?;
                     if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&file, &base) {
                         if path.is_file() {
-                            return self.image(path, s.color_space, s.transfer, s.alpha);
+                            return self.image(
+                                path,
+                                s.color_space,
+                                s.transfer,
+                                s.alpha,
+                                s.color_profile == sr_model::model::ColorProfile::Embedded,
+                            );
                         }
                     }
                 }
@@ -762,7 +787,7 @@ impl Renderer {
                     }
                 };
                 if gm.kind.as_str() == "image" {
-                    let t = self.image(path.clone(), m::ColorSpace::Srgb, m::Transfer::Auto, m::AlphaMode::Auto);
+                    let t = self.image(path.clone(), m::ColorSpace::Srgb, m::Transfer::Auto, m::AlphaMode::Auto, true);
                     if t.is_none() {
                         plan.stats.errors.push(format!("{}: cannot read generated image {}", n.id, path.display()));
                     }
@@ -1714,6 +1739,7 @@ impl Renderer {
             AssetsChild::Lottie(l) => (l.width as f64, l.height as f64),
             AssetsChild::Text(x) => (x.width as f64, x.height as f64),
             AssetsChild::Chart(x) => (x.width as f64, x.height as f64),
+            AssetsChild::Map(x) => (x.width as f64, x.height as f64),
             AssetsChild::Audiogram(x) => (x.width as f64, x.height as f64),
             AssetsChild::Code(x) => (x.width as f64, x.height as f64),
             AssetsChild::Formula(x) => (x.width as f64, x.height as f64),
@@ -1738,6 +1764,7 @@ impl Renderer {
         let scene = match a {
             AssetsChild::Text(_)
             | AssetsChild::Chart(_)
+            | AssetsChild::Map(_)
             | AssetsChild::Audiogram(_)
             | AssetsChild::Code(_)
             | AssetsChild::Formula(_) => {
@@ -2205,7 +2232,15 @@ impl Renderer {
                                     sr_model::assets::Resolved::Local(p) => Some(p),
                                     _ => None,
                                 };
-                                match path.and_then(|p| self.image(p, img.color_space, img.transfer, img.alpha)) {
+                                match path.and_then(|p| {
+                                    self.image(
+                                        p,
+                                        img.color_space,
+                                        img.transfer,
+                                        img.alpha,
+                                        img.color_profile == sr_model::model::ColorProfile::Embedded,
+                                    )
+                                }) {
                                     Some(t) => (
                                         src::PATTERN,
                                         plan.paints.pattern(pt, g, [img.width as f64, img.height as f64]),

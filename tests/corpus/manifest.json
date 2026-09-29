@@ -138,6 +138,9 @@
     "c44.scene.xml": [
       "C44"
     ],
+    "c45.scene.xml": [
+      "C45"
+    ],
     "c5.scene.xml": [
       "C5"
     ],
@@ -234,6 +237,9 @@
     "r24-strokeColor.scene.xml": [
       "R24-strokeColor"
     ],
+    "r24.scene.xml": [
+      "R24"
+    ],
     "r25-activeColor.scene.xml": [
       "R25-activeColor"
     ],
@@ -257,6 +263,12 @@
     ],
     "r25-strokeColor.scene.xml": [
       "R25-strokeColor"
+    ],
+    "r25.scene.xml": [
+      "R25"
+    ],
+    "r26.scene.xml": [
+      "R26"
     ],
     "r3.scene.xml": [
       "R3"

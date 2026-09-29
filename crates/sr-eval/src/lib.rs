@@ -23,6 +23,7 @@ pub mod curve;
 pub mod data;
 pub mod eval;
 pub mod expr;
+pub mod geo;
 pub mod layout;
 pub mod path;
 pub mod program;

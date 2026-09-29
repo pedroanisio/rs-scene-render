@@ -914,6 +914,7 @@ impl Builder<'_> {
             m::ColorSpace::Srgb,
             m::Transfer::Auto,
             m::AlphaMode::Auto,
+            true,
             working,
             16384,
         )?;

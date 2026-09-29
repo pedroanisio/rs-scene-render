@@ -63,6 +63,13 @@ fn bradford(src: [f64; 2], dst: [f64; 2]) -> M3 {
     mul(&inv(&B), &mul(&scale, &B))
 }
 
+/// Bradford adaptation from the ICC connection white (D50 = 0.9642, 1, 0.8249) to D65.
+pub fn icc_d50_to_d65() -> M3 {
+    let d50 = [0.9642, 1.0, 0.8249];
+    let s = d50[0] + d50[1] + d50[2];
+    bradford([d50[0] / s, d50[1] / s], D65)
+}
+
 /// Linear RGB of `space` → XYZ (D65).
 pub fn to_xyz_d65(space: ColorSpace) -> M3 {
     let srgb = ([0.64, 0.33], [0.30, 0.60], [0.15, 0.06]);

@@ -36,6 +36,8 @@ PLACEHOLDERS = {
     "{MEDIA}": os.path.join(ROOT, "tests", "corpus", "media"),
     "{SHADERS}": os.path.join(ROOT, "crates", "sr-gpu", "tests", "shaders"),
     "{FIXTURES3D}": os.path.join(ROOT, "crates", "sr-3d", "tests", "fixtures"),
+    "{STILLS}": os.path.join(ROOT, "crates", "sr-media", "tests", "fixtures", "still"),
+    "{GEO}": os.path.join(ROOT, "crates", "sr-geo", "tests", "fixtures"),
 }
 OUTCOMES = ("native", "degraded", "wrong", "error", "gap")
 

@@ -71,6 +71,17 @@
     <audiogram id="wave" source="music" width="800" height="120"/>
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
+    <geo id="places" src="../media/places.geojson" sha256="6835b996e02a5d81173cc113fec9b1f3558e5c7f65c17e2db0573964b31a55da"/>
+    <map id="atlas" width="800" height="400" projection="equal-earth" fit="places" fitPadding="10" background="#12324F" outline="#FFFFFF">
+      <graticule step="15"/>
+      <geoLayer geo="places" fillBy="v" palette="#F7FBFF #08306B" label="name">
+        <featureStyle key="a" fill="#E63946"/>
+      </geoLayer>
+      <route points="0,0 20,20" progress="0.5" headRadius="4"/>
+      <route geo="places" filter="name=R"/>
+      <pin lon="5" lat="5" label="Here"/>
+      <flyTo begin="1" duration="2" lon="10" lat="10" zoom="2"/>
+    </map>
     <generated id="voiceover" kind="music" provider="acme-tts" model="v2" voice="warm" language="en-US" cache="../media/voice.wav" cacheSha256="a7c8762ed87de244999d54dd968928d4fc415edcbb2d0b9497c0960b1754a977"/>
   </assets>
   <paints>

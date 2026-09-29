@@ -1,0 +1,4 @@
+{"type":"FeatureCollection","features":[
+ {"type":"Feature","id":"a","properties":{"name":"A","v":1},"geometry":{"type":"Polygon","coordinates":[[[0,0],[10,0],[10,10],[0,10],[0,0]]]}},
+ {"type":"Feature","id":"r","properties":{"name":"R"},"geometry":{"type":"LineString","coordinates":[[0,0],[20,20]]}}
+]}

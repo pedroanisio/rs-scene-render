@@ -13,12 +13,12 @@ pub struct Equirect {
     pub rgb: Vec<[f32; 3]>,
 }
 
-/// Loads `.hdr` (Radiance), `.exr` or an integer image (PNG, JPEG, …) into linear RGB.
+/// Loads `.hdr` (Radiance), `.exr` or an integer image (PNG, JPEG, AVIF, …) into linear RGB.
 /// Float images are linear; 8- and 16-bit images are sRGB-decoded (conventions 5.5).
 pub fn load(path: &std::path::Path) -> Result<Equirect, String> {
-    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let float = matches!(img.color(), image::ColorType::Rgb32F | image::ColorType::Rgba32F);
-    let img = img.to_rgb32f();
+    let still = sr_media::still::open(path)?;
+    let float = still.linear;
+    let img = still.image.to_rgb32f();
     let decode = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
     let rgb = img.pixels().map(|p| if float { p.0 } else { p.0.map(decode) }).collect();
     Ok(Equirect { width: img.width(), height: img.height(), rgb })

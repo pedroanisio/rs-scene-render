@@ -22,6 +22,9 @@ use sr_vector::Paint;
 use crate::vector::{is, Attrs};
 
 /// Paint resolution over a box (node-local x, y, w, h).
+#[path = "text_map.rs"]
+mod map;
+
 pub type PaintFn<'a> = dyn FnMut(&Value, [f64; 4]) -> Option<Paint> + 'a;
 
 /// A caption track ready to draw.
@@ -807,6 +810,7 @@ pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild
             Ok(d)
         }
         AssetsChild::Chart(c) => chart_drawing(tc, cx, key, c),
+        AssetsChild::Map(mp) => map::map_drawing(tc, cx, mp),
         AssetsChild::Audiogram(au) => {
             let at = Attrs { e: au, props: None };
             let color = at

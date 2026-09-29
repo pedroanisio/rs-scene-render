@@ -245,9 +245,7 @@ fn build(p: &Program, n: &FrameNode, problems: &mut Vec<String>) -> Sim {
                     .find(|k| k.rsplit('/').next() == Some(id.as_str()))
                     .map(|k| k.to_string())
                     .unwrap_or(id);
-                match crate::sim::image_path(p, &key)
-                    .and_then(|path| image::open(&path).map_err(|e| format!("{}: {e}", path.display())))
-                {
+                match crate::sim::image_path(p, &key).and_then(|path| sr_media::still::open(&path).map(|s| s.image)) {
                     Ok(img) => {
                         let img = img.to_luma32f();
                         Some((img.width() as usize, img.height() as usize, img.into_raw()))

@@ -1,0 +1,20 @@
+<scene version="1.1">
+  <!-- Stills in formats beyond PNG/JPEG/WebP, each scaled 10x without smoothing concerns
+       (the probes sit in the middle of a source pixel). The HEIC carries Display P3 code
+       points (nclx), so its colours are converted, not read as sRGB. -->
+  <project width="640" height="200" fps="10" duration="1" background="#101418"/>
+  <assets>
+    <image id="heic" src="{STILLS}/p3-nclx.heic" width="12" height="8"/>
+    <image id="jxl" src="{STILLS}/pattern.jxl" width="12" height="8"/>
+    <image id="avif" src="{STILLS}/pattern.avif" width="12" height="8"/>
+    <image id="psd" src="{STILLS}/pattern.psd" width="12" height="8"/>
+    <image id="tiff" src="{STILLS}/pattern.tiff" width="12" height="8"/>
+  </assets>
+  <composition>
+    <layer id="a" asset="heic" x="0" y="0" scaleX="10" scaleY="10"/>
+    <layer id="b" asset="jxl" x="130" y="0" scaleX="10" scaleY="10"/>
+    <layer id="c" asset="avif" x="260" y="0" scaleX="10" scaleY="10"/>
+    <layer id="d" asset="psd" x="390" y="0" scaleX="10" scaleY="10"/>
+    <layer id="e" asset="tiff" x="520" y="0" scaleX="10" scaleY="10"/>
+  </composition>
+</scene>

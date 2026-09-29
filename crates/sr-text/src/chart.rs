@@ -138,8 +138,9 @@ fn nice_max(v: f64) -> f64 {
     10.0 * e
 }
 
+/// One line of text in a `width` box whose top-left is (x, y), aligned within it.
 #[allow(clippy::too_many_arguments)]
-fn text(lib: &mut FontLib, s: &str, st: &Style, x: f64, y: f64, align: Align, width: f64, tol: f64) -> Drawing {
+pub fn text(lib: &mut FontLib, s: &str, st: &Style, x: f64, y: f64, align: Align, width: f64, tol: f64) -> Drawing {
     let para = Para {
         runs: vec![Run { text: s.to_string(), style: 0, role: None }],
         styles: vec![st.clone()],

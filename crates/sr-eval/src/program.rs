@@ -1352,6 +1352,7 @@ impl Builder {
                     m::AssetsChild::Lottie(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Generator(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Chart(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Map(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Audiogram(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Code(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Formula(x) => wh(Some(x.width as f64), Some(x.height as f64)),

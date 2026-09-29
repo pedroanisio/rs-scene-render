@@ -421,6 +421,71 @@ A 3D Gaussian Splatting capture (Kerbl et al. 2023) turns an object photographed
 
 **Limitations.** Splats are not relit by the scene's lights and cast no shadows (they carry the lighting of the capture); the harmonic coefficients cost 192 bytes a splat on the GPU; and the `.splat` format has no harmonics.
 
+## Still images: formats, orientation and colour
+
+Every still the renderer reads (image layers, sequences, patterns, sprites, shader and material textures, simulation seeds, environment maps) goes through `sr_media::still::open`.
+
+**Formats.**
+- In-process: PNG, JPEG, WebP, GIF, TIFF, BMP, TGA, QOI, PNM, ICO, DDS, farbfeld, Radiance HDR and OpenEXR (the `image` crate), and JPEG XL (`jxl-oxide`).
+- HEIC, HEIF and AVIF decode through FFmpeg, which the engine already needs; so does anything the in-process decoders refuse (PSD, JPEG 2000, SGI, PCX and others). One frame is read as 8- or 16-bit RGBA to match the source, since FFmpeg's own 8-to-16-bit widening rounds some values down.
+- Animated GIF and APNG play as `<video>` sources through FFmpeg; FFmpeg does not decode animated WebP, which loads its first frame.
+- The native AVIF and HEIC libraries (dav1d, libheif) are not linked: the distribution's versions are older than the Rust bindings accept, and FFmpeg covers both.
+
+**Orientation.** EXIF orientation is applied, so phone photos come out upright (JPEG XL's codestream orientation is applied by its decoder).
+
+**Colour.** A file's own colour description takes precedence over the asset's `colorSpace` and `transfer`, which now apply only to files without one; `colorProfile="declared"` restores them for data textures and mis-tagged files.
+- ICC profiles of the matrix/TRC kind (sRGB, Display P3, Adobe RGB, ProPhoto, Rec. 2020, grey; curves as gammas, tables or parametric functions) are read by `sr_media::icc`, from PNG, JPEG, WebP, TIFF and JPEG XL files and from HEIF `colr` boxes (which FFmpeg does not pass on).
+- H.273 code points (HEIF `nclx`, the ICC 4.4 `cicp` tag) map onto the named spaces and transfers, PQ and HLG included.
+- A profile equal to a named space (within ICC's fixed-point rounding) takes that space's exact path, so sRGB-tagged images decode exactly as before; any other profile decodes through its own curves and colorants, adapted from ICC's D50 to D65 with Bradford.
+- A profile that cannot be used (CMYK, lookup-table printer profiles, damaged) is reported, and the declared colour space applies.
+- OpenEXR, Radiance HDR and floating-point TIFF are linear light, so `transfer="auto"` means linear for them.
+
+`tools/fixtures/make_still_formats.py` writes one 12 × 8 pattern in every format, ICC-tagged PNGs from profiles it builds (Display P3 with a parametric curve, a v2 gamma 2.2 Adobe RGB, a tabulated curve, grey), HEIC files tagged by ICC and by `nclx`, an EXIF-rotated JPEG and a CMYK JPEG, with LittleCMS's (Pillow's ImageCms) sRGB conversion of every tagged pixel. The tests decode every lossless format to the exact pattern, HEIC within 3 steps of libheif, and the tagged files within 1/255 of LittleCMS (4/255 for lossy HEIC), and render a P3 image both ways.
+
+## Maps
+
+Maps are drawn as vectors from geographic data, so they go through the same compositor, effects, masks and trim as any shape, and stay deterministic (no tiles loading in a browser). The `sr-geo` crate holds the geography: d3-geo's spherical pipeline, ported and checked against d3 itself.
+
+**Data.** `<geo src="…">` reads GeoJSON, TopoJSON (`object` picks one object), KML (placemarks with their extended data) or GPX (waypoints, routes, tracks). Polygon edges are great-circle arcs, as in d3. Data wound the RFC 7946 way would enclose the rest of the globe, so a polygon larger than a hemisphere is turned round on reading.
+
+**Projections.** `<map projection="…">` takes Mercator, Web Mercator, equirectangular, Equal Earth, Natural Earth, Albers, Lambert conformal conic (both with `parallels`), orthographic, stereographic, and azimuthal equal-area and equidistant.
+- Geometry is rotated on the sphere and clipped there: cut along the antimeridian opposite the centre (polygons rejoined along the cut, and a polygon round a pole, like Antarctica, wrapped round it), or, for the globe and azimuthal views, clipped to the visible cap.
+- Edges are then resampled adaptively, so long lines curve as they should, projected, and clipped to the frame.
+- `tools/fixtures/make_geo_expected.mjs` records what d3-geo 3.1 and topojson-client make of the Natural Earth 110 m countries (world-atlas) under 13 setups: every projection, rotations that cut Russia, Fiji and Antarctica differently, rectangle clips and plane rotation. For all 177 countries the areas, bounds and ring counts must match d3's, and the full coordinates of Russia, Fiji and Antarctica must match to 10⁻⁶ pixels, as must fitted scales and van Wijk paths.
+
+**The camera.** `zoom` counts doublings from the fitted view: zoom 0 shows `fit` (geo assets; the whole sphere by default) inside the frame less `fitPadding`, centred on `centerLon`/`centerLat` (default: the middle of the fit target). Web Mercator uses MapLibre's zoom levels instead, a 512-pixel world at zoom 0. `centerLon`, `centerLat`, `zoom` and `rotation` animate like any attribute; a globe spins by animating `centerLon`.
+- `<flyTo begin lon lat zoom>` moves along van Wijk and Nuij's smooth zoom-and-pan path, as d3's `interpolateZoom` and MapLibre's `flyTo` do: it zooms out as far as the distance warrants, takes the short way round the antimeridian, eases by `easing`, and lasts `duration` (by default the path's natural length).
+- The first move starts from the map's own centre and zoom and each later one from the previous target; once a move has begun, the moves decide centre and zoom.
+- Tilt a map in perspective with its layer's 3D rotation.
+
+**Content,** painted in document order over `background` (the globe or world outline filled) and under `outline`:
+- `<geoLayer>` fills polygons, strokes lines (drawn on by `progress`) and dots points, filtered by `prop=value`/`prop!=value` conditions.
+- For a choropleth, `fillBy` names a numeric property mapped through `domain` and a `linear`, `log`, `sqrt` or `quantize` scale onto `palette`, interpolated in sRGB like d3's `interpolateRgb`; features without a value take `noData`.
+- `<featureStyle key="…">` restyles single features (matched on `keyBy`, the feature id by default) and animates, so a country can light up. Neighbouring features with the same paint fill as one shape, so their shared borders leave no anti-aliasing seam.
+- `label` names a property drawn at each feature's centre.
+- `<graticule step>` draws meridians and parallels.
+- `<route points="lon,lat …">` (or the lines of a geo asset) follows great circles and is drawn on by `progress` measured along the ground, so it advances at constant ground speed in any projection; `headRadius` puts a dot at its tip.
+- `<pin lon lat label>` marks a place, hidden on the far side of a globe.
+
+**Placing any layer.** The expressions `geo('map', lon, lat)` and `geoVisible('map', lon, lat)` give where a place lands on a map now (in map pixels, following its animation and fly-to moves) and whether it is visible, so a photo or a caption can ride on a spinning globe and fade as it turns away.
+
+**Validation.** R24–R26 require `geoLayer/@geo`, `route/@geo` and every id in `map/@fit` to name geo assets, and C45 requires a route to have `points` or `geo`.
+
+**Tests.**
+- World features land where they belong on an equirectangular map, with a border pixel filled without a seam.
+- Choropleth colours come out at the right values, including quantize and no-data.
+- An animated feature style changes colour.
+- A globe hides its far side, and a fly-to ends on target.
+- A route stops at half its ground length with its head there.
+- KML and GPX draw.
+- Web Mercator matches tile geometry.
+- `geo()` follows a spinning globe, and `geoVisible()` turns off on the far side.
+- A geoLayer naming a non-geo asset fails validation (R24).
+
+**Not yet.** Basemap tiles (vector PMTiles or raster), terrain and 3D buildings, label collision, and simplification of detailed data. The whole file is read into memory, so 1:10 m data is slow to fit; `fit` is cached per map setup.
+
+**Schema extension.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R24–R26 and C45 are rs-scene-render extensions of `schema/scene-render-1.1.xsd` and `.sch`, marked as such. Other scene-render 1.1 implementations may not recognise them.
+
 ## Reference-clip evidence
 
 `tools/evidence.py [OUT_DIR] [--bin PATH] [--case ID]… [--bench]` measures how far the engine is from a set of reference clips instead of asserting it. Each case in `tools/evidence/cases.json` names a reference style and one technique it depends on, and either a probe scene in `tools/evidence/scenes/` or none. The harness writes the probe (generating any asset it needs: a Gaussian-splat torus, an animated glTF, an OCIO config), renders the frames its checks name with `render --strict`, compares pixels (a colour at a point, the share of a region near or away from a colour, the change of a region between two times) and classifies the case:
@@ -431,7 +496,7 @@ A 3D Gaussian Splatting capture (Kerbl et al. 2023) turns an object photographed
 - **error**: the scene did not render;
 - **gap**: no probe exists because the engine has no feature for the technique.
 
-Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so fixing a defect means updating the manifest. The run writes `report.json`, `report.md` and `contact-sheet.png`, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 19 cases: 17 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
+Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so fixing a defect means updating the manifest. The run writes `report.json`, `report.md` and `contact-sheet.png`, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 21 cases: 19 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
 
 | Case | Outcome | Evidence |
 |---|---|---|
@@ -454,6 +519,8 @@ Each case records the outcome last accepted as `expect`, and any difference fail
 | landscape erosion (`<erosion>`) | native | the terrain fills its box and changes |
 | claymation (`primitive="clay"`, fingerprints, boil) | native | the body draws in its colour; a blob pulls away |
 | path-traced still life (`renderer="pathtrace"`) | native | the traced set draws; the chrome ball reflects its surroundings |
+| stills beyond PNG/JPEG/WebP: HEIC in Display P3, JPEG XL, AVIF, PSD, TIFF | native | exact code values; the HEIC converts from P3 as LittleCMS does |
+| world map: Equal Earth, a highlighted country, a great-circle route, pins, a globe flying to Beijing | native | land, sea, route and pins where d3-geo projects them; the fly-to lands on target |
 
 The animated-`z` and `object3D` depth cases cover the paint-order rule under [evaluation](#evaluation). A test also renders frames on either side of a restack in alternation with one renderer, at the root and inside an isolated group, so every render cache sees both orders.
 
@@ -483,14 +550,14 @@ crates/sr-model/src/        diag, xsd/{simple,structure}, rules, assets, values,
 crates/sr-eval/src/         program (templating, instantiation, compilation), eval (frames), layout, channel,
                             curve, expr/{parse,vm}, value, path, data, rng, rig (constraints, bones,
                             tracking, stabilisation), sim (physics and particles), agents (flocks, fluids,
-                            slime, erosion), codes
+                            slime, erosion), geo (map cameras for rendering and expressions), codes
 crates/sr-3d/src/           import (glTF, OBJ, PLY, splats, FBX, USD), usdc (USD crate reader), prim (primitives,
                             extrusion), clay (SDF blobs, surface nets), anim, material,
                             light (colour temperature, IES), env (HDRI prefiltering), camera, mtlx
 crates/sr-gpu/src/          gpu (device), color, resources (textures, images, pool), paint, render (planning,
                             caching, execution), video (decode conversion, frame blending, optical flow),
                             output (delivery conversion, readback ring), vector (shape, SVG, Lottie scenes,
-                            deformers), text (text, data graphics and captions), fx (effect passes, LUTs),
+                            deformers), text (text, data graphics and captions), text_map (maps), fx (effect passes, LUTs),
                             glsl and shader (custom GLSL through naga), render_fx (effects, adjustments,
                             transitions, motion blur, finishing), ocio (OpenColorIO through ociobakelut),
                             three (3D renderer), pathtrace (BVH, path tracer), render_three (3D scenes, cameras,
@@ -504,7 +571,11 @@ crates/sr-vector/src/       geom, path, shapes, measure (trim, dash), stroke, mo
 crates/sr-text/src/         font, style, layout, glyph (outlines, COLR, bitmaps), animate (animators, presets,
                             text on a path), captions, chart, audiogram, code, formula
 crates/sr-media/src/        probe, decode (video look-ahead, audio), encode (codecs, containers, hardware, stills),
-                            spherical (360 metadata)
+                            spherical (360 metadata), still (image formats, orientation), icc (colour profiles),
+                            heif (HEIF colour boxes)
+crates/sr-geo/src/          data (GeoJSON, TopoJSON, KML, GPX), sphere (spherical geometry), clip (antimeridian,
+                            small circle, rectangle, rejoin), project (projections, resampling, fit), view (map
+                            camera, fly-to)
 crates/sr-audio/src/        layout, dsp, effects, loudness, mix, analysis, wav
 crates/sr-sim/src/          physics (Rapier world, joints, checkpoints), soft, particles, fields, timeline, flock,
                             fluid, slime, erosion, rng
@@ -517,7 +588,8 @@ examples/splat/             a synthetic 3DGS capture generator and a turntable s
 tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_sink.xml.in, perf_layers.py,
                             perf_video.py, perf_vector.py, perf_text.py, perf_effects.py, perf_3d.py,
                             perf_physics.py, evidence.py and evidence/ (cases, probe scenes),
-                            fixtures/ (Blender, usd-core and PyOpenColorIO scripts that write the test fixtures)
+                            fixtures/ (Blender, usd-core, PyOpenColorIO, Pillow/LittleCMS and d3-geo scripts that
+                            write the test fixtures)
 ```
 
 ## Tests
@@ -533,4 +605,6 @@ tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_
 - **Effects:** naga validation of the effect shaders and of wrapped custom GLSL effects and gl-transitions shaders, the three LUT formats and CLF operator chains, curves and gradient tables; on the GPU, blur coverage and spread, glow, drop shadow, colour operations against their formulas, LUT files, keying, pixelation, all 34 built-in transitions at both ends and three at mid-point, custom GLSL effects and transitions, adjustment layers with opacity, motion blur with and without a provider and adaptive skipping, posterize-time, echo, pixel motion blur, finishing looks, exposure and tone mapping, OpenColorIO views against PyOpenColorIO values, and every one of the 80 effect types drawing finite pixels without errors.
 - **3D and 360:** primitive volumes and outward winding, extrusion with holes and bevels, every importer (glTF with extensions, variants and animation, OBJ with MTL, ASCII PLY, 3DGS PLY, `.splat`, Z-up USDA, USDC and USDZ, FBX through ufbx including animation stacks), colour temperature, IES, environment prefiltering, the camera's projection and pitch and yaw conventions, MaterialX, naga validation of the 3D shaders; on the GPU, lit-side shading, shadows, glass over a backdrop, splat sorting, depth of field and dome lighting in the engine, then from documents a material sphere under default lights, shadows from `<lights>`, glass refracting 2D layers, an imported glTF with a material variant, a moving camera shifting 3D objects and 2.5D layers alike, 3D and 2.5D agreement, extruded text, group opacity, camera depth of field, lights following constraints, the four 360 layouts and stereo parallax; spherical metadata read back by ffprobe in both MP4 box orders.
 - **Simulation and accessibility:** free fall against ½gt², resting on the floor, bit-exact replay in any order, pendulum length and breaking welds, kinematic following and field forces, jelly and pinned cloth, particle counts, bursts, caps, floors and preroll; from documents, a falling layer, sparks with identical pixels under seeking, rain streaks, a landing jelly layer, reported constraint problems and the physics cache with its digest; validation of the soft-body substep limit; the flash detector at 15 Hz, 1 Hz, small areas, red and dim flicker, and delivery failing on flashes, low contrast and missing captions; `simulate` on the CLI; flocks, fluids, slime and erosion, clay meshing, screen-space lighting, cascaded shadows and path tracing as described in their sections; and a short fuzzing campaign on every test run.
+- **Still images:** every lossless format decoded to its exact pattern, HEIC within 3 steps of libheif, EXIF orientation, linear-light formats, the embedded colour descriptions each file reports, ICC-tagged images within 1/255 of LittleCMS, the declared-space override, a CMYK profile reported, an animated GIF played as video.
+- **Maps:** TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, and `geo()` placing a layer; the reference rules R24–R26 and C45.
 - **CLI:** validate, inspect, eval, render, encode and explain end to end.

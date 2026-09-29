@@ -1,0 +1,26 @@
+<scene version="1.1">
+  <!-- A world map built from Natural Earth countries (world-atlas TopoJSON): Equal Earth,
+       graticule, one country highlighted by id, a great-circle route half drawn by ground
+       distance, pins; then a globe flying from the Atlantic to Beijing. -->
+  <project width="960" height="540" fps="10" duration="6" background="#0B1D2E"/>
+  <assets>
+    <geo id="countries" src="{GEO}/countries-110m.json" object="countries"/>
+    <map id="world" width="960" height="540" projection="equal-earth" fitPadding="20" background="#12324F" outline="#FFFFFF80">
+      <graticule step="15"/>
+      <geoLayer geo="countries" fill="#E8E2D0" stroke="#0B1D2E" strokeWidth="0.5">
+        <featureStyle key="250" fill="#E63946"/>
+      </geoLayer>
+      <route points="2.35,48.86 139.69,35.69" stroke="#FFD166" strokeWidth="3" progress="0.5"/>
+      <pin lon="139.69" lat="35.69"/>
+    </map>
+    <map id="globe" width="640" height="360" projection="orthographic" centerLon="-40" centerLat="20" fitPadding="10" background="#1B4F72" outline="#FFFFFF">
+      <geoLayer geo="countries" fill="#A9DFBF" stroke="#1B4F72" strokeWidth="0.4"/>
+      <pin lon="116.4" lat="39.9" radius="8"/>
+      <flyTo begin="3" duration="2.5" lon="116.4" lat="39.9" zoom="1.5"/>
+    </map>
+  </assets>
+  <composition>
+    <layer id="w" asset="world" start="0" end="3"/>
+    <layer id="g" asset="globe" start="3" end="6" x="160" y="90"/>
+  </composition>
+</scene>

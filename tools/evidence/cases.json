@@ -755,6 +755,174 @@
         }
       ],
       "known": "The stage's time-sampled translate takes its first sample and is reported: USD animation is not imported."
+    },
+    {
+      "id": "still-formats",
+      "reference": "photo and design assets",
+      "technique": "HEIC, JPEG XL, AVIF, PSD and TIFF stills with embedded colour",
+      "scene": "scenes/still-formats.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 115,
+          "y": 5,
+          "rgb": "#D0465D",
+          "tol": 0.03,
+          "why": "HEIC tagged Display P3 (nclx) converts to sRGB as LittleCMS does"
+        },
+        {
+          "type": "not_color",
+          "t": 0.0,
+          "x": 115,
+          "y": 5,
+          "rgb": "#C0505F",
+          "tol": 0.03,
+          "why": "its P3 values are not shown as if they were sRGB"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 165,
+          "y": 25,
+          "rgb": "#3F429B",
+          "tol": 0.02,
+          "why": "JPEG XL (lossless) decodes exactly"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 315,
+          "y": 55,
+          "rgb": "#69A57D",
+          "tol": 0.02,
+          "why": "AVIF (lossless) decodes exactly"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 475,
+          "y": 15,
+          "rgb": "#A82150",
+          "tol": 0.02,
+          "why": "PSD decodes through FFmpeg"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 525,
+          "y": 5,
+          "rgb": "#0000C8",
+          "tol": 0.02,
+          "why": "TIFF with alpha decodes"
+        }
+      ]
+    },
+    {
+      "id": "world-map",
+      "reference": "GEOlayers / Flourish maps",
+      "technique": "projected world map with a highlighted country, a great-circle route and a globe fly-to",
+      "scene": "scenes/world-map.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 539,
+          "y": 277,
+          "rgb": "#E8E2D0",
+          "tol": 0.03,
+          "why": "land where d3-geo puts the Congo basin"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 416,
+          "y": 294,
+          "rgb": "#12324F",
+          "tol": 0.03,
+          "why": "sea where d3-geo puts the South Atlantic"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 353,
+          "y": 304,
+          "rgb": "#E8E2D0",
+          "tol": 0.03,
+          "why": "Brazil"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 484,
+          "y": 123,
+          "rgb": "#E63946",
+          "tol": 0.03,
+          "why": "France (feature id 250) is highlighted"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 537,
+          "y": 75,
+          "rgb": "#FFD166",
+          "tol": 0.05,
+          "why": "the Paris-Tokyo great circle is drawn a quarter of the way"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 730,
+          "y": 99,
+          "rgb": "#E8E2D0",
+          "tol": 0.03,
+          "why": "three quarters along is not drawn yet (half progress)"
+        },
+        {
+          "type": "color",
+          "t": 1.0,
+          "x": 805,
+          "y": 151,
+          "rgb": "#FF3B30",
+          "tol": 0.03,
+          "why": "the Tokyo pin"
+        },
+        {
+          "type": "color",
+          "t": 3.0,
+          "x": 480,
+          "y": 270,
+          "rgb": "#1B4F72",
+          "tol": 0.03,
+          "why": "the globe starts over the Atlantic"
+        },
+        {
+          "type": "changes",
+          "t": [
+            3.5,
+            4.5
+          ],
+          "region": [
+            160,
+            90,
+            640,
+            360
+          ],
+          "min": 0.02,
+          "why": "the globe moves"
+        },
+        {
+          "type": "color",
+          "t": 5.9,
+          "x": 480,
+          "y": 270,
+          "rgb": "#FF3B30",
+          "tol": 0.03,
+          "why": "the fly-to ends with Beijing in the middle"
+        }
+      ]
     }
   ]
 }

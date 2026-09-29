@@ -166,7 +166,7 @@ fn dis_optical_flow_recovers_a_translation() {
             &gpu.device,
             &gpu.queue,
             &layout,
-            &sr_gpu::resources::Decoded { levels: vec![(w, h, px)] },
+            &sr_gpu::resources::Decoded { levels: vec![(w, h, px)], note: None },
             "t",
         )
     };

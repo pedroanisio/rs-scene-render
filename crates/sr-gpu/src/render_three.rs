@@ -417,9 +417,9 @@ impl Renderer {
         if let Some(t) = self.three_engine().textures.get(&key) {
             return Some(t.clone());
         }
-        match image::open(&path) {
-            Ok(img) => {
-                let img = img.to_rgba8();
+        match sr_media::still::open(&path) {
+            Ok(still) => {
+                let img = still.image.to_rgba8();
                 let t = self.three_engine().upload_rgba8(img.width(), img.height(), img.as_raw(), srgb);
                 self.three_engine().textures.insert(key, t.clone());
                 Some(t)
@@ -1538,7 +1538,13 @@ impl Renderer {
                 Some((AssetsChild::Image(img), doc)) => {
                     let base = ctx.p.base_dirs.get(doc).cloned().unwrap_or_default();
                     if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&img.src, &base) {
-                        if let Some(t) = self.image(path, img.color_space, img.transfer, img.alpha) {
+                        if let Some(t) = self.image(
+                            path,
+                            img.color_space,
+                            img.transfer,
+                            img.alpha,
+                            img.color_profile == sr_model::model::ColorProfile::Embedded,
+                        ) {
                             sprite = Some((key.to_string(), t.view.clone()));
                             plan.fx_temps.push(t);
                         }

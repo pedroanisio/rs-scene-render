@@ -56,8 +56,19 @@ const V3_ELEMENTS: [&str; 15] = [
     "shapeModifier",
     "transformConstraint",
 ];
-const V4_ASSETS: [&str; 9] =
-    ["imageSequence", "lottie", "font", "generator", "chart", "audiogram", "code", "formula", "generated"];
+const V4_ASSETS: [&str; 11] = [
+    "imageSequence",
+    "lottie",
+    "font",
+    "generator",
+    "chart",
+    "audiogram",
+    "code",
+    "formula",
+    "generated",
+    "geo",
+    "map",
+];
 const PARENTED: [&str; 10] = [
     "layer",
     "shape",
@@ -176,6 +187,7 @@ struct Sets<'a> {
     text_assets: HashSet<&'a str>,
     font_assets: HashSet<&'a str>,
     mesh_assets: HashSet<&'a str>,
+    geo_assets: Vec<&'a str>,
     audio_assets: HashSet<&'a str>,
     generated_audio: HashSet<&'a str>,
     video_with_audio: HashSet<&'a str>,
@@ -216,6 +228,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.font_assets.insert(i);
             } else if is(a, "mesh") {
                 s.mesh_assets.insert(i);
+            } else if is(a, "geo") {
+                s.geo_assets.push(i);
             } else if is(a, "audio") {
                 s.audio_assets.insert(i);
             } else if is(a, "generated") && matches!(a.attribute("kind"), Some("speech" | "music" | "sound-effect")) {
@@ -375,6 +389,20 @@ impl<'a> Eval<'a> {
                 self.check(r4, n, "R4", || "object3D/@material must name a material.".into());
                 let r5 = !has("mesh") || contains(&self.sets.mesh_assets, a("mesh"));
                 self.check(r5, n, "R5", || "object3D/@mesh must name a mesh asset.".into());
+            }
+            // p42
+            "geoLayer" => {
+                let r24 = self.sets.geo_assets.contains(&v("geo").as_str());
+                self.check(r24, n, "R24", || "geoLayer/@geo must name a geo asset.".into());
+            }
+            "route" => {
+                let r25 = !has("geo") || self.sets.geo_assets.contains(&v("geo").as_str());
+                self.check(r25, n, "R25", || "route/@geo must name a geo asset.".into());
+                self.check(has("points") || has("geo"), n, "C45", || "route needs @points or @geo.".into());
+            }
+            "map" => {
+                let r26 = a("fit").is_none_or(|list| every_token_names(list, &self.sets.geo_assets));
+                self.check(r26, n, "R26", || "every id in map/@fit must name a geo asset.".into());
             }
             // p6, p7
             "constraint" => {

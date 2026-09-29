@@ -262,4 +262,16 @@
       <sch:assert id="R25-strokeColor" test="not(starts-with(@strokeColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@strokeColor,'var(--'),')')]">@strokeColor: var(--name) must name a style token.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p42">
+    <sch:rule context="geoLayer">
+      <sch:assert id="R24" test="/scene/assets/geo[@id=current()/@geo]">geoLayer/@geo must name a geo asset.</sch:assert>
+    </sch:rule>
+    <sch:rule context="route">
+      <sch:assert id="R25" test="not(@geo) or /scene/assets/geo[@id=current()/@geo]">route/@geo must name a geo asset.</sch:assert>
+      <sch:assert id="C45" test="@points or @geo">route needs @points or @geo.</sch:assert>
+    </sch:rule>
+    <sch:rule context="map">
+      <sch:assert id="R26" test="not(@fit) or count(str:tokenize(normalize-space(@fit),' ')) = count(/scene/assets/geo[contains(concat(' ',normalize-space(current()/@fit),' '), concat(' ',@id,' '))])">every id in map/@fit must name a geo asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

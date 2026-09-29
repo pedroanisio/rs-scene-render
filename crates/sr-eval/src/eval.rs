@@ -543,6 +543,19 @@ impl Host for ExprHost<'_, '_> {
         self.p.analysis.amplitude(track, band, self.comp_t)
     }
 
+    fn geo(&mut self, map: &str, lon: f64, lat: f64) -> Option<([f64; 2], bool)> {
+        let mp = crate::geo::map_asset(self.p, map)?;
+        let cam = crate::geo::camera(self.p, mp).ok()?;
+        let target = self.p.elements.iter().find(|e| *e.key == *map);
+        let (p, comp_t, depth) = (self.p, self.comp_t, self.depth);
+        let animated = |name: &str| {
+            let slot = target?.slots.iter().copied().find(|&s| &*p.slots[s as usize].prop == name)?;
+            p.value_at(slot, comp_t, depth + 1).as_num()
+        };
+        let v = crate::geo::view(&cam, mp, &animated, comp_t);
+        Some(crate::geo::locate(&cam, &v, lon, lat))
+    }
+
     fn beat(&mut self) -> f64 {
         self.p.beat_at(self.comp_t)
     }
