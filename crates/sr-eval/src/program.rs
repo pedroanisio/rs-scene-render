@@ -423,6 +423,8 @@ pub struct TransitionInst {
     pub ease: Ease,
     /// Container whose timeline the window lives on.
     pub container: Option<u32>,
+    /// The `luma` matte sibling, which is not drawn itself (D19).
+    pub matte: Option<u32>,
 }
 
 /// A beat grid.
@@ -1737,7 +1739,8 @@ impl Builder {
                 if explicit.contains(&(ida, idb)) {
                     continue;
                 }
-                let cut = self.nodes[b as usize].start;
+                // D19: the cut is from's end
+                let cut = self.nodes[a as usize].end.unwrap_or(self.nodes[b as usize].start);
                 let d = s.transition_duration.get();
                 self.transitions.push(TransitionInst {
                     node: None,
@@ -1747,6 +1750,7 @@ impl Builder {
                     window: (cut - d / 2.0, cut + d / 2.0),
                     ease: curve::EASE_IN_OUT,
                     container: Some(idx),
+                    matte: None,
                 });
             }
         }
@@ -2184,10 +2188,13 @@ impl Builder {
             let scope = self.nodes[n].scope.clone();
             let from = t.from.as_ref().and_then(|f| self.resolve(&scope, f));
             let to = t.to.as_ref().and_then(|x| self.resolve(&scope, x));
-            let cut = match (from, to) {
-                (_, Some(b)) => self.nodes[b as usize].start,
-                (Some(a), None) => self.nodes[a as usize].end.unwrap_or(f64::INFINITY),
-                (None, None) => continue,
+            let matte = t.matte.as_ref().and_then(|x| self.resolve(&scope, x));
+            // D19: the cut is from's end, or to's start when there is no from (or from never ends)
+            let cut = match (from.and_then(|a| self.nodes[a as usize].end), from, to) {
+                (Some(end), _, _) => end,
+                (None, _, Some(b)) => self.nodes[b as usize].start,
+                (None, Some(_), None) => f64::INFINITY,
+                (None, None, None) => continue,
             };
             let d = t.duration.get();
             let window = match t.alignment {
@@ -2204,6 +2211,7 @@ impl Builder {
                 window,
                 ease: curve::resolve(t.curve, &KeyParams::default()),
                 container: self.nodes[n].parent,
+                matte,
             });
             self.nodes[n].kind = Kind::Transition(ti);
             self.nodes[n].start = window.0;

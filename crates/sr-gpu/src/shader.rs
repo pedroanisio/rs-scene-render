@@ -942,7 +942,12 @@ impl Builder<'_> {
         let pipe = self.eng.program(&program).map_err(|e| format!("GLSL compile/link failed; crossfading.\n{e}"))?;
         let space = Space::parse(None).unwrap();
         let working = cx.working;
-        let [w, h] = from.size;
+        // a missing side is a 1×1 transparent texture: the frame is the other side's size
+        let [w, h] = if from.size[0] as u64 * from.size[1] as u64 >= to.size[0] as u64 * to.size[1] as u64 {
+            from.size
+        } else {
+            to.size
+        };
         let fs = self.space_in(from, Some(to), &space, &working);
         let ts = self.space_in(to, Some(from), &space, &working);
         let mut textures: HashMap<String, Arc<Tex>> = [("from".to_string(), fs), ("to".to_string(), ts)].into();

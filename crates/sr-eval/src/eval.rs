@@ -985,6 +985,12 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             }
         }
     }
+    // a luma transition's matte sibling is not drawn itself (D19)
+    for tr in &p.transitions {
+        if let Some(m) = tr.matte.and_then(|m| out.out_ix[m as usize]) {
+            hidden[m as usize] = true;
+        }
+    }
     for (i, h) in hidden.into_iter().enumerate() {
         if h {
             out.nodes[i].draw = false;

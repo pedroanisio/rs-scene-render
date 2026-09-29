@@ -854,6 +854,37 @@ fn F(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), S(uv), in_unit(uv));
 fn T(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), A(uv), in_unit(uv)); }
 fn over(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return a + b * (1.0 - a.a); }
 fn edge(x: f32, soft: f32) -> f32 { return smoothstep(-soft * 0.5 - 1e-4, soft * 0.5 + 1e-4, x); }
+// D19 geometry, in frame pixels. The share of b at coordinate s: b where s < e − w, a beyond e,
+// smoothstep across [e − w, e], with e = p (1 + w) and w the softness.
+fn d19_b(s: f32, p: f32, soft: f32) -> f32 {
+    let w = max(soft, 1e-4);
+    let e = p * (1.0 + w);
+    return 1.0 - smoothstep(e - w, e, s);
+}
+// The coordinate along the travel, 0 on the side the edge starts from and 1 on the far side.
+fn d19_axis(uv: vec2<f32>, dir: vec2<f32>) -> f32 {
+    let d = dims();
+    let proj = dot(uv * d, dir);
+    let c = vec4(0.0, d.x * dir.x, d.y * dir.y, d.x * dir.x + d.y * dir.y);
+    let lo = min(min(c.x, c.y), min(c.z, c.w));
+    let hi = max(max(c.x, c.y), max(c.z, c.w));
+    return (proj - lo) / max(hi - lo, 1e-6);
+}
+// Distance from the centre over half the diagonal.
+fn d19_radius(uv: vec2<f32>) -> f32 {
+    let d = dims();
+    return length((uv - 0.5) * d) / max(length(d) * 0.5, 1e-6);
+}
+// The angle clockwise on screen from the ray at `start` radians (clockwise from +x), in turns.
+fn d19_angle(uv: vec2<f32>, start: f32) -> f32 {
+    let q = (uv - 0.5) * dims();
+    return fract((atan2(q.y, q.x) - start) / (2.0 * PI) + 2.0);
+}
+// The travel of a picture moved fully off the frame along dir, in uv units.
+fn d19_travel(dir: vec2<f32>) -> vec2<f32> {
+    let d = dims();
+    return dir * (abs(dir.x) * d.x + abs(dir.y) * d.y) / d;
+}
 fn Fb(uv: vec2<f32>, o: vec2<f32>) -> vec4<f32> {
     let n = max(i32(fx.v[2].x), 1);
     var a = vec4(0.0);
@@ -880,22 +911,18 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
     switch fx.i.x {
         case 0u: { return select(F(uv), T(uv), p >= 0.5); }                       // cut
         case 1u: { return mix(F(uv), T(uv), p); }                                  // crossfade
-        case 2u: { return min(F(uv) * min(1.0, 2.0 * (1.0 - p)) + T(uv) * min(1.0, 2.0 * p), vec4(1e4)); } // additive dissolve
+        case 2u: { return min(F(uv) * min(1.0, 2.0 * (1.0 - p)) + T(uv) * min(1.0, 2.0 * p), vec4(1.0)); } // additive dissolve
         case 3u: { // dip to colour
             if (p < 0.5) { return mix(F(uv), col, p * 2.0); }
             return mix(col, T(uv), (p - 0.5) * 2.0);
         }
-        case 4u: { // wipe: the edge travels along the direction, revealing from the opposite side
-            let x = dot(uv - 0.5, dir) + 0.5;
-            let w = edge(p * (1.0 + soft) - soft * 0.5 - x, soft);
-            return mix(F(uv), T(uv), w);
-        }
-        case 5u, 6u, 7u, 8u: { // slide (incoming slides in), push (both move), cover, reveal (outgoing slides out)
-            let o = dir * p;
-            let blur = dir * speed * 0.08;
-            if (fx.i.x == 5u || fx.i.x == 7u) { return over(Tb(uv + dir * (1.0 - p), blur), F(uv)); }
-            if (fx.i.x == 6u) { return over(Tb(uv + dir * (1.0 - p), blur), Fb(uv - o, blur)); }
-            return over(Fb(uv - o, blur), T(uv));
+        case 4u: { return mix(F(uv), T(uv), d19_b(d19_axis(uv, dir), p, soft)); } // wipe (D19)
+        case 5u, 6u, 7u, 8u: { // slide (= cover), push, cover, reveal (D19): pictures travel the frame's span
+            let tv = d19_travel(dir);
+            let blur = tv * speed * 0.08;
+            if (fx.i.x == 5u || fx.i.x == 7u) { return over(Tb(uv + tv * (1.0 - p), blur), F(uv)); }
+            if (fx.i.x == 6u) { return over(Tb(uv + tv * (1.0 - p), blur), Fb(uv - tv * p, blur)); }
+            return over(Fb(uv - tv * p, blur), T(uv));
         }
         case 9u, 10u: { // zoom in / zoom out
             let zin = fx.i.x == 9u;
@@ -918,38 +945,19 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             let blur = dir * speed * 0.5;
             return over(Tb(uv + dir * (1.0 - e), blur), Fb(uv - dir * e, blur));
         }
-        case 13u, 14u, 15u: { // circle open, circle close, iris (diamond)
-            let q = (uv - 0.5) * vec2(asp, 1.0);
-            let maxr = length(vec2(asp, 1.0)) * 0.5;
-            var r = length(q);
-            if (fx.i.x == 15u) { r = (abs(q.x) + abs(q.y)) * 0.7071; }
-            if (fx.i.x == 14u) { let w = edge(r - (1.0 - p) * maxr * (1.0 + soft), soft * maxr); return mix(F(uv), T(uv), w); }
-            let w = edge(p * maxr * (1.0 + soft) - r, soft * maxr);
-            return mix(F(uv), T(uv), w);
-        }
-        case 16u: { // clock wipe from 12 o'clock
-            let q = (uv - 0.5) * vec2(asp, 1.0);
-            let a = fract(atan2(q.x, -q.y) / (2.0 * PI) + 1.0);
-            return mix(F(uv), T(uv), edge(p - a, soft * 0.1));
-        }
-        case 17u: { // radial wipe (both directions from the top)
-            let q = (uv - 0.5) * vec2(asp, 1.0);
-            let a = abs(atan2(q.x, -q.y)) / PI;
-            return mix(F(uv), T(uv), edge(p - a, soft * 0.1));
-        }
-        case 18u: { // barn door (horizontal unless direction is up/down)
-            let vert = u32(fx.v[0].w) == 2u || u32(fx.v[0].w) == 3u;
-            let x = abs(select(uv.x, uv.y, vert) - 0.5) * 2.0;
-            return mix(F(uv), T(uv), edge(p * (1.0 + soft) - x, soft));
-        }
+        case 13u, 15u: { return mix(F(uv), T(uv), d19_b(d19_radius(uv), p, soft)); } // circle open, iris (D19)
+        case 14u: { return mix(F(uv), T(uv), 1.0 - d19_b(d19_radius(uv), 1.0 - p, soft)); } // circle close: a closes
+        case 16u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, -0.5 * PI), p, soft)); } // clock wipe from 12
+        case 17u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, fx.v[0].z), p, soft)); } // radial wipe from @angle
+        case 18u: { return mix(F(uv), T(uv), d19_b(abs(d19_axis(uv, dir) - 0.5) * 2.0, p, soft)); } // barn door
         case 19u: { // blinds: 10 slats across the direction
             let x = fract(dot(uv, abs(dir)) * 10.0);
             return mix(F(uv), T(uv), edge(p * (1.0 + soft) - soft * 0.5 - x, soft));
         }
-        case 20u: { // luma matte from aux2 (or the incoming luma)
-            var l = luma(unpre(A2(uv)));
-            if (fx.i.y == 0u) { l = luma(unpre(T(uv))); }
-            return mix(F(uv), T(uv), edge(p * (1.0 + soft) - l, soft));
+        case 20u: { // luma (D19): the matte's working-space Rec. 709 luminance; without one, a wipe
+            var l = d19_axis(uv, dir);
+            if (fx.i.y != 0u) { l = clamp(luma(A2(uv).rgb), 0.0, 1.0); }
+            return mix(F(uv), T(uv), d19_b(l, p, soft));
         }
         case 21u: { // blur through
             let r = sin(p * PI) * 0.02;

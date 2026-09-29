@@ -1647,7 +1647,12 @@ impl Builder<'_> {
         velocity: f64,
         cx: Option<&Cx>,
     ) -> Result<Arc<Tex>, String> {
-        let size = from.size;
+        // a missing side is a 1×1 transparent texture: the frame is the other side's size
+        let size = if from.size[0] as u64 * from.size[1] as u64 >= to.size[0] as u64 * to.size[1] as u64 {
+            from.size
+        } else {
+            to.size
+        };
         if kind == "shader" {
             let (code, path) = shader.ok_or("transition type=\"shader\" needs @shader")?;
             let cx = cx.ok_or("shader transitions need a context")?;
@@ -1702,7 +1707,8 @@ impl Builder<'_> {
         let mut v = [[0.0f32; 4]; 8];
         v[0] = [p as f32, a.num("softness", 0.1) as f32, a.num("angle", 0.0).to_radians() as f32, dir];
         v[1] = v4(color);
-        v[2] = [if a.num("motionBlur", 1.0) != 0.0 { 8.0 } else { 1.0 }, 0.0, 0.0, 0.0];
+        let blur = !matches!(a.str("motionBlur").as_deref(), Some("false" | "0"));
+        v[2] = [if blur { 8.0 } else { 1.0 }, 0.0, 0.0, 0.0];
         let has_luma = luma.is_some();
         Ok(self.run(Entry::Trans, [k as u32, has_luma as u32, 0, 0], v, from, Aux::Tex(to.clone()), luma, None, size))
     }
