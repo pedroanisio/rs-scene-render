@@ -56,6 +56,34 @@ fn primitive_areas_match_formulas() {
 }
 
 #[test]
+fn closed_outlines_start_where_svg_2_starts_them() {
+    // CONVENTIONS 5.21: an ellipse starts at 3 o'clock, a rect at its top-left corner (x + rx, y),
+    // both clockwise on screen (+y down), so a quarter trim of an ellipse is its bottom-right arc
+    let e = shapes::ellipse(0.0, 0.0, 40.0, 20.0).flatten(0.01);
+    assert!((e[0].pts[0].x - 40.0).abs() < 1e-9 && e[0].pts[0].y.abs() < 1e-9);
+    assert!(e[0].pts[1].y > 0.0, "clockwise on screen: {:?}", e[0].pts[1]);
+    let q = measure::trim(&e, 0.0, 0.25, 0.0, TrimMode::Simultaneous);
+    assert!(q[0].pts.iter().all(|v| v.x >= -1e-9 && v.y >= -1e-9), "bottom-right quadrant");
+    let r = shapes::rect(0.0, 0.0, 100.0, 50.0, [10.0; 4]).flatten(0.01);
+    assert!((r[0].pts[0].x - 10.0).abs() < 1e-9 && r[0].pts[0].y.abs() < 1e-9);
+    assert!(r[0].pts[1].x > r[0].pts[0].x, "then right along the top");
+    // Lottie's ellipse keeps its own start at the top
+    let l = shapes::ellipse_top(0.0, 0.0, 40.0, 20.0).flatten(0.01);
+    assert!(l[0].pts[0].x.abs() < 1e-9 && (l[0].pts[0].y + 20.0).abs() < 1e-9);
+}
+
+#[test]
+fn polygon_and_star_on_an_ellipse() {
+    // D16, D27: vertices on the ellipse of radii (rx, ry), first straight up, clockwise
+    let d = shapes::polygon_on(p(0.0, 0.0), 4, p(20.0, 10.0), 0.0, 0.0).flatten(0.01);
+    let v: Vec<(f64, f64)> = d[0].pts.iter().map(|q| (q.x.round(), q.y.round())).collect();
+    assert_eq!(v, vec![(0.0, -10.0), (20.0, 0.0), (0.0, 10.0), (-20.0, 0.0)]);
+    let s = shapes::star_on(p(0.0, 0.0), 4, p(20.0, 10.0), p(5.0, 5.0), 0.0, 0.0, 0.0).flatten(0.01);
+    assert_eq!(s[0].pts.len(), 8);
+    assert!((s[0].pts[2].x - 20.0).abs() < 1e-9 && (s[0].pts[1].x.hypot(s[0].pts[1].y) - 5.0).abs() < 1e-9);
+}
+
+#[test]
 fn flattening_stays_within_tolerance() {
     let c = shapes::ellipse(0.0, 0.0, 100.0, 100.0);
     for tol in [1.0, 0.25, 0.05] {

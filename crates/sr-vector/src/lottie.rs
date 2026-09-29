@@ -1153,7 +1153,7 @@ fn primitive(it: &ShapeItem, f: f64) -> Path {
         }
         ShapeItem::Ellipse { p: pp, s } => {
             let (c, sz) = (pp.at(f), s.at(f));
-            shapes::ellipse(g(&c, 0, 0.0), g(&c, 1, 0.0), g(&sz, 0, 0.0) * 0.5, g(&sz, 1, 0.0) * 0.5)
+            shapes::ellipse_top(g(&c, 0, 0.0), g(&c, 1, 0.0), g(&sz, 0, 0.0) * 0.5, g(&sz, 1, 0.0) * 0.5)
         }
         ShapeItem::Star { star, p: pp, pt, r, or, ir, os, is } => {
             let c = pp.at(f);

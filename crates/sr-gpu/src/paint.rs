@@ -26,26 +26,19 @@ pub enum PaintRef<'a> {
     Paint(&'a PaintsChild),
 }
 
-/// Affine `[a, b, c, d, e, f]` mapping local coordinates to paint space.
+/// Affine `[a, b, c, d, e, f]` mapping local coordinates to paint space. `rotation` (degrees,
+/// clockwise) turns the gradient about the centre of the painted box in local pixels, whatever the
+/// units (CONVENTIONS 5.18, as the Python renderer does), so a non-square box rotates without shear.
 fn object_xform(box_rect: [f64; 4], rotation: f64, object: bool) -> [f64; 6] {
     let [x0, y0, w, h] = box_rect;
-    let (sx, sy, tx, ty) = if object {
-        (1.0 / w.max(1e-9), 1.0 / h.max(1e-9), -x0 / w.max(1e-9), -y0 / h.max(1e-9))
-    } else {
-        (1.0, 1.0, 0.0, 0.0)
-    };
-    // rotation about the centre of the painted box (object units) or the origin (user units)
-    let (cx, cy) = if object { (0.5, 0.5) } else { (0.0, 0.0) };
+    let pivot = [x0 + w * 0.5, y0 + h * 0.5];
     let r = (-rotation).to_radians();
     let (c, s) = (libm::cos(r), libm::sin(r));
-    // g = R·(S·p + t − c) + c
-    let a = c * sx;
-    let b = s * sx;
-    let cc = -s * sy;
-    let d = c * sy;
-    let ex = tx - cx;
-    let ey = ty - cy;
-    [a, b, cc, d, c * ex - s * ey + cx, s * ex + c * ey + cy]
+    // g = M·p + k − M·pivot, M = S⁻¹·R(−rotation) with S the box size (object units) or 1 (user units),
+    // and k the pivot in paint space
+    let (sx, sy, k) = if object { (1.0 / w.max(1e-9), 1.0 / h.max(1e-9), [0.5, 0.5]) } else { (1.0, 1.0, pivot) };
+    let (a, b, cc, d) = (c * sx, s * sy, -s * sx, c * sy);
+    [a, b, cc, d, k[0] - (a * pivot[0] + cc * pivot[1]), k[1] - (b * pivot[0] + d * pivot[1])]
 }
 
 fn prop<'g>(g: &'g FrameGraph, key: &str, name: &str) -> Option<&'g Value> {
@@ -227,6 +220,7 @@ impl PaintTable {
                 let (rows, cols) = (mg.rows.get() as usize, mg.cols.get() as usize);
                 let off = self.stops.len() as u32;
                 let mut grid = vec![[0.0f64; 4]; rows * cols];
+                let mut known = vec![false; rows * cols];
                 let mut k = 0;
                 for c in &mg.children {
                     if let m::MeshGradientChild::Point(pt) = c {
@@ -237,7 +231,19 @@ impl PaintTable {
                             grid[r * cols + cc] = prop(g, &pk, "color")
                                 .and_then(value_color)
                                 .unwrap_or_else(|| literal(&pt.color, tokens));
+                            known[r * cols + cc] = true;
                         }
+                    }
+                }
+                // a missing point takes the colour of the nearest defined one (as the Python renderer does)
+                let defined: Vec<usize> = (0..rows * cols).filter(|&i| known[i]).collect();
+                for i in (0..rows * cols).filter(|&i| !known[i]) {
+                    let d2 = |j: usize| {
+                        let (dr, dc) = ((i / cols) as i64 - (j / cols) as i64, (i % cols) as i64 - (j % cols) as i64);
+                        dr * dr + dc * dc
+                    };
+                    if let Some(&j) = defined.iter().min_by_key(|&&j| d2(j)) {
+                        grid[i] = grid[j];
                     }
                 }
                 for col in grid {
@@ -330,5 +336,22 @@ mod tests {
         let ap = |p: [f64; 2]| [r[0] * p[0] + r[2] * p[1] + r[4], r[1] * p[0] + r[3] * p[1] + r[5]];
         let c = ap([0.5, 0.5]);
         assert!((c[0] - 0.5).abs() < 1e-12 && (c[1] - 0.5).abs() < 1e-12, "rotation keeps the centre");
+    }
+
+    #[test]
+    fn rotation_turns_about_the_box_centre_in_pixels() {
+        // CONVENTIONS 5.18: a 200 × 100 box turned 90° clockwise: the pixel 50 px below the centre shows
+        // the point 50 px right of it in the unturned gradient, i.e. x = 0.75 of the box (not 1.0, as
+        // turning the unit square would give)
+        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12;
+        let x = object_xform([0.0, 0.0, 200.0, 100.0], 90.0, true);
+        let ap = |p: [f64; 2]| [x[0] * p[0] + x[2] * p[1] + x[4], x[1] * p[0] + x[3] * p[1] + x[5]];
+        assert!(near(ap([100.0, 50.0]), [0.5, 0.5]));
+        assert!(near(ap([100.0, 100.0]), [0.75, 0.5]), "{:?}", ap([100.0, 100.0]));
+        // user units pivot on the box centre too
+        let u = object_xform([0.0, 0.0, 200.0, 100.0], 90.0, false);
+        let ap = |p: [f64; 2]| [u[0] * p[0] + u[2] * p[1] + u[4], u[1] * p[0] + u[3] * p[1] + u[5]];
+        assert!(near(ap([100.0, 50.0]), [100.0, 50.0]));
+        assert!(near(ap([100.0, 100.0]), [150.0, 50.0]), "{:?}", ap([100.0, 100.0]));
     }
 }

@@ -771,6 +771,9 @@ pub struct Cx<'a> {
     pub to_uv: &'a dyn Fn([f64; 2]) -> [f64; 2],
     /// Default centre (uv).
     pub center: [f64; 2],
+    /// The effect's input in offscreen pixels (x0, y0, x1, y1): the node's content box, or the whole
+    /// offscreen (adjustment layers, unknown extents).
+    pub content: Option<[f64; 4]>,
     pub time: f64,
     pub frame: i64,
     /// A colour value → straight stored working RGBA.
@@ -930,14 +933,14 @@ impl Builder<'_> {
         self.run(entry, [op, 0, 0, 0], v, src, aux, None, None, size)
     }
 
-    /// Dual-Kawase blur of radius `r` texels.
-    pub fn blur(&mut self, src: &Arc<Tex>, r: f64) -> Arc<Tex> {
-        if r < 0.75 {
+    /// Dual-Kawase approximation of a Gaussian blur of standard deviation `sigma` texels.
+    pub fn blur(&mut self, src: &Arc<Tex>, sigma: f64) -> Arc<Tex> {
+        if sigma < 0.375 {
             return src.clone();
         }
         // σ of the pyramid ≈ 1.45 · offset · 2^levels (measured on an impulse);
-        // `radius` is 2σ, so pick the fewest levels keeping the offset ≤ 1.5 texels
-        let x = r * 0.5 / 1.45;
+        // pick the fewest levels keeping the offset ≤ 1.5 texels
+        let x = sigma / 1.45;
         let levels = ((x / 1.5).log2().ceil() as i32).clamp(1, 10);
         let off = (x / 2f64.powi(levels)).clamp(0.2, 3.0) as f32;
         let mut chain = vec![src.clone()];
@@ -1035,20 +1038,26 @@ impl Builder<'_> {
                     "halation" => lin(colour("color", [1.0, 0.3, 0.12, 1.0])),
                     _ => lin(colour("color", [1.0; 4])),
                 };
-                v[0] = [threshold as f32, if kind == "glow" { 0.05 } else { 0.5 }, 0.0, 0.0];
+                // glow keeps the part of each pixel above `threshold` of its working-space luminance (D9)
+                v[0] = [threshold as f32, if kind == "glow" { 0.0 } else { 0.5 }, 0.0, 0.0];
                 v[1] = [tint[0] as f32, tint[1] as f32, tint[2] as f32, 1.0];
                 let bright = self.simple(Entry::Pre, 0, v, input, Aux::None);
-                let blurred = self.blur(&bright, r.max(1.0));
+                // radius is the glow's standard deviation, as the blur effect's (D9)
+                let blurred = self.blur(&bright, r.max(0.5));
+                // CONVENTIONS 5.6: the bloom is added over the content, as the C renderer does
                 self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
             }
             "drop-shadow" | "inner-shadow" | "inner-glow" => {
-                let c =
-                    colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 0.75] });
+                let c = colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 1.0] });
                 let off = if kind == "inner-glow" { [0.0; 2] } else { offset_uv() };
                 v[0] = [0.0, 0.0, off[0], off[1]];
                 v[1] = v4(c);
                 let pre = self.simple(Entry::Pre, if kind == "drop-shadow" { 1 } else { 2 }, v, input, Aux::None);
-                let b = self.blur(&pre, r);
+                // a drop shadow's radius is twice the standard deviation (CSS drop-shadow(), D9);
+                // the inner styles' radius is the standard deviation, as the blur effect's
+                let b = self.blur(&pre, if kind == "drop-shadow" { r * 0.5 } else { r });
+                // CONVENTIONS 5.6: a drop shadow goes behind the content by default; the inner styles
+                // are drawn over it
                 let mode = if kind == "drop-shadow" {
                     match a.str("compositeOriginal").as_deref() {
                         Some("on-top") => 3,
@@ -1300,13 +1309,13 @@ impl Builder<'_> {
                 color_op(self, 23, v, Aux::None)
             }
             "vignette" => {
+                // D9 (CONVENTIONS 5.8): darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the
+                // distance from the centre over the half diagonal and r₀ = radius / half diagonal; absent
+                // attributes take the schema's effect defaults (amount 1, radius 4, softness 0.1)
                 let c = colour("color", [0.0, 0.0, 0.0, 1.0]);
-                v[0] = [
-                    (amount * c[3]).clamp(0.0, 1.0) as f32,
-                    sz.max(0.05) as f32,
-                    a.num("softness", 0.1).max(0.3) as f32,
-                    0.0,
-                ];
+                let r0 = r / (0.5 * w.hypot(h));
+                let soft = a.num("softness", 0.1).max(0.0);
+                v[0] = [(amount * c[3]) as f32, r0 as f32, soft as f32, 0.0];
                 v[1] = v4(c);
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 color_op(self, 64, v, Aux::None)
@@ -1482,7 +1491,16 @@ impl Builder<'_> {
                         }
                     }
                     "chromatic-aberration" => {
-                        v[0] = [(amount * 4.0 * px) as f32, 0.0, 0.0, 0.0];
+                        // CONVENTIONS 5.18: `amount` pixels at the input's farthest corner from its centre;
+                        // the input is the node's content box (the frame for adjustment layers)
+                        let b = cx.content.unwrap_or([0.0, 0.0, w, h]);
+                        let c = match (a.opt("centerX"), a.opt("centerY")) {
+                            (None, None) => [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5],
+                            _ => [center[0] * w, center[1] * h],
+                        };
+                        let reach = (c[0] - b[0]).hypot(c[1] - b[1]).max((b[2] - c[0]).hypot(b[3] - c[1])).max(1.0);
+                        v[0] = [(amount * px) as f32, 0.0, 0.0, 0.0];
+                        v[1] = [c[0] as f32, c[1] as f32, reach as f32, 0.0];
                         14
                     }
                     "rgb-split" => {
@@ -1553,7 +1571,7 @@ impl Builder<'_> {
                     v[0] = [choke.abs() as f32, (choke > 0.0) as u8 as f32, 0.0, 0.0];
                     let o = self.simple(Entry::Morph, 0, v, input, Aux::None);
                     let soft = a.num("softness", 0.1) * px * 4.0;
-                    return Ok(if soft >= 1.0 { self.blur(&o, soft) } else { o });
+                    return Ok(if soft >= 1.0 { self.blur(&o, soft * 0.5) } else { o });
                 }
                 let c = colour("color", [1.0; 4]);
                 let pos = match a.str("position").as_deref() {

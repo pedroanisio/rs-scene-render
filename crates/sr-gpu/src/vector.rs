@@ -97,7 +97,10 @@ fn rule(s: Option<String>, d: FillRule) -> FillRule {
 /// Base outline of a primitive in its `w`×`h` box.
 pub fn primitive(a: &Attrs, kind: &str, w: f64, h: f64) -> Result<Path, String> {
     let c = p(w * 0.5, h * 0.5);
-    let outer = a.opt("outerRadius").unwrap_or(w.min(h) * 0.5);
+    // D27 (CONVENTIONS 5.15): polygon and star vertices lie on the ellipse inscribed in the box, or on
+    // a circle of `outerRadius` units; a star's inner vertices on a circle of `innerRadius` units, or
+    // on the outer figure scaled by 0.5
+    let outer = a.opt("outerRadius").map(|r| p(r, r)).unwrap_or(c);
     Ok(match kind {
         "rect" | "rounded-rect" => {
             let r = a.num("radius", 0.0);
@@ -106,12 +109,14 @@ pub fn primitive(a: &Attrs, kind: &str, w: f64, h: f64) -> Result<Path, String> 
             shapes::rect(0.0, 0.0, w, h, radii)
         }
         "ellipse" => shapes::ellipse(c.x, c.y, w * 0.5, h * 0.5),
-        "polygon" => shapes::polygon(c, a.num("points", 5.0).max(3.0) as u32, outer, a.num("outerRoundness", 0.0), 0.0),
-        "star" => shapes::star(
+        "polygon" => {
+            shapes::polygon_on(c, a.num("points", 5.0).max(3.0) as u32, outer, a.num("outerRoundness", 0.0), 0.0)
+        }
+        "star" => shapes::star_on(
             c,
             a.num("points", 5.0).max(2.0) as u32,
             outer,
-            a.opt("innerRadius").unwrap_or(outer * 0.5),
+            a.opt("innerRadius").map(|r| p(r, r)).unwrap_or(outer * 0.5),
             a.num("outerRoundness", 0.0),
             a.num("innerRoundness", 0.0),
             0.0,

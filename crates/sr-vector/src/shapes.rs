@@ -38,8 +38,22 @@ pub fn rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
     path
 }
 
-/// Ellipse inscribed in the box, clockwise from the top.
+/// Ellipse about (cx, cy), starting at 3 o'clock and running clockwise on screen, as SVG 2 draws
+/// `<ellipse>` (CONVENTIONS 5.21: trims and dashes start there).
 pub fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
+    let (kx, ky) = (rx * KAPPA, ry * KAPPA);
+    let mut path = Path::default();
+    path.move_to(p(cx + rx, cy));
+    path.cubic_to(p(cx + rx, cy + ky), p(cx + kx, cy + ry), p(cx, cy + ry));
+    path.cubic_to(p(cx - kx, cy + ry), p(cx - rx, cy + ky), p(cx - rx, cy));
+    path.cubic_to(p(cx - rx, cy - ky), p(cx - kx, cy - ry), p(cx, cy - ry));
+    path.cubic_to(p(cx + kx, cy - ry), p(cx + rx, cy - ky), p(cx + rx, cy));
+    path.close();
+    path
+}
+
+/// Ellipse about (cx, cy), clockwise from the top (Lottie's ellipse).
+pub fn ellipse_top(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
     let (kx, ky) = (rx * KAPPA, ry * KAPPA);
     let mut path = Path::default();
     path.move_to(p(cx, cy - ry));
@@ -55,40 +69,55 @@ pub fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
 /// inner radii, roundness 0–1 as tangent length relative to the vertex
 /// spacing, first tip straight up, rotated by `rot_deg`.
 pub fn star(c: P, points: u32, outer: f64, inner: f64, outer_round: f64, inner_round: f64, rot_deg: f64) -> Path {
-    let n = points.max(2) as usize * 2;
-    let angle = std::f64::consts::TAU / n as f64;
-    let (lp, sp) = (std::f64::consts::TAU * outer / (n as f64 * 2.0), std::f64::consts::TAU * inner / (n as f64 * 2.0));
-    let mut cn = Contour { closed: true, ..Default::default() };
-    let mut a = -std::f64::consts::FRAC_PI_2 + rot_deg.to_radians();
-    for k in 0..n {
-        let long = k % 2 == 0;
-        let (r, round, seg) = if long { (outer, outer_round, lp) } else { (inner, inner_round, sp) };
-        vertex(&mut cn, c, r, a, round * seg);
-        a += angle;
-    }
-    Path::from_contours(&[cn])
+    star_on(c, points, p(outer, outer), p(inner, inner), outer_round, inner_round, rot_deg)
 }
 
 /// Regular polygon (Lottie polystar with one radius).
 pub fn polygon(c: P, points: u32, r: f64, roundness: f64, rot_deg: f64) -> Path {
-    let n = points.max(3) as usize;
+    polygon_on(c, points, p(r, r), roundness, rot_deg)
+}
+
+/// [`star`] with its tips on the ellipse of radii `outer` and its inner vertices on the ellipse of
+/// radii `inner` (D16, D27: a shape's or mask's star in a non-square box); the roundness handles are
+/// tangent to those ellipses.
+pub fn star_on(c: P, points: u32, outer: P, inner: P, outer_round: f64, inner_round: f64, rot_deg: f64) -> Path {
+    let n = points.max(2) as usize * 2;
     let angle = std::f64::consts::TAU / n as f64;
-    let seg = std::f64::consts::TAU * r / (n as f64 * 4.0);
+    // handle length relative to the ellipse's derivative (the vertex spacing over the radius on a circle)
+    let k = std::f64::consts::TAU / (n as f64 * 2.0);
     let mut cn = Contour { closed: true, ..Default::default() };
     let mut a = -std::f64::consts::FRAC_PI_2 + rot_deg.to_radians();
-    for _ in 0..n {
-        vertex(&mut cn, c, r, a, roundness * seg);
+    for i in 0..n {
+        let (r, round) = if i % 2 == 0 { (outer, outer_round) } else { (inner, inner_round) };
+        vertex(&mut cn, c, r, a, round * k);
         a += angle;
     }
     Path::from_contours(&[cn])
 }
 
-fn vertex(cn: &mut Contour, c: P, r: f64, a: f64, handle: f64) {
-    let v = p(r * libm::cos(a), r * libm::sin(a));
-    let t = if r > 0.0 { p(-v.y / r, v.x / r) } else { p(0.0, 0.0) };
+/// [`polygon`] with its vertices on the ellipse of radii `r`.
+pub fn polygon_on(c: P, points: u32, r: P, roundness: f64, rot_deg: f64) -> Path {
+    let n = points.max(3) as usize;
+    let angle = std::f64::consts::TAU / n as f64;
+    let k = std::f64::consts::TAU / (n as f64 * 4.0);
+    let mut cn = Contour { closed: true, ..Default::default() };
+    let mut a = -std::f64::consts::FRAC_PI_2 + rot_deg.to_radians();
+    for _ in 0..n {
+        vertex(&mut cn, c, r, a, roundness * k);
+        a += angle;
+    }
+    Path::from_contours(&[cn])
+}
+
+/// A vertex at angle `a` on the ellipse of radii `r` about `c`, with handles `k` times the
+/// ellipse's derivative there.
+fn vertex(cn: &mut Contour, c: P, r: P, a: f64, k: f64) {
+    let (s, co) = (libm::sin(a), libm::cos(a));
+    let v = p(r.x * co, r.y * s);
+    let t = p(-r.x * s, r.y * co);
     cn.v.push(c + v);
-    cn.o.push(c + v + t * handle);
-    cn.i.push(c + v - t * handle);
+    cn.o.push(c + v + t * k);
+    cn.i.push(c + v - t * k);
 }
 
 /// Line across the middle of its box, left to right.

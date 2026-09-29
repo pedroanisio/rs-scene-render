@@ -37,6 +37,23 @@ fn A2(uv: vec2<f32>) -> vec4<f32> { return textureSampleLevel(aux2, smp, uv, 0.0
 fn dims() -> vec2<f32> { return vec2<f32>(textureDimensions(src)); }
 fn in_unit(uv: vec2<f32>) -> bool { return all(uv >= vec2(0.0)) && all(uv <= vec2(1.0)); }
 fn Sz(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), S(uv), in_unit(uv)); }
+// Bilinear sample of src with transparent texels beyond its edges.
+fn St(uv: vec2<f32>) -> vec4<f32> {
+    let d = vec2<i32>(textureDimensions(src));
+    let q = uv * vec2<f32>(d) - 0.5;
+    let i = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    var acc = vec4(0.0);
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1u);
+        let p = i + o;
+        if (all(p >= vec2(0)) && all(p < d)) {
+            let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+            acc += textureLoad(src, p, 0) * w;
+        }
+    }
+    return acc;
+}
 
 fn unpre(c: vec4<f32>) -> vec3<f32> { return select(vec3(0.0), c.rgb / c.a, c.a > 1e-6); }
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -383,10 +400,11 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
         return vec4(stored(c) * s.a, s.a);
     }
     switch fx.i.x {
-        case 64u: { // vignette: v0 amount, size, softness; v1 colour; v2.xy centre (uv)
-            let asp = vec2(d.x / d.y, 1.0);
-            let r = length((in.uv - v[2].xy) * asp) / length(0.5 * asp);
-            let w = smoothstep(v[0].y - v[0].z, v[0].y + v[0].z * 0.5, r) * v[0].x;
+        case 64u: { // vignette (D9): v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
+            let r = length((in.uv - v[2].xy) * d) / (0.5 * length(d));
+            var k = select(0.0, 1.0, r >= v[0].y);
+            if (v[0].z > 0.0) { k = smoothstep(v[0].y, v[0].y + v[0].z, r); }
+            let w = k * v[0].x;
             return vec4(mix(s.rgb, v[1].rgb * s.a, w), s.a);
         }
         case 65u: { // letterbox: v0.x target aspect, v1 colour
@@ -579,9 +597,19 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             }
             return acc / 16.0;
         }
-        case 14u, 15u: { // chromatic aberration (radial, v0.x px at edge) / rgb split (v0.xy px)
-            var o = v[0].xy / d;
-            if (fx.i.x == 14u) { o = (in.uv - c) * 2.0 * v[0].x / d; }
+        case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner (CONVENTIONS 5.18)
+            // red magnifies by 1 − l and blue by 1 + l about the centre v1.xy (px), l = amount / reach
+            // (v1.z px, the distance to the input's farthest corner); outside the input is transparent
+            let pc = v[1].xy;
+            let x = in.uv * d;
+            let l = v[0].x / max(v[1].z, 1.0);
+            let r = St((pc + (x - pc) / max(1.0 - l, 0.01)) / d);
+            let g = S(in.uv);
+            let b = St((pc + (x - pc) / max(1.0 + l, 0.01)) / d);
+            return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
+        }
+        case 15u: { // rgb split (v0.xy px)
+            let o = v[0].xy / d;
             let r = Sz(in.uv + o);
             let g = S(in.uv);
             let b = Sz(in.uv - o);

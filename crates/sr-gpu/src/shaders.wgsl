@@ -119,6 +119,73 @@ fn mask_distance(m: Mask, p: vec2<f32>) -> f32 {
   return select(d, -d, inside);
 }
 
+// Standard normal cumulative distribution (Abramowitz and Stegun 7.1.26, error below 1.5e-7).
+fn phi(x: f32) -> f32 {
+  let z = abs(x) * 0.70710678;
+  let t = 1.0 / (1.0 + 0.3275911 * z);
+  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-z * z);
+  return 0.5 * (1.0 + select(y, -y, x < 0.0));
+}
+
+// Half width of a rectangle (half extents h) with corners of radius r at height y from its centre;
+// negative outside it.
+fn rounded_half_width(h: vec2<f32>, r: f32, y: f32) -> f32 {
+  let ay = abs(y);
+  if (ay >= h.y) { return -1.0; }
+  let dy = ay - (h.y - r);
+  if (dy <= 0.0) { return h.x; }
+  return h.x - r + sqrt(max(r * r - dy * dy, 0.0));
+}
+
+// Coverage of one mask before invert and opacity. Feather is a Gaussian blur of standard deviation
+// `feather` local units (D16): for rectangles, rounded rectangles and ellipses it integrates the blurred
+// outline row by row (exact for rectangles); polygons and paths take Φ of the signed distance, exact
+// along straight edges. Expansion grows or shrinks the outline first (a disc's maximum or minimum).
+fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
+  if (m.feather <= 0.0) {
+    let dist = mask_distance(m, p) - m.expansion;
+    return clamp(0.5 - dist / max(aa, 1e-4), 0.0, 1.0);
+  }
+  let sigma = max(m.feather, 0.4 * aa);
+  let e = m.expansion;
+  let h = m.rect.zw * 0.5 + vec2(e);
+  let q = p - (m.rect.xy + m.rect.zw * 0.5);
+  if (m.kind == 3u) {
+    return phi(-(mask_distance(m, p) - e) / sigma);
+  }
+  if (any(h <= vec2(0.0))) { return 0.0; }
+  if (m.kind == 0u && e <= 0.0) {
+    // eroding a rectangle keeps it a rectangle: a product of two edge integrals
+    let cx = phi((q.x + h.x) / sigma) - phi((q.x - h.x) / sigma);
+    let cy = phi((q.y + h.y) / sigma) - phi((q.y - h.y) / sigma);
+    return clamp(cx * cy, 0.0, 1.0);
+  }
+  var r = 0.0;
+  if (m.kind == 0u) { r = e; }
+  if (m.kind == 2u) { r = max(min(m.radius, min(m.rect.z, m.rect.w) * 0.5) + e, 0.0); }
+  r = min(r, min(h.x, h.y));
+  // ∫ G(v) [Φ((q.x + w(y + v)) / σ) − Φ((q.x − w(y + v)) / σ)] dv over ±4σ, w the outline's half width
+  let n = 32;
+  let step = 8.0 * sigma / f32(n);
+  var sum = 0.0;
+  var wsum = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let v = (f32(i) + 0.5) * step - 4.0 * sigma;
+    let g = exp(-0.5 * (v / sigma) * (v / sigma));
+    wsum = wsum + g;
+    let y = q.y + v;
+    var hw = -1.0;
+    if (m.kind == 1u) {
+      let k = y / h.y;
+      if (abs(k) < 1.0) { hw = h.x * sqrt(1.0 - k * k); }
+    } else {
+      hw = rounded_half_width(h, r, y);
+    }
+    if (hw > 0.0) { sum = sum + g * (phi((q.x + hw) / sigma) - phi((q.x - hw) / sigma)); }
+  }
+  return clamp(sum / wsum, 0.0, 1.0);
+}
+
 fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
   if (d.mask_count == 0u) { return 1.0; }
   let first = masks[d.mask_off].mode;
@@ -127,14 +194,12 @@ fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
   for (var i = 0u; i < d.mask_count; i = i + 1u) {
     let m = masks[d.mask_off + i];
     if (m.mode == 6u) { continue; }
-    let dist = mask_distance(m, p) - m.expansion;
-    let w = select(max(aa, 1e-4), m.feather, m.feather > 0.0);
-    var v = clamp(0.5 - dist / w, 0.0, 1.0);
+    var v = mask_value(m, p, aa);
     if (m.invert == 1u) { v = 1.0 - v; }
     v = v * m.opacity;
     switch (m.mode) {
       case 0u: { cov = cov * v; }                  // intersect
-      case 1u: { cov = min(1.0, cov + v); }        // add
+      case 1u: { cov = cov + v - cov * v; }        // add (D16: a + m − a·m)
       case 2u: { cov = cov * (1.0 - v); }          // subtract
       case 3u: { cov = max(cov, v); }              // lighten
       case 4u: { cov = min(cov, v); }              // darken
@@ -164,10 +229,12 @@ fn blend_soft(b: f32, s: f32) -> f32 {
   if (b <= 0.25) { dd = ((16.0 * b - 12.0) * b + 4.0) * b; }
   return b + (2.0 * s - 1.0) * (dd - b);
 }
+// W3C Compositing Level 1 luminance, for the non-separable modes and darker/lighter colour (D14)
+fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3(0.3, 0.59, 0.11)); }
 fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
-  let d = l - luma(c);
+  let d = l - lum(c);
   var r = c + vec3(d);
-  let ll = luma(r);
+  let ll = lum(r);
   let n = min(r.r, min(r.g, r.b));
   let x = max(r.r, max(r.g, r.b));
   if (n < 0.0) { r = vec3(ll) + (r - vec3(ll)) * ll / max(ll - n, 1e-6); }
@@ -182,8 +249,14 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
   return (c - vec3(mn)) * s / (mx - mn);
 }
 
-// Separable and non-separable B(Cb, Cs) on straight colours.
-fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
+// Separable and non-separable B(Cb, Cs) on straight colours. add, multiply and difference pass HDR
+// values through; the other modes take their inputs clamped to [0, 1] (D14).
+fn blend_fn(mode: u32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+  var b = cb; var s = cs;
+  if (mode != 2u && mode != 17u && mode != 4u && mode != 7u) {
+    b = clamp(cb, vec3(0.0), vec3(1.0));
+    s = clamp(cs, vec3(0.0), vec3(1.0));
+  }
   switch (mode) {
     case 2u, 17u: { return b + s; }                                    // add, linear-dodge
     case 4u: { return b * s; }                                          // multiply
@@ -192,11 +265,13 @@ fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
     case 7u: { return abs(b - s); }                                     // difference
     case 8u: { return b + s - 2.0 * b * s; }                            // exclusion
     case 9u: { return max(b - s, vec3(0.0)); }                          // subtract
-    case 10u: { return min(b / max(s, vec3(1e-6)), vec3(1e4)); }        // divide
+    case 10u: {                                                         // divide (1 where cs is 0 and cb is not)
+      return select(min(b / max(s, vec3(1e-30)), vec3(1.0)), select(vec3(0.0), vec3(1.0), b > vec3(0.0)), s <= vec3(0.0));
+    }
     case 11u: { return min(b, s); }                                     // darken
     case 12u: { return max(b, s); }                                     // lighten
-    case 13u: { return select(b, s, luma(s) < luma(b)); }               // darker-color
-    case 14u: { return select(b, s, luma(s) > luma(b)); }               // lighter-color
+    case 13u: { return select(b, s, lum(s) < lum(b)); }                 // darker-color
+    case 14u: { return select(b, s, lum(s) > lum(b)); }                 // lighter-color
     case 15u: { return vec3(blend_dodge(b.r, s.r), blend_dodge(b.g, s.g), blend_dodge(b.b, s.b)); }
     case 16u: { return vec3(blend_burn(b.r, s.r), blend_burn(b.g, s.g), blend_burn(b.b, s.b)); }
     case 18u: { return max(b + s - vec3(1.0), vec3(0.0)); }             // linear-burn
@@ -218,10 +293,10 @@ fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
       return r;
     }
     case 24u: { return select(vec3(0.0), vec3(1.0), b + s >= vec3(1.0)); }                                 // hard-mix
-    case 25u: { return set_lum(set_sat(s, sat(b)), luma(b)); }                                            // hue
-    case 26u: { return set_lum(set_sat(b, sat(s)), luma(b)); }                                            // saturation
-    case 27u: { return set_lum(s, luma(b)); }                                                             // color
-    case 28u: { return set_lum(b, luma(s)); }                                                             // luminosity
+    case 25u: { return set_lum(set_sat(s, sat(b)), lum(b)); }                                             // hue
+    case 26u: { return set_lum(set_sat(b, sat(s)), lum(b)); }                                             // saturation
+    case 27u: { return set_lum(s, lum(b)); }                                                              // color
+    case 28u: { return set_lum(b, lum(s)); }                                                              // luminosity
     default: { return s; }
   }
 }
@@ -365,6 +440,12 @@ fn rotate(p: vec2<f32>, deg: f32) -> vec2<f32> {
   return vec2(p.x * cos(r) - p.y * sin(r), p.x * sin(r) + p.y * cos(r));
 }
 
+// Asset position → pattern space: about the centre, turned clockwise by `angle`, scrolled by
+// `evolution` periods of `period`.
+fn pattern_space(p: vec2<f32>, period: f32) -> vec2<f32> {
+  return rotate(p - gen.size * 0.5, -gen.angle) - vec2(gen.evolution * period, 0.0);
+}
+
 fn gen_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
   return eval_paint(i, p, pixel);
 }
@@ -407,18 +488,20 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
       }
       t = clamp(best, 0.0, 1.0);
     }
-    case 5u: {                                                                    // checkerboard
-      let q = floor(rotate(p, gen.angle) / s);
+    // The patterns (CONVENTIONS 5.18, the Python renderer's): pattern space has its origin at the
+    // asset's centre, turns clockwise by `angle` and scrolls along its x by `evolution` periods.
+    case 5u: {                                                                    // checkerboard: `scale` squares, paint at the origin's
+      let q = floor(pattern_space(p, 2.0 * s) / s);
       t = f32((i32(q.x) + i32(q.y)) & 1);
     }
-    case 6u: {                                                                    // grid lines
-      let q = rotate(p, gen.angle) / s;
-      let w = max(1.0 / s, 0.04);
-      let f = abs(fract(q + vec2(0.5)) - vec2(0.5));
-      t = select(1.0, 0.0, min(f.x, f.y) < w * 0.5);
+    case 6u: {                                                                    // grid: lines from each multiple of `scale`
+      let n = clamp(round(s), 2.0, 256.0);
+      let w = max(1.0, round(n * 0.04)) / n;
+      let f = fract(pattern_space(p, s) / s);
+      t = select(1.0, 0.0, min(f.x, f.y) < w);
     }
-    case 7u: {                                                                    // stripes
-      let q = rotate(p, gen.angle) / s;
+    case 7u: {                                                                    // stripes: period 2 × `scale`, paint first
+      let q = pattern_space(p, 2.0 * s) / (2.0 * s);
       t = select(0.0, 1.0, fract(q.x) >= 0.5);
     }
     case 8u: {                                                                    // film grain, changes with evolution
@@ -435,6 +518,14 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
   }
   t = clamp((t - 0.5) * gen.contrast + 0.5, 0.0, 1.0);
   // t = 0 → paint, t = 1 → paint2
+  if (gen.kind == 1u) {
+    // the gradient mixes premultiplied sRGB-encoded colours (CONVENTIONS 5.18, the Python renderer's)
+    let pa = vec4(to_space(a.rgb, 1u) * a.a, a.a);
+    let pb = vec4(to_space(b.rgb, 1u) * b.a, b.a);
+    let m = mix(pa, pb, t);
+    let rgb = select(vec3(0.0), from_space(m.rgb / max(m.a, 1e-6), 1u), m.a > 0.0);
+    return vec4(rgb * m.a, m.a);
+  }
   let c = mix(a, b, t);
   return vec4(c.rgb * c.a, c.a);
 }

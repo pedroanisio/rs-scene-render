@@ -22,7 +22,7 @@ fn blur_spreads_and_conserves_coverage() {
     let blurred = render(&fx_doc(
         r##"background="#00000000""##,
         r#"<layer id="a" asset="white" x="24" y="8" scaleX="4" scaleY="4" effects="b"/>"#,
-        r#"<effect id="b" type="blur" radius="2"/>"#,
+        r#"<effect id="b" type="blur" radius="1"/>"#,
     ))
     .unwrap();
     assert!(problems(&blurred).is_empty(), "{:?}", problems(&blurred));
@@ -48,6 +48,101 @@ fn glow_and_drop_shadow() {
     assert_px(&r, 50, 18, [0.0, 0.0, 0.0, 1.0], 2e-2);
     assert_px(&r, 38, 2, [bg, bg, bg, 1.0], 2e-2);
     assert_px(&r, 44, 8, [1.0, 0.0, 0.0, 1.0], 2e-2);
+}
+
+/// Standard normal cumulative distribution (Abramowitz–Stegun 7.1.26 through erf).
+fn phi(x: f64) -> f64 {
+    let z = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * z);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592)
+            * t
+            * (-z * z).exp();
+    0.5 * (1.0 + if x < 0.0 { -y } else { y })
+}
+
+#[test]
+fn blur_radius_is_the_standard_deviation() {
+    // CONVENTIONS 5.7 (D9): `radius` is σ; a drop shadow's `radius` is 2σ. Radii are in the node's units,
+    // so on a layer scaled 10× these are σ = 3 px. A straight edge at x = 32 blurred with σ covers Φ(d / σ)
+    // at signed distance d inside it.
+    let fx = r##"<effect id="b" type="blur" radius="0.3"/>
+        <effect id="s" type="drop-shadow" radius="0.6" offsetX="0" offsetY="0" color="#000000"/>"##;
+    let edge = |e: &str| {
+        let body = format!(r#"<layer id="a" asset="white" x="32" y="-4" scaleX="10" scaleY="10" effects="{e}"/>"#);
+        render(&fx_doc(r##"background="#00000000""##, &body, fx))
+            .inspect(|r| assert!(problems(r).is_empty(), "{:?}", problems(r)))
+    };
+    let Some(b) = edge("b") else { return };
+    for x in [27u32, 29, 31, 33, 35, 37] {
+        let want = phi((x as f64 + 0.5 - 32.0) / 3.0) as f32;
+        let got = b.at(x, 16)[3];
+        assert!((got - want).abs() < 0.05, "blur alpha at x = {x}: {got}, want {want}");
+    }
+    let s = edge("s").unwrap();
+    for x in [27u32, 29, 31] {
+        let want = phi((x as f64 + 0.5 - 32.0) / 3.0) as f32;
+        let got = s.at(x, 16)[3];
+        assert!((got - want).abs() < 0.05, "shadow alpha at x = {x}: {got}, want {want}");
+        assert!(s.at(x, 16)[0] < 1e-3, "an absent shadow colour is opaque black: {:?}", s.at(x, 16));
+    }
+}
+
+#[test]
+fn glow_adds_a_bloom_over_the_content() {
+    // CONVENTIONS 5.6: the pixels above `threshold`, blurred, are added over the content (as in C)
+    let body = r##"<layer id="a" asset="src" x="16" y="8" scaleX="4" scaleY="4" effects="g"/>"##;
+    let fx = r##"<effect id="g" type="glow" radius="0.5" threshold="0" intensity="1"/>"##;
+    let Some(r) = render(&fx_doc(r##"background="#00000000""##, body, fx)) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the middle of the square is the content plus its own (nearly unblurred) bloom: twice the content
+    assert_px(&r, 24, 16, [2.0 * lin8(200), 2.0 * lin8(100), 2.0 * lin8(50), 1.0], 2e-2);
+    assert!(r.at(14, 16)[3] > 0.1, "the halo spreads outside: {:?}", r.at(14, 16));
+}
+
+#[test]
+fn vignette_follows_d9() {
+    // CONVENTIONS 5.8: 1 − amount · smoothstep(r₀, r₀ + softness, r), r over the half diagonal.
+    let body = r#"<layer id="a" asset="gray" x="0" y="0" scaleX="16" scaleY="8"/><adjustment id="v" effects="e"/>"#;
+    let half = 0.5 * (64f64 * 64.0 + 32.0 * 32.0).sqrt();
+    let k = |amount: f64, r0: f64, soft: f64, x: u32, y: u32| {
+        let r = ((x as f64 + 0.5 - 32.0).hypot(y as f64 + 0.5 - 16.0)) / half;
+        let u = ((r - r0) / soft).clamp(0.0, 1.0);
+        (1.0 - amount * u * u * (3.0 - 2.0 * u)) as f32
+    };
+    let g = lin8(128);
+    // the second takes the schema's defaults: amount 1, radius 4, softness 0.1
+    for (attrs, amount, r0, soft) in
+        [(r#"amount="0.8" radius="10" softness="0.3""#, 0.8, 10.0 / half, 0.3), ("", 1.0, 4.0 / half, 0.1)]
+    {
+        let fx = format!(r#"<effect id="e" type="vignette" {attrs}/>"#);
+        let Some(r) = render(&fx_doc("", body, &fx)) else { return };
+        assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+        for (x, y) in [(32u32, 16u32), (40, 16), (50, 20), (0, 0), (63, 31)] {
+            let v = g * k(amount, r0, soft, x, y);
+            assert_px(&r, x, y, [v, v, v, 1.0], 1e-2);
+        }
+    }
+}
+
+#[test]
+fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
+    // CONVENTIONS 5.18: red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
+    // (35.8 px here); samples beyond the frame are transparent
+    let Some(r) = render(&fx_doc(
+        r##"background="#00000000""##,
+        r#"<layer id="w" asset="white" scaleX="16" scaleY="8"/><adjustment id="a" effects="c"/>"#,
+        r#"<effect id="c" type="chromatic-aberration" amount="4"/>"#,
+    )) else {
+        return;
+    };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the left edge: red reads 3.5 px beyond the frame, blue and green inside
+    let e = r.at(0, 16);
+    assert!(e[0] < 0.02 && e[1] > 0.98 && e[2] > 0.98, "{e:?}");
+    // 4 px in, red reads inside again
+    assert!(r.at(4, 16)[0] > 0.98, "{:?}", r.at(4, 16));
+    assert_px(&r, 32, 16, [1.0; 4], 1e-3);
 }
 
 #[test]
