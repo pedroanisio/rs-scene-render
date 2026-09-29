@@ -620,9 +620,48 @@ impl Enc {
 
 /// Encodes a scene (in target pixels) for a `size` target.
 pub fn encode(scene: &Scene, size: [u32; 2]) -> Encoded {
+    encode_cached(scene, size, &mut TileCache::default())
+}
+
+/// Tiled paths kept across frames, by the hash of their points and the target size.
+#[derive(Default)]
+pub struct TileCache {
+    map: std::collections::HashMap<u64, (u64, std::sync::Arc<TileArena>)>,
+    frame: u64,
+}
+
+impl TileCache {
+    /// Starts a frame: drops the paths no encode has used in the last two frames.
+    pub fn next_frame(&mut self) {
+        self.frame += 1;
+        let keep = self.frame.saturating_sub(2);
+        self.map.retain(|_, (used, _)| *used >= keep);
+    }
+}
+
+fn polys_hash(polys: &[Poly], size: [u32; 2]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut word = |w: u64| {
+        h ^= w;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    word(((size[0] as u64) << 32) | size[1] as u64);
+    word(polys.len() as u64);
+    for q in polys {
+        word(((q.pts.len() as u64) << 1) | q.closed as u64);
+        for pt in &q.pts {
+            word(pt.x.to_bits());
+            word(pt.y.to_bits());
+        }
+    }
+    h
+}
+
+/// [`encode`], reusing the tiles of paths whose points did not change since a recent frame.
+pub fn encode_cached(scene: &Scene, size: [u32; 2], cache: &mut TileCache) -> Encoded {
     let tiles = [size[0].div_ceil(TILE), size[1].div_ceil(TILE)];
     let ntiles = (tiles[0] * tiles[1]) as usize;
-    let (pre, arena) = tile_all(scene, size);
+    let (pre, arena) = tile_all(scene, size, cache);
     let paths = arena.tiles.len();
     let mut e = Enc {
         size,
@@ -694,8 +733,91 @@ pub fn encode(scene: &Scene, size: [u32; 2]) -> Encoded {
     Encoded { size, tiles, ranges, cmds, pieces, backdrops, paints: e.paints, flattened_layers: e.flattened }
 }
 
+/// Tiles every path of the scene (unchanged ones from `cache`), laid out in path order as
+/// [`tile_fresh`] lays them out.
+fn tile_all(scene: &Scene, size: [u32; 2], cache: &mut TileCache) -> (Vec<Option<PathRange>>, TileArena) {
+    let polys: Vec<Option<&[Poly]>> = scene
+        .cmds
+        .iter()
+        .map(|c| match c {
+            Cmd::Fill { polys, .. } | Cmd::Mask { polys, .. } => Some(polys.as_slice()),
+            _ => None,
+        })
+        .collect();
+    let keys: Vec<Option<u64>> = polys.iter().map(|p| p.map(|p| polys_hash(p, size))).collect();
+    let frame = cache.frame;
+    let mut got: Vec<Option<std::sync::Arc<TileArena>>> = keys
+        .iter()
+        .map(|k| {
+            k.and_then(|k| cache.map.get_mut(&k)).map(|(used, a)| {
+                *used = frame;
+                a.clone()
+            })
+        })
+        .collect();
+    // the misses, each tiled into an arena of its own, spread over the available cores
+    let miss: Vec<usize> = (0..polys.len()).filter(|&i| polys[i].is_some() && got[i].is_none()).collect();
+    let one = |i: usize, scratch: &mut Scratch| {
+        let mut a = TileArena::default();
+        tile_path(polys[i].unwrap_or_default(), size, scratch, &mut a);
+        (i, a)
+    };
+    let work: usize = miss.iter().map(|&i| polys[i].map_or(0, |p| p.iter().map(|q| q.pts.len()).sum::<usize>())).sum();
+    let threads = crate::threads();
+    let fresh: Vec<(usize, TileArena)> = if threads <= 1 || work < 20_000 {
+        let mut scratch = Scratch::default();
+        miss.iter().map(|&i| one(i, &mut scratch)).collect()
+    } else {
+        let chunk = miss.len().div_ceil(threads).max(1);
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = miss
+                .chunks(chunk)
+                .map(|part| {
+                    let one = &one;
+                    sc.spawn(move || {
+                        let mut scratch = Scratch::default();
+                        part.iter().map(|&i| one(i, &mut scratch)).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        })
+    };
+    for (i, a) in fresh {
+        let a = std::sync::Arc::new(a);
+        if let Some(k) = keys[i] {
+            cache.map.insert(k, (frame, a.clone()));
+        }
+        got[i] = Some(a);
+    }
+    // one arena in path order, references relocated as `TileArena::append` does
+    let (mut nt, mut np, mut nr) = (0, 0, 0);
+    for a in got.iter().flatten() {
+        (nt, np, nr) = (nt + a.tiles.len(), np + a.pieces.len(), nr + a.rows.len());
+    }
+    let mut arena = TileArena { tiles: Vec::with_capacity(nt), pieces: Vec::with_capacity(np), rows: Vec::with_capacity(nr) };
+    let pre = got
+        .iter()
+        .map(|a| {
+            a.as_ref().map(|a| {
+                let (dt, dp, dr) = (arena.tiles.len() as u32, arena.pieces.len() as u32, arena.rows.len() as u32);
+                arena.tiles.extend(a.tiles.iter().map(|t| TileRef {
+                    piece_off: t.piece_off + dp,
+                    backdrop: if t.backdrop == u32::MAX { u32::MAX } else { t.backdrop + dr },
+                    ..*t
+                }));
+                arena.pieces.extend_from_slice(&a.pieces);
+                arena.rows.extend_from_slice(&a.rows);
+                PathRange { start: dt, end: dt + a.tiles.len() as u32 }
+            })
+        })
+        .collect();
+    (pre, arena)
+}
+
 /// Tiles every path of the scene, spread over the available cores.
-fn tile_all(scene: &Scene, size: [u32; 2]) -> (Vec<Option<PathRange>>, TileArena) {
+#[allow(dead_code)]
+fn tile_fresh(scene: &Scene, size: [u32; 2]) -> (Vec<Option<PathRange>>, TileArena) {
     let polys: Vec<Option<&[Poly]>> = scene
         .cmds
         .iter()

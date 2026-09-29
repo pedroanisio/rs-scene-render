@@ -270,6 +270,8 @@ pub struct Renderer {
     pub audio: Option<Arc<crate::shader::AudioSignals>>,
     /// Whether the scene's shaders keep persistent ISF buffers (decided on the first render).
     persistent_isf: Option<bool>,
+    /// Tiled vector paths reused across frames.
+    tiles: sr_vector::tile::TileCache,
     /// The frame rendered last (ISF feedback replays on a seek).
     last_frame: Option<i64>,
     /// The project seed (seeded 64-bit hash draws default to it).
@@ -658,6 +660,7 @@ impl Renderer {
             burn_captions: None,
             audio: None,
             persistent_isf: None,
+            tiles: Default::default(),
             last_frame: None,
             frame_bufs: None,
             last_submit: None,
@@ -2081,7 +2084,7 @@ impl Renderer {
                     _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, [tw, th], 1, "vector")),
                 };
                 let clock = std::time::Instant::now();
-                let enc = sr_vector::tile::encode(&scene.transformed(&to_tex), [tw, th]);
+                let enc = sr_vector::tile::encode_cached(&scene.transformed(&to_tex), [tw, th], &mut self.tiles);
                 if enc.flattened_layers > 0 {
                     plan.stats.unsupported.push(format!(
                         "{}: vector layers nested deeper than {} were flattened",
@@ -2201,7 +2204,7 @@ impl Renderer {
                     _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "vector batch")),
                 };
                 let clock = std::time::Instant::now();
-                let enc = sr_vector::tile::encode(&b.scene, size);
+                let enc = sr_vector::tile::encode_cached(&b.scene, size, &mut self.tiles);
                 if enc.flattened_layers > 0 {
                     plan.stats.unsupported.push(format!(
                         "{}: vector layers nested deeper than {} were flattened",
@@ -2416,6 +2419,7 @@ impl Renderer {
         p: &Program,
         mut provider: Option<&mut dyn FnMut(f64) -> FrameGraph>,
     ) -> Frame {
+        self.tiles.next_frame();
         let persistent =
             *self.persistent_isf.get_or_insert_with(|| crate::shader::has_persistent(p, &Self::base_dir(p)));
         let fps = {
