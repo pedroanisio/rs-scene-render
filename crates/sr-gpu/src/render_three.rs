@@ -60,6 +60,40 @@ pub(super) struct CamExtras {
     pub lens_k1: f32,
 }
 
+/// The blobs of a clay object at this frame: static attributes, overridden by the animated
+/// values of each `<blob>` (part `{id}/blob[k]`).
+fn clay_blobs(n: &sr_eval::FrameNode) -> Vec<sr_3d::clay::Blob> {
+    let mut out = Vec::new();
+    for (k, c) in sr_model::element::children(&*n.elem).iter().filter(|c| c.element_name() == "blob").enumerate() {
+        let key = format!("{}/blob[{k}]", n.id);
+        let props = n.parts.iter().find(|p| &*p.key == key).map(|p| &p.props);
+        let a = Attrs { e: *c, props };
+        let f = |name: &str, d: f64| a.num(name, d) as f32;
+        let rot = glam::Quat::from_euler(
+            glam::EulerRot::YXZ,
+            f("rotationY", 0.0).to_radians(),
+            f("rotationX", 0.0).to_radians(),
+            f("rotation", 0.0).to_radians(),
+        );
+        out.push(sr_3d::clay::Blob {
+            shape: match a.str("shape").as_deref() {
+                Some("box") => sr_3d::clay::BlobShape::Box,
+                Some("capsule") => sr_3d::clay::BlobShape::Capsule,
+                Some("torus") => sr_3d::clay::BlobShape::Torus,
+                _ => sr_3d::clay::BlobShape::Sphere,
+            },
+            center: Vec3::new(f("x", 0.0), f("y", 0.0), f("z", 0.0)),
+            rotation: rot,
+            radius: f("radius", 30.0),
+            size: Vec3::new(f("width", 60.0), f("height", 60.0), f("depth", 60.0)),
+            length: f("length", 60.0),
+            blend: f("blend", 10.0),
+            subtract: a.num("subtract", 0.0) != 0.0 || a.str("subtract").as_deref() == Some("true"),
+        });
+    }
+    out
+}
+
 fn attrs<'a>(n: &'a sr_eval::FrameNode) -> Attrs<'a> {
     Attrs { e: &*n.elem, props: Some(&n.props) }
 }
@@ -406,6 +440,31 @@ impl Renderer {
         Some((p, maps))
     }
 
+    /// The mesh of a clay object, re-extracted when its blobs, finish or boil frame change.
+    fn clay_mesh(&mut self, n: &sr_eval::FrameNode) -> Option<Arc<crate::three::MeshGpu>> {
+        let a = attrs(n);
+        let blobs = clay_blobs(n);
+        let res = a.num("resolution", 64.0).clamp(8.0, 256.0) as u32;
+        let seed = a.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
+        let finish =
+            sr_3d::clay::Finish { amount: a.num("fingerprints", 0.0) as f32, seed, boil: a.num("boil", 0.0) as f32 };
+        let boil_frame = if finish.boil > 0.0 { (n.local_time * finish.boil as f64).floor() as i64 } else { 0 };
+        let key = format!("clay|{}|{blobs:?}|{finish:?}|{res}|{boil_frame}", n.id);
+        if let Some(m) = self.three_engine().meshes.get(&key) {
+            return Some(m.clone());
+        }
+        let prim = sr_3d::clay::mesh(&blobs, &finish, res, n.local_time);
+        if prim.indices.is_empty() {
+            return None;
+        }
+        let m = self.three_engine().upload_mesh(&prim.vertices, &prim.indices);
+        if let Some(old) = self.clay_keys.insert(n.id.clone(), key.clone()) {
+            self.three_engine().meshes.remove(&old);
+        }
+        self.three_engine().meshes.insert(key, m.clone());
+        Some(m)
+    }
+
     fn primitive_mesh(
         &mut self,
         plan: &mut Plan,
@@ -419,6 +478,9 @@ impl Renderer {
         let (w, hh) = (a.opt("width").map(|v| v as f32).unwrap_or(2.0 * r), a.opt("height").map(|v| v as f32));
         let depth = a.num("depth", 10.0) as f32;
         let bevel = a.num("bevel", 0.0) as f32;
+        if kind == "clay" {
+            return self.clay_mesh(n);
+        }
         let key = match kind.as_str() {
             "text" => format!(
                 "text|{}|{:?}|{:?}|{depth}|{bevel}",

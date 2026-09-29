@@ -343,3 +343,33 @@ fn reused_render_targets_leave_no_trace_between_frames() {
     let moved = render_times(&d, &[0.0]).unwrap();
     assert!(cold.px != moved.px, "the scene must change between the frames compared");
 }
+
+#[test]
+fn clay_blobs_merge_split_and_animate() {
+    // a blob slides out of a body: one silhouette at first, two apart later (topology changes)
+    let mats = r##"<material id="c" baseColor="#C8643C" roughness="0.8"/>"##;
+    let body = r#"<object3D id="clay" primitive="clay" material="c" x="64" y="64" resolution="48" fingerprints="0.3" boil="12">
+          <blob radius="22"/>
+          <blob radius="12" blend="10"><animate property="x"><key time="0" value="14"/><key time="2" value="50"/></animate></blob>
+        </object3D>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="1"/>"#;
+    let d = scene("", mats, body, lights);
+    let runs = |r: &Rendered| {
+        // covered runs along the middle row
+        let mut n = 0;
+        let mut inside = false;
+        for x in 0..128 {
+            let on = r.at(x, 64)[3] > 0.5;
+            if on && !inside {
+                n += 1;
+            }
+            inside = on;
+        }
+        n
+    };
+    let Some(a) = render_times(&d, &[0.0]) else { return };
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let b = render_times(&d, &[2.0]).unwrap();
+    assert_eq!(runs(&a), 1, "merged at t = 0");
+    assert_eq!(runs(&b), 2, "split at t = 2");
+}

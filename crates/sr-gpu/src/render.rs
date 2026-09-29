@@ -247,6 +247,8 @@ pub struct Renderer {
     /// Blurred glyph groups of the text layer being drawn (radius in node pixels, node-local scene).
     pending_blur: Vec<(f64, Scene)>,
     text: crate::text::TextCache,
+    /// The current mesh key of each clay object (its old meshes are dropped when it changes).
+    clay_keys: HashMap<Arc<str>, String>,
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
     /// Burn only this caption track (an output's `burnCaptions`); otherwise tracks with mode burn or both.
     pub burn_captions: Option<String>,
@@ -530,6 +532,7 @@ impl Renderer {
             lotties: HashMap::new(),
             svgs: HashMap::new(),
             text: Default::default(),
+            clay_keys: HashMap::new(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
             audio: None,

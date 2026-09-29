@@ -19,6 +19,7 @@
 
 pub mod anim;
 pub mod camera;
+pub mod clay;
 pub mod env;
 pub mod import;
 pub mod light;
