@@ -6,7 +6,8 @@
 //! the compositor's 2.5D projection: it sits on the frame's centre axis at
 //! `zoom = (w/2) / tan(fov/2)` with a 60° horizontal field of view, looking
 //! along +z with y down, so the z = 0 plane maps 1:1 onto the frame (2.2).
-//! A `<camera>`'s x, y and z are absolute scene positions (2.3).
+//! A `<camera>`'s x, y and z are absolute scene positions (2.3), or positions in
+//! its parent's frame when it is parented (5.4).
 
 use glam::{Mat4, Vec3};
 
@@ -30,6 +31,8 @@ pub struct CameraParams {
     pub roll: f32,
     /// World point to look at.
     pub target: Option<Vec3>,
+    /// World matrix of the parent frame that `position`, `yaw`, `pitch` and `roll` are in.
+    pub frame: Option<Mat4>,
 }
 
 impl Default for CameraParams {
@@ -46,6 +49,7 @@ impl Default for CameraParams {
             pitch: 0.0,
             roll: 0.0,
             target: None,
+            frame: None,
         }
     }
 }
@@ -92,7 +96,11 @@ fn orientation(yaw: f32, pitch: f32, roll: f32) -> Mat4 {
 pub fn resolve(p: &CameraParams, w: f32, h: f32) -> CameraView {
     let fov = p.fov.clamp(0.1, 179.0);
     let z = zoom(w, fov);
-    let eye = p.position.unwrap_or(Vec3::new(w * 0.5, h * 0.5, -z)) + p.offset;
+    let local_eye = p.position.unwrap_or(Vec3::new(w * 0.5, h * 0.5, -z)) + p.offset;
+    let (eye, frame_rot) = match p.frame {
+        Some(f) => (f.transform_point3(local_eye), Mat4::from_quat(f.to_scale_rotation_translation().1)),
+        None => (local_eye, Mat4::IDENTITY),
+    };
     let rot = match p.target {
         Some(t) if (t - eye).length_squared() > 1e-8 => {
             // look-at with y down as "up" in camera space
@@ -105,7 +113,7 @@ pub fn resolve(p: &CameraParams, w: f32, h: f32) -> CameraView {
             Mat4::from_cols(r.extend(0.0), d.extend(0.0), f.extend(0.0), glam::Vec4::W)
                 * Mat4::from_rotation_z(p.roll.to_radians())
         }
-        _ => orientation(p.yaw, p.pitch, p.roll),
+        _ => frame_rot * orientation(p.yaw, p.pitch, p.roll),
     };
     let cam_to_world = Mat4::from_translation(eye) * rot;
     let view = cam_to_world.inverse();

@@ -88,25 +88,56 @@ fn local3(a: &Attrs) -> Mat4 {
         ))
 }
 
+/// Pose of a camera or light: T(x, y, z) · R_yaw · R_pitch · R_roll (conventions 2.4).
+fn pose3(a: &Attrs) -> Mat4 {
+    let deg = |n: &str| (a.num(n, 0.0) as f32).to_radians();
+    Mat4::from_translation(Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32))
+        * Mat4::from_rotation_y(deg("yaw"))
+        * Mat4::from_rotation_x(deg("pitch"))
+        * Mat4::from_rotation_z(deg("roll"))
+}
+
+/// The 3D parent of an element and its influence: `@parent`, else the target of a
+/// `transformConstraint type="parent"`.
+fn parent3(e: &dyn Element) -> Option<(String, f32)> {
+    if let Some(AttrValue::Str(pid)) = e.get_attr("parent") {
+        return Some((pid.to_string(), 1.0));
+    }
+    sr_model::element::children(e).into_iter().find_map(|c| {
+        let ca = Attrs { e: c, props: None };
+        (c.element_name() == "transformConstraint" && ca.str("type").as_deref() == Some("parent"))
+            .then(|| ca.str("target").map(|t| (t, ca.num("influence", 1.0).clamp(0.0, 1.0) as f32)))
+            .flatten()
+    })
+}
+
+/// `m` blended with the identity by `w` (constraint influence).
+fn toward(m: Mat4, w: f32) -> Mat4 {
+    if w >= 1.0 {
+        return m;
+    }
+    let (s, r, t) = m.to_scale_rotation_translation();
+    Mat4::from_scale_rotation_translation(Vec3::ONE.lerp(s, w), glam::Quat::IDENTITY.slerp(r, w), t * w)
+}
+
+/// The document's lights.
+pub(super) fn doc_lights(p: &Program) -> &[m::Light] {
+    p.scene.lights.as_ref().map(|l| &l.lights[..]).unwrap_or(&[])
+}
+
 impl Renderer {
     fn three_engine(&mut self) -> &mut ThreeEngine {
         let g = &self.gpu;
         self.three.get_or_insert_with(|| Box::new(ThreeEngine::new(g.device.clone(), g.queue.clone())))
     }
 
-    /// World matrix of a 3D object: its @parent chain of 3D objects, then the enclosing 2D world.
-    fn world3(g: &FrameGraph, i: usize, depth: u32) -> Mat4 {
+    /// World matrix of a 3D object: its parent's full 3D world (an object, camera or light;
+    /// a 2D parent contributes its 2D world), else the enclosing 2D world.
+    fn world3(g: &FrameGraph, lights: &[m::Light], i: usize, depth: u32) -> Mat4 {
         let n = &g.nodes[i];
         let own = local3(&attrs(n));
-        if depth < 32 {
-            if let Some(AttrValue::Str(pid)) = n.elem.get_attr("parent") {
-                if let Some(j) = g.nodes.iter().position(|m| &*m.id == pid.as_str()) {
-                    if g.nodes[j].kind == "object3D" {
-                        return Self::world3(g, j, depth + 1) * own;
-                    }
-                    return embed(&g.nodes[j].world) * own;
-                }
-            }
+        if let Some(pw) = Self::parent_world(g, lights, &*n.elem, depth) {
+            return pw * own;
         }
         match n.parent {
             Some(p) => embed(&g.nodes[p as usize].world) * own,
@@ -114,19 +145,49 @@ impl Renderer {
         }
     }
 
-    /// World position of a node for look-at and focus targets.
-    fn target_point(g: &FrameGraph, id: &str) -> Option<Vec3> {
-        let j = g.nodes.iter().position(|m| &*m.id == id)?;
-        let n = &g.nodes[j];
-        if n.kind == "object3D" {
-            return Some(Self::world3(g, j, 0).transform_point3(Vec3::ZERO));
+    /// World matrix of the frame a parented element's own transform is in (conventions 5.3, 5.4),
+    /// weighted by the parent constraint's influence.
+    fn parent_world(g: &FrameGraph, lights: &[m::Light], e: &dyn Element, depth: u32) -> Option<Mat4> {
+        if depth >= 32 {
+            return None;
         }
-        let p = n.world.apply(n.anchor);
-        Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32))
+        let (pid, w) = parent3(e)?;
+        Some(toward(Self::world_of(g, lights, &pid, depth + 1)?, w))
+    }
+
+    /// World matrix of the node or light `id`: objects, cameras and lights in 3D, other nodes as their 2D world.
+    fn world_of(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Mat4> {
+        if let Some(j) = g.nodes.iter().position(|m| &*m.id == id) {
+            let n = &g.nodes[j];
+            return Some(match n.kind {
+                "object3D" => Self::world3(g, lights, j, depth),
+                "camera" => Self::pose_world(g, lights, &*n.elem, &attrs(n), depth),
+                _ => embed(&n.world),
+            });
+        }
+        let l = lights.iter().find(|l| l.id == id)?;
+        let a = Attrs { e: l as &dyn Element, props: element_props(g, &l.id) };
+        Some(Self::pose_world(g, lights, l, &a, depth))
+    }
+
+    /// World matrix of a camera or light: its pose in its parent's frame.
+    fn pose_world(g: &FrameGraph, lights: &[m::Light], e: &dyn Element, a: &Attrs, depth: u32) -> Mat4 {
+        let own = pose3(a);
+        Self::parent_world(g, lights, e, depth).map(|p| p * own).unwrap_or(own)
+    }
+
+    /// World position of a node for look-at and focus targets.
+    fn target_point(g: &FrameGraph, lights: &[m::Light], id: &str) -> Option<Vec3> {
+        if let Some(n) = g.nodes.iter().find(|m| &*m.id == id).filter(|n| !matches!(n.kind, "object3D" | "camera")) {
+            let p = n.world.apply(n.anchor);
+            return Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32));
+        }
+        Some(Self::world_of(g, lights, id, 0)?.transform_point3(Vec3::ZERO))
     }
 
     /// The frame camera (the active camera node, else the default 2.5D camera).
-    pub(super) fn camera3(&self, g: &FrameGraph, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
+    pub(super) fn camera3(&self, g: &FrameGraph, p: &Program, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
+        let lights = doc_lights(p);
         let mut cp = CameraParams::default();
         let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0 };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
@@ -150,8 +211,10 @@ impl Renderer {
             cp.yaw = a.num("yaw", 0.0) as f32;
             cp.pitch = a.num("pitch", 0.0) as f32;
             cp.roll = a.num("roll", 0.0) as f32;
+            // a parented camera's position and angles are in its parent's frame (conventions 5.4)
+            cp.frame = Self::parent_world(g, lights, &*n.elem, 0);
             if let Some(t) = a.str("target") {
-                cp.target = Self::target_point(g, &t);
+                cp.target = Self::target_point(g, lights, &t);
             }
             // shake children
             for c in sr_model::element::children(&*n.elem) {
@@ -222,7 +285,7 @@ impl Renderer {
             size = [side, side];
         }
         if dof_on && !view.orthographic {
-            if let Some(t) = focus_target.and_then(|t| Self::target_point(g, &t)) {
+            if let Some(t) = focus_target.and_then(|t| Self::target_point(g, lights, &t)) {
                 focus = view.depth_of(t).max(1.0);
             }
             ex.dof = Some(Dof {
@@ -539,7 +602,7 @@ impl Renderer {
         let g = ctx.g;
         let n = &g.nodes[j];
         let a = attrs(n);
-        let world = Self::world3(g, j, 0);
+        let world = Self::world3(g, doc_lights(ctx.p), j, 0);
         let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
         let doc_mat = match a.str("material") {
             Some(id) => {
@@ -699,12 +762,10 @@ impl Renderer {
                 }
             }
             let scale = a.num("intensity", 1.0) as f32 * 2f32.powf(a.num("exposure", 0.0) as f32);
-            let deg = |n: &str| (a.num(n, 0.0) as f32).to_radians();
-            let rot = Mat4::from_rotation_y(deg("yaw"))
-                * Mat4::from_rotation_x(deg("pitch"))
-                * Mat4::from_rotation_z(deg("roll"));
-            let dir = rot.transform_vector3(Vec3::Z).normalize();
-            let right = rot.transform_vector3(Vec3::X).normalize();
+            // pose in the parent's frame when parented (conventions 5.4)
+            let world = Self::pose_world(ctx.g, &ls.lights, l, &a, 0);
+            let dir = world.transform_vector3(Vec3::Z).normalize();
+            let right = world.transform_vector3(Vec3::X).normalize();
             if kind == "dome" {
                 let Some(uri) = a.str("environment") else {
                     // a dome without an image lights uniformly, like an ambient light
@@ -741,7 +802,7 @@ impl Renderer {
                     env = Some(Env3 {
                         env: e,
                         intensity: scale * color[1].max(color[0]).max(color[2]),
-                        rotation: deg("yaw"),
+                        rotation: (a.num("yaw", 0.0) as f32).to_radians(),
                         visible: flag(&a, "environmentVisible", false),
                     });
                 }
@@ -784,15 +845,17 @@ impl Renderer {
                 None => None,
             };
             let mut lt = self.light(k, &a, Vec3::from_slice(&color[..3]) * scale, dir, right, ies);
-            Self::constrain_light(plan, ctx.g, l as &dyn Element, &l.id, &mut lt);
+            lt.pos = world.transform_point3(Vec3::ZERO);
+            Self::constrain_light(plan, ctx.g, &ls.lights, l as &dyn Element, &l.id, &mut lt);
             out.push(lt);
         }
         (out, env)
     }
 
-    /// Applies a light's transform constraints: look-at aims it, parent and copy-position
-    /// move it to the target (plus offset), follow-path rides a path, distance clamps its range.
-    fn constrain_light(plan: &mut Plan, g: &FrameGraph, e: &dyn Element, id: &str, lt: &mut Light3) {
+    /// Applies a light's transform constraints: look-at aims it, copy-position moves it to the
+    /// target (plus offset), follow-path rides a path, distance clamps its range. `parent` is part
+    /// of the light's pose (`pose_world`).
+    fn constrain_light(plan: &mut Plan, g: &FrameGraph, lights: &[m::Light], e: &dyn Element, id: &str, lt: &mut Light3) {
         for c in sr_model::element::children(e) {
             if c.element_name() != "transformConstraint" {
                 continue;
@@ -800,7 +863,7 @@ impl Renderer {
             let ca = Attrs { e: c, props: None };
             let kind = ca.str("type").unwrap_or_default();
             let w = ca.num("influence", 1.0).clamp(0.0, 1.0) as f32;
-            let target = ca.str("target").and_then(|t| Self::target_point(g, &t));
+            let target = ca.str("target").and_then(|t| Self::target_point(g, lights, &t));
             let off = Vec3::new(ca.num("offsetX", 0.0) as f32, ca.num("offsetY", 0.0) as f32, 0.0);
             match (kind.as_str(), target) {
                 ("look-at", Some(t)) => {
@@ -810,7 +873,8 @@ impl Renderer {
                     lt.right = up.cross(dir).normalize_or(Vec3::X) * -1.0;
                     lt.dir = dir;
                 }
-                ("parent" | "copy-position" | "copy-transform", Some(t)) => lt.pos = lt.pos.lerp(t + off, w),
+                ("parent", Some(_)) => {}
+                ("copy-position" | "copy-transform", Some(t)) => lt.pos = lt.pos.lerp(t + off, w),
                 ("distance", Some(t)) => {
                     let d = lt.pos - t;
                     let len = d.length();
@@ -1195,8 +1259,8 @@ impl Renderer {
     }
 
     /// Projection of 2.5D layers: target pixels (with z) → target clip space through the frame camera.
-    pub(super) fn proj25(&self, g: &FrameGraph, space: &Space) -> Mat4 {
-        let (cam, _, cam_size) = self.camera3(g, [g.size[0] as f32, g.size[1] as f32]);
+    pub(super) fn proj25(&self, g: &FrameGraph, p: &Program, space: &Space) -> Mat4 {
+        let (cam, _, cam_size) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
         let back = space.xform.inverse().map(|a| embed(&a)).unwrap_or(Mat4::IDENTITY);
         Self::clip_fix(space, cam_size) * cam.view_proj() * back
     }
@@ -1233,7 +1297,7 @@ impl Renderer {
             return;
         }
         let frame = [g.size[0] as f32, g.size[1] as f32];
-        let (cam, ex, cam_size) = self.camera3(g, frame);
+        let (cam, ex, cam_size) = self.camera3(g, ctx.p, frame);
         let (mut lights, env) = self.lights3(plan, ctx);
         if lights.is_empty()
             && env.is_none()

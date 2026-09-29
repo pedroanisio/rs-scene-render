@@ -251,6 +251,40 @@ fn flat_layers_float_in_front_of_the_360_viewer() {
     assert_eq!(r.at(20, 64)[3], 0.0, "and nowhere behind");
 }
 
+const UNLIT: &str = r##"<material id="u" baseColor="#00FF00" unlit="true" doubleSided="true"/>"##;
+
+fn green(p: [f32; 4]) -> bool {
+    p[3] > 0.99 && p[1] > 0.5 && p[0] < 0.1
+}
+
+#[test]
+fn objects_parented_to_a_camera_take_its_3d_pose() {
+    // on the camera's view axis, 100 units ahead: the frame centre, wherever the camera is and however it turns
+    let body = r#"<camera id="cam" x="30" y="90" z="-150" yaw="20" pitch="10" roll="15"/>
+        <object3D id="hud" primitive="plane" parent="cam" width="10" height="10" z="100" material="u"/>"#;
+    let Some(r) = render(&scene("", UNLIT, body, "")) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert!(green(r.at(64, 64)), "{:?}", r.at(64, 64));
+    assert!(!green(r.at(64, 80)) && !green(r.at(80, 64)), "10 units at 100 cover about 11 px");
+}
+
+#[test]
+fn parented_cameras_are_placed_in_their_parents_frame() {
+    // the rig turns 30° towards +x; the camera 50 units along the rig's forward axis sees the plane
+    // 150 further along that axis at the frame centre
+    let (s, c) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+    let at = |d: f32| (64.0 + d * s, -200.0 + d * c);
+    let (px, pz) = at(200.0);
+    let body = format!(
+        r#"<object3D id="rig" primitive="sphere" radius="1" visible="false" x="64" y="64" z="-200" rotationY="30"/>
+        <camera id="cam" z="50"><transformConstraint type="parent" target="rig"/></camera>
+        <object3D id="p" primitive="plane" width="10" height="10" x="{px}" y="64" z="{pz}" rotationY="30" material="u"/>"#
+    );
+    let Some(r) = render(&scene("", UNLIT, &body, "")) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert!(green(r.at(64, 64)), "{:?}", r.at(64, 64));
+}
+
 #[test]
 fn look_at_constraints_aim_lights() {
     let body = r#"<object3D id="s" primitive="sphere" radius="30" x="64" y="64" z="0"/>"#;

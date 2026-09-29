@@ -348,7 +348,7 @@ impl Renderer {
             // the pattern over the covered box, through the coverage
             self.flush_vec(plan, cmds);
             let local = [lb[0], lb[1], lb[2], lb[3]];
-            let proj = self.proj25(ctx.g, space);
+            let proj = self.proj25(ctx.g, ctx.p, space);
             let (bounds, first_vertex) =
                 self.push_quad(plan, space, &n.world, None, local, [0.0, 0.0, 1.0, 1.0], &proj);
             let paint = plan.paints.pattern(pt, ctx.g, [img.width as f64, img.height as f64]);

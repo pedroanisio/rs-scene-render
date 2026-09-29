@@ -1212,7 +1212,7 @@ impl Renderer {
         } else if stencil {
             self.push_full(plan, space, world, local, uv)
         } else {
-            self.push_quad(plan, space, world, three, local, uv, &self.proj25(ctx.g, space))
+            self.push_quad(plan, space, world, three, local, uv, &self.proj25(ctx.g, ctx.p, space))
         };
         let mut matte = None;
         if let Some(mt) = n.matte.filter(|_| !self.bare.contains(&n.id)) {
@@ -2220,7 +2220,7 @@ impl Renderer {
         }
         // the camera (with any 360 face override) changes every projected draw
         let cam_hash = {
-            let (cv, _, _) = self.camera3(g, [g.size[0] as f32, g.size[1] as f32]);
+            let (cv, _, _) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
             h(&cv.view_proj().to_cols_array().map(|v| v.to_bits() as u64))
         };
         let elements = h(&[sr_eval::rng::hash_str(&serde_json::to_string(&g.elements).unwrap_or_default()), cam_hash]);
