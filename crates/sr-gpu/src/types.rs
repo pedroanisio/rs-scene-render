@@ -96,7 +96,7 @@ pub struct Globals {
 
 /// Generator parameters (`Gen` in the shader).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Gen {
     pub size: [f32; 2],
     pub kind: u32,
@@ -105,10 +105,21 @@ pub struct Gen {
     pub evolution: f32,
     pub contrast: f32,
     pub angle: f32,
+    /// The generator's seed as a u64 (low, high words: `seed`, `seed_hi`).
     pub seed: u32,
     pub paint_a: u32,
     pub paint_b: u32,
-    pub pad: u32,
+    pub seed_hi: u32,
+    /// Film grain: this frame's seed (low, high), then padding.
+    pub grain: [u32; 4],
+    /// Perlin permutation of 0..255 (D24 draws), four per vector.
+    pub perm: [[u32; 4]; 64],
+}
+
+impl Default for Gen {
+    fn default() -> Gen {
+        bytemuck::Zeroable::zeroed()
+    }
 }
 
 /// One vertex of a draw quad.

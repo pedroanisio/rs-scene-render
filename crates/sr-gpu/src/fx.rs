@@ -18,7 +18,8 @@ use crate::resources::{Pool, Tex, FORMAT};
 use crate::vector::Attrs;
 
 /// The WGSL of every built-in pass.
-pub const WGSL: &str = concat!(include_str!("transfer.wgsl"), "\n", include_str!("effects.wgsl"));
+pub const WGSL: &str =
+    concat!(include_str!("transfer.wgsl"), "\n", include_str!("d24.wgsl"), "\n", include_str!("effects.wgsl"));
 
 /// Gradient stops: (offset, straight stored working RGBA).
 pub type Stops = Vec<(f64, [f64; 4])>;
