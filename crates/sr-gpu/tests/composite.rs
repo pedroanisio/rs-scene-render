@@ -30,9 +30,11 @@ fn opacity_rotation_and_anchor() {
 }
 
 /// CPU reference for B(Cb, Cs) with opaque source and backdrop (W3C
-/// Compositing and Blending Level 1 plus the After Effects modes).
+/// Compositing and Blending Level 1 plus the After Effects modes, D14).
 fn reference(mode: &str, b: [f32; 3], s: [f32; 3]) -> [f32; 4] {
-    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    // W3C luminance for the non-separable modes and darker/lighter colour; Rec. 709 for the stencils
+    let lum = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     let clip = |c: [f32; 3]| {
         let l = lum(c);
         let n = c.iter().cloned().fold(f32::MAX, f32::min);
@@ -91,7 +93,7 @@ fn reference(mode: &str, b: [f32; 3], s: [f32; 3]) -> [f32; 4] {
         "difference" => sep(&|b, s| (b - s).abs()),
         "exclusion" => sep(&|b, s| b + s - 2.0 * b * s),
         "subtract" => sep(&|b, s| (b - s).max(0.0)),
-        "divide" => sep(&|b, s| b / s),
+        "divide" => sep(&|b, s| if s <= 0.0 { (b > 0.0) as u8 as f32 } else { (b / s).min(1.0) }),
         "darken" => sep(&f32::min),
         "lighten" => sep(&f32::max),
         "darker-color" => rgb1(if lum(s) < lum(b) { s } else { b }),
@@ -117,17 +119,17 @@ fn reference(mode: &str, b: [f32; 3], s: [f32; 3]) -> [f32; 4] {
         "color" => rgb1(set_lum(s, lum(b))),
         "luminosity" => rgb1(set_lum(b, lum(s))),
         "stencil-alpha" | "behind" => rgb1(b),
-        "stencil-luma" => rgb1(b.map(|v| v * lum(s)))
+        "stencil-luma" => rgb1(b.map(|v| v * luma(s)))
             .map(|v| v)
             .into_iter()
             .enumerate()
-            .map(|(i, v)| if i == 3 { lum(s) } else { v })
+            .map(|(i, v)| if i == 3 { luma(s) } else { v })
             .collect::<Vec<_>>()
             .try_into()
             .unwrap(),
         "silhouette-alpha" => [0.0; 4],
         "silhouette-luma" => {
-            let k = 1.0 - lum(s);
+            let k = 1.0 - luma(s);
             [b[0] * k, b[1] * k, b[2] * k, k]
         }
         other => panic!("no reference for {other}"),
@@ -140,15 +142,14 @@ fn all_blend_modes_match_the_reference_formulas() {
     assert_eq!(all.len(), 35);
     // the stencil modes clear the whole frame outside their layer, so they get their own frames
     let modes: Vec<&str> = all.iter().copied().filter(|m| !m.starts_with("stencil")).collect();
-    // one 4×4 layer per mode, in a row, over a coloured background
-    let body: String = modes
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
+    // one 4×4 layer per mode, in a row, over a coloured backdrop layer (the project background goes
+    // beneath everything last, so the modes do not see it)
+    let body: String = std::iter::once(BACKDROP.replace("HEIGHT", "12"))
+        .chain(modes.iter().enumerate().map(|(i, m)| {
             format!(r#"<layer id="l{i}" asset="src" x="{}" y="{}" blend="{m}"/>"#, (i % 16) * 4, (i / 16) * 4)
-        })
+        }))
         .collect();
-    let d = doc(r##"width="64" height="12" background="#4080C0""##, "", &body);
+    let d = doc(r##"width="64" height="12" background="#00000000""##, "", &body);
     let Some(r) = render(&d) else { return };
     let b = [lin8(0x40), lin8(0x80), lin8(0xC0)];
     let s = [lin8(200), lin8(100), lin8(50)];
@@ -164,19 +165,24 @@ fn all_blend_modes_match_the_reference_formulas() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(r.stats.backdrop_copies >= 31, "{:?}", r.stats);
     for m in ["stencil-alpha", "stencil-luma"] {
-        let d = doc(r##"background="#4080C0""##, "", &format!(r#"<layer id="s" asset="src" blend="{m}"/>"#));
+        let body = format!(r#"{}<layer id="s" asset="src" blend="{m}"/>"#, BACKDROP.replace("HEIGHT", "32"));
+        let d = doc(r##"background="#00000000""##, "", &body);
         let r = render(&d).unwrap();
         assert_px(&r, 1, 1, reference(m, b, s), 3e-3);
         assert_px(&r, 20, 20, [0.0; 4], 1e-4);
     }
 }
 
+/// A 64-wide backdrop rectangle of #4080C0 (replace HEIGHT).
+const BACKDROP: &str = r##"<shape id="bd" shape="rect" x="0" y="0" width="64" height="HEIGHT" fill="#4080C0"/>"##;
+
 #[test]
 fn stencil_alpha_cuts_the_backdrop_outside_the_layer() {
     let d = doc(
-        r##"background="#FFFFFF""##,
+        r##"background="#00000000""##,
         "",
-        r#"<layer id="s" asset="red" x="8" y="8" scaleX="2" scaleY="2" blend="stencil-alpha"/>"#,
+        r##"<shape id="w" shape="rect" x="0" y="0" width="64" height="32" fill="#FFFFFF"/>
+            <layer id="s" asset="red" x="8" y="8" scaleX="2" scaleY="2" blend="stencil-alpha"/>"##,
     );
     let Some(r) = render(&d) else { return };
     assert_px(&r, 10, 10, [1.0; 4], 1e-3);
@@ -184,14 +190,67 @@ fn stencil_alpha_cuts_the_backdrop_outside_the_layer() {
 }
 
 #[test]
-fn partial_alpha_uses_the_general_compositing_formula() {
-    // half.png: white at alpha 128/255 over the background with multiply:
-    // co = (1 − αs)·Cb + αs·B(Cb, Cs), backdrop opaque
+fn the_project_background_goes_beneath_everything_last() {
+    // CONVENTIONS 5.13: the layers composite on transparency; behind, subtract and stencils do not see
+    // the background, which fills whatever the layers leave uncovered.
     let d = doc(
-        r##"background="#4080C0""##,
+        r##"background="#0000FF""##,
         "",
-        r#"<layer id="a" asset="half" blend="multiply"/><layer id="b" asset="half" x="8" blend="screen"/>"#,
+        r#"<layer id="w" asset="white" x="0" y="0" scaleX="8" scaleY="8"/>
+           <layer id="s" asset="red" x="8" y="8" scaleX="2" scaleY="2" blend="stencil-alpha"/>
+           <layer id="b" asset="red" x="40" y="8" scaleX="2" scaleY="2" blend="behind"/>
+           <layer id="u" asset="white" x="56" y="0" scaleX="2" scaleY="2" blend="subtract"/>"#,
     );
+    let Some(r) = render(&d) else { return };
+    // the stencil keeps the white layer inside itself and cuts it outside, down to the background
+    assert_px(&r, 10, 10, [1.0; 4], 1e-3);
+    assert_px(&r, 4, 4, [0.0, 0.0, 1.0, 1.0], 1e-3);
+    // behind over transparency shows the layer, not the background
+    assert_px(&r, 42, 10, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    // subtract over transparency leaves white; the blue background does not darken
+    assert_px(&r, 58, 2, [1.0; 4], 1e-3);
+    assert_px(&r, 30, 30, [0.0, 0.0, 1.0, 1.0], 1e-3);
+}
+
+#[test]
+fn non_separable_modes_use_w3c_luminance() {
+    // D14: Lum = 0.3 R + 0.59 G + 0.11 B. `color` of pure green over grey l: SetLum((0, 1, 0), l) = (0, l / 0.59, 0).
+    let d = doc(
+        "",
+        "",
+        r#"<layer id="g" asset="gray" scaleX="16" scaleY="8"/><layer id="c" asset="solid" x="8" y="8" blend="color"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let l = lin8(128);
+    assert_px(&r, 9, 9, [0.0, l / 0.59, 0.0, 1.0], 3e-3);
+}
+
+#[test]
+fn divide_takes_clamped_inputs() {
+    // D14: divide is cb / cs on inputs in [0, 1], and 1 where cs is 0 and cb is not.
+    let d = doc(
+        "",
+        "",
+        r#"<layer id="g" asset="gray" scaleX="16" scaleY="8"/>
+           <layer id="v" asset="solid" x="8" y="8" blend="divide"/>
+           <layer id="h" asset="half" x="24" y="8" blend="divide"/>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    let l = lin8(128);
+    assert_px(&r, 9, 9, [1.0, l, 1.0, 1.0], 3e-3);
+    // half-covered white: (1 − αs)·Cb + αs·Cb / 1
+    assert_px(&r, 25, 9, [l, l, l, 1.0], 3e-3);
+}
+
+#[test]
+fn partial_alpha_uses_the_general_compositing_formula() {
+    // half.png: white at alpha 128/255 over an opaque backdrop layer with multiply:
+    // co = (1 − αs)·Cb + αs·B(Cb, Cs)
+    let body = format!(
+        r#"{}<layer id="a" asset="half" blend="multiply"/><layer id="b" asset="half" x="8" blend="screen"/>"#,
+        BACKDROP.replace("HEIGHT", "32")
+    );
+    let d = doc("", "", &body);
     let Some(r) = render(&d) else { return };
     let a = 128.0 / 255.0;
     let b = [lin8(0x40), lin8(0x80), lin8(0xC0)];
@@ -372,9 +431,9 @@ fn unchanged_frames_restore_the_root_prefix() {
            <layer id="mover" asset="red" x="0" y="20"><animate property="x"><key time="0" value="0"/><key time="2" value="60"/></animate></layer>"#,
     );
     let Some(r) = render_times(&d, &[0.0, 0.1, 0.2]) else { return };
-    // background + two static layers restored; only the mover draws
-    assert_eq!(r.stats.prefix_restored, 3, "{:?}", r.stats);
-    assert_eq!(r.stats.draws, 1);
+    // the two static layers are restored; the mover draws, then the background beneath everything
+    assert_eq!(r.stats.prefix_restored, 2, "{:?}", r.stats);
+    assert_eq!(r.stats.draws, 2);
     let fresh = render_times(&d, &[0.2]).unwrap();
     assert_eq!(fresh.px, r.px, "restored frames are identical to fresh renders");
 }

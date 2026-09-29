@@ -155,9 +155,16 @@ impl Renderer {
         0.2126 * lin(d[0]) + 0.7152 * lin(d[1]) + 0.0722 * lin(d[2])
     }
 
-    /// Contrast ratio of the text a probe covered against the backdrop behind its glyphs.
-    pub(super) fn measure_contrast(&self, snapshot: &Tex, frame: &Tex, r: [u32; 4]) -> Option<f64> {
-        let before = self.read_rect(snapshot, r);
+    /// Contrast ratio of the text a probe covered against the backdrop behind its glyphs; the project
+    /// background `bg`, drawn after everything, goes beneath the snapshot.
+    pub(super) fn measure_contrast(&self, snapshot: &Tex, bg: Option<&Tex>, frame: &Tex, r: [u32; 4]) -> Option<f64> {
+        let mut before = self.read_rect(snapshot, r);
+        if let Some(bg) = bg {
+            for (p, b) in before.iter_mut().zip(self.read_rect(bg, r)) {
+                let k = 1.0 - p[3];
+                *p = [p[0] + b[0] * k, p[1] + b[1] * k, p[2] + b[2] * k, p[3] + b[3] * k];
+            }
+        }
         let after = self.read_rect(frame, r);
         let lb: Vec<f64> = before.iter().map(|p| self.luminance(*p)).collect();
         let la: Vec<f64> = after.iter().map(|p| self.luminance(*p)).collect();

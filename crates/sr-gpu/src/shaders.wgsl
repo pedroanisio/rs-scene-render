@@ -164,10 +164,12 @@ fn blend_soft(b: f32, s: f32) -> f32 {
   if (b <= 0.25) { dd = ((16.0 * b - 12.0) * b + 4.0) * b; }
   return b + (2.0 * s - 1.0) * (dd - b);
 }
+// W3C Compositing Level 1 luminance, for the non-separable modes and darker/lighter colour (D14)
+fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3(0.3, 0.59, 0.11)); }
 fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
-  let d = l - luma(c);
+  let d = l - lum(c);
   var r = c + vec3(d);
-  let ll = luma(r);
+  let ll = lum(r);
   let n = min(r.r, min(r.g, r.b));
   let x = max(r.r, max(r.g, r.b));
   if (n < 0.0) { r = vec3(ll) + (r - vec3(ll)) * ll / max(ll - n, 1e-6); }
@@ -182,8 +184,14 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
   return (c - vec3(mn)) * s / (mx - mn);
 }
 
-// Separable and non-separable B(Cb, Cs) on straight colours.
-fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
+// Separable and non-separable B(Cb, Cs) on straight colours. add, multiply and difference pass HDR
+// values through; the other modes take their inputs clamped to [0, 1] (D14).
+fn blend_fn(mode: u32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+  var b = cb; var s = cs;
+  if (mode != 2u && mode != 17u && mode != 4u && mode != 7u) {
+    b = clamp(cb, vec3(0.0), vec3(1.0));
+    s = clamp(cs, vec3(0.0), vec3(1.0));
+  }
   switch (mode) {
     case 2u, 17u: { return b + s; }                                    // add, linear-dodge
     case 4u: { return b * s; }                                          // multiply
@@ -192,11 +200,13 @@ fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
     case 7u: { return abs(b - s); }                                     // difference
     case 8u: { return b + s - 2.0 * b * s; }                            // exclusion
     case 9u: { return max(b - s, vec3(0.0)); }                          // subtract
-    case 10u: { return min(b / max(s, vec3(1e-6)), vec3(1e4)); }        // divide
+    case 10u: {                                                         // divide (1 where cs is 0 and cb is not)
+      return select(min(b / max(s, vec3(1e-30)), vec3(1.0)), select(vec3(0.0), vec3(1.0), b > vec3(0.0)), s <= vec3(0.0));
+    }
     case 11u: { return min(b, s); }                                     // darken
     case 12u: { return max(b, s); }                                     // lighten
-    case 13u: { return select(b, s, luma(s) < luma(b)); }               // darker-color
-    case 14u: { return select(b, s, luma(s) > luma(b)); }               // lighter-color
+    case 13u: { return select(b, s, lum(s) < lum(b)); }                 // darker-color
+    case 14u: { return select(b, s, lum(s) > lum(b)); }                 // lighter-color
     case 15u: { return vec3(blend_dodge(b.r, s.r), blend_dodge(b.g, s.g), blend_dodge(b.b, s.b)); }
     case 16u: { return vec3(blend_burn(b.r, s.r), blend_burn(b.g, s.g), blend_burn(b.b, s.b)); }
     case 18u: { return max(b + s - vec3(1.0), vec3(0.0)); }             // linear-burn
@@ -218,10 +228,10 @@ fn blend_fn(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
       return r;
     }
     case 24u: { return select(vec3(0.0), vec3(1.0), b + s >= vec3(1.0)); }                                 // hard-mix
-    case 25u: { return set_lum(set_sat(s, sat(b)), luma(b)); }                                            // hue
-    case 26u: { return set_lum(set_sat(b, sat(s)), luma(b)); }                                            // saturation
-    case 27u: { return set_lum(s, luma(b)); }                                                             // color
-    case 28u: { return set_lum(b, luma(s)); }                                                             // luminosity
+    case 25u: { return set_lum(set_sat(s, sat(b)), lum(b)); }                                             // hue
+    case 26u: { return set_lum(set_sat(b, sat(s)), lum(b)); }                                             // saturation
+    case 27u: { return set_lum(s, lum(b)); }                                                              // color
+    case 28u: { return set_lum(b, lum(s)); }                                                              // luminosity
     default: { return s; }
   }
 }

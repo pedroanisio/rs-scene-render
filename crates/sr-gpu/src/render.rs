@@ -133,6 +133,10 @@ struct GenJob {
     bind: wgpu::BindGroup,
 }
 
+/// The `behind` blend code; a draw with it and no backdrop copy uses the fixed-function
+/// destination-over pipeline (the project background).
+const BLEND_UNDER: u32 = 34;
+
 #[derive(Clone, Copy)]
 struct Space {
     /// World → target pixels.
@@ -190,6 +194,8 @@ pub struct Frame {
 pub struct Renderer {
     gpu: Gpu,
     over: wgpu::RenderPipeline,
+    /// Premultiplied destination-over: the project background, drawn last beneath everything.
+    under: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     generator: wgpu::RenderPipeline,
     bgl0: wgpu::BindGroupLayout,
@@ -429,6 +435,12 @@ impl Renderer {
             };
         let vbufs = [Some(vbuf)];
         let over = pipe("fs_over", Some(premul), "vs_main", &vbufs);
+        let dst_over = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let under = pipe("fs_over", Some(wgpu::BlendState { color: dst_over, alpha: dst_over }), "vs_main", &vbufs);
         let blend = pipe("fs_blend", None, "vs_main", &vbufs);
         let generator = pipe("fs_generator", None, "vs_full", &[]);
         let sampler = |mode: wgpu::AddressMode| {
@@ -479,6 +491,7 @@ impl Renderer {
             tokens: token_table(&program.scene),
             gpu,
             over,
+            under,
             blend,
             generator,
             bgl0,
@@ -2056,6 +2069,9 @@ impl Renderer {
 
     // ---------------------------------------------------------- frame
 
+    /// The project background. The composition composites on transparency and the background goes
+    /// beneath everything last (CONVENTIONS 5.13, After Effects), so `behind`, `subtract`, stencils and
+    /// silhouettes act on the layers only.
     fn background(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
         let g = ctx.g;
         let (w, hh) = (space.size[0] as f64, space.size[1] as f64);
@@ -2116,6 +2132,7 @@ impl Renderer {
             paint,
             target_size: [w as f32, hh as f32],
             uv_rect: [0.0, 0.0, 1.0, 1.0],
+            blend: BLEND_UNDER,
             ..Default::default()
         });
         let hash =
@@ -2240,13 +2257,23 @@ impl Renderer {
         }
         let space = Space { xform: Affine::IDENTITY, size };
         let mut cmds = Vec::new();
-        self.background(&mut plan, &ctx, &space, &mut cmds);
         for r in Self::depth_sorted(g, &roots) {
             let rh = h(&[Self::subtree_hash(&ctx, r, &Affine::IDENTITY), hf(g.nodes[r].world_opacity), cam_hash]);
             self.emit(&mut plan, &ctx, r, &space, 1.0, &mut cmds, false, rh);
         }
         self.burn_captions(&mut plan, &ctx, &space, &mut cmds);
         self.flush_vec(&mut plan, &mut cmds);
+        self.background(&mut plan, &ctx, &space, &mut cmds);
+        // contrast probes measure against what ends up behind the text: the background too
+        let probe_bg = if plan.probes.is_empty() {
+            None
+        } else {
+            let bg = self.temp(&mut plan, size);
+            let mut bcmds = Vec::new();
+            self.background(&mut plan, &ctx, &space, &mut bcmds);
+            plan.jobs.push(Job::draws(bg.clone(), true, bcmds, false));
+            Some(bg)
+        };
         self.finishing(&mut plan, p, &frame);
         if let Some(s) = &subs {
             plan.stats.subframes = s.count();
@@ -2279,7 +2306,7 @@ impl Renderer {
         let probes = std::mem::take(&mut plan.probes);
         let mut stats = self.execute(plan, restore, snapshot_at, &hashes);
         for (id, rect, snap) in probes {
-            if let Some(ratio) = self.measure_contrast(&snap, &frame, rect) {
+            if let Some(ratio) = self.measure_contrast(&snap, probe_bg.as_deref(), &frame, rect) {
                 stats.contrast.push((id, ratio));
             }
             self.pool.put(snap);
@@ -2497,7 +2524,13 @@ impl Renderer {
                     pass.set_bind_group(0, &bg0, &[]);
                     pass.set_bind_group(3, &dummy_gen, &[]);
                     for (k, c) in job.cmds[i..j].iter().enumerate() {
-                        pass.set_pipeline(if c.backdrop.is_some() { &self.blend } else { &self.over });
+                        pass.set_pipeline(if c.backdrop.is_some() {
+                            &self.blend
+                        } else if plan.draws[c.draw as usize].blend == BLEND_UNDER {
+                            &self.under
+                        } else {
+                            &self.over
+                        });
                         pass.set_bind_group(1, &c.src.bind, &[]);
                         pass.set_bind_group(2, groups[k].as_ref().unwrap_or(&dummy_pair), &[]);
                         pass.draw(c.first_vertex..c.first_vertex + c.count, c.draw..c.draw + 1);
