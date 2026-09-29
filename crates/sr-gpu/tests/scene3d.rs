@@ -1,4 +1,4 @@
-//! Batch 8: 3D objects in documents — primitives, materials, lights and shadows,
+//! 3D objects in documents — primitives, materials, lights and shadows,
 //! glass over 2D layers, imported meshes, cameras, 2.5D agreement and depth of field.
 
 mod common;
@@ -361,7 +361,7 @@ fn look_at_constraints_aim_lights() {
 #[test]
 fn motion_blurred_3d_objects_share_one_pass() {
     // two overlapping spheres, both moving under motion blur; the near red one is listed first. Blurred objects
-    // used to render one pass each and composite in document order, so the far green one painted over it.
+    // render as one pass and composite by depth, so the near red one stays in front of the far green one.
     let mats = r##"<material id="rm" baseColor="#FF0000" roughness="0.6"/><material id="gm" baseColor="#00FF00" roughness="0.6"/>"##;
     let body = r#"<object3D id="near" primitive="sphere" radius="14" x="64" y="64" z="-30" material="rm">
             <animate property="x"><key time="0" value="60"/><key time="4" value="68"/></animate></object3D>

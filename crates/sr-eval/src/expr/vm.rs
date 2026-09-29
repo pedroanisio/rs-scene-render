@@ -169,9 +169,9 @@ pub trait Host {
     fn beat(&mut self) -> f64;
     /// Uniform random in [0, 1) for a call site and component.
     fn random(&mut self, site: u32, component: u32) -> f64;
-    /// Noise seed of this expression (D25 `seed`: the expression's `@seed`, else the project's).
+    /// Noise seed of this expression (the expression's `@seed`, else the project's).
     fn noise_seed(&mut self) -> u64;
-    /// D25 noise channel of the property the expression computes: [`property_channel`].
+    /// Noise channel of the property the expression computes: [`property_channel`].
     fn noise_channel(&mut self) -> u64 {
         OTHER_CHANNEL
     }
@@ -180,9 +180,8 @@ pub trait Host {
 /// Noise channel of a property-less expression (text selectors, conditions).
 pub const OTHER_CHANNEL: u64 = 8;
 
-/// D25's property channel for `wiggle` and `random`: the position of the property in
-/// D25's list (x, y, rotation, scaleX, scaleY, anchorX, anchorY, opacity), else 8 + the
-/// CRC-32 of its name (as the Python renderer numbers them).
+/// Property channel for `wiggle` and `random`: the position of the property in the list
+/// (x, y, rotation, scaleX, scaleY, anchorX, anchorY, opacity), else 8 + the CRC-32 of its name.
 pub fn property_channel(prop: &str) -> u64 {
     match prop {
         "x" => 0,
@@ -202,8 +201,8 @@ thread_local! {
     static PERM: std::cell::RefCell<(u64, Vec<usize>)> = const { std::cell::RefCell::new((0, Vec::new())) };
 }
 
-/// `noise(x, y, z)` with y or z: improved Perlin noise over the permutation of 256 D24 draws
-/// of channel 7 (the Python renderer's choice; D25 defines only the 1D form).
+/// `noise(x, y, z)` with y or z: improved Perlin noise over the permutation of 256 seeded draws
+/// of channel 7 (the 1D form is `rng::noise` on channel 7).
 fn noise3(seed: u64, x: f64, y: f64, z: f64) -> f64 {
     PERM.with(|p| {
         let mut p = p.borrow_mut();
@@ -479,7 +478,7 @@ impl<'r> Compiler<'r> {
                 self.scopes.last_mut().unwrap().insert(name.clone(), r);
             }
             Stmt::Assign(name, op, e, at) => {
-                // Assigning an undeclared name declares it (CONVENTIONS 5.1); it lives in the
+                // Assigning an undeclared name declares it; it lives in the
                 // outermost scope so it stays visible after the block that assigned it.
                 let r = match self.lookup(name) {
                     Some(r) => r,
@@ -1098,7 +1097,7 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             let value = host.var(Var::Value);
             let base = value.components().unwrap_or_else(|| vec![0.0]);
             let amps = amp.components().unwrap_or_else(|| vec![0.0]);
-            // D25: value + amp · Σ multᵏ N(seed, channel · 1024 + k, t · freq · 2ᵏ) / Σ multᵏ;
+            // value + amp · Σ multᵏ N(seed, channel · 1024 + k, t · freq · 2ᵏ) / Σ multᵏ;
             // component i of an array value uses channel + i · 2¹⁶
             let out: Vec<f64> = base
                 .iter()
@@ -1120,7 +1119,7 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             for a in args {
                 c.extend(a.components().unwrap_or_default());
             }
-            // D25: N(seed, 7, x); with a non-zero y or z, 3D Perlin noise
+            // N(seed, 7, x); with a non-zero y or z, 3D Perlin noise
             let at = |k: usize| c.get(k).copied().unwrap_or(0.0);
             V::Num(if at(1) == 0.0 && at(2) == 0.0 {
                 rng::noise(seed, 7, at(0))
@@ -1369,8 +1368,8 @@ mod tests {
         let r = eval("random(10, 20)").num();
         assert!((10.0..20.0).contains(&r));
         assert_eq!(eval("random(10, 20)"), eval("random(10, 20)"), "deterministic");
-        // D25 over D24 noise (seed 1, the test host's channel 8, component k on channel
-        // 8 + k · 2¹⁶); golden values that the Python renderer's noise.py reproduces
+        // seeded noise (seed 1, the test host's channel 8, component k on channel
+        // 8 + k · 2¹⁶); golden values from an independent reference implementation
         let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
         let w = eval("wiggle(1.3, 30)");
         let V::Arr(w) = w else { panic!() };
@@ -1382,7 +1381,7 @@ mod tests {
         close(eval("noise(0.3)").num(), -0.5599620552733947);
         // with a y: improved Perlin noise over the permutation of channel 7
         close(eval("noise(0.3, 0.7)").num(), 0.28006378512);
-        assert_eq!(eval("wiggle(2, 30)"), V::nums(&[10.0, 20.0]), "D24 noise is zero at integers");
+        assert_eq!(eval("wiggle(2, 30)"), V::nums(&[10.0, 20.0]), "noise is zero at integers");
     }
 
     #[test]

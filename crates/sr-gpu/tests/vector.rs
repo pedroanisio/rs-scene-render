@@ -1,4 +1,4 @@
-//! Batch 5 on the GPU: shapes, strokes, trim, modifiers, gradients,
+//! Shapes, strokes, trim, modifiers, gradients,
 //! masks, SVG and Lottie assets, and deformed layers.
 
 mod common;

@@ -1,4 +1,4 @@
-//! Batch 9 accessibility: flash analysis, text contrast and required captions.
+//! Accessibility: flash analysis, text contrast and required captions.
 
 use sr_deliver::access::{FlashDetector, COLS, ROWS};
 
@@ -115,7 +115,7 @@ fn delivery_runs_the_checks() {
 
 #[test]
 fn flash_check_needs_an_accessibility_element() {
-    // parity with the Python and JS renderers and the XSD: attribute defaults apply to a
+    // as the XSD says: attribute defaults apply to a
     // declared <accessibility>; without one nothing is checked
     let Some(dir) = fixtures() else { return };
     if sr_gpu::Gpu::new().is_err() {

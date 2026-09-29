@@ -3,6 +3,8 @@ name = "sr-3d"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+publish.workspace = true
 description = "3D assets for scene-render: model import (glTF, OBJ, PLY, FBX, USD, splats), primitives, animation, lights, environments, cameras"
 
 [dependencies]

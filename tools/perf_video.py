@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Writes the Batch 4 exit-gate scene and its media: four 1920x1080 60 fps
+"""Performance scene and media: four 1920x1080 60 fps
 H.264 sources with AAC audio, a music track, and a 1080p60 H.264 output
 of four transformed video layers with the mixed, loudness-normalised audio.
 
-usage: tools/gate4.py OUTDIR [--duration SECONDS]   (default 60)
-then:  scene-render encode OUTDIR/gate4.scene.xml --hw auto
+usage: tools/perf_video.py OUTDIR [--duration SECONDS]   (default 60)
+then:  scene-render encode OUTDIR/perf_video.scene.xml --hw auto
 """
 import os
 import subprocess
@@ -16,7 +16,7 @@ def ff(*args):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate4"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_video"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 60.0
     os.makedirs(out, exist_ok=True)
     sources = ["testsrc2", "smptehdbars", "testsrc", "rgbtestsrc"]
@@ -49,7 +49,7 @@ def main():
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <scene version="1.1">
   <project width="1920" height="1080" fps="60" duration="{dur}" background="#101418"/>
-  <output id="gate" path="gate4.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
+  <output id="perf" path="perf_video.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
   <assets>
 {assets}
     <audio id="musicA" src="music.wav"/>
@@ -63,7 +63,7 @@ def main():
   </audioMix>
 </scene>
 '''
-    path = os.path.join(out, "gate4.scene.xml")
+    path = os.path.join(out, "perf_video.scene.xml")
     with open(path, "w") as f:
         f.write(xml)
     print(path)

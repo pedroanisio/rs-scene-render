@@ -28,7 +28,7 @@ pub enum PaintRef<'a> {
 
 /// Affine `[a, b, c, d, e, f]` mapping local coordinates to paint space. `rotation` (degrees,
 /// clockwise) turns the gradient about the centre of the painted box in local pixels, whatever the
-/// units (CONVENTIONS 5.18, as the Python renderer does), so a non-square box rotates without shear.
+/// units, so a non-square box rotates without shear.
 fn object_xform(box_rect: [f64; 4], rotation: f64, object: bool) -> [f64; 6] {
     let [x0, y0, w, h] = box_rect;
     let pivot = [x0 + w * 0.5, y0 + h * 0.5];
@@ -235,7 +235,7 @@ impl PaintTable {
                         }
                     }
                 }
-                // a missing point takes the colour of the nearest defined one (as the Python renderer does)
+                // a missing point takes the colour of the nearest defined one
                 let defined: Vec<usize> = (0..rows * cols).filter(|&i| known[i]).collect();
                 for i in (0..rows * cols).filter(|&i| !known[i]) {
                     let d2 = |j: usize| {
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn rotation_turns_about_the_box_centre_in_pixels() {
-        // CONVENTIONS 5.18: a 200 × 100 box turned 90° clockwise: the pixel 50 px below the centre shows
+        // a 200 × 100 box turned 90° clockwise: the pixel 50 px below the centre shows
         // the point 50 px right of it in the unturned gradient, i.e. x = 0.75 of the box (not 1.0, as
         // turning the unit square would give)
         let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12;

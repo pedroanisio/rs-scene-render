@@ -156,7 +156,7 @@ pub struct Light3 {
 pub struct Env3 {
     pub env: Arc<EnvGpu>,
     pub intensity: f32,
-    /// Environment → world rotation: the dome's yaw, pitch and roll (conventions 5.5).
+    /// Environment → world rotation: the dome's yaw, pitch and roll.
     pub rotation: Mat4,
     pub visible: bool,
 }
@@ -451,7 +451,7 @@ const PREMUL: wgpu::BlendState = wgpu::BlendState {
 
 /// Render targets of [`ThreeEngine::render`] kept between calls. Each is a large dedicated
 /// allocation, and creating and dropping them every frame cost more CPU time than the rest of the
-/// pass (gate 8). A target is lent for one call and returned at its end; the encoder orders the
+/// pass. A target is lent for one call and returned at its end; the encoder orders the
 /// passes of successive calls, so reuse is safe, and targets unused for a while are dropped.
 #[derive(Default)]
 struct TargetPool {
@@ -1625,7 +1625,7 @@ impl ThreeEngine {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        // the visible sky at the source's resolution (conventions 5.5), apart from the prefiltered chain
+        // the visible sky at the source's resolution, apart from the prefiltered chain
         let sky_view = env.map(|e| &e.env.sky).unwrap_or(&self.black_env);
         let no_tiles =
             pool([1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles").create_view(&Default::default());

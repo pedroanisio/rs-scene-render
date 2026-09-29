@@ -196,8 +196,8 @@ impl Video<'_> {
             })
         });
         // Without an <accessibility> element nothing is checked: the XSD defaults (flashCheck
-        // "warn", contrastCheck "off") apply to the element's attributes, and the Python and JS
-        // renderers skip the checks when it is absent. Declare <accessibility/> to opt in.
+        // "warn", contrastCheck "off") apply to the element's attributes, and the checks
+        // are skipped when it is absent. Declare <accessibility/> to opt in.
         let flash_mode = acc.as_ref().map(|a| a.flash_check.to_string()).unwrap_or_else(|| "off".into());
         let contrast_mode = acc.as_ref().map(|a| a.contrast_check.to_string()).unwrap_or_else(|| "off".into());
         let min_contrast = acc.as_ref().map(|a| a.min_contrast.get()).unwrap_or(4.5);

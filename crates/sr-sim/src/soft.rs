@@ -72,7 +72,7 @@ impl SoftState {
         let add = |a: usize, b: usize, k: f64, springs: &mut Vec<(usize, usize, f64, f64)>| {
             springs.push((a, b, dist(spec.rest[a], spec.rest[b]), k))
         };
-        // cloth: shear springs at 0.15 k and bend springs at 0.02 k, so it drapes (conventions 5.10)
+        // cloth: shear springs at 0.15 k and bend springs at 0.02 k, so it drapes
         let shear = if spec.kind == SoftKind::Cloth { 0.15 } else { 1.0 };
         let pos: Vec<[f64; 2]> = if spec.kind == SoftKind::Rope {
             // the chain runs along the centre row

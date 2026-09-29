@@ -1,5 +1,5 @@
 //! Custom GLSL effects (`effect type="shader"`) and transitions (`transition type="shader"`)
-//! with the semantics of the Python engine: Shadertoy, ISF (inputs, imported images, passes,
+//! supporting Shadertoy, ISF (inputs, imported images, passes,
 //! persistent feedback) and plain programs; gl-transitions; `<param>` children, attributes
 //! and `// =` defaults as uniforms; `@space` colour handling; `padding`; `@source` and named
 //! sampler inputs; compile errors report user line numbers and fall back (effects pass their
@@ -997,7 +997,7 @@ impl Builder<'_> {
         run.builtins.insert("resolution", vec![w as f64, h as f64]);
         run.builtins.insert("time", vec![cx.time]);
         run.builtins.insert("frame", vec![cx.frame as f64]);
-        // shutter samples of progress (Python's _progress_samples)
+        // shutter samples of progress (progress sampled across the shutter)
         let blur = a.num("motionBlur", 1.0) != 0.0;
         let dp = velocity.abs() * 0.5 / cx.fps.max(1e-6);
         let ps: Vec<f64> = if !blur || dp < 1.0 / 512.0 {

@@ -68,7 +68,7 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 fn enc(c: vec3<f32>) -> vec3<f32> { return tf_encode3(1u, max(c, vec3(0.0))); }
 fn dec(c: vec3<f32>) -> vec3<f32> { return tf_decode3(1u, c); }
 
-// The effect's D24 seed (a u64 in i.yz, or for transitions in the bits of v3.xy).
+// The effect's hash seed (a u64 in i.yz, or for transitions in the bits of v3.xy).
 fn fx_seed() -> vec2<u32> { return vec2(fx.i.y, fx.i.z); }
 fn tr_seed() -> vec2<u32> { return vec2(bitcast<u32>(fx.v[3].x), bitcast<u32>(fx.v[3].y)); }
 
@@ -76,7 +76,7 @@ fn tr_seed() -> vec2<u32> { return vec2(bitcast<u32>(fx.v[3].x), bitcast<u32>(fx
 fn seed_plus(seed: vec2<u32>, k: i32) -> vec2<u32> { return u64_add(seed, u64_of_i32(k)); }
 
 // Smooth lattice noise in [0, 1): U(seed, 0, pack(i, j)) at the lattice points, smoothstep
-// between (the Python renderer's effects.value_noise, CONVENTIONS 5.19).
+// between .
 fn d24_value(p: vec2<f32>, seed: vec2<u32>) -> f32 {
     let i = floor(p);
     var f = p - i;
@@ -87,7 +87,7 @@ fn d24_value(p: vec2<f32>, seed: vec2<u32>) -> f32 {
     return mix(mix(l.x, l.y, f.x), mix(l.z, l.w, f.x), f.y);
 }
 
-// The Python renderer's fields.fractal (basic): octave i at 2^i weighs roughness^i, on seed
+// Basic fractal noise: octave i at 2^i weighs roughness^i, on seed
 // + 101 i + 7919 · phase, cross-faded (smoothstep) to the next evolution phase; normalised.
 fn d24_fbm(p: vec2<f32>, seed: vec2<u32>, octaves: f32, evolution: f32) -> f32 {
     let oc = clamp(octaves, 1.0, 12.0);
@@ -131,8 +131,7 @@ fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
 fn fs_copy(in: VOut) -> @location(0) vec4<f32> { return S(in.uv); }
 
 // Dual-Kawase downsample (output half size); v0.x = offset in source texels.
-// The blur pyramid reads the input bilinearly with transparent texels outside it (CONVENTIONS
-// 5.7: samples outside the effect's input are transparent, never clamped to the edge).
+// The blur pyramid reads the input bilinearly with transparent texels outside it (samples outside the effect's input are transparent, never clamped to the edge).
 fn Z(uv: vec2<f32>) -> vec4<f32> { return bil(src, uv * dims()); }
 
 @fragment
@@ -259,8 +258,7 @@ fn tonemap(c: vec3<f32>, op: u32) -> vec3<f32> {
     }
 }
 
-// Bilinear sampling at pixel coordinates (texel i at i), transparent outside: the Python
-// renderer's effects.sample.
+// Bilinear sampling at pixel coordinates (texel i at i), transparent outside.
 fn sample_px(p: vec2<f32>) -> vec4<f32> {
     let d = vec2<i32>(dims());
     let f0 = floor(p);
@@ -277,7 +275,7 @@ fn sample_px(p: vec2<f32>) -> vec4<f32> {
     return acc;
 }
 
-// Film grain's three D24 normals at pixel px: draws (y · width + x) · 3 + c of the effect's seed
+// Film grain's three seeded-hash normals at pixel px: draws (y · width + x) · 3 + c of the effect's seed
 // (i.yz) on the frame's channel (v0.z).
 fn grain_draws(px: vec2<f32>) -> vec3<f32> {
     let xy = vec2<u32>(floor(px));
@@ -393,7 +391,7 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             c = dec(hsv2rgb(h));
         }
         case 21u: { // film grain: v0 0.05·amount, _, frame, field scale (0: draw here); v1 strength, response
-            // D24 normals per sample, (y · width + x) · 3 + channel, seed in i.yz, the frame as the channel
+            // seeded-hash normals per sample, (y · width + x) · 3 + channel, seed in i.yz, the frame as the channel
             var n: vec3<f32>;
             if (v[0].w == 0.0) {
                 n = grain_draws(px);
@@ -404,7 +402,7 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             let wgt = pow(max(4.0 * k * (1.0 - k), vec3(0.0)), vec3(v[1].w));
             c = max(c + n * v[0].x * wgt * v[1].rgb, vec3(0.0));
         }
-        case 22u: { // noise: v0 amount, frame, channels (1 or 3); D24 uniforms in [-1, 1) per sample in display values
+        case 22u: { // noise: v0 amount, frame, channels (1 or 3); seeded-hash uniforms in [-1, 1) per sample in display values
             let xy = vec2<u32>(floor(px));
             let nc = u32(v[0].z);
             let base = (xy.y * u32(dims().x) + xy.x) * nc;
@@ -491,7 +489,7 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
             let l = v[0].y - 1.0;
             return vec4(round(st * l) / l * a, a);
         }
-        case 64u: { // vignette (D9): v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
+        case 64u: { // vignette: v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
             let r = length((in.uv - v[2].xy) * d) / (0.5 * length(d));
             var k = select(0.0, 1.0, r >= v[0].y);
             if (v[0].z > 0.0) { k = smoothstep(v[0].y, v[0].y + v[0].z, r); }
@@ -649,7 +647,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
         }
         case 8u: { // heat haze: v0 amount px, scale px, time
             let q = in.uv * d / max(v[0].y, 1.0);
-            let q2 = q - vec2(0.0, v[0].z);  // rising cells (the Python renderer's heat haze)
+            let q2 = q - vec2(0.0, v[0].z);  // rising cells (heat haze)
             let o = vec2(d24_fbm(q2, fx_seed(), 6.0, v[0].z), d24_fbm(q2 + vec2(37.0, 17.0), seed_plus(fx_seed(), 7), 6.0, v[0].z)) - 0.5;
             uv = uv + o * v[0].x / d;
         }
@@ -689,7 +687,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             }
             return acc / 16.0;
         }
-        case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner (CONVENTIONS 5.18)
+        case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner
             // red magnifies by 1 − l and blue by 1 + l about the centre v1.xy (px), l = amount / reach
             // (v1.z px, the distance to the input's farthest corner); outside the input is transparent
             let pc = v[1].xy;
@@ -967,7 +965,7 @@ fn F(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), S(uv), in_unit(uv));
 fn T(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), A(uv), in_unit(uv)); }
 fn over(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return a + b * (1.0 - a.a); }
 fn edge(x: f32, soft: f32) -> f32 { return smoothstep(-soft * 0.5 - 1e-4, soft * 0.5 + 1e-4, x); }
-// D19 geometry, in frame pixels. The share of b at coordinate s: b where s < e − w, a beyond e,
+// Wipe geometry, in frame pixels. The share of b at coordinate s: b where s < e − w, a beyond e,
 // smoothstep across [e − w, e], with e = p (1 + w) and w the softness.
 fn d19_b(s: f32, p: f32, soft: f32) -> f32 {
     let w = max(soft, 1e-4);
@@ -985,7 +983,7 @@ fn d19_axis(uv: vec2<f32>, dir: vec2<f32>) -> f32 {
 }
 // Distance from the centre over half the diagonal.
 // With <param> cx, cy the centre moves (v4.xy, pixels) and the radius is over the distance to the
-// farthest corner (v4.z), as in the Python renderer.
+// farthest corner (v4.z).
 fn d19_radius(uv: vec2<f32>) -> f32 {
     return length(uv * fdims() - fx.v[4].xy) / max(fx.v[4].z, 1e-6);
 }
@@ -999,7 +997,7 @@ fn d19_travel(dir: vec2<f32>) -> vec2<f32> {
     let d = fdims();
     return dir * (abs(dir.x) * d.x + abs(dir.y) * d.y) / d;
 }
-// ---- the Python renderer's transitions (CONVENTIONS 5.17), in frame pixels (centres at i + ½)
+// ---- transitions, in frame pixels (centres at i + ½)
 
 // x snapped to a nearby integer: GPU division is not correctly rounded, and slats and stripes
 // must switch exactly where the float64 reference does.
@@ -1008,7 +1006,7 @@ fn snap(x: f32) -> f32 {
     return select(x, r, abs(x - r) < 1e-5 * max(1.0, abs(x)));
 }
 
-// Bilinear sample of t at pixel coordinates q, transparent outside (scenerender.transitions.sample).
+// Bilinear sample of t at pixel coordinates q, transparent outside.
 fn bil(t: texture_2d<f32>, q: vec2<f32>) -> vec4<f32> {
     let dd = vec2<i32>(textureDimensions(t));
     let pp = q - 0.5;
@@ -1029,7 +1027,7 @@ fn bil(t: texture_2d<f32>, q: vec2<f32>) -> vec4<f32> {
 fn PA(q: vec2<f32>, tr: bool) -> vec4<f32> { return bil(src, select(q, q.yx, tr)); }
 fn PB(q: vec2<f32>, tr: bool) -> vec4<f32> { return bil(aux, select(q, q.yx, tr)); }
 
-// translate(px, o) then streak(length bl along d): scenerender.transitions.moved. The translated
+// translate(px, o) then streak(length bl along d). The translated
 // picture is a frame-sized image, so the streak reads nothing outside the frame.
 fn in_frame(q: vec2<f32>) -> bool { return all(q >= vec2(0.0)) && all(q < fdims()); }
 fn moved(t: texture_2d<f32>, q: vec2<f32>, o: vec2<f32>, bl: f32, d: vec2<f32>) -> vec4<f32> {
@@ -1056,7 +1054,7 @@ fn moved(t: texture_2d<f32>, q: vec2<f32>, o: vec2<f32>, bl: f32, d: vec2<f32>) 
 }
 
 // A picture of size wh turned by (cos, sin) of its yaw about its vertical centre line, centred at
-// (x0, 0, z0), seen by a pinhole camera at distance cam (scenerender.transitions.plane_homography),
+// (x0, 0, z0), seen by a pinhole camera at distance cam,
 // sampled at output pixel q; transparent behind the camera.
 fn plane_px(t: texture_2d<f32>, q: vec2<f32>, pl: vec4<f32>, wh: vec2<f32>, cam: f32, tr: bool, shade: f32) -> vec4<f32> {
     let c = pl.x; let s = pl.y; let x0 = pl.z; let z0 = pl.w;
@@ -1080,7 +1078,7 @@ fn plane_px(t: texture_2d<f32>, q: vec2<f32>, pl: vec4<f32>, wh: vec2<f32>, cam:
     return vec4(v.rgb * shade, v.a);
 }
 
-// Film roll's strip at time t (scenerender.transitions.fx.film_roll's render), in the
+// Film roll's strip at time t, in the
 // (transposed) frame of size wh; v4 gap, border, curvature, holes; v5.x sign.
 fn film_strip(q: vec2<f32>, t: f32, wh: vec2<f32>, tr: bool, col: vec4<f32>) -> vec4<f32> {
     let w = wh.x; let h = wh.y;
@@ -1168,8 +1166,8 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             if (p < 0.5) { return mix(F(uv), col, p * 2.0); }
             return mix(col, T(uv), (p - 0.5) * 2.0);
         }
-        case 4u: { return mix(F(uv), T(uv), d19_b(d19_axis(uv, dir), p, soft)); } // wipe (D19)
-        case 5u, 6u, 7u, 8u: { // slide (= cover), push, cover, reveal (D19); v4.x streak px, v4.y span
+        case 4u: { return mix(F(uv), T(uv), d19_b(d19_axis(uv, dir), p, soft)); } // wipe
+        case 5u, 6u, 7u, 8u: { // slide (= cover), push, cover, reveal; v4.x streak px, v4.y span
             let q = uv * fdims();
             let bl = fx.v[4].x;
             let e = fx.v[4].y;
@@ -1202,12 +1200,12 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             let bl = fx.v[4].x; let e = fx.v[4].y; let tq = fx.v[4].z;
             return over(moved(aux, q, dir * e * (tq - 1.0), bl, dir), moved(src, q, dir * e * tq, bl, dir));
         }
-        case 13u, 15u: { return mix(F(uv), T(uv), d19_b(d19_radius(uv), p, soft)); } // circle open, iris (D19)
+        case 13u, 15u: { return mix(F(uv), T(uv), d19_b(d19_radius(uv), p, soft)); } // circle open, iris
         case 14u: { return mix(F(uv), T(uv), 1.0 - d19_b(d19_radius(uv), 1.0 - p, soft)); } // circle close: a closes
         case 16u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, -0.5 * PI), p, soft)); } // clock wipe from 12
         case 17u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, fx.v[0].z), p, soft)); } // radial wipe from @angle
         case 18u: { return mix(F(uv), T(uv), d19_b(abs(d19_axis(uv, dir) - 0.5) * 2.0, p, soft)); } // barn door
-        case 20u: { // luma (D19): the matte's working-space Rec. 709 luminance; without one, a wipe
+        case 20u: { // luma: the matte's working-space Rec. 709 luminance; without one, a wipe
             var l = d19_axis(uv, dir);
             if (fx.i.y != 0u) {
                 l = clamp(luma(A2(uv).rgb), 0.0, 1.0);
@@ -1351,7 +1349,7 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             }
             return acc / max(cnt, 1.0);
         }
-        case 36u: { // box filter of the Python renderer's gaussian: v4 width (odd), axis (0 x, 1 y), clamp
+        case 36u: { // box filter of gaussian: v4 width (odd), axis (0 x, 1 y), clamp
             let r = i32(fx.v[4].x) / 2;
             let ax = select(vec2(1, 0), vec2(0, 1), fx.v[4].y > 0.5);
             let dd = vec2<i32>(textureDimensions(src));

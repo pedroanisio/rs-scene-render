@@ -1,8 +1,11 @@
-//! D24 noise and hashing (c-scene-render docs/xml11-definitions.md; CONVENTIONS.md 5.19).
+//! Seeded counter-based draws: noise and hashing.
 //!
-//! Every seeded function of the renderer draws from these: N(seed, channel, x), its
-//! fractal sum, and the lattice hash splitmix64(seed ⊕ splitmix64(channel ⊕ splitmix64(i)))
-//! whose top 53 bits give a uniform value. Integers enter as two's-complement u64.
+//! Every seeded function of the renderer draws from these. A draw is addressed by
+//! (seed, channel, index) and is a pure function of them, so results do not depend on the
+//! order in which draws are made. The lattice hash is
+//! splitmix64(seed ⊕ splitmix64(channel ⊕ splitmix64(i))); its top 53 bits give a uniform
+//! value in [0, 1). On top of it sit N(seed, channel, x), 1D Perlin gradient noise, and its
+//! fractal sum. Integers enter as two's-complement u64.
 
 /// SplitMix64 finaliser.
 #[inline]
@@ -24,7 +27,7 @@ fn fade(t: f64) -> f64 {
 }
 
 /// Lattice index of (i, j, k) for fields over the plane or space: 21 bits of each
-/// (two's complement), i | j << 21 | k << 42 (the Python renderer's `noise.pack`).
+/// (two's complement), i | j << 21 | k << 42.
 #[inline]
 pub fn pack(i: i64, j: i64, k: i64) -> u64 {
     const M: u64 = (1 << 21) - 1;
@@ -52,7 +55,7 @@ pub fn permutation(seed: u64, channel: u64, n: usize) -> Vec<usize> {
 }
 
 /// CRC-32 (IEEE, as zlib's `crc32`): per-element seeds and the channels of properties
-/// outside D25's list are CRC-32s of text.
+/// outside the fixed list of transform properties are CRC-32s of text.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut c = !0u32;
     for &b in bytes {
@@ -64,15 +67,15 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     !c
 }
 
-/// A per-element seed: CRC-32 of "project seed:element id:@seed:purpose" (the Python
-/// renderer's `seed_for`, used where D24 leaves the seed of an element's draws open).
+/// A per-element seed: CRC-32 of "project seed:element id:@seed:purpose", used where the
+/// seed of an element's draws is not otherwise given.
 pub fn element_seed(project: u64, id: &str, seed_attr: Option<u64>, purpose: &str) -> u64 {
     let s = seed_attr.map(|v| v.to_string()).unwrap_or_default();
     crc32(format!("{project}:{id}:{s}:{purpose}").as_bytes()) as u64
 }
 
 /// Improved Perlin noise (2002) over a 256-entry permutation, clamped to [−1, 1]: the
-/// Python renderer's multi-dimensional noise, with the permutation drawn by [`permutation`].
+/// multi-dimensional noise, with the permutation drawn by [`permutation`].
 pub fn perlin3(perm: &[usize], x: f64, y: f64, z: f64) -> f64 {
     if !(x.is_finite() && y.is_finite() && z.is_finite()) {
         return f64::NAN;
@@ -113,13 +116,13 @@ pub fn perlin3(perm: &[usize], x: f64, y: f64, z: f64) -> f64 {
     r.clamp(-1.0, 1.0)
 }
 
-/// The standard SplitMix64 step: adds the golden-ratio increment, then finalises (D24).
+/// The standard SplitMix64 step: adds the golden-ratio increment, then finalises.
 #[inline]
 pub fn splitmix64(x: u64) -> u64 {
     mix64(x.wrapping_add(0x9e37_79b9_7f4a_7c15))
 }
 
-/// D24's lattice hash: splitmix64(seed ⊕ splitmix64(channel ⊕ splitmix64(i))).
+/// The lattice hash: splitmix64(seed ⊕ splitmix64(channel ⊕ splitmix64(i))).
 #[inline]
 pub fn d24_hash(seed: u64, channel: u64, i: u64) -> u64 {
     splitmix64(seed ^ splitmix64(channel ^ splitmix64(i)))
@@ -132,7 +135,7 @@ pub fn d24_unit(seed: u64, channel: u64, i: u64) -> f64 {
     unit(d24_hash(seed, channel, i))
 }
 
-/// D24 noise N(seed, channel, x): 1D Perlin gradient noise with gradients
+/// Noise N(seed, channel, x): 1D Perlin gradient noise with gradients
 /// h / 2⁵³ · 2 − 1 at the lattice points and the quintic fade. In [−1, 1], zero at integers.
 pub fn noise(seed: u64, channel: u64, x: f64) -> f64 {
     let fl = libm::floor(x);
@@ -144,14 +147,14 @@ pub fn noise(seed: u64, channel: u64, x: f64) -> f64 {
     2.0 * (a + (b - a) * fade(f))
 }
 
-/// D24 fractal noise: octave k weighs 0.5ᵏ and samples channel · 1024 + k at x · 2ᵏ;
+/// Fractal noise: octave k weighs 0.5ᵏ and samples channel · 1024 + k at x · 2ᵏ;
 /// the sum is divided by the sum of the weights.
 pub fn fractal(seed: u64, channel: u64, x: f64, octaves: u32) -> f64 {
     weighted_octaves(seed, channel, x, octaves, 0.5)
 }
 
-/// Octave sum with weights `mult`ᵏ over channels `channel` · 1024 + k (D24 fractal
-/// noise at `mult` = 0.5, D25 `wiggle` otherwise), normalised by the weights.
+/// Octave sum with weights `mult`ᵏ over channels `channel` · 1024 + k (fractal
+/// noise at `mult` = 0.5, the `wiggle` expression otherwise), normalised by the weights.
 pub fn weighted_octaves(seed: u64, channel: u64, x: f64, octaves: u32, mult: f64) -> f64 {
     let (mut sum, mut norm, mut w, mut f) = (0.0, 0.0, 1.0, 1.0);
     for k in 0..octaves.clamp(1, 16) {
@@ -171,8 +174,8 @@ pub fn weighted_octaves(seed: u64, channel: u64, x: f64, octaves: u32, mult: f64
 mod tests {
     use super::*;
 
-    /// Golden values of D24, computed by an independent reference of the definition
-    /// (and matching c-scene-render's `sr_noise1` / `sr_noise_fractal`).
+    /// Golden values computed by an independent reference implementation of the definitions
+    /// above.
     #[test]
     fn d24_golden_values() {
         assert_eq!(splitmix64(0), 0xe220_a839_7b1d_cdaf);
@@ -186,7 +189,7 @@ mod tests {
         close(noise(1, 0, 0.25), -0.2591138999211539);
         close(noise(42, 7, -1.3), -0.22195948101587748);
         close(noise(12345, 3, 99.75), 0.052042264166522356);
-        #[allow(clippy::approx_constant)] // a sample point shared with the Python golden values, not π
+        #[allow(clippy::approx_constant)] // a sample point shared with the reference values, not π
         let x = 3.14159;
         close(noise(7, 1024, x), 0.14007526307765447);
         assert_eq!(noise(0, 0, 2.0), 0.0);
@@ -195,8 +198,8 @@ mod tests {
         close(fractal(42, 3, -2.6, 3), 0.13784387603697973);
     }
 
-    /// The Python renderer's choices where D24 is silent (scenerender/noise.py), with golden
-    /// values from that module.
+    /// Draws built on the hash beyond noise (Gaussian, permutation, packing, CRC-32 seeds), with
+    /// golden values from an independent reference.
     #[test]
     fn draws_beyond_d24() {
         assert!((gaussian(1, 2, 3) - 0.3180452816872121).abs() < 1e-12);

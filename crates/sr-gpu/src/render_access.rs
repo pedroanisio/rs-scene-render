@@ -1,4 +1,4 @@
-//! Accessibility measurements in the compositor (Batch 9): the contrast of
+//! Accessibility measurements in the compositor: the contrast of
 //! burned-in text against the backdrop actually drawn behind it.
 //!
 //! When `contrast_probe` is on, each text layer and the caption burn-in in

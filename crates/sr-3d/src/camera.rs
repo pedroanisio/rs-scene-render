@@ -182,7 +182,7 @@ pub fn coc_scale(focal_mm: f32, f_stop: f32, sensor_mm: f32, width_px: f32) -> f
     (focal_mm * focal_mm / f_stop.max(0.1)) * (width_px / sensor_mm.max(1e-3)) / 10.0
 }
 
-/// Camera shake (D24) from its four fractal noise values N₀…N₃ (channels 0 to 3 at
+/// Camera shake from its four fractal noise values N₀…N₃ (channels 0 to 3 at
 /// frequency · t): (x, y offset in scene units, roll in degrees, zoom factor). The camera
 /// moves amplitude · N₀ right and amplitude · N₁ down, rolls rotation · N₂ and zooms by 1 + zoom · N₃.
 pub fn shake(amplitude: f32, rotation: f32, zoom_amount: f32, n: [f64; 4]) -> (f32, f32, f32, f32) {

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Writes the Batch 3 exit-gate scene: 200 transformed image layers at
+"""Performance scene: 200 transformed image layers at
 1920x1080, each masked with a feathered ellipse, cycling through the 33
 layer-local blend modes, every layer animated so no frame can be served from a cache.
 
-usage: tools/gate3.py OUTDIR [--layers N]
-then:  scene-render render OUTDIR/gate3.scene.xml --bench --frames 0..60
+usage: tools/perf_layers.py OUTDIR [--layers N]
+then:  scene-render render OUTDIR/perf_layers.scene.xml --bench --frames 0..60
 """
 import math
 import os
@@ -16,7 +16,7 @@ BLENDS = ("normal dissolve add plus-lighter multiply screen overlay difference e
           "darken lighten darker-color lighter-color color-dodge color-burn linear-dodge linear-burn soft-light "
           "hard-light linear-light vivid-light pin-light hard-mix hue saturation color luminosity stencil-alpha "
           "stencil-luma silhouette-alpha silhouette-luma alpha-add behind").split()
-# stencil modes clear the whole frame outside their layer; the gate cycles through the 33 layer-local modes
+# stencil modes clear the whole frame outside their layer; the scene cycles through the 33 layer-local modes
 BLENDS = tuple(b for b in BLENDS if not b.startswith("stencil"))
 
 
@@ -39,7 +39,7 @@ def png(path, w, h, pixel):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate3"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_layers"
     n = int(sys.argv[sys.argv.index("--layers") + 1]) if "--layers" in sys.argv else 200
     os.makedirs(out, exist_ok=True)
     for k in range(8):
@@ -79,9 +79,9 @@ def main():
   </composition>
 </scene>
 '''
-    with open(os.path.join(out, "gate3.scene.xml"), "w") as f:
+    with open(os.path.join(out, "perf_layers.scene.xml"), "w") as f:
         f.write(xml)
-    print(os.path.join(out, "gate3.scene.xml"))
+    print(os.path.join(out, "perf_layers.scene.xml"))
 
 
 if __name__ == "__main__":

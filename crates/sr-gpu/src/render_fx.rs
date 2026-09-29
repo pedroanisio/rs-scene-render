@@ -444,7 +444,7 @@ impl Renderer {
             opacity: op as f32,
             blend: match (self.bare.contains(&n.id), blend_index(e)) {
                 (true, _) => 0,
-                // an adjustment layer replaces the backdrop by its effect within its coverage (D17)
+                // an adjustment layer replaces the backdrop by its effect within its coverage
                 (false, 0) if n.kind == "adjustment" => BLEND_ADJUST,
                 (false, b) => b,
             },
@@ -539,7 +539,7 @@ impl Renderer {
             }
             stack.extend(ctx.kids[k].iter().copied());
         }
-        // the Python renderer's tiles: each box grown by 2 px to whole pixels, within 64 px of the target
+        // tiles: each box grown by 2 px to whole pixels, within 64 px of the target
         let (w, h) = (space.size[0] as f64, space.size[1] as f64);
         let b = [
             (b[0] - 2.0).floor().max(-64.0),
@@ -690,7 +690,7 @@ impl Renderer {
                 x1 = x1.max(q[0]);
                 y1 = y1.max(q[1]);
             }
-            // custom shaders see the Python engine's tile: the layer's pixels with a 2 px margin,
+            // custom shaders see tile: the layer's pixels with a 2 px margin,
             // reaching up to 64 px past the frame (their resolution and uv depend on it)
             let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
             let (m, lo, hx, hy) = if shader { (2.0, -64.0, fw + 64.0, fh + 64.0) } else { (1.0, 0.0, fw, fh) };
@@ -1246,7 +1246,7 @@ impl Renderer {
             None => None,
         };
         let base = Self::base_dir(ctx.p);
-        // sequence junctions carry the sequence's @transition type (D19)
+        // sequence junctions carry the sequence's @transition type
         let mut kind = tr.kind.to_string();
         let shader = match a.str("shader") {
             Some(src) if kind == "shader" => match crate::glsl::load_source(&src, &base) {
@@ -1303,7 +1303,7 @@ impl Renderer {
             Some(&cx),
         );
         if kind == "shader" && r.is_err() {
-            // a failing shader (compile error) renders as a crossfade, like the Python engine
+            // a failing shader (compile error) renders as a crossfade
             if let Err(msg) = &r {
                 b.problems.push(msg.clone());
             }

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Batch 7 exit gate.
+"""Effects performance scene and per-effect cost measurement.
 
-usage: tools/gate7.py OUTDIR [--duration SECONDS]
-    Writes gate7.scene.xml: a 1080p60 scene with 8 effects (on layers and an
+usage: tools/perf_effects.py OUTDIR [--duration SECONDS]
+    Writes perf_effects.scene.xml: a 1080p60 scene with 8 effects (on layers and an
     adjustment layer), a crossfade active over the whole timeline, and
     16-sample shutter motion blur on two moving layers.
-    then: scene-render render OUTDIR/gate7.scene.xml --bench --frames 0..120
+    then: scene-render render OUTDIR/perf_effects.scene.xml --bench --frames 0..120
 
-usage: tools/gate7.py OUTDIR --measure BIN [--frames N]
+usage: tools/perf_effects.py OUTDIR --measure BIN [--frames N]
     Writes one 1080p scene per effect type (the effect at its default
     settings on a full-frame moving layer) plus a baseline without effects,
     benches each with BIN (with SR_FX_NO_CACHE=1, so every frame recomputes
@@ -63,7 +63,7 @@ def write_support(out):
         f.write("uniform float amount; // = 0.5\nvec4 effect(vec2 uv) { vec4 c = getColor(uv); return vec4(mix(c.rgb, c.gbr, amount), c.a); }\n")
 
 
-def gate_scene(dur):
+def perf_scene(dur):
     return f'''<?xml version="1.0" encoding="UTF-8"?>
 <scene version="1.1">
   <project width="1920" height="1080" fps="60" duration="{dur}" background="#000000" motionBlur="true" shutterAngle="180" shutterPhase="-90" motionBlurSamples="16"/>
@@ -124,7 +124,7 @@ def median_ms(binary, path, frames):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate7"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_effects"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 10.0
     os.makedirs(out, exist_ok=True)
     write_support(out)
@@ -148,9 +148,9 @@ def main():
         over = [k for c, k in worst if c > 2.0]
         print(f"effects over 2 ms: {len(over)} of {len(EFFECTS)}; slowest: " + ", ".join(f"{k} {c:.1f} ms" for c, k in worst[:5]))
         return
-    path = os.path.join(out, "gate7.scene.xml")
+    path = os.path.join(out, "perf_effects.scene.xml")
     with open(path, "w") as f:
-        f.write(gate_scene(dur))
+        f.write(perf_scene(dur))
     print(path)
 
 

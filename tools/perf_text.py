@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Writes the Batch 6 exit-gate scene: 50 text layers with per-character
+"""Performance scene: 50 text layers with per-character
 animators (cycling through the presets plus a wiggly selector) over a
 1080p60 frame, and a burned-in karaoke caption track with word timing.
 
-usage: tools/gate6.py OUTDIR [--duration SECONDS]   (default 10)
-then:  scene-render encode OUTDIR/gate6.scene.xml --hw auto
+usage: tools/perf_text.py OUTDIR [--duration SECONDS]   (default 10)
+then:  scene-render encode OUTDIR/perf_text.scene.xml --hw auto
 """
 import os
 import sys
@@ -16,7 +16,7 @@ WORDS = ("every word lights up as it is sung while fifty animated titles "
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate6"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_text"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 10.0
     os.makedirs(out, exist_ok=True)
     assets, layers = [], []
@@ -44,7 +44,7 @@ def main():
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <scene version="1.1">
   <project width="1920" height="1080" fps="60" duration="{dur}" background="#0B0E12"/>
-  <output id="gate" path="gate6.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
+  <output id="perf" path="perf_text.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
   <assets>
 {chr(10).join(assets)}
   </assets>
@@ -58,7 +58,7 @@ def main():
   </captions>
 </scene>
 '''
-    path = os.path.join(out, "gate6.scene.xml")
+    path = os.path.join(out, "perf_text.scene.xml")
     with open(path, "w") as f:
         f.write(xml)
     print(path)

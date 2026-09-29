@@ -227,7 +227,7 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     var radiance = li.color.rgb;
     var a = s.rough * s.rough;
     if (ty == 0u) {
-        // ambient (conventions 5.20): dielectrics take it diffusely, albedo × radiance; metals reflect it
+        // ambient: dielectrics take it diffusely, albedo × radiance; metals reflect it
         // as a uniform environment of this radiance (split sum, as the dome), in proportion to metalness
         let nv = max(dot(s.n, s.v), 1e-3);
         let lut = textureSampleLevel(brdf_lut, clamp_smp, vec2(nv, s.rough), 0.0).rg;
@@ -301,7 +301,7 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     return out * radiance * nl;
 }
 
-// Equirect coordinates of a world direction: the image's centre column is the dome's +z (conventions 5.5).
+// Equirect coordinates of a world direction: the image's centre column is the dome's +z.
 fn env_uv(dir: vec3<f32>) -> vec2<f32> {
     let d = normalize((fr.env_rot * vec4(dir, 0.0)).xyz);
     let u = (atan2(d.x, d.z) + PI) / (2.0 * PI);

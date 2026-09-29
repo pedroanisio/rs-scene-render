@@ -118,7 +118,7 @@ pub struct Props {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub z_depth: Option<f64>,
-    /// Factors (1 = unchanged), as on nodes (CONVENTIONS 5.23).
+    /// Factors (1 = unchanged), as on nodes.
     pub scale: Option<f64>,
     pub scale_x: Option<f64>,
     pub scale_y: Option<f64>,
@@ -219,7 +219,7 @@ fn smooth(x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// Easing curves of the preset table (the Penner curves of the Python renderer's `curves.py`).
+/// Easing curves of the preset table (the Penner curves).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ease {
     Linear,
@@ -309,7 +309,7 @@ fn units(lay: &Layout, unit: Unit, role_span: Option<&dyn Fn(usize) -> bool>) ->
 
 /// Position of unit `i` of `n` in the selection order: forward i, reverse n − 1 − i,
 /// center-out 2·|i − c|, edges-in n − 1 − 2·|i − c| (c the middle index), random entry i of
-/// the D24 permutation of channel 0 ([`sr_vector::d24::permutation`]).
+/// the seeded permutation of noise channel 0 ([`sr_vector::d24::permutation`]).
 fn order_index(i: usize, n: usize, order: Order, seed: u64) -> f64 {
     let c = (n as f64 - 1.0) * 0.5;
     match order {
@@ -325,7 +325,7 @@ fn range_amount(sel: &Selector, i: usize, n: usize, t: f64) -> f64 {
     match sel {
         Selector::Values(v) => v.get(i).copied().unwrap_or(0.0) / 100.0,
         Selector::Wiggly { amount, rate, seed } => {
-            // D24 noise N(seed, 0, t · rate + 7.31 · i)
+            // fractal noise N(seed, 0, t · rate + 7.31 · i)
             sr_vector::d24::noise(*seed, 0, t * rate + i as f64 * 7.31) * amount / 100.0
         }
         Selector::Range {
@@ -390,7 +390,7 @@ enum Mode {
     Counter,
 }
 
-/// The preset table (CONVENTIONS 5.11: the Python renderer's `text_animators.py` PRESETS):
+/// The preset table:
 /// unit, timing mode, ease and overlap.
 fn table(kind: Preset) -> (Unit, Mode, Ease, f64) {
     use Ease::*;
@@ -835,7 +835,7 @@ pub fn apply(
             if s.abs() < 1e-6 && s_op.abs() < 1e-6 {
                 continue;
             }
-            // the Python renderer's combine: additive offsets add (replace moves toward the value),
+            // combining animators: additive offsets add (replace moves toward the value),
             // factors multiply by 1 + (v − 1)·s (replace moves toward the value)
             let add = |cur: &mut f64, v: Option<f64>| {
                 if let Some(v) = v {
@@ -862,7 +862,7 @@ pub fn apply(
             add(&mut ag.ry, props.rotation_y);
             add(&mut ag.skew, props.skew);
             add(&mut ag.sw, props.stroke_width);
-            // thousandths of an em (CONVENTIONS 5.23), accumulated along the line below
+            // thousandths of an em, accumulated along the line below
             add(&mut ag.tracking, props.tracking);
             add(&mut ag.line_sp, props.line_spacing);
             add(&mut ag.shift, props.baseline_shift);
@@ -958,7 +958,7 @@ pub fn offset_char(c: char, off: i64) -> char {
     }
 }
 
-/// A scrambled character: a letter of the same case or a digit, drawn from D24 as
+/// A scrambled character: a letter of the same case or a digit, drawn from the seeded noise hash as
 /// pool[⌊U(seed, character index, tick) · |pool|⌋]; other characters are kept.
 fn scramble_char(c: char, seed: u64, tick: i64, ci: usize) -> Option<char> {
     let pool: &[u8] = if c.is_uppercase() {

@@ -404,7 +404,7 @@ fn on_poly(q: &Poly, pt: P) -> bool {
 }
 
 /// Smooth 1D value noise in [−1, 1], keyed by seed and channel: lattice values
-/// 2 · U(seed, channel, k) − 1 of D24's hash (CONVENTIONS 5.19), smoothstep between.
+/// 2 · U(seed, channel, k) − 1 of the seeded lattice hash (`d24::d24_unit`), smoothstep between.
 pub fn smooth_noise(seed: u64, channel: u64, x: f64) -> f64 {
     let i = libm::floor(x);
     let f = x - i;

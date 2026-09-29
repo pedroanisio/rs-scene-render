@@ -73,7 +73,7 @@ pub use value::Value;
 #[derive(Debug)]
 pub struct Evaluator {
     program: program::Program,
-    /// Physics and particles (Batch 9), when the document has any.
+    /// Physics and particles, when the document has any.
     sim: Option<std::sync::Mutex<sim::Runtime>>,
 }
 

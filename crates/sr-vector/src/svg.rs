@@ -1,8 +1,8 @@
 //! SVG import through `usvg`: the normalised tree becomes a [`Scene`] in
 //! SVG user units. Groups with opacity below one, clip paths or masks
 //! become layers; clip paths become intersecting masks and `<mask>`
-//! becomes a luminance or alpha matte. Colours are sRGB. Text needs
-//! Batch 6; images, patterns and filters are reported and skipped.
+//! becomes a luminance or alpha matte. Colours are sRGB. Text is
+//! not imported; images, patterns and filters are reported and skipped.
 
 use crate::geom::{p, Xf};
 use crate::path::{Path, Poly};
@@ -184,7 +184,7 @@ impl Ctx {
                 }
             }
             usvg::Node::Image(_) => self.skipped.push("embedded image".into()),
-            usvg::Node::Text(_) => self.skipped.push("text (Batch 6)".into()),
+            usvg::Node::Text(_) => self.skipped.push("text".into()),
         }
     }
 
@@ -216,7 +216,7 @@ impl Ctx {
 
     fn group(&mut self, g: &usvg::Group, out: &mut Scene) {
         if !g.filters().is_empty() {
-            self.skipped.push(format!("filter on group {:?} (Batch 7)", g.id()));
+            self.skipped.push(format!("filter on group {:?}", g.id()));
         }
         if g.blend_mode() != usvg::BlendMode::Normal {
             self.skipped.push(format!("mix-blend-mode on group {:?} (drawn normal)", g.id()));

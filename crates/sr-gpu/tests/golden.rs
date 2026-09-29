@@ -1,4 +1,4 @@
-//! Golden-frame regression: a scene exercising every Batch 3 feature is
+//! Golden-frame regression: a scene exercising the core compositing features is
 //! rendered at several times and compared with PNGs in tests/golden
 //! (PSNR ≥ 50 dB and max ΔE2000 ≤ 1). `SR_BLESS=1` rewrites the goldens.
 

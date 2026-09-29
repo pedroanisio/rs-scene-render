@@ -57,7 +57,7 @@ fn primitive_areas_match_formulas() {
 
 #[test]
 fn closed_outlines_start_where_svg_2_starts_them() {
-    // CONVENTIONS 5.21: an ellipse starts at 3 o'clock, a rect at its top-left corner (x + rx, y),
+    // an ellipse starts at 3 o'clock, a rect at its top-left corner (x + rx, y),
     // both clockwise on screen (+y down), so a quarter trim of an ellipse is its bottom-right arc
     let e = shapes::ellipse(0.0, 0.0, 40.0, 20.0).flatten(0.01);
     assert!((e[0].pts[0].x - 40.0).abs() < 1e-9 && e[0].pts[0].y.abs() < 1e-9);
@@ -74,7 +74,7 @@ fn closed_outlines_start_where_svg_2_starts_them() {
 
 #[test]
 fn polygon_and_star_on_an_ellipse() {
-    // D16, D27: vertices on the ellipse of radii (rx, ry), first straight up, clockwise
+    // vertices on the ellipse of radii (rx, ry), first straight up, clockwise
     let d = shapes::polygon_on(p(0.0, 0.0), 4, p(20.0, 10.0), 0.0, 0.0).flatten(0.01);
     let v: Vec<(f64, f64)> = d[0].pts.iter().map(|q| (q.x.round(), q.y.round())).collect();
     assert_eq!(v, vec![(0.0, -10.0), (20.0, 0.0), (0.0, 10.0), (-20.0, 0.0)]);

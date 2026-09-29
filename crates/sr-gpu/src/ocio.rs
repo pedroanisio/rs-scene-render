@@ -1,7 +1,7 @@
 //! OpenColorIO configurations (`colorManagement@ocioConfig`), evaluated by OpenColorIO itself.
 //!
 //! OCIO is a C++ library with no C interface, so instead of linking it the renderer runs OCIO's
-//! own `ociobakelut` (shipped with the `opencolorio` Python wheel and OCIO builds), the way it
+//! own `ociobakelut` (shipped with the `opencolorio` Python package and OCIO builds), the way it
 //! runs FFmpeg for media. The config's transform from the working space through the looks to
 //! the display and view is baked onto a 129³ lattice indexed by the ACEScct curve of each working
 //! channel (so the lattice follows the working space's own axes, where configs clamp), which

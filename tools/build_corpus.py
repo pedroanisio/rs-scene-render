@@ -64,7 +64,7 @@ CASES = [
     ("s07-text", ["S07"], sub("<master/>", "<master>loud</master>")),
     ("s09-duplicate-id", ["S09"], sub('<bus id="fx"/>', '<bus id="fx"/>\n    <bus id="fx"/>')),
     ("s10-dangling-idref", ["S10"], sub('<audiogram id="wave" source="music"', '<audiogram id="wave" source="musik"')),
-    # ---- version gate
+    # ---- version check
     ("v1-sections", ["V1"], lambda t: v10("", '<markers><marker time="1"/></markers>')),
     ("v2-outputs", ["V2"], lambda t: '<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/><output path="a.mp4" codec="h264"/><output path="b.mp4" codec="h264"/><composition/></scene>\n'),
     ("v3-elements", ["V3"], lambda t: v10('<sequence id="s"/>')),

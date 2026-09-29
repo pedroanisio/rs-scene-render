@@ -30,7 +30,7 @@ fn opacity_rotation_and_anchor() {
 }
 
 /// CPU reference for B(Cb, Cs) with opaque source and backdrop (W3C
-/// Compositing and Blending Level 1 plus the After Effects modes, D14).
+/// Compositing and Blending Level 1 plus the After Effects modes).
 fn reference(mode: &str, b: [f32; 3], s: [f32; 3]) -> [f32; 4] {
     // W3C luminance for the non-separable modes and darker/lighter colour; Rec. 709 for the stencils
     let lum = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
@@ -191,7 +191,7 @@ fn stencil_alpha_cuts_the_backdrop_outside_the_layer() {
 
 #[test]
 fn the_project_background_goes_beneath_everything_last() {
-    // CONVENTIONS 5.13: the layers composite on transparency; behind, subtract and stencils do not see
+    // The layers composite on transparency; behind, subtract and stencils do not see
     // the background, which fills whatever the layers leave uncovered.
     let d = doc(
         r##"background="#0000FF""##,
@@ -214,7 +214,7 @@ fn the_project_background_goes_beneath_everything_last() {
 
 #[test]
 fn non_separable_modes_use_w3c_luminance() {
-    // D14: Lum = 0.3 R + 0.59 G + 0.11 B. `color` of pure green over grey l: SetLum((0, 1, 0), l) = (0, l / 0.59, 0).
+    // Lum = 0.3 R + 0.59 G + 0.11 B. `color` of pure green over grey l: SetLum((0, 1, 0), l) = (0, l / 0.59, 0).
     let d = doc(
         "",
         "",
@@ -227,7 +227,7 @@ fn non_separable_modes_use_w3c_luminance() {
 
 #[test]
 fn divide_takes_clamped_inputs() {
-    // D14: divide is cb / cs on inputs in [0, 1], and 1 where cs is 0 and cb is not.
+    // divide is cb / cs on inputs in [0, 1], and 1 where cs is 0 and cb is not.
     let d = doc(
         "",
         "",
@@ -260,7 +260,7 @@ fn partial_alpha_uses_the_general_compositing_formula() {
     assert_px(&r, 9, 1, [sc[0], sc[1], sc[2], 1.0], 3e-3);
 }
 
-/// The C renderer's dissolve hash of a frame pixel and the project seed (D14; CONVENTIONS 5.19).
+/// The dissolve hash of a frame pixel and the project seed.
 fn dissolve_hash(x: u32, y: u32, seed: u64) -> f32 {
     let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^= h >> 33;
@@ -322,7 +322,7 @@ fn masks_combine_modes_invert_and_feather() {
     assert_px(&r, 10, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
     assert_px(&r, 24, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
     assert_px(&r, 30, 4, [1.0; 4], 1e-3);
-    // D16: feather is a Gaussian of σ = 0.5 local units (2 pixels); the first pixel's centre lies
+    // feather is a Gaussian of σ = 0.5 local units (2 pixels); the first pixel's centre lies
     // 0.125 units inside the edge
     let edge = r.at(40, 8)[0];
     let centre = r.at(48, 8)[0];
@@ -339,7 +339,7 @@ fn masks_combine_modes_invert_and_feather() {
 
 #[test]
 fn masks_add_as_a_plus_m_minus_am() {
-    // D16: two half-opaque rectangles added overlap to 0.5 + 0.5 − 0.25
+    // two half-opaque rectangles added overlap to 0.5 + 0.5 − 0.25
     let d = doc(
         r##"background="#000000""##,
         "",
@@ -355,7 +355,7 @@ fn masks_add_as_a_plus_m_minus_am() {
 
 #[test]
 fn polygons_and_stars_lie_on_the_inscribed_ellipse() {
-    // D16, D27: a square (4 points) in a 2:1 box is a diamond touching the middle of every side,
+    // a square (4 points) in a 2:1 box is a diamond touching the middle of every side,
     // as a mask and as a shape
     let d = doc(
         r##"background="#000000""##,
@@ -548,7 +548,7 @@ fn mesh_gradient_corners() {
     assert!(r.at(0, 0)[0] > 0.95 && r.at(63, 0)[1] > 0.95 && r.at(0, 31)[2] > 0.95);
     let c = r.at(32, 16);
     assert!((c[0] - 0.5).abs() < 0.05 && (c[1] - 0.5).abs() < 0.05, "{c:?}");
-    // CONVENTIONS 5.18: positions and colours follow one Catmull-Rom surface, so a 2 × 2 grid is linear
+    // positions and colours follow one Catmull-Rom surface, so a 2 × 2 grid is linear
     // in position (not smoothstepped)
     let q = r.at(16, 0);
     let f = 16.5 / 64.0;
@@ -557,7 +557,7 @@ fn mesh_gradient_corners() {
 
 #[test]
 fn generator_patterns_and_gradient_geometry_follow_the_python_renderer() {
-    // CONVENTIONS 5.18: patterns centre on the asset (a 12-wide checkerboard of 4 px squares starts
+    // patterns centre on the asset (a 12-wide checkerboard of 4 px squares starts
     // mid-square), stripes repeat every 2 × scale, radial aspect stretches x, rotation pivots on the
     // box centre in pixels
     let assets = r##"<paints>
@@ -718,7 +718,7 @@ fn image_sequences_follow_source_time() {
 
 #[test]
 fn a_clip_that_does_not_loop_ends_with_its_media() {
-    // CONVENTIONS 5.16 (D9): the three-frame sequence at 10 fps runs out at 0.3 s
+    // the three-frame sequence at 10 fps runs out at 0.3 s
     let d = doc(
         r##"background="#000000""##,
         "",
@@ -750,11 +750,11 @@ fn working_spaces_and_non_linear_compositing() {
 }
 
 #[test]
-fn no_content_is_left_to_later_batches() {
-    // Batch 9 closed the last deferred node kind: particle emitters draw
+fn every_node_kind_is_supported() {
+    // particle emitters draw and report nothing as unsupported
     let d = doc(r##"background="#000000""##, "", r##"<particleEmitter id="sparks" preset="sparks" x="32" y="16"/>"##);
     let Some(r) = render_times(&d, &[1.0]) else { return };
-    assert!(r.stats.unsupported.iter().all(|u| !u.contains("Batch")), "{:?}", r.stats.unsupported);
+    assert!(r.stats.unsupported.is_empty(), "{:?}", r.stats.unsupported);
     assert!(r.px.iter().any(|p| p[0] > 0.1), "sparks drawn");
 }
 

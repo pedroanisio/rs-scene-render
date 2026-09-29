@@ -112,7 +112,7 @@ pub struct Gen {
     pub seed_hi: u32,
     /// Film grain: this frame's seed (low, high), then padding.
     pub grain: [u32; 4],
-    /// Perlin permutation of 0..255 (D24 draws), four per vector.
+    /// Perlin permutation of 0..255 (seeded 64-bit hash draws), four per vector.
     pub perm: [[u32; 4]; 64],
 }
 

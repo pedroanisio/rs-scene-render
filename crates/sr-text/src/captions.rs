@@ -552,7 +552,7 @@ impl Page {
 }
 
 /// Splits cues into pages of at most `max_lines` lines of `max_chars` characters and `max_words`
-/// words (the Python renderer's pagination, CONVENTIONS 5.12): the first page starts with its
+/// words: the first page starts with its
 /// cue, later ones with their first word, and each lasts until the next page starts (the
 /// last until the cue ends). `one_word` gives every word its own page (the one-word preset).
 pub fn paginate(
@@ -726,7 +726,7 @@ fn bounce_out(x: f64) -> f64 {
 }
 
 /// Per-glyph effects of a caption page at time `t`, for a layout of `page.text()`
-/// (the Python renderer's caption presets, CONVENTIONS 5.12). The active word is the last
+/// (caption presets). The active word is the last
 /// word that has started (it stays active through the gap before the next). Karaoke lights
 /// each word as a whole: from its start its fill cross-fades to `active` over its duration.
 pub fn effects(preset: Preset, lay: &Layout, page: &Page, t: f64, active: &Paint) -> Vec<GlyphFx> {

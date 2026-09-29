@@ -1,4 +1,4 @@
-//! Batch 9 on the GPU: physics bodies, soft bodies and particles from documents.
+//! Physics bodies, soft bodies and particles from documents.
 
 mod common;
 use common::*;
@@ -124,7 +124,7 @@ fn same(a: &Rendered, b: &Rendered) -> bool {
 
 #[test]
 fn flocks_fluids_slime_and_erosion_draw_and_seek_deterministically() {
-    // Phase 5 simulations: each draws, changes over time, and reaching a time directly
+    // Flock, fluid, slime and erosion simulations: each draws, changes over time, and reaching a time directly
     // gives the same frame as playing up to it
     let cases = [
         r#"<flock id="s" width="64" height="64" count="80" seed="2" size="3" shape="disc"/>"#,

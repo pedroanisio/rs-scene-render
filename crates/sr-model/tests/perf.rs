@@ -1,4 +1,4 @@
-//! Batch 1 exit gate: a 10,000-node document validates and loads in under
+//! Load performance: a 10,000-node document validates and loads in under
 //! 200 ms (release build). Debug builds report the time without asserting.
 
 use std::fmt::Write;

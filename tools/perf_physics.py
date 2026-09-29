@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Batch 9 benchmark scene: simulation at 1080p60.
+"""Physics performance scene: simulation at 1080p60.
 
-usage: tools/gate9.py OUTDIR [--duration SECONDS]
-    Writes gate9.scene.xml: 200 rigid bodies (boxes and circles) falling in a
+usage: tools/perf_physics.py OUTDIR [--duration SECONDS]
+    Writes perf_physics.scene.xml: 200 rigid bodies (boxes and circles) falling in a
     frame-bounded world under a vortex field, a jelly soft body, a pinned
     cloth, and three emitters (fire, sparks that collide with the bodies, and
     snow) holding up to 12,000 live particles. Every frame advances the
     simulation, so nothing is served from caches.
-    then: scene-render render OUTDIR/gate9.scene.xml --bench --frames 60..120
+    then: scene-render render OUTDIR/perf_physics.scene.xml --bench --frames 60..120
 """
 import os
 import sys
@@ -41,10 +41,10 @@ def scene(dur):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate9"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_physics"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 10.0
     os.makedirs(out, exist_ok=True)
-    path = os.path.join(out, "gate9.scene.xml")
+    path = os.path.join(out, "perf_physics.scene.xml")
     with open(path, "w") as f:
         f.write(scene(dur))
     print(path)

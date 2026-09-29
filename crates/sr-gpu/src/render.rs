@@ -122,7 +122,7 @@ struct Job {
     flow: Option<(Arc<Tex>, Arc<Tex>, fx::FlowSlot)>,
     /// Whether the job draws into `target` (effect-only jobs do not).
     draw: bool,
-    /// Particles drawn into `target` before anything else (Batch 9).
+    /// Particles drawn into `target` before anything else.
     parts: Option<Box<crate::particles::ParticleJob>>,
 }
 
@@ -140,7 +140,7 @@ struct GenJob {
 /// The `behind` blend code; a draw with it and no backdrop copy uses the fixed-function
 /// destination-over pipeline (the project background).
 const BLEND_UNDER: u32 = 34;
-/// Adjustment layers: backdrop + (effect − backdrop) · coverage (D17, CONVENTIONS 5.6).
+/// Adjustment layers: backdrop + (effect − backdrop) · coverage.
 pub(crate) const BLEND_ADJUST: u32 = 35;
 
 #[derive(Clone, Copy)]
@@ -168,7 +168,7 @@ struct Plan {
     /// Colour finishing on the frame, and its result (copied back into the frame).
     post: Vec<fx::Pass>,
     post_out: Option<Arc<Tex>>,
-    /// Contrast probes: node id, target rectangle, backdrop snapshot (Batch 9).
+    /// Contrast probes: node id, target rectangle, backdrop snapshot.
     probes: Vec<(String, [u32; 4], Arc<Tex>)>,
 }
 
@@ -270,7 +270,7 @@ pub struct Renderer {
     persistent_isf: Option<bool>,
     /// The frame rendered last (ISF feedback replays on a seek).
     last_frame: Option<i64>,
-    /// The project seed (D24 draws default to it).
+    /// The project seed (seeded 64-bit hash draws default to it).
     pub(crate) seed: u64,
 }
 
@@ -474,7 +474,7 @@ impl Renderer {
         let from_srgb = color::convert(m::ColorSpace::LinearSrgb, working.space);
         let g = Globals {
             linear_light: working.linear as u32,
-            // the project seed as a u64 (low, high) for D24 draws
+            // the project seed as a u64 (low, high) for seeded 64-bit hash draws
             seed: program.seed as u32,
             pad: [(program.seed >> 32) as u32, 0],
             to_srgb: types::mat3(&to_srgb),
@@ -920,7 +920,7 @@ impl Renderer {
         };
         let (ia, ib) = (paint_index(&pa, plan), paint_index(&pb, plan));
         let kind = m::GeneratorAssetKind::ALL.iter().position(|k| *k == gen.kind).unwrap_or(0) as u32;
-        // D24 draws with the Python renderer's generator seed (CONVENTIONS 5.18, 5.19)
+        // seeded 64-bit hash draws with generator seed
         let seed = sr_eval::rng::element_seed(p.seed, &gen.id, gen.seed, "generator");
         let evolution = num("evolution", gen.evolution);
         let frame = libm::floor(g.time * p.fps.as_f64() + 1e-6) as i64;
@@ -1039,7 +1039,7 @@ impl Renderer {
                     None
                 }
                 m::MaskKind::Polygon | m::MaskKind::Star => {
-                    // D16 (CONVENTIONS 5.15): vertices on the ellipse inscribed in the box, from the top,
+                    // vertices on the ellipse inscribed in the box, from the top,
                     // clockwise; a star's inner vertices on that ellipse scaled by `innerRadius` (0.5)
                     let pts = mk.points.max(3) as usize;
                     let (cx, cy, rx, ry) = (x + w / 2.0, y + hh / 2.0, w / 2.0, hh / 2.0);
@@ -1127,7 +1127,7 @@ impl Renderer {
                 Some(([z, rx, ry], anchor)) => {
                     let a = xf.apply(anchor);
                     let (mut vx, mut vy, mut vz) = (p[0] - a[0], p[1] - a[1], 0.0);
-                    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge (conventions 5.14)
+                    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
                     let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
                     let ny = vy * cx + vz * sx;
                     vz = -vy * sx + vz * cx;
@@ -2181,7 +2181,7 @@ impl Renderer {
     // ---------------------------------------------------------- frame
 
     /// The project background. The composition composites on transparency and the background goes
-    /// beneath everything last (CONVENTIONS 5.13, After Effects), so `behind`, `subtract`, stencils and
+    /// beneath everything last (as After Effects does), so `behind`, `subtract`, stencils and
     /// silhouettes act on the layers only.
     fn background(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
         let g = ctx.g;

@@ -1,4 +1,4 @@
-//! Batch 6 on the GPU: text layers with animators, charts, codes,
+//! Text layers with animators, charts, codes,
 //! formulas, colour emoji and burned-in captions.
 
 mod common;
@@ -43,7 +43,7 @@ fn text_charts_codes_formulas_and_captions() {
     );
     let Some(r) = render_times(&d, &[0.0, 2.0]) else { return };
     assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
-    assert!(r.stats.unsupported.iter().all(|u| !u.contains("Batch 6")), "{:?}", r.stats.unsupported);
+    assert!(r.stats.unsupported.is_empty(), "{:?}", r.stats.unsupported);
     // red text in its box, nothing red elsewhere
     assert!(sum(&r, 0, 0, 200, 60, 0) > 300.0);
     assert!(sum(&r, 0, 0, 200, 60, 2) < 1.0);

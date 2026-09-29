@@ -14,5 +14,5 @@
 // screen-space ambient occlusion (r) and the prepass's view depth (r) and reflectance (g)
 @group(0) @binding(12) var ao_tex: texture_2d<f32>;
 @group(0) @binding(13) var gb_depth: texture_2d<f32>;
-// the visible sky at the source's resolution (conventions 5.5)
+// the visible sky at the source's resolution
 @group(0) @binding(14) var sky_tex: texture_2d<f32>;

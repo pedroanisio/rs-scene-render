@@ -160,7 +160,7 @@ fn render_writes_png_frames() {
         String::from_utf8_lossy(&o.stderr)
     );
     let text = String::from_utf8_lossy(&o.stdout);
-    // the shape renders since Batch 5: nothing is reported as not rendered yet
+    // the shape renders: nothing is reported as not rendered yet
     assert!(text.contains("wrote") && !text.contains("not rendered yet"), "{text}");
     let img = image::open(dir.join("one.png")).unwrap().to_rgba8();
     assert_eq!(img.dimensions(), (48, 32));

@@ -127,7 +127,7 @@ fn local3(a: &Attrs) -> Mat4 {
         ))
 }
 
-/// Pose of a camera or light: T(x, y, z) · R_yaw · R_pitch · R_roll (conventions 2.4).
+/// Pose of a camera or light: T(x, y, z) · R_yaw · R_pitch · R_roll.
 fn pose3(a: &Attrs) -> Mat4 {
     let deg = |n: &str| (a.num(n, 0.0) as f32).to_radians();
     Mat4::from_translation(Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32))
@@ -184,7 +184,7 @@ impl Renderer {
         }
     }
 
-    /// World matrix of the frame a parented element's own transform is in (conventions 5.3, 5.4),
+    /// World matrix of the frame a parented element's own transform is in,
     /// weighted by the parent constraint's influence.
     fn parent_world(g: &FrameGraph, lights: &[m::Light], e: &dyn Element, depth: u32) -> Option<Mat4> {
         if depth >= 32 {
@@ -256,7 +256,7 @@ impl Renderer {
             yaw: a.num("yaw", 0.0) as f32,
             pitch: a.num("pitch", 0.0) as f32,
             roll: a.num("roll", 0.0) as f32,
-            // a parented camera's position and angles are in its parent's frame (conventions 5.4)
+            // a parented camera's position and angles are in its parent's frame
             frame: Self::parent_world(g, lights, &*n.elem, depth),
             ..Default::default()
         };
@@ -273,7 +273,7 @@ impl Renderer {
             if t < sa.num("start", 0.0) || sa.opt("end").map(|e| t >= e).unwrap_or(false) {
                 continue;
             }
-            // D24: four fractal channels at frequency · t, with @seed or the project's seed
+            // four fractal channels at frequency · t, with @seed or the project's seed
             let seed = sa.opt("seed").map(|s| s as u64).unwrap_or(g.seed);
             let (f, oct) = (sa.num("frequency", 2.0), sa.num("octaves", 2.0).max(1.0) as u32);
             let noise = [0, 1, 2, 3].map(|k| sr_eval::rng::fractal(seed, k, f * t, oct));
@@ -604,7 +604,7 @@ impl Renderer {
             "plane" => Ok(sr_3d::prim::plane(w, hh.unwrap_or(2.0 * r), 1)),
             "cylinder" => Ok(sr_3d::prim::cylinder(r, r, hh.unwrap_or(2.0 * r), segs)),
             "cone" => Ok(sr_3d::prim::cylinder(0.0, r, hh.unwrap_or(2.0 * r), segs)),
-            // tube radius: half the height, else 0.35 of the ring radius (the Python renderer's, conventions 5.20)
+            // tube radius: half the height, else 0.35 of the ring radius
             "torus" => Ok(sr_3d::prim::torus(r, hh.map(|h| h * 0.5).unwrap_or(0.35 * r).min(r), segs)),
             "capsule" => Ok(sr_3d::prim::capsule(r, hh.unwrap_or(4.0 * r).max(2.0 * r), segs)),
             "extrude" => a
@@ -866,7 +866,7 @@ impl Renderer {
                 }
             }
             let scale = a.num("intensity", 1.0) as f32 * 2f32.powf(a.num("exposure", 0.0) as f32);
-            // pose in the parent's frame when parented (conventions 5.4)
+            // pose in the parent's frame when parented
             let world = Self::pose_world(ctx.g, &ls.lights, l, &a, 0);
             let dir = world.transform_vector3(Vec3::Z).normalize();
             let right = world.transform_vector3(Vec3::X).normalize();
@@ -1415,7 +1415,7 @@ impl Renderer {
             && env.is_none()
             && ctx.p.scene.lights.as_ref().map(|l| l.lights.is_empty()).unwrap_or(true)
         {
-            // no lights in the document: the Python renderer's neutral rig (conventions 5.20), ambient 0.35
+            // no lights in the document: neutral rig, ambient 0.35
             // (a uniform environment, so metals reflect it) and a directional key from the upper left
             // front whose irradiance π · 0.65 brings a white Lambertian surface facing it to 1
             let base = Light3 {

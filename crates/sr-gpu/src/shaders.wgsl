@@ -138,7 +138,7 @@ fn rounded_half_width(h: vec2<f32>, r: f32, y: f32) -> f32 {
 }
 
 // Coverage of one mask before invert and opacity. Feather is a Gaussian blur of standard deviation
-// `feather` local units (D16): for rectangles, rounded rectangles and ellipses it integrates the blurred
+// `feather` local units: for rectangles, rounded rectangles and ellipses it integrates the blurred
 // outline row by row (exact for rectangles); polygons and paths take Φ of the signed distance, exact
 // along straight edges. Expansion grows or shrinks the outline first (a disc's maximum or minimum).
 fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
@@ -199,7 +199,7 @@ fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
     v = v * m.opacity;
     switch (m.mode) {
       case 0u: { cov = cov * v; }                  // intersect
-      case 1u: { cov = cov + v - cov * v; }        // add (D16: a + m − a·m)
+      case 1u: { cov = cov + v - cov * v; }        // add (a + m − a·m)
       case 2u: { cov = cov * (1.0 - v); }          // subtract
       case 3u: { cov = max(cov, v); }              // lighten
       case 4u: { cov = min(cov, v); }              // darken
@@ -229,7 +229,7 @@ fn blend_soft(b: f32, s: f32) -> f32 {
   if (b <= 0.25) { dd = ((16.0 * b - 12.0) * b + 4.0) * b; }
   return b + (2.0 * s - 1.0) * (dd - b);
 }
-// W3C Compositing Level 1 luminance, for the non-separable modes and darker/lighter colour (D14)
+// W3C Compositing Level 1 luminance, for the non-separable modes and darker/lighter colour
 fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3(0.3, 0.59, 0.11)); }
 fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
   let d = l - lum(c);
@@ -250,7 +250,7 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 }
 
 // Separable and non-separable B(Cb, Cs) on straight colours. add, multiply and difference pass HDR
-// values through; the other modes take their inputs clamped to [0, 1] (D14).
+// values through; the other modes take their inputs clamped to [0, 1].
 fn blend_fn(mode: u32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
   var b = cb; var s = cs;
   if (mode != 2u && mode != 17u && mode != 4u && mode != 7u) {
@@ -375,7 +375,7 @@ fn shade(v: VOut) -> vec4<f32> {
   }
   c = c * cov;
   COV = cov;
-  if (d.blend == 1u) {                                                   // dissolve (D14, C's hash)
+  if (d.blend == 1u) {                                                   // dissolve
     let r = dissolve_hash(pixel.x, pixel.y, vec2(globals.seed, globals.pad0));
     if (c.a > 0.0 && r < c.a) { c = vec4(c.rgb / c.a, 1.0); } else { c = vec4(0.0); }
   }
@@ -428,9 +428,9 @@ fn vs_full(@builtin(vertex_index) i: u32) -> GOut {
   return o;
 }
 
-// Noise kinds of the Python renderer (CONVENTIONS 5.18) over D24 draws (5.19): improved
-// Perlin noise with the gradient table of scenerender/assets/generator.py over a
-// permutation of D24 draws, and lattice values U(seed, k, pack(i, j)).
+// Noise kinds over seeded 64-bit hash draws: improved
+// Perlin noise with a fixed gradient table over a
+// permutation of seeded 64-bit hash draws, and lattice values U(seed, k, pack(i, j)).
 
 var<private> GRAD3: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
   vec3(1.0, 1.0, 0.0), vec3(-1.0, 1.0, 0.0), vec3(1.0, -1.0, 0.0), vec3(-1.0, -1.0, 0.0),
@@ -560,8 +560,8 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
   let a = gen_paint(gen.paint_a, p, pixel);
   let b = gen_paint(gen.paint_b, p, pixel);
   if (is_noise_kind(gen.kind)) {
-    // paint2 → paint by the field, premultiplied in display sRGB (as the Python renderer's
-    // 8-bit surfaces mix)
+    // paint2 → paint by the field, premultiplied in display sRGB (as 8-bit
+    // surfaces mix)
     let pa = vec4(to_space(a.rgb, 1u) * a.a, a.a);
     let pb = vec4(to_space(b.rgb, 1u) * b.a, b.a);
     let m = mix(pb, pa, noise_field(p));
@@ -578,7 +578,7 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
       let ext = abs(dir.x) * gen.size.x * 0.5 + abs(dir.y) * gen.size.y * 0.5;
       t = clamp(dot(p - c, dir) / max(ext, 1e-3) * 0.5 + 0.5, 0.0, 1.0);
     }
-    // The patterns (CONVENTIONS 5.18, the Python renderer's): pattern space has its origin at the
+    // The patterns: pattern space has its origin at the
     // asset's centre, turns clockwise by `angle` and scrolls along its x by `evolution` periods.
     case 5u: {                                                                    // checkerboard: `scale` squares, paint at the origin's
       let q = floor(pattern_space(p, 2.0 * s) / s);
@@ -599,7 +599,7 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
   t = clamp((t - 0.5) * gen.contrast + 0.5, 0.0, 1.0);
   // t = 0 → paint, t = 1 → paint2
   if (gen.kind == 1u) {
-    // the gradient mixes premultiplied sRGB-encoded colours (CONVENTIONS 5.18, the Python renderer's)
+    // the gradient mixes premultiplied sRGB-encoded colours
     let pa = vec4(to_space(a.rgb, 1u) * a.a, a.a);
     let pb = vec4(to_space(b.rgb, 1u) * b.a, b.a);
     let m = mix(pa, pb, t);

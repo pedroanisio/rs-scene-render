@@ -1,5 +1,5 @@
-//! Batch 2 exit gate: 5,000 animated properties with 500 expressions
-//! evaluate in under 2 ms per frame on one core (release build).
+//! Cost of evaluating 5,000 animated properties with 500 expressions: the median frame
+//! takes under 2 ms on one core (release build).
 
 use std::fmt::Write;
 use std::time::Instant;

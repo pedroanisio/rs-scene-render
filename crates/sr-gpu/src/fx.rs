@@ -837,13 +837,13 @@ pub struct Cx<'a> {
     pub named: HashMap<String, Arc<Tex>>,
     /// The audio mix, when the render has one (ISF audio inputs).
     pub audio: Option<Arc<crate::shader::AudioSignals>>,
-    /// The project seed (seeded effects draw from D24 with per-element seeds derived from it).
+    /// The project seed (seeded effects draw from the seeded 64-bit hash with per-element seeds derived from it).
     pub seed: u64,
 }
 
-/// The seed of an effect's D24 draws (the Python renderer's `Params.rng`): the CRC-32
+/// The seed of an effect's seeded 64-bit hash draws (`Params.rng`): the CRC-32
 /// element seed of the project seed, the effect's id and @seed, with the seed's value as a
-/// Python float prints (`0.0` when absent, `7.0` for seed="7") as the purpose.
+/// float print (`0.0` when absent, `7.0` for seed="7") as the purpose.
 pub fn effect_seed(project: u64, e: &dyn Element, seed: Option<f64>) -> u64 {
     let v = seed.unwrap_or(0.0);
     let purpose = if v.fract() == 0.0 && v.abs() < 1e16 { format!("{v:.1}") } else { format!("{v}") };
@@ -1085,27 +1085,27 @@ impl Builder<'_> {
         };
         let big = |r: f64| if r <= 4.0 * px + 1e-9 { w.min(h) * 0.5 } else { r };
         let mut v = [[0.0f32; 4]; 8];
-        // seeded ops read the effect's D24 seed from i.yz
+        // seeded ops read the effect's hash seed from i.yz
         let es = effect_seed(cx.seed, e, a.opt("seed"));
         let ids = |op: u32| [op, es as u32, (es >> 32) as u32, 0];
         let color_op = |b: &mut Self, op: u32, v: [[f32; 4]; 8], aux: Aux| {
             b.run(Entry::Color, ids(op), v, input, aux, None, None, input.size)
         };
         Ok(match kind {
-            // the Python renderer's separable Gaussian (σ = radius), edges transparent
+            // separable Gaussian (σ = radius), edges transparent
             "blur" => self.gauss(input, r),
             "glow" | "bloom" | "halation" => {
                 let tint = match kind {
                     "halation" => lin(colour("color", [1.0, 0.3, 0.12, 1.0])),
                     _ => lin(colour("color", [1.0; 4])),
                 };
-                // glow keeps the part of each pixel above `threshold` of its working-space luminance (D9)
+                // glow keeps the part of each pixel above `threshold` of its working-space luminance
                 v[0] = [threshold as f32, if kind == "glow" { 0.0 } else { 0.5 }, 0.0, 0.0];
                 v[1] = [tint[0] as f32, tint[1] as f32, tint[2] as f32, 1.0];
                 let bright = self.simple(Entry::Pre, 0, v, input, Aux::None);
-                // radius is the glow's standard deviation, as the blur effect's (D9)
+                // radius is the glow's standard deviation, as the blur effect's
                 let blurred = self.blur(&bright, r.max(0.5));
-                // CONVENTIONS 5.6: the bloom is added over the content, as the C renderer does
+                // the bloom is added over the content
                 self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
             }
             "drop-shadow" | "inner-shadow" | "inner-glow" => {
@@ -1114,10 +1114,10 @@ impl Builder<'_> {
                 v[0] = [0.0, 0.0, off[0], off[1]];
                 v[1] = v4(c);
                 let pre = self.simple(Entry::Pre, if kind == "drop-shadow" { 1 } else { 2 }, v, input, Aux::None);
-                // a drop shadow's radius is twice the standard deviation (CSS drop-shadow(), D9);
+                // a drop shadow's radius is twice the standard deviation (CSS drop-shadow());
                 // the inner styles' radius is the standard deviation, as the blur effect's
                 let b = self.blur(&pre, if kind == "drop-shadow" { r * 0.5 } else { r });
-                // CONVENTIONS 5.6: a drop shadow goes behind the content by default; the inner styles
+                // a drop shadow goes behind the content by default; the inner styles
                 // are drawn over it
                 let mode = if kind == "drop-shadow" {
                     match a.str("compositeOriginal").as_deref() {
@@ -1351,7 +1351,7 @@ impl Builder<'_> {
                 color_op(self, 20, v, Aux::None)
             }
             "film-grain" => {
-                // the Python renderer's grain (CONVENTIONS 5.19): D24 normals per sample, drawn from the
+                // grain: seeded-hash normals per sample, drawn from the
                 // effect's seed with the frame as the channel, blurred by σ = (size − 1) / 2 px,
                 // weighted by (4v(1 − v))^response per channel in linear light
                 let sigma = ((sz * px - 1.0) / 2.0).max(0.0);
@@ -1372,7 +1372,7 @@ impl Builder<'_> {
                 }
             }
             "noise" => {
-                // D24 uniforms in [-1, 1) per sample on the frame's channel, times amount, in display values
+                // seeded-hash uniforms in [-1, 1) per sample on the frame's channel, times amount, in display values
                 let mono = a.str("channel").is_some_and(|c| c != "rgb") || a.num("saturation", 1.0) == 0.0;
                 v[0] = [amount as f32, cx.frame.max(0) as f32, if mono { 1.0 } else { 3.0 }, 0.0];
                 color_op(self, 22, v, Aux::None)
@@ -1384,7 +1384,7 @@ impl Builder<'_> {
                 color_op(self, 23, v, Aux::None)
             }
             "vignette" => {
-                // D9 (CONVENTIONS 5.8): darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the
+                // darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the
                 // distance from the centre over the half diagonal and r₀ = radius / half diagonal; absent
                 // attributes take the schema's effect defaults (amount 1, radius 4, softness 0.1)
                 let c = colour("color", [0.0, 0.0, 0.0, 1.0]);
@@ -1467,7 +1467,7 @@ impl Builder<'_> {
                 color_op(self, 74, v, Aux::None)
             }
             "glitch" => {
-                // the Python renderer's glitch (CONVENTIONS 5.19): D24 draws of the effect's seed
+                // glitch: seeded 64-bit hash draws of the effect's seed
                 // on the frame's channel — rows shifted sideways, then blocks copied from the
                 // input, channel delay and quantisation
                 let amount_px = amount * px;
@@ -1616,7 +1616,7 @@ impl Builder<'_> {
                         }
                     }
                     "chromatic-aberration" => {
-                        // CONVENTIONS 5.18: `amount` pixels at the input's farthest corner from its centre;
+                        // `amount` pixels at the input's farthest corner from its centre;
                         // the input is the node's content box (the frame for adjustment layers)
                         let b = cx.content.unwrap_or([0.0, 0.0, w, h]);
                         let c = match (a.opt("centerX"), a.opt("centerY")) {
@@ -1888,7 +1888,7 @@ impl Builder<'_> {
         let (from, to) = (&pre(self, from, x.shrink[0]), &pre(self, to, x.shrink[1]));
         match kind {
             "blur" => {
-                // the Python renderer's blur: both sides blurred (σ peaks at the cut), mixed by m
+                // blur: both sides blurred (σ peaks at the cut), mixed by m
                 let sigma = pparam(e, "amount", 0.03) * fw.max(fh) * (1.0 - (2.0 * p - 1.0).abs());
                 let m = sstep(0.3, 0.7, p);
                 let fa = if m < 1.0 { self.py_gaussian(from, sigma, sigma, true, true) } else { from.clone() };
@@ -1926,8 +1926,8 @@ impl Builder<'_> {
 }
 
 impl Builder<'_> {
-    /// The Python renderer's effect gaussian (`effects.gaussian`): separable, edges transparent
-    /// (CONVENTIONS 5.7); σ > 4 as three box passes of width ⌊√(4σ² + 1)⌋ (odd), else the
+    /// The effect gaussian: separable, edges transparent;
+    /// σ > 4 as three box passes of width ⌊√(4σ² + 1)⌋ (odd), else the
     /// kernel sampled over ±⌈3σ⌉.
     pub fn gauss(&mut self, src: &Arc<Tex>, sigma: f64) -> Arc<Tex> {
         if sigma < 0.3 {
@@ -1945,7 +1945,7 @@ impl Builder<'_> {
         cur
     }
 
-    /// The Python renderer's transition gaussian (`transitions.gaussian`): three box passes per
+    /// The transition gaussian: three box passes per
     /// axis of width ⌊√(4σ² + 1)⌋ (odd), edges transparent or extended (`clamp`); an isotropic
     /// σ > 2.5 runs on a copy downsampled by f = min(8, max(2, ⌊σ / 2.5⌋)).
     pub fn py_gaussian(&mut self, src: &Arc<Tex>, sx: f64, sy: f64, clamp: bool, iso: bool) -> Arc<Tex> {
@@ -1976,18 +1976,18 @@ impl Builder<'_> {
     }
 }
 
-/// Smoothstep with the Python renderer's clamping (`transitions.sstep`).
+/// Smoothstep with clamping (`transitions.sstep`).
 fn sstep(e0: f64, e1: f64, x: f64) -> f64 {
     let t = ((x - e0) / (e1 - e0).max(1e-9)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// A transition's `<param name value>` (the Python renderer's `transitions.param`).
+/// A transition's `<param name value>` (`transitions.param`).
 fn pparam(e: &dyn Element, name: &str, default: f64) -> f64 {
     params_of(e).into_iter().find(|p| p.0 == name).and_then(|p| p.1.first().map(|v| *v as f64)).unwrap_or(default)
 }
 
-/// The per-type parameters of the Python renderer's transitions (CONVENTIONS 5.17), in v4..v7,
+/// The per-type parameters of transitions, in v4..v7,
 /// and the data table of the seeded types (in aux2).
 struct TransitionExtras {
     v: [[f32; 4]; 4],
@@ -2202,7 +2202,7 @@ impl TransitionExtras {
                             "transition:glitch",
                         );
                         let frame = (cx.time * cx.fps).round_ties_even() as i64 as u64;
-                        // the Python renderer's Rng: one counter for uniform and normal draws
+                        // Rng: one counter for uniform and normal draws
                         let n = std::cell::Cell::new(0u64);
                         let u = || {
                             let x = sr_eval::rng::d24_unit(seed, frame, n.get());

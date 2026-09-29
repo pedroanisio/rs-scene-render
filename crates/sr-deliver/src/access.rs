@@ -1,4 +1,4 @@
-//! Accessibility checks on rendered frames (Batch 9).
+//! Accessibility checks on rendered frames.
 //!
 //! **Flash analysis** follows ITU-R BT.1702 and WCAG 2.3.1. Each frame
 //! arrives as a 48 × 27 grid of display-referred linear sRGB. In every cell:

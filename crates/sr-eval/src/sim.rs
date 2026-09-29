@@ -1,4 +1,4 @@
-//! Simulation in the evaluator (Batch 9): physics bodies, soft bodies,
+//! Simulation in the evaluator: physics bodies, soft bodies,
 //! force fields and particle emitters of a document, stepped by `sr-sim`
 //! from `physics@start` and applied to each FrameGraph.
 //!
@@ -275,7 +275,6 @@ pub(crate) struct FieldSrc {
 
 /// A field in document units (m/s² with +y up, radius in metres; positive radial strength
 /// attracts) as the simulation's pixel-space field (px/s², +y down; positive radial repels).
-/// Conventions 5.9 and the C renderer's D8.
 fn to_pixels(mut f: Field, ppm: f64) -> Field {
     f.force = [f.force[0] * ppm, -f.force[1] * ppm];
     f.radius = f.radius.map(|r| r * ppm);
@@ -544,7 +543,7 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
                     };
                     let (rows, cols) =
                         (num(c, "rows", 4.0).clamp(2.0, 16.0) as usize, num(c, "cols", 4.0).clamp(2.0, 16.0) as usize);
-                    // jelly and cloth: a lattice of (rows + 1) × (cols + 1) points (conventions 5.10, D7);
+                    // jelly and cloth: a lattice of (rows + 1) × (cols + 1) points;
                     // a rope is one chain of `cols` points
                     let (rows, cols) = if kind == SoftKind::Rope { (rows, cols) } else { (rows + 1, cols + 1) };
                     let mut rest_local = Vec::with_capacity(rows * cols);

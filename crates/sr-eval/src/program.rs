@@ -44,7 +44,7 @@ pub struct EvalOptions {
     pub analysis: Analysis,
 }
 
-/// Per-track audio analysis, filled by the media pipeline (Batch 4).
+/// Per-track audio analysis, filled by the media pipeline.
 #[derive(Debug, Clone, Default)]
 pub struct Analysis {
     /// Frames per second of the envelopes.
@@ -111,7 +111,7 @@ pub struct MediaClock {
     pub loops: u64,
     /// Play backwards.
     pub reverse: bool,
-    /// Local time whose source frame is held for the node's whole window (conventions 5.16).
+    /// Local time whose source frame is held for the node's whole window.
     pub freeze_at: Option<f64>,
     /// timeRemap channel (local time → source seconds).
     pub remap: Option<Channel>,
@@ -264,7 +264,7 @@ pub struct InstNode {
     /// Animated transform sources.
     pub tf_slots: TfSlots,
     /// Stacking order among siblings. `object3D` and `camera` take `z` as a depth in scene units,
-    /// so theirs is 0 (the Python engine's rule).
+    /// so theirs is 0.
     pub z: i32,
     /// Slot of an animated `z`, when the stacking order can change between frames.
     pub z_slot: Option<u32>,
@@ -425,7 +425,7 @@ pub struct TransitionInst {
     pub ease: Ease,
     /// Container whose timeline the window lives on.
     pub container: Option<u32>,
-    /// The `luma` matte sibling, which is not drawn itself (D19).
+    /// The `luma` matte sibling, which is not drawn itself.
     pub matte: Option<u32>,
 }
 
@@ -1134,7 +1134,7 @@ impl Builder {
                 }
             };
             // object3D/@instances: one node per copy, each evaluated with its own index and count
-            // (CONVENTIONS 5.2); copy 0 keeps the id, copy k is `id[k]`.
+            // copy 0 keeps the id, copy k is `id[k]`.
             let copies = if name == "object3D" { attr_num(n, "instances").unwrap_or(1.0).max(1.0) as u32 } else { 1 };
             if copies > 1 {
                 let mut one = n.clone();
@@ -1787,7 +1787,7 @@ impl Builder {
                 if explicit.contains(&(ida, idb)) {
                     continue;
                 }
-                // D19: the cut is from's end
+                // the cut is from's end
                 let cut = self.nodes[a as usize].end.unwrap_or(self.nodes[b as usize].start);
                 let d = s.transition_duration.get();
                 self.transitions.push(TransitionInst {
@@ -1921,7 +1921,7 @@ fn snapshot(e: &dyn Element, tokens: &HashMap<String, [f64; 4]>) -> Vec<(&'stati
 }
 
 /// Numeric `<param name value>` children of shader effects and transitions, as animatable properties:
-/// `<animate property="NAME">` then drives the uniform of the same name, as in the Python engine.
+/// `<animate property="NAME">` then drives the uniform of the same name.
 fn shader_params(e: &dyn Element, known: &[(&'static str, PropKind, Value)]) -> Vec<(&'static str, PropKind, Value)> {
     const NUM: PropKind = PropKind::Number(crate::value::Range { lo: None, hi: None, integer: false });
     sr_model::element::children(e)
@@ -2022,7 +2022,7 @@ impl Builder {
                     }
                     match self.slot(owner, &x.property) {
                         Ok(slot) => {
-                            // D25 `seed`: the expression's @seed, else the project's
+                            // the expression's @seed, else the project's
                             let seed = x.seed.unwrap_or(self.project_seed);
                             self.pending_expr.push((
                                 Some(slot),
@@ -2237,7 +2237,7 @@ impl Builder {
             let from = t.from.as_ref().and_then(|f| self.resolve(&scope, f));
             let to = t.to.as_ref().and_then(|x| self.resolve(&scope, x));
             let matte = t.matte.as_ref().and_then(|x| self.resolve(&scope, x));
-            // D19: the cut is from's end, or to's start when there is no from (or from never ends)
+            // the cut is from's end, or to's start when there is no from (or from never ends)
             let cut = match (from.and_then(|a| self.nodes[a as usize].end), from, to) {
                 (Some(end), _, _) => end,
                 (None, _, Some(b)) => self.nodes[b as usize].start,

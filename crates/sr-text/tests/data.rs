@@ -120,7 +120,7 @@ fn presets_and_selectors() {
     assert_eq!(animate::counter_progress(0.0, 1.0, 100.0, 1.0), None, "at the end the text shows its value");
 }
 
-/// CONVENTIONS 5.11: the preset table (unit, mode, ease, overlap) of the Python renderer.
+/// The preset table: unit, mode, ease and overlap of each preset.
 #[test]
 fn preset_table_timing() {
     let mut lib = lib();
@@ -385,7 +385,7 @@ fn charts_codes_formulas_audiograms() {
     let _ = Decor::default();
 }
 
-/// CONVENTIONS 5.23: an animator's scale is a factor and its tracking thousandths of an em.
+/// An animator's scale is a factor and its tracking thousandths of an em.
 #[test]
 fn animator_units() {
     let mut lib = lib();

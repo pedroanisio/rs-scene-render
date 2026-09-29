@@ -492,7 +492,7 @@ impl Parser<'_> {
             let ty = l["ty"].as_i64().unwrap_or(-1);
             match ty {
                 2 => self.skipped.push("image layer".into()),
-                5 => self.skipped.push("text layer (Batch 6)".into()),
+                5 => self.skipped.push("text layer".into()),
                 0 | 1 | 3 | 4 => {}
                 other => self.skipped.push(format!("layer type {other}")),
             }

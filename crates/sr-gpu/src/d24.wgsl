@@ -1,4 +1,4 @@
-// D24 hashing on the GPU (CONVENTIONS 5.19; sr_vector::d24 on the CPU). WGSL has no 64-bit
+// Seeded 64-bit hashing on the GPU (sr_vector::d24 on the CPU). WGSL has no 64-bit
 // integers: a u64 is vec2<u32>(low, high) and products are built from 16-bit halves, so
 // every draw has exactly the CPU's bits.
 
@@ -64,7 +64,7 @@ fn d24_gaussian(seed: vec2<u32>, channel: vec2<u32>, i: vec2<u32>) -> f32 {
   return sqrt(-2.0 * log(max(u1, 1e-38))) * cos(6.2831853 * u2);
 }
 
-// D14's dissolve hash of a frame pixel and the project seed (the C renderer's): seed ^ x · φ64
+// The dissolve hash of a frame pixel and the project seed: seed ^ x · φ64
 // ^ y · 0xC2B2AE3D27D4EB4F, MurmurHash3's 64-bit finaliser, top 24 bits.
 fn dissolve_hash(x: u32, y: u32, seed: vec2<u32>) -> f32 {
   var h = seed ^ u64_mul(vec2(x, 0u), vec2(0x7f4a7c15u, 0x9e3779b9u)) ^ u64_mul(vec2(y, 0u), vec2(0x27d4eb4fu, 0xc2b2ae3du));

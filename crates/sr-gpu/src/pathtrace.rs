@@ -143,7 +143,7 @@ pub fn build(scene: &Scene3) -> PtScene {
         });
         let (verts, idx) = dr.mesh.cpu();
         let nmat = dr.model.inverse().transpose();
-        // each copy of an instanced object is its own draw (conventions 5.2)
+        // each copy of an instanced object is its own draw
         let model = dr.model;
         for t in idx.chunks_exact(3) {
             let p: [Vec3; 3] = std::array::from_fn(|c| model.transform_point3(Vec3::from(verts[t[c] as usize].pos)));
@@ -592,7 +592,7 @@ pub fn render(
     let base = Params {
         cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
         view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
-        // the dome's full orientation, as the rasteriser applies it (conventions 5.5)
+        // the dome's full orientation, as the rasteriser applies it
         env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
         size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
         cam: [scene.cam.focal_px, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],

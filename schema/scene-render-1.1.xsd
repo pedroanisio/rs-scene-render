@@ -1795,7 +1795,7 @@
     <xs:attribute name="shutterAngle" type="nonNegativeDecimal"/>
     <xs:attribute name="exposure" type="xs:double" default="0"/>
     <xs:attribute name="lensDistortion" type="xs:double" default="0"/>
-    <!-- rs-scene-render extensions (Phase 5): screen-space lighting of the raster renderer, and a
+    <!-- rs-scene-render extensions: screen-space lighting of the raster renderer, and a
          progressive path tracer for final frames -->
     <xs:attribute name="ambientOcclusion" type="xs:boolean" default="false"/>
     <xs:attribute name="aoRadius" type="positiveDecimal" default="40"/>
@@ -2023,7 +2023,7 @@
   </xs:complexType>
 
   <!-- ============================================================ 2D simulations
-       Extensions of rs-scene-render (Phase 5): each simulates at a fixed step from its start
+       Extensions of rs-scene-render: each simulates at a fixed step from its start
        with a checkpoint every simulated second, like physics and particles, and is drawn in
        its own box (flock: as particles in frame space). -->
   <xs:simpleType name="simBoundsType">
@@ -2456,7 +2456,7 @@
         <xs:minInclusive value="16"/><xs:maxInclusive value="8192"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <!-- rs-scene-render extension (Phase 5): screen-space contact shadows for detail the
+    <!-- rs-scene-render extension: screen-space contact shadows for detail the
          shadow map cannot resolve -->
     <xs:attribute name="contactShadows" type="xs:boolean" default="false"/>
     <xs:attribute name="contactShadowLength" type="positiveDecimal" default="20"/>

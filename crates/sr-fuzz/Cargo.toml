@@ -3,6 +3,8 @@ name = "sr-fuzz"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+publish.workspace = true
 description = "Mutation fuzzing of the scene-render parser, validator, evaluator and expression compiler"
 
 [dependencies]

@@ -1,5 +1,5 @@
 //! Custom GLSL shaders: the conventions, uniform rules, colour handling and fallbacks of the
-//! Python engine (its fixtures live in tests/shaders).
+//! shader layer (its fixtures live in tests/shaders).
 
 mod common;
 use common::*;

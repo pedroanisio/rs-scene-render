@@ -199,10 +199,10 @@ pub struct FrameNode {
     /// Explicit skin weights of a skeleton (`@weights`), in skeleton space.
     #[serde(skip)]
     pub skin: Option<Arc<SkinWeights>>,
-    /// Soft-body lattice displacement (Batch 9), in node space.
+    /// Soft-body lattice displacement in node space.
     #[serde(skip)]
     pub soft: Option<Arc<crate::sim::SoftWarp>>,
-    /// Live particles of an emitter (Batch 9) or agents of a flock, in frame space.
+    /// Live particles of an emitter or agents of a flock, in frame space.
     #[serde(skip)]
     pub particles: Option<Arc<crate::sim::ParticleFrame>>,
     /// The picture of a grid simulation (fluid, slime, erosion), filling the node's box.
@@ -274,7 +274,7 @@ pub struct FrameGraph {
     /// Problems found while simulating (physics, particles), reported by the renderer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
-    /// The project seed (D24's default for seeded behaviour such as camera shake).
+    /// The project seed (the default for seeded behaviour such as camera shake).
     #[serde(skip)]
     pub seed: u64,
 }
@@ -548,7 +548,7 @@ impl Host for ExprHost<'_, '_> {
     }
 
     fn random(&mut self, site: u32, component: u32) -> f64 {
-        // D25: splitmix64 hash of (seed, frame, call site, property), as D24's lattice hash
+        // splitmix64 hash of (seed, frame, call site, property): the lattice hash of `rng`
         // with the frame as the channel; an array's component k adds k · 2⁴⁸
         let frame = libm::floor(self.t * self.p.fps.as_f64() + 1e-9) as i64;
         let index = site as u64 + (self.noise_channel() << 32) + ((component as u64) << 48);
@@ -1030,7 +1030,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             }
         }
     }
-    // a luma transition's matte sibling is not drawn itself (D19)
+    // a luma transition's matte sibling is not drawn itself
     for tr in &p.transitions {
         if let Some(m) = tr.matte.and_then(|m| out.out_ix[m as usize]) {
             hidden[m as usize] = true;
@@ -1057,7 +1057,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             continue;
         }
         let u = if w1 > w0 { (tt - w0) / (w1 - w0) } else { 1.0 };
-        // central difference of the eased curve (the Python engine's `velocity`)
+        // central difference of the eased curve (the `velocity` variable)
         let velocity = if w1 > w0 {
             let (lo, hi) = ((u - 1e-3).max(0.0), (u + 1e-3).min(1.0));
             if hi > lo {

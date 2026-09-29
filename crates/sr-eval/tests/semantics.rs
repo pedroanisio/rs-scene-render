@@ -183,10 +183,10 @@ fn expressions_read_values_other_properties_and_params() {
     assert_ne!(o1, o2, "random changes per frame");
 }
 
-/// CONVENTIONS 5.19 / D24–D25: golden values computed from the definition by an
+/// Seeded expression functions: golden values computed from the definition by an
 /// independent reference (project seed 1, fps 10; t = 2.35 is frame 23).
 #[test]
-fn seeded_expression_functions_follow_d24() {
+fn seeded_expression_functions_are_deterministic() {
     let d = doc(
         "",
         r#"<layer id="a" asset="img"><expression property="x">random() * 1000 + random()</expression>
@@ -300,7 +300,7 @@ fn layer_source_time_speed_reverse_loop_freeze_and_remap() {
     assert_eq!(node(&eval(&d, 5.0), "loop").source_time, Some(1.0), "second play");
     assert!(!has(&eval(&d, 12.5), "loop"));
     assert_eq!(node(&f, "freeze").source_time, Some(1.0));
-    // conventions 5.16: freezeAt holds its frame for the node's whole window, past the media's end too
+    // freezeAt holds its frame for the node's whole window, past the media's end too
     assert_eq!(node(&eval(&d, 0.5), "freeze").source_time, Some(1.0));
     assert_eq!(node(&eval(&d, 9.0), "freeze").source_time, Some(1.0));
     assert_eq!(node(&eval(&d, 1.0), "remap").source_time, Some(2.0));
@@ -494,7 +494,7 @@ fn transitions_and_mattes() {
     assert_eq!(node(&w, "u").matte, Some(w.nodes.iter().position(|n| &*n.id == "m").unwrap() as u32));
 }
 
-/// D19 (CONVENTIONS 5.17): the cut is from's end, the matte sibling of a luma transition
+/// The cut is from's end, the matte sibling of a luma transition
 /// is not drawn, and a sequence junction happens at the outgoing child's end.
 #[test]
 fn transition_cut_is_the_outgoing_end() {
@@ -660,7 +660,7 @@ fn flex_layout_alignment_and_fit_boxes() {
 
 #[test]
 fn force_fields_are_in_metres_per_second_squared_with_y_up() {
-    // conventions 5.9: 2 m/s² for 1 s moves a body ½·2·1² = 1 m = 100 px
+    // 2 m/s² for 1 s moves a body ½·2·1² = 1 m = 100 px
     let fall = |field: &str| {
         let d = doc_after(
             "",
@@ -680,7 +680,7 @@ fn force_fields_are_in_metres_per_second_squared_with_y_up() {
 
 #[test]
 fn soft_body_lattices_have_rows_plus_one_by_cols_plus_one_points() {
-    // conventions 5.10 and D7: rows × cols cells
+    // rows × cols cells
     let d = doc_after(
         "",
         r#"<layer id="c" asset="img"><softBody kind="cloth" rows="3" cols="5" pin="top"/></layer>"#,

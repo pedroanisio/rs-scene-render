@@ -7,7 +7,7 @@ struct Params {
     cam_to_world: mat4x4<f32>,
     // world → clip of the frame (the composition plane's backdrop lookup)
     view_proj: mat4x4<f32>,
-    // world → dome directions (the dome's yaw, pitch and roll; conventions 5.5)
+    // world → dome directions (the dome's yaw, pitch and roll)
     env_rot: mat4x4<f32>,
     // width, height, first sample of this dispatch, samples in it
     size: vec4<f32>,

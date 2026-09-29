@@ -3,6 +3,8 @@ name = "sr-sim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+publish.workspace = true
 description = "Deterministic simulation for scene-render: Rapier 2D physics, soft bodies, force fields and particles"
 
 [dependencies]

@@ -1,5 +1,4 @@
-//! GLSL custom shaders in the conventions of the Python engine (`effects/shader.py`,
-//! `transitions/shader.py`), compiled through naga.
+//! GLSL custom shaders (effects and transitions), compiled through naga.
 //!
 //! Effects: a Shadertoy program (`void mainImage(out vec4, in vec2)`), an ISF program
 //! (a leading `/*{ JSON }*/` header: INPUTS, IMPORTED, PASSES) or a plain `void main()`
@@ -92,7 +91,7 @@ impl Program {
         vec![0u8; self.block_size as usize]
     }
 
-    /// Writes `vals` into uniform `u` of `block` (Python's `write_uniform`: a scalar
+    /// Writes `vals` into uniform `u` of `block` (a scalar
     /// broadcasts, a vec4 given three values gets 1 as fourth, missing values are 0, int
     /// and bool uniforms round).
     pub fn write(&self, block: &mut [u8], u: &Uniform, vals: &[f64]) {

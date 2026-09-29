@@ -1,4 +1,4 @@
-//! Batch 7: effects, transitions, adjustment layers, motion blur and colour finishing on the GPU.
+//! Effects, transitions, adjustment layers, motion blur and colour finishing on the GPU.
 
 mod common;
 use common::*;
@@ -63,8 +63,8 @@ fn phi(x: f64) -> f64 {
 
 #[test]
 fn blur_samples_outside_its_input_are_transparent() {
-    // CONVENTIONS 5.7: an adjustment layer's blur reads transparency outside the frame, and the
-    // layer replaces the backdrop by its effect within its coverage (D17), so a blurred opaque
+    // An adjustment layer's blur reads transparency outside the frame, and the
+    // layer replaces the backdrop by its effect within its coverage, so a blurred opaque
     // frame loses half its alpha at the frame's edge (transparent background).
     let fx = r##"<effect id="b" type="blur" radius="3"/>"##;
     let body = r#"<layer id="a" asset="white" scaleX="16" scaleY="8"/><adjustment id="adj" effects="b"/>"#;
@@ -77,7 +77,7 @@ fn blur_samples_outside_its_input_are_transparent() {
 
 #[test]
 fn blur_radius_is_the_standard_deviation() {
-    // CONVENTIONS 5.7 (D9): `radius` is σ; a drop shadow's `radius` is 2σ. Radii are in the node's units,
+    // `radius` is σ; a drop shadow's `radius` is 2σ. Radii are in the node's units,
     // so on a layer scaled 10× these are σ = 3 px. A straight edge at x = 32 blurred with σ covers Φ(d / σ)
     // at signed distance d inside it.
     let fx = r##"<effect id="b" type="blur" radius="0.3"/>
@@ -104,7 +104,7 @@ fn blur_radius_is_the_standard_deviation() {
 
 #[test]
 fn glow_adds_a_bloom_over_the_content() {
-    // CONVENTIONS 5.6: the pixels above `threshold`, blurred, are added over the content (as in C)
+    // the pixels above `threshold`, blurred, are added over the content
     let body = r##"<layer id="a" asset="src" x="16" y="8" scaleX="4" scaleY="4" effects="g"/>"##;
     let fx = r##"<effect id="g" type="glow" radius="0.5" threshold="0" intensity="1"/>"##;
     let Some(r) = render(&fx_doc(r##"background="#00000000""##, body, fx)) else { return };
@@ -116,7 +116,7 @@ fn glow_adds_a_bloom_over_the_content() {
 
 #[test]
 fn vignette_follows_d9() {
-    // CONVENTIONS 5.8: 1 − amount · smoothstep(r₀, r₀ + softness, r), r over the half diagonal.
+    // Vignette: 1 − amount · smoothstep(r₀, r₀ + softness, r), r over the half diagonal.
     let body = r#"<layer id="a" asset="gray" x="0" y="0" scaleX="16" scaleY="8"/><adjustment id="v" effects="e"/>"#;
     let half = 0.5 * (64f64 * 64.0 + 32.0 * 32.0).sqrt();
     let k = |amount: f64, r0: f64, soft: f64, x: u32, y: u32| {
@@ -141,7 +141,7 @@ fn vignette_follows_d9() {
 
 #[test]
 fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
-    // CONVENTIONS 5.18: red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
+    // Red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
     // (35.8 px here); samples beyond the frame are transparent
     let Some(r) = render(&fx_doc(
         r##"background="#00000000""##,
@@ -313,8 +313,8 @@ fn transitions_mid_way() {
     assert_px(&dip, 52, 10, [0.0, 1.0, 0.0, 1.0], 3e-2);
 }
 
-/// CONVENTIONS 5.17: the types D19 leaves open, their <param> children and the motion blur of
-/// moving types are the Python renderer's.
+/// Transition types without a fixed geometric definition, their <param> children and the motion
+/// blur of moving types (180° shutter by default, off with `motionBlur="false"`).
 #[test]
 fn undefined_transition_types_follow_the_python_renderer() {
     let Some(_) = gpu() else { return };
@@ -343,7 +343,7 @@ fn undefined_transition_types_follow_the_python_renderer() {
     assert_eq!(g.px, render("glitch", "", "").px);
 }
 
-/// CONVENTIONS 5.17: D19's coordinates in frame pixels, at p = ½ with no softness (b is
+/// Geometric transitions, in frame pixels, at p = ½ with no softness (b is
 /// blue at x ≥ 32, a is red; the frame is 64 × 32 with its centre at (32, 16)).
 #[test]
 fn transitions_follow_d19_coordinates() {

@@ -224,7 +224,7 @@ fn soft_bodies_keep_shape_and_hang_from_pins() {
 
 #[test]
 fn cloth_shears_and_bends_more_easily_than_jelly() {
-    // conventions 5.10: cloth shear springs are 0.15 k and bend springs 0.02 k; a cantilever pinned
+    // cloth shear springs are 0.15 k and bend springs 0.02 k; a cantilever pinned
     // along its left column droops further as cloth than as jelly with the same stiffness
     let droop = |kind: SoftKind| {
         let spec = SoftSpec {

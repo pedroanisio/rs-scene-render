@@ -406,7 +406,7 @@ impl Host for UnitHost {
         0.0
     }
     fn random(&mut self, site: u32, component: u32) -> f64 {
-        // D25: (seed, frame, call site + property · 2³², the "selector" property)
+        // hash of (seed, frame, call site + property · 2³², the "selector" property)
         let frame = libm::floor(self.t * self.fps + 1e-9) as i64 as u64;
         let index = site as u64 + (self.noise_channel() << 32) + ((component as u64) << 48);
         sr_eval::rng::d24_unit(self.seed, frame, index)
@@ -501,7 +501,7 @@ fn animators(
             "span" => Unit::Span,
             _ => Unit::Char,
         };
-        // D24 draws with the Python renderer's per-element seeds: CRC-32 of the project seed,
+        // seeded 64-bit hash draws with per-element seeds: CRC-32 of the project seed,
         // the element's id and @seed, and the purpose
         let own = a.opt("seed").map(|v| v as u64);
         let el_seed = |purpose: &str| sr_eval::rng::element_seed(cx.p.seed, "", own, purpose);
@@ -527,7 +527,7 @@ fn animators(
                             )
                     })
                     .map(|x| {
-                        // D25 seed: the expression's @seed, else the project's
+                        // seed: the expression's @seed, else the project's
                         let xs = Attrs { e: x, props: None }.opt("seed").map(|v| v as u64).unwrap_or(cx.p.seed);
                         (x.text().map(str::to_string), xs)
                     });
@@ -1110,7 +1110,7 @@ pub fn caption_scene(
         let width = len_px(&tr.width, frame[0], frame);
         let (cxp, cyp) = (len_px(&tr.x, frame[0], frame), len_px(&tr.y, frame[1], frame));
         let bx = [0.0, 0.0, width, frame[1]];
-        // CONVENTIONS 5.12: the Python renderer's default style (4.4 % of the frame height,
+        // default style (4.4 % of the frame height,
         // white DejaVu Sans at its regular weight, line height 1.2)
         let size = (frame[1] * 0.044 * 100.0).round() / 100.0;
         let default = Style {

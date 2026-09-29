@@ -186,7 +186,7 @@ fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
   } else if (pd.kind == 2u) {
     let c = pd.p0.xy; let r = pd.p0.z; let aspect = pd.p0.w;
     let f = pd.p1.xy; let fr = pd.p1.z;
-    // aspect stretches the gradient along x about its centre (CONVENTIONS 5.18)
+    // aspect stretches the gradient along x about its centre
     let q = vec2(c.x + (g.x - c.x) / aspect, g.y);
     let fq = f;
     let dir = q - fq;
@@ -206,7 +206,7 @@ fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
     t = fract(ang / 360.0);
   } else if (pd.kind == 4u) {
     // a Catmull-Rom tensor-product surface through the grid's colours, in the interpolation space,
-    // edge rows and columns repeated (CONVENTIONS 5.18, the Python renderer's)
+    // edge rows and columns repeated.
     // The grid positions follow the same surface, which is not linear in its end spans: each axis
     // solves for the surface parameter at the pixel's position first.
     let rows = u32(pd.p0.x); let cols = u32(pd.p0.y);
@@ -225,7 +225,7 @@ fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
       }
       acc = acc + wy[i] * row;
     }
-    // the surface overshoots between points: clamp as the Python renderer does
+    // the surface overshoots between points: clamp
     let rgb = from_lin(clamp(to_lin(from_space(acc.rgb, pd.space)), vec3(0.0), vec3(1.0)));
     return vec4(rgb, clamp(acc.a, 0.0, 1.0));
   }

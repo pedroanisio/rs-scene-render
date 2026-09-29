@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Writes the Batch 5 exit-gate scene: 2,000 animated, stroked shapes with
+"""Performance scene: 2,000 animated, stroked shapes with
 animated trim paths over a 1080p60 frame, plus a 30-bone skeleton whose
 chain follows an IK target and deforms a skinned image layer.
 
-usage: tools/gate5.py OUTDIR [--duration SECONDS]   (default 10)
-then:  scene-render encode OUTDIR/gate5.scene.xml --hw auto
+usage: tools/perf_vector.py OUTDIR [--duration SECONDS]   (default 10)
+then:  scene-render encode OUTDIR/perf_vector.scene.xml --hw auto
 """
 import os
 import subprocess
@@ -12,7 +12,7 @@ import sys
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate5"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_vector"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 10.0
     os.makedirs(out, exist_ok=True)
     img = os.path.join(out, "ribbon.png")
@@ -46,7 +46,7 @@ def main():
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <scene version="1.1">
   <project width="1920" height="1080" fps="60" duration="{dur}" background="#0B0E12"/>
-  <output id="gate" path="gate5.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
+  <output id="perf" path="perf_vector.mp4" codec="h264" preset="veryfast" crf="20" colorSpace="rec709"/>
   <assets>
     <image id="ribbon" src="ribbon.png" width="900" height="120"/>
   </assets>
@@ -65,7 +65,7 @@ def main():
   </composition>
 </scene>
 '''
-    path = os.path.join(out, "gate5.scene.xml")
+    path = os.path.join(out, "perf_vector.scene.xml")
     with open(path, "w") as f:
         f.write(xml)
     print(path)

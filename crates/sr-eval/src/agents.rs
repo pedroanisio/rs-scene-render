@@ -1,4 +1,4 @@
-//! Flocks, fluids, slime networks and erosion (Phase 5): builds `sr-sim` simulations from their
+//! Flocks, fluids, slime networks and erosion: builds `sr-sim` simulations from their
 //! elements, steps them on the node's own timeline (1/60 s steps, checkpointed) and attaches
 //! the result to the frame: flocks as particles in frame space, the grid simulations as a
 //! picture filling the node's box. Force fields named in `forceFields` (all of them when

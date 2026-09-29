@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Batch 8 exit gate.
+"""3D performance scene and per-feature cost measurement.
 
-usage: tools/gate8.py OUTDIR [--duration SECONDS]
-    Writes gate8.scene.xml: 1080p60 with 207,936 triangles (a 114-segment
+usage: tools/perf_3d.py OUTDIR [--duration SECONDS]
+    Writes perf_3d.scene.xml: 1080p60 with 207,936 triangles (a 114-segment
     sphere drawn as 16 instances placed on a 4×4 grid by `index`), a floor,
     a glass slab (transmission), 4 spot lights casting 2048² shadows, and a
     camera with depth of field.
     The spheres turn and the lights orbit, so every frame is new work.
-    then: scene-render render OUTDIR/gate8.scene.xml --bench --frames 0..120
+    then: scene-render render OUTDIR/perf_3d.scene.xml --bench --frames 0..120
 
-usage: tools/gate8.py OUTDIR --measure BIN [--frames N]
-    Benches the gate scene and variants without shadows, transmission and
+usage: tools/perf_3d.py OUTDIR --measure BIN [--frames N]
+    Benches the scene and variants without shadows, transmission and
     depth of field, and prints each feature's cost.
 """
 import os
@@ -70,7 +70,7 @@ def median_ms(binary, path, frames):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "gate8"
+    out = sys.argv[1] if len(sys.argv) > 1 else "perf_3d"
     dur = float(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else 10.0
     os.makedirs(out, exist_ok=True)
     if "--measure" in sys.argv:
@@ -85,7 +85,7 @@ def main():
         ]
         times = {}
         for name, kw in variants:
-            path = os.path.join(out, f"gate8_{name.replace(' ', '_')}.scene.xml")
+            path = os.path.join(out, f"perf_3d_{name.replace(' ', '_')}.scene.xml")
             with open(path, "w") as f:
                 f.write(scene(2.0, **kw))
             times[name] = median_ms(binary, path, frames)
@@ -94,7 +94,7 @@ def main():
         print(f"shadows {full - times['no shadows']:.1f} ms, transmission {full - times['no transmission']:.1f} ms, "
               f"depth of field {full - times['no depth of field']:.1f} ms, geometry and lighting {times['geometry only']:.1f} ms")
         return
-    path = os.path.join(out, "gate8.scene.xml")
+    path = os.path.join(out, "perf_3d.scene.xml")
     with open(path, "w") as f:
         f.write(scene(dur))
     print(path)

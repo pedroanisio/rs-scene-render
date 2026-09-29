@@ -39,7 +39,7 @@ pub fn rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
 }
 
 /// Ellipse about (cx, cy), starting at 3 o'clock and running clockwise on screen, as SVG 2 draws
-/// `<ellipse>` (CONVENTIONS 5.21: trims and dashes start there).
+/// `<ellipse>` (trims and dashes start there).
 pub fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
     let (kx, ky) = (rx * KAPPA, ry * KAPPA);
     let mut path = Path::default();
@@ -78,7 +78,7 @@ pub fn polygon(c: P, points: u32, r: f64, roundness: f64, rot_deg: f64) -> Path 
 }
 
 /// [`star`] with its tips on the ellipse of radii `outer` and its inner vertices on the ellipse of
-/// radii `inner` (D16, D27: a shape's or mask's star in a non-square box); the roundness handles are
+/// radii `inner` (a star in a non-square box); the roundness handles are
 /// tangent to those ellipses.
 pub fn star_on(c: P, points: u32, outer: P, inner: P, outer_round: f64, inner_round: f64, rot_deg: f64) -> Path {
     let n = points.max(2) as usize * 2;
