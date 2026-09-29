@@ -24,6 +24,22 @@ pub mod tile;
 pub mod track;
 pub mod zip;
 
+static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Caps the worker threads of the tile encoder (0 restores the default: the machine's
+/// parallelism, at most 16). Results do not depend on the count.
+pub fn set_threads(n: usize) {
+    THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Worker threads the tile encoder uses.
+pub fn threads() -> usize {
+    match THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16),
+        n => n,
+    }
+}
+
 pub use geom::{Xf, P};
 pub use path::{Contour, Path, Poly, Seg};
 pub use scene::{Cmd, FillRule, Gradient, GradientKind, MaskOp, MatteMode, Paint, Scene};

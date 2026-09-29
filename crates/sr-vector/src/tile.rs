@@ -435,7 +435,7 @@ fn tile_all(scene: &Scene, size: [u32; 2]) -> Vec<Option<Vec<PathTile>>> {
             _ => None,
         })
         .collect();
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16);
+    let threads = crate::threads();
     let work: usize = polys.iter().flatten().map(|p| p.iter().map(|q| q.pts.len()).sum::<usize>()).sum();
     if threads <= 1 || work < 20_000 {
         return polys.iter().map(|p| p.map(|p| tile_path(p, size))).collect();

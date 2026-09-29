@@ -24,6 +24,7 @@ pub mod video;
 
 pub use gpu::{Gpu, GpuError};
 pub use render::{Frame, RenderStats, Renderer};
+pub use wgpu::SubmissionIndex;
 
 /// The FrameGraph value of a document paint.
 pub(crate) fn value_of_paint(p: &sr_model::values::Paint) -> sr_eval::Value {

@@ -2131,6 +2131,7 @@ dependencies = [
  "sr-media",
  "sr-model",
  "sr-resolve",
+ "sr-vector",
 ]
 
 [[package]]

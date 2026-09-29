@@ -16,6 +16,7 @@ path = "src/main.rs"
 sr-model.workspace = true
 sr-eval.workspace = true
 sr-gpu.workspace = true
+sr-vector.workspace = true
 sr-media.workspace = true
 sr-deliver.workspace = true
 sr-resolve.workspace = true

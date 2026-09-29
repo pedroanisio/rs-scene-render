@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Color::Auto, global = true, env = "SCENE_RENDER_COLOR")]
     color: Color,
 
+    /// Worker threads for the CPU stages (vector tiling, audio analysis); default: every core.
+    #[arg(long, global = true, env = "SR_THREADS", value_name = "N")]
+    threads: Option<usize>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -178,6 +182,10 @@ enum Command {
         /// Print per-frame renderer statistics as JSON lines on stderr.
         #[arg(long)]
         stats: bool,
+        /// With --bench, keep one frame in flight: wait for the previous frame's submission
+        /// instead of draining the GPU after every frame, so the figure is throughput.
+        #[arg(long, requires = "bench")]
+        pipelined: bool,
         /// Exit 1 if anything was not rendered as authored: unsupported content, shader fallbacks
         /// (pass-through effects, crossfaded transitions), evaluator warnings or, when encoding,
         /// accessibility findings. Output files are still written.
@@ -795,6 +803,7 @@ fn render(
     bit_depth: u8,
     bench: bool,
     stats: bool,
+    pipelined: bool,
     strict: bool,
     out: &mut Out,
 ) -> std::io::Result<ExitCode> {
@@ -852,6 +861,7 @@ fn render(
         let mut eval_ms = Vec::new();
         let mut submit_ms = Vec::new();
         let mut last = sr_gpu::RenderStats::default();
+        let mut prev: Option<sr_gpu::SubmissionIndex> = None;
         for &f in &frames {
             let t0 = std::time::Instant::now();
             let g = graphs(f);
@@ -859,7 +869,14 @@ fn render(
             let mut sub = |st: f64| ev.evaluate(st);
             last = r.render_with(&g, ev.program(), Some(&mut sub)).stats;
             submit_ms.push(t1.elapsed().as_secs_f64() * 1e3);
-            r.gpu().wait();
+            if pipelined {
+                if let Some(p) = prev.take() {
+                    r.gpu().wait_for(p);
+                }
+                prev = r.last_submission();
+            } else {
+                r.gpu().wait();
+            }
             eval_ms.push((t1 - t0).as_secs_f64() * 1e3);
             times.push(t1.elapsed().as_secs_f64() * 1e3);
             unsupported.extend(last.unsupported.iter().cloned());
@@ -867,13 +884,22 @@ fn render(
                 eprintln!("{}", serde_json::json!({ "frame": f, "stats": &last }));
             }
         }
+        if let Some(p) = prev.take() {
+            r.gpu().wait_for(p);
+        }
         let sorted = |mut v: Vec<f64>| {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             v
         };
         let (times, eval_ms, submit_ms) = (sorted(times), sorted(eval_ms), sorted(submit_ms));
         let med = times[times.len() / 2];
-        writeln!(out.w, "{}: {} frames on {adapter}", file.display(), frames.len())?;
+        writeln!(
+            out.w,
+            "{}: {} frames on {adapter}{}",
+            file.display(),
+            frames.len(),
+            if pipelined { ", pipelined" } else { "" }
+        )?;
         writeln!(
             out.w,
             "render: median {med:.3} ms ({:.1} fps), p95 {:.3} ms; of which CPU planning and submission {:.3} ms; evaluation {:.3} ms",
@@ -1100,6 +1126,12 @@ fn encode(
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(n) = cli.threads.filter(|&n| n > 0) {
+        sr_vector::set_threads(n);
+        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            std::env::set_var("RAYON_NUM_THREADS", n.to_string());
+        }
+    }
     let mut out = Out::new(cli.color);
     let res = match cli.command {
         Command::Validate { files, format, no_assets, base_dir, deny_warnings, quiet } => {
@@ -1125,6 +1157,7 @@ fn main() -> ExitCode {
             data,
             bench,
             stats,
+            pipelined,
             strict,
         } => {
             let opts =
@@ -1134,7 +1167,19 @@ fn main() -> ExitCode {
                 (None, Some((a, b))) => (a..b).collect(),
                 (None, None) => Vec::new(),
             };
-            render(&file, list, time, opts, output, bit_depth.parse().unwrap_or(8), bench, stats, strict, &mut out)
+            render(
+                &file,
+                list,
+                time,
+                opts,
+                output,
+                bit_depth.parse().unwrap_or(8),
+                bench,
+                stats,
+                pipelined,
+                strict,
+                &mut out,
+            )
         }
         Command::Encode {
             file,

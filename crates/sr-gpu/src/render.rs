@@ -274,10 +274,107 @@ pub struct Renderer {
     last_frame: Option<i64>,
     /// The project seed (seeded 64-bit hash draws default to it).
     pub(crate) seed: u64,
+    /// The per-frame storage buffers, grown as needed and reused across frames with their bind group.
+    frame_bufs: Option<FrameBufs>,
+    /// The queue submission of the last frame (a pipelined caller waits on it, not on the whole queue).
+    last_submit: Option<wgpu::SubmissionIndex>,
+}
+
+/// A grow-only GPU buffer reused across frames.
+struct GrowBuf {
+    buf: wgpu::Buffer,
+    cap: u64,
+}
+
+/// The per-frame storage buffers and the bind group over them.
+struct FrameBufs {
+    draws: GrowBuf,
+    masks: GrowBuf,
+    edges: GrowBuf,
+    paints: GrowBuf,
+    stops: GrowBuf,
+    verts: GrowBuf,
+    bg0: wgpu::BindGroup,
 }
 
 fn h(words: &[u64]) -> u64 {
     sr_eval::rng::hash(words)
+}
+
+/// Hash of the animated state of the elements outside the composition (paints, generators,
+/// effects, lights): the same content as their JSON form, without formatting it.
+fn elements_hash(elements: &[sr_eval::ElementState]) -> u64 {
+    let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+    for e in elements {
+        f.str(&e.key);
+        f.str(e.element);
+        f.u64(e.props.0.len() as u64);
+        for (k, v) in &e.props.0 {
+            f.str(k);
+            f.value(v);
+        }
+    }
+    h(&[f.0])
+}
+
+/// FNV-1a over tagged, length-prefixed fields.
+struct Fnv(u64);
+
+impl Fnv {
+    fn byte(&mut self, b: u8) {
+        self.0 ^= b as u64;
+        self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    fn u64(&mut self, v: u64) {
+        v.to_le_bytes().into_iter().for_each(|b| self.byte(b));
+    }
+    fn str(&mut self, s: &str) {
+        self.u64(s.len() as u64);
+        s.bytes().for_each(|b| self.byte(b));
+    }
+    fn len(&mut self, l: &sr_model::values::Length) {
+        self.u64(l.value.to_bits());
+        self.byte(l.unit as u8);
+    }
+    fn value(&mut self, v: &sr_eval::Value) {
+        use sr_eval::Value as V;
+        match v {
+            V::Num(n) => {
+                self.byte(1);
+                self.u64(n.to_bits());
+            }
+            V::Bool(b) => {
+                self.byte(2);
+                self.byte(*b as u8);
+            }
+            V::Str(s) => {
+                self.byte(3);
+                self.str(s);
+            }
+            V::Len(l) => {
+                self.byte(4);
+                self.len(l);
+            }
+            V::Pair(p) => {
+                self.byte(5);
+                self.len(&p[0]);
+                self.len(&p[1]);
+            }
+            V::Color(c) => {
+                self.byte(6);
+                c.iter().for_each(|x| self.u64(x.to_bits()));
+            }
+            V::PaintRef(s) => {
+                self.byte(7);
+                self.str(s);
+            }
+            V::List(l) => {
+                self.byte(8);
+                self.u64(l.len() as u64);
+                l.iter().for_each(|x| self.u64(x.to_bits()));
+            }
+        }
+    }
 }
 
 fn hf(v: f64) -> u64 {
@@ -562,6 +659,8 @@ impl Renderer {
             audio: None,
             persistent_isf: None,
             last_frame: None,
+            frame_bufs: None,
+            last_submit: None,
         }
     }
 
@@ -2386,7 +2485,7 @@ impl Renderer {
             let (cv, _, _) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
             h(&cv.view_proj().to_cols_array().map(|v| v.to_bits() as u64))
         };
-        let elements = h(&[sr_eval::rng::hash_str(&serde_json::to_string(&g.elements).unwrap_or_default()), cam_hash]);
+        let elements = h(&[elements_hash(&g.elements), cam_hash]);
         let ctx = Ctx {
             g,
             p,
@@ -2467,17 +2566,31 @@ impl Renderer {
         Frame { texture: frame, stats }
     }
 
-    fn storage<T: bytemuck::Pod + Default>(&self, data: &[T], label: &str) -> wgpu::Buffer {
+    /// Writes `data` into a grow-only buffer, reallocating (at least doubling) when it no longer
+    /// fits. Returns whether it was reallocated, in which case bind groups over it must be rebuilt.
+    /// The write is queued, so it is ordered after the frames already submitted.
+    fn upload<T: bytemuck::Pod + Default>(&self, slot: &mut Option<GrowBuf>, data: &[T], label: &str) -> bool {
         let one = [T::default()];
         let bytes: &[u8] = if data.is_empty() { bytemuck::cast_slice(&one) } else { bytemuck::cast_slice(data) };
-        let b = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: bytes.len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
-            mapped_at_creation: false,
-        });
-        self.gpu.queue.write_buffer(&b, 0, bytes);
-        b
+        let need = bytes.len() as u64;
+        let realloc = slot.as_ref().is_none_or(|b| b.cap < need);
+        if realloc {
+            let cap = need.max(slot.as_ref().map_or(0, |b| b.cap * 2)).div_ceil(256) * 256;
+            let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: cap,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            });
+            *slot = Some(GrowBuf { buf, cap });
+        }
+        self.gpu.queue.write_buffer(&slot.as_ref().expect("allocated").buf, 0, bytes);
+        realloc
+    }
+
+    /// The queue submission of the last frame, to wait on without draining later work.
+    pub fn last_submission(&self) -> Option<wgpu::SubmissionIndex> {
+        self.last_submit.clone()
     }
 
     fn copy(enc: &mut wgpu::CommandEncoder, from: &Tex, to: &Tex, rect: [u32; 4]) {
@@ -2500,26 +2613,59 @@ impl Renderer {
 
     fn execute(&mut self, mut plan: Plan, restore: usize, snapshot_at: Option<usize>, hashes: &[u64]) -> RenderStats {
         let d = self.gpu.device.clone();
-        let draws = self.storage(&plan.draws, "draws");
-        let masks = self.storage(&plan.masks, "masks");
-        let edges = self.storage(&plan.edges, "edges");
-        let paints = self.storage(&plan.paints.paints, "paints");
-        let stops = self.storage(&plan.paints.stops, "stops");
-        let verts = self.storage(&plan.verts, "vertices");
-        let bg0 = d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame"),
-            layout: &self.bgl0,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: draws.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: masks.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: edges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: paints.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: stops.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.samp) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.samp_repeat) },
-                wgpu::BindGroupEntry { binding: 7, resource: self.globals.as_entire_binding() },
-            ],
-        });
+        // the frame's storage buffers persist across frames; the bind group only when none grew
+        let (bg0, verts, paints, stops) = {
+            let (mut draws, mut masks, mut edges, mut paints, mut stops, mut verts, old) = match self.frame_bufs.take()
+            {
+                Some(f) => (
+                    Some(f.draws),
+                    Some(f.masks),
+                    Some(f.edges),
+                    Some(f.paints),
+                    Some(f.stops),
+                    Some(f.verts),
+                    Some(f.bg0),
+                ),
+                None => (None, None, None, None, None, None, None),
+            };
+            let mut grew = self.upload(&mut draws, &plan.draws, "draws");
+            grew |= self.upload(&mut masks, &plan.masks, "masks");
+            grew |= self.upload(&mut edges, &plan.edges, "edges");
+            grew |= self.upload(&mut paints, &plan.paints.paints, "paints");
+            grew |= self.upload(&mut stops, &plan.paints.stops, "stops");
+            self.upload(&mut verts, &plan.verts, "vertices");
+            let (draws, masks, edges, paints, stops, verts) = (
+                draws.expect("allocated"),
+                masks.expect("allocated"),
+                edges.expect("allocated"),
+                paints.expect("allocated"),
+                stops.expect("allocated"),
+                verts.expect("allocated"),
+            );
+            let bg0 = match old {
+                Some(bg) if !grew => bg,
+                _ => d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("frame"),
+                    layout: &self.bgl0,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: draws.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: masks.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: edges.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: paints.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: stops.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.samp) },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.samp_repeat),
+                        },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.globals.as_entire_binding() },
+                    ],
+                }),
+            };
+            let (vbuf, pbuf, sbuf) = (verts.buf.clone(), paints.buf.clone(), stops.buf.clone());
+            self.frame_bufs = Some(FrameBufs { draws, masks, edges, paints, stops, verts, bg0: bg0.clone() });
+            (bg0, vbuf, pbuf, sbuf)
+        };
         let bgl2 = self.bgl2.clone();
         let pair = |a: &wgpu::TextureView, b: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2532,6 +2678,8 @@ impl Renderer {
             })
         };
         let dummy_pair = pair(&self.dummy.view, &self.dummy.view);
+        // one bind group per (backdrop, matte) texture pair per frame, not one per draw
+        let mut pairs: HashMap<(usize, usize), wgpu::BindGroup> = HashMap::new();
         let dummy_gen = {
             let ub = d.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -2658,9 +2806,18 @@ impl Renderer {
                     .map(|c| match (&c.backdrop, &c.matte) {
                         (None, None) => None,
                         (bd, mt) => {
-                            let back = if bd.is_some() { &scratch[&job.target.size].view } else { &self.dummy.view };
-                            let mv = mt.as_ref().map(|t| &t.view).unwrap_or(&self.dummy.view);
-                            Some(pair(back, mv))
+                            let (bk, back) = match bd {
+                                Some(_) => {
+                                    let s = &scratch[&job.target.size];
+                                    (Arc::as_ptr(s) as usize, &s.view)
+                                }
+                                None => (0, &self.dummy.view),
+                            };
+                            let (mk, mv) = match mt {
+                                Some(t) => (Arc::as_ptr(t) as usize, &t.view),
+                                None => (0, &self.dummy.view),
+                            };
+                            Some(pairs.entry((bk, mk)).or_insert_with(|| pair(back, mv)).clone())
                         }
                     })
                     .collect();
@@ -2696,7 +2853,7 @@ impl Renderer {
                 Self::copy(&mut enc, out, &root.target, [0, 0, root.target.size[0], root.target.size[1]]);
             }
         }
-        self.gpu.queue.submit([enc.finish()]);
+        self.last_submit = Some(self.gpu.queue.submit([enc.finish()]));
         for (_, t) in scratch {
             self.pool.put(t);
         }

@@ -59,4 +59,9 @@ impl Gpu {
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
+
+    /// Waits for one submission (and everything before it), leaving later submissions in flight.
+    pub fn wait_for(&self, idx: wgpu::SubmissionIndex) {
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });
+    }
 }
