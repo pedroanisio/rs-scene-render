@@ -90,18 +90,15 @@ fn blur_radius_is_the_standard_deviation() {
 }
 
 #[test]
-fn glow_goes_behind_the_unchanged_content() {
-    // CONVENTIONS 5.6: compositeOriginal defaults to behind; none shows the glow alone.
-    let body = r##"<layer id="a" asset="src" x="16" y="8" scaleX="4" scaleY="4" effects="g"/>
-        <layer id="b" asset="src" x="40" y="8" scaleX="4" scaleY="4" effects="n"/>"##;
-    let fx = r##"<effect id="g" type="glow" radius="2" threshold="0" intensity="1"/>
-        <effect id="n" type="glow" radius="2" threshold="0" intensity="1" compositeOriginal="none"/>"##;
+fn glow_adds_a_bloom_over_the_content() {
+    // CONVENTIONS 5.6: the pixels above `threshold`, blurred, are added over the content (as in C)
+    let body = r##"<layer id="a" asset="src" x="16" y="8" scaleX="4" scaleY="4" effects="g"/>"##;
+    let fx = r##"<effect id="g" type="glow" radius="0.5" threshold="0" intensity="1"/>"##;
     let Some(r) = render(&fx_doc(r##"background="#00000000""##, body, fx)) else { return };
     assert!(problems(&r).is_empty(), "{:?}", problems(&r));
-    assert_px(&r, 24, 16, [lin8(200), lin8(100), lin8(50), 1.0], 2e-3);
+    // the middle of the square is the content plus its own (nearly unblurred) bloom: twice the content
+    assert_px(&r, 24, 16, [2.0 * lin8(200), 2.0 * lin8(100), 2.0 * lin8(50), 1.0], 2e-2);
     assert!(r.at(14, 16)[3] > 0.1, "the halo spreads outside: {:?}", r.at(14, 16));
-    // alone, the glow of an opaque square is a blurred copy of it: its edge is half covered
-    assert!((r.at(40, 16)[3] - 0.5).abs() < 0.1, "glow alone: {:?}", r.at(40, 16));
 }
 
 #[test]
@@ -115,8 +112,9 @@ fn vignette_follows_d9() {
         (1.0 - amount * u * u * (3.0 - 2.0 * u)) as f32
     };
     let g = lin8(128);
+    // the second takes the schema's defaults: amount 1, radius 4, softness 0.1
     for (attrs, amount, r0, soft) in
-        [(r#"amount="0.8" radius="10" softness="0.3""#, 0.8, 10.0 / half, 0.3), ("", 0.5, 0.5, 0.5)]
+        [(r#"amount="0.8" radius="10" softness="0.3""#, 0.8, 10.0 / half, 0.3), ("", 1.0, 4.0 / half, 0.1)]
     {
         let fx = format!(r#"<effect id="e" type="vignette" {attrs}/>"#);
         let Some(r) = render(&fx_doc("", body, &fx)) else { return };

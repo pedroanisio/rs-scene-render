@@ -541,16 +541,6 @@ fn apply_ops(ops: &[Op], mut c: [f32; 3]) -> [f32; 3] {
     c
 }
 
-/// The combine mode placing an effect relative to the unchanged content (`compositeOriginal`,
-/// CONVENTIONS 5.6): 2 behind it (the default), 3 on top of it, 4 the effect alone.
-fn composite_original(a: &Attrs) -> u32 {
-    match a.str("compositeOriginal").as_deref() {
-        Some("on-top") => 3,
-        Some("none") => 4,
-        _ => 2,
-    }
-}
-
 fn nums(s: &str) -> Vec<f32> {
     s.split(|c: char| c.is_whitespace() || c == ',').filter_map(|t| t.parse().ok()).collect()
 }
@@ -1051,12 +1041,8 @@ impl Builder<'_> {
                 let bright = self.simple(Entry::Pre, 0, v, input, Aux::None);
                 // radius is the glow's standard deviation, as the blur effect's (D9)
                 let blurred = self.blur(&bright, r.max(0.5));
-                if kind == "glow" {
-                    // CONVENTIONS 5.6: the glow goes behind the unchanged content by default
-                    self.combine(composite_original(a), input, &blurred, intensity, [1.0; 3], 0.0)
-                } else {
-                    self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
-                }
+                // CONVENTIONS 5.6: the bloom is added over the content, as the C renderer does
+                self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
             }
             "drop-shadow" | "inner-shadow" | "inner-glow" => {
                 let c =
@@ -1068,7 +1054,17 @@ impl Builder<'_> {
                 // a drop shadow's radius is twice the standard deviation (CSS drop-shadow(), D9);
                 // the inner styles' radius is the standard deviation, as the blur effect's
                 let b = self.blur(&pre, if kind == "drop-shadow" { r * 0.5 } else { r });
-                let mode = if kind == "drop-shadow" { composite_original(a) } else { 5 };
+                // CONVENTIONS 5.6: a drop shadow goes behind the content by default; the inner styles
+                // are drawn over it
+                let mode = if kind == "drop-shadow" {
+                    match a.str("compositeOriginal").as_deref() {
+                        Some("on-top") => 3,
+                        Some("none") => 4,
+                        _ => 2,
+                    }
+                } else {
+                    5
+                };
                 self.combine(mode, input, &b, intensity, [1.0; 3], 0.0)
             }
             "directional-blur" => {
@@ -1311,17 +1307,12 @@ impl Builder<'_> {
                 color_op(self, 23, v, Aux::None)
             }
             "vignette" => {
-                // D9: darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the distance from the
-                // centre over the half diagonal and r₀ = radius / half diagonal. The typed model applies
-                // the schema defaults (amount 1, radius 4, softness 0.1), so those values read as
-                // unwritten and take the defaults of CONVENTIONS 5.8: amount 0.5, radius half the half
-                // diagonal, softness 0.5.
+                // D9 (CONVENTIONS 5.8): darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the
+                // distance from the centre over the half diagonal and r₀ = radius / half diagonal; absent
+                // attributes take the schema's effect defaults (amount 1, radius 4, softness 0.1)
                 let c = colour("color", [0.0, 0.0, 0.0, 1.0]);
-                let unwritten = |name: &str, d: f64| a.props.and_then(|p| p.get(name)).is_none() && a.num(name, d) == d;
-                let amount = if unwritten("amount", 1.0) { 0.5 } else { amount };
-                let half = 0.5 * w.hypot(h);
-                let r0 = if unwritten("radius", 4.0) { 0.5 } else { r / half };
-                let soft = if unwritten("softness", 0.1) { 0.5 } else { a.num("softness", 0.1).max(0.0) };
+                let r0 = r / (0.5 * w.hypot(h));
+                let soft = a.num("softness", 0.1).max(0.0);
                 v[0] = [(amount * c[3]) as f32, r0 as f32, soft as f32, 0.0];
                 v[1] = v4(c);
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
