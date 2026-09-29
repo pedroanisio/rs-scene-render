@@ -23,6 +23,17 @@ use crate::vector::{is, Attrs};
 
 #[path = "text_basemap.rs"]
 mod basemap;
+
+/// A map asset drawn in `frame` (a map setup and view replacing its own), or in its own frame:
+/// the texture of a 3D map or globe.
+pub fn map_drape(
+    tc: &mut TextCache,
+    cx: &mut Cx,
+    mp: &m::MapAsset,
+    frame: Option<(sr_geo::view::Map, sr_geo::view::View)>,
+) -> Result<Drawing, String> {
+    map::map_drawing_as(tc, cx, mp, frame)
+}
 /// Paint resolution over a box (node-local x, y, w, h).
 #[path = "text_map.rs"]
 mod map;

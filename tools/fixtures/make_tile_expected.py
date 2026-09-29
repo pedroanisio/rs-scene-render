@@ -9,6 +9,8 @@
   © OpenStreetMap contributors (ODbL), see NOTICE.
 * `raster.pmtiles`: z0-2 PNG tiles written by the reference `pmtiles` writer,
   each a solid colour made from its z/x/y (red = 60·z, green = 40·x, blue = 40·y).
+* `hill.pmtiles`: z10 Terrarium elevation tiles round 0°, 0° holding a 2000-metre
+  Gaussian hill (σ 0.05°) for the 3D map tests.
 * `tiles.json`: what the reference readers make of them: header fields, tile
   ids, and per tile and layer the feature count, vertex count and coordinate
   sums, with the first features in full.
@@ -83,6 +85,29 @@ def main(src):
         w.finalize({"tile_type": TileType.PNG, "tile_compression": Compression.NONE, "min_zoom": 0, "max_zoom": 2,
                     "min_lon_e7": -1800000000, "min_lat_e7": -850511287, "max_lon_e7": 1800000000, "max_lat_e7": 850511287,
                     "center_zoom": 0, "center_lon_e7": 0, "center_lat_e7": 0}, {"name": "solid"})
+
+    import math
+    with open(OUT / "hill.pmtiles", "wb") as f:
+        w = Writer(f)
+        for x in range(510, 514):
+            for y in range(510, 514):
+                img = Image.new("RGB", (256, 256))
+                px = img.load()
+                for j in range(256):
+                    for i in range(256):
+                        n = 1 << 10
+                        lon = (x + (i + 0.5) / 256) / n * 360 - 180
+                        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + (j + 0.5) / 256) / n))))
+                        v = 2000 * math.exp(-(lon * lon + lat * lat) / 0.05 ** 2) + 32768
+                        r = math.floor(v / 256)
+                        g = math.floor(v - r * 256)
+                        px[i, j] = (r, g, math.floor((v - r * 256 - g) * 256))
+                b = io.BytesIO()
+                img.save(b, "PNG")
+                w.write_tile(zxy_to_tileid(10, x, y), b.getvalue())
+        w.finalize({"tile_type": TileType.PNG, "tile_compression": Compression.NONE, "min_zoom": 10, "max_zoom": 10,
+                    "min_lon_e7": -3515625, "min_lat_e7": -3515065, "max_lon_e7": 3515625, "max_lat_e7": 3515065,
+                    "center_zoom": 10, "center_lon_e7": 0, "center_lat_e7": 0}, {"name": "hill", "encoding": "terrarium"})
 
     (OUT / "tiles.json").write_text(json.dumps(expected, indent=0, sort_keys=True))
     print("wrote", len(expected["tiles"]), "vector tiles")

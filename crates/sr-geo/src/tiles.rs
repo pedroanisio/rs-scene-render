@@ -51,6 +51,32 @@ pub fn tile_zoom(p: &Projection, tile_size: f64, min: u8, max: u8) -> u8 {
     z.clamp(min as f64, max as f64) as u8
 }
 
+/// Longitude and latitude at a screen point of a Web Mercator view (`None` for other projections):
+/// the inverse of the view's affine map from (longitude, Mercator y) to the screen.
+pub fn screen_lonlat(proj: &Projection, x: f64, y: f64) -> Option<[f64; 2]> {
+    if proj.raw() != Raw::Mercator || proj.rotate()[1] != 0.0 || proj.rotate()[2] != 0.0 {
+        return None;
+    }
+    let lon0 = -proj.rotate()[0];
+    let merc = |lat: f64| (std::f64::consts::FRAC_PI_4 + lat * RAD / 2.0).tan().ln();
+    let o = proj.point_unclipped(lon0, 0.0);
+    let ex = proj.point_unclipped(lon0 + 1.0, 0.0);
+    let ey = proj.point_unclipped(lon0, 1.0);
+    // columns: screen change per degree of longitude, per unit of Mercator y
+    let (a, b) = (ex[0] - o[0], ex[1] - o[1]);
+    let my = merc(1.0);
+    let (c, d) = ((ey[0] - o[0]) / my, (ey[1] - o[1]) / my);
+    let det = a * d - b * c;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let (px, py) = (x - o[0], y - o[1]);
+    let dlon = (d * px - c * py) / det;
+    let yy = (-b * px + a * py) / det;
+    let lat = (2.0 * yy.exp().atan() - std::f64::consts::FRAC_PI_2) * DEG;
+    Some([lon0 + dlon, lat])
+}
+
 /// The outline of a tile as a lon/lat polygon (edges sampled so they bend as parallels and
 /// meridians do), exterior clockwise.
 fn outline(t: Tile) -> Geometry {
@@ -281,6 +307,15 @@ mod tests {
             (fast.lines(&[vec![[0.0, 0.0], [4096.0, 4096.0]]]), slow.lines(&[vec![[0.0, 0.0], [4096.0, 4096.0]]]));
         let (ea, eb) = (la[0].last().unwrap(), lb[0].last().unwrap());
         assert!((ea[0] - eb[0]).abs() < 0.1 && (ea[1] - eb[1]).abs() < 0.1, "{ea:?} {eb:?}");
+    }
+
+    #[test]
+    fn screen_points_invert() {
+        let (m, _) = Map::new(Kind::WebMercator, None, [800.0, 600.0], &[], 0.0, Some([-9.14, 38.71]));
+        let p = m.projection(&View { lon: -9.14, lat: 38.71, zoom: 12.0, rotation: 30.0 });
+        let q = p.point_unclipped(-9.2, 38.75);
+        let ll = screen_lonlat(&p, q[0], q[1]).unwrap();
+        assert!((ll[0] + 9.2).abs() < 1e-9 && (ll[1] - 38.75).abs() < 1e-9, "{ll:?}");
     }
 
     #[test]

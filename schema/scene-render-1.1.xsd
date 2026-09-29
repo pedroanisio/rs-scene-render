@@ -1955,10 +1955,33 @@
         <xs:enumeration value="cylinder"/><xs:enumeration value="cone"/>
         <xs:enumeration value="torus"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
-        <xs:enumeration value="clay"/>
+        <xs:enumeration value="clay"/><xs:enumeration value="map"/><xs:enumeration value="globe"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="map" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        rs-scene-render extension. primitive="map": the map asset as ground in the object's xy
+        plane, one map pixel per scene unit, draped with the map as drawn; @terrain (tiles of
+        elevation, Terrarium or Mapbox Terrain-RGB per @terrainEncoding) raises it toward the
+        camera (−z) by true height times @exaggeration on a grid of @resolution cells, and
+        @buildings extrudes the footprints of its vector basemap to their heights (in @material). Terrain and
+        buildings need a web-mercator map. primitive="globe": a sphere of @radius (poles on the
+        y axis, 0° longitude facing the camera) draped with the map's content drawn over the
+        whole world. @textureSize is the drape's size in pixels along its longer side.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="terrain" type="xs:IDREF"/>
+    <xs:attribute name="terrainEncoding" default="terrarium">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="exaggeration" type="xs:double" default="1"/>
+    <xs:attribute name="buildings" type="xs:boolean" default="false"/>
+    <xs:attribute name="textureSize" default="2048">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="64"/><xs:maxInclusive value="8192"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="resolution" default="64">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType>
     </xs:attribute>

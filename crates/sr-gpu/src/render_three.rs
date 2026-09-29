@@ -165,7 +165,7 @@ pub(super) fn doc_lights(p: &Program) -> &[m::Light] {
 }
 
 impl Renderer {
-    fn three_engine(&mut self) -> &mut ThreeEngine {
+    pub(super) fn three_engine(&mut self) -> &mut ThreeEngine {
         let g = &self.gpu;
         self.three.get_or_insert_with(|| Box::new(ThreeEngine::new(g.device.clone(), g.queue.clone())))
     }
@@ -720,6 +720,10 @@ impl Renderer {
         };
         let default_mat =
             || (MaterialParams { base_color: [0.8, 0.8, 0.8, 1.0], ..Default::default() }, Maps::default());
+        if matches!(a.str("primitive").as_deref(), Some("map" | "globe")) {
+            self.map3d_draws(plan, ctx, j, world, opacity, doc_mat, cast, receive, draws);
+            return;
+        }
         if a.str("primitive").as_deref() != Some("mesh") {
             if let Some(mesh) = self.primitive_mesh(plan, ctx, n) {
                 let (material, maps) = doc_mat.unwrap_or_else(default_mat);

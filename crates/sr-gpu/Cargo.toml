@@ -23,6 +23,7 @@ pollster.workspace = true
 bytemuck.workspace = true
 half.workspace = true
 image.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 libm.workspace = true
 serde.workspace = true

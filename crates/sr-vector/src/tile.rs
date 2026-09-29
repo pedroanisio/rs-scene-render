@@ -935,9 +935,20 @@ fn mask_combine(m: f32, v: f32, op: u32) -> f32 {
 /// CPU reference of the fine stage (premultiplied RGBA, row-major), with
 /// `paint(index, x, y)` returning a straight colour.
 pub fn render_cpu(e: &Encoded, paint: &dyn Fn(u32, f32, f32) -> [f32; 4]) -> Vec<[f32; 4]> {
+    render_cpu_rows(e, 0..e.tiles[1], paint)
+}
+
+/// [`render_cpu`] for a range of tile rows: the pixels of those rows (full width, row-major).
+pub fn render_cpu_rows(
+    e: &Encoded,
+    rows: std::ops::Range<u32>,
+    paint: &dyn Fn(u32, f32, f32) -> [f32; 4],
+) -> Vec<[f32; 4]> {
     let [w, h] = e.size;
-    let mut out = vec![[0.0f32; 4]; (w * h) as usize];
-    for ty in 0..e.tiles[1] {
+    let y_first = rows.start * TILE;
+    let y_end = (rows.end * TILE).min(h);
+    let mut out = vec![[0.0f32; 4]; (w * y_end.saturating_sub(y_first)) as usize];
+    for ty in rows {
         for tx in 0..e.tiles[0] {
             let [off, n] = e.ranges[(ty * e.tiles[0] + tx) as usize];
             if n == 0 {
@@ -998,7 +1009,7 @@ pub fn render_cpu(e: &Encoded, paint: &dyn Fn(u32, f32, f32) -> [f32; 4]) -> Vec
                             _ => {}
                         }
                     }
-                    out[(y * w + x) as usize] = acc;
+                    out[((y - y_first) * w + x) as usize] = acc;
                 }
             }
         }

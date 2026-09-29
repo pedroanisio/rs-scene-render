@@ -973,6 +973,52 @@
           "why": "nothing beyond the globe's limb"
         }
       ]
+    },
+    {
+      "id": "map-3d",
+      "reference": "Google Earth Studio / 3D city maps",
+      "technique": "a globe draped with its map, terrain from elevation tiles, buildings extruded from a basemap",
+      "scene": "scenes/map-3d.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 150,
+          "y": 150,
+          "rgb": "#785050",
+          "tol": 0.03,
+          "why": "the globe faces 0°, 0°: raster tile z2 (2, 2)"
+        },
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            440,
+            60,
+            20,
+            80
+          ],
+          "not_rgb": "#000000",
+          "tol": 0.02,
+          "min": 0.3,
+          "why": "the hill rises above the edge-on ground"
+        },
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            600,
+            0,
+            300,
+            300
+          ],
+          "rgb": "#FF0000",
+          "tol": 0.1,
+          "min": 0.05,
+          "why": "Baixa's buildings stand up in their material"
+        }
+      ]
     }
   ]
 }

@@ -213,6 +213,7 @@ struct Sets<'a> {
     sprite_assets: HashSet<&'a str>,
     /// `@id` of every `/scene/physics/forceField`.
     force_fields: Vec<&'a str>,
+    map_assets: Vec<&'a str>,
     tiles_assets: Vec<&'a str>,
     audio_assets: HashSet<&'a str>,
     generated_audio: HashSet<&'a str>,
@@ -264,6 +265,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.geo_assets.push(i);
             } else if is(a, "tiles") {
                 s.tiles_assets.push(i);
+            } else if is(a, "map") {
+                s.map_assets.push(i);
             } else if is(a, "audio") {
                 s.audio_assets.insert(i);
             } else if is(a, "generated") && matches!(a.attribute("kind"), Some("speech" | "music" | "sound-effect")) {
@@ -438,6 +441,12 @@ impl<'a> Eval<'a> {
                 self.check(a("primitive") != Some("extrude") || has("path"), n, "C8", || {
                     "object3D primitive=\"extrude\" requires @path.".into()
                 });
+                let c47 = !matches!(a("primitive"), Some("map" | "globe")) || has("map");
+                self.check(c47, n, "C47", || "object3D primitive=\"map\" or \"globe\" requires @map.".into());
+                let r28 = !has("map") || self.sets.map_assets.contains(&v("map").as_str());
+                self.check(r28, n, "R28", || "object3D/@map must name a map asset.".into());
+                let r29 = !has("terrain") || self.sets.tiles_assets.contains(&v("terrain").as_str());
+                self.check(r29, n, "R29", || "object3D/@terrain must name a tiles asset.".into());
                 let r4 = !has("material") || contains(&self.sets.materials, a("material"));
                 self.check(r4, n, "R4", || "object3D/@material must name a material.".into());
                 let r5 = !has("mesh") || contains(&self.sets.mesh_assets, a("mesh"));

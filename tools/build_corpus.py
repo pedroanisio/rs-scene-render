@@ -165,6 +165,9 @@ CASES = [
     ("c53", ["C53"], sub('palette="#F7FBFF #08306B"', 'palette="#F7FBFF #08306B" domain="3 1"')),
     ("s06-latitude", ["S06"], sub('<pin lon="5" lat="5"', '<pin lon="5" lat="95"')),
     ("r27", ["R27"], sub('<basemap tiles="streets"', '<basemap tiles="places"')),
+    ("c47", ["C47"], sub('<object3D id="earth" primitive="globe" map="atlas"', '<object3D id="earth" primitive="globe"')),
+    ("r28", ["R28"], sub('primitive="globe" map="atlas"', 'primitive="globe" map="streets"')),
+    ("r29", ["R29"], sub('terrain="streets"', 'terrain="atlas"')),
     ("c46", ["C46"], sub('<tiles id="streets" src="../media/streets.pmtiles"', '<tiles id="streets"')),
 ]
 for attr, anchor, repl in [

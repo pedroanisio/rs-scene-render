@@ -163,6 +163,9 @@
   </sch:pattern>
   <sch:pattern id="p26">
     <sch:rule context="object3D">
+      <sch:assert id="C47" test="not(@primitive='map' or @primitive='globe') or @map">object3D primitive="map" or "globe" requires @map.</sch:assert>
+      <sch:assert id="R28" test="not(@map) or /scene/assets/map[@id=current()/@map]">object3D/@map must name a map asset.</sch:assert>
+      <sch:assert id="R29" test="not(@terrain) or /scene/assets/tiles[@id=current()/@terrain]">object3D/@terrain must name a tiles asset.</sch:assert>
       <sch:assert id="R4" test="not(@material) or /scene/materials/material[@id=current()/@material]">object3D/@material must name a material.</sch:assert>
       <sch:assert id="R5" test="not(@mesh) or /scene/assets/mesh[@id=current()/@mesh]">object3D/@mesh must name a mesh asset.</sch:assert>
     </sch:rule>

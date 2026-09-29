@@ -261,3 +261,68 @@ pub fn basemap_zoom(proj: &sr_geo::project::Projection, tile_size: f64, detail: 
     let z = if raster { z.round() } else { z.floor() };
     z.clamp(0.0, 24.0) as u8
 }
+
+/// How elevation tiles encode heights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DemEncoding {
+    /// Mapzen/AWS Terrarium: metres = R·256 + G + B/256 − 32768.
+    Terrarium,
+    /// Mapbox Terrain-RGB: metres = −10000 + (R·65536 + G·256 + B)·0.1.
+    Mapbox,
+}
+
+/// An elevation tile decoded to metres: (width, heights row-major).
+pub type Dem = (u32, Vec<f32>);
+
+/// Elevation tile z/x/y of an archive of encoded PNG (or WebP) tiles, in metres (cached).
+pub fn dem(a: &Arc<Archive>, z: u8, x: u32, y: u32, enc: DemEncoding) -> Result<Option<Arc<Dem>>, String> {
+    type DemCache = HashMap<(usize, u8, u32, u32, DemEncoding), Option<Arc<Dem>>>;
+    static CACHE: OnceLock<Mutex<DemCache>> = OnceLock::new();
+    let key = (Arc::as_ptr(a) as usize, z, x, y, enc);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(d) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Ok(d.clone());
+    }
+    let d = match a.tile(z, x, y)? {
+        None => None,
+        Some(b) => {
+            let img = image::load_from_memory(&b).map_err(|e| format!("elevation tile {z}/{x}/{y}: {e}"))?.to_rgb8();
+            let w = img.width();
+            let h = img
+                .pixels()
+                .map(|p| {
+                    let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+                    match enc {
+                        DemEncoding::Terrarium => r * 256.0 + g + b / 256.0 - 32768.0,
+                        DemEncoding::Mapbox => -10000.0 + (r * 65536.0 + g * 256.0 + b) * 0.1,
+                    }
+                })
+                .collect();
+            Some(Arc::new((w, h)))
+        }
+    };
+    let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if c.len() > 512 {
+        c.clear();
+    }
+    c.insert(key, d.clone());
+    Ok(d)
+}
+
+/// Elevation (metres) at a longitude and latitude from the elevation tiles of zoom `z`
+/// (bilinear within a tile; `None` where the archive has no tile).
+pub fn elevation(a: &Arc<Archive>, z: u8, enc: DemEncoding, lon: f64, lat: f64) -> Result<Option<f64>, String> {
+    let [tx, ty] = sr_geo::tiles::tile_xy(z, lon, lat);
+    let n = 1u32 << z;
+    let (x, y) = ((tx.floor() as i64).clamp(0, n as i64 - 1) as u32, (ty.floor() as i64).clamp(0, n as i64 - 1) as u32);
+    let Some(d) = dem(a, z, x, y, enc)? else { return Ok(None) };
+    let w = d.0 as usize;
+    let hgt = d.1.len() / w.max(1);
+    let fx = ((tx - x as f64) * w as f64 - 0.5).clamp(0.0, (w - 1) as f64);
+    let fy = ((ty - y as f64) * hgt as f64 - 0.5).clamp(0.0, (hgt - 1) as f64);
+    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(hgt - 1));
+    let (u, v) = (fx - x0 as f64, fy - y0 as f64);
+    let at = |x: usize, y: usize| d.1[y * w + x] as f64;
+    Ok(Some((at(x0, y0) * (1.0 - u) + at(x1, y0) * u) * (1.0 - v) + (at(x0, y1) * (1.0 - u) + at(x1, y1) * u) * v))
+}

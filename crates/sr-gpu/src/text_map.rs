@@ -251,21 +251,38 @@ fn label_anchor(pl: &Planar) -> Option<([f64; 2], f64)> {
 
 /// Draws a map asset in its width × height box.
 pub fn map_drawing(tc: &mut TextCache, cx: &mut Cx, mp: &m::MapAsset) -> Result<Drawing, String> {
+    map_drawing_as(tc, cx, mp, None)
+}
+
+/// Draws a map asset, in its own frame and camera, or in `frame` (a map setup and view that
+/// replace them: the whole world for a globe's texture).
+pub fn map_drawing_as(
+    tc: &mut TextCache,
+    cx: &mut Cx,
+    mp: &m::MapAsset,
+    frame: Option<(sr_geo::view::Map, sr_geo::view::View)>,
+) -> Result<Drawing, String> {
     let key = mp.id.as_str();
     let g = cx.g;
-    let (w, h) = (mp.width as f64, mp.height as f64);
+    let (w, h) = match &frame {
+        Some((m, _)) => (m.size[0], m.size[1]),
+        None => (mp.width as f64, mp.height as f64),
+    };
     let bx = [0.0, 0.0, w, h];
     let at = attrs(g, mp, key);
-
-    let cam = sr_eval::geo::camera(cx.p, mp)?;
-    let map = &cam.map;
-    let view = sr_eval::geo::view(
-        &cam,
-        mp,
-        &|name| at.opt(name).filter(|_| at.props.is_some_and(|p| p.get(name).is_some())),
-        cx.g.time,
-    );
-    let proj = map.projection(&view);
+    let proj = match &frame {
+        Some((m, v)) => m.projection(v),
+        None => {
+            let cam = sr_eval::geo::camera(cx.p, mp)?;
+            let view = sr_eval::geo::view(
+                &cam,
+                mp,
+                &|name| at.opt(name).filter(|_| at.props.is_some_and(|p| p.get(name).is_some())),
+                cx.g.time,
+            );
+            cam.map.projection(&view)
+        }
+    };
 
     let mut d = Drawing::default();
     let tol = cx.tol;

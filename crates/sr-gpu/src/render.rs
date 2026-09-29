@@ -35,6 +35,8 @@ use crate::fx;
 mod render_access;
 #[path = "render_fx.rs"]
 mod render_fx;
+#[path = "render_map3d.rs"]
+mod render_map3d;
 #[path = "render_three.rs"]
 mod render_three;
 pub use render_three::ViewOverride;

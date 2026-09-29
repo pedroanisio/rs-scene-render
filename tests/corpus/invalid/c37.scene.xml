@@ -157,6 +157,8 @@
       <shape id="dot" shape="ellipse" width="20" height="20" fill="#ffffff"/>
     </repeat>
     <object3D id="bot" primitive="mesh" mesh="robot" material="chrome"/>
+    <object3D id="earth" primitive="globe" map="atlas" radius="120" textureSize="512"/>
+    <object3D id="ground" primitive="map" map="atlas" terrain="streets" terrainEncoding="mapbox" exaggeration="2" buildings="true"/>
     <particleEmitter id="sparks" color="#ffcc00">
       <burst time="4.2" count="50"/>
     </particleEmitter>

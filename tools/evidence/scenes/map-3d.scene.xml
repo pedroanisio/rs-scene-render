@@ -1,0 +1,23 @@
+<scene version="1.1">
+  <!-- Maps in 3D: a globe draped with raster tiles; ground raised by Terrarium elevation tiles
+       (a 2000 m hill, seen edge-on); Lisbon's Baixa with its buildings extruded from the
+       Protomaps basemap (seen edge-on, in red). -->
+  <project width="900" height="300" fps="10" duration="1" background="#000000"/>
+  <assets>
+    <tiles id="raster" src="{GEO}/raster.pmtiles"/>
+    <tiles id="dem" src="{GEO}/hill.pmtiles"/>
+    <tiles id="baixa" src="{GEO}/baixa.pmtiles"/>
+    <map id="world" width="100" height="100"><basemap tiles="raster" attribution="false"/></map>
+    <map id="hillside" width="240" height="240" projection="web-mercator" centerLon="0" centerLat="0" zoom="12" background="#FFFFFF"/>
+    <map id="city" width="300" height="300" projection="web-mercator" centerLon="-9.1375" centerLat="38.7110" zoom="16">
+      <basemap tiles="baixa" labels="false" attribution="false"/>
+    </map>
+  </assets>
+  <materials><material id="stone" baseColor="#FF0000" roughness="1"/></materials>
+  <composition>
+    <object3D id="globe" primitive="globe" map="world" radius="130" textureSize="1024" x="150" y="150"/>
+    <object3D id="hill" primitive="map" map="hillside" terrain="dem" exaggeration="3" resolution="96" textureSize="256" x="450" y="150" rotationX="90"/>
+    <object3D id="town" primitive="map" map="city" buildings="true" material="stone" textureSize="256" x="750" y="170" rotationX="90"/>
+  </composition>
+  <lights><light id="a" type="ambient" intensity="1"/></lights>
+</scene>
