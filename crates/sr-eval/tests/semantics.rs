@@ -385,6 +385,29 @@ fn repeats_generate_scoped_copies() {
 }
 
 #[test]
+fn object3d_instances_evaluate_once_per_index() {
+    let d = doc(
+        "",
+        r#"<object3D id="p" primitive="plane" instances="4" y="5"><expression property="x">170 + index * 100 + count</expression></object3D>"#,
+    );
+    let f = eval(&d, 0.0);
+    let copies: Vec<&FrameNode> = f.nodes.iter().filter(|n| n.kind == "object3D").collect();
+    assert_eq!(copies.len(), 4);
+    for (k, id) in ["p", "p[1]", "p[2]", "p[3]"].into_iter().enumerate() {
+        let n = node(&f, id);
+        let x = n.props.get("x").and_then(Value::as_num);
+        assert_eq!(x, Some(174.0 + 100.0 * k as f64), "{id}");
+        assert_eq!(n.repeat, Some([k as u32, 4]));
+    }
+}
+
+#[test]
+fn bare_assignment_declares_a_variable() {
+    let d = doc("", r#"<layer id="a" asset="img"><expression property="x">t0 = [40, 50][0]; a = 50; t0 + 2 * a</expression></layer>"#);
+    assert_eq!(node(&eval(&d, 0.0), "a").props.get("x"), Some(&Value::Len(Length::px(140.0))));
+}
+
+#[test]
 fn instances_scope_ids_apply_overrides_and_run_on_their_own_clock() {
     let d = doc_after(
         r#"<symbols><symbol id="card" width="200" height="100" duration="2">

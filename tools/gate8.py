@@ -3,8 +3,9 @@
 
 usage: tools/gate8.py OUTDIR [--duration SECONDS]
     Writes gate8.scene.xml: 1080p60 with 207,936 triangles (a 114-segment
-    sphere drawn as 16 instances), a floor, a glass slab (transmission),
-    4 spot lights casting 2048² shadows, and a camera with depth of field.
+    sphere drawn as 16 instances placed on a 4×4 grid by `index`), a floor,
+    a glass slab (transmission), 4 spot lights casting 2048² shadows, and a
+    camera with depth of field.
     The spheres turn and the lights orbit, so every frame is new work.
     then: scene-render render OUTDIR/gate8.scene.xml --bench --frames 0..120
 
@@ -44,7 +45,9 @@ def scene(dur, shadows=True, glass=True, dof=True):
   </materials>
   <composition>
 {camera}    <object3D id="floor" primitive="plane" width="6000" height="6000" x="960" y="900" z="600" rotationX="-90" material="m-floor"/>
-    <object3D id="spheres" primitive="sphere" radius="60" segments="114" instances="16" x="960" y="620" z="500" material="m-chrome">
+    <object3D id="spheres" primitive="sphere" radius="60" segments="114" instances="16" z="500" material="m-chrome">
+      <expression property="x">960 + (index % 4 - 1.5) * 150</expression>
+      <expression property="y">620 + (Math.floor(index / 4) - 1.5) * 150</expression>
       <animate property="rotationY"><key time="0" value="0"/><key time="{dur}" value="{36 * dur}"/></animate>
     </object3D>
 {glass_obj}  </composition>

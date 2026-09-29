@@ -34,9 +34,9 @@ struct Material {
 struct Object {
     model: mat4x4<f32>,
     normal: mat4x4<f32>,
-    // opacity, receive shadow, instances, grid columns
+    // opacity, receive shadow, unused, unused
     params: vec4<f32>,
-    // grid spacing xyz (object units), light view index for shadow passes
+    // unused xyz, light view index for shadow passes
     spacing: vec4<f32>,
 };
 
@@ -57,16 +57,6 @@ struct VOut {
     @location(3) tangent: vec4<f32>,
 };
 
-fn instance_offset(ii: u32) -> vec3<f32> {
-    let n = u32(obj.params.z);
-    if (n <= 1u) { return vec3(0.0); }
-    let cols = max(u32(obj.params.w), 1u);
-    let rows = (n + cols - 1u) / cols;
-    let c = f32(ii % cols) - (f32(cols) - 1.0) * 0.5;
-    let r = f32(ii / cols) - (f32(rows) - 1.0) * 0.5;
-    return vec3(c * obj.spacing.x, r * obj.spacing.y, 0.0);
-}
-
 fn displaced(v: VIn) -> vec3<f32> {
     var p = v.pos;
     if ((u32(mat.aniso.w) & 32u) != 0u) {
@@ -77,9 +67,9 @@ fn displaced(v: VIn) -> vec3<f32> {
 }
 
 @vertex
-fn vs_main(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
+fn vs_main(v: VIn) -> VOut {
     var o: VOut;
-    let local = displaced(v) + instance_offset(ii);
+    let local = displaced(v);
     let w = obj.model * vec4(local, 1.0);
     o.world = w.xyz;
     o.clip = fr.view_proj * w;
@@ -91,8 +81,8 @@ fn vs_main(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
 
 // Shadow pass: obj.spacing.w selects the light view matrix.
 @vertex
-fn vs_shadow(v: VIn, @builtin(instance_index) ii: u32) -> @builtin(position) vec4<f32> {
-    let local = displaced(v) + instance_offset(ii);
+fn vs_shadow(v: VIn) -> @builtin(position) vec4<f32> {
+    let local = displaced(v);
     let w = obj.model * vec4(local, 1.0);
     return shadow_mats[u32(obj.spacing.w)] * w;
 }

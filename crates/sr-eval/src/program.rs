@@ -1122,6 +1122,37 @@ impl Builder {
                     format!("{p}~{name}{tcount}").into()
                 }
             };
+            // object3D/@instances: one node per copy, each evaluated with its own index and count
+            // (CONVENTIONS 5.2); copy 0 keeps the id, copy k is `id[k]`.
+            let copies = if name == "object3D" { attr_num(n, "instances").unwrap_or(1.0).max(1.0) as u32 } else { 1 };
+            if copies > 1 {
+                let mut one = n.clone();
+                let _ = one.set_attr("instances", "1");
+                for k in 0..copies {
+                    let (var, item) = match &ctx.repeat {
+                        Some((_, _, v, it)) => (v.clone(), it.clone()),
+                        None => ("index".into(), V::Num(k as f64)),
+                    };
+                    let cctx = Ctx { repeat: Some((k, copies, var, item)), ..ctx.clone() };
+                    let got = self.instantiate(std::slice::from_ref(&one), parent, &cctx);
+                    let cid: Arc<str> = if k == 0 { id.clone() } else { format!("{id}[{k}]").into() };
+                    for &c in &got {
+                        let node = &mut self.nodes[c as usize];
+                        node.id = cid.clone();
+                        if attr_num(n, "seed").is_none() {
+                            node.seed = crate::rng::hash_str(&cid);
+                        }
+                        if n.id().is_some() && k > 0 {
+                            self.ids.insert(cid.clone(), c);
+                        }
+                    }
+                    out.extend(got);
+                }
+                if n.id().is_some() {
+                    self.ids.insert(id.clone(), out[out.len() - copies as usize]);
+                }
+                continue;
+            }
             let idx = self.nodes.len() as u32;
             let e: &dyn Element = n;
             let tf = Tf {

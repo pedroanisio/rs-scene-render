@@ -541,7 +541,6 @@ impl Renderer {
         let a = attrs(n);
         let world = Self::world3(g, j, 0);
         let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
-        let instances = a.num("instances", 1.0).max(1.0) as u32;
         let doc_mat = match a.str("material") {
             Some(id) => {
                 let m = self.document_material(plan, ctx, &id);
@@ -565,7 +564,6 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
-                    instances,
                 });
             }
             return;
@@ -674,7 +672,6 @@ impl Renderer {
                         opacity,
                         cast_shadow: cast,
                         receive_shadow: receive,
-                        instances,
                     });
                 }
             }
@@ -1279,7 +1276,7 @@ impl Renderer {
             return;
         }
         plan.stats.objects3d += draws.len();
-        plan.stats.triangles += draws.iter().map(|d| d.mesh_triangles() * d.instances.max(1) as u64).sum::<u64>();
+        plan.stats.triangles += draws.iter().map(|d| d.mesh_triangles()).sum::<u64>();
         plan.stats.splats += splats.iter().map(|s| s.gpu.n as u64).sum::<u64>();
         let clip_fix = Self::clip_fix(space, cam_size);
         let scene = Scene3 {

@@ -86,11 +86,10 @@ pub struct Draw3 {
     pub opacity: f32,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
-    pub instances: u32,
 }
 
 impl Draw3 {
-    /// Triangles of one instance.
+    /// Triangles of the mesh.
     pub fn mesh_triangles(&self) -> u64 {
         self.mesh.mesh().count as u64 / 3
     }
@@ -1225,14 +1224,11 @@ impl ThreeEngine {
         let mut preps: Vec<Prep> = Vec::new();
         for dr in &scene.draws {
             let m = dr.mesh.mesh();
-            let size3 = (m.hi - m.lo).max(Vec3::splat(1e-3));
-            let n = dr.instances.max(1);
-            let cols = (n as f32).sqrt().ceil().max(1.0);
             let o = ObjectU {
                 model: dr.model.to_cols_array_2d(),
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
-                params: [dr.opacity, dr.receive_shadow as u32 as f32, n as f32, cols],
-                spacing: [size3.x * 1.25, size3.y * 1.25, size3.z * 1.25, 0.0],
+                params: [dr.opacity, dr.receive_shadow as u32 as f32, 0.0, 0.0],
+                spacing: [0.0; 4],
             };
             let obj = pad(&mut obj_bytes, bytemuck::bytes_of(&o));
             let mat = pad(&mut mat_bytes, bytemuck::bytes_of(&material_u(&dr.material, &dr.maps)));
@@ -1248,7 +1244,7 @@ impl ThreeEngine {
                 MeshSrc::Deformed(vs, _) => Some(buf(bytemuck::cast_slice(vs), wgpu::BufferUsages::VERTEX, "deformed")),
                 MeshSrc::Cached(_) => None,
             };
-            stats.triangles += m.count as u64 / 3 * n as u64;
+            stats.triangles += m.count as u64 / 3;
             preps.push(Prep {
                 kind,
                 obj,
@@ -1377,7 +1373,7 @@ impl ThreeEngine {
                 rp.set_bind_group(2, &obj_bind, &[off]);
                 rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.count, 0, 0..dr.instances.max(1));
+                rp.draw_indexed(0..m.count, 0, 0..1);
             }
         }
         // ------------------------------------------------ opaque pass
@@ -1392,7 +1388,7 @@ impl ThreeEngine {
                 rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
                 rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.count, 0, 0..dr.instances.max(1));
+                rp.draw_indexed(0..m.count, 0, 0..1);
             }
         };
         let opaque: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Opaque).collect();
