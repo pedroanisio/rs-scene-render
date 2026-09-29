@@ -144,3 +144,74 @@ fn fs_tile_dilate(i: PostOut) -> @location(0) vec4<f32> {
     }
     return vec4(m, 0.0, 0.0, 1.0);
 }
+
+// ---------------------------------------------------------------- screen-space ambient occlusion
+// post_src: prepass normals (view space) and roughness; post_depth: view depth.
+
+fn view_pos(px: vec2<f32>, z: f32) -> vec3<f32> {
+    let c = pfr.screen.xy * 0.5;
+    return vec3((px - c) * z / pfr.lens.x, z);
+}
+
+fn to_px(p: vec3<f32>) -> vec2<f32> {
+    return p.xy * pfr.lens.x / p.z + pfr.screen.xy * 0.5;
+}
+
+@fragment
+fn fs_ssao(i: PostOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(i.pos.xy);
+    let z = textureLoad(post_depth, px, 0).r;
+    if (z <= 0.0) { return vec4(1.0); }
+    let p = view_pos(i.pos.xy, z);
+    let n = normalize(textureLoad(post_src, px, 0).xyz);
+    let radius = pfr.fx.x;
+    // a tangent frame turned per pixel by a 4 × 4 interleaved pattern
+    let rot = f32((px.x & 3) * 4 + (px.y & 3)) * (6.2831853 / 16.0);
+    var t = normalize(cross(n, select(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), abs(n.z) > 0.9)));
+    let b = cross(n, t);
+    t = t * cos(rot) + b * sin(rot);
+    let bb = cross(n, t);
+    let dims = vec2<i32>(textureDimensions(post_depth));
+    var occ = 0.0;
+    let count = 16;
+    for (var k = 0; k < count; k++) {
+        // a fixed hemisphere kernel (golden-angle spiral), denser near the centre
+        let f = (f32(k) + 0.5) / f32(count);
+        let a = f32(k) * 2.39996323;
+        let r = sqrt(f);
+        let h = sqrt(max(1.0 - f, 0.0));
+        let dir = t * (cos(a) * r) + bb * (sin(a) * r) + n * h;
+        let scale = mix(0.1, 1.0, f * f);
+        let s = p + dir * radius * scale;
+        if (s.z <= 0.0) { continue; }
+        let q = vec2<i32>(to_px(s));
+        if (any(q < vec2(0)) || any(q >= dims)) { continue; }
+        let sz = textureLoad(post_depth, q, 0).r;
+        if (sz <= 0.0) { continue; }
+        let range = smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
+        if (sz < s.z - 0.02 * radius) { occ += range; }
+    }
+    let ao = clamp(1.0 - pfr.fx.y * occ / f32(count), 0.0, 1.0);
+    return vec4(ao, ao, ao, 1.0);
+}
+
+// 4 × 4 depth-aware box blur of the occlusion (removes the interleaved pattern)
+@fragment
+fn fs_ao_blur(i: PostOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(i.pos.xy);
+    let z = textureLoad(post_depth, px, 0).r;
+    let dims = vec2<i32>(textureDimensions(post_src));
+    var sum = 0.0;
+    var w = 0.0;
+    for (var y = -2; y < 2; y++) {
+        for (var x = -2; x < 2; x++) {
+            let q = clamp(px + vec2(x, y), vec2(0), dims - 1);
+            let qz = textureLoad(post_depth, q, 0).r;
+            let wt = select(0.0, 1.0, abs(qz - z) <= max(0.05 * z, 1.0));
+            sum += textureLoad(post_src, q, 0).r * wt;
+            w += wt;
+        }
+    }
+    let ao = select(1.0, sum / w, w > 0.0);
+    return vec4(ao, ao, ao, 1.0);
+}

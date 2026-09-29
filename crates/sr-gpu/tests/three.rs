@@ -29,6 +29,8 @@ fn scene(draws: Vec<Draw3>, lights: Vec<Light3>) -> Scene3 {
         env: None,
         splats: Vec::new(),
         encode_srgb: false,
+        ao: None,
+        ssr: false,
     }
 }
 
@@ -64,6 +66,7 @@ fn sun(dir: Vec3, lux: f32, shadow: bool) -> Light3 {
         ies: None,
         affects_diffuse: true,
         affects_specular: true,
+        contact: 0.0,
     }
 }
 
@@ -109,7 +112,8 @@ fn shadows_fall_on_the_plane_behind() {
     let shadowed = lum(at(&lit, 64 + 55, 64));
     let open = lum(at(&lit, 64 - 45, 64));
     assert!(open > 0.1 && shadowed < open * 0.4, "shadow {shadowed} vs open {open}");
-    assert_eq!(eng.stats.shadow_views, 1);
+    // a directional light under a perspective camera casts through four cascades
+    assert_eq!(eng.stats.shadow_views, 4);
 }
 
 #[test]

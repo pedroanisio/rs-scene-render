@@ -58,6 +58,9 @@ pub(super) struct CamExtras {
     pub exposure: f32,
     pub dof: Option<Dof>,
     pub lens_k1: f32,
+    /// Screen-space ambient occlusion (radius, intensity) and reflections.
+    pub ao: Option<[f32; 2]>,
+    pub ssr: bool,
 }
 
 /// The blobs of a clay object at this frame: static attributes, overridden by the animated
@@ -162,7 +165,7 @@ impl Renderer {
     /// The frame camera (the active camera node, else the default 2.5D camera).
     pub(super) fn camera3(&self, g: &FrameGraph, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
         let mut cp = CameraParams::default();
-        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0 };
+        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0, ao: None, ssr: false };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
         let (mut sensor, mut fstop, mut focus, mut blades, mut dof_on, mut focus_target) =
             (36.0f32, 2.8f32, 1000.0f32, 0u32, false, None);
@@ -170,6 +173,10 @@ impl Renderer {
             let n = &g.nodes[ci as usize];
             let a = attrs(n);
             sensor = a.num("sensorWidth", 36.0) as f32;
+            if flag(&a, "ambientOcclusion", false) {
+                ex.ao = Some([a.num("aoRadius", 40.0) as f32, a.num("aoIntensity", 1.0) as f32]);
+            }
+            ex.ssr = flag(&a, "screenSpaceReflections", false);
             cp.fov = a.num("fov", 60.0) as f32;
             if let Some(f) = a.opt("focalLength") {
                 cp.fov = camera::fov_of_lens(f as f32, sensor);
@@ -922,6 +929,7 @@ impl Renderer {
         let hgt = a.opt("height").map(|v| v as f32).unwrap_or(w);
         let r = a.opt("radius").map(|v| v as f32).unwrap_or(if kind == LightKind::Disk { w * 0.5 } else { 10.0 });
         Light3 {
+            contact: if flag(a, "contactShadows", false) { a.num("contactShadowLength", 20.0) as f32 } else { 0.0 },
             kind,
             pos: Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32),
             dir,
@@ -1307,6 +1315,7 @@ impl Renderer {
             // no lights in the document: a headlight along the view and a soft fill
             let fwd = cam.view.inverse().transform_vector3(Vec3::Z).normalize();
             let base = Light3 {
+                contact: 0.0,
                 kind: LightKind::Directional,
                 pos: Vec3::ZERO,
                 dir: (fwd + Vec3::new(0.3, 0.4, 0.0)).normalize(),
@@ -1356,6 +1365,8 @@ impl Renderer {
             env,
             splats,
             encode_srgb: !self.working.linear,
+            ao: ex.ao,
+            ssr: ex.ssr,
         };
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);

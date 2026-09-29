@@ -21,8 +21,10 @@ struct Frame {
     dof: vec4<f32>,
     // lens distortion k1, dof on, near, far
     post: vec4<f32>,
-    // focal length (px), unused ×3
+    // focal length (px), encode sRGB, ambient occlusion on, unused
     lens: vec4<f32>,
+    // ambient-occlusion radius (scene units), intensity, screen-space reflections on, unused
+    fx: vec4<f32>,
     sh: array<vec4<f32>, 9>,
 };
 
@@ -35,11 +37,11 @@ struct Light {
     color: vec4<f32>,
     // cos outer, cos inner, first shadow view (−1 none), shadow softness (texels)
     spot: vec4<f32>,
-    // width, height, radius (scene units), IES row (−1 none)
+    // width, height, radius (scene units; directional: the view depths where cascades 0–2 end), IES row (−1 none)
     size: vec4<f32>,
-    // affects diffuse, affects specular, shadow bias, shadow views (1 or 6)
+    // affects diffuse, affects specular, shadow bias, shadow views (1, 4 cascades or 6 cube faces)
     flags: vec4<f32>,
-    // xyz right axis of the light (IES azimuth), w unused
+    // xyz right axis of the light (IES azimuth), w contact-shadow length (scene units, 0 = off)
     right: vec4<f32>,
 };
 

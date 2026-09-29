@@ -373,3 +373,98 @@ fn clay_blobs_merge_split_and_animate() {
     assert_eq!(runs(&a), 1, "merged at t = 0");
     assert_eq!(runs(&b), 2, "split at t = 2");
 }
+
+/// A 128 × 128 set: the default eye as an explicit camera (so it can take the screen-space
+/// options), a floor plane at y = 100 receding in depth, and `body`.
+fn stage(cam: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    stage_on("fl", cam, mats, body, lights)
+}
+
+fn stage_on(floor: &str, cam: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    let body = format!(
+        r#"<camera id="cam" fov="60" x="64" y="64" z="-110.85" {cam}/>
+        <object3D id="ground" primitive="box" width="400" height="4" depth="600" x="64" y="102" z="150" material="{floor}"/>{body}"#
+    );
+    scene("", &format!(r##"<material id="fl" baseColor="#A0A0A0" roughness="0.9"/>{mats}"##), &body, lights)
+}
+
+fn lum3(p: [f32; 4]) -> f32 {
+    p[0] + p[1] + p[2]
+}
+
+#[test]
+fn directional_shadows_fit_what_the_camera_sees() {
+    // a 20 000-unit floor makes a whole-scene shadow map 40 units a texel at 512: a 6-unit pole
+    // would cast nothing; fitted to the view, its shadow shows on the floor behind it
+    let body = r#"<object3D id="huge" primitive="box" width="20000" height="2" depth="20000" x="64" y="100" z="5000" material="fl"/>
+        <object3D id="pole" primitive="box" width="6" height="60" depth="6" x="64" y="70" z="40" material="fl"/>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="0.2"/>
+        <light id="sun" type="directional" intensity="2" pitch="-35" yaw="70" castShadow="true" shadowMapSize="512"/>"#;
+    let d = scene("", r##"<material id="fl" baseColor="#C0C0C0" roughness="1"/>"##, body, lights);
+    let Some(r) = render(&d) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the sun comes from the side (yaw 70), so the pole's shadow runs to the right of its foot
+    // along the floor (rows 86 to 91 of this view), where the pole does not hide it
+    let dark =
+        (86..91).flat_map(|y| (70..110).map(move |x| (x, y))).map(|(x, y)| lum3(r.at(x, y))).fold(f32::MAX, f32::min);
+    let lit = (86..91).map(|y| lum3(r.at(30, y))).fold(0.0, f32::max);
+    assert!(dark < lit * 0.6, "a pole shadow on the floor: darkest {dark}, lit {lit}");
+}
+
+#[test]
+fn ambient_occlusion_darkens_contacts_only() {
+    let mats = r##"<material id="redm" baseColor="#C04030" roughness="0.8"/>"##;
+    let body =
+        r#"<object3D id="ball" primitive="sphere" radius="18" segments="48" x="64" y="82" z="40" material="redm"/>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="1"/>"#;
+    let Some(off) = render(&stage("", mats, body, lights)) else { return };
+    let on = render(&stage(r#"ambientOcclusion="true" aoRadius="12""#, mats, body, lights)).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    // around the ball's foot (row 90, x 51 to 77 in this view) the floor darkens
+    let darker = (84..100u32)
+        .flat_map(|y| (40..90u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| lum3(on.at(x, y)) < lum3(off.at(x, y)) * 0.95)
+        .count();
+    assert!(darker > 40, "{darker} pixels darkened around the contact");
+    // far from it nothing changes
+    let (far_off, far_on) = (lum3(off.at(10, 120)), lum3(on.at(10, 120)));
+    assert!((far_on - far_off).abs() < far_off * 0.02, "open floor: {far_off} -> {far_on}");
+}
+
+#[test]
+fn contact_shadows_catch_what_the_shadow_map_misses() {
+    // no shadow map at all: the contact shadow alone darkens the floor beside a cube (the sun
+    // comes from the side, so the shadow is not hidden behind the cube)
+    let body =
+        r#"<object3D id="cube" primitive="box" width="16" height="16" depth="16" x="64" y="92" z="30" material="fl"/>"#;
+    let sun = |extra: &str| {
+        format!(
+            r#"<light id="a" type="ambient" intensity="0.1"/><light id="sun" type="directional" intensity="2" pitch="-25" yaw="70" {extra}/>"#
+        )
+    };
+    let Some(off) = render(&stage("", "", body, &sun(""))) else { return };
+    let on = render(&stage("", "", body, &sun(r#"contactShadows="true" contactShadowLength="30""#))).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    let changed = (0..128u32)
+        .flat_map(|y| (0..128u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| lum3(on.at(x, y)) < lum3(off.at(x, y)) * 0.7)
+        .count();
+    assert!(changed > 20, "{changed} pixels shadowed");
+    assert!((lum3(on.at(10, 120)) - lum3(off.at(10, 120))).abs() < 0.02, "open floor unchanged");
+}
+
+#[test]
+fn screen_space_reflections_mirror_objects_in_glossy_floors() {
+    let mats = r##"<material id="redm" baseColor="#FF2010" roughness="0.8"/><material id="gloss" baseColor="#303030" roughness="0.05"/>"##;
+    let body =
+        r#"<object3D id="ball" primitive="sphere" radius="14" segments="48" x="64" y="70" z="60" material="redm"/>"#;
+    let glossy = |cam: &str| stage_on("gloss", cam, mats, body, r#"<light id="a" type="ambient" intensity="1"/>"#);
+    let Some(off) = render(&glossy("")) else { return };
+    let on = render(&glossy(r#"screenSpaceReflections="true""#)).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    // below the ball, where its mirror image falls on the floor, red rises
+    let redness = |r: &Rendered, x: u32, y: u32| r.at(x, y)[0] - r.at(x, y)[1];
+    let gain = (100..112).map(|y| redness(&on, 64, y) - redness(&off, 64, y)).fold(0.0f32, f32::max);
+    assert!(gain > 0.05, "reflection of the red ball: {gain}");
+    assert!((lum3(on.at(10, 120)) - lum3(off.at(10, 120))).abs() < 0.03, "empty floor unchanged");
+}
