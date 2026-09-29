@@ -1019,13 +1019,14 @@ impl Renderer {
                 Some(([z, rx, ry], anchor)) => {
                     let a = xf.apply(anchor);
                     let (mut vx, mut vy, mut vz) = (p[0] - a[0], p[1] - a[1], 0.0);
+                    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge (conventions 5.14)
                     let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
-                    let ny = vy * cx - vz * sx;
-                    vz = vy * sx + vz * cx;
+                    let ny = vy * cx + vz * sx;
+                    vz = -vy * sx + vz * cx;
                     vy = ny;
                     let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
-                    let nx = vx * cy + vz * sy;
-                    vz = -vx * sy + vz * cy;
+                    let nx = vx * cy - vz * sy;
+                    vz = vx * sy + vz * cy;
                     vx = nx;
                     let (px, py, pz) = (a[0] + vx, a[1] + vy, z + vz);
                     // through the frame camera (target px → frame → clip → target clip)

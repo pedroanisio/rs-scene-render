@@ -480,6 +480,29 @@ fn layers_in_2_5d_project_and_sort_by_depth() {
 }
 
 #[test]
+fn positive_2_5d_rotations_turn_the_right_and_top_edges_away() {
+    // conventions 5.14: the edge that turns away is farther from the eye, so it projects shorter
+    let flat = |rot: &str| {
+        let d = doc(
+            r##"width="64" height="64" background="#000000""##,
+            "",
+            &format!(r#"<layer id="flat" asset="white" x="32" y="32" anchorX="2" anchorY="2" scaleX="8" scaleY="8" threeD="true" {rot}="40"/>"#),
+        );
+        render(&d)
+    };
+    let Some(r) = flat("rotationY") else { return };
+    let cols: Vec<u32> = (0..64).filter(|x| r.at(*x, 32)[0] > 0.5).collect();
+    let height = |x: u32| (0..64).filter(|y| r.at(x, *y)[0] > 0.5).count();
+    let (left, right) = (height(cols[0] + 1), height(cols[cols.len() - 1] - 1));
+    assert!(right + 2 < left, "rotationY: right edge {right} px vs left {left} px");
+    let r = flat("rotationX").unwrap();
+    let rows: Vec<u32> = (0..64).filter(|y| r.at(32, *y)[0] > 0.5).collect();
+    let width = |y: u32| (0..64).filter(|x| r.at(*x, y)[0] > 0.5).count();
+    let (top, bottom) = (width(rows[0] + 1), width(rows[rows.len() - 1] - 1));
+    assert!(top + 2 < bottom, "rotationX: top edge {top} px vs bottom {bottom} px");
+}
+
+#[test]
 fn fit_cover_contain_and_blur_fill() {
     let d = doc(
         r##"background="#000000""##,
