@@ -195,12 +195,17 @@ impl Video<'_> {
                 _ => None,
             })
         });
-        let flash_mode = acc.as_ref().map(|a| a.flash_check.to_string()).unwrap_or_else(|| "warn".into());
+        // Without an <accessibility> element nothing is checked: the XSD defaults (flashCheck
+        // "warn", contrastCheck "off") apply to the element's attributes, and the Python and JS
+        // renderers skip the checks when it is absent. Declare <accessibility/> to opt in.
+        let flash_mode = acc.as_ref().map(|a| a.flash_check.to_string()).unwrap_or_else(|| "off".into());
         let contrast_mode = acc.as_ref().map(|a| a.contrast_check.to_string()).unwrap_or_else(|| "off".into());
         let min_contrast = acc.as_ref().map(|a| a.min_contrast.get()).unwrap_or(4.5);
         let mut flash = (flash_mode != "off").then(crate::access::FlashDetector::default);
         self.renderer.contrast_probe = contrast_mode != "off";
         let mut lowest: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+        // text inside isolated groups: frame indices where each appears (measured after the pass)
+        let mut unprobed: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
         for (k, &t) in times.iter().enumerate() {
             let t0 = Instant::now();
             let g = self.ev.evaluate(t);
@@ -215,6 +220,9 @@ impl Video<'_> {
             if let Some(det) = flash.as_mut() {
                 let cells = self.renderer.flash_grid(&frame.texture);
                 det.push(t, &cells);
+            }
+            for id in &frame.stats.contrast_unprobed {
+                unprobed.entry(id.clone()).or_default().push(k);
             }
             for (id, ratio) in &frame.stats.contrast {
                 let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
@@ -245,6 +253,20 @@ impl Video<'_> {
             }
         }
         report.unsupported = unsupported.into_iter().collect();
+        // text the inline probe could not reach: measure once, at the middle of the longest run of
+        // frames in which it is drawn, by rendering that frame with and without it
+        for (id, frames) in &unprobed {
+            let Some(t) = middle_of_longest_run(frames).map(|k| times[k]) else { continue };
+            let g = self.ev.evaluate(t);
+            let ev = &self.ev;
+            let mut sub = |st: f64| ev.evaluate(st);
+            if let Some(ratio) = self.renderer.contrast_with_without(&g, p, id, &mut sub) {
+                let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
+                if ratio < e.0 {
+                    *e = (ratio, t);
+                }
+            }
+        }
         // accessibility verdicts
         report.accessibility.clear();
         report.accessibility_error = None;
@@ -747,4 +769,31 @@ fn write_sidecars(
         files.push(path);
     }
     Ok(files)
+}
+
+/// Index (into `frames`' values) of the middle frame of the longest run of consecutive indices.
+fn middle_of_longest_run(frames: &[usize]) -> Option<usize> {
+    let (mut best, mut start) = ((0usize, 0usize), 0usize);
+    for i in 1..=frames.len() {
+        if i == frames.len() || frames[i] != frames[i - 1] + 1 {
+            if i - start > best.1 - best.0 {
+                best = (start, i);
+            }
+            start = i;
+        }
+    }
+    (best.1 > best.0).then(|| frames[(best.0 + best.1 - 1) / 2])
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::middle_of_longest_run;
+
+    #[test]
+    fn middle_of_longest_run_picks_the_longest_contiguous_span() {
+        assert_eq!(middle_of_longest_run(&[]), None);
+        assert_eq!(middle_of_longest_run(&[7]), Some(7));
+        assert_eq!(middle_of_longest_run(&[0, 1, 5, 6, 7, 8, 9, 20]), Some(7));
+        assert_eq!(middle_of_longest_run(&[3, 4, 10, 11]), Some(3));
+    }
 }

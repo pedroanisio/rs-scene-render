@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A custom shader that does not compile: the effect must fall back visibly, not silently. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="1" background="#000000"/>
+  <composition>
+    <shape id="card" shape="rect" x="0" y="0" width="640" height="360" fill="#FF0000" effects="fx"/>
+  </composition>
+  <effects>
+    <effect id="fx" type="shader" src="{SHADERS}/broken.glsl"/>
+  </effects>
+</scene>

@@ -426,14 +426,15 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             e[ch] = mix(e[ch], min(e[ch], lim), v[0].x);
             c = e;
         }
-        case 24u: { // LUT: v4..v6 working→LUT matrix rows, v7.x transfer id, v7.y inverse ready (aux2 unused), v0.x mix, v0.y size
+        case 24u: { // LUT: v4..v6 working→LUT matrix rows, v7.x transfer id, v7.z output transfer id + 1 (0: v7.x), v0.x mix, v0.y size
             let m = mat3x3<f32>(v[4].xyz, v[5].xyz, v[6].xyz);
             var x = transpose(m) * c;
             x = tf_encode3(u32(v[7].x), x);
             let n = v[0].y;
             let coord = clamp(x, vec3(0.0), vec3(1.0)) * ((n - 1.0) / n) + 0.5 / n;
             var y = textureSampleLevel(lut3, smp, coord, 0.0).rgb;
-            y = tf_decode3(u32(v[7].x), y);
+            let tf_out = select(u32(v[7].x), u32(v[7].z) - 1u, v[7].z > 0.5);
+            y = tf_decode3(tf_out, y);
             let mi = mat3x3<f32>(vec3(v[4].w, v[5].w, v[6].w), vec3(v[1].x, v[1].y, v[1].z), vec3(v[2].x, v[2].y, v[2].z));
             c = mix(c, transpose(mi) * y, v[0].x);
         }

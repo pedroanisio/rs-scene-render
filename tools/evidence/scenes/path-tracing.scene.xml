@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Offline-quality lighting: a path-traced still life (chrome, glass, soft area light). -->
+<scene version="1.1">
+  <project width="480" height="270" fps="24" duration="1" background="#101418"/>
+  <materials>
+    <material id="fl" baseColor="#B0B0B0" roughness="0.6"/>
+    <material id="ball" baseColor="#D04030" roughness="0.5"/>
+    <material id="chrome" baseColor="#E0E0E8" metallic="1" roughness="0.15"/>
+    <material id="glass" transmission="1" roughness="0.02" ior="1.5"/>
+  </materials>
+  <composition>
+    <camera id="cam" fov="45" x="240" y="100" z="-420" pitch="-12" renderer="pathtrace" pathSamples="128" maxBounces="5"/>
+    <object3D id="ground" primitive="box" width="1400" height="10" depth="1400" x="240" y="205" z="200" material="fl"/>
+    <object3D id="b1" primitive="sphere" radius="40" segments="64" x="150" y="160" z="160" material="ball"/>
+    <object3D id="b2" primitive="sphere" radius="40" segments="64" x="250" y="160" z="220" material="chrome"/>
+    <object3D id="b3" primitive="sphere" radius="36" segments="64" x="345" y="164" z="120" material="glass"/>
+  </composition>
+  <lights>
+    <light id="amb" type="ambient" intensity="0.25"/>
+    <light id="fill" type="sphere-area" x="420" y="-60" z="60" radius="30" intensity="40" castShadow="true" range="3000"/>
+  </lights>
+</scene>

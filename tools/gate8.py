@@ -33,7 +33,9 @@ def scene(dur, shadows=True, glass=True, dof=True):
         '    <object3D id="glass" primitive="box" width="700" height="360" depth="30" x="960" y="620" z="-120" material="m-glass"/>\n' if glass else ""
     )
     camera = (
-        f'    <camera id="cam" fov="45" y="-120" pitch="-8" depthOfField="{"true" if dof else "false"}" fStop="2" focusTarget="spheres" focalLength="50"/>\n'
+        # an explicit camera's x/y/z are absolute scene positions (default 0: the frame's top-left
+        # corner on z = 0), so frame the set explicitly: centred, pulled back, slightly above
+        f'    <camera id="cam" fov="45" x="960" y="380" z="-1900" pitch="-8" depthOfField="{"true" if dof else "false"}" fStop="2" focusTarget="spheres" focalLength="50"/>\n'
     )
     return f'''<?xml version="1.0" encoding="UTF-8"?>
 <scene version="1.1">

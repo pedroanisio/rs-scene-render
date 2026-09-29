@@ -348,3 +348,197 @@ fn materialx_standard_surface() {
     assert_eq!(m.base_color_map.as_deref(), Some(std::path::Path::new("/assets/tex/wood.png")));
     assert!(mtlx::parse("<materialx/>", std::path::Path::new(".")).is_err());
 }
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+}
+
+/// Bounding box and centroid of the distinct vertex positions of every named mesh node, in the
+/// model's own space (Y-up metres), with the model posed at `t` in `clip`.
+fn posed(m: &sr_3d::Model, clip: Option<&sr_3d::Animation>, t: f32) -> std::collections::BTreeMap<String, [Vec3; 3]> {
+    let (locals, weights) = anim::pose(m, clip, t);
+    let mut pts: std::collections::BTreeMap<String, std::collections::BTreeSet<[i64; 3]>> = Default::default();
+    for item in anim::draw_list(m, &locals, &weights, None) {
+        let vs = item.vertices.as_ref().unwrap_or(&m.primitives[item.prim].vertices);
+        let set = pts.entry(m.nodes[item.node].name.clone()).or_default();
+        for v in vs {
+            let p = item.matrix.transform_point3(Vec3::from(v.pos));
+            set.insert([p.x, p.y, p.z].map(|c| (c as f64 * 1e4).round() as i64));
+        }
+    }
+    pts.into_iter()
+        .map(|(name, set)| {
+            let ps: Vec<Vec3> = set.iter().map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32) / 1e4).collect();
+            let lo = ps.iter().fold(Vec3::splat(f32::MAX), |a, b| a.min(*b));
+            let hi = ps.iter().fold(Vec3::splat(f32::MIN), |a, b| a.max(*b));
+            let c = ps.iter().copied().sum::<Vec3>() / ps.len() as f32;
+            (name, [lo, hi, c])
+        })
+        .collect()
+}
+
+#[test]
+fn fbx_animation_stacks_skins_and_blend_shapes() {
+    // tools/fixtures/make_fbx_rig.py: Blender's evaluated vertices are the reference
+    let Asset::Model(m) = import::load(&fixture("rig.fbx"), None).unwrap() else { panic!() };
+    assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    assert_eq!(m.animations.len(), 1, "{:?}", m.animations.iter().map(|a| &a.name).collect::<Vec<_>>());
+    let clip = &m.animations[0];
+    assert!((clip.duration - 1.0).abs() < 1e-3, "{}", clip.duration);
+    assert_eq!(m.skins.len(), 1);
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("rig.expected.json")).unwrap()).unwrap();
+    let v3 = |v: &serde_json::Value| {
+        Vec3::new(v[0].as_f64().unwrap() as f32, v[1].as_f64().unwrap() as f32, v[2].as_f64().unwrap() as f32)
+    };
+    for (key, t) in [("0.0", 0.0), ("0.5", 0.5), ("1.0", 1.0)] {
+        let got = posed(&m, Some(clip), t);
+        for (name, w) in want[key].as_object().unwrap() {
+            let [lo, hi, c] = got.get(name).unwrap_or_else(|| panic!("no mesh node {name}: {:?}", got.keys()));
+            for (what, g, e) in
+                [("min", lo, v3(&w["min"])), ("max", hi, v3(&w["max"])), ("centroid", c, v3(&w["centroid"]))]
+            {
+                assert!((*g - e).abs().max_element() < 2e-3, "{name} {what} at t = {t}: {g} vs Blender {e}");
+            }
+        }
+    }
+    // past the end the last pose holds
+    let (end, after) = (posed(&m, Some(clip), 1.0), posed(&m, Some(clip), 3.0));
+    for (name, e) in &end {
+        assert!((after[name][2] - e[2]).abs().max_element() < 1e-4, "{name}");
+    }
+}
+
+#[test]
+fn usd_text_binary_and_packaged_import_alike() {
+    // tools/fixtures/make_usd_stage.py writes one stage three ways, and USD's own world-space points
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("stage.expected.json")).unwrap()).unwrap();
+    let load = |name: &str| match import::load(&fixture(name), None).unwrap_or_else(|e| panic!("{name}: {e}")) {
+        Asset::Model(m) => m,
+        _ => panic!("{name}: not a model"),
+    };
+    let text = load("stage.usda");
+    for (name, m) in [("stage.usda", &text), ("stage.usdc", &load("stage.usdc")), ("stage.usdz", &load("stage.usdz"))] {
+        assert!(m.warnings.iter().any(|w| w.contains("time-sampled")), "{name}: {:?}", m.warnings);
+        // every mesh's points, as USD places them in the world (stage units, before the basis)
+        let locals: Vec<sr_3d::Trs> = m.nodes.iter().map(|n| n.local).collect();
+        let world = m.world_matrices(&locals);
+        for (path, pts) in want.as_object().unwrap() {
+            let ni = m.nodes.iter().position(|n| &n.name == path).unwrap_or_else(|| panic!("{name}: no {path}"));
+            let got: Vec<Vec3> = m.nodes[ni]
+                .primitives
+                .iter()
+                .flat_map(|&p| m.primitives[p].vertices.iter().map(|v| world[ni].transform_point3(Vec3::from(v.pos))))
+                .collect();
+            for p in pts.as_array().unwrap() {
+                let e = Vec3::new(
+                    p[0].as_f64().unwrap() as f32,
+                    p[1].as_f64().unwrap() as f32,
+                    p[2].as_f64().unwrap() as f32,
+                );
+                let d = got.iter().map(|g| (*g - e).length()).fold(f32::MAX, f32::min);
+                assert!(d < 1e-3, "{name} {path}: USD point {e} is {d} from the nearest imported vertex");
+            }
+            for g in &got {
+                assert!(
+                    pts.as_array().unwrap().iter().any(|p| (Vec3::new(
+                        p[0].as_f64().unwrap() as f32,
+                        p[1].as_f64().unwrap() as f32,
+                        p[2].as_f64().unwrap() as f32
+                    ) - *g)
+                        .length()
+                        < 1e-3),
+                    "{name} {path}: imported vertex {g} is not a USD point"
+                );
+            }
+        }
+        // and the binary layers import exactly as the text one
+        assert_eq!(m.basis, text.basis, "{name}");
+        assert_eq!(m.primitives.len(), text.primitives.len(), "{name}");
+        for (a, b) in m.primitives.iter().zip(&text.primitives) {
+            assert_eq!(a.indices, b.indices, "{name}");
+            assert_eq!(
+                a.material.map(|k| &m.materials[k].params),
+                b.material.map(|k| &text.materials[k].params),
+                "{name}"
+            );
+            for (u, v) in a.vertices.iter().zip(&b.vertices) {
+                let d = (0..3)
+                    .map(|k| (u.pos[k] - v.pos[k]).abs().max((u.normal[k] - v.normal[k]).abs()))
+                    .fold(0.0, f32::max);
+                let duv = (0..2).map(|k| (u.uv[k] - v.uv[k]).abs()).fold(0.0, f32::max);
+                assert!(d < 1e-5 && duv < 1e-6, "{name}: {u:?} vs {v:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn usdc_values_decode_as_usd_reads_them() {
+    // tools/fixtures/make_usdc_values.py: one attribute per coding (inlined scalars, vectors and
+    // diagonal matrices, compressed int, int64 and float arrays, tables, strings, tokens, assets)
+    use sr_3d::usdc::{self, Val};
+    let specs = usdc::read(&std::fs::read(fixture("values.usdc")).unwrap()).unwrap();
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("values.expected.json")).unwrap()).unwrap();
+    for (name, w) in want.as_object().unwrap() {
+        let spec = specs.iter().find(|s| s.path == format!("/V.{name}")).unwrap_or_else(|| panic!("no /V.{name}"));
+        let got = spec.get("default").unwrap_or_else(|| panic!("{name}: no default"));
+        match (got, w) {
+            (Val::Str(s) | Val::Token(s) | Val::Asset(s), serde_json::Value::String(e)) => assert_eq!(s, e, "{name}"),
+            (Val::Tokens(t), serde_json::Value::Array(e)) => {
+                assert_eq!(t, &e.iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>(), "{name}")
+            }
+            (Val::Nums(n) | Val::Array(n), serde_json::Value::Array(e)) => {
+                assert_eq!(n.len(), e.len(), "{name}: {n:?}");
+                for (g, e) in n.iter().zip(e) {
+                    let e = e.as_f64().unwrap();
+                    assert!((g - e).abs() <= 1e-12 * e.abs().max(1.0), "{name}: {g} vs {e}");
+                }
+            }
+            (Val::Bool(b), serde_json::Value::Array(e)) => {
+                assert_eq!(*b as u8 as f64, e[0].as_f64().unwrap(), "{name}")
+            }
+            (g, e) => panic!("{name}: {g:?} vs {e}"),
+        }
+    }
+}
+
+#[test]
+fn splat_ply_spherical_harmonics_import_in_coefficient_order() {
+    // 3DGS writes f_rest channel-major (15 red, then 15 green, then 15 blue coefficients)
+    for (rest, degree) in [(9usize, 1u32), (24, 2), (45, 3)] {
+        let mut gs = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\n".to_vec();
+        let mut names: Vec<String> =
+            ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"].map(String::from).to_vec();
+        names.extend((0..rest).map(|k| format!("f_rest_{k}")));
+        names
+            .extend(["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"].map(String::from));
+        for p in &names {
+            gs.extend_from_slice(format!("property float {p}\n").as_bytes());
+        }
+        gs.extend_from_slice(b"end_header\n");
+        let per = rest / 3;
+        let mut vals = vec![0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3];
+        // f_rest value encodes (channel, coefficient) so the mapping can be read back
+        vals.extend((0..rest).map(|k| (k / per) as f32 * 100.0 + (k % per) as f32 + 1.0));
+        vals.extend([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        for v in vals {
+            gs.extend_from_slice(&v.to_le_bytes());
+        }
+        let Asset::Splats(s) = import::load(&tmp(&format!("sh{rest}.ply"), &gs), None).unwrap() else { panic!() };
+        assert_eq!(s.sh_degree, degree);
+        let c = s.sh[0];
+        assert_eq!([c[0], c[1], c[2]], [0.1, 0.2, 0.3], "DC first");
+        for j in 1..=per {
+            for ch in 0..3 {
+                assert_eq!(
+                    c[j * 3 + ch],
+                    ch as f32 * 100.0 + j as f32,
+                    "degree {degree}: coefficient {j} channel {ch}"
+                );
+            }
+        }
+    }
+}

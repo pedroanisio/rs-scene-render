@@ -58,6 +58,45 @@ pub(super) struct CamExtras {
     pub exposure: f32,
     pub dof: Option<Dof>,
     pub lens_k1: f32,
+    /// Screen-space ambient occlusion (radius, intensity) and reflections.
+    pub ao: Option<[f32; 2]>,
+    pub ssr: bool,
+    /// Path tracing (camera renderer="pathtrace").
+    pub path: Option<crate::pathtrace::PathOpts>,
+}
+
+/// The blobs of a clay object at this frame: static attributes, overridden by the animated
+/// values of each `<blob>` (part `{id}/blob[k]`).
+fn clay_blobs(n: &sr_eval::FrameNode) -> Vec<sr_3d::clay::Blob> {
+    let mut out = Vec::new();
+    for (k, c) in sr_model::element::children(&*n.elem).iter().filter(|c| c.element_name() == "blob").enumerate() {
+        let key = format!("{}/blob[{k}]", n.id);
+        let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
+        let a = Attrs { e: *c, props };
+        let f = |name: &str, d: f64| a.num(name, d) as f32;
+        let rot = glam::Quat::from_euler(
+            glam::EulerRot::YXZ,
+            f("rotationY", 0.0).to_radians(),
+            f("rotationX", 0.0).to_radians(),
+            f("rotation", 0.0).to_radians(),
+        );
+        out.push(sr_3d::clay::Blob {
+            shape: match a.str("shape").as_deref() {
+                Some("box") => sr_3d::clay::BlobShape::Box,
+                Some("capsule") => sr_3d::clay::BlobShape::Capsule,
+                Some("torus") => sr_3d::clay::BlobShape::Torus,
+                _ => sr_3d::clay::BlobShape::Sphere,
+            },
+            center: Vec3::new(f("x", 0.0), f("y", 0.0), f("z", 0.0)),
+            rotation: rot,
+            radius: f("radius", 30.0),
+            size: Vec3::new(f("width", 60.0), f("height", 60.0), f("depth", 60.0)),
+            length: f("length", 60.0),
+            blend: f("blend", 10.0),
+            subtract: a.num("subtract", 0.0) != 0.0 || a.str("subtract").as_deref() == Some("true"),
+        });
+    }
+    out
 }
 
 fn attrs<'a>(n: &'a sr_eval::FrameNode) -> Attrs<'a> {
@@ -255,7 +294,7 @@ impl Renderer {
     pub(super) fn camera3(&self, g: &FrameGraph, p: &Program, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
         let lights = doc_lights(p);
         let mut cp = CameraParams::default();
-        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0 };
+        let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0, ao: None, ssr: false, path: None };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
         let (mut sensor, mut fstop, mut focus, mut blades, mut dof_on, mut focus_target) =
             (36.0f32, 2.8f32, 1000.0f32, 0u32, false, None);
@@ -263,6 +302,17 @@ impl Renderer {
             let n = &g.nodes[ci as usize];
             let a = attrs(n);
             sensor = a.num("sensorWidth", 36.0) as f32;
+            if flag(&a, "ambientOcclusion", false) {
+                ex.ao = Some([a.num("aoRadius", 40.0) as f32, a.num("aoIntensity", 1.0) as f32]);
+            }
+            ex.ssr = flag(&a, "screenSpaceReflections", false);
+            if a.str("renderer").as_deref() == Some("pathtrace") {
+                ex.path = Some(crate::pathtrace::PathOpts {
+                    samples: a.num("pathSamples", 64.0).clamp(1.0, 65536.0) as u32,
+                    bounces: a.num("maxBounces", 4.0).clamp(1.0, 64.0) as u32,
+                    denoise: flag(&a, "denoise", true),
+                });
+            }
             focal_mm = camera::lens_of_fov(Self::cam_fov(&a), sensor);
             cp = Self::cam_params(g, lights, ci as usize, 0);
             ex.exposure = 2f32.powf(a.num("exposure", 0.0) as f32);
@@ -494,6 +544,31 @@ impl Renderer {
         Some((p, maps))
     }
 
+    /// The mesh of a clay object, re-extracted when its blobs, finish or boil frame change.
+    fn clay_mesh(&mut self, n: &sr_eval::FrameNode) -> Option<Arc<crate::three::MeshGpu>> {
+        let a = attrs(n);
+        let blobs = clay_blobs(n);
+        let res = a.num("resolution", 64.0).clamp(8.0, 256.0) as u32;
+        let seed = a.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
+        let finish =
+            sr_3d::clay::Finish { amount: a.num("fingerprints", 0.0) as f32, seed, boil: a.num("boil", 0.0) as f32 };
+        let boil_frame = if finish.boil > 0.0 { (n.local_time * finish.boil as f64).floor() as i64 } else { 0 };
+        let key = format!("clay|{}|{blobs:?}|{finish:?}|{res}|{boil_frame}", n.id);
+        if let Some(m) = self.three_engine().meshes.get(&key) {
+            return Some(m.clone());
+        }
+        let prim = sr_3d::clay::mesh(&blobs, &finish, res, n.local_time);
+        if prim.indices.is_empty() {
+            return None;
+        }
+        let m = self.three_engine().upload_mesh(&prim.vertices, &prim.indices);
+        if let Some(old) = self.clay_keys.insert(n.id.clone(), key.clone()) {
+            self.three_engine().meshes.remove(&old);
+        }
+        self.three_engine().meshes.insert(key, m.clone());
+        Some(m)
+    }
+
     fn primitive_mesh(
         &mut self,
         plan: &mut Plan,
@@ -507,6 +582,9 @@ impl Renderer {
         let (w, hh) = (a.opt("width").map(|v| v as f32).unwrap_or(2.0 * r), a.opt("height").map(|v| v as f32));
         let depth = a.num("depth", 10.0) as f32;
         let bevel = a.num("bevel", 0.0) as f32;
+        if kind == "clay" {
+            return self.clay_mesh(n);
+        }
         let key = match kind.as_str() {
             "text" => format!(
                 "text|{}|{:?}|{:?}|{depth}|{bevel}",
@@ -954,6 +1032,7 @@ impl Renderer {
         let hgt = a.opt("height").map(|v| v as f32).unwrap_or(w);
         let r = a.opt("radius").map(|v| v as f32).unwrap_or(if kind == LightKind::Disk { w * 0.5 } else { 10.0 });
         Light3 {
+            contact: if flag(a, "contactShadows", false) { a.num("contactShadowLength", 20.0) as f32 } else { 0.0 },
             kind,
             pos: Vec3::new(a.num("x", 0.0) as f32, a.num("y", 0.0) as f32, a.num("z", 0.0) as f32),
             dir,
@@ -1340,6 +1419,7 @@ impl Renderer {
             // (a uniform environment, so metals reflect it) and a directional key from the upper left
             // front whose irradiance π · 0.65 brings a white Lambertian surface facing it to 1
             let base = Light3 {
+                contact: 0.0,
                 kind: LightKind::Directional,
                 pos: Vec3::ZERO,
                 dir: Vec3::new(0.45, 0.7, 0.55).normalize(),
@@ -1389,7 +1469,24 @@ impl Renderer {
             env,
             splats,
             encode_srgb: !self.working.linear,
+            ao: ex.ao,
+            ssr: ex.ssr,
+            path: None,
         };
+        let mut scene = scene;
+        if let Some(opts) = ex.path {
+            if scene.cam.orthographic || scene.clip_fix != Mat4::IDENTITY {
+                plan.stats.unsupported.push(format!(
+                    "{}: path tracing needs a perspective camera over the whole frame; rasterised instead",
+                    n.id
+                ));
+            } else {
+                plan.stats
+                    .unsupported
+                    .extend(crate::pathtrace::notes(&scene).into_iter().map(|m| format!("{}: {m}", n.id)));
+                scene.path = Some(opts);
+            }
+        }
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);
         let out = self.temp(plan, space.size);

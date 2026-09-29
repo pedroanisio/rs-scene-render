@@ -690,3 +690,45 @@ fn soft_body_lattices_have_rows_plus_one_by_cols_plus_one_points() {
     let w = node(&f, "c").soft.clone().expect("a soft lattice");
     assert_eq!((w.rows, w.cols, w.offsets.len()), (4, 6, 24));
 }
+
+fn paint_order(f: &FrameGraph) -> Vec<&str> {
+    f.nodes.iter().map(|n| &*n.id).collect()
+}
+
+#[test]
+fn animated_z_restacks_siblings_every_frame() {
+    let d = doc(
+        "",
+        r##"<shape id="a" shape="rect" width="10" height="10" z="0">
+              <animate property="z"><key time="0" value="0" interpolation="hold"/><key time="1" value="10"/></animate>
+            </shape>
+            <group id="g" z="5"><shape id="g1" shape="rect" width="10" height="10"/></group>
+            <shape id="c" shape="rect" width="10" height="10"/>"##,
+    );
+    // equal z keeps document order; a container moves with its subtree
+    assert_eq!(paint_order(&eval(&d, 0.5)), ["a", "c", "g", "g1"]);
+    assert_eq!(paint_order(&eval(&d, 1.5)), ["c", "g", "g1", "a"]);
+    // z is an integer property: animated values round, as the frame graph reports them
+    let e = doc(
+        "",
+        r##"<shape id="a" shape="rect" width="10" height="10">
+              <animate property="z"><key time="0" value="0"/><key time="10" value="3"/></animate>
+            </shape>
+            <shape id="b" shape="rect" width="10" height="10" z="1"/>"##,
+    );
+    assert_eq!(paint_order(&eval(&e, 4.0)), ["a", "b"], "z = 1.2 rounds to 1, level with b");
+    assert_eq!(paint_order(&eval(&e, 6.0)), ["b", "a"], "z = 1.8 rounds to 2, above b");
+}
+
+#[test]
+fn object3d_and_camera_depth_is_not_paint_order() {
+    let d = doc(
+        "",
+        r##"<shape id="back" shape="rect" width="10" height="10"/>
+            <camera id="cam" z="-500"/>
+            <object3D id="near" primitive="sphere" radius="10" z="-100"/>
+            <object3D id="far" primitive="sphere" radius="10" z="300"/>
+            <shape id="front" shape="rect" width="10" height="10"/>"##,
+    );
+    assert_eq!(paint_order(&eval(&d, 0.0)), ["back", "cam", "near", "far", "front"]);
+}

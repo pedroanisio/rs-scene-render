@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A USDZ package holding a binary (usdc) layer: meshes under an Xform hierarchy with
+     UsdPreviewSurface materials. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="1" background="#101418"/>
+  <assets>
+    <mesh id="stage" src="{FIXTURES3D}/stage.usdz" format="usdz"/>
+  </assets>
+  <composition>
+    <object3D id="set" primitive="mesh" mesh="stage" x="320" y="180" z="100"/>
+  </composition>
+  <lights>
+    <light id="sky" type="ambient" intensity="0.6"/>
+    <light id="sun" type="directional" intensity="3"/>
+  </lights>
+</scene>

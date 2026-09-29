@@ -1,0 +1,73 @@
+ocio_profile_version: 2
+
+environment:
+  {}
+search_path: .
+strictparsing: false
+luma: [0.2126, 0.7152, 0.0722]
+
+roles:
+  compositing_log: log
+  default: raw
+  scene_linear: lin_rec709
+
+file_rules:
+  - !<Rule> {name: Default, colorspace: default}
+
+displays:
+  sRGB:
+    - !<View> {name: Raw, colorspace: lin_rec709}
+    - !<View> {name: Film, colorspace: film_srgb}
+
+active_displays: [sRGB]
+active_views: [Film, Raw]
+
+looks:
+  - !<Look>
+    name: warm
+    process_space: log
+    transform: !<CDLTransform> {slope: [1.1, 1, 0.9], offset: [0.01, 0, 0.005], sat: 1.2}
+
+
+colorspaces:
+  - !<ColorSpace>
+    name: raw
+    family: raw
+    equalitygroup: ""
+    bitdepth: 32f
+    description: A raw color space. Conversions to and from this space are no-ops.
+    isdata: true
+    allocation: uniform
+
+  - !<ColorSpace>
+    name: lin_rec709
+    family: ""
+    equalitygroup: ""
+    bitdepth: unknown
+    isdata: false
+    allocation: uniform
+
+  - !<ColorSpace>
+    name: log
+    family: ""
+    equalitygroup: ""
+    bitdepth: unknown
+    isdata: false
+    encoding: log
+    allocation: uniform
+    from_scene_reference: !<LogAffineTransform> {log_side_slope: 0.0555555555555556, log_side_offset: 0.6, lin_side_offset: 0.005}
+
+  - !<ColorSpace>
+    name: film_srgb
+    family: ""
+    equalitygroup: ""
+    bitdepth: unknown
+    isdata: false
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      children:
+        - !<MatrixTransform> {matrix: [1.1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.9, 0, 0, 0, 0, 1]}
+        - !<RangeTransform> {min_in_value: 0, max_in_value: 16, min_out_value: 0, max_out_value: 1}
+        - !<ExponentWithLinearTransform> {gamma: 2, offset: 0.05, direction: inverse}
+        - !<FileTransform> {src: curve.spi1d, interpolation: linear}
+        - !<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055, direction: inverse}

@@ -7,6 +7,8 @@
 //! * [`particles`]: emitters with a structure-of-arrays particle store,
 //!   checkpointed the same way.
 //! * [`fields`]: force fields shared by bodies and particles.
+//! * [`flock`], [`fluid`], [`slime`] and [`erosion`]: boids, stable fluids, Physarum networks
+//!   and hydraulic erosion, stepped on a [`timeline`] with checkpoints.
 //!
 //! Everything works in document pixels with y down; physics converts to
 //! Rapier's metres with y up through `pixelsPerMeter`. Randomness is a
@@ -16,10 +18,15 @@
 // `is_multiple_of` (Rust 1.87) is newer than the workspace's Rust 1.82.
 #![allow(clippy::manual_is_multiple_of)]
 
+pub mod erosion;
 pub mod fields;
+pub mod flock;
+pub mod fluid;
 pub mod particles;
 pub mod physics;
 pub mod rng;
+pub mod slime;
 pub mod soft;
+pub mod timeline;
 
 pub use fields::{Field, FieldKind};

@@ -477,10 +477,66 @@ fn colour_finishing_applies_looks_exposure_and_tone_mapping() {
     let g = 2.0 * lin8(128);
     let want = g / (1.0 + g);
     assert_px(&r, 8, 8, [want, want, want, 1.0], 1e-2);
-    std::fs::write(fixtures().join("config.ocio"), "ocio_profile_version: 2\n").unwrap();
-    let ocio = r#"<colorManagement ocioConfig="config.ocio"/>"#;
-    let r = render(&doc_with("", ocio, body, "")).unwrap();
-    assert!(r.stats.unsupported.iter().any(|m| m.contains("OpenColorIO")));
+}
+
+#[test]
+fn ocio_configs_match_opencolorio() {
+    // tools/fixtures/make_ocio_expected.py: OpenColorIO's display code values for sRGB colours
+    // through a working space, an exposure, looks and a display/view, for the built-in ACES CG
+    // config (ACES 2.0 SDR) and a small config with a LUT file, a log shaper and a CDL look
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocio");
+    let want: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("expected.json")).unwrap()).unwrap();
+    let colors = ["#000000", "#FFFFFF", "#808080", "#FF0000", "#00FF00", "#0000FF", "#FFC080", "#204060", "#C8102E"];
+    let body: String = colors
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            format!(r#"<shape id="p{k}" shape="rect" x="{}" y="0" width="7" height="32" fill="{c}"/>"#, k * 7)
+        })
+        .collect();
+    for (name, case) in want.as_object().unwrap() {
+        let s = |k: &str| case[k].as_str().unwrap().to_string();
+        let config =
+            if s("config").starts_with("ocio://") { s("config") } else { dir.join(s("config")).display().to_string() };
+        let working = s("working");
+        // a <look> with neither a LUT nor CDL values names a look of the OCIO config
+        let (looks, look_el) = if s("looks").is_empty() {
+            (String::new(), String::new())
+        } else {
+            (format!(r#" looks="{}""#, s("looks")), format!(r#"<look id="{}"/>"#, s("looks")))
+        };
+        for ev in [0.0, 3.0, -2.0] {
+            let cm = format!(
+                r#"<colorManagement ocioConfig="{config}" workingSpace="{working}" display="{}" view="{}" exposure="{ev}"{looks}>{look_el}</colorManagement>"#,
+                s("display"),
+                s("view")
+            );
+            let Some(r) = render(&doc_with("", &cm, &body, "")) else { return };
+            if sr_gpu::ocio::tool().is_none() {
+                assert!(r.stats.unsupported.iter().any(|m| m.contains("ociobakelut")), "{:?}", r.stats.unsupported);
+                return;
+            }
+            assert!(r.stats.unsupported.is_empty(), "{name}: {:?}", r.stats.unsupported);
+            let ws = sr_model::model::ColorSpace::ALL.iter().copied().find(|c| c.as_str() == working).unwrap();
+            let m = sr_gpu::color::convert(ws, sr_model::model::ColorSpace::Srgb);
+            for (k, c) in colors.iter().enumerate() {
+                let px = r.at(k as u32 * 7 + 3, 16);
+                let lin: [f64; 3] = std::array::from_fn(|i| (0..3).map(|j| m[i][j] * px[j] as f64).sum());
+                let got = lin.map(|v| sr_gpu::color::encode(sr_model::model::Transfer::Srgb, v));
+                let e = &case["values"][format!("{c} {ev}")];
+                for i in 0..3 {
+                    let e = e[i].as_f64().unwrap();
+                    // the 129³ table's trilinear error peaks near 0.011 at the gamut boundary
+                    // (measured against OCIO's analytic CPU path), plus half-float storage
+                    assert!(
+                        (got[i] - e).abs() < 0.015,
+                        "{name} {c} at {ev} EV: {got:?} vs OpenColorIO {e} (channel {i})"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

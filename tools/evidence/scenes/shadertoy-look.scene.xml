@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Shader-driven look: a Shadertoy mainImage() treatment animated by iTime. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="2" background="#000000"/>
+  <composition>
+    <shape id="card" shape="rect" x="0" y="0" width="640" height="360" fill="#FF0000" effects="toy"/>
+  </composition>
+  <effects>
+    <effect id="toy" type="shader" src="{SHADERS}/rainbow_shadertoy.glsl"><param name="intensity" value="1"/></effect>
+  </effects>
+</scene>

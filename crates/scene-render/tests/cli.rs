@@ -248,3 +248,31 @@ fn simulate_writes_a_verified_physics_cache() {
     std::fs::write(&path, scene("").replace(r#" cache="box.physics""#, "")).unwrap();
     assert_eq!(run(&["simulate", path.to_str().unwrap()]).status.code(), Some(2));
 }
+
+#[test]
+fn strict_render_fails_on_shader_fallback() {
+    if sr_gpu::Gpu::new().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sr-strict-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("broken.glsl"), "vec4 effect(vec2 uv) { return this is not glsl; }").unwrap();
+    let scene = dir.join("strict.scene.xml");
+    std::fs::write(
+        &scene,
+        r##"<scene version="1.1"><project width="32" height="32" fps="1" duration="1" background="#202020"/><composition><shape id="s" shape="rect" width="32" height="32" fill="#FF0000" effects="fx"/></composition><effects><effect id="fx" type="shader" src="broken.glsl"/></effects></scene>"##,
+    )
+    .unwrap();
+    let run = |extra: &[&str]| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_scene-render"));
+        c.arg("render").arg(&scene).arg("-o").arg(dir.join("f.png")).args(extra);
+        c.output().unwrap()
+    };
+    let lax = run(&[]);
+    let out = String::from_utf8_lossy(&lax.stdout);
+    assert!(lax.status.success(), "{out}");
+    assert!(out.contains("not rendered yet") && out.contains("passed through"), "{out}");
+    let strict = run(&["--strict"]);
+    assert_eq!(strict.status.code(), Some(1), "{}", String::from_utf8_lossy(&strict.stdout));
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("--strict"));
+}

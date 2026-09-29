@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::material::srgb_to_linear;
 use crate::{
@@ -610,7 +610,28 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
         let op = col("opacity");
         let r0 = col("rot_0").ok_or("splats without rot_0")?;
         let mut s = Splats { basis: Mat4::from_scale(Vec3::splat(100.0)), ..Default::default() };
+        // higher-order SH: f_rest_* holds (degree + 1)² − 1 coefficients per channel, channel-major
+        let rest = (0..).take_while(|k| col(&format!("f_rest_{k}")).is_some()).count();
+        let per = rest / 3;
+        let degree = match per {
+            3 => 1,
+            8 => 2,
+            15 => 3,
+            _ => 0,
+        };
+        let rest0 = col("f_rest_0");
+        s.sh_degree = degree;
         for v in &verts {
+            if degree > 0 {
+                let mut c = [0.0f32; 48];
+                for ch in 0..3 {
+                    c[ch] = v[dc0 + ch] as f32;
+                    for j in 0..per {
+                        c[(j + 1) * 3 + ch] = v[rest0.unwrap_or(0) + ch * per + j] as f32;
+                    }
+                }
+                s.sh.push(c);
+            }
             s.pos.push([v[x] as f32, v[y] as f32, v[z] as f32]);
             s.scale.push([0, 1, 2].map(|k| v[s0 + k].exp() as f32));
             let q = Quat::from_xyzw(v[r0 + 1] as f32, v[r0 + 2] as f32, v[r0 + 3] as f32, v[r0] as f32).normalize();
@@ -685,7 +706,41 @@ pub fn splat(data: &[u8]) -> Result<Splats, String> {
 
 // ---------------------------------------------------------------- FBX
 
-/// Loads FBX through ufbx, converted to Y-up metres.
+/// ufbx's row-major 3×4 matrix as a glam matrix.
+fn fbx_mat(w: &ufbx::Matrix) -> Mat4 {
+    Mat4::from_cols_array(&[
+        w.m00 as f32,
+        w.m10 as f32,
+        w.m20 as f32,
+        0.0,
+        w.m01 as f32,
+        w.m11 as f32,
+        w.m21 as f32,
+        0.0,
+        w.m02 as f32,
+        w.m12 as f32,
+        w.m22 as f32,
+        0.0,
+        w.m03 as f32,
+        w.m13 as f32,
+        w.m23 as f32,
+        1.0,
+    ])
+}
+
+fn fbx_trs(t: &ufbx::Transform) -> Trs {
+    let (v, q, s) = (t.translation, t.rotation, t.scale);
+    Trs {
+        t: Vec3::new(v.x as f32, v.y as f32, v.z as f32),
+        r: glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize(),
+        s: Vec3::new(s.x as f32, s.y as f32, s.z as f32),
+    }
+}
+
+/// Loads FBX through ufbx, converted to Y-up metres: the node hierarchy, meshes with their
+/// materials, skins (clusters become joints, `geometry_to_bone` their inverse bind), blend shapes
+/// (morph targets) and every animation stack, baked by ufbx into linear keys (pivots, pre- and
+/// post-rotations and rotation orders resolved) with blend-channel weights as morph weights.
 pub fn fbx(path: &Path) -> Result<Model, String> {
     let opts = ufbx::LoadOpts {
         target_axes: ufbx::CoordinateAxes {
@@ -716,8 +771,55 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
         mat_index.insert(mat.element.typed_id, m.materials.len());
         m.materials.push(ImportedMaterial { name: mat.element.name.to_string(), params, maps: Default::default() });
     }
+    // every node, parents first (ufbx lists them in depth order), so the hierarchy animates
+    let node_of: std::collections::HashMap<u32, usize> =
+        scene.nodes.iter().enumerate().map(|(i, n)| (n.element.typed_id, i)).collect();
     for node in scene.nodes.iter() {
+        m.nodes.push(Node {
+            name: node.element.name.to_string(),
+            parent: node.parent.as_ref().and_then(|p| node_of.get(&p.element.typed_id).copied()),
+            local: fbx_trs(&node.local_transform),
+            ..Default::default()
+        });
+    }
+    // blend channels by element id: (node, morph index)
+    let mut channel_of: std::collections::HashMap<u32, (usize, usize)> = Default::default();
+    for (ni, node) in scene.nodes.iter().enumerate() {
         let Some(mesh) = node.mesh.as_ref() else { continue };
+        let skin = mesh.skin_deformers.first();
+        if mesh.skin_deformers.len() > 1 {
+            m.warnings.push(format!(
+                "{}: only the first of {} skins is used",
+                node.element.name,
+                mesh.skin_deformers.len()
+            ));
+        }
+        // skinned vertices stay in geometry space (the clusters bind from there); others move into node space
+        let geo = if skin.is_some() { Mat4::IDENTITY } else { fbx_mat(&node.geometry_to_node) };
+        let geo_n = Mat3::from_mat4(geo).inverse().transpose();
+        // morph targets: one per blend channel, offsets by logical vertex
+        let mut morphs: Vec<std::collections::HashMap<u32, (Vec3, Vec3)>> = Vec::new();
+        let mut weights = Vec::new();
+        for bd in mesh.blend_deformers.iter() {
+            for ch in bd.channels.iter() {
+                let Some(shape) = ch.target_shape.as_ref() else { continue };
+                if ch.keyframes.len() > 1 {
+                    m.warnings.push(format!(
+                        "{}: in-between blend shapes of {} use the full shape only",
+                        node.element.name, ch.element.name
+                    ));
+                }
+                let mut offs = std::collections::HashMap::new();
+                for (k, &vi) in shape.offset_vertices.iter().enumerate() {
+                    let d = shape.position_offsets[k];
+                    let n = shape.normal_offsets.get(k).map(|n| Vec3::new(n.x as f32, n.y as f32, n.z as f32));
+                    offs.insert(vi, (Vec3::new(d.x as f32, d.y as f32, d.z as f32), n.unwrap_or(Vec3::ZERO)));
+                }
+                channel_of.insert(ch.element.element_id, (ni, morphs.len()));
+                morphs.push(offs);
+                weights.push(ch.weight as f32);
+            }
+        }
         let mut tri = vec![0u32; mesh.max_face_triangles * 3];
         // one primitive per material slot
         let slots = mesh.materials.len().max(1);
@@ -728,6 +830,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             let p = &mut prims[slot];
             for &ix in &tri[..n * 3] {
                 let ix = ix as usize;
+                let vi = mesh.vertex_indices[ix];
                 let pos = mesh.vertex_position[ix];
                 let nrm = if mesh.vertex_normal.exists {
                     mesh.vertex_normal[ix]
@@ -735,13 +838,35 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
                     ufbx::Vec3 { x: 0.0, y: 0.0, z: 0.0 }
                 };
                 let uv = if mesh.vertex_uv.exists { mesh.vertex_uv[ix] } else { ufbx::Vec2 { x: 0.0, y: 0.0 } };
+                let pos = geo.transform_point3(Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32));
+                let nrm = geo_n * Vec3::new(nrm.x as f32, nrm.y as f32, nrm.z as f32);
                 p.indices.push(p.vertices.len() as u32);
                 p.vertices.push(Vertex {
-                    pos: [pos.x as f32, pos.y as f32, pos.z as f32],
-                    normal: [nrm.x as f32, nrm.y as f32, nrm.z as f32],
+                    pos: pos.into(),
+                    normal: nrm.into(),
                     uv: [uv.x as f32, 1.0 - uv.y as f32],
                     tangent: [1.0, 0.0, 0.0, 1.0],
                 });
+                if p.morphs.len() < morphs.len() {
+                    p.morphs.resize_with(morphs.len(), Default::default);
+                }
+                for (k, offs) in morphs.iter().enumerate() {
+                    let (dp, dn) = offs.get(&vi).copied().unwrap_or((Vec3::ZERO, Vec3::ZERO));
+                    p.morphs[k].dpos.push(geo.transform_vector3(dp).into());
+                    p.morphs[k].dnormal.push((geo_n * dn).into());
+                }
+                if let Some(sk) = skin {
+                    let sv = &sk.vertices[vi as usize];
+                    let (mut js, mut ws) = ([0u16; 4], [0f32; 4]);
+                    // ufbx sorts each vertex's weights by decreasing weight: keep the four largest
+                    for k in 0..(sv.num_weights as usize).min(4) {
+                        let w = &sk.weights[sv.weight_begin as usize + k];
+                        js[k] = w.cluster_index as u16;
+                        ws[k] = w.weight as f32;
+                    }
+                    p.joints.push(js);
+                    p.weights.push(ws);
+                }
             }
         }
         let mut list = Vec::new();
@@ -754,37 +879,106 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             m.primitives.push(p);
             list.push(m.primitives.len() - 1);
         }
-        let w = node.geometry_to_world;
-        let mat = Mat4::from_cols_array(&[
-            w.m00 as f32,
-            w.m10 as f32,
-            w.m20 as f32,
-            0.0,
-            w.m01 as f32,
-            w.m11 as f32,
-            w.m21 as f32,
-            0.0,
-            w.m02 as f32,
-            w.m12 as f32,
-            w.m22 as f32,
-            0.0,
-            w.m03 as f32,
-            w.m13 as f32,
-            w.m23 as f32,
-            1.0,
-        ]);
-        let (s, r, t) = mat.to_scale_rotation_translation();
-        m.nodes.push(Node {
-            name: node.element.name.to_string(),
-            local: Trs { t, r, s },
-            primitives: list,
-            ..Default::default()
-        });
+        if let Some(sk) = skin {
+            m.skins.push(Skin {
+                joints: sk
+                    .clusters
+                    .iter()
+                    .map(|c| c.bone_node.as_ref().and_then(|b| node_of.get(&b.element.typed_id).copied()).unwrap_or(ni))
+                    .collect(),
+                inverse_bind: sk.clusters.iter().map(|c| fbx_mat(&c.geometry_to_bone)).collect(),
+            });
+            m.nodes[ni].skin = Some(m.skins.len() - 1);
+        }
+        m.nodes[ni].primitives = list;
+        m.nodes[ni].weights = weights;
     }
-    if !scene.anim_stacks.is_empty() {
-        m.warnings.push("FBX animation stacks are not imported; export the animation as glTF".into());
+    for stack in scene.anim_stacks.iter() {
+        let opts = ufbx::BakeOpts { trim_start_time: true, ..Default::default() };
+        let baked = match ufbx::bake_anim(&scene, &stack.anim, opts) {
+            Ok(b) => b,
+            Err(e) => {
+                m.warnings.push(format!("animation {}: {:?}", stack.element.name, e.description));
+                continue;
+            }
+        };
+        let mut channels = Vec::new();
+        for bn in baked.nodes.iter() {
+            let Some(&node) = node_of.get(&bn.typed_id) else { continue };
+            let t3 = |keys: &ufbx::List<ufbx::BakedVec3>, path| Channel {
+                node,
+                path,
+                interp: Interp::Linear,
+                times: keys.iter().map(|k| k.time as f32).collect(),
+                values: keys.iter().flat_map(|k| [k.value.x as f32, k.value.y as f32, k.value.z as f32]).collect(),
+            };
+            channels.push(t3(&bn.translation_keys, AnimPath::Translation));
+            channels.push(t3(&bn.scale_keys, AnimPath::Scale));
+            channels.push(Channel {
+                node,
+                path: AnimPath::Rotation,
+                interp: Interp::Linear,
+                times: bn.rotation_keys.iter().map(|k| k.time as f32).collect(),
+                values: bn
+                    .rotation_keys
+                    .iter()
+                    .flat_map(|k| [k.value.x as f32, k.value.y as f32, k.value.z as f32, k.value.w as f32])
+                    .collect(),
+            });
+        }
+        // blend-channel weights (DeformPercent, 0–100): one weights channel per mesh node on the
+        // union of the key times, each morph interpolated linearly
+        let mut per_node: std::collections::BTreeMap<usize, Vec<MorphKeys>> = Default::default();
+        for el in baked.elements.iter() {
+            let Some(&(node, k)) = channel_of.get(&el.element_id) else { continue };
+            for prop in el.props.iter() {
+                if &*prop.name == "DeformPercent" {
+                    let keys = prop.keys.iter().map(|x| (x.time as f32, x.value.x as f32 / 100.0)).collect();
+                    per_node.entry(node).or_default().push((k, keys));
+                }
+            }
+        }
+        for (node, morphs) in per_node {
+            let mut times: Vec<f32> = morphs.iter().flat_map(|(_, keys)| keys.iter().map(|k| k.0)).collect();
+            times.sort_by(f32::total_cmp);
+            times.dedup();
+            let defaults = m.nodes[node].weights.clone();
+            let mut values = Vec::with_capacity(times.len() * defaults.len());
+            for &t in &times {
+                let mut w = defaults.clone();
+                for (k, keys) in &morphs {
+                    if let Some(slot) = w.get_mut(*k) {
+                        *slot = lerp_keys(keys, t);
+                    }
+                }
+                values.extend(w);
+            }
+            channels.push(Channel { node, path: AnimPath::Weights, interp: Interp::Linear, times, values });
+        }
+        channels.retain(|c| !c.times.is_empty());
+        let duration = if baked.playback_duration > 0.0 {
+            baked.playback_duration
+        } else {
+            baked.key_time_max - baked.key_time_min.min(0.0)
+        };
+        m.animations.push(Animation { name: stack.element.name.to_string(), channels, duration: duration as f32 });
     }
     Ok(m)
+}
+
+/// A morph index with its (time, weight) keys.
+type MorphKeys = (usize, Vec<(f32, f32)>);
+
+/// Linear interpolation of (time, value) keys, held beyond the ends.
+fn lerp_keys(keys: &[(f32, f32)], t: f32) -> f32 {
+    match keys.iter().position(|k| k.0 > t) {
+        None => keys.last().map_or(0.0, |k| k.1),
+        Some(0) => keys[0].1,
+        Some(i) => {
+            let (a, b) = (keys[i - 1], keys[i]);
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0).max(1e-9)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- USD
@@ -796,6 +990,8 @@ enum UV {
     Path(String),
     Ident(String),
     List(Vec<UV>),
+    /// `{ time: value, … }` of a `.timeSamples` attribute.
+    Samples(Vec<(f64, UV)>),
 }
 
 impl UV {
@@ -831,6 +1027,8 @@ impl Prim {
 struct Usda<'a> {
     s: &'a [u8],
     i: usize,
+    /// Time-sampled attributes seen.
+    sampled: usize,
 }
 
 impl Usda<'_> {
@@ -934,6 +1132,32 @@ impl Usda<'_> {
                 }
                 UV::List(items)
             }
+            Some(b'{') => {
+                self.i += 1;
+                let mut samples = Vec::new();
+                loop {
+                    match self.peek() {
+                        Some(b'}') => {
+                            self.i += 1;
+                            break;
+                        }
+                        Some(b',') => self.i += 1,
+                        None => break,
+                        _ => {
+                            let before = self.i;
+                            let t = self.word().trim_end_matches(':').parse::<f64>().unwrap_or(0.0);
+                            if self.peek() == Some(b':') {
+                                self.i += 1;
+                            }
+                            samples.push((t, self.value()));
+                            if self.i == before {
+                                self.i += 1;
+                            }
+                        }
+                    }
+                }
+                UV::Samples(samples)
+            }
             Some(b'"') | Some(b'\'') => UV::Str(self.string()),
             Some(b'<') => {
                 let st = self.i + 1;
@@ -1029,7 +1253,18 @@ impl Usda<'_> {
                     if self.peek() == Some(b'=') {
                         self.i += 1;
                         let v = self.value();
-                        out.attrs.push((name, v));
+                        match (name.strip_suffix(".timeSamples"), v) {
+                            // without a default, an attribute takes its first sample
+                            (Some(base), UV::Samples(samples)) => {
+                                self.sampled += 1;
+                                if out.get(base).is_none() {
+                                    if let Some((_, first)) = samples.into_iter().next() {
+                                        out.attrs.insert(0, (base.to_string(), first));
+                                    }
+                                }
+                            }
+                            (_, v) => out.attrs.push((name, v)),
+                        }
                     }
                     if self.peek() == Some(b'(') {
                         self.skip_group(b'(', b')');
@@ -1078,24 +1313,119 @@ fn prim_matrix(p: &Prim) -> Mat4 {
     m
 }
 
-/// Loads USDA text, or USDZ archives containing USDA. Binary `.usdc` crates are not supported.
+/// A crate layer as the prim tree the USDA parser builds: prims by path with their type, each
+/// attribute's default (or, without one, its first time sample) and each relationship's first
+/// target; stage metadata gives the up axis and metres per unit.
+fn usdc_prims(data: &[u8], warnings: &mut Vec<String>) -> Result<(Prim, bool, f32), String> {
+    use crate::usdc::{SpecKind, Val};
+    let specs = crate::usdc::read(data)?;
+    let uv = |v: &Val| -> Option<UV> {
+        Some(match v {
+            Val::Bool(b) => UV::Num(*b as u8 as f64),
+            Val::Nums(n) if n.len() == 1 => UV::Num(n[0]),
+            Val::Nums(n) | Val::Array(n) => UV::List(n.iter().map(|&x| UV::Num(x)).collect()),
+            Val::Token(t) => UV::Ident(t.clone()),
+            Val::Str(t) | Val::Asset(t) => UV::Str(t.clone()),
+            Val::Tokens(t) => UV::List(t.iter().map(|x| UV::Ident(x.clone())).collect()),
+            Val::Paths(p) => UV::Path(p.first()?.clone()),
+            _ => return None,
+        })
+    };
+    let (mut up_z, mut mpu) = (false, 0.01f32);
+    let mut prims: std::collections::HashMap<String, Prim> = Default::default();
+    let mut order: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let mut sampled = 0usize;
+    for sp in &specs {
+        match sp.kind {
+            SpecKind::PseudoRoot | SpecKind::Prim => {
+                if sp.kind == SpecKind::PseudoRoot {
+                    up_z = matches!(sp.get("upAxis"), Some(Val::Token(t)) if t == "Z");
+                    if let Some(Val::Nums(n)) = sp.get("metersPerUnit") {
+                        mpu = n.first().copied().unwrap_or(0.01) as f32;
+                    }
+                }
+                let kind = match sp.get("typeName") {
+                    Some(Val::Token(t)) => t.clone(),
+                    _ => String::new(),
+                };
+                let path = if sp.path == "/" { String::new() } else { sp.path.clone() };
+                if let Some(Val::Tokens(kids)) = sp.get("primChildren") {
+                    order.insert(path.clone(), kids.clone());
+                }
+                let p = prims.entry(path.clone()).or_default();
+                p.kind = kind;
+                p.path = path;
+            }
+            SpecKind::Attribute | SpecKind::Relationship => {
+                let Some((owner, name)) = sp.path.rsplit_once('.') else { continue };
+                let value = if sp.kind == SpecKind::Relationship {
+                    sp.get("targetPaths")
+                } else {
+                    sp.get("default").or_else(|| match sp.get("timeSamples") {
+                        Some(Val::TimeSamples(ts)) => ts.first().map(|(_, v)| {
+                            sampled += 1;
+                            v
+                        }),
+                        _ => None,
+                    })
+                };
+                if let Some(v) = value.and_then(uv) {
+                    let owner = if owner == "/" { String::new() } else { owner.to_string() };
+                    prims.entry(owner).or_default().attrs.push((name.to_string(), v));
+                }
+            }
+            SpecKind::Other => {}
+        }
+    }
+    if sampled > 0 {
+        warnings.push(sampled_warning(sampled));
+    }
+    fn build(
+        path: &str,
+        prims: &mut std::collections::HashMap<String, Prim>,
+        order: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Prim {
+        let mut p = prims.remove(path).unwrap_or_default();
+        for name in order.get(path).cloned().unwrap_or_default() {
+            let child = format!("{path}/{name}");
+            if prims.contains_key(&child) {
+                p.children.push(build(&child, prims, order));
+            }
+        }
+        p
+    }
+    Ok((build("", &mut prims, &order), up_z, mpu))
+}
+
+/// Loads USD: USDA text, binary USDC crates, or USDZ archives holding either (their first
+/// layer). The meshes, their transforms and UsdPreviewSurface materials are imported.
 pub fn usd(path: &Path) -> Result<Model, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    let text: Vec<u8> = if data.starts_with(b"PK") {
+    let layer: Vec<u8> = if data.starts_with(b"PK") {
         let entries = sr_vector::zip::entries(&data)?;
-        match entries.iter().find(|(n, _)| n.ends_with(".usda")) {
+        match entries.iter().find(|(n, _)| n.ends_with(".usda") || n.ends_with(".usdc") || n.ends_with(".usd")) {
             Some((_, b)) => b.clone(),
-            None if entries.iter().any(|(n, _)| n.ends_with(".usdc") || n.ends_with(".usd")) => {
-                return Err("the USDZ holds binary USD (usdc), which is not supported; export USDA".into())
-            }
             None => return Err("the USDZ holds no USD layer".into()),
         }
-    } else if data.starts_with(b"PXR-USDC") {
-        return Err("binary USD (usdc) is not supported; export USDA".into());
     } else {
         data
     };
-    let mut parser = Usda { s: &text, i: 0 };
+    let mut warnings = Vec::new();
+    let (root, up_z, mpu) = if layer.starts_with(b"PXR-USDC") {
+        usdc_prims(&layer, &mut warnings)?
+    } else {
+        usda_prims(&layer, &mut warnings)
+    };
+    usd_model(root, up_z, mpu, warnings)
+}
+
+fn sampled_warning(n: usize) -> String {
+    format!("{n} time-sampled attribute(s) use their first sample; USD animation is not imported")
+}
+
+/// Parses USDA text into its prim tree, up axis and metres per unit.
+fn usda_prims(text: &[u8], warnings: &mut Vec<String>) -> (Prim, bool, f32) {
+    let mut parser = Usda { s: text, i: 0, sampled: 0 };
     // stage metadata: #usda 1.0 ( upAxis = "Z" metersPerUnit = 0.01 )
     let mut up_z = false;
     let mut mpu = 0.01f32;
@@ -1121,7 +1451,14 @@ pub fn usd(path: &Path) -> Result<Model, String> {
     }
     let mut root = Prim::default();
     parser.body("", &mut root);
-    let mut m = Model::default();
+    if parser.sampled > 0 {
+        warnings.push(sampled_warning(parser.sampled));
+    }
+    (root, up_z, mpu)
+}
+
+fn usd_model(root: Prim, up_z: bool, mpu: f32, warnings: Vec<String>) -> Result<Model, String> {
+    let mut m = Model { warnings, ..Default::default() };
     let axis = if up_z { Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2) } else { Mat4::IDENTITY };
     m.basis = Y_UP_METRES * Mat4::from_scale(Vec3::splat(mpu)) * axis;
     // materials: prim path → UsdPreviewSurface inputs

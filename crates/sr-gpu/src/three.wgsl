@@ -154,7 +154,13 @@ fn shadow_factor(li: Light, world: vec3<f32>, nrm: vec3<f32>) -> f32 {
     let first = i32(li.spot.z);
     if (first < 0 || obj.params.y < 0.5) { return 1.0; }
     var view = u32(first);
-    if (li.flags.w > 1.5) {
+    if (u32(li.pos.w) == 1u && li.flags.w > 1.5) {
+        // directional cascades: the first whose far split lies beyond this point
+        let z = (fr.view * vec4(world, 1.0)).z;
+        var c = 3u;
+        if (z < li.size.x) { c = 0u; } else if (z < li.size.y) { c = 1u; } else if (z < li.size.z) { c = 2u; }
+        view = view + c;
+    } else if (li.flags.w > 1.5) {
         // cube: pick the face of the dominant axis of (world − light)
         let d = world - li.pos.xyz;
         let a = abs(d);
@@ -400,6 +406,27 @@ struct FOut {
     @location(0) color: vec4<f32>,
 };
 
+/// Screen-space contact shadow: marches from the surface toward the light for `len` scene
+/// units against the prepass depth; 0 when something in front of the ray's path hides it.
+fn contact_shadow(world: vec3<f32>, l: vec3<f32>, len: f32) -> f32 {
+    let dims = vec2<f32>(textureDimensions(gb_depth));
+    let thick = max(len * 0.35, 2.0);
+    let steps = 16;
+    for (var k = 1; k <= steps; k++) {
+        let p = world + l * (len * f32(k) / f32(steps));
+        let c = fr.view_proj * vec4(p, 1.0);
+        if (c.w <= 0.0) { break; }
+        let ndc = c.xy / c.w;
+        let uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { break; }
+        let scene_z = textureLoad(gb_depth, vec2<i32>(uv * dims), 0).r;
+        let ray_z = (fr.view * vec4(p, 1.0)).z;
+        let d = ray_z - scene_z;
+        if (scene_z > 0.0 && d > 0.5 && d < thick) { return 0.0; }
+    }
+    return 1.0;
+}
+
 @fragment
 fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     var o: FOut;
@@ -413,6 +440,9 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         return o;
     }
     var col = vec3(0.0);
+    // screen-space ambient occlusion darkens the ambient and environment light only
+    var ao = 1.0;
+    if (fr.lens.z > 0.5) { ao = textureLoad(ao_tex, vec2<i32>(i.clip.xy), 0).r; }
     let tile = vec2<u32>(i.clip.xy) / TILE;
     let tiles_x = u32(fr.params.z);
     let base = (tile.y * tiles_x + tile.x) * (MAX_PER_TILE + 1u);
@@ -421,7 +451,16 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let li = lights[tiles[base + 1u + k]];
         let ty = u32(li.pos.w);
         var sh = 1.0;
-        if (ty != 0u) { sh = shadow_factor(li, s.world, s.n); }
+        if (ty != 0u) {
+            sh = shadow_factor(li, s.world, s.n);
+            if (li.right.w > 0.0 && sh > 0.0) {
+                var l = -li.dir.xyz;
+                if (ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+            }
+        } else {
+            sh = ao;
+        }
         col += shade_light(li, s) * sh;
     }
     // image-based lighting from the dome
@@ -433,7 +472,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let spec = pre * (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight;
         let fr_avg = s.f0 + (1.0 - s.f0) * pow(1.0 - nv, 5.0);
         let diff = sh_irradiance(s.n) * s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * (vec3(1.0) - fr_avg);
-        var ibl = (diff + spec) * s.occlusion;
+        var ibl = (diff + spec) * s.occlusion * ao;
         if (mat.p2.x > 0.0) {
             let fc = (0.04 + 0.96 * pow(1.0 - nv, 5.0)) * mat.p2.x;
             ibl = ibl * (1.0 - fc) + env_sample(r, mat.p2.y * (fr.params2.w - 1.0)) * fc;
@@ -453,6 +492,30 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     if (mode == 2u) { a = s.alpha; }
     else { a = select(1.0, s.alpha, obj.params.x < 1.0); }
     o.color = vec4(col * a, a);
+    return o;
+}
+
+// ---------------------------------------------------------------- depth and normal prepass
+
+struct GOut {
+    // view-space normal, roughness
+    @location(0) nr: vec4<f32>,
+    // view depth, reflectance (split-sum specular albedo × specular weight), unused ×2
+    @location(1) zr: vec4<f32>,
+};
+
+@fragment
+fn fs_prepass(i: VOut, @builtin(front_facing) front: bool) -> GOut {
+    var o: GOut;
+    let s = surface(i, front);
+    let mode = u32(mat.p1.x);
+    if (mode == 1u && s.alpha < mat.p0.w) { discard; }
+    let nv = max(dot(s.n, s.v), 1e-3);
+    let lut = textureSampleLevel(brdf_lut, clamp_smp, vec2(nv, s.rough), 0.0).rg;
+    let spec = (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight;
+    let refl = select(dot(spec, vec3(0.2126, 0.7152, 0.0722)), 0.0, mat.p1.z > 0.5);
+    o.nr = vec4(normalize((fr.view * vec4(s.n, 0.0)).xyz), s.rough);
+    o.zr = vec4((fr.view * vec4(s.world, 1.0)).z, refl, 0.0, 0.0);
     return o;
 }
 

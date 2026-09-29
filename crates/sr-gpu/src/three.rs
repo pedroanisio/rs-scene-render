@@ -24,7 +24,7 @@ const MSAA: u32 = 4;
 const TILE: u32 = 16;
 const MAX_PER_TILE: usize = 63;
 const UNIFORM_ALIGN: u64 = 256;
-const SHADOW_BUDGET: u64 = 256 << 20;
+const SHADOW_BUDGET: u64 = 512 << 20;
 const IES_W: usize = 128;
 const IES_ROWS: usize = 32;
 
@@ -33,6 +33,8 @@ pub struct MeshGpu {
     pub vbuf: wgpu::Buffer,
     pub ibuf: wgpu::Buffer,
     pub count: u32,
+    /// The vertices and indices on the CPU (the path tracer builds its BVH from them).
+    pub cpu: Arc<(Vec<Vertex>, Vec<u32>)>,
     /// Object-space bounds.
     pub lo: Vec3,
     pub hi: Vec3,
@@ -57,6 +59,9 @@ pub struct EnvGpu {
 /// Splats on the GPU (model space).
 pub struct SplatGpu {
     pub buf: wgpu::Buffer,
+    /// Spherical-harmonic coefficients (48 floats a splat), or one dummy entry.
+    pub sh: wgpu::Buffer,
+    pub sh_degree: u32,
     pub n: u32,
     pub lo: Vec3,
     pub hi: Vec3,
@@ -70,6 +75,14 @@ pub enum MeshSrc {
 }
 
 impl MeshSrc {
+    /// The vertices this draw uses (deformed ones when deformed) and the mesh's indices.
+    pub fn cpu(&self) -> (&[Vertex], &[u32]) {
+        match self {
+            MeshSrc::Cached(m) => (&m.cpu.0, &m.cpu.1),
+            MeshSrc::Deformed(v, m) => (v, &m.cpu.1),
+        }
+    }
+
     fn mesh(&self) -> &MeshGpu {
         match self {
             MeshSrc::Cached(m) | MeshSrc::Deformed(_, m) => m,
@@ -135,6 +148,8 @@ pub struct Light3 {
     pub ies: Option<Arc<Vec<f32>>>,
     pub affects_diffuse: bool,
     pub affects_specular: bool,
+    /// Screen-space contact-shadow length in scene units (0: off).
+    pub contact: f32,
 }
 
 /// The dome environment.
@@ -178,6 +193,12 @@ pub struct Scene3 {
     pub splats: Vec<SplatDraw>,
     /// Encode the output with the sRGB curve (working spaces that blend on encoded values).
     pub encode_srgb: bool,
+    /// Screen-space ambient occlusion: radius (scene units) and intensity.
+    pub ao: Option<[f32; 2]>,
+    /// Screen-space reflections.
+    pub ssr: bool,
+    /// Path trace instead of rasterising.
+    pub path: Option<crate::pathtrace::PathOpts>,
 }
 
 /// Counters for statistics and tests.
@@ -204,6 +225,7 @@ struct FrameU {
     dof: [f32; 4],
     post: [f32; 4],
     lens: [f32; 4],
+    fx: [f32; 4],
     sh: [[f32; 4]; 9],
     env_rot: [[f32; 4]; 4],
 }
@@ -260,6 +282,9 @@ struct SortU {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SplatObjU {
     model: [[f32; 4]; 4],
+    /// Scene space to the splats' own space (for view directions of their SH colour).
+    model_inv: [[f32; 4]; 4],
+    /// opacity, SH degree, unused ×2
     params: [f32; 4],
 }
 
@@ -313,12 +338,21 @@ struct PipeKey {
 /// GPU state of the 3D renderer.
 pub struct ThreeEngine {
     device: Arc<wgpu::Device>,
+    targets: Arc<std::sync::Mutex<TargetPool>>,
     queue: Arc<wgpu::Queue>,
     main_mod: wgpu::ShaderModule,
     bgl_frame: wgpu::BindGroupLayout,
     bgl_mat: wgpu::BindGroupLayout,
     bgl_obj: wgpu::BindGroupLayout,
     bgl_splat: wgpu::BindGroupLayout,
+    bgl_ssr: wgpu::BindGroupLayout,
+    /// Path-tracing pipelines, built on first use.
+    pt: Option<crate::pathtrace::PtGpu>,
+    /// Depth and normal prepass pipelines (by culling).
+    pre_pipes: [wgpu::RenderPipeline; 2],
+    ssao_pipe: wgpu::RenderPipeline,
+    ao_blur_pipe: wgpu::RenderPipeline,
+    ssr_pipe: wgpu::RenderPipeline,
     bgl_post: wgpu::BindGroupLayout,
     bgl_depth: wgpu::BindGroupLayout,
     bgl_sort: wgpu::BindGroupLayout,
@@ -415,6 +449,49 @@ const PREMUL: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// Render targets of [`ThreeEngine::render`] kept between calls. Each is a large dedicated
+/// allocation, and creating and dropping them every frame cost more CPU time than the rest of the
+/// pass (gate 8). A target is lent for one call and returned at its end; the encoder orders the
+/// passes of successive calls, so reuse is safe, and targets unused for a while are dropped.
+#[derive(Default)]
+struct TargetPool {
+    free: HashMap<TargetKey, Vec<(wgpu::Texture, u64)>>,
+    lent: Vec<(TargetKey, wgpu::Texture)>,
+    calls: u64,
+}
+
+type TargetKey = ([u32; 2], wgpu::TextureFormat, u32, u32, u32, &'static str);
+
+/// Calls a pooled target may go unused before it is freed.
+const POOL_KEEP: u64 = 64;
+
+impl TargetPool {
+    fn take(&mut self, device: &wgpu::Device, key: TargetKey) -> wgpu::Texture {
+        let t = match self.free.get_mut(&key).and_then(|v| v.pop()) {
+            Some((t, _)) => t,
+            None => {
+                let (size, format, mips, samples, layers, label) = key;
+                texture(device, size, format, mips, samples, layers, label)
+            }
+        };
+        self.lent.push((key, t.clone()));
+        t
+    }
+
+    /// Returns the targets lent during this call and frees those unused for [`POOL_KEEP`] calls.
+    fn end_call(&mut self) {
+        self.calls += 1;
+        let now = self.calls;
+        for (k, t) in self.lent.drain(..) {
+            self.free.entry(k).or_default().push((t, now));
+        }
+        self.free.retain(|_, v| {
+            v.retain(|(_, used)| now - used <= POOL_KEEP);
+            !v.is_empty()
+        });
+    }
+}
+
 fn texture(
     device: &wgpu::Device,
     size: [u32; 2],
@@ -482,6 +559,8 @@ impl ThreeEngine {
                 tex_entry(10, VS_FS, F, D2, false),
                 smp_entry(11, VS_FS, filt),
                 tex_entry(12, VS_FS, F, D2, false),
+                tex_entry(13, VS_FS, wgpu::TextureSampleType::Float { filterable: false }, D2, false),
+                tex_entry(14, VS_FS, F, D2, false),
             ],
             "three-frame",
         );
@@ -493,7 +572,12 @@ impl ThreeEngine {
         let bgl_mat = bgl(&mat_entries, "three-material");
         let bgl_obj = bgl(&[buf_entry(0, VS_FS, uni, true)], "three-object");
         let bgl_splat = bgl(
-            &[buf_entry(0, VS_FS, ro, false), buf_entry(1, VS_FS, ro, false), buf_entry(2, VS_FS, uni, false)],
+            &[
+                buf_entry(0, VS_FS, ro, false),
+                buf_entry(1, VS_FS, ro, false),
+                buf_entry(2, VS_FS, uni, false),
+                buf_entry(3, VS_FS, ro, false),
+            ],
             "three-splat",
         );
         let bgl_post = bgl(
@@ -530,6 +614,42 @@ impl ThreeEngine {
             })
         };
         let main_layout = layout(&[&bgl_frame, &bgl_mat, &bgl_obj]);
+        // depth and normal prepass for the screen-space effects: view normal + roughness, view
+        // depth + reflectance
+        let pre_pipe = |cull: bool| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-prepass"),
+                layout: Some(&main_layout),
+                vertex: wgpu::VertexState {
+                    module: &main_mod,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(vertex_layout())],
+                },
+                primitive: wgpu::PrimitiveState {
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: if cull { Some(wgpu::Face::Back) } else { None },
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &main_mod,
+                    entry_point: Some("fs_prepass"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(FORMAT.into()), Some(wgpu::TextureFormat::Rgba32Float.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pre_pipes = [pre_pipe(true), pre_pipe(false)];
         let shadow_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("three-shadow"),
             layout: Some(&main_layout),
@@ -631,6 +751,44 @@ impl ThreeEngine {
             })
         };
         let blit_pipe = post("fs_blit", FORMAT);
+        let ssao_pipe = post("fs_ssao", FORMAT);
+        let ao_blur_pipe = post("fs_ao_blur", FORMAT);
+        let ssr_mod = module(ssr_src(), "three-ssr");
+        let unf = wgpu::TextureSampleType::Float { filterable: false };
+        let bgl_ssr = bgl(
+            &[
+                buf_entry(0, VS_FS, uni, false),
+                tex_entry(1, VS_FS, F, D2, false),
+                tex_entry(2, VS_FS, unf, D2, false),
+                tex_entry(3, VS_FS, unf, D2, false),
+                tex_entry(4, VS_FS, F, D2, false),
+                smp_entry(5, VS_FS, filt),
+                smp_entry(6, VS_FS, filt),
+            ],
+            "three-ssr",
+        );
+        let ssr_layout = layout(&[&bgl_ssr]);
+        let ssr_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("three-ssr"),
+            layout: Some(&ssr_layout),
+            vertex: wgpu::VertexState {
+                module: &ssr_mod,
+                entry_point: Some("vs_ssr"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &ssr_mod,
+                entry_point: Some("fs_ssr"),
+                compilation_options: Default::default(),
+                targets: &[Some(FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let under_pipe = post("fs_under", FORMAT);
         let dof_pipe = post("fs_dof", FORMAT);
         let tile_max_pipe = post("fs_tile_max", wgpu::TextureFormat::R32Float);
@@ -689,6 +847,7 @@ impl ThreeEngine {
             ..Default::default()
         });
         let mut eng = ThreeEngine {
+            targets: Default::default(),
             white: Arc::new(TexGpu {
                 view: texture(d, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1, 1, 1, "white")
                     .create_view(&Default::default()),
@@ -703,6 +862,12 @@ impl ThreeEngine {
             bgl_mat,
             bgl_obj,
             bgl_splat,
+            bgl_ssr,
+            pt: None,
+            pre_pipes,
+            ssao_pipe,
+            ao_blur_pipe,
+            ssr_pipe,
             bgl_post,
             bgl_depth,
             bgl_sort,
@@ -838,7 +1003,14 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        Arc::new(MeshGpu { vbuf, ibuf, count: indices.len() as u32, lo, hi })
+        Arc::new(MeshGpu {
+            vbuf,
+            ibuf,
+            count: indices.len() as u32,
+            cpu: Arc::new((vertices.to_vec(), indices.to_vec())),
+            lo,
+            hi,
+        })
     }
 
     /// Prefilters and uploads an environment.
@@ -898,7 +1070,21 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(&data),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        Arc::new(SplatGpu { buf, n: s.len() as u32, lo, hi })
+        let has_sh = s.sh_degree > 0 && s.sh.len() == s.len() && !s.is_empty();
+        let dummy = [[0.0f32; 48]];
+        let sh = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("splat-sh"),
+            contents: bytemuck::cast_slice(if has_sh { &s.sh[..] } else { &dummy[..] }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        Arc::new(SplatGpu {
+            buf,
+            sh,
+            sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 },
+            n: s.len() as u32,
+            lo,
+            hi,
+        })
     }
 
     fn mat_bind(&mut self, maps: &Maps, uniform: &wgpu::Buffer) -> [u64; 6] {
@@ -1046,8 +1232,38 @@ impl ThreeEngine {
         backdrop: Option<&wgpu::TextureView>,
         out: &wgpu::TextureView,
     ) {
+        if let Some(opts) = scene.path {
+            let data = crate::pathtrace::build(scene);
+            if self.pt.is_none() {
+                self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
+            }
+            let env_view = scene.env.as_ref().map(|e| &e.env.view).unwrap_or(&self.black_env);
+            let inputs = crate::pathtrace::PtInputs {
+                env: env_view,
+                backdrop,
+                black: &self.black_env,
+                sampler: &self.repeat_smp,
+            };
+            crate::pathtrace::render(
+                self.pt.as_ref().expect("built"),
+                &self.device,
+                enc,
+                scene,
+                &data,
+                opts,
+                &inputs,
+                out,
+            );
+            self.stats =
+                Stats3 { draws: scene.draws.len(), triangles: data.tri_mat.len() as u64, ..Default::default() };
+            return;
+        }
         let d = self.device.clone();
         let size = [scene.size[0].max(1), scene.size[1].max(1)];
+        let targets = self.targets.clone();
+        let pool = |size: [u32; 2], format, mips, samples, layers, label| {
+            targets.lock().unwrap_or_else(|e| e.into_inner()).take(&d, (size, format, mips, samples, layers, label))
+        };
         for cull in [true, false] {
             for blend in [false, true] {
                 for write in [false, true] {
@@ -1080,12 +1296,45 @@ impl ThreeEngine {
             (blo, bhi) = (Vec3::ZERO, Vec3::ONE);
         }
         let extent = (bhi - blo).length().max(1.0);
+        // cascaded shadow maps for directional lights: the view frustum out to the scene's
+        // farthest point, split in depth (the practical split scheme: a blend of logarithmic
+        // and uniform splits), each slice as world-space corners with its far distance
+        const CASCADES: usize = 4;
+        let cascades: Option<Vec<([Vec3; 8], f32)>> = (!scene.cam.orthographic).then(|| {
+            let inv = scene.cam.view.inverse();
+            let near = scene.cam.near.max(1e-3);
+            let far = corners(blo, bhi)
+                .iter()
+                .map(|c| scene.cam.view.transform_point3(*c).z)
+                .fold(near * 2.0, f32::max)
+                .min(scene.cam.far);
+            let (hw, hh) = (size[0] as f32 * 0.5 / scene.cam.focal_px, size[1] as f32 * 0.5 / scene.cam.focal_px);
+            let split = |i: usize| {
+                let f = i as f32 / CASCADES as f32;
+                0.8 * near * (far / near).powf(f) + 0.2 * (near + (far - near) * f)
+            };
+            (0..CASCADES)
+                .map(|c| {
+                    let mut out = [Vec3::ZERO; 8];
+                    for (k, z) in [split(c), split(c + 1)].into_iter().enumerate() {
+                        for (j, (sx, sy)) in
+                            [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].into_iter().enumerate()
+                        {
+                            out[k * 4 + j] = inv.transform_point3(Vec3::new(sx * hw * z, sy * hh * z, z));
+                        }
+                    }
+                    (out, split(c + 1))
+                })
+                .collect()
+        });
         let mut shadow_mats: Vec<Mat4> = Vec::new();
         let mut map_size = 16u32;
         let mut lights_u: Vec<LightU> = Vec::with_capacity(scene.lights.len());
         for (li, l) in scene.lights.iter().enumerate() {
             let mut first = -1.0;
             let mut views = 1.0;
+            // cascade split depths of a directional light (view z where cascades 0–2 end)
+            let mut splits = [0.0f32; 3];
             if l.cast_shadow && l.kind != LightKind::Ambient {
                 first = shadow_mats.len() as f32;
                 map_size = map_size.max(l.map_size.clamp(16, 8192));
@@ -1098,27 +1347,56 @@ impl ThreeEngine {
                             lo = lo.min(q);
                             hi = hi.max(q);
                         }
-                        let pad = extent * 0.02;
-                        let (lo, hi) = (lo - Vec3::splat(pad), hi + Vec3::splat(pad));
-                        let ortho = Mat4::from_cols_array(&[
-                            2.0 / (hi.x - lo.x),
-                            0.0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            2.0 / (hi.y - lo.y),
-                            0.0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            1.0 / (hi.z - lo.z),
-                            0.0,
-                            -(hi.x + lo.x) / (hi.x - lo.x),
-                            -(hi.y + lo.y) / (hi.y - lo.y),
-                            -lo.z / (hi.z - lo.z),
-                            1.0,
-                        ]);
-                        shadow_mats.push(ortho * v);
+                        // one ortho view over light-space box [lo, hi], padded
+                        let ortho_of = |lo: Vec3, hi: Vec3| {
+                            let side = (hi.x - lo.x).max(hi.y - lo.y);
+                            let pad = Vec3::new(side * 0.02, side * 0.02, extent * 0.02);
+                            let (lo, hi) = (lo - pad, hi + pad);
+                            Mat4::from_cols_array(&[
+                                2.0 / (hi.x - lo.x),
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                2.0 / (hi.y - lo.y),
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                1.0 / (hi.z - lo.z),
+                                0.0,
+                                -(hi.x + lo.x) / (hi.x - lo.x),
+                                -(hi.y + lo.y) / (hi.y - lo.y),
+                                -lo.z / (hi.z - lo.z),
+                                1.0,
+                            ]) * v
+                        };
+                        match &cascades {
+                            // each cascade covers its slice across the light (within the scene),
+                            // and the whole scene along it, so casters outside the slice still shade it
+                            Some(cs) => {
+                                views = CASCADES as f32;
+                                for (k, (slice, far)) in cs.iter().enumerate() {
+                                    let (mut vlo, mut vhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                                    for c in slice {
+                                        let q = v.transform_point3(*c);
+                                        vlo = vlo.min(q);
+                                        vhi = vhi.max(q);
+                                    }
+                                    let (nlo, nhi) = (lo.max(vlo), hi.min(vhi));
+                                    let (clo, chi) = if nlo.x < nhi.x && nlo.y < nhi.y {
+                                        (Vec3::new(nlo.x, nlo.y, lo.z), Vec3::new(nhi.x, nhi.y, hi.z))
+                                    } else {
+                                        (lo, hi)
+                                    };
+                                    shadow_mats.push(ortho_of(clo, chi));
+                                    if k < 3 {
+                                        splits[k] = *far;
+                                    }
+                                }
+                            }
+                            None => shadow_mats.push(ortho_of(lo, hi)),
+                        }
                     }
                     LightKind::Spot => {
                         let far = if l.range > 0.0 { l.range } else { (l.pos - (blo + bhi) * 0.5).length() + extent };
@@ -1139,9 +1417,14 @@ impl ThreeEngine {
                 dir: [l.dir.x, l.dir.y, l.dir.z, l.range],
                 color: [l.color.x, l.color.y, l.color.z, l.falloff],
                 spot: [l.cos_outer, l.cos_inner, first, l.softness.max(1.0)],
-                size: [l.size[0], l.size[1], l.size[2], ies_rows[li]],
+                // directional lights have no size: their cascade splits ride in it
+                size: if l.kind == LightKind::Directional && views > 1.5 {
+                    [splits[0], splits[1], splits[2], ies_rows[li]]
+                } else {
+                    [l.size[0], l.size[1], l.size[2], ies_rows[li]]
+                },
                 flags: [l.affects_diffuse as u32 as f32, l.affects_specular as u32 as f32, l.bias, views],
-                right: [l.right.x, l.right.y, l.right.z, 0.0],
+                right: [l.right.x, l.right.y, l.right.z, l.contact.max(0.0)],
             });
         }
         if lights_u.is_empty() {
@@ -1203,7 +1486,13 @@ impl ThreeEngine {
             lens: [
                 scene.clip_fix.x_axis.x * scene.cam.proj.x_axis.x * size[0] as f32 * 0.5,
                 scene.encode_srgb as u32 as f32,
+                scene.ao.is_some() as u32 as f32,
                 0.0,
+            ],
+            fx: [
+                scene.ao.map(|a| a[0]).unwrap_or(0.0),
+                scene.ao.map(|a| a[1]).unwrap_or(0.0),
+                scene.ssr as u32 as f32,
                 0.0,
             ],
             sh,
@@ -1221,8 +1510,7 @@ impl ThreeEngine {
             shadow_mats.iter().map(|m| m.to_cols_array_2d()).collect()
         };
         let smat_buf = buf(bytemuck::cast_slice(&mats), wgpu::BufferUsages::STORAGE, "three-shadow-mats");
-        let shadow =
-            texture(&d, [map_size, map_size], wgpu::TextureFormat::Depth32Float, 1, 1, layers, "three-shadows");
+        let shadow = pool([map_size, map_size], wgpu::TextureFormat::Depth32Float, 1, 1, layers, "three-shadows");
         let shadow_view = shadow.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -1327,41 +1615,119 @@ impl ThreeEngine {
             }],
         });
         // ------------------------------------------------ targets
-        let color_ms = texture(&d, size, FORMAT, 1, MSAA, 1, "three-color-ms").create_view(&Default::default());
-        let depth_ms = texture(&d, size, wgpu::TextureFormat::Depth32Float, 1, MSAA, 1, "three-depth-ms")
+        let color_ms = pool(size, FORMAT, 1, MSAA, 1, "three-color-ms").create_view(&Default::default());
+        let depth_ms = pool(size, wgpu::TextureFormat::Depth32Float, 1, MSAA, 1, "three-depth-ms")
             .create_view(&Default::default());
-        let resolved_t = texture(&d, size, FORMAT, 1, 1, 1, "three-resolved");
+        let resolved_t = pool(size, FORMAT, 1, 1, 1, "three-resolved");
         let resolved = resolved_t.create_view(&Default::default());
-        let dummy_shadow = texture(&d, [1, 1], wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-no-shadows");
+        let dummy_shadow = pool([1, 1], wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-no-shadows");
         let dummy_shadow_view = dummy_shadow.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
+        // the visible sky at the source's resolution (conventions 5.5), apart from the prefiltered chain
         let sky_view = env.map(|e| &e.env.sky).unwrap_or(&self.black_env);
+        let no_tiles =
+            pool([1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles").create_view(&Default::default());
+        let post_bind3 = |src: &wgpu::TextureView, aux: &wgpu::TextureView, tiles: &wgpu::TextureView| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("three-post"),
+                layout: &self.bgl_post,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(aux) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(tiles) },
+                ],
+            })
+        };
+        let post_bind = |src: &wgpu::TextureView, aux: &wgpu::TextureView| post_bind3(src, aux, &no_tiles);
+        let post_pass = |enc: &mut wgpu::CommandEncoder,
+                         pipe: &wgpu::RenderPipeline,
+                         bind: &wgpu::BindGroup,
+                         dst: &wgpu::TextureView| {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("three-post"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(pipe);
+            rp.set_bind_group(0, bind, &[]);
+            rp.draw(0..3, 0..1);
+        };
+        // ------------------------------------------------ screen-space targets
+        let prepass = scene.ao.is_some() || scene.ssr || scene.lights.iter().any(|l| l.contact > 0.0);
+        let no_gbuffer = pool([1, 1], wgpu::TextureFormat::Rgba32Float, 1, 1, 1, "three-no-gbuffer")
+            .create_view(&Default::default());
+        let (gb_n, gb_z, gb_d) = if prepass {
+            (
+                Some(pool(size, FORMAT, 1, 1, 1, "three-gb-normal").create_view(&Default::default())),
+                Some(
+                    pool(size, wgpu::TextureFormat::Rgba32Float, 1, 1, 1, "three-gb-depth")
+                        .create_view(&Default::default()),
+                ),
+                Some(
+                    pool(size, wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-gb-zbuffer")
+                        .create_view(&Default::default()),
+                ),
+            )
+        } else {
+            (None, None, None)
+        };
+        let ao_views = scene.ao.map(|_| {
+            (
+                pool(size, FORMAT, 1, 1, 1, "three-ao-raw").create_view(&Default::default()),
+                pool(size, FORMAT, 1, 1, 1, "three-ao").create_view(&Default::default()),
+            )
+        });
+        let ao_view = ao_views.as_ref().map(|a| &a.1).unwrap_or(&self.white.view);
+        let gbz_view = gb_z.as_ref().unwrap_or(&no_gbuffer);
+        let frame_bind_full = |scene_color: &wgpu::TextureView,
+                               env_view: &wgpu::TextureView,
+                               shadow_view: &wgpu::TextureView,
+                               ao: &wgpu::TextureView,
+                               gbz: &wgpu::TextureView| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("three-frame"),
+                layout: &self.bgl_frame,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: light_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: tile_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.cmp_smp) },
+                    wgpu::BindGroupEntry { binding: 5, resource: smat_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(env_view) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.repeat_smp) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brdf) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&ies_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(scene_color) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(ao) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(gbz) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(sky_view) },
+                ],
+            })
+        };
+        // passes that write the occlusion or the prepass bind stand-ins for them
         let frame_bind_with =
             |scene_color: &wgpu::TextureView, env_view: &wgpu::TextureView, shadow_view: &wgpu::TextureView| {
-                d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("three-frame"),
-                    layout: &self.bgl_frame,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: light_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: tile_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.cmp_smp) },
-                        wgpu::BindGroupEntry { binding: 5, resource: smat_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(env_view) },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.repeat_smp) },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.brdf) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&ies_view) },
-                        wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(scene_color) },
-                        wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
-                        wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sky_view) },
-                    ],
-                })
+                frame_bind_full(scene_color, env_view, shadow_view, &self.white.view, &no_gbuffer)
             };
         let frame_bind = |scene_color: &wgpu::TextureView, env_view: &wgpu::TextureView| {
-            frame_bind_with(scene_color, env_view, &shadow_view)
+            frame_bind_full(scene_color, env_view, &shadow_view, ao_view, gbz_view)
         };
         let env_view = env.map(|e| &e.env.view).unwrap_or(&self.black_env);
         let fb_plain = frame_bind(&self.white.view, env_view);
@@ -1422,6 +1788,59 @@ impl ThreeEngine {
         let mut blended: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Blend).collect();
         trans.reverse();
         blended.reverse();
+        // ------------------------------------------------ depth and normal prepass, ambient occlusion
+        if let (Some(gn), Some(gz), Some(gd)) = (&gb_n, &gb_z, &gb_d) {
+            let fb_pre = frame_bind_with(&self.white.view, env_view, &shadow_view);
+            {
+                let clear = wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                };
+                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("three-prepass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gn,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: clear,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gz,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: clear,
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: gd,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                rp.set_bind_group(0, &fb_pre, &[]);
+                for &i in &opaque {
+                    let dr = &scene.draws[i];
+                    let m = dr.mesh.mesh();
+                    rp.set_pipeline(&self.pre_pipes[if preps[i].cull { 0 } else { 1 }]);
+                    rp.set_bind_group(1, &self.mat_binds[&preps[i].key], &[preps[i].mat]);
+                    rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
+                    rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
+                    rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..m.count, 0, 0..1);
+                }
+            }
+            if let Some((raw, ao)) = &ao_views {
+                post_pass(enc, &self.ssao_pipe, &post_bind(gn, gz), raw);
+                post_pass(enc, &self.ao_blur_pipe, &post_bind(raw, gz), ao);
+            }
+        }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("three-opaque"),
@@ -1452,52 +1871,12 @@ impl ThreeEngine {
             }
             draw_list(&mut rp, &opaque, self, false);
         }
-        let no_tiles = texture(&d, [1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles")
-            .create_view(&Default::default());
-        let post_bind3 = |src: &wgpu::TextureView, aux: &wgpu::TextureView, tiles: &wgpu::TextureView| {
-            d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("three-post"),
-                layout: &self.bgl_post,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(aux) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(tiles) },
-                ],
-            })
-        };
-        let post_bind = |src: &wgpu::TextureView, aux: &wgpu::TextureView| post_bind3(src, aux, &no_tiles);
-        let post_pass = |enc: &mut wgpu::CommandEncoder,
-                         pipe: &wgpu::RenderPipeline,
-                         bind: &wgpu::BindGroup,
-                         dst: &wgpu::TextureView| {
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("three-post"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rp.set_pipeline(pipe);
-            rp.set_bind_group(0, bind, &[]);
-            rp.draw(0..3, 0..1);
-        };
         // ------------------------------------------------ transmission: backdrop + opaque, mip chain
         let mut fb_trans = None;
         if !trans.is_empty() {
             let mips = 32 - size[0].max(size[1]).leading_zeros();
             let mips = mips.min(8);
-            let sc = texture(&d, size, FORMAT, mips, 1, 1, "three-scene-color");
+            let sc = pool(size, FORMAT, mips, 1, 1, "three-scene-color");
             let lvl = |k: u32| {
                 sc.create_view(&wgpu::TextureViewDescriptor {
                     base_mip_level: k,
@@ -1505,7 +1884,7 @@ impl ThreeEngine {
                     ..Default::default()
                 })
             };
-            let black = texture(&d, [1, 1], FORMAT, 1, 1, 1, "three-black").create_view(&Default::default());
+            let black = pool([1, 1], FORMAT, 1, 1, 1, "three-black").create_view(&Default::default());
             let under = post_bind(&resolved, backdrop.unwrap_or(&black));
             post_pass(enc, &self.under_pipe, &under, &lvl(0));
             for k in 1..mips {
@@ -1589,7 +1968,11 @@ impl ThreeEngine {
                 }
             }
             // four passes end back in the "a" buffers
-            let so = SplatObjU { model: sp.model.to_cols_array_2d(), params: [sp.opacity, 0.0, 0.0, 0.0] };
+            let so = SplatObjU {
+                model: sp.model.to_cols_array_2d(),
+                model_inv: sp.model.inverse().to_cols_array_2d(),
+                params: [sp.opacity, sp.gpu.sh_degree as f32, 0.0, 0.0],
+            };
             let obuf = buf(bytemuck::bytes_of(&so), wgpu::BufferUsages::UNIFORM, "splat-object");
             let sb = d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("splat"),
@@ -1598,12 +1981,13 @@ impl ThreeEngine {
                     wgpu::BindGroupEntry { binding: 0, resource: sp.gpu.buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: va.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: obuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: sp.gpu.sh.as_entire_binding() },
                 ],
             });
             splat_binds.push((sb, sp.gpu.n));
         }
         // ------------------------------------------------ transmissive, splats, blended
-        let depth_t = texture(&d, size, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-depth");
+        let depth_t = pool(size, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-depth");
         let depth_view = depth_t.create_view(&Default::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1665,19 +2049,42 @@ impl ThreeEngine {
             rp.set_bind_group(0, &db, &[]);
             rp.draw(0..3, 0..1);
         }
+        // ------------------------------------------------ screen-space reflections
+        let ssr_view = if let (true, Some(gn), Some(gz)) = (scene.ssr, &gb_n, &gb_z) {
+            let v = pool(size, FORMAT, 1, 1, 1, "three-ssr").create_view(&Default::default());
+            let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("three-ssr"),
+                layout: &self.bgl_ssr,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&resolved) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(gz) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(gn) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(env_view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.repeat_smp) },
+                ],
+            });
+            post_pass(enc, &self.ssr_pipe, &bind, &v);
+            Some(v)
+        } else {
+            None
+        };
+        let resolved = ssr_view.as_ref().unwrap_or(&resolved);
         let pb = if scene.dof.is_some() {
             let tsize = [size[0].div_ceil(16), size[1].div_ceil(16)];
-            let a = texture(&d, tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-tiles")
+            let a =
+                pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
+            let b = pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-dilated")
                 .create_view(&Default::default());
-            let b = texture(&d, tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-dilated")
-                .create_view(&Default::default());
-            post_pass(enc, &self.tile_max_pipe, &post_bind(&resolved, &depth_view), &a);
-            post_pass(enc, &self.tile_dilate_pipe, &post_bind(&resolved, &a), &b);
-            post_bind3(&resolved, &depth_view, &b)
+            post_pass(enc, &self.tile_max_pipe, &post_bind(resolved, &depth_view), &a);
+            post_pass(enc, &self.tile_dilate_pipe, &post_bind(resolved, &a), &b);
+            post_bind3(resolved, &depth_view, &b)
         } else {
-            post_bind(&resolved, &depth_view)
+            post_bind(resolved, &depth_view)
         };
         post_pass(enc, &self.dof_pipe, &pb, out);
+        self.targets.lock().unwrap_or_else(|e| e.into_inner()).end_call();
         self.stats = stats;
     }
 }
@@ -1758,6 +2165,10 @@ pub fn splat_src() -> String {
 }
 
 /// Post passes: blits, backdrop composite, depth of field.
+pub fn ssr_src() -> String {
+    format!("{TYPES}\n{}", include_str!("three_ssr.wgsl"))
+}
+
 pub fn post_src() -> String {
     format!("{TYPES}\n{}", include_str!("three_post.wgsl"))
 }

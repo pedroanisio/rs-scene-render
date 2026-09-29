@@ -112,3 +112,45 @@ fn delivery_runs_the_checks() {
     let r = deliver(&doc(&dir, r#"<accessibility flashCheck="off" requireCaptions="true"/>"#, ""));
     assert!(matches!(r, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("requireCaptions")));
 }
+
+#[test]
+fn flash_check_needs_an_accessibility_element() {
+    // parity with the Python and JS renderers and the XSD: attribute defaults apply to a
+    // declared <accessibility>; without one nothing is checked
+    let Some(dir) = fixtures() else { return };
+    if sr_gpu::Gpu::new().is_err() {
+        return;
+    }
+    let r = deliver(&doc(&dir, "", &flicker())).unwrap();
+    assert!(r.accessibility.is_empty(), "no <accessibility>: {:?}", r.accessibility);
+    let r = deliver(&doc(&dir, "<accessibility/>", &flicker())).unwrap();
+    assert!(r.accessibility.iter().any(|m| m.contains("flashCheck")), "declared: {:?}", r.accessibility);
+}
+
+#[test]
+fn contrast_is_measured_inside_isolated_groups() {
+    let Some(dir) = fixtures() else { return };
+    if sr_gpu::Gpu::new().is_err() {
+        return;
+    }
+    // text drawn into an offscreen (isolated group) is measured against what the viewer sees:
+    // the frame rendered with and without the layer
+    let with = |c: &str, group: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="64" fps="30" duration="0.2" background="#000000"/><metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata><output id="o" path="out/g.mp4" codec="h264" preset="ultrafast" audio="false"/><assets><text id="label" text="AB" width="56" height="32" size="28" color="{c}" font="DejaVu Sans"/></assets><composition><group id="g" {group}><layer id="t" asset="label" x="4" y="16"/></group></composition></scene>"##
+        );
+        let path = dir.join("isolated.scene.xml");
+        std::fs::write(&path, xml).unwrap();
+        sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"))
+    };
+    let ok = deliver(&with("#FFFFFF", r#"isolate="true""#)).unwrap();
+    assert!(ok.accessibility.is_empty(), "{:?}", ok.accessibility);
+    let low = deliver(&with("#303030", r#"isolate="true""#)).unwrap_err();
+    assert!(
+        matches!(low, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck") && m.contains(" t ")),
+        "{low}"
+    );
+    // a group fading the text is judged at its delivered, faded contrast
+    let faded = deliver(&with("#FFFFFF", r#"isolate="true" opacity="0.12""#)).unwrap_err();
+    assert!(matches!(faded, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck")), "{faded}");
+}

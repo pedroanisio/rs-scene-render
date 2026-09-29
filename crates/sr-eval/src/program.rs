@@ -263,8 +263,13 @@ pub struct InstNode {
     pub tf: Tf,
     /// Animated transform sources.
     pub tf_slots: TfSlots,
-    /// Stacking order among siblings.
+    /// Stacking order among siblings. `object3D` and `camera` take `z` as a depth in scene units,
+    /// so theirs is 0 (the Python engine's rule).
     pub z: i32,
+    /// Slot of an animated `z`, when the stacking order can change between frames.
+    pub z_slot: Option<u32>,
+    /// Whether any child has an animated `z`: the evaluator then restacks the children every frame.
+    pub restack: bool,
     /// `@threeD`.
     pub three_d: bool,
     /// `@matteVisible`.
@@ -454,6 +459,10 @@ pub struct Program {
     pub nodes: Vec<InstNode>,
     /// Root nodes in document order.
     pub roots: Vec<u32>,
+    /// Root nodes in document order.
+    pub doc_roots: Vec<u32>,
+    /// Whether any root has an animated `z`.
+    pub restack_roots: bool,
     /// Slots.
     pub slots: Vec<Slot>,
     /// Slot evaluation order (dependencies first).
@@ -1217,7 +1226,9 @@ impl Builder {
                 media: None,
                 tf,
                 tf_slots: TfSlots::default(),
-                z: attr_num(e, "z").unwrap_or(0.0) as i32,
+                z: if matches!(name, "object3D" | "camera") { 0 } else { attr_num(e, "z").unwrap_or(0.0) as i32 },
+                z_slot: None,
+                restack: false,
                 three_d: attr_bool(e, "threeD").unwrap_or(false),
                 matte_visible: attr_bool(e, "matteVisible").unwrap_or(false),
                 visible: attr_bool(e, "visible").unwrap_or(true)
@@ -1244,6 +1255,11 @@ impl Builder {
                 clip: attr_bool(e, "clip").unwrap_or(false),
             };
             self.nodes.push(node);
+            if matches!(name, "flock" | "fluid" | "slime" | "erosion") {
+                // simulations draw in their width × height box
+                let (w, h) = (attr_num(e, "width").unwrap_or(1.0), attr_num(e, "height").unwrap_or(1.0));
+                self.nodes[idx as usize].box_size = Some([Length::px(w), Length::px(h)]);
+            }
             self.statics(idx, n, ctx.doc);
             if n.id().is_some() {
                 self.ids.insert(id.clone(), idx);
@@ -2592,7 +2608,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     b.globals();
     b.compile_pending();
     let order = b.order();
-    let slot_read = b.slot_read();
+    let mut slot_read = b.slot_read();
     b.fill_tf_slots();
     // transition handles: extend visibility of the nodes on both sides
     let windows: Vec<(Option<u32>, Option<u32>, (f64, f64))> =
@@ -2639,10 +2655,32 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         }
     }
     let zs: Vec<i32> = b.nodes.iter().map(|n| n.z).collect();
+    // an animated `z` (keys, expression or link) restacks its siblings every frame
+    for i in 0..b.nodes.len() {
+        if matches!(b.nodes[i].name, "object3D" | "camera") {
+            continue;
+        }
+        b.nodes[i].z_slot = b.nodes[i].slots.iter().copied().find(|&s| {
+            let slot = &b.slots[s as usize];
+            &*slot.prop == "z"
+                && slot.owner == Owner::Node(i as u32)
+                && (!slot.channels.is_empty() || slot.expr.is_some() || slot.link.is_some())
+        });
+    }
+    // stacking reads every sibling's z before any is drawn, off-screen ones included (eval Frame::stacked)
+    for n in &b.nodes {
+        if let Some(s) = n.z_slot {
+            slot_read[s as usize] = true;
+        }
+    }
+    let dynamic: Vec<bool> = b.nodes.iter().map(|n| n.z_slot.is_some()).collect();
     for node in b.nodes.iter_mut() {
         node.doc_children = node.children.clone();
         node.children.sort_by_key(|&k| zs[k as usize]);
+        node.restack = node.children.iter().any(|&k| dynamic[k as usize]);
     }
+    let doc_roots = roots.clone();
+    let restack_roots = roots.iter().any(|&k| dynamic[k as usize]);
     let mut roots = roots;
     roots.sort_by_key(|&k| zs[k as usize]);
     let includes = b.docs.iter().skip(1).map(|d| (d.ns.clone(), (*d.scene).clone())).collect();
@@ -2685,6 +2723,8 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         seed: b.project_seed,
         nodes: b.nodes,
         roots,
+        doc_roots,
+        restack_roots,
         slots: b.slots,
         order,
         slot_read,

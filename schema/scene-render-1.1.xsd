@@ -1682,6 +1682,7 @@
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
+      <xs:element name="blob" type="clayBlobType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
@@ -1692,9 +1693,16 @@
         <xs:enumeration value="cylinder"/><xs:enumeration value="cone"/>
         <xs:enumeration value="torus"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
+        <xs:enumeration value="clay"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="resolution" default="64">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="fingerprints" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="boil" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mesh" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
@@ -1787,6 +1795,24 @@
     <xs:attribute name="shutterAngle" type="nonNegativeDecimal"/>
     <xs:attribute name="exposure" type="xs:double" default="0"/>
     <xs:attribute name="lensDistortion" type="xs:double" default="0"/>
+    <!-- rs-scene-render extensions (Phase 5): screen-space lighting of the raster renderer, and a
+         progressive path tracer for final frames -->
+    <xs:attribute name="ambientOcclusion" type="xs:boolean" default="false"/>
+    <xs:attribute name="aoRadius" type="positiveDecimal" default="40"/>
+    <xs:attribute name="aoIntensity" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="screenSpaceReflections" type="xs:boolean" default="false"/>
+    <xs:attribute name="renderer" default="raster">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="raster"/><xs:enumeration value="pathtrace"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="pathSamples" default="64">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="maxBounces" default="4">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="denoise" type="xs:boolean" default="true"/>
   </xs:complexType>
 
   <xs:complexType name="groupType">
@@ -1996,6 +2022,207 @@
     </xs:attribute>
   </xs:complexType>
 
+  <!-- ============================================================ 2D simulations
+       Extensions of rs-scene-render (Phase 5): each simulates at a fixed step from its start
+       with a checkpoint every simulated second, like physics and particles, and is drawn in
+       its own box (flock: as particles in frame space). -->
+  <xs:simpleType name="simBoundsType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="steer"/><xs:enumeration value="bounce"/><xs:enumeration value="wrap"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="flockType">
+    <xs:annotation><xs:documentation>
+      Boids (Reynolds 1987): `count` agents in the width x height box steer by separation,
+      alignment and cohesion with neighbours within `perception`, capped at `maxSpeed` and
+      `maxForce`, kept in the box by `bounds`, and pushed by the named force fields. Drawn like
+      particles (disc, streak or sprite), oriented to their velocity.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="count" default="200">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="100000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal" default="120"/>
+    <xs:attribute name="maxSpeed" type="positiveDecimal" default="240"/>
+    <xs:attribute name="maxForce" type="positiveDecimal" default="400"/>
+    <xs:attribute name="perception" type="positiveDecimal" default="60"/>
+    <xs:attribute name="separationDistance" type="positiveDecimal" default="24"/>
+    <xs:attribute name="separation" type="nonNegativeDecimal" default="1.5"/>
+    <xs:attribute name="alignment" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="cohesion" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="bounds" type="simBoundsType" default="steer"/>
+    <xs:attribute name="edgeMargin" type="nonNegativeDecimal" default="40"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="size" type="positiveDecimal" default="6"/>
+    <xs:attribute name="color" type="paintType" default="#FFFFFFFF"/>
+    <xs:attribute name="shape" default="streak">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="disc"/><xs:enumeration value="streak"/><xs:enumeration value="sprite"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="sprite" type="xs:IDREF"/>
+    <xs:attribute name="trail" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
+  <xs:complexType name="fluidSourceType">
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="20"/>
+    <xs:attribute name="color" type="paintType" default="#FFFFFFFF"/>
+    <xs:attribute name="density" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+  </xs:complexType>
+  <xs:complexType name="fluidType">
+    <xs:annotation><xs:documentation>
+      Incompressible 2D fluid on a grid (Stam 1999, stable fluids): semi-Lagrangian advection of
+      velocity and coloured dye, viscous diffusion, vorticity confinement and a pressure
+      projection. Sources inject dye (per second) and velocity (px/s) inside their radius.
+      Positions are in the fluid's box.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+      <xs:element name="fluidSource" type="fluidSourceType"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="resolution" default="128">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="1024"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="viscosity" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="diffusion" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="dissipation" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="velocityDissipation" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="vorticity" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="buoyancy" type="xs:double" default="0"/>
+    <xs:attribute name="iterations" default="40">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="500"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bounds" default="closed">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="wrap"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
+  <xs:complexType name="slimeType">
+    <xs:annotation><xs:documentation>
+      Physarum transport network (Jones 2010): agents sense a trail map ahead and to either side,
+      turn toward the strongest trail, move and deposit; the map diffuses and decays each step.
+      Drawn as the trail map through a two-colour ramp (colorLow at 0, color at `saturation`).
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="resolution" default="256">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="2048"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="agents" default="20000">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="2000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong"/>
+    <xs:attribute name="spawn" default="disc">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="random"/><xs:enumeration value="disc"/><xs:enumeration value="ring"/><xs:enumeration value="center"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="sensorAngle" type="xs:double" default="30"/>
+    <xs:attribute name="sensorDistance" type="positiveDecimal" default="9"/>
+    <xs:attribute name="turnAngle" type="xs:double" default="45"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal" default="60"/>
+    <xs:attribute name="deposit" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="decay" type="unitDecimal" default="0.1"/>
+    <xs:attribute name="diffuse" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="saturation" type="positiveDecimal" default="4"/>
+    <xs:attribute name="color" type="paintType" default="#FFD27AFF"/>
+    <xs:attribute name="colorLow" type="paintType" default="#00000000"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
+  <xs:complexType name="erosionType">
+    <xs:annotation><xs:documentation>
+      Hydraulic erosion of a heightmap by water droplets (Beyer 2015): each droplet runs downhill
+      with inertia, carries sediment up to a capacity that grows with speed, water and slope,
+      erodes within a radius and deposits where it slows or climbs, and evaporates. The terrain
+      starts as fractal noise (or the `heightmap` image's luminance) and is drawn hill-shaded
+      through colorLow to colorHigh.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="resolution" default="256">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="16"/><xs:maxInclusive value="2048"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong"/>
+    <xs:attribute name="heightmap" type="xs:IDREF"/>
+    <xs:attribute name="octaves" default="6">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="12"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="frequency" type="positiveDecimal" default="3"/>
+    <xs:attribute name="droplets" type="nonNegativeDecimal" default="20000"/>
+    <xs:attribute name="inertia" type="unitDecimal" default="0.05"/>
+    <xs:attribute name="capacity" type="nonNegativeDecimal" default="4"/>
+    <xs:attribute name="erodeRate" type="unitDecimal" default="0.3"/>
+    <xs:attribute name="depositRate" type="unitDecimal" default="0.3"/>
+    <xs:attribute name="evaporation" type="unitDecimal" default="0.01"/>
+    <xs:attribute name="gravity" type="nonNegativeDecimal" default="4"/>
+    <xs:attribute name="erodeRadius" default="3">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="16"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="relief" type="positiveDecimal" default="1"/>
+    <xs:attribute name="sunAzimuth" type="xs:double" default="315"/>
+    <xs:attribute name="sunElevation" type="xs:double" default="45"/>
+    <xs:attribute name="colorLow" type="paintType" default="#3B4A2FFF"/>
+    <xs:attribute name="colorHigh" type="paintType" default="#E8E2D0FF"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
+  <xs:complexType name="clayBlobType">
+    <xs:annotation><xs:documentation>
+      One solid of a clay object (primitive="clay"), in the object's local scene units: its signed
+      distance field joins the others with a smooth union of width `blend` (or is carved out
+      with `subtract`). Blobs animate like any element, so topology can change over time.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="shape" default="sphere">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="sphere"/><xs:enumeration value="box"/><xs:enumeration value="capsule"/><xs:enumeration value="torus"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="30"/>
+    <xs:attribute name="width" type="positiveDecimal" default="60"/>
+    <xs:attribute name="height" type="positiveDecimal" default="60"/>
+    <xs:attribute name="depth" type="positiveDecimal" default="60"/>
+    <xs:attribute name="length" type="nonNegativeDecimal" default="60"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="blend" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="subtract" type="xs:boolean" default="false"/>
+  </xs:complexType>
+
   <xs:group name="nodeChoice">
     <xs:choice>
       <xs:element name="group" type="groupType"/>
@@ -2005,6 +2232,10 @@
       <xs:element name="object3D" type="object3DType"/>
       <xs:element name="camera" type="cameraType"/>
       <xs:element name="particleEmitter" type="particleEmitterType"/>
+      <xs:element name="flock" type="flockType"/>
+      <xs:element name="fluid" type="fluidType"/>
+      <xs:element name="slime" type="slimeType"/>
+      <xs:element name="erosion" type="erosionType"/>
       <xs:element name="instance" type="instanceType"/>
       <xs:element name="include" type="includeType"/>
       <xs:element name="repeat" type="repeatType"/>
@@ -2225,6 +2456,10 @@
         <xs:minInclusive value="16"/><xs:maxInclusive value="8192"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <!-- rs-scene-render extension (Phase 5): screen-space contact shadows for detail the
+         shadow map cannot resolve -->
+    <xs:attribute name="contactShadows" type="xs:boolean" default="false"/>
+    <xs:attribute name="contactShadowLength" type="positiveDecimal" default="20"/>
   </xs:complexType>
   <xs:complexType name="lightsType">
     <xs:sequence><xs:element name="light" type="lightType" maxOccurs="unbounded"/></xs:sequence>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A captured object on a turntable: a Gaussian-splat asset (3DGS PLY with spherical
+     harmonics) turning in front of a studio backdrop, its highlight staying with the light.
+     Run `python examples/splat/make_splat.py` first (or put your own capture's PLY in its place),
+     then: scene-render encode examples/splat/turntable.scene.xml -o turntable.mp4 -->
+<scene version="1.1">
+  <project width="1280" height="720" fps="30" duration="6" background="#16181C"/>
+  <assets>
+    <mesh id="capture" src="glossy.ply" format="ply"/>
+  </assets>
+  <composition>
+    <shape id="floor" shape="ellipse" x="340" y="520" width="600" height="90" fill="#0C0D10"/>
+    <!-- PLY splats come in at 100 px per unit; the capture is y up, scene space is y down -->
+    <object3D id="vase" primitive="mesh" mesh="capture" x="640" y="560" z="0" rotationX="180" scaleX="8" scaleY="8" scaleZ="8">
+      <animate property="rotationY"><key time="0" value="0"/><key time="6" value="360"/></animate>
+    </object3D>
+  </composition>
+</scene>

@@ -117,3 +117,47 @@ fn physics_cache_round_trip() {
     assert!(g3.problems.iter().any(|m| m.contains("SHA-256")), "{:?}", g3.problems);
     assert_eq!(world(&g3), world(&simulated));
 }
+
+fn same(a: &Rendered, b: &Rendered) -> bool {
+    a.px.iter().zip(&b.px).all(|(p, q)| (0..4).all(|c| (p[c] - q[c]).abs() < 1e-5))
+}
+
+#[test]
+fn flocks_fluids_slime_and_erosion_draw_and_seek_deterministically() {
+    // Phase 5 simulations: each draws, changes over time, and reaching a time directly
+    // gives the same frame as playing up to it
+    let cases = [
+        r#"<flock id="s" width="64" height="64" count="80" seed="2" size="3" shape="disc"/>"#,
+        r##"<fluid id="s" width="64" height="64" resolution="32" vorticity="1">
+              <fluidSource x="32" y="56" radius="6" color="#FF8030" density="4" velocityY="-60"/></fluid>"##,
+        r#"<slime id="s" width="64" height="64" resolution="64" agents="3000" seed="4" spawn="random"/>"#,
+        r#"<erosion id="s" width="64" height="64" resolution="64" droplets="30000" seed="6"/>"#,
+    ];
+    for body in cases {
+        let d = scene(body, "");
+        let Some(early) = render_times(&d, &[0.5]) else { return };
+        assert!(problems(&early).is_empty(), "{body}: {:?}", problems(&early));
+        let direct = render_times(&d, &[2.0]).unwrap();
+        let played = render_times(&d, &[0.5, 1.0, 1.5, 2.0]).unwrap();
+        let back = render_times(&d, &[3.0, 2.0]).unwrap();
+        assert!(direct.px.iter().any(|p| p[3] > 0.1), "{body}: nothing drawn");
+        assert!(!same(&early, &direct), "{body}: no change over time");
+        assert!(same(&direct, &played), "{body}: seeking and playing differ");
+        assert!(same(&direct, &back), "{body}: seeking back differs");
+    }
+}
+
+#[test]
+fn simulated_content_inside_isolated_groups_follows_the_frame() {
+    // an isolated group caches its content by hash: particles and simulation pictures change
+    // without their nodes' attributes changing, so the hash must see the simulated content
+    for inner in [
+        r#"<particleEmitter id="p" preset="sparks" x="32" y="40" seed="3"/>"#,
+        r#"<slime id="p" width="64" height="64" resolution="64" agents="3000" seed="4" spawn="random"/>"#,
+    ] {
+        let d = scene(&format!(r#"<group id="g" isolate="true">{inner}</group>"#), "");
+        let Some(cold) = render_times(&d, &[1.5]) else { return };
+        let warm = render_times(&d, &[0.5, 1.0, 1.5]).unwrap();
+        assert!(same(&cold, &warm), "{inner}: a warm frame differs from a cold one");
+    }
+}

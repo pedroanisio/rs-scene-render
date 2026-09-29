@@ -379,3 +379,264 @@ fn motion_blurred_3d_objects_share_one_pass() {
     let edge = r.at(64, 64 - 24);
     assert!(edge[1] > edge[0], "the far sphere shows around the near one: {edge:?}");
 }
+
+#[test]
+fn objects_in_front_of_the_2d_plane_draw_over_earlier_layers() {
+    // object3D z is a depth: z < 0 is nearer the camera (the eye is at z = -111 here), not lower
+    // in the paint order
+    let mats = r##"<material id="green" baseColor="#00FF00" roughness="1"/>"##;
+    let body = r#"<layer id="bg" asset="red" scaleX="32" scaleY="32"/>
+        <object3D id="near" primitive="sphere" radius="16" x="64" y="64" z="-40" material="green"/>"#;
+    let Some(r) = render(&scene("", mats, body, r#"<light id="a" type="ambient" intensity="1"/>"#)) else { return };
+    let c = r.at(64, 64);
+    assert!(c[1] > 0.5 && c[0] < 0.2, "the near sphere covers the layer: {c:?}");
+}
+
+#[test]
+fn glass_in_front_of_the_2d_plane_refracts_the_layers_behind_it() {
+    // a tinted pane nearer the camera than the 2D plane: the backdrop shows through, tinted,
+    // so the pixel is neither the bare backdrop nor missing the backdrop
+    let mats =
+        r##"<material id="glass" baseColor="#8080FF" transmission="1" roughness="0.05" ior="1.5" thickness="5"/>"##;
+    let body = r#"<layer id="bg" asset="white" scaleX="32" scaleY="32"/>
+        <object3D id="g" primitive="box" width="60" height="60" depth="5" x="64" y="64" z="-50" material="glass"/>"#;
+    let lights = r#"<light id="sun" type="directional" intensity="1" yaw="45"/>"#;
+    let Some(r) = render(&scene("", mats, body, lights)) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    let c = r.at(64, 64);
+    let edge = r.at(4, 4);
+    assert!(edge[0] > 0.95 && edge[1] > 0.95 && edge[2] > 0.95, "backdrop outside the pane: {edge:?}");
+    assert!(c[2] > c[0] + 0.1 && c[0] > 0.2, "the pane tints the backdrop blue: {c:?}");
+}
+
+#[test]
+fn reused_render_targets_leave_no_trace_between_frames() {
+    // the 3D pass keeps its targets between calls; a frame rendered after others (shadows,
+    // transmission and depth of field all on, the object moving) matches a cold render
+    let mats = r##"<material id="chrome" baseColor="#D0D0D8" metallic="1" roughness="0.3"/>
+        <material id="glass" transmission="1" roughness="0.05" ior="1.5" thickness="5"/>"##;
+    let body = r#"<layer id="bg" asset="checker" scaleX="8" scaleY="8"/>
+        <camera id="cam" fov="60" x="64" y="64" z="-111" depthOfField="true" fStop="1.4" focusTarget="ball"/>
+        <object3D id="ball" primitive="sphere" radius="20" x="64" y="64" z="40" material="chrome">
+          <animate property="x"><key time="0" value="30"/><key time="2" value="100"/></animate>
+        </object3D>
+        <object3D id="pane" primitive="box" width="50" height="50" depth="4" x="64" y="64" z="-20" material="glass"/>"#;
+    let lights = r#"<light id="key" type="spot" x="64" y="-100" z="-100" pitch="-45" spotAngle="60" intensity="400" castShadow="true" range="2000"/>"#;
+    let d = scene("", mats, body, lights);
+    let Some(cold) = render_times(&d, &[1.0]) else { return };
+    let warm = render_times(&d, &[0.0, 1.9, 0.4, 1.0]).unwrap();
+    assert!(problems(&warm).is_empty(), "{:?}", problems(&warm));
+    let diff = cold
+        .px
+        .iter()
+        .zip(&warm.px)
+        .map(|(a, b)| (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max))
+        .fold(0.0, f32::max);
+    assert!(diff < 1e-4, "warm frame differs from a cold one by {diff}");
+    let moved = render_times(&d, &[0.0]).unwrap();
+    assert!(cold.px != moved.px, "the scene must change between the frames compared");
+}
+
+#[test]
+fn clay_blobs_merge_split_and_animate() {
+    // a blob slides out of a body: one silhouette at first, two apart later (topology changes)
+    let mats = r##"<material id="c" baseColor="#C8643C" roughness="0.8"/>"##;
+    let body = r#"<object3D id="clay" primitive="clay" material="c" x="64" y="64" resolution="48" fingerprints="0.3" boil="12">
+          <blob radius="22"/>
+          <blob radius="12" blend="10"><animate property="x"><key time="0" value="14"/><key time="2" value="50"/></animate></blob>
+        </object3D>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="1"/>"#;
+    let d = scene("", mats, body, lights);
+    let runs = |r: &Rendered| {
+        // covered runs along the middle row
+        let mut n = 0;
+        let mut inside = false;
+        for x in 0..128 {
+            let on = r.at(x, 64)[3] > 0.5;
+            if on && !inside {
+                n += 1;
+            }
+            inside = on;
+        }
+        n
+    };
+    let Some(a) = render_times(&d, &[0.0]) else { return };
+    assert!(problems(&a).is_empty(), "{:?}", problems(&a));
+    let b = render_times(&d, &[2.0]).unwrap();
+    assert_eq!(runs(&a), 1, "merged at t = 0");
+    assert_eq!(runs(&b), 2, "split at t = 2");
+}
+
+/// A 128 × 128 set: the default eye as an explicit camera (so it can take the screen-space
+/// options), a floor plane at y = 100 receding in depth, and `body`.
+fn stage(cam: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    stage_on("fl", cam, mats, body, lights)
+}
+
+fn stage_on(floor: &str, cam: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    let body = format!(
+        r#"<camera id="cam" fov="60" x="64" y="64" z="-110.85" {cam}/>
+        <object3D id="ground" primitive="box" width="400" height="4" depth="600" x="64" y="102" z="150" material="{floor}"/>{body}"#
+    );
+    scene("", &format!(r##"<material id="fl" baseColor="#A0A0A0" roughness="0.9"/>{mats}"##), &body, lights)
+}
+
+fn lum3(p: [f32; 4]) -> f32 {
+    p[0] + p[1] + p[2]
+}
+
+#[test]
+fn directional_shadows_fit_what_the_camera_sees() {
+    // a 20 000-unit floor makes a whole-scene shadow map 40 units a texel at 512: a 6-unit pole
+    // would cast nothing; fitted to the view, its shadow shows on the floor behind it
+    let body = r#"<object3D id="huge" primitive="box" width="20000" height="2" depth="20000" x="64" y="100" z="5000" material="fl"/>
+        <object3D id="pole" primitive="box" width="6" height="60" depth="6" x="64" y="70" z="40" material="fl"/>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="0.2"/>
+        <light id="sun" type="directional" intensity="2" pitch="-35" yaw="70" castShadow="true" shadowMapSize="512"/>"#;
+    let d = scene("", r##"<material id="fl" baseColor="#C0C0C0" roughness="1"/>"##, body, lights);
+    let Some(r) = render(&d) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the sun comes from the side (yaw 70), so the pole's shadow runs to the right of its foot
+    // along the floor (rows 86 to 91 of this view), where the pole does not hide it
+    let dark =
+        (86..91).flat_map(|y| (70..110).map(move |x| (x, y))).map(|(x, y)| lum3(r.at(x, y))).fold(f32::MAX, f32::min);
+    let lit = (86..91).map(|y| lum3(r.at(30, y))).fold(0.0, f32::max);
+    assert!(dark < lit * 0.6, "a pole shadow on the floor: darkest {dark}, lit {lit}");
+}
+
+#[test]
+fn ambient_occlusion_darkens_contacts_only() {
+    let mats = r##"<material id="redm" baseColor="#C04030" roughness="0.8"/>"##;
+    let body =
+        r#"<object3D id="ball" primitive="sphere" radius="18" segments="48" x="64" y="82" z="40" material="redm"/>"#;
+    let lights = r#"<light id="a" type="ambient" intensity="1"/>"#;
+    let Some(off) = render(&stage("", mats, body, lights)) else { return };
+    let on = render(&stage(r#"ambientOcclusion="true" aoRadius="12""#, mats, body, lights)).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    // around the ball's foot (row 90, x 51 to 77 in this view) the floor darkens
+    let darker = (84..100u32)
+        .flat_map(|y| (40..90u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| lum3(on.at(x, y)) < lum3(off.at(x, y)) * 0.95)
+        .count();
+    assert!(darker > 40, "{darker} pixels darkened around the contact");
+    // far from it nothing changes
+    let (far_off, far_on) = (lum3(off.at(10, 120)), lum3(on.at(10, 120)));
+    assert!((far_on - far_off).abs() < far_off * 0.02, "open floor: {far_off} -> {far_on}");
+}
+
+#[test]
+fn contact_shadows_catch_what_the_shadow_map_misses() {
+    // no shadow map at all: the contact shadow alone darkens the floor beside a cube (the sun
+    // comes from the side, so the shadow is not hidden behind the cube)
+    let body =
+        r#"<object3D id="cube" primitive="box" width="16" height="16" depth="16" x="64" y="92" z="30" material="fl"/>"#;
+    let sun = |extra: &str| {
+        format!(
+            r#"<light id="a" type="ambient" intensity="0.1"/><light id="sun" type="directional" intensity="2" pitch="-25" yaw="70" {extra}/>"#
+        )
+    };
+    let Some(off) = render(&stage("", "", body, &sun(""))) else { return };
+    let on = render(&stage("", "", body, &sun(r#"contactShadows="true" contactShadowLength="30""#))).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    let changed = (0..128u32)
+        .flat_map(|y| (0..128u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| lum3(on.at(x, y)) < lum3(off.at(x, y)) * 0.7)
+        .count();
+    assert!(changed > 20, "{changed} pixels shadowed");
+    assert!((lum3(on.at(10, 120)) - lum3(off.at(10, 120))).abs() < 0.02, "open floor unchanged");
+}
+
+#[test]
+fn screen_space_reflections_mirror_objects_in_glossy_floors() {
+    let mats = r##"<material id="redm" baseColor="#FF2010" roughness="0.8"/><material id="gloss" baseColor="#303030" roughness="0.05"/>"##;
+    let body =
+        r#"<object3D id="ball" primitive="sphere" radius="14" segments="48" x="64" y="70" z="60" material="redm"/>"#;
+    let glossy = |cam: &str| stage_on("gloss", cam, mats, body, r#"<light id="a" type="ambient" intensity="1"/>"#);
+    let Some(off) = render(&glossy("")) else { return };
+    let on = render(&glossy(r#"screenSpaceReflections="true""#)).unwrap();
+    assert!(problems(&on).is_empty(), "{:?}", problems(&on));
+    // below the ball, where its mirror image falls on the floor, red rises
+    let redness = |r: &Rendered, x: u32, y: u32| r.at(x, y)[0] - r.at(x, y)[1];
+    let gain = (100..112).map(|y| redness(&on, 64, y) - redness(&off, 64, y)).fold(0.0f32, f32::max);
+    assert!(gain > 0.05, "reflection of the red ball: {gain}");
+    assert!((lum3(on.at(10, 120)) - lum3(off.at(10, 120))).abs() < 0.03, "empty floor unchanged");
+}
+
+fn traced(cam_extra: &str, mats: &str, body: &str, lights: &str) -> sr_model::Document {
+    let body = format!(r#"<camera id="cam" fov="60" x="64" y="64" z="-110.85" {cam_extra}/>{body}"#);
+    scene("", mats, &body, lights)
+}
+
+const PT: &str = r#"renderer="pathtrace" pathSamples="64" maxBounces="4" denoise="false""#;
+
+#[test]
+fn path_tracing_matches_the_rasteriser_where_both_are_exact() {
+    // a grey (linear 0.5) diffuse sphere; (1) lit by ambient light only it is a white furnace:
+    // every path leaves after one bounce, so it returns albedo × ambient like the rasteriser;
+    // (2) lit by a directional light only, both evaluate the same BRDF
+    let mats = r##"<material id="g" baseColor="#BCBCBC" roughness="1"/>"##;
+    let body = r#"<object3D id="s" primitive="sphere" radius="30" segments="96" x="64" y="64" z="0" material="g"/>"#;
+    for lights in [
+        r#"<light id="a" type="ambient" intensity="1"/>"#,
+        r#"<light id="sun" type="directional" intensity="2" yaw="30" pitch="-40"/>"#,
+    ] {
+        let Some(r) = render(&traced("", mats, body, lights)) else { return };
+        let p = render(&traced(PT, mats, body, lights)).unwrap();
+        assert!(problems(&p).is_empty(), "{:?}", problems(&p));
+        for (x, y) in [(64, 64), (54, 54), (74, 60), (64, 80)] {
+            let (a, b) = (r.at(x, y), p.at(x, y));
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 0.03 + 0.04 * a[c],
+                    "{lights} at ({x}, {y}): raster {a:?} vs traced {b:?}"
+                );
+            }
+            assert!((b[3] - 1.0).abs() < 1e-3, "covered");
+        }
+        assert_eq!(p.at(2, 2)[3], 0.0, "a primary miss is transparent");
+    }
+}
+
+#[test]
+fn path_tracing_is_deterministic_and_shadows_and_refracts() {
+    let mats = r##"<material id="w" baseColor="#D0D0D0" roughness="0.9"/><material id="gl" transmission="1" roughness="0.02" ior="1.5"/>"##;
+    let body = r#"<layer id="bg" asset="red" scaleX="32" scaleY="32"/>
+        <object3D id="floor" primitive="box" width="300" height="4" depth="300" x="64" y="102" z="100" material="w"/>
+        <object3D id="ball" primitive="sphere" radius="14" segments="48" x="40" y="70" z="20" material="w"/>
+        <object3D id="pane" primitive="sphere" radius="16" segments="64" x="96" y="50" z="-10" material="gl"/>"#;
+    let lights = r#"<light id="sun" type="directional" intensity="2" pitch="-80" castShadow="true"/>"#;
+    let Some(a) = render(&traced(PT, mats, body, lights)) else { return };
+    let b = render(&traced(PT, mats, body, lights)).unwrap();
+    assert!(a.px == b.px, "the same frame twice");
+    // under the ball (the sun is nearly overhead) the floor is in shadow
+    let under = lum(a.at(40, 96));
+    let open = lum(a.at(10, 110));
+    assert!(under < open * 0.5, "shadow {under} vs open floor {open}");
+    // through the glass the red layer behind shows, refracted: red, not black
+    let g = a.at(96, 50);
+    assert!(g[0] > 0.3 && g[0] > g[1] * 2.0, "through glass: {g:?}");
+}
+
+#[test]
+fn path_tracing_denoiser_smooths_noise_and_keeps_the_mean() {
+    // a floor under a sphere-area light at 4 samples: soft, noisy light; the à-trous filter
+    // lowers the pixel-to-pixel variation and keeps the average
+    let mats = r##"<material id="w" baseColor="#C0C0C0" roughness="0.9"/>"##;
+    let body = r#"<object3D id="floor" primitive="box" width="400" height="4" depth="400" x="64" y="102" z="100" material="w"/>
+        <object3D id="ball" primitive="sphere" radius="12" segments="32" x="64" y="84" z="40" material="w"/>"#;
+    let lights = r#"<light id="l" type="sphere-area" x="64" y="20" z="20" radius="25" intensity="60" castShadow="true" range="2000"/>"#;
+    let cam = |dn: bool| format!(r#"renderer="pathtrace" pathSamples="4" maxBounces="3" denoise="{dn}""#);
+    let Some(noisy) = render(&traced(&cam(false), mats, body, lights)) else { return };
+    let clean = render(&traced(&cam(true), mats, body, lights)).unwrap();
+    let region: Vec<(u32, u32)> = (104..124).flat_map(|y| (20..108).map(move |x| (x, y))).collect();
+    let stats = |r: &Rendered| {
+        let v: Vec<f32> = region.iter().map(|&(x, y)| lum(r.at(x, y))).collect();
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let tv = region.windows(2).map(|w| (lum(r.at(w[0].0, w[0].1)) - lum(r.at(w[1].0, w[1].1))).abs()).sum::<f32>()
+            / v.len() as f32;
+        (mean, tv)
+    };
+    let ((m0, tv0), (m1, tv1)) = (stats(&noisy), stats(&clean));
+    assert!(tv1 < tv0 * 0.5, "variation {tv0} -> {tv1}");
+    assert!((m1 - m0).abs() < 0.05 * m0, "mean {m0} -> {m1}");
+}

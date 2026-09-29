@@ -10,5 +10,9 @@
 @group(0) @binding(9) var ies_tex: texture_2d<f32>;
 @group(0) @binding(10) var scene_color: texture_2d<f32>;
 @group(0) @binding(11) var clamp_smp: sampler;
-@group(0) @binding(12) var sky_tex: texture_2d<f32>;
 
+// screen-space ambient occlusion (r) and the prepass's view depth (r) and reflectance (g)
+@group(0) @binding(12) var ao_tex: texture_2d<f32>;
+@group(0) @binding(13) var gb_depth: texture_2d<f32>;
+// the visible sky at the source's resolution (conventions 5.5)
+@group(0) @binding(14) var sky_tex: texture_2d<f32>;

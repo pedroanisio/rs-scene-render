@@ -71,7 +71,7 @@ pub struct ParticleFrame {
 
 // ------------------------------------------------------------------ attributes
 
-fn num(e: &dyn Element, n: &str, d: f64) -> f64 {
+pub(crate) fn num(e: &dyn Element, n: &str, d: f64) -> f64 {
     match e.get_attr(n) {
         Some(AttrValue::Num(v)) => v,
         Some(AttrValue::Length(l)) => l.value,
@@ -80,7 +80,7 @@ fn num(e: &dyn Element, n: &str, d: f64) -> f64 {
     }
 }
 
-fn opt(e: &dyn Element, n: &str) -> Option<f64> {
+pub(crate) fn opt(e: &dyn Element, n: &str) -> Option<f64> {
     match e.get_attr(n) {
         Some(AttrValue::Num(v)) => Some(v),
         Some(AttrValue::Length(l)) => Some(l.value),
@@ -88,7 +88,7 @@ fn opt(e: &dyn Element, n: &str) -> Option<f64> {
     }
 }
 
-fn text(e: &dyn Element, n: &str) -> Option<String> {
+pub(crate) fn text(e: &dyn Element, n: &str) -> Option<String> {
     match e.get_attr(n) {
         Some(AttrValue::Str(s)) => Some(s),
         Some(AttrValue::Tokens(t)) => Some(t.join(" ")),
@@ -112,7 +112,7 @@ fn color_of(c: &Color) -> Value {
     }
 }
 
-fn color_attr(e: &dyn Element, props: &crate::eval::Props, n: &str) -> Option<Value> {
+pub(crate) fn color_attr(e: &dyn Element, props: &crate::eval::Props, n: &str) -> Option<Value> {
     if let Some(v) = props.get(n) {
         return Some(v.clone());
     }
@@ -176,7 +176,8 @@ fn along(polys: &[Vec<[f64; 2]>], n: usize) -> Vec<[f64; 2]> {
 }
 
 /// Pixels of an image asset whose alpha exceeds ½ (at most `limit`, evenly strided), in image pixels.
-fn alpha_points(p: &Program, key: &str, limit: usize) -> Result<(Vec<[f64; 2]>, [f64; 2]), String> {
+/// The local file of image asset `key`.
+pub(crate) fn image_path(p: &Program, key: &str) -> Result<std::path::PathBuf, String> {
     let (doc, id) = p.assets.get(key).ok_or_else(|| format!("asset {key} not found"))?;
     let scene = if *doc == 0 { &p.scene } else { &p.includes.get(*doc as usize - 1).ok_or("include missing")?.1 };
     let a = scene
@@ -189,10 +190,14 @@ fn alpha_points(p: &Program, key: &str, limit: usize) -> Result<(Vec<[f64; 2]>, 
         _ => return Err(format!("asset {id} is not an image")),
     };
     let base = p.base_dirs.get(*doc as usize).cloned().unwrap_or_default();
-    let path = match sr_model::assets::resolve(&src, &base) {
-        sr_model::assets::Resolved::Local(pth) => pth,
-        sr_model::assets::Resolved::Remote(u) => return Err(format!("remote image {u}")),
-    };
+    match sr_model::assets::resolve(&src, &base) {
+        sr_model::assets::Resolved::Local(pth) => Ok(pth),
+        sr_model::assets::Resolved::Remote(u) => Err(format!("remote image {u}")),
+    }
+}
+
+fn alpha_points(p: &Program, key: &str, limit: usize) -> Result<(Vec<[f64; 2]>, [f64; 2]), String> {
+    let path = image_path(p, key)?;
     let img = image::open(&path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgba8();
     let (w, h) = img.dimensions();
     let all: Vec<[f64; 2]> = img
@@ -234,13 +239,13 @@ fn hull(mut pts: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
 
 // ------------------------------------------------------------------ graphs at step times
 
-struct Graphs<'a> {
+pub(crate) struct Graphs<'a> {
     base: &'a dyn Fn(f64) -> FrameGraph,
     cache: Vec<(u64, Arc<FrameGraph>)>,
 }
 
 impl Graphs<'_> {
-    fn at(&mut self, t: f64) -> Arc<FrameGraph> {
+    pub(crate) fn at(&mut self, t: f64) -> Arc<FrameGraph> {
         let key = t.to_bits();
         if let Some((_, g)) = self.cache.iter().find(|(k, _)| *k == key) {
             return g.clone();
@@ -254,16 +259,16 @@ impl Graphs<'_> {
     }
 }
 
-fn index_of(g: &FrameGraph, id: &str) -> Option<usize> {
+pub(crate) fn index_of(g: &FrameGraph, id: &str) -> Option<usize> {
     g.nodes.iter().position(|n| &*n.id == id)
 }
 
 // ------------------------------------------------------------------ force fields
 
-struct FieldSrc {
+pub(crate) struct FieldSrc {
     /// (element key, static field in document units) per `<forceField>`.
     fields: Vec<(String, Field, f64, Option<f64>)>,
-    animated: bool,
+    pub(crate) animated: bool,
     /// physics@pixelsPerMeter.
     ppm: f64,
 }
@@ -283,7 +288,11 @@ fn to_pixels(mut f: Field, ppm: f64) -> Field {
 }
 
 impl FieldSrc {
-    fn at(&self, t: f64, g: Option<&FrameGraph>) -> Vec<Field> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    pub(crate) fn at(&self, t: f64, g: Option<&FrameGraph>) -> Vec<Field> {
         self.fields
             .iter()
             .filter(|(_, _, s, e)| t >= *s && e.map(|e| t < e).unwrap_or(true))
@@ -304,7 +313,7 @@ impl FieldSrc {
             .collect()
     }
 
-    fn named(&self, ids: &[String], t: f64, g: Option<&FrameGraph>) -> Vec<Field> {
+    pub(crate) fn named(&self, ids: &[String], t: f64, g: Option<&FrameGraph>) -> Vec<Field> {
         let all = self.at(t, g);
         let keys: Vec<&String> = self
             .fields
@@ -1105,6 +1114,7 @@ pub struct Runtime {
     fields: Option<FieldSrc>,
     physics: Option<PhysicsRt>,
     emitters: HashMap<Arc<str>, EmitterRt>,
+    agents: crate::agents::Sims,
     /// Problems found while building (reported once).
     pub problems: Vec<String>,
 }
@@ -1120,6 +1130,7 @@ pub fn needed(p: &Program) -> bool {
     p.scene.physics.is_some()
         || p.nodes.iter().any(|n| {
             n.name == "particleEmitter"
+                || crate::agents::is_sim(n.name)
                 || children(&*n.elem).iter().any(|c| matches!(c.element_name(), "rigidBody" | "softBody"))
         })
 }
@@ -1178,6 +1189,8 @@ impl Runtime {
             rt.emitter.at(t, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
+        // ---- flocks and grid simulations
+        self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
     }
 }
 
