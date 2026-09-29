@@ -383,10 +383,11 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
         return vec4(stored(c) * s.a, s.a);
     }
     switch fx.i.x {
-        case 64u: { // vignette: v0 amount, size, softness; v1 colour; v2.xy centre (uv)
-            let asp = vec2(d.x / d.y, 1.0);
-            let r = length((in.uv - v[2].xy) * asp) / length(0.5 * asp);
-            let w = smoothstep(v[0].y - v[0].z, v[0].y + v[0].z * 0.5, r) * v[0].x;
+        case 64u: { // vignette (D9): v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
+            let r = length((in.uv - v[2].xy) * d) / (0.5 * length(d));
+            var k = select(0.0, 1.0, r >= v[0].y);
+            if (v[0].z > 0.0) { k = smoothstep(v[0].y, v[0].y + v[0].z, r); }
+            let w = k * v[0].x;
             return vec4(mix(s.rgb, v[1].rgb * s.a, w), s.a);
         }
         case 65u: { // letterbox: v0.x target aspect, v1 colour

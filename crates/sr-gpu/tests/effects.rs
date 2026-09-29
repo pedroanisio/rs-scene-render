@@ -105,6 +105,30 @@ fn glow_goes_behind_the_unchanged_content() {
 }
 
 #[test]
+fn vignette_follows_d9() {
+    // CONVENTIONS 5.8: 1 − amount · smoothstep(r₀, r₀ + softness, r), r over the half diagonal.
+    let body = r#"<layer id="a" asset="gray" x="0" y="0" scaleX="16" scaleY="8"/><adjustment id="v" effects="e"/>"#;
+    let half = 0.5 * (64f64 * 64.0 + 32.0 * 32.0).sqrt();
+    let k = |amount: f64, r0: f64, soft: f64, x: u32, y: u32| {
+        let r = ((x as f64 + 0.5 - 32.0).hypot(y as f64 + 0.5 - 16.0)) / half;
+        let u = ((r - r0) / soft).clamp(0.0, 1.0);
+        (1.0 - amount * u * u * (3.0 - 2.0 * u)) as f32
+    };
+    let g = lin8(128);
+    for (attrs, amount, r0, soft) in
+        [(r#"amount="0.8" radius="10" softness="0.3""#, 0.8, 10.0 / half, 0.3), ("", 0.5, 0.5, 0.5)]
+    {
+        let fx = format!(r#"<effect id="e" type="vignette" {attrs}/>"#);
+        let Some(r) = render(&fx_doc("", body, &fx)) else { return };
+        assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+        for (x, y) in [(32u32, 16u32), (40, 16), (50, 20), (0, 0), (63, 31)] {
+            let v = g * k(amount, r0, soft, x, y);
+            assert_px(&r, x, y, [v, v, v, 1.0], 1e-2);
+        }
+    }
+}
+
+#[test]
 fn colour_operations_match_reference_formulas() {
     let body = r#"<layer id="e" asset="gray" x="0" y="0" scaleX="2" scaleY="2" effects="exp"/>
         <layer id="s" asset="src" x="8" y="0" scaleX="2" scaleY="2" effects="sat"/>

@@ -1311,13 +1311,18 @@ impl Builder<'_> {
                 color_op(self, 23, v, Aux::None)
             }
             "vignette" => {
+                // D9: darkening 1 − amount · smoothstep(r₀, r₀ + softness, r), r the distance from the
+                // centre over the half diagonal and r₀ = radius / half diagonal. The typed model applies
+                // the schema defaults (amount 1, radius 4, softness 0.1), so those values read as
+                // unwritten and take the defaults of CONVENTIONS 5.8: amount 0.5, radius half the half
+                // diagonal, softness 0.5.
                 let c = colour("color", [0.0, 0.0, 0.0, 1.0]);
-                v[0] = [
-                    (amount * c[3]).clamp(0.0, 1.0) as f32,
-                    sz.max(0.05) as f32,
-                    a.num("softness", 0.1).max(0.3) as f32,
-                    0.0,
-                ];
+                let unwritten = |name: &str, d: f64| a.props.and_then(|p| p.get(name)).is_none() && a.num(name, d) == d;
+                let amount = if unwritten("amount", 1.0) { 0.5 } else { amount };
+                let half = 0.5 * w.hypot(h);
+                let r0 = if unwritten("radius", 4.0) { 0.5 } else { r / half };
+                let soft = if unwritten("softness", 0.1) { 0.5 } else { a.num("softness", 0.1).max(0.0) };
+                v[0] = [(amount * c[3]) as f32, r0 as f32, soft as f32, 0.0];
                 v[1] = v4(c);
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 color_op(self, 64, v, Aux::None)
