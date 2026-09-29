@@ -626,7 +626,9 @@ pub fn encode(scene: &Scene, size: [u32; 2]) -> Encoded {
 /// Tiled paths kept across frames, by the hash of their points and the target size.
 #[derive(Default)]
 pub struct TileCache {
-    map: std::collections::HashMap<u64, (u64, std::sync::Arc<TileArena>)>,
+    /// Hash → (frame last used, the path's points as bits, its tiles). A hit compares the points,
+    /// so a hash collision can never hand a path another path's tiles.
+    map: std::collections::HashMap<u64, (u64, Vec<u64>, std::sync::Arc<TileArena>)>,
     frame: u64,
 }
 
@@ -635,26 +637,40 @@ impl TileCache {
     pub fn next_frame(&mut self) {
         self.frame += 1;
         let keep = self.frame.saturating_sub(2);
-        self.map.retain(|_, (used, _)| *used >= keep);
+        self.map.retain(|_, (used, _, _)| *used >= keep);
     }
 }
 
-fn polys_hash(polys: &[Poly], size: [u32; 2]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    let mut word = |w: u64| {
-        h ^= w;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    };
-    word(((size[0] as u64) << 32) | size[1] as u64);
-    word(polys.len() as u64);
+/// The exact identity of a path for the cache: sizes, closed flags and point bits.
+fn polys_bits(polys: &[Poly], size: [u32; 2]) -> Vec<u64> {
+    let n: usize = polys.iter().map(|q| 1 + 2 * q.pts.len()).sum();
+    let mut v = Vec::with_capacity(2 + n);
+    v.push(((size[0] as u64) << 32) | size[1] as u64);
+    v.push(polys.len() as u64);
     for q in polys {
-        word(((q.pts.len() as u64) << 1) | q.closed as u64);
+        v.push(((q.pts.len() as u64) << 1) | q.closed as u64);
         for pt in &q.pts {
-            word(pt.x.to_bits());
-            word(pt.y.to_bits());
+            v.push(pt.x.to_bits());
+            v.push(pt.y.to_bits());
         }
     }
-    h
+    v
+}
+
+fn polys_hash(polys: &[Poly], size: [u32; 2]) -> u64 {
+    use std::hash::Hasher;
+    // SipHash with fixed keys: deterministic, and every input bit reaches every output bit
+    let mut h = std::hash::DefaultHasher::new();
+    h.write_u64(((size[0] as u64) << 32) | size[1] as u64);
+    h.write_usize(polys.len());
+    for q in polys {
+        h.write_u64(((q.pts.len() as u64) << 1) | q.closed as u64);
+        for pt in &q.pts {
+            h.write_u64(pt.x.to_bits());
+            h.write_u64(pt.y.to_bits());
+        }
+    }
+    h.finish()
 }
 
 /// [`encode`], reusing the tiles of paths whose points did not change since a recent frame.
@@ -748,11 +764,15 @@ fn tile_all(scene: &Scene, size: [u32; 2], cache: &mut TileCache) -> (Vec<Option
     let frame = cache.frame;
     let mut got: Vec<Option<std::sync::Arc<TileArena>>> = keys
         .iter()
-        .map(|k| {
-            k.and_then(|k| cache.map.get_mut(&k)).map(|(used, a)| {
-                *used = frame;
-                a.clone()
-            })
+        .zip(&polys)
+        .map(|(k, p)| {
+            let (k, p) = (k.as_ref()?, p.as_ref()?);
+            let (used, bits, a) = cache.map.get_mut(k)?;
+            if *bits != polys_bits(p, size) {
+                return None;
+            }
+            *used = frame;
+            Some(a.clone())
         })
         .collect();
     // the misses, each tiled into an arena of its own, spread over the available cores
@@ -785,8 +805,8 @@ fn tile_all(scene: &Scene, size: [u32; 2], cache: &mut TileCache) -> (Vec<Option
     };
     for (i, a) in fresh {
         let a = std::sync::Arc::new(a);
-        if let Some(k) = keys[i] {
-            cache.map.insert(k, (frame, a.clone()));
+        if let (Some(k), Some(p)) = (keys[i], polys[i]) {
+            cache.map.insert(k, (frame, polys_bits(p, size), a.clone()));
         }
         got[i] = Some(a);
     }
