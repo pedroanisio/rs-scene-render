@@ -73,6 +73,17 @@ fn closed_outlines_start_where_svg_2_starts_them() {
 }
 
 #[test]
+fn polygon_and_star_on_an_ellipse() {
+    // D16, D27: vertices on the ellipse of radii (rx, ry), first straight up, clockwise
+    let d = shapes::polygon_on(p(0.0, 0.0), 4, p(20.0, 10.0), 0.0, 0.0).flatten(0.01);
+    let v: Vec<(f64, f64)> = d[0].pts.iter().map(|q| (q.x.round(), q.y.round())).collect();
+    assert_eq!(v, vec![(0.0, -10.0), (20.0, 0.0), (0.0, 10.0), (-20.0, 0.0)]);
+    let s = shapes::star_on(p(0.0, 0.0), 4, p(20.0, 10.0), p(5.0, 5.0), 0.0, 0.0, 0.0).flatten(0.01);
+    assert_eq!(s[0].pts.len(), 8);
+    assert!((s[0].pts[2].x - 20.0).abs() < 1e-9 && (s[0].pts[1].x.hypot(s[0].pts[1].y) - 5.0).abs() < 1e-9);
+}
+
+#[test]
 fn flattening_stays_within_tolerance() {
     let c = shapes::ellipse(0.0, 0.0, 100.0, 100.0);
     for tol in [1.0, 0.25, 0.05] {

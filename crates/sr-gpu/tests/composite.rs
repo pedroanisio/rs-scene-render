@@ -287,7 +287,7 @@ fn masks_combine_modes_invert_and_feather() {
              <mask type="rect" x="0" y="0" width="2" height="4" invert="true"/>
            </layer>
            <layer id="c" asset="white" x="40" scaleX="4" scaleY="4">
-             <mask type="rect" x="0" y="0" width="4" height="4" feather="2"/>
+             <mask type="rect" x="0" y="0" width="4" height="4" feather="0.5"/>
            </layer>
            <layer id="d" asset="white" x="0" y="16" scaleX="4" scaleY="4">
              <mask type="rect" x="0" y="0" width="4" height="4"/>
@@ -303,10 +303,11 @@ fn masks_combine_modes_invert_and_feather() {
     assert_px(&r, 10, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
     assert_px(&r, 24, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
     assert_px(&r, 30, 4, [1.0; 4], 1e-3);
-    // feather 2 local units: a ramp one local unit (4 pixels) either side of the edge
+    // D16: feather is a Gaussian of σ = 0.5 local units (2 pixels); the first pixel's centre lies
+    // 0.125 units inside the edge
     let edge = r.at(40, 8)[0];
     let centre = r.at(48, 8)[0];
-    assert!(edge > 0.3 && edge < 0.7, "feathered edge {edge}");
+    assert!((edge - 0.5987).abs() < 0.02, "feathered edge {edge}");
     assert!(centre > 0.99, "centre {centre}");
     // rect minus ellipse: corners stay, centre removed
     assert_px(&r, 0, 16, [1.0; 4], 2e-2);
@@ -315,6 +316,43 @@ fn masks_combine_modes_invert_and_feather() {
     assert_px(&r, 22, 20, [1.0; 4], 1e-3);
     assert_px(&r, 28, 20, [0.0, 0.0, 0.0, 1.0], 1e-3);
     assert_px(&r, 34, 20, [1.0; 4], 1e-3);
+}
+
+#[test]
+fn masks_add_as_a_plus_m_minus_am() {
+    // D16: two half-opaque rectangles added overlap to 0.5 + 0.5 − 0.25
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="a" asset="white" scaleX="4" scaleY="4">
+             <mask type="rect" x="0" y="0" width="3" height="4" mode="add" opacity="0.5"/>
+             <mask type="rect" x="1" y="0" width="3" height="4" mode="add" opacity="0.5"/>
+           </layer>"#,
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 2, 8, [0.5, 0.5, 0.5, 1.0], 3e-3);
+    assert_px(&r, 8, 8, [0.75, 0.75, 0.75, 1.0], 3e-3);
+}
+
+#[test]
+fn polygons_and_stars_lie_on_the_inscribed_ellipse() {
+    // D16, D27: a square (4 points) in a 2:1 box is a diamond touching the middle of every side,
+    // as a mask and as a shape
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r##"<layer id="a" asset="wide" scaleX="2" scaleY="2">
+             <mask type="polygon" x="0" y="0" width="8" height="4" points="4"/>
+           </layer>
+           <shape id="s" shape="polygon" x="32" y="0" width="16" height="8" points="4" fill="#FF0000"/>"##,
+    );
+    let Some(r) = render(&d) else { return };
+    let lit = |x: u32, y: u32| r.at(x, y)[0].max(r.at(x, y)[2]);
+    for x0 in [0u32, 32] {
+        assert!(lit(x0 + 13, 4) > 0.98, "right vertex at {}: {:?}", x0 + 13, r.at(x0 + 13, 4));
+        assert!(lit(x0 + 2, 4) > 0.98, "left vertex at {}: {:?}", x0 + 2, r.at(x0 + 2, 4));
+        assert!(lit(x0 + 1, 1) < 0.02, "outside the diamond at {}: {:?}", x0 + 1, r.at(x0 + 1, 1));
+    }
 }
 
 #[test]

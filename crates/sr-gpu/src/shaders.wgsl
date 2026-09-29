@@ -119,6 +119,73 @@ fn mask_distance(m: Mask, p: vec2<f32>) -> f32 {
   return select(d, -d, inside);
 }
 
+// Standard normal cumulative distribution (Abramowitz and Stegun 7.1.26, error below 1.5e-7).
+fn phi(x: f32) -> f32 {
+  let z = abs(x) * 0.70710678;
+  let t = 1.0 / (1.0 + 0.3275911 * z);
+  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-z * z);
+  return 0.5 * (1.0 + select(y, -y, x < 0.0));
+}
+
+// Half width of a rectangle (half extents h) with corners of radius r at height y from its centre;
+// negative outside it.
+fn rounded_half_width(h: vec2<f32>, r: f32, y: f32) -> f32 {
+  let ay = abs(y);
+  if (ay >= h.y) { return -1.0; }
+  let dy = ay - (h.y - r);
+  if (dy <= 0.0) { return h.x; }
+  return h.x - r + sqrt(max(r * r - dy * dy, 0.0));
+}
+
+// Coverage of one mask before invert and opacity. Feather is a Gaussian blur of standard deviation
+// `feather` local units (D16): for rectangles, rounded rectangles and ellipses it integrates the blurred
+// outline row by row (exact for rectangles); polygons and paths take Φ of the signed distance, exact
+// along straight edges. Expansion grows or shrinks the outline first (a disc's maximum or minimum).
+fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
+  if (m.feather <= 0.0) {
+    let dist = mask_distance(m, p) - m.expansion;
+    return clamp(0.5 - dist / max(aa, 1e-4), 0.0, 1.0);
+  }
+  let sigma = max(m.feather, 0.4 * aa);
+  let e = m.expansion;
+  let h = m.rect.zw * 0.5 + vec2(e);
+  let q = p - (m.rect.xy + m.rect.zw * 0.5);
+  if (m.kind == 3u) {
+    return phi(-(mask_distance(m, p) - e) / sigma);
+  }
+  if (any(h <= vec2(0.0))) { return 0.0; }
+  if (m.kind == 0u && e <= 0.0) {
+    // eroding a rectangle keeps it a rectangle: a product of two edge integrals
+    let cx = phi((q.x + h.x) / sigma) - phi((q.x - h.x) / sigma);
+    let cy = phi((q.y + h.y) / sigma) - phi((q.y - h.y) / sigma);
+    return clamp(cx * cy, 0.0, 1.0);
+  }
+  var r = 0.0;
+  if (m.kind == 0u) { r = e; }
+  if (m.kind == 2u) { r = max(min(m.radius, min(m.rect.z, m.rect.w) * 0.5) + e, 0.0); }
+  r = min(r, min(h.x, h.y));
+  // ∫ G(v) [Φ((q.x + w(y + v)) / σ) − Φ((q.x − w(y + v)) / σ)] dv over ±4σ, w the outline's half width
+  let n = 32;
+  let step = 8.0 * sigma / f32(n);
+  var sum = 0.0;
+  var wsum = 0.0;
+  for (var i = 0; i < n; i = i + 1) {
+    let v = (f32(i) + 0.5) * step - 4.0 * sigma;
+    let g = exp(-0.5 * (v / sigma) * (v / sigma));
+    wsum = wsum + g;
+    let y = q.y + v;
+    var hw = -1.0;
+    if (m.kind == 1u) {
+      let k = y / h.y;
+      if (abs(k) < 1.0) { hw = h.x * sqrt(1.0 - k * k); }
+    } else {
+      hw = rounded_half_width(h, r, y);
+    }
+    if (hw > 0.0) { sum = sum + g * (phi((q.x + hw) / sigma) - phi((q.x - hw) / sigma)); }
+  }
+  return clamp(sum / wsum, 0.0, 1.0);
+}
+
 fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
   if (d.mask_count == 0u) { return 1.0; }
   let first = masks[d.mask_off].mode;
@@ -127,14 +194,12 @@ fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
   for (var i = 0u; i < d.mask_count; i = i + 1u) {
     let m = masks[d.mask_off + i];
     if (m.mode == 6u) { continue; }
-    let dist = mask_distance(m, p) - m.expansion;
-    let w = select(max(aa, 1e-4), m.feather, m.feather > 0.0);
-    var v = clamp(0.5 - dist / w, 0.0, 1.0);
+    var v = mask_value(m, p, aa);
     if (m.invert == 1u) { v = 1.0 - v; }
     v = v * m.opacity;
     switch (m.mode) {
       case 0u: { cov = cov * v; }                  // intersect
-      case 1u: { cov = min(1.0, cov + v); }        // add
+      case 1u: { cov = cov + v - cov * v; }        // add (D16: a + m − a·m)
       case 2u: { cov = cov * (1.0 - v); }          // subtract
       case 3u: { cov = max(cov, v); }              // lighten
       case 4u: { cov = min(cov, v); }              // darken

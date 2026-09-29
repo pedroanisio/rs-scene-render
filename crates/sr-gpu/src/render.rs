@@ -946,16 +946,18 @@ impl Renderer {
                     None
                 }
                 m::MaskKind::Polygon | m::MaskKind::Star => {
+                    // D16 (CONVENTIONS 5.15): vertices on the ellipse inscribed in the box, from the top,
+                    // clockwise; a star's inner vertices on that ellipse scaled by `innerRadius` (0.5)
                     let pts = mk.points.max(3) as usize;
-                    let (cx, cy, r) = (x + w / 2.0, y + hh / 2.0, w.min(hh) / 2.0);
-                    let inner = mk.inner_radius.map(|v| v.get()).unwrap_or(r * 0.5);
+                    let (cx, cy, rx, ry) = (x + w / 2.0, y + hh / 2.0, w / 2.0, hh / 2.0);
+                    let inner = mk.inner_radius.map(|v| v.get()).unwrap_or(0.5);
                     let star = mk.r#type == m::MaskKind::Star;
                     let count = if star { pts * 2 } else { pts };
                     Some(vec![(0..count)
                         .map(|i| {
                             let a = -std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::TAU / count as f64;
-                            let rr = if star && i % 2 == 1 { inner } else { r };
-                            [cx + rr * libm::cos(a), cy + rr * libm::sin(a)]
+                            let k = if star && i % 2 == 1 { inner } else { 1.0 };
+                            [cx + k * rx * libm::cos(a), cy + k * ry * libm::sin(a)]
                         })
                         .collect()])
                 }

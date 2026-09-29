@@ -22,7 +22,7 @@ const SCENE: &str = r##"
     <animate property="rotationY"><key time="0" value="-40"/><key time="2" value="40"/></animate>
   </layer>
   <layer id="star" asset="white" x="4" y="50" scaleX="5" scaleY="5" blend="difference">
-    <mask type="star" x="0" y="0" width="4" height="4" points="6" innerRadius="1"/>
+    <mask type="star" x="0" y="0" width="4" height="4" points="6" innerRadius="0.5"/>
     <animate property="rotation"><key time="0" value="0"/><key time="2" value="90"/></animate>
   </layer>"##;
 
