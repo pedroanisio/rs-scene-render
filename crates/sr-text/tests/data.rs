@@ -311,6 +311,14 @@ fn charts_codes_formulas_audiograms() {
         let c = chart::Chart { kind: chart::Kind::parse(k).unwrap(), ..base.clone() };
         assert!(coverage(&chart::draw(&mut lib, &c, 0.25), [400, 300]) > 100.0, "{k}");
     }
+    // a counter with two values counts from the first to the second (halfway: 500, like one value 500)
+    let mut counter = |values: Vec<f64>, progress: f64| {
+        let series = vec![chart::Series { name: "n".into(), values, color: None }];
+        let c = chart::Chart { kind: chart::Kind::Counter, series, progress, ..base.clone() };
+        coverage(&chart::draw(&mut lib, &c, 0.25), [400, 300])
+    };
+    let (from_to, one) = (counter(vec![0.0, 1000.0], 0.5), counter(vec![500.0], 1.0));
+    assert!((from_to - one).abs() < 1e-6 && from_to != counter(vec![0.0, 1000.0], 0.0), "{from_to} {one}");
     assert_eq!(chart::format_number(1234.5, Some("$#,##0.00")), "$1,234.50");
     assert_eq!(chart::format_number(0.25, Some("0%")), "25%");
     assert_eq!(chart::format_number(1.234, Some("%.2f")), "1.23");

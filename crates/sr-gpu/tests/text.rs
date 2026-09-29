@@ -75,6 +75,17 @@ fn text_animators_move_characters() {
     let r1 = render_times(&d, &[2.5]).unwrap();
     let full = sum(&r1, 0, 0, 200, 100, 0);
     assert!(full > 300.0);
+    // presetStart is on the layer's clock (composition time), not measured from the layer's start
+    let late = r#"<layer id="lt" asset="t" x="0" y="0" start="2"><textAnimator preset="fade-in" presetStart="2.5" presetDuration="1"/></layer>"#;
+    let d = doc_text(asset, "", late, 200, 100);
+    assert!(sum(&render_times(&d, &[2.2]).unwrap(), 0, 0, 200, 100, 0) < 1.0);
+    assert!(sum(&render_times(&d, &[4.0]).unwrap(), 0, 0, 200, 100, 0) > full * 0.95);
+    // without presetStart the preset starts with the layer
+    let own =
+        r#"<layer id="lt" asset="t" x="0" y="0" start="2"><textAnimator preset="fade-in" presetDuration="1"/></layer>"#;
+    let d = doc_text(asset, "", own, 200, 100);
+    assert!(sum(&render_times(&d, &[2.1]).unwrap(), 0, 0, 200, 100, 0) < full * 0.5);
+    assert!(sum(&render_times(&d, &[3.5]).unwrap(), 0, 0, 200, 100, 0) > full * 0.95);
     // a range selector moving y by +50 pushes the glyphs down
     let d = doc_text(asset, "", &body(r#"<textAnimator y="50"/>"#), 200, 100);
     let r = render_times(&d, &[0.0]).unwrap();

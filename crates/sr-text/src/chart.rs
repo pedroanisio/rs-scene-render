@@ -162,7 +162,13 @@ pub fn draw(lib: &mut FontLib, c: &Chart, tol: f64) -> Drawing {
     let fill = |d: &mut Drawing, path: &Path, paint: Paint| d.scene.fill(path, FillRule::NonZero, paint, 1.0, tol);
     match c.kind {
         Kind::Counter => {
-            let v = c.series.first().and_then(|s| s.values.first()).copied().unwrap_or(0.0) * prog;
+            // one value counts from 0, two values from the first to the second
+            let vals = c.series.first().map(|s| s.values.as_slice()).unwrap_or(&[]);
+            let v = match vals {
+                [a, b, ..] => a + (b - a) * prog,
+                [a] => a * prog,
+                [] => 0.0,
+            };
             let st = Style { size: (h * 0.6).min(w / 5.0).max(fs), ..c.text.clone() };
             d.extend(text(
                 lib,
