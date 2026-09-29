@@ -307,6 +307,41 @@ fn the_dome_turns_by_its_yaw_and_pitch_and_decodes_srgb() {
 }
 
 #[test]
+fn default_lights_are_the_neutral_rig_and_ambient_reflects_on_metals() {
+    // conventions 5.20: without <lights>, ambient 0.35 plus a key whose irradiance π · 0.65 brings a white
+    // Lambertian surface facing it to 1; ambient is a uniform environment, so a metal reflects it
+    let mats = r##"<material id="matte" baseColor="#FFFFFF" roughness="1"/><material id="chrome" baseColor="#FFFFFF" metallic="1" roughness="0.3"/>"##;
+    let body = r#"<object3D id="w" primitive="sphere" radius="30" x="32" y="64" material="matte"/>
+        <object3D id="m" primitive="sphere" radius="30" x="96" y="64" material="chrome"/>"#;
+    let Some(r) = render(&scene("", mats, body, "")) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the lit side of the white sphere (towards the key, up and left) is near 1, its unlit side the ambient 0.35
+    let lit = (0..60).map(|k| lum(r.at(10 + k % 20, 42 + k / 20 * 3)) / 3.0).fold(0.0f32, f32::max);
+    assert!(lit > 0.85 && lit < 1.15, "lit side {lit}");
+    let shade = lum(r.at(50, 84)) / 3.0;
+    assert!(shade > 0.2 && shade < 0.45, "ambient side {shade}");
+    let metal = lum(r.at(96, 64)) / 3.0;
+    assert!(metal > 0.2, "a metal reflects the ambient environment: {metal}");
+    let lights = r#"<light id="a" type="ambient" intensity="0.5"/>"#;
+    let r = render(&scene("", mats, body, lights)).unwrap();
+    assert!(lum(r.at(96, 64)) / 3.0 > 0.3, "ambient only: {:?}", r.at(96, 64));
+}
+
+#[test]
+fn the_torus_tube_defaults_to_0_35_of_the_radius() {
+    let mats = r##"<material id="u" baseColor="#FFFFFF" unlit="true" doubleSided="true"/>"##;
+    // seen along its axis (rotationX 90 turns the ring into the frame plane): ring radius 40, tube 14
+    let body = |h: &str| format!(r#"<object3D id="t" primitive="torus" radius="40" {h} x="64" y="64" rotationX="90" material="u"/>"#);
+    let Some(r) = render(&scene("", mats, &body(""), "")) else { return };
+    let row: Vec<u32> = (0..128).filter(|x| r.at(*x, 64)[3] > 0.5).collect();
+    // on the centre row: the tube spans 26..54 px from the centre on each side
+    assert!(row.contains(&(64 + 40)) && row.contains(&(64 + 28)) && !row.contains(&(64 + 22)), "{row:?}");
+    let r = render(&scene("", mats, &body(r#"height="10""#), "")).unwrap();
+    let row: Vec<u32> = (0..128).filter(|x| r.at(*x, 64)[3] > 0.5).collect();
+    assert!(row.contains(&(64 + 40)) && !row.contains(&(64 + 33)), "height/2 is the tube radius: {row:?}");
+}
+
+#[test]
 fn look_at_constraints_aim_lights() {
     let body = r#"<object3D id="s" primitive="sphere" radius="30" x="64" y="64" z="0"/>"#;
     // a narrow spot to the left, pointing straight ahead (+z): it misses the sphere unless aimed

@@ -501,7 +501,8 @@ impl Renderer {
             "plane" => Ok(sr_3d::prim::plane(w, hh.unwrap_or(2.0 * r), 1)),
             "cylinder" => Ok(sr_3d::prim::cylinder(r, r, hh.unwrap_or(2.0 * r), segs)),
             "cone" => Ok(sr_3d::prim::cylinder(0.0, r, hh.unwrap_or(2.0 * r), segs)),
-            "torus" => Ok(sr_3d::prim::torus(r, depth.min(r), segs)),
+            // tube radius: half the height, else 0.35 of the ring radius (the Python renderer's, conventions 5.20)
+            "torus" => Ok(sr_3d::prim::torus(r, hh.map(|h| h * 0.5).unwrap_or(0.35 * r).min(r), segs)),
             "capsule" => Ok(sr_3d::prim::capsule(r, hh.unwrap_or(4.0 * r).max(2.0 * r), segs)),
             "extrude" => a
                 .str("path")
@@ -1303,14 +1304,15 @@ impl Renderer {
             && env.is_none()
             && ctx.p.scene.lights.as_ref().map(|l| l.lights.is_empty()).unwrap_or(true)
         {
-            // no lights in the document: a headlight along the view and a soft fill
-            let fwd = cam.view.inverse().transform_vector3(Vec3::Z).normalize();
+            // no lights in the document: the Python renderer's neutral rig (conventions 5.20), ambient 0.35
+            // (a uniform environment, so metals reflect it) and a directional key from the upper left
+            // front whose irradiance π · 0.65 brings a white Lambertian surface facing it to 1
             let base = Light3 {
                 kind: LightKind::Directional,
                 pos: Vec3::ZERO,
-                dir: (fwd + Vec3::new(0.3, 0.4, 0.0)).normalize(),
+                dir: Vec3::new(0.45, 0.7, 0.55).normalize(),
                 right: Vec3::X,
-                color: Vec3::splat(2.5),
+                color: Vec3::splat(std::f32::consts::PI * 0.65),
                 range: 0.0,
                 falloff: 2.0,
                 cos_outer: 0.0,
@@ -1324,7 +1326,7 @@ impl Renderer {
                 affects_diffuse: true,
                 affects_specular: true,
             };
-            lights.push(Light3 { kind: LightKind::Ambient, color: Vec3::splat(0.25), ..base.clone() });
+            lights.push(Light3 { kind: LightKind::Ambient, color: Vec3::splat(0.35), ..base.clone() });
             lights.push(base);
         }
         let mut draws = Vec::new();
