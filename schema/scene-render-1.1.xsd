@@ -1145,8 +1145,8 @@
     <xs:annotation><xs:documentation>
       Map tiles: a PMTiles archive (@src) of vector (MVT) or raster (PNG, JPEG, WebP) tiles; or
       an online tile service (@url, a template with {z}, {x} and {y}, or {s} for a subdomain),
-      whose tiles `scene-render resolve` downloads for the views the document's maps show into
-      @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
+      whose tiles a resolve step, run before rendering, downloads for the views the document's
+      maps show into @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
       @tileSize is the pixel size tiles are drawn at (default 512 for vector tiles, 256 for
       raster); @minZoom and @maxZoom bound the zooms fetched from a service. @attribution is the
       credit the data requires.
@@ -1581,7 +1581,7 @@
   </xs:complexType>
   <xs:complexType name="rigidBody3DType">
     <xs:annotation><xs:documentation>
-      rs-scene-render extension. A rigid body in 3D on an object3D: the simulation moves the
+      A rigid body in 3D on an object3D: the simulation moves the
       object from its pose at physics@start (its position and rotations, in its parent's frame);
       from then on the simulation, not its own attributes, places it (a kinematic body follows
       its animation).
@@ -2008,14 +2008,15 @@
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="map" type="xs:IDREF">
       <xs:annotation><xs:documentation>
-        rs-scene-render extension. primitive="map": the map asset as ground in the object's xy
+        primitive="map": the map asset as ground in the object's xy
         plane, one map pixel per scene unit, draped with the map as drawn; @terrain (tiles of
         elevation, Terrarium or Mapbox Terrain-RGB per @terrainEncoding) raises it toward the
         camera (−z) by true height times @exaggeration on a grid of @resolution cells, and
         @buildings extrudes the footprints of its vector basemap to their heights (in @material). Terrain and
         buildings need a web-mercator map. primitive="globe": a sphere of @radius (poles on the
         y axis, 0° longitude facing the camera) draped with the map's content drawn over the
-        whole world. @textureSize is the drape's size in pixels along its longer side.
+        whole world. @textureSize is the drape's size in pixels along a map's longer side, and a globe drape's height (its width
+        is twice that).
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="terrain" type="xs:IDREF"/>
@@ -2812,12 +2813,12 @@
     <xs:attribute name="x" type="xs:double" default="0"/>
     <xs:attribute name="y" type="xs:double" default="0"/>
     <xs:attribute name="z" type="xs:double" default="0">
-      <xs:annotation><xs:documentation>rs-scene-render extension: depth of a radial or vortex centre for 3D bodies.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Depth of a radial field's centre, for 3D bodies.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="forceX" type="xs:double" default="0"/>
     <xs:attribute name="forceY" type="xs:double" default="0"/>
     <xs:attribute name="forceZ" type="xs:double" default="0">
-      <xs:annotation><xs:documentation>rs-scene-render extension: m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="strength" type="xs:double" default="0"/>
     <xs:attribute name="falloff" type="xs:double" default="0"/>
@@ -2838,7 +2839,7 @@
       spring/distance/rope/hinge/slider/weld/motor join bodies a and b; pin ties
       body a to the world point x, y (b is not allowed) and is rigid unless
       stiffness is given. breakForce removes the constraint when exceeded.
-      rs-scene-render extension: between 3D bodies (object3D rigidBody) the anchor is x, y, z;
+      Between 3D bodies (object3D rigidBody) the anchor is x, y, z;
       hinge, motor and slider turn about or slide along axisX, axisY, axisZ (scene axes; z by
       default for hinges and motors, x for sliders); ball is a ball-and-socket joint.
     </xs:documentation></xs:annotation>
@@ -2884,7 +2885,7 @@
     <xs:attribute name="gravityX" type="xs:double" default="0"/>
     <xs:attribute name="gravityY" type="xs:double" default="-9.80665"/>
     <xs:attribute name="gravityZ" type="xs:double" default="0">
-      <xs:annotation><xs:documentation>rs-scene-render extension: m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="pixelsPerMeter" type="positiveDecimal" default="100"/>
     <xs:attribute name="solverIterations" type="xs:positiveInteger" default="8"/>
@@ -3609,7 +3610,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>

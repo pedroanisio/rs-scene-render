@@ -18,7 +18,7 @@ fn world() -> String {
 /// A document of `w`×`h` with `assets` whose composition shows the map asset `m` unscaled.
 fn map_doc(w: u32, h: u32, assets: &str) -> sr_model::Document {
     let xml = format!(
-        r##"<scene version="1.1"><project width="{w}" height="{h}" fps="10" duration="6" background="#000000"/>
+        r##"<scene version="1.2"><project width="{w}" height="{h}" fps="10" duration="6" background="#000000"/>
            <assets>{assets}</assets><composition><layer id="l" asset="m"/></composition></scene>"##
     );
     let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(geo_dir()) };
@@ -188,7 +188,7 @@ fn web_mercator_uses_tile_zoom_levels() {
 
 #[test]
 fn bad_geo_references_fail_validation() {
-    let xml = r#"<scene version="1.1"><project width="64" height="32" fps="10" duration="1"/>
+    let xml = r#"<scene version="1.2"><project width="64" height="32" fps="10" duration="1"/>
         <assets><map id="m" width="64" height="32"><geoLayer geo="m"/></map></assets>
         <composition><layer id="l" asset="m"/></composition></scene>"#;
     let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(geo_dir()) };
@@ -200,7 +200,7 @@ fn bad_geo_references_fail_validation() {
 fn expressions_place_layers_on_the_map() {
     // A globe spinning a quarter turn east over two seconds; the marker layer follows
     // 0°N 0°E with geo() and fades out with geoVisible() once it turns away.
-    let xml = r##"<scene version="1.1"><project width="200" height="200" fps="10" duration="4" background="#000000"/>
+    let xml = r##"<scene version="1.2"><project width="200" height="200" fps="10" duration="4" background="#000000"/>
         <assets><map id="m" width="200" height="200" projection="orthographic" centerLon="0" centerLat="0">
           <animate property="centerLon"><key time="0" value="0"/><key time="2" value="180"/></animate></map>
           <image id="dot" src="red.png" width="4" height="4"/></assets>

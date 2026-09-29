@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- expect: C38 -->
 <!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
-<scene version="1.1">
+<scene version="1.2">
   <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
            workingColorSpace="acescg" safeArea="broadcast" timecodeStart="01:00:00;00" quality="final"/>
   <metadata>

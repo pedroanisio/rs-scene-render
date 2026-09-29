@@ -186,7 +186,7 @@ fn pose3(g: &sr_eval::FrameGraph, id: &str) -> [f64; 16] {
 
 fn scene3(objects: &str, physics: &str) -> sr_model::Document {
     let xml = format!(
-        r##"<scene version="1.1"><project width="200" height="200" fps="30" duration="4" background="#000000"/>
+        r##"<scene version="1.2"><project width="200" height="200" fps="30" duration="4" background="#000000"/>
           <materials><material id="red" baseColor="#FF0000" roughness="1"/></materials>
           <composition>{objects}</composition>
           <lights><light id="amb" type="ambient" intensity="1"/></lights>{physics}</scene>"##

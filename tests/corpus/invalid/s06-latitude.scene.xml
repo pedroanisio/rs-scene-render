@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- expect: S06 -->
 <!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
-<scene version="1.1">
+<scene version="1.2">
   <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
            workingColorSpace="acescg" safeArea="broadcast" timecodeStart="01:00:00;00" quality="final"/>
   <metadata>
@@ -72,7 +72,9 @@
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
     <geo id="places" src="../media/places.geojson" sha256="6835b996e02a5d81173cc113fec9b1f3558e5c7f65c17e2db0573964b31a55da"/>
+    <tiles id="streets" src="../media/streets.pmtiles" sha256="f8bc680c129c74be9360aa0bde56af397aa0b102876a2e824d4078a46c6b04e0" attribution="© OpenStreetMap contributors"/>
     <map id="atlas" width="800" height="400" projection="equal-earth" fit="places" fitPadding="10" background="#12324F" outline="#FFFFFF">
+      <basemap tiles="streets" mapStyle="protomaps-dark" detail="0.5"/>
       <graticule step="15"/>
       <geoLayer geo="places" fillBy="v" palette="#F7FBFF #08306B" label="name">
         <featureStyle key="a" fill="#E63946"/>
@@ -153,7 +155,11 @@
     <repeat id="grid" count="3">
       <shape id="dot" shape="ellipse" width="20" height="20" fill="#ffffff"/>
     </repeat>
-    <object3D id="bot" primitive="mesh" mesh="robot" material="chrome"/>
+    <object3D id="bot" primitive="mesh" mesh="robot" material="chrome">
+      <rigidBody type="static" shape="trimesh"/>
+    </object3D>
+    <object3D id="earth" primitive="globe" map="atlas" radius="120" textureSize="512"/>
+    <object3D id="ground" primitive="map" map="atlas" terrain="streets" terrainEncoding="mapbox" exaggeration="2" buildings="true"/>
     <particleEmitter id="sparks" color="#ffcc00">
       <burst time="4.2" count="50"/>
     </particleEmitter>
@@ -177,6 +183,7 @@
   <physics>
     <forceField id="gravity" type="directional"/>
     <constraint id="pin1" type="pin" a="sparks" x="0" y="0"/>
+    <constraint id="socket" type="ball" a="bot" b="earth" x="0" y="0" z="0"/>
   </physics>
   <audioMix>
     <audioTrack id="music-track" asset="music" bus="fx" duckUnder="vo-track"/>

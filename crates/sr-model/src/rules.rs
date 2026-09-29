@@ -367,6 +367,34 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// p1: what version="1.0" documents cannot use.
+    fn version_1_0(&mut self, n: Node) {
+        self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
+            "version=\"1.0\" documents cannot use 1.1 sections; set version=\"1.1\".".into()
+        });
+        self.check(kids(n, "output").count() <= 1, n, "V2", || "version=\"1.0\" allows one output element.".into());
+        let v3 = n.descendants().skip(1).any(|d| V3_ELEMENTS.iter().any(|e| is(d, e)));
+        self.check(!v3, n, "V3", || "version=\"1.0\" documents cannot use 1.1 node or animation elements.".into());
+        let v4 = kids(n, "assets").any(|s| s.children().any(|c| V4_ASSETS.iter().any(|e| is(c, e))));
+        self.check(!v4, n, "V4", || "version=\"1.0\" documents cannot use 1.1 asset kinds.".into());
+        // p50
+        let v6 = n.descendants().skip(1).any(|d| V6_ELEMENTS.iter().any(|e| is(d, e)));
+        self.check(!v6, n, "V6", || {
+            "version=\"1.0\" documents cannot use 1.1 elements (simulation nodes, geo and map assets, clay \
+             blobs, audio buses and effects, output posters, thumbnails and destinations, camera shake, \
+             representations, text spans, effect params); set version=\"1.1\"."
+                .into()
+        });
+        let v7 = n
+            .descendants()
+            .any(|d| is(d, "object3D") && d.attribute("primitive").is_some_and(|p| V7_PRIMITIVES.contains(&p)));
+        self.check(!v7, n, "V7", || {
+            "version=\"1.0\" documents cannot use the 1.1 object3D primitives (capsule, clay, cone, \
+             cylinder, extrude, text, torus); set version=\"1.1\"."
+                .into()
+        });
+    }
+
     fn element(&mut self, n: Node) {
         let a = |k: &str| n.attribute(k);
         let has = |k: &str| n.attribute(k).is_some();
@@ -376,33 +404,18 @@ impl<'a> Eval<'a> {
 
         match local {
             // p1 — version gate
-            "scene" if n.parent_element().is_none() && a("version") == Some("1.0") => {
-                self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
-                    "version=\"1.0\" documents cannot use 1.1 sections; set version=\"1.1\".".into()
-                });
-                self.check(kids(n, "output").count() <= 1, n, "V2", || {
-                    "version=\"1.0\" allows one output element.".into()
-                });
-                let v3 = n.descendants().skip(1).any(|d| V3_ELEMENTS.iter().any(|e| is(d, e)));
-                self.check(!v3, n, "V3", || {
-                    "version=\"1.0\" documents cannot use 1.1 node or animation elements.".into()
-                });
-                let v4 = kids(n, "assets").any(|s| s.children().any(|c| V4_ASSETS.iter().any(|e| is(c, e))));
-                self.check(!v4, n, "V4", || "version=\"1.0\" documents cannot use 1.1 asset kinds.".into());
-                // p50
-                let v6 = n.descendants().skip(1).any(|d| V6_ELEMENTS.iter().any(|e| is(d, e)));
-                self.check(!v6, n, "V6", || {
-                    "version=\"1.0\" documents cannot use 1.1 elements (simulation nodes, geo and map assets, clay \
-                     blobs, audio buses and effects, output posters, thumbnails and destinations, camera shake, \
-                     representations, text spans, effect params); set version=\"1.1\"."
-                        .into()
-                });
-                let v7 = n
-                    .descendants()
-                    .any(|d| is(d, "object3D") && d.attribute("primitive").is_some_and(|p| V7_PRIMITIVES.contains(&p)));
-                self.check(!v7, n, "V7", || {
-                    "version=\"1.0\" documents cannot use the 1.1 object3D primitives (capsule, clay, cone, \
-                     cylinder, extrude, text, torus); set version=\"1.1\"."
+            "scene" if n.parent_element().is_none() && matches!(a("version"), Some("1.0" | "1.1")) => {
+                if a("version") == Some("1.0") {
+                    self.version_1_0(n);
+                }
+                // p1b
+                let v5 = kids(n, "assets").any(|s| s.children().any(|c| is(c, "tiles")))
+                    || n.descendants().any(|d| {
+                        is(d, "basemap")
+                            || (is(d, "rigidBody") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                    });
+                self.check(!v5, n, "V5", || {
+                    "documents before version=\"1.2\" cannot use 1.2 elements or asset kinds; set version=\"1.2\"."
                         .into()
                 });
             }

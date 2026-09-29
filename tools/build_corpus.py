@@ -68,6 +68,7 @@ CASES = [
     ("v1-sections", ["V1"], lambda t: v10("", '<markers><marker time="1"/></markers>')),
     ("v2-outputs", ["V2"], lambda t: '<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/><output path="a.mp4" codec="h264"/><output path="b.mp4" codec="h264"/><composition/></scene>\n'),
     ("v3-elements", ["V3"], lambda t: v10('<sequence id="s"/>')),
+    ("v5-elements", ["V5"], sub('<scene version="1.2">', '<scene version="1.1">')),
     ("v4-assets", ["V4"], lambda t: '<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/><assets><formula id="f" tex="x" width="10" height="10"/></assets><composition/></scene>\n'),
     # ---- co-occurrence
     ("c1", ["C1"], sub('<vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z"', '<vector id="icon" shape="path"')),

@@ -1,4 +1,4 @@
-<scene version="1.1">
+<scene version="1.2">
   <!-- Maps in 3D: a globe draped with raster tiles; ground raised by Terrarium elevation tiles
        (a 2000 m hill, seen edge-on); Lisbon's Baixa with its buildings extruded from the
        Protomaps basemap (seen edge-on, in red). -->

@@ -30,7 +30,7 @@ fn globes_turn_their_map_to_the_camera() {
     // face the camera (0° does at rest)
     let xml = |turn: f64| {
         format!(
-            r##"<scene version="1.1"><project width="200" height="200" fps="10" duration="1" background="#000000"/>
+            r##"<scene version="1.2"><project width="200" height="200" fps="10" duration="1" background="#000000"/>
               <assets><geo id="sq" src="squares.geojson"/>
                 <map id="m" width="100" height="100" background="#0000FF"><geoLayer geo="sq" filter="v=100" fill="#FFFFFF"/></map></assets>
               <composition><object3D id="g" primitive="globe" map="m" radius="90" textureSize="512" x="100" y="100" rotationY="{turn}"/></composition>
@@ -85,7 +85,7 @@ fn terrain_raises_the_ground_toward_the_camera() {
     // hill at its centre rises above it
     let xml = |terrain: &str| {
         format!(
-            r##"<scene version="1.1"><project width="300" height="200" fps="10" duration="1" background="#000000"/>
+            r##"<scene version="1.2"><project width="300" height="200" fps="10" duration="1" background="#000000"/>
               <assets><tiles id="dem" src="hill.pmtiles"/>
                 <map id="m" width="240" height="240" projection="web-mercator" centerLon="0" centerLat="0" zoom="12" background="#FFFFFF"/></assets>
               <composition><object3D id="g" primitive="map" map="m" {terrain} exaggeration="3" resolution="96" textureSize="256" x="150" y="100" rotationX="90"/></composition>
@@ -108,7 +108,7 @@ fn terrain_raises_the_ground_toward_the_camera() {
 fn buildings_rise_from_the_basemap() {
     let xml = |b: bool| {
         format!(
-            r##"<scene version="1.1"><project width="300" height="200" fps="10" duration="1" background="#000000"/>
+            r##"<scene version="1.2"><project width="300" height="200" fps="10" duration="1" background="#000000"/>
               <assets><tiles id="t" src="{}"/>
                 <map id="m" width="300" height="300" projection="web-mercator" centerLon="-9.1375" centerLat="38.7110" zoom="16">
                   <basemap tiles="t" labels="false" attribution="false"/></map></assets>

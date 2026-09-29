@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- 3D rigid bodies: a tilted crate tumbles off another onto a static ground mesh, a ball on a
      ball joint swings past, and a torus drops as its convex hull. -->
-<scene version="1.1">
+<scene version="1.2">
   <project width="640" height="360" fps="24" duration="3" background="#101418"/>
   <materials>
     <material id="red" baseColor="#E63946" roughness="0.7"/>

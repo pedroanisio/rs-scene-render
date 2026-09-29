@@ -37,7 +37,7 @@ fn status(rows: &[Resolution], id: &str) -> Status {
 
 fn narrated(prompt: &str) -> String {
     format!(
-        r#"<scene version="1.1">
+        r#"<scene version="1.2">
   <!-- narrated title: keep this comment -->
   <project width="320" height="180" fps="10" duration="6"/>
   <assets>
@@ -148,7 +148,7 @@ fn images_and_errors() {
     let d = project(
         "images",
         &format!(
-            r#"<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/><assets>
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/><assets>
   <generated id="pic" kind="image" provider="example" model="m" prompt="a red door" width="32" height="16" cache="pic.png" cacheSha256="{ZERO}"/>
   <generated id="cloudy" kind="speech" provider="openai" model="tts-1" prompt="hi" cache="c.wav" cacheSha256="{ZERO}"/>
   <generated id="odd" kind="speech" provider="no-such-provider" model="m" prompt="hi" cache="o.wav" cacheSha256="{ZERO}"/>
@@ -238,7 +238,7 @@ fn openai_speech_and_images_through_a_local_server() {
     let d = project(
         "openai",
         &format!(
-            r#"<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/><assets>
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/><assets>
   <generated id="say" kind="speech" provider="openai" model="gpt-4o-mini-tts" voice="coral" prompt="Welcome" cache="say.wav" cacheSha256="{ZERO}"/>
   <generated id="art" kind="image" provider="openai" model="gpt-image-1" prompt="a lighthouse" width="1024" height="1536" cache="art.png" cacheSha256="{ZERO}"/>
 </assets><composition/></scene>"#
@@ -272,7 +272,7 @@ fn piper_speech_captioned_by_whisper() {
     let d = project(
         "piper-whisper",
         &format!(
-            r#"<scene version="1.1"><project width="64" height="64" fps="10" duration="8"/><assets>
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="8"/><assets>
   <generated id="vo" kind="speech" provider="piper" model="en_US-lessac-medium" prompt="The quick brown fox jumps over the lazy dog." cache="vo.wav" cacheSha256="{ZERO}"/>
 </assets><composition/>
 <audioMix><audioTrack id="voice" asset="vo" start="1.5"/></audioMix>
@@ -315,7 +315,7 @@ fn audioforge_renders_a_cue() {
     let d = project(
         "audioforge",
         &format!(
-            r#"<scene version="1.1"><project width="64" height="64" fps="10" duration="3"/><assets>
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="3"/><assets>
   <generated id="hit" kind="sound-effect" provider="audioforge" model="{cue}" prompt="" seed="3" cache="hit.wav" cacheSha256="{ZERO}"/>
 </assets><composition/><audioMix sampleRate="44100" bitDepth="16"><audioTrack id="t" asset="hit"/></audioMix></scene>"#
         ),
@@ -376,7 +376,7 @@ fn online_tiles_are_fetched_for_the_views_and_pinned() {
     let d = project(
         "tiles",
         &format!(
-            r#"<scene version="1.1"><project width="512" height="512" fps="2" duration="1"/><assets>
+            r#"<scene version="1.2"><project width="512" height="512" fps="2" duration="1"/><assets>
   <tiles id="osm" url="{url}" cache="gen/osm.pmtiles" cacheSha256="{ZERO}" attribution="Test tiles"/>
   <map id="m" width="512" height="512" projection="web-mercator" centerLon="0" centerLat="0"><basemap tiles="osm"/></map>
 </assets><composition><layer id="l" asset="m"/></composition></scene>"#

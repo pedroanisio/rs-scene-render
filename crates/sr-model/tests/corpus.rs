@@ -62,7 +62,7 @@ fn kitchen_sink_loads_into_a_resolved_model() {
 
     let doc =
         load_file(corpus().join("valid/kitchen-sink.scene.xml"), &LoadOptions::default()).expect("valid document");
-    assert_eq!(doc.version().as_str(), "1.1");
+    assert_eq!(doc.version().as_str(), "1.2");
     assert_eq!(doc.frame_size(), (1920, 1080));
     assert_eq!(doc.fps().to_string(), "30000/1001");
     assert_eq!(doc.frame_count(), 375);
