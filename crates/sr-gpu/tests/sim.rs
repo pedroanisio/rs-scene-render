@@ -62,7 +62,7 @@ fn soft_bodies_deform_their_layer() {
     let rest = render_times(&scene(&body(""), ""), &[0.0]);
     let Some(rest) = rest else { return };
     let d = scene(
-        &body(r#"<softBody kind="jelly" stiffness="200" mass="1" rows="4" cols="4"/>"#),
+        &body(r#"<softBody kind="jelly" stiffness="20" mass="2" rows="3" cols="3"/>"#),
         r#"<physics bounds="floor" pixelsPerMeter="40"/>"#,
     );
     let r = render_times(&d, &[2.0]).unwrap();
