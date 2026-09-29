@@ -627,6 +627,19 @@ fn image_sequences_follow_source_time() {
 }
 
 #[test]
+fn a_clip_that_does_not_loop_ends_with_its_media() {
+    // CONVENTIONS 5.16 (D9): the three-frame sequence at 10 fps runs out at 0.3 s
+    let d = doc(
+        r##"background="#000000""##,
+        "",
+        r#"<layer id="s" asset="seq" scaleX="4" scaleY="4"/><layer id="l" asset="seq" x="16" scaleX="4" scaleY="4" loop="1"/>"#,
+    );
+    let Some(r) = render_times(&d, &[0.45]) else { return };
+    assert_px(&r, 1, 1, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert!((r.at(17, 1)[0] - lin8(160)).abs() < 3e-3, "the looping copy plays on: {:?}", r.at(17, 1));
+}
+
+#[test]
 fn working_spaces_and_non_linear_compositing() {
     // ACEScg working space: sRGB red decodes into AP1 and displays back as red
     let d = doc(
