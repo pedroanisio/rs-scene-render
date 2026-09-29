@@ -529,6 +529,52 @@ fn mesh_gradient_corners() {
     assert!(r.at(0, 0)[0] > 0.95 && r.at(63, 0)[1] > 0.95 && r.at(0, 31)[2] > 0.95);
     let c = r.at(32, 16);
     assert!((c[0] - 0.5).abs() < 0.05 && (c[1] - 0.5).abs() < 0.05, "{c:?}");
+    // CONVENTIONS 5.18: positions and colours follow one Catmull-Rom surface, so a 2 × 2 grid is linear
+    // in position (not smoothstepped)
+    let q = r.at(16, 0);
+    let f = 16.5 / 64.0;
+    assert!((q[0] - (1.0 - f)).abs() < 0.02 && (q[1] - f).abs() < 0.02, "{q:?}");
+}
+
+#[test]
+fn generator_patterns_and_gradient_geometry_follow_the_python_renderer() {
+    // CONVENTIONS 5.18: patterns centre on the asset (a 12-wide checkerboard of 4 px squares starts
+    // mid-square), stripes repeat every 2 × scale, radial aspect stretches x, rotation pivots on the
+    // box centre in pixels
+    let assets = r##"<paints>
+        <radialGradient id="rg" aspect="2"><stop offset="0" color="#FFFFFF"/><stop offset="1" color="#000000"/></radialGradient>
+        <linearGradient id="lg" rotation="90"><stop offset="0" color="#000000"/><stop offset="1" color="#FFFFFF"/></linearGradient>
+      </paints>"##;
+    let xml = format!(
+        r##"<scene version="1.1"><project width="64" height="48" fps="10" duration="1" background="#000000"/>
+        <assets>
+          <generator id="ck" kind="checkerboard" width="12" height="4" scale="4" paint="#FFFFFF" paint2="#000000"/>
+          <generator id="st" kind="stripes" width="32" height="4" scale="4" paint="#FFFFFF" paint2="#000000"/>
+        </assets>{assets}<composition>
+          <layer id="c" asset="ck"/><layer id="s" asset="st" y="8"/>
+          <shape id="r" shape="rect" x="0" y="16" width="32" height="16" fill="url(#rg)"/>
+          <shape id="l" shape="rect" x="32" y="16" width="32" height="16" fill="url(#lg)"/>
+        </composition></scene>"##
+    );
+    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+    let Some(r) = render(&d) else { return };
+    // checker: squares from the centre (x = 6): x 6..10 paint, 2..6 paint2, 0..2 paint
+    assert_px(&r, 0, 2, [1.0; 4], 1e-3);
+    assert_px(&r, 3, 2, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 7, 2, [1.0; 4], 1e-3);
+    // stripes from the centre (x = 16): paint for 16..20, paint2 for 20..24, paint again from 24
+    assert_px(&r, 17, 10, [1.0; 4], 1e-3);
+    assert_px(&r, 21, 10, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&r, 25, 10, [1.0; 4], 1e-3);
+    // radial, aspect 2 in a 32 × 16 box: the ellipse reaches x = ±32 (the box's full width) and y = ±8,
+    // so 8 px right of the centre is a quarter of the way out, 4 px down half of it
+    let right = r.at(24, 23)[0];
+    let down = r.at(15, 28)[0];
+    assert!(right > down + 0.1, "stretched along x: right {right}, down {down}");
+    // linear rotated 90° clockwise about the box centre in pixels: dark at the top, light at the bottom,
+    // spanning the middle half of the gradient (the box is 16 px tall, the gradient 32 px long)
+    let (top, bottom) = (r.at(48, 16)[0], r.at(48, 31)[0]);
+    assert!((top - 0.266).abs() < 0.03 && (bottom - 0.734).abs() < 0.03, "{top} {bottom}");
 }
 
 #[test]

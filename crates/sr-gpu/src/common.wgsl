@@ -151,6 +151,27 @@ fn eval_stops(pd: PaintDesc, t: f32) -> vec4<f32> {
   return last.color;
 }
 
+// Catmull-Rom weights of the four points around a fraction u of the middle span
+fn catmull_rom(u: f32) -> vec4<f32> {
+  let u2 = u * u; let u3 = u2 * u;
+  return vec4(-u3 + 2.0 * u2 - u, 3.0 * u3 - 5.0 * u2 + 2.0, -3.0 * u3 + 4.0 * u2 + u, u3 - u2) * 0.5;
+}
+
+// The parameter u in span i of a Catmull-Rom curve through the grid positions 0 … n − 1 (edge points
+// repeated) where the curve reaches position t (Newton's method; the curve is monotonic).
+fn catmull_rom_param(t: f32, i: u32, n: u32) -> f32 {
+  let k = vec4(
+    f32(max(i32(i) - 1, 0)), f32(i), f32(min(i + 1u, n - 1u)), f32(min(i + 2u, n - 1u)));
+  var u = clamp(t - f32(i), 0.0, 1.0);
+  for (var it = 0; it < 5; it = it + 1) {
+    let f = dot(catmull_rom(u), k) - t;
+    let u2 = u * u;
+    let d = dot(vec4(-3.0 * u2 + 4.0 * u - 1.0, 9.0 * u2 - 10.0 * u, -9.0 * u2 + 8.0 * u + 1.0, 3.0 * u2 - 2.0 * u) * 0.5, k);
+    u = clamp(u - f / max(d, 1e-3), 0.0, 1.0);
+  }
+  return u;
+}
+
 // straight colour of paint `i` at local position `p`
 fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
   let pd = paints[i];
@@ -165,8 +186,9 @@ fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
   } else if (pd.kind == 2u) {
     let c = pd.p0.xy; let r = pd.p0.z; let aspect = pd.p0.w;
     let f = pd.p1.xy; let fr = pd.p1.z;
-    let q = vec2(g.x, c.y + (g.y - c.y) / aspect);
-    let fq = vec2(f.x, c.y + (f.y - c.y) / aspect);
+    // aspect stretches the gradient along x about its centre (CONVENTIONS 5.18)
+    let q = vec2(c.x + (g.x - c.x) / aspect, g.y);
+    let fq = f;
     let dir = q - fq;
     let len = length(dir);
     if (len < 1e-9) { t = 0.0; } else {
@@ -183,19 +205,29 @@ fn eval_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
     var ang = degrees(atan2(d.x, -d.y)) - pd.p0.z;
     t = fract(ang / 360.0);
   } else if (pd.kind == 4u) {
+    // a Catmull-Rom tensor-product surface through the grid's colours, in the interpolation space,
+    // edge rows and columns repeated (CONVENTIONS 5.18, the Python renderer's)
+    // The grid positions follow the same surface, which is not linear in its end spans: each axis
+    // solves for the surface parameter at the pixel's position first.
     let rows = u32(pd.p0.x); let cols = u32(pd.p0.y);
     let gx = clamp(g.x, 0.0, 1.0) * f32(cols - 1u);
     let gy = clamp(g.y, 0.0, 1.0) * f32(rows - 1u);
     let c0 = min(u32(floor(gx)), cols - 2u); let r0 = min(u32(floor(gy)), rows - 2u);
-    let fx = smoothstep(0.0, 1.0, gx - f32(c0)); let fy = smoothstep(0.0, 1.0, gy - f32(r0));
-    let s00 = stops[pd.stop_off + r0 * cols + c0].color;
-    let s01 = stops[pd.stop_off + r0 * cols + c0 + 1u].color;
-    let s10 = stops[pd.stop_off + (r0 + 1u) * cols + c0].color;
-    let s11 = stops[pd.stop_off + (r0 + 1u) * cols + c0 + 1u].color;
-    let top = mix_space(to_space(s00.rgb, pd.space), to_space(s01.rgb, pd.space), fx, pd.space);
-    let bot = mix_space(to_space(s10.rgb, pd.space), to_space(s11.rgb, pd.space), fx, pd.space);
-    let rgb = from_space(mix_space(top, bot, fy, pd.space), pd.space);
-    return vec4(rgb, mix(mix(s00.a, s01.a, fx), mix(s10.a, s11.a, fx), fy));
+    let wx = catmull_rom(catmull_rom_param(gx, c0, cols)); let wy = catmull_rom(catmull_rom_param(gy, r0, rows));
+    var acc = vec4(0.0);
+    for (var i = 0; i < 4; i = i + 1) {
+      let r = u32(clamp(i32(r0) + i - 1, 0, i32(rows) - 1));
+      var row = vec4(0.0);
+      for (var j = 0; j < 4; j = j + 1) {
+        let cc = u32(clamp(i32(c0) + j - 1, 0, i32(cols) - 1));
+        let s = stops[pd.stop_off + r * cols + cc].color;
+        row = row + wx[j] * vec4(to_space(s.rgb, pd.space), s.a);
+      }
+      acc = acc + wy[i] * row;
+    }
+    // the surface overshoots between points: clamp as the Python renderer does
+    let rgb = from_lin(clamp(to_lin(from_space(acc.rgb, pd.space)), vec3(0.0), vec3(1.0)));
+    return vec4(rgb, clamp(acc.a, 0.0, 1.0));
   }
   var c = eval_stops(pd, spread_t(t, pd.spread));
   if (pd.dither == 1u) {

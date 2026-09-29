@@ -440,6 +440,12 @@ fn rotate(p: vec2<f32>, deg: f32) -> vec2<f32> {
   return vec2(p.x * cos(r) - p.y * sin(r), p.x * sin(r) + p.y * cos(r));
 }
 
+// Asset position → pattern space: about the centre, turned clockwise by `angle`, scrolled by
+// `evolution` periods of `period`.
+fn pattern_space(p: vec2<f32>, period: f32) -> vec2<f32> {
+  return rotate(p - gen.size * 0.5, -gen.angle) - vec2(gen.evolution * period, 0.0);
+}
+
 fn gen_paint(i: u32, p: vec2<f32>, pixel: vec2<u32>) -> vec4<f32> {
   return eval_paint(i, p, pixel);
 }
@@ -482,18 +488,20 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
       }
       t = clamp(best, 0.0, 1.0);
     }
-    case 5u: {                                                                    // checkerboard
-      let q = floor(rotate(p, gen.angle) / s);
+    // The patterns (CONVENTIONS 5.18, the Python renderer's): pattern space has its origin at the
+    // asset's centre, turns clockwise by `angle` and scrolls along its x by `evolution` periods.
+    case 5u: {                                                                    // checkerboard: `scale` squares, paint at the origin's
+      let q = floor(pattern_space(p, 2.0 * s) / s);
       t = f32((i32(q.x) + i32(q.y)) & 1);
     }
-    case 6u: {                                                                    // grid lines
-      let q = rotate(p, gen.angle) / s;
-      let w = max(1.0 / s, 0.04);
-      let f = abs(fract(q + vec2(0.5)) - vec2(0.5));
-      t = select(1.0, 0.0, min(f.x, f.y) < w * 0.5);
+    case 6u: {                                                                    // grid: lines from each multiple of `scale`
+      let n = clamp(round(s), 2.0, 256.0);
+      let w = max(1.0, round(n * 0.04)) / n;
+      let f = fract(pattern_space(p, s) / s);
+      t = select(1.0, 0.0, min(f.x, f.y) < w);
     }
-    case 7u: {                                                                    // stripes
-      let q = rotate(p, gen.angle) / s;
+    case 7u: {                                                                    // stripes: period 2 × `scale`, paint first
+      let q = pattern_space(p, 2.0 * s) / (2.0 * s);
       t = select(0.0, 1.0, fract(q.x) >= 0.5);
     }
     case 8u: {                                                                    // film grain, changes with evolution
@@ -510,6 +518,14 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
   }
   t = clamp((t - 0.5) * gen.contrast + 0.5, 0.0, 1.0);
   // t = 0 → paint, t = 1 → paint2
+  if (gen.kind == 1u) {
+    // the gradient mixes premultiplied sRGB-encoded colours (CONVENTIONS 5.18, the Python renderer's)
+    let pa = vec4(to_space(a.rgb, 1u) * a.a, a.a);
+    let pb = vec4(to_space(b.rgb, 1u) * b.a, b.a);
+    let m = mix(pa, pb, t);
+    let rgb = select(vec3(0.0), from_space(m.rgb / max(m.a, 1e-6), 1u), m.a > 0.0);
+    return vec4(rgb * m.a, m.a);
+  }
   let c = mix(a, b, t);
   return vec4(c.rgb * c.a, c.a);
 }
