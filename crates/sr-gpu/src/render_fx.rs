@@ -97,8 +97,9 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
     let r = a.num("radius", 4.0);
     let sz = a.num("size", 1.0);
     match kind {
-        "blur" | "glow" | "bloom" | "halation" | "lens-blur" | "tilt-shift" | "unsharp-mask" | "inner-glow"
-        | "inner-shadow" => r * 2.0,
+        // radius is the standard deviation: reach four of them
+        "blur" | "glow" | "bloom" | "halation" | "unsharp-mask" | "inner-glow" | "inner-shadow" => r * 4.0,
+        "lens-blur" | "tilt-shift" => r * 2.0,
         "drop-shadow" => r * 2.0 + a.num("offsetX", 8.0).abs().max(a.num("offsetY", 8.0).abs()),
         "directional-blur" => r * 2.0,
         "long-shadow" => {
@@ -258,7 +259,8 @@ impl Renderer {
         self.flush_vec(plan, &mut inner);
         plan.jobs.push(Job::draws(tex.clone(), true, inner, false));
         let mut b = self.builder(plan);
-        let out = b.blur(&tex, radius * Xf(ta.0).max_scale());
+        // a text blur radius is twice the standard deviation
+        let out = b.blur(&tex, 0.5 * radius * Xf(ta.0).max_scale());
         let (passes, temps, problems) =
             (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
         Self::finish_builder(plan, passes, temps, problems, &n.id);

@@ -541,6 +541,16 @@ fn apply_ops(ops: &[Op], mut c: [f32; 3]) -> [f32; 3] {
     c
 }
 
+/// The combine mode placing an effect relative to the unchanged content (`compositeOriginal`,
+/// CONVENTIONS 5.6): 2 behind it (the default), 3 on top of it, 4 the effect alone.
+fn composite_original(a: &Attrs) -> u32 {
+    match a.str("compositeOriginal").as_deref() {
+        Some("on-top") => 3,
+        Some("none") => 4,
+        _ => 2,
+    }
+}
+
 fn nums(s: &str) -> Vec<f32> {
     s.split(|c: char| c.is_whitespace() || c == ',').filter_map(|t| t.parse().ok()).collect()
 }
@@ -930,14 +940,14 @@ impl Builder<'_> {
         self.run(entry, [op, 0, 0, 0], v, src, aux, None, None, size)
     }
 
-    /// Dual-Kawase blur of radius `r` texels.
-    pub fn blur(&mut self, src: &Arc<Tex>, r: f64) -> Arc<Tex> {
-        if r < 0.75 {
+    /// Dual-Kawase approximation of a Gaussian blur of standard deviation `sigma` texels.
+    pub fn blur(&mut self, src: &Arc<Tex>, sigma: f64) -> Arc<Tex> {
+        if sigma < 0.375 {
             return src.clone();
         }
         // σ of the pyramid ≈ 1.45 · offset · 2^levels (measured on an impulse);
-        // `radius` is 2σ, so pick the fewest levels keeping the offset ≤ 1.5 texels
-        let x = r * 0.5 / 1.45;
+        // pick the fewest levels keeping the offset ≤ 1.5 texels
+        let x = sigma / 1.45;
         let levels = ((x / 1.5).log2().ceil() as i32).clamp(1, 10);
         let off = (x / 2f64.powi(levels)).clamp(0.2, 3.0) as f32;
         let mut chain = vec![src.clone()];
@@ -1035,29 +1045,30 @@ impl Builder<'_> {
                     "halation" => lin(colour("color", [1.0, 0.3, 0.12, 1.0])),
                     _ => lin(colour("color", [1.0; 4])),
                 };
-                v[0] = [threshold as f32, if kind == "glow" { 0.05 } else { 0.5 }, 0.0, 0.0];
+                // glow keeps the part of each pixel above `threshold` of its working-space luminance (D9)
+                v[0] = [threshold as f32, if kind == "glow" { 0.0 } else { 0.5 }, 0.0, 0.0];
                 v[1] = [tint[0] as f32, tint[1] as f32, tint[2] as f32, 1.0];
                 let bright = self.simple(Entry::Pre, 0, v, input, Aux::None);
-                let blurred = self.blur(&bright, r.max(1.0));
-                self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
+                // radius is the glow's standard deviation, as the blur effect's (D9)
+                let blurred = self.blur(&bright, r.max(0.5));
+                if kind == "glow" {
+                    // CONVENTIONS 5.6: the glow goes behind the unchanged content by default
+                    self.combine(composite_original(a), input, &blurred, intensity, [1.0; 3], 0.0)
+                } else {
+                    self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
+                }
             }
             "drop-shadow" | "inner-shadow" | "inner-glow" => {
                 let c =
-                    colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 0.75] });
+                    colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 1.0] });
                 let off = if kind == "inner-glow" { [0.0; 2] } else { offset_uv() };
                 v[0] = [0.0, 0.0, off[0], off[1]];
                 v[1] = v4(c);
                 let pre = self.simple(Entry::Pre, if kind == "drop-shadow" { 1 } else { 2 }, v, input, Aux::None);
-                let b = self.blur(&pre, r);
-                let mode = if kind == "drop-shadow" {
-                    match a.str("compositeOriginal").as_deref() {
-                        Some("on-top") => 3,
-                        Some("none") => 4,
-                        _ => 2,
-                    }
-                } else {
-                    5
-                };
+                // a drop shadow's radius is twice the standard deviation (CSS drop-shadow(), D9);
+                // the inner styles' radius is the standard deviation, as the blur effect's
+                let b = self.blur(&pre, if kind == "drop-shadow" { r * 0.5 } else { r });
+                let mode = if kind == "drop-shadow" { composite_original(a) } else { 5 };
                 self.combine(mode, input, &b, intensity, [1.0; 3], 0.0)
             }
             "directional-blur" => {
@@ -1553,7 +1564,7 @@ impl Builder<'_> {
                     v[0] = [choke.abs() as f32, (choke > 0.0) as u8 as f32, 0.0, 0.0];
                     let o = self.simple(Entry::Morph, 0, v, input, Aux::None);
                     let soft = a.num("softness", 0.1) * px * 4.0;
-                    return Ok(if soft >= 1.0 { self.blur(&o, soft) } else { o });
+                    return Ok(if soft >= 1.0 { self.blur(&o, soft * 0.5) } else { o });
                 }
                 let c = colour("color", [1.0; 4]);
                 let pos = match a.str("position").as_deref() {
