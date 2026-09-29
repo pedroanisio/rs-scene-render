@@ -36,11 +36,7 @@ fn object_xform(box_rect: [f64; 4], rotation: f64, object: bool) -> [f64; 6] {
     let (c, s) = (libm::cos(r), libm::sin(r));
     // g = M·p + k − M·pivot, M = S⁻¹·R(−rotation) with S the box size (object units) or 1 (user units),
     // and k the pivot in paint space
-    let (sx, sy, k) = if object {
-        (1.0 / w.max(1e-9), 1.0 / h.max(1e-9), [0.5, 0.5])
-    } else {
-        (1.0, 1.0, pivot)
-    };
+    let (sx, sy, k) = if object { (1.0 / w.max(1e-9), 1.0 / h.max(1e-9), [0.5, 0.5]) } else { (1.0, 1.0, pivot) };
     let (a, b, cc, d) = (c * sx, s * sy, -s * sx, c * sy);
     [a, b, cc, d, k[0] - (a * pivot[0] + cc * pivot[1]), k[1] - (b * pivot[0] + d * pivot[1])]
 }

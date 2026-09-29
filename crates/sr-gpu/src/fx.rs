@@ -1045,8 +1045,7 @@ impl Builder<'_> {
                 self.combine(1, input, &blurred, intensity, [1.0; 3], 0.0)
             }
             "drop-shadow" | "inner-shadow" | "inner-glow" => {
-                let c =
-                    colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 1.0] });
+                let c = colour("color", if kind == "inner-glow" { [1.0, 1.0, 0.8, 1.0] } else { [0.0, 0.0, 0.0, 1.0] });
                 let off = if kind == "inner-glow" { [0.0; 2] } else { offset_uv() };
                 v[0] = [0.0, 0.0, off[0], off[1]];
                 v[1] = v4(c);
