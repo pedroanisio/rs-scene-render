@@ -175,8 +175,8 @@ impl FxEngine {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
                     },
                     count: None,
                 },
@@ -303,50 +303,77 @@ impl FxEngine {
         self.pipes.get(&(entry, additive))
     }
 
-    /// Records passes in order.
+    /// Records passes in order. The parameters of every pass go into one uniform buffer (a
+    /// dynamic offset selects the pass), and passes reading the same textures share a bind group.
     pub fn record(&mut self, enc: &mut wgpu::CommandEncoder, passes: &[Pass]) -> usize {
         use wgpu::util::DeviceExt;
         let mut n = 0;
+        let stride = {
+            let align = self.device.limits().min_uniform_buffer_offset_alignment as usize;
+            std::mem::size_of::<Params>().div_ceil(align) * align
+        };
+        let fixed: Vec<usize> = (0..passes.len()).filter(|&i| passes[i].custom.is_none()).collect();
+        let params_buf = (!fixed.is_empty()).then(|| {
+            let mut bytes = vec![0u8; stride * fixed.len()];
+            for (slot, &i) in fixed.iter().enumerate() {
+                let b = bytemuck::bytes_of(&passes[i].params);
+                bytes[slot * stride..slot * stride + b.len()].copy_from_slice(b);
+            }
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx params"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        });
+        let mut slot = 0u32;
+        let mut groups: HashMap<[usize; 5], wgpu::BindGroup> = HashMap::new();
         for p in passes {
             if let Some(c) = &p.custom {
                 self.record_custom(enc, c, &p.out);
                 n += 1;
                 continue;
             }
-            let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("fx params"),
-                contents: bytemuck::bytes_of(&p.params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+            let offset = slot * stride as u32;
+            slot += 1;
+            let ub = params_buf.as_ref().expect("params buffer");
             let (aux_view, flow_view): (&wgpu::TextureView, &wgpu::TextureView) = match &p.aux {
                 Aux::Tex(t) => (&t.view, &self.dummy2),
                 Aux::View(v) => (v, &self.dummy2),
                 Aux::Flow(slot) => (&self.dummy2, slot.get().unwrap_or(&self.dummy2)),
                 Aux::None => (&self.dummy2, &self.dummy2),
             };
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("fx"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&p.src.view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(aux_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.samp) },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(
-                            p.lut.as_ref().map(|l| &l.view).unwrap_or(&self.dummy3),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(
-                            p.aux2.as_ref().map(|t| &t.view).unwrap_or(&self.dummy2),
-                        ),
-                    },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(flow_view) },
-                ],
+            let lut_view = p.lut.as_ref().map(|l| &l.view).unwrap_or(&self.dummy3);
+            let aux2_view = p.aux2.as_ref().map(|t| &t.view).unwrap_or(&self.dummy2);
+            let key = [
+                &p.src.view as *const _ as usize,
+                aux_view as *const _ as usize,
+                lut_view as *const _ as usize,
+                aux2_view as *const _ as usize,
+                flow_view as *const _ as usize,
+            ];
+            let bg = groups.entry(key).or_insert_with(|| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("fx"),
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: ub,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+                            }),
+                        },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&p.src.view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(aux_view) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.samp) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(lut_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(aux2_view) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(flow_view) },
+                    ],
+                })
             });
+            let bg = bg.clone();
             let Some(pipe) = self.pipeline(p.entry, p.additive) else { continue };
             let pipe = pipe.clone();
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -370,7 +397,7 @@ impl FxEngine {
                 multiview_mask: None,
             });
             rp.set_pipeline(&pipe);
-            rp.set_bind_group(0, &bg, &[]);
+            rp.set_bind_group(0, &bg, &[offset]);
             rp.draw(0..3, 0..1);
             n += 1;
         }

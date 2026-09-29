@@ -2566,8 +2566,8 @@ impl Renderer {
         Frame { texture: frame, stats }
     }
 
-    /// Writes `data` into a grow-only buffer, reallocating (at least doubling) when it no longer
-    /// fits. Returns whether it was reallocated, in which case bind groups over it must be rebuilt.
+    /// Writes `data` into a grow-only buffer, reallocating (at least doubling) when it does not
+    /// fit. Returns whether it was reallocated, in which case bind groups over it must be rebuilt.
     /// The write is queued, so it is ordered after the frames already submitted.
     fn upload<T: bytemuck::Pod + Default>(&self, slot: &mut Option<GrowBuf>, data: &[T], label: &str) -> bool {
         let one = [T::default()];
