@@ -273,6 +273,9 @@ fn layer_source_time_speed_reverse_loop_freeze_and_remap() {
     assert_eq!(node(&eval(&d, 5.0), "loop").source_time, Some(1.0), "second play");
     assert!(!has(&eval(&d, 12.5), "loop"));
     assert_eq!(node(&f, "freeze").source_time, Some(1.0));
+    // conventions 5.16: freezeAt holds its frame for the node's whole window, past the media's end too
+    assert_eq!(node(&eval(&d, 0.5), "freeze").source_time, Some(1.0));
+    assert_eq!(node(&eval(&d, 9.0), "freeze").source_time, Some(1.0));
     assert_eq!(node(&eval(&d, 1.0), "remap").source_time, Some(2.0));
     assert!(!has(&eval(&d, 1.9), "speed") || node(&eval(&d, 1.9), "speed").source_time.is_some());
     assert!(!has(&eval(&d, 2.8), "speed"), "3.5 s of source at 2× ends at t = 2.75");

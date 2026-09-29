@@ -111,7 +111,7 @@ pub struct MediaClock {
     pub loops: u64,
     /// Play backwards.
     pub reverse: bool,
-    /// Local time after which the source stops advancing.
+    /// Local time whose source frame is held for the node's whole window (conventions 5.16).
     pub freeze_at: Option<f64>,
     /// timeRemap channel (local time → source seconds).
     pub remap: Option<Channel>,
@@ -120,10 +120,7 @@ pub struct MediaClock {
 impl MediaClock {
     /// Source time at timeline time `t`.
     pub fn map(&self, t: f64) -> f64 {
-        let mut local = t - self.start;
-        if let Some(f) = self.freeze_at {
-            local = local.min(f);
-        }
+        let local = self.freeze_at.unwrap_or(t - self.start);
         if let Some(r) = &self.remap {
             return r.eval(local).as_num().unwrap_or(0.0);
         }
@@ -1404,7 +1401,8 @@ impl Builder {
             remap,
         };
         let node = &mut self.nodes[idx as usize];
-        if node.end.is_none() && clock.remap.is_none() {
+        // a clip ends when its media runs out, unless it is remapped or frozen on one frame
+        if node.end.is_none() && clock.remap.is_none() && clock.freeze_at.is_none() {
             if let Some(len) = clock.len.filter(|_| rate != 0.0) {
                 node.end = Some(start + len * (clock.loops + 1) as f64 / rate.abs());
             }
