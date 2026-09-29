@@ -1,7 +1,8 @@
 //! One `<output>` from document to delivered files.
 //!
 //! Stages overlap: while the encoder thread writes frame N, the GPU renders
-//! and converts frame N+1 and the readback of frame N maps; decoders run in
+//! and converts frame N+1 and the readback of frame N maps; a helper thread
+//! evaluates frame N+2 when the document has no simulation; decoders run in
 //! their own FFmpeg processes ahead of the render position. Audio mixes
 //! first, because loudness normalisation needs the whole programme and the
 //! evaluator reads the analysis table built from it.
@@ -74,7 +75,9 @@ pub struct Report {
     pub seconds: f64,
     /// Frames per second achieved for the video pass.
     pub render_fps: f64,
-    /// Seconds spent evaluating, rendering (CPU planning and submission), waiting for converted frames, and blocked on the encoder.
+    /// Seconds spent evaluating (waiting for the next graph, when a helper thread evaluates
+    /// ahead), rendering (CPU planning and submission), waiting for converted frames, and
+    /// blocked on the encoder.
     pub stage_seconds: [f64; 4],
     /// Seconds of the render stage spent waiting for video decoders.
     pub decode_wait_seconds: f64,
@@ -206,52 +209,78 @@ impl Video<'_> {
         let mut lowest: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
         // text inside isolated groups: frame indices where each appears (measured after the pass)
         let mut unprobed: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
-        for (k, &t) in times.iter().enumerate() {
-            let t0 = Instant::now();
-            let g = self.ev.evaluate(t);
-            let t1 = Instant::now();
-            let ev = &self.ev;
-            let mut sub = |st: f64| ev.evaluate(st);
-            let frame = self.renderer.render_with(&g, p, Some(&mut sub));
-            if let Some(e) = frame.stats.errors.first() {
-                return Err(DeliverError::Render { time: t, message: e.clone() });
-            }
-            unsupported.extend(frame.stats.unsupported.iter().cloned());
-            if let Some(det) = flash.as_mut() {
-                let cells = self.renderer.flash_grid(&frame.texture);
-                det.push(t, &cells);
-            }
-            for id in &frame.stats.contrast_unprobed {
-                unprobed.entry(id.clone()).or_default().push(k);
-            }
-            for (id, ratio) in &frame.stats.contrast {
-                let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
-                if *ratio < e.0 {
-                    *e = (*ratio, t);
+        let ev = self.ev;
+        // Without a simulation, evaluation is a pure function of time, so a helper thread
+        // evaluates the next frame while this one renders: the channel holds one graph and
+        // the helper works on the one after it, two frames ahead at most. Simulated state
+        // is stepped in time order under a lock, so those documents evaluate here, serially.
+        let ahead = !ev.has_simulation();
+        std::thread::scope(|s| -> Result<(), DeliverError> {
+            let graphs = if ahead {
+                let (tx, rx) = sync_channel::<sr_eval::FrameGraph>(1);
+                std::thread::Builder::new().name("sr-eval".into()).spawn_scoped(s, move || {
+                    for &t in times {
+                        // the render loop stopped early: nobody wants the rest
+                        if tx.send(ev.evaluate(t)).is_err() {
+                            break;
+                        }
+                    }
+                })?;
+                Some(rx)
+            } else {
+                None
+            };
+            for (k, &t) in times.iter().enumerate() {
+                let t0 = Instant::now();
+                let g = match &graphs {
+                    Some(rx) => rx.recv().map_err(|_| DeliverError::Invalid("evaluator thread stopped".into()))?,
+                    None => ev.evaluate(t),
+                };
+                let t1 = Instant::now();
+                // sub-frame samples (motion blur, video lookups) evaluate on this thread
+                let mut sub = |st: f64| ev.evaluate(st);
+                let frame = self.renderer.render_with(&g, p, Some(&mut sub));
+                if let Some(e) = frame.stats.errors.first() {
+                    return Err(DeliverError::Render { time: t, message: e.clone() });
                 }
-            }
-            report.decode_wait_seconds += frame.stats.decode_wait;
-            report.vector_seconds += frame.stats.vector_seconds;
-            let next =
-                self.stage.submit(&frame.texture, &working, &self.color, self.format, self.size, self.keep_alpha);
-            let t2 = Instant::now();
-            report.stage_seconds[0] += (t1 - t0).as_secs_f64();
-            report.stage_seconds[1] += (t2 - t1).as_secs_f64();
-            if let Some((_, prev)) = pending.replace((t, next)) {
-                let w = Instant::now();
-                let bytes = self.stage.wait(prev);
-                report.stage_seconds[2] += w.elapsed().as_secs_f64();
-                report.stage_seconds[3] += sink(bytes)?;
-            }
-            if k + 1 == times.len() {
-                if let Some((_, last)) = pending.take() {
+                unsupported.extend(frame.stats.unsupported.iter().cloned());
+                if let Some(det) = flash.as_mut() {
+                    let cells = self.renderer.flash_grid(&frame.texture);
+                    det.push(t, &cells);
+                }
+                for id in &frame.stats.contrast_unprobed {
+                    unprobed.entry(id.clone()).or_default().push(k);
+                }
+                for (id, ratio) in &frame.stats.contrast {
+                    let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
+                    if *ratio < e.0 {
+                        *e = (*ratio, t);
+                    }
+                }
+                report.decode_wait_seconds += frame.stats.decode_wait;
+                report.vector_seconds += frame.stats.vector_seconds;
+                let next =
+                    self.stage.submit(&frame.texture, &working, &self.color, self.format, self.size, self.keep_alpha);
+                let t2 = Instant::now();
+                report.stage_seconds[0] += (t1 - t0).as_secs_f64();
+                report.stage_seconds[1] += (t2 - t1).as_secs_f64();
+                if let Some((_, prev)) = pending.replace((t, next)) {
                     let w = Instant::now();
-                    let bytes = self.stage.wait(last);
+                    let bytes = self.stage.wait(prev);
                     report.stage_seconds[2] += w.elapsed().as_secs_f64();
                     report.stage_seconds[3] += sink(bytes)?;
                 }
+                if k + 1 == times.len() {
+                    if let Some((_, last)) = pending.take() {
+                        let w = Instant::now();
+                        let bytes = self.stage.wait(last);
+                        report.stage_seconds[2] += w.elapsed().as_secs_f64();
+                        report.stage_seconds[3] += sink(bytes)?;
+                    }
+                }
             }
-        }
+            Ok(())
+        })?;
         report.unsupported = unsupported.into_iter().collect();
         // text the inline probe could not reach: measure once, at the middle of the longest run of
         // frames in which it is drawn, by rendering that frame with and without it
@@ -364,7 +393,7 @@ pub fn deliver(
     let mut report = Report { path: resolve(&base, &output.path), fps, ..Default::default() };
     // audio first: the mix feeds the analysis table
     let t_audio = Instant::now();
-    let scene_audio: Option<SceneAudio> = audio::mix_scene(&ev0, fps, representation.as_deref())?;
+    let mut scene_audio: Option<SceneAudio> = audio::mix_scene(&ev0, fps, representation.as_deref())?;
     report.audio_seconds = t_audio.elapsed().as_secs_f64();
     let ev = match &scene_audio {
         Some(sa) => {
@@ -459,10 +488,12 @@ pub fn deliver(
         let mut renderer = Renderer::new(gpu.clone(), p);
         renderer.representation = representation.clone();
         renderer.burn_captions = output.burn_captions.clone();
-        if let Some(sa) = &scene_audio {
+        if let Some(sa) = scene_audio.as_mut() {
+            // the mix is done with these buffers (the master was sliced to disk above), so
+            // the shaders take them over rather than doubling a programme's worth of audio
             let mut channels: std::collections::HashMap<String, std::sync::Arc<Vec<Vec<f32>>>> =
-                sa.mixed.nodes.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))).collect();
-            channels.insert("master".into(), std::sync::Arc::new(sa.mixed.master.clone()));
+                std::mem::take(&mut sa.mixed.nodes).into_iter().map(|(k, v)| (k, std::sync::Arc::new(v))).collect();
+            channels.insert("master".into(), std::sync::Arc::new(std::mem::take(&mut sa.mixed.master)));
             renderer.audio =
                 Some(std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: sa.mix.rate as f64, channels }));
         }

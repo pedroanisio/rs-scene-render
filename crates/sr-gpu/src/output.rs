@@ -2,7 +2,7 @@
 //! bytes an encoder reads (NV12, P010, RGBA8, RGBA16 or planar float), in
 //! the output colour space, transfer, matrix and range, scaled to the
 //! output size with letterboxing, then read back through a staging ring so
-//! the next frame renders while this one maps.
+//! the next frame renders and converts while this one maps.
 
 use std::sync::Arc;
 
@@ -78,12 +78,18 @@ struct Params {
     pad: [u32; 3],
 }
 
-/// A conversion in flight.
+/// A conversion in flight: its staging buffer (out of the ring until [`OutputStage::wait`]
+/// returns it), the submission that fills it, and the flag its map callback sets.
 pub struct Pending {
+    slot: usize,
     buffer: wgpu::Buffer,
     bytes: usize,
+    submitted: wgpu::SubmissionIndex,
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Staging buffers in the ring: one mapping, one converting, one spare.
+const RING: usize = 3;
 
 /// The converter and its staging ring.
 pub struct OutputStage {
@@ -92,7 +98,14 @@ pub struct OutputStage {
     pipe: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     samp: wgpu::Sampler,
-    free: Vec<(u64, wgpu::Buffer)>,
+    /// Parameters, rewritten before every submission (queue writes land after earlier work).
+    params: wgpu::Buffer,
+    /// Packed output, grown when a larger frame needs it.
+    packed: Option<wgpu::Buffer>,
+    /// Staging buffers by slot; a slot is empty while its buffer is out in a [`Pending`].
+    ring: [Option<wgpu::Buffer>; RING],
+    /// The slot the next submission takes.
+    head: usize,
     frame_index: u32,
 }
 
@@ -165,7 +178,24 @@ impl OutputStage {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        OutputStage { device, queue, pipe, bgl, samp, free: Vec::new(), frame_index: 0 }
+        let params = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("output params"),
+            size: std::mem::size_of::<Params>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        OutputStage {
+            device,
+            queue,
+            pipe,
+            bgl,
+            samp,
+            params,
+            packed: None,
+            ring: [None, None, None],
+            head: 0,
+            frame_index: 0,
+        }
     }
 
     /// Starts converting `frame` to `size` in `format`; returns a pending readback.
@@ -210,23 +240,28 @@ impl OutputStage {
             pad: [0; 3],
         };
         self.frame_index = self.frame_index.wrapping_add(1);
-        let ubuf = d.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: std::mem::size_of::<Params>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&p));
+        // The queue orders this write after every earlier submission, so the previous
+        // frame's pack pass reads its own parameters before these land.
+        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         let size_bytes = (words as u64) * 4;
-        let storage = d.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("packed"),
-            size: size_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let staging = match self.free.iter().position(|(s, _)| *s == size_bytes) {
-            Some(i) => self.free.swap_remove(i).1,
-            None => d.create_buffer(&wgpu::BufferDescriptor {
+        // The shader stops at `words`, so a packed buffer left over from a larger frame is fine.
+        if self.packed.as_ref().is_none_or(|b| b.size() < size_bytes) {
+            self.packed = Some(d.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("packed"),
+                size: size_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+        }
+        let storage = self.packed.as_ref().expect("packed buffer");
+        // Round-robin through the ring. A slot is only empty while its buffer is out in a
+        // `Pending` (still mapping, or dropped unwaited), so a buffer is never handed out
+        // twice; an empty or wrongly sized slot gets a fresh buffer.
+        let slot = self.head;
+        self.head = (self.head + 1) % RING;
+        let staging = match self.ring[slot].take() {
+            Some(b) if b.size() == size_bytes => b,
+            _ => d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("staging"),
                 size: size_bytes,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -237,7 +272,7 @@ impl OutputStage {
             label: None,
             layout: &self.bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.params.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&frame.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.samp) },
                 wgpu::BindGroupEntry { binding: 3, resource: storage.as_entire_binding() },
@@ -252,28 +287,31 @@ impl OutputStage {
             let (x, y) = if groups > 65535 { (65535, groups.div_ceil(65535)) } else { (groups, 1) };
             pass.dispatch_workgroups(x, y, 1);
         }
-        enc.copy_buffer_to_buffer(&storage, 0, &staging, 0, size_bytes);
-        self.queue.submit([enc.finish()]);
+        enc.copy_buffer_to_buffer(storage, 0, &staging, 0, size_bytes);
+        let submitted = self.queue.submit([enc.finish()]);
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let r = ready.clone();
         staging.slice(..).map_async(wgpu::MapMode::Read, move |_| r.store(true, std::sync::atomic::Ordering::Release));
-        Pending { buffer: staging, bytes, ready }
+        Pending { slot, buffer: staging, bytes, submitted, ready }
     }
 
     /// Waits for a conversion and returns its bytes; the staging buffer returns to the ring.
+    ///
+    /// Only this conversion's submission is waited for, so work submitted after it (the
+    /// next frame's render and pack) keeps running on the GPU meanwhile.
     pub fn wait(&mut self, p: Pending) -> Vec<u8> {
-        while !p.ready.load(std::sync::atomic::Ordering::Acquire) {
+        use std::sync::atomic::Ordering;
+        let Pending { slot, buffer, bytes, submitted, ready } = p;
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: None });
+        while !ready.load(Ordering::Acquire) {
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         }
         let out = {
-            let view = p.buffer.slice(..).get_mapped_range().expect("mapped");
-            view[..p.bytes].to_vec()
+            let view = buffer.slice(..).get_mapped_range().expect("mapped");
+            view[..bytes].to_vec()
         };
-        p.buffer.unmap();
-        let size = p.buffer.size();
-        if self.free.len() < 4 {
-            self.free.push((size, p.buffer));
-        }
+        buffer.unmap();
+        self.ring[slot] = Some(buffer);
         out
     }
 }
