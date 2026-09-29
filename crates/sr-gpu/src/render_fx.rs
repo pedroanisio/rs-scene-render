@@ -511,6 +511,7 @@ impl Renderer {
             node: n.id.to_string(),
             named: HashMap::new(),
             audio: self.audio.clone(),
+            seed: self.seed,
         }
     }
 

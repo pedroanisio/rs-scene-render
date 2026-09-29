@@ -51,31 +51,42 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 fn enc(c: vec3<f32>) -> vec3<f32> { return tf_encode3(1u, max(c, vec3(0.0))); }
 fn dec(c: vec3<f32>) -> vec3<f32> { return tf_decode3(1u, c); }
 
-fn hash21(p: vec2<f32>, s: f32) -> f32 {
-    var q = fract(vec3(p.x, p.y, s) * vec3(0.1031, 0.1030, 0.0973));
-    q += dot(q, q.yzx + 33.33);
-    return fract((q.x + q.y) * q.z);
-}
-fn vnoise(p: vec2<f32>, s: f32) -> f32 {
+// The effect's D24 seed (a u64 in i.yz, or for transitions in the bits of v3.xy).
+fn fx_seed() -> vec2<u32> { return vec2(fx.i.y, fx.i.z); }
+fn tr_seed() -> vec2<u32> { return vec2(bitcast<u32>(fx.v[3].x), bitcast<u32>(fx.v[3].y)); }
+
+// A u64 seed plus a signed offset.
+fn seed_plus(seed: vec2<u32>, k: i32) -> vec2<u32> { return u64_add(seed, u64_of_i32(k)); }
+
+// Smooth lattice noise in [0, 1): U(seed, 0, pack(i, j)) at the lattice points, smoothstep
+// between (the Python renderer's effects.value_noise, CONVENTIONS 5.19).
+fn d24_value(p: vec2<f32>, seed: vec2<u32>) -> f32 {
     let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i, s);
-    let b = hash21(i + vec2(1.0, 0.0), s);
-    let c = hash21(i + vec2(0.0, 1.0), s);
-    let d = hash21(i + vec2(1.0, 1.0), s);
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    var f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    let ix = i32(i.x); let iy = i32(i.y);
+    let l = vec4(d24_unit(seed, vec2(0u), d24_pack(ix, iy, 0)), d24_unit(seed, vec2(0u), d24_pack(ix + 1, iy, 0)),
+                 d24_unit(seed, vec2(0u), d24_pack(ix, iy + 1, 0)), d24_unit(seed, vec2(0u), d24_pack(ix + 1, iy + 1, 0)));
+    return mix(mix(l.x, l.y, f.x), mix(l.z, l.w, f.x), f.y);
 }
-fn fbm(p: vec2<f32>, s: f32) -> f32 {
-    var v = 0.0;
-    var a = 0.5;
-    var q = p;
-    for (var k = 0; k < 5; k++) {
-        v += a * vnoise(q, s + f32(k) * 7.0);
-        q = q * 2.03 + vec2(17.0, 9.0);
-        a *= 0.5;
+
+// The Python renderer's fields.fractal (basic): octave i at 2^i weighs roughness^i, on seed
+// + 101 i + 7919 · phase, cross-faded (smoothstep) to the next evolution phase; normalised.
+fn d24_fbm(p: vec2<f32>, seed: vec2<u32>, octaves: f32, evolution: f32) -> f32 {
+    let oc = clamp(octaves, 1.0, 12.0);
+    let phase = floor(evolution);
+    var f = evolution - phase;
+    f = f * f * (3.0 - 2.0 * f);
+    var out = 0.0; var total = 0.0;
+    for (var i = 0; i < i32(ceil(oc)); i++) {
+        let w = pow(0.5, f32(i)) * min(1.0, oc - f32(i));
+        let q = p * exp2(f32(i));
+        let base = i * 101 + i32(phase) * 7919;
+        let z = mix(d24_value(q, seed_plus(seed, base)), d24_value(q, seed_plus(seed, base + 7919)), f);
+        out += z * w;
+        total += w;
     }
-    return v;
+    return out / max(total, 1e-7);
 }
 
 fn rgb2hsv(c: vec3<f32>) -> vec3<f32> {
@@ -227,6 +238,35 @@ fn tonemap(c: vec3<f32>, op: u32) -> vec3<f32> {
     }
 }
 
+// Bilinear sampling at pixel coordinates (texel i at i), transparent outside: the Python
+// renderer's effects.sample.
+fn sample_px(p: vec2<f32>) -> vec4<f32> {
+    let d = vec2<i32>(dims());
+    let f0 = floor(p);
+    let f = p - f0;
+    let i0 = vec2<i32>(f0);
+    var acc = vec4(0.0);
+    for (var j = 0; j < 2; j++) {
+        for (var i = 0; i < 2; i++) {
+            let q = i0 + vec2(i, j);
+            let w = select(1.0 - f.x, f.x, i == 1) * select(1.0 - f.y, f.y, j == 1);
+            if (all(q >= vec2(0)) && all(q < d) && w > 0.0) { acc += textureLoad(src, q, 0) * w; }
+        }
+    }
+    return acc;
+}
+
+// Film grain's three D24 normals at pixel px: draws (y · width + x) · 3 + c of the effect's seed
+// (i.yz) on the frame's channel (v0.z).
+fn grain_draws(px: vec2<f32>) -> vec3<f32> {
+    let xy = vec2<u32>(floor(px));
+    let base = (xy.y * u32(dims().x) + xy.x) * 3u;
+    let seed = vec2(fx.i.y, fx.i.z);
+    let ch = vec2(u32(fx.v[0].z), 0u);
+    return vec3(d24_gaussian(seed, ch, vec2(base, 0u)), d24_gaussian(seed, ch, vec2(base + 1u, 0u)),
+                d24_gaussian(seed, ch, vec2(base + 2u, 0u)));
+}
+
 fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
     var c = c3;
     let v = fx.v;
@@ -331,17 +371,29 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             h.z = h.z + v[0].w * w;
             c = dec(hsv2rgb(h));
         }
-        case 21u: { // film grain: v0.x amount, v0.y size, v0.z seed
-            let q = floor(px / max(v[0].y, 0.5));
-            let n = (hash21(q, v[0].z) + hash21(q + 0.5, v[0].z + 3.0) - 1.0);
-            let e = enc(c);
-            let l = luma(e);
-            c = dec(max(e + n * v[0].x * 0.25 * (1.0 - abs(l * 2.0 - 1.0) * 0.5), vec3(0.0)));
+        case 21u: { // film grain: v0 0.05·amount, _, frame, field scale (0: draw here); v1 strength, response
+            // D24 normals per sample, (y · width + x) · 3 + channel, seed in i.yz, the frame as the channel
+            var n: vec3<f32>;
+            if (v[0].w == 0.0) {
+                n = grain_draws(px);
+            } else {
+                n = A(uv).rgb * v[0].w;
+            }
+            let k = clamp(c, vec3(0.0), vec3(1.0));
+            let wgt = pow(max(4.0 * k * (1.0 - k), vec3(0.0)), vec3(v[1].w));
+            c = max(c + n * v[0].x * wgt * v[1].rgb, vec3(0.0));
         }
-        case 22u: { // noise: v0.x amount, v0.y seed, v0.z monochrome
-            let n = vec3(hash21(px, v[0].y), hash21(px, v[0].y + 1.7), hash21(px, v[0].y + 3.1)) - 0.5;
-            let m = select(n, vec3(n.x), v[0].z > 0.5);
-            c = dec(max(enc(c) + m * v[0].x, vec3(0.0)));
+        case 22u: { // noise: v0 amount, frame, channels (1 or 3); D24 uniforms in [-1, 1) per sample in display values
+            let xy = vec2<u32>(floor(px));
+            let nc = u32(v[0].z);
+            let base = (xy.y * u32(dims().x) + xy.x) * nc;
+            let ch = vec2(u32(v[0].y), 0u);
+            var n = vec3(-1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base, 0u)));
+            if (nc == 3u) {
+                n.y = -1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base + 1u, 0u));
+                n.z = -1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base + 2u, 0u));
+            }
+            c = dec(max(enc(c) + n * v[0].x, vec3(0.0)));
         }
         case 23u: { // spill suppress: v1 key colour, v0.x amount
             let k = v[1].rgb;
@@ -383,6 +435,40 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
         return vec4(stored(c) * s.a, s.a);
     }
     switch fx.i.x {
+        case 75u: { return vec4(grain_draws(px), 1.0); } // film grain's field, before its blur
+        case 76u: { // glitch, rows and blocks: v0 amount px, row height, block weight, blocks; v1 frame, rows
+            let seed = vec2(fx.i.y, fx.i.z);
+            let ch = vec2(u32(v[1].x), 0u);
+            let xy = vec2<i32>(floor(px));
+            let row = u32(floor(f32(xy.y) / v[0].y));
+            let rows = u32(v[1].y);
+            let keep = d24_unit(seed, ch, vec2(rows + row, 0u)) < 0.25;
+            let shift = select(0.0, -1.0 + 2.0 * d24_unit(seed, ch, vec2(row, 0u)), keep) * v[0].x;
+            var o = sample_px(vec2(f32(xy.x) + shift, f32(xy.y)));
+            for (var k = 0; k < i32(v[0].w); k++) {
+                let t0 = textureLoad(aux, vec2(3 * k, 0), 0);
+                let t1 = textureLoad(aux, vec2(3 * k + 1, 0), 0);
+                let t2 = textureLoad(aux, vec2(3 * k + 2, 0), 0);
+                let bx = i32(t0.x * 256.0 + t0.y); let by = i32(t0.z * 256.0 + t0.w);
+                let bw = i32(t1.x * 256.0 + t1.y); let bh = i32(t1.z * 256.0 + t1.w);
+                let sx = i32(t2.x * 256.0 + t2.y); let sy = i32(t2.z * 256.0 + t2.w);
+                if (xy.x >= bx && xy.x < bx + bw && xy.y >= by && xy.y < by + bh) {
+                    let src_px = textureLoad(src, vec2(sx + xy.x - bx, sy + xy.y - by), 0);
+                    o = mix(o, src_px, v[0].z);
+                }
+            }
+            return o;
+        }
+        case 77u: { // glitch, channel delay and quantisation: v0 delay px, levels
+            let xy = floor(px);
+            let r = sample_px(vec2(xy.x - v[0].x, xy.y));
+            let b = sample_px(vec2(xy.x + v[0].x, xy.y));
+            let g = textureLoad(src, vec2<i32>(xy), 0);
+            let a = max(max(r.a, g.a), b.a);
+            let st = select(vec3(0.0), vec3(r.r, g.g, b.b) / a, a > 1e-6);
+            let l = v[0].y - 1.0;
+            return vec4(round(st * l) / l * a, a);
+        }
         case 64u: { // vignette: v0 amount, size, softness; v1 colour; v2.xy centre (uv)
             let asp = vec2(d.x / d.y, 1.0);
             let r = length((in.uv - v[2].xy) * asp) / length(0.5 * asp);
@@ -403,7 +489,7 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
         }
         case 67u: { // light leak: v0 intensity, time*speed, seed; v1 colour
             let t = v[0].y;
-            let n = fbm(in.uv * 1.5 + vec2(t * 0.15, t * 0.05), v[0].z);
+            let n = d24_fbm(in.uv * 1.5 + vec2(t * 0.15, t * 0.05), fx_seed(), 5.0, 0.0);
             let edge = pow(1.0 - clamp(length(in.uv - vec2(0.9, 0.1)) * 1.1, 0.0, 1.0), 2.0);
             let w = clamp(n * edge * 2.0, 0.0, 1.0) * v[0].x;
             return s + vec4(v[1].rgb * w, 0.0) * max(s.a, 0.0);
@@ -430,7 +516,7 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
             return vec4(s.rgb + add, max(s.a, min(1.0, luma(add))));
         }
         case 70u: { // fractal noise: v0 scale px, frequency, time*speed, seed; v1 intensity, mix
-            let n = fbm(px / max(v[0].x, 1.0) * v[0].y + vec2(v[0].z), v[0].w) * v[1].x;
+            let n = d24_fbm(px / max(v[0].x, 1.0) * v[0].y, fx_seed(), 6.0, v[0].z) * v[1].x;
             let g = vec4(vec3(n), 1.0);
             return mix(s, g, v[1].y);
         }
@@ -497,7 +583,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
         }
         case 1u: { // turbulent displace: v0 amount px, size px, time, seed
             let q = in.uv * d / max(v[0].y, 1.0);
-            let o = vec2(fbm(q + vec2(v[0].z), v[0].w), fbm(q + vec2(5.2, 1.3) + vec2(v[0].z), v[0].w)) - 0.5;
+            let o = vec2(d24_fbm(q, fx_seed(), 6.0, v[0].z), d24_fbm(q + vec2(37.0, 17.0), seed_plus(fx_seed(), 7), 6.0, v[0].z)) - 0.5;
             uv = uv + o * 2.0 * v[0].x / d;
         }
         case 2u: { // wave warp: v0 amplitude px, wavelength px, phase (rad), angle deg
@@ -540,7 +626,8 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
         }
         case 8u: { // heat haze: v0 amount px, scale px, time
             let q = in.uv * d / max(v[0].y, 1.0);
-            let o = vec2(vnoise(q + vec2(0.0, v[0].z * 2.0), 3.0), vnoise(q + vec2(4.0, v[0].z * 2.0), 5.0)) - 0.5;
+            let q2 = q - vec2(0.0, v[0].z);  // rising cells (the Python renderer's heat haze)
+            let o = vec2(d24_fbm(q2, fx_seed(), 6.0, v[0].z), d24_fbm(q2 + vec2(37.0, 17.0), seed_plus(fx_seed(), 7), 6.0, v[0].z)) - 0.5;
             uv = uv + o * v[0].x / d;
         }
         case 9u: { // mirror across a line through c at angle v0.x
@@ -587,25 +674,16 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             let b = Sz(in.uv - o);
             return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
         }
-        case 16u: { // glitch: v0 amount, seed, time bucket, block px
-            let row = floor(in.uv.y * d.y / max(v[0].w, 2.0));
-            let h = hash21(vec2(row, v[0].z), v[0].y);
-            var o = 0.0;
-            if (h < v[0].x * 0.5) { o = (hash21(vec2(row, v[0].z + 1.0), v[0].y) - 0.5) * 0.2 * v[0].x; }
-            let split = v[0].x * 6.0 / d.x;
-            let r = Sz(in.uv + vec2(o + split, 0.0));
-            let g = Sz(in.uv + vec2(o, 0.0));
-            let b = Sz(in.uv + vec2(o - split, 0.0));
-            return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
-        }
         case 17u: { // vhs: v0 amount, time, seed
             let row = in.uv.y * d.y;
-            let j = (vnoise(vec2(row * 0.05, v[0].y * 8.0), v[0].z) - 0.5) * 6.0 * v[0].x / d.x;
+            let ch = vec2(u32(v[0].z), 0u);
+            let j = d24_gaussian(fx_seed(), ch, vec2(u32(row), 0u)) * 0.4 * 6.0 * v[0].x / d.x;
             let bleed = 3.0 * v[0].x / d.x;
             let g = Sz(in.uv + vec2(j, 0.0));
             let r = Sz(in.uv + vec2(j + bleed, 0.0));
             let b = Sz(in.uv + vec2(j - bleed, 0.0));
-            let n = (hash21(floor(in.uv * d), v[0].y * 60.0 + v[0].z) - 0.5) * 0.08 * v[0].x;
+            let xy = vec2<u32>(floor(in.uv * d));
+            let n = d24_gaussian(fx_seed(), ch, vec2(u32(d.y) + xy.y * u32(d.x) + xy.x, 0u)) * 0.018 * v[0].x;
             let line = 1.0 - 0.15 * v[0].x * step(0.5, fract(row * 0.5));
             return vec4((vec3(r.r, g.g, b.b) + n * g.a) * line, max(g.a, max(r.a, b.a)));
         }
@@ -973,7 +1051,7 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
         }
         case 22u: { // glitch
             let row = floor(uv.y * 24.0);
-            let h = hash21(vec2(row, floor(p * 20.0)), 7.0);
+            let h = d24_unit(tr_seed(), vec2(u32(floor(p * 20.0)), 0u), vec2(u32(row), 0u));
             let o = (h - 0.5) * 0.2 * sin(p * PI);
             let w = select(0.0, 1.0, h < p);
             return mix(F(uv + vec2(o, 0.0)), T(uv + vec2(o * 0.5, 0.0)), w);
@@ -1047,7 +1125,7 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             return select(over(a, b), over(b, a), p >= 0.5);
         }
         case 32u: { // light leak: warm burn over a crossfade
-            let n = fbm(uv * 2.0 + vec2(p, 0.0), 11.0);
+            let n = d24_fbm(uv * 2.0 + vec2(p, 0.0), tr_seed(), 5.0, 0.0);
             let burn = sin(p * PI) * smoothstep(0.3, 0.9, n + uv.x * 0.4);
             let base = mix(F(uv), T(uv), smoothstep(0.35, 0.65, p));
             return base + vec4(col.rgb * burn * 2.0, 0.0) * max(base.a, burn);
