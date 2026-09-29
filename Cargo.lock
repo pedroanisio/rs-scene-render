@@ -2304,6 +2304,7 @@ dependencies = [
 name = "sr-audio"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "serde",
  "thiserror",
 ]
@@ -2312,6 +2313,7 @@ dependencies = [
 name = "sr-deliver"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
