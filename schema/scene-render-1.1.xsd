@@ -1141,6 +1141,47 @@
     <xs:attribute name="object" type="xs:string"/>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+  <xs:complexType name="tilesAssetType">
+    <xs:annotation><xs:documentation>
+      Map tiles: a PMTiles archive (@src) of vector (MVT) or raster (PNG, JPEG, WebP) tiles; or
+      an online tile service (@url, a template with {z}, {x} and {y}, or {s} for a subdomain),
+      whose tiles `scene-render resolve` downloads for the views the document's maps show into
+      @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
+      @tileSize is the pixel size tiles are drawn at (default 512 for vector tiles, 256 for
+      raster); @minZoom and @maxZoom bound the zooms fetched from a service. @attribution is the
+      credit the data requires.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI"/>
+    <xs:attribute name="url" type="xs:string"/>
+    <xs:attribute name="cache" type="xs:anyURI"/>
+    <xs:attribute name="cacheSha256" type="sha256Type"/>
+    <xs:attribute name="tileSize" type="xs:positiveInteger"/>
+    <xs:attribute name="minZoom" type="xs:nonNegativeInteger" default="0"/>
+    <xs:attribute name="maxZoom" type="xs:nonNegativeInteger" default="19"/>
+    <xs:attribute name="attribution" type="xs:string"/>
+    <xs:attributeGroup ref="assetProvenance"/>
+  </xs:complexType>
+  <xs:complexType name="basemapType">
+    <xs:annotation><xs:documentation>
+      A basemap from a tiles asset. Vector tiles are drawn with a MapLibre style (@mapStyle: a
+      style JSON file, or protomaps-light / protomaps-dark, the Protomaps basemap styles, the
+      default);
+      raster tiles are drawn as images, warped into the map's projection. Raster basemaps paint
+      beneath the map's vector content. @detail shifts the tile zoom (positive: finer tiles);
+      @labels="false" leaves out the style's text.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="tiles" type="xs:IDREF" use="required"/>
+    <xs:attribute name="mapStyle" type="xs:string"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="detail" type="xs:double" default="0"/>
+    <xs:attribute name="labels" type="xs:boolean" default="true"/>
+    <xs:attribute name="attribution" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>Draws the tiles' credit (their @attribution, or the archive's) in the map's corner, as data licences such as OpenStreetMap's require.</xs:documentation></xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
   <xs:complexType name="featureStyleType">
     <xs:annotation><xs:documentation>
       Overrides the style of the features of a geoLayer whose key (the layer's @keyBy property)
@@ -1264,6 +1305,7 @@
       camera moves. Tilt a map in perspective with its layer's 3D rotation.
     </xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="basemap" type="basemapType"/>
       <xs:element name="geoLayer" type="geoLayerType"/>
       <xs:element name="graticule" type="graticuleType"/>
       <xs:element name="route" type="routeType"/>
@@ -1305,6 +1347,7 @@
       <xs:element name="formula" type="formulaAssetType"/>
       <xs:element name="generated" type="generatedAssetType"/>
       <xs:element name="geo" type="geoAssetType"/>
+      <xs:element name="tiles" type="tilesAssetType"/>
       <xs:element name="map" type="mapAssetType"/>
     </xs:choice>
   </xs:complexType>

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sr_geo::data::{self, Feature, Format, Geometry};
+use sr_geo::mvt;
+use sr_geo::pmtiles::Archive;
+use sr_geo::style::Style;
 use sr_geo::view::{Fly, Kind, Map, View};
 use sr_model::model as m;
 
@@ -155,4 +158,106 @@ pub fn locate(cam: &Camera, v: &View, lon: f64, lat: f64) -> ([f64; 2], bool) {
     let q = proj.point_unclipped(lon, lat);
     let inside = q[0] >= 0.0 && q[1] >= 0.0 && q[0] <= cam.map.size[0] && q[1] <= cam.map.size[1];
     (q, proj.visible(lon, lat) && inside)
+}
+
+/// The tiles asset `id` of the main document and the archive it reads: `src`, or the `cache` that
+/// `scene-render resolve` fills from `url`.
+pub fn tiles_asset<'p>(p: &'p Program, id: &str) -> Result<(&'p m::TilesAsset, PathBuf), String> {
+    let a = p
+        .scene
+        .assets
+        .as_ref()
+        .and_then(|a| a.children.iter().find(|c| c.id() == Some(id)))
+        .ok_or_else(|| format!("no tiles asset {id:?}"))?;
+    let m::AssetsChild::Tiles(t) = a else { return Err(format!("{id} is not a tiles asset")) };
+    let src =
+        t.src.as_deref().or(t.cache.as_deref()).ok_or_else(|| {
+            format!("tiles {id}: needs @src, or @url with a @cache that `scene-render resolve` fills")
+        })?;
+    let base = p.base_dirs.first().cloned().unwrap_or_default();
+    match sr_model::assets::resolve(src, &base) {
+        sr_model::assets::Resolved::Local(path) => Ok((t, path)),
+        sr_model::assets::Resolved::Remote(u) => Err(format!("{u}: tiles are not fetched while rendering")),
+    }
+}
+
+/// An open tile archive (per process, keyed by path, size and modification time).
+pub fn archive(path: &Path) -> Result<Arc<Archive>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Archive>>>> = OnceLock::new();
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let key = format!("{}|{}|{:?}", path.display(), meta.len(), meta.modified().ok());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(a) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Ok(a.clone());
+    }
+    let a = Arc::new(Archive::open(path)?);
+    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, a.clone());
+    Ok(a)
+}
+
+type TileCache = HashMap<(usize, u8, u32, u32), Option<Arc<TileData>>>;
+
+/// A tile's contents: vector layers, or the encoded image of a raster tile.
+pub enum TileData {
+    Vector(Vec<mvt::Layer>),
+    Raster(Arc<Vec<u8>>),
+}
+
+/// Tile z/x/y of an archive, decoded (a bounded cache of recent tiles).
+pub fn tile(a: &Arc<Archive>, z: u8, x: u32, y: u32) -> Result<Option<Arc<TileData>>, String> {
+    static CACHE: OnceLock<Mutex<TileCache>> = OnceLock::new();
+    let key = (Arc::as_ptr(a) as usize, z, x, y);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(t) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Ok(t.clone());
+    }
+    let t = match a.tile(z, x, y)? {
+        None => None,
+        Some(b) if a.header.tile_type.raster() => Some(Arc::new(TileData::Raster(Arc::new(b)))),
+        Some(b) => Some(Arc::new(TileData::Vector(mvt::decode(&b)?))),
+    };
+    let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if c.len() > 1024 {
+        c.clear();
+    }
+    c.insert(key, t.clone());
+    Ok(t)
+}
+
+/// A basemap style: a built-in name (`protomaps-light` by default, `protomaps-dark`) or a style
+/// file relative to the document.
+pub fn style(p: &Program, spec: Option<&str>) -> Result<Arc<Style>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Style>>>> = OnceLock::new();
+    let spec = spec.unwrap_or("protomaps-light");
+    let (key, text) = match sr_geo::style::builtin(spec) {
+        Some(t) => (spec.to_string(), t.to_string()),
+        None => {
+            let base = p.base_dirs.first().cloned().unwrap_or_default();
+            let path = match sr_model::assets::resolve(spec, &base) {
+                sr_model::assets::Resolved::Local(path) => path,
+                sr_model::assets::Resolved::Remote(u) => return Err(format!("{u}: styles are read from local files")),
+            };
+            let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let key = format!("{}|{}|{:?}", path.display(), meta.len(), meta.modified().ok());
+            if let Some(s) = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+                return Ok(s.clone());
+            }
+            (key, std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
+        }
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(s) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Ok(s.clone());
+    }
+    let s = Arc::new(Style::parse(&text)?);
+    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, s.clone());
+    Ok(s)
+}
+
+/// The tile zoom a basemap draws at: raster tiles closest to their pixel size (rounded), vector
+/// tiles by the floor of the map zoom as MapLibre does, shifted by `detail`.
+pub fn basemap_zoom(proj: &sr_geo::project::Projection, tile_size: f64, detail: f64, raster: bool) -> u8 {
+    let z = (std::f64::consts::TAU * proj.scale() / tile_size).log2() + detail;
+    let z = if raster { z.round() } else { z.floor() };
+    z.clamp(0.0, 24.0) as u8
 }

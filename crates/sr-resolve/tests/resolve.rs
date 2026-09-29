@@ -325,3 +325,78 @@ fn audioforge_renders_a_cue() {
     let info = sr_media::probe(&d.join("hit.wav")).unwrap();
     assert_eq!(info.audio.first().map(|a| a.sample_rate), Some(44100));
 }
+
+#[test]
+fn online_tiles_are_fetched_for_the_views_and_pinned() {
+    // a tile service answering every z/x/y with a PNG of colour (60·z, 40·x, 40·y)
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/tiles/{{z}}/{{x}}/{{y}}.png", l.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let mut s = s.unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let mut headers = String::new();
+            loop {
+                let mut h = String::new();
+                r.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                headers.push_str(&h);
+            }
+            let zxy: Vec<u32> = path
+                .trim_start_matches("/tiles/")
+                .trim_end_matches(".png")
+                .split('/')
+                .filter_map(|v| v.parse().ok())
+                .collect();
+            let mut png = Vec::new();
+            image::RgbImage::from_pixel(
+                256,
+                256,
+                image::Rgb([60 * zxy[0] as u8, 40 * zxy[1] as u8, 40 * zxy[2] as u8]),
+            )
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+            write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                png.len()
+            )
+            .unwrap();
+            s.write_all(&png).unwrap();
+            log.lock().unwrap().push((path, headers));
+        }
+    });
+    let d = project(
+        "tiles",
+        &format!(
+            r#"<scene version="1.1"><project width="512" height="512" fps="2" duration="1"/><assets>
+  <tiles id="osm" url="{url}" cache="gen/osm.pmtiles" cacheSha256="{ZERO}" attribution="Test tiles"/>
+  <map id="m" width="512" height="512" projection="web-mercator" centerLon="0" centerLat="0"><basemap tiles="osm"/></map>
+</assets><composition><layer id="l" asset="m"/></composition></scene>"#
+        ),
+    );
+    let doc = d.join("scene.scene.xml");
+    // the network needs permission
+    let refused = resolve(&doc, &opts(&d)).unwrap();
+    assert!(refused[0].status == Status::Error && refused[0].message.contains("--allow-cloud"), "{refused:?}");
+    assert!(seen.lock().unwrap().is_empty());
+    let rows = resolve(&doc, &Options { allow_cloud: true, ..opts(&d) }).unwrap();
+    assert_eq!(status(&rows, "osm"), Status::Made, "{rows:?}");
+    // zoom 0 of a 512-pixel Web Mercator world shows the four 256-pixel tiles of z1
+    let got: Vec<String> = seen.lock().unwrap().iter().map(|s| s.0.clone()).collect();
+    assert_eq!(got, ["/tiles/1/0/0.png", "/tiles/1/0/1.png", "/tiles/1/1/0.png", "/tiles/1/1/1.png"]);
+    assert!(seen.lock().unwrap()[0].1.contains("User-Agent: scene-render/"));
+    // the archive holds them; the document validates
+    let a = sr_geo::pmtiles::Archive::open(&d.join("gen/osm.pmtiles")).unwrap();
+    assert!(a.tile(1, 1, 1).unwrap().is_some() && a.tile(2, 0, 0).unwrap().is_none());
+    assert!(sr_model::load_file(&doc, &sr_model::LoadOptions::default()).is_ok());
+    assert_eq!(resolve(&doc, &Options { allow_cloud: true, ..opts(&d) }).unwrap()[0].status, Status::UpToDate);
+    assert_eq!(seen.lock().unwrap().len(), 4);
+}

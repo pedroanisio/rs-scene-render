@@ -164,6 +164,8 @@ CASES = [
     ("c52", ["C52"], ins_comp('<fluid id="fl" width="10" height="10"><fluidSource start="2" end="1"/></fluid>')),
     ("c53", ["C53"], sub('palette="#F7FBFF #08306B"', 'palette="#F7FBFF #08306B" domain="3 1"')),
     ("s06-latitude", ["S06"], sub('<pin lon="5" lat="5"', '<pin lon="5" lat="95"')),
+    ("r27", ["R27"], sub('<basemap tiles="streets"', '<basemap tiles="places"')),
+    ("c46", ["C46"], sub('<tiles id="streets" src="../media/streets.pmtiles"', '<tiles id="streets"')),
 ]
 for attr, anchor, repl in [
     ("fill", 'shape="rounded-rect" width="400" height="300" fill="var(--bg)"', 'shape="rounded-rect" width="400" height="300" fill="url(#logo)"'),

@@ -213,6 +213,7 @@ struct Sets<'a> {
     sprite_assets: HashSet<&'a str>,
     /// `@id` of every `/scene/physics/forceField`.
     force_fields: Vec<&'a str>,
+    tiles_assets: Vec<&'a str>,
     audio_assets: HashSet<&'a str>,
     generated_audio: HashSet<&'a str>,
     video_with_audio: HashSet<&'a str>,
@@ -261,6 +262,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.mesh_assets.insert(i);
             } else if is(a, "geo") {
                 s.geo_assets.push(i);
+            } else if is(a, "tiles") {
+                s.tiles_assets.push(i);
             } else if is(a, "audio") {
                 s.audio_assets.insert(i);
             } else if is(a, "generated") && matches!(a.attribute("kind"), Some("speech" | "music" | "sound-effect")) {
@@ -449,6 +452,14 @@ impl<'a> Eval<'a> {
                 let r37 = !has("geo") || self.sets.geo_assets.contains(&v("geo").as_str());
                 self.check(r37, n, "R37", || "route/@geo must name a geo asset.".into());
                 self.check(has("points") || has("geo"), n, "C45", || "route needs @points or @geo.".into());
+            }
+            "basemap" => {
+                let r27 = self.sets.tiles_assets.contains(&v("tiles").as_str());
+                self.check(r27, n, "R27", || "basemap/@tiles must name a tiles asset.".into());
+            }
+            "tiles" if parent_is("assets") => {
+                let ok = has("src") || (has("url") && has("cache") && has("cacheSha256"));
+                self.check(ok, n, "C46", || "tiles need @src, or @url with @cache and @cacheSha256.".into());
             }
             "map" => {
                 let r26 = a("fit").is_none_or(|list| every_token_names(list, &self.sets.geo_assets));

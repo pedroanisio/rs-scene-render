@@ -21,6 +21,8 @@ use sr_vector::Paint;
 
 use crate::vector::{is, Attrs};
 
+#[path = "text_basemap.rs"]
+mod basemap;
 /// Paint resolution over a box (node-local x, y, w, h).
 #[path = "text_map.rs"]
 mod map;

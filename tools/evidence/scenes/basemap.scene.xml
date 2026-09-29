@@ -1,0 +1,20 @@
+<scene version="1.1">
+  <!-- Basemaps: Protomaps vector tiles of Lisbon's Baixa styled with the Protomaps light
+       style (labels placed without overlap, streets named along their lines), beside a globe
+       of raster tiles warped into the orthographic projection. -->
+  <project width="800" height="360" fps="10" duration="1" background="#000000"/>
+  <assets>
+    <tiles id="baixa" src="{GEO}/baixa.pmtiles"/>
+    <tiles id="raster" src="{GEO}/raster.pmtiles" attribution="Test tiles"/>
+    <map id="streets" width="640" height="360" projection="web-mercator" centerLon="-9.1365" centerLat="38.7060" zoom="15.5">
+      <basemap tiles="baixa"/>
+    </map>
+    <map id="globe" width="160" height="160" projection="orthographic" centerLon="20" centerLat="20">
+      <basemap tiles="raster" attribution="false"/>
+    </map>
+  </assets>
+  <composition>
+    <layer id="a" asset="streets"/>
+    <layer id="b" asset="globe" x="640" y="100"/>
+  </composition>
+</scene>

@@ -923,6 +923,56 @@
           "why": "the fly-to ends with Beijing in the middle"
         }
       ]
+    },
+    {
+      "id": "basemap",
+      "reference": "MapLibre / Protomaps street maps",
+      "technique": "vector-tile basemap with a MapLibre style, and raster tiles on a globe",
+      "scene": "scenes/basemap.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 320,
+          "y": 306,
+          "rgb": "#80DEEA",
+          "tol": 0.02,
+          "why": "the Tagus in the style's water colour"
+        },
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            0,
+            0,
+            640,
+            300
+          ],
+          "not_rgb": "#E2DFDA",
+          "tol": 0.02,
+          "min": 0.3,
+          "why": "streets, blocks and labels cover the land"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 720,
+          "y": 180,
+          "rgb": "#3C2800",
+          "tol": 0.02,
+          "why": "the globe's centre (20°E, 20°N) shows raster tile z1 (1, 0)"
+        },
+        {
+          "type": "color",
+          "t": 0.0,
+          "x": 643,
+          "y": 103,
+          "rgb": "#000000",
+          "tol": 0.02,
+          "why": "nothing beyond the globe's limb"
+        }
+      ]
     }
   ]
 }

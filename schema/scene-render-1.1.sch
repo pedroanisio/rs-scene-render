@@ -270,6 +270,12 @@
       <sch:assert id="R37" test="not(@geo) or /scene/assets/geo[@id=current()/@geo]">route/@geo must name a geo asset.</sch:assert>
       <sch:assert id="C45" test="@points or @geo">route needs @points or @geo.</sch:assert>
     </sch:rule>
+    <sch:rule context="basemap">
+      <sch:assert id="R27" test="/scene/assets/tiles[@id=current()/@tiles]">basemap/@tiles must name a tiles asset.</sch:assert>
+    </sch:rule>
+    <sch:rule context="tiles">
+      <sch:assert id="C46" test="@src or (@url and @cache and @cacheSha256)">tiles need @src, or @url with @cache and @cacheSha256.</sch:assert>
+    </sch:rule>
     <sch:rule context="map">
       <sch:assert id="R26" test="not(@fit) or count(str:tokenize(normalize-space(@fit),' ')) = count(/scene/assets/geo[contains(concat(' ',normalize-space(current()/@fit),' '), concat(' ',@id,' '))])">every id in map/@fit must name a geo asset.</sch:assert>
     </sch:rule>

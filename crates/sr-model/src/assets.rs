@@ -227,7 +227,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                 } else {
                     format!("@{} of <{ename}>: file {shown} does not exist (resolved to {})", c.attr, c.path.display())
                 };
-                let resolvable = matches!(ename, "generated" | "captionTrack") && c.attr == "cache";
+                let resolvable = matches!(ename, "generated" | "captionTrack" | "tiles") && c.attr == "cache";
                 out.push(Diagnostic {
                     severity: c.missing,
                     code: c.missing_code.into(),
@@ -273,7 +273,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                     attr_loc(c.node, c.hash_attr),
                     path,
                 )
-                .with_help(if matches!(ename, "generated" | "captionTrack") {
+                .with_help(if matches!(ename, "generated" | "captionTrack" | "tiles") {
                     "run `scene-render resolve` to make the cache and pin its digest"
                 } else {
                     "the file changed since the digest was recorded; regenerate it or update the digest"

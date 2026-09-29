@@ -72,7 +72,9 @@
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
     <geo id="places" src="../media/places.geojson" sha256="6835b996e02a5d81173cc113fec9b1f3558e5c7f65c17e2db0573964b31a55da"/>
+    <tiles id="streets" src="../media/streets.pmtiles" sha256="f8bc680c129c74be9360aa0bde56af397aa0b102876a2e824d4078a46c6b04e0" attribution="© OpenStreetMap contributors"/>
     <map id="atlas" width="800" height="400" projection="equal-earth" fit="places logo" fitPadding="10" background="#12324F" outline="#FFFFFF">
+      <basemap tiles="streets" mapStyle="protomaps-dark" detail="0.5"/>
       <graticule step="15"/>
       <geoLayer geo="places" fillBy="v" palette="#F7FBFF #08306B" label="name">
         <featureStyle key="a" fill="#E63946"/>

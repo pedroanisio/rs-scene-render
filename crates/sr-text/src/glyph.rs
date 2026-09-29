@@ -24,6 +24,10 @@ pub struct Bitmap {
     pub rect: [f64; 4],
     pub xf: Xf,
     pub opacity: f64,
+    /// The part of the image drawn (u0, v0, u1, v1).
+    pub uv: [f64; 4],
+    /// Drawn before the vector commands instead of after them (map raster tiles).
+    pub below: bool,
 }
 
 /// Vector commands plus bitmaps, in the text box's space.
@@ -530,6 +534,8 @@ fn draw_glyphs(lib: &FontLib, lay: &Layout, fx: Option<&[GlyphFx]>, decor: &Deco
                                 ],
                                 xf: e.xf,
                                 opacity: e.opacity,
+                                uv: [0.0, 0.0, 1.0, 1.0],
+                                below: false,
                             });
                             true
                         } else {

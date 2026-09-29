@@ -1651,43 +1651,16 @@ impl Renderer {
                                 let ds = crate::vector::deformers(n, g, size);
                                 crate::vector::deform_scene(&mut scene, &ds, tol);
                                 plan.stats.vector_seconds += clock.elapsed().as_secs_f64();
+                                for b in bitmaps.iter().filter(|b| b.below) {
+                                    self.draw_bitmap(plan, ctx, i, space, op, blend, seed, cmds, root_hash, b);
+                                }
                                 self.emit_vector(plan, ctx, i, space, op, blend, seed, cmds, root_hash, scene);
                                 for (radius, part) in std::mem::take(&mut self.pending_blur) {
                                     self.blurred_part(plan, ctx, i, space, op, cmds, root_hash, radius, part);
                                 }
-                                // colour bitmap glyphs as textured quads
-                                for b in bitmaps {
-                                    let Some(tex) = self.glyph_texture(&b) else { continue };
-                                    let world = n.world.then(&Affine(b.xf.0));
-                                    let d = Draw {
-                                        opacity: (op * b.opacity) as f32,
-                                        blend,
-                                        src_kind: src::TEXTURE,
-                                        seed,
-                                        uv_rect: [0.0, 0.0, 1.0, 1.0],
-                                        ..Default::default()
-                                    };
-                                    let [x, y, w, hh] = b.rect;
-                                    let hash = h(&[
-                                        root_hash,
-                                        b.key,
-                                        affine_hash(&space.xform.then(&world)),
-                                        hf(op * b.opacity),
-                                    ]);
-                                    self.draw_cmd(
-                                        plan,
-                                        ctx,
-                                        i,
-                                        space,
-                                        d,
-                                        [x, y, x + w, y + hh],
-                                        [0.0, 0.0, 1.0, 1.0],
-                                        &world,
-                                        tex,
-                                        cmds,
-                                        hash,
-                                        false,
-                                    );
+                                // colour bitmap glyphs and map tiles as textured quads
+                                for b in bitmaps.iter().filter(|b| !b.below) {
+                                    self.draw_bitmap(plan, ctx, i, space, op, blend, seed, cmds, root_hash, b);
                                 }
                             }
                             Err(e) => plan.stats.errors.push(format!("{}: {e}", n.id)),
@@ -1991,6 +1964,46 @@ impl Renderer {
     }
 
     /// Texture of a bitmap glyph (decoded once).
+    /// Draws a drawing's bitmap (a colour glyph or a map tile) as a textured quad in node space.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_bitmap(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        i: usize,
+        space: &Space,
+        op: f64,
+        blend: u32,
+        seed: u32,
+        cmds: &mut Vec<Cmd>,
+        root_hash: u64,
+        b: &sr_text::Bitmap,
+    ) {
+        let Some(tex) = self.glyph_texture(b) else { return };
+        let n = &ctx.g.nodes[i];
+        let world = n.world.then(&Affine(b.xf.0));
+        let d = Draw {
+            opacity: (op * b.opacity) as f32,
+            blend,
+            src_kind: src::TEXTURE,
+            seed,
+            uv_rect: b.uv.map(|v| v as f32),
+            ..Default::default()
+        };
+        let [x, y, w, hh] = b.rect;
+        let hash = h(&[
+            root_hash,
+            b.key,
+            affine_hash(&space.xform.then(&world)),
+            hf(op * b.opacity),
+            hf(b.uv[0]),
+            hf(b.uv[1]),
+            hf(b.uv[2]),
+            hf(b.uv[3]),
+        ]);
+        self.draw_cmd(plan, ctx, i, space, d, [x, y, x + w, y + hh], b.uv, &world, tex, cmds, hash, false);
+    }
+
     fn glyph_texture(&mut self, b: &sr_text::Bitmap) -> Option<Arc<Tex>> {
         if let Some(t) = self.glyph_tex.get(&b.key) {
             return t.clone();

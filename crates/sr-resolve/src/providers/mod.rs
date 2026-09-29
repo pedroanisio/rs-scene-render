@@ -18,6 +18,7 @@ use crate::protocol::{Request, Response};
 mod audioforge;
 mod cloud;
 mod piper;
+pub mod tiles;
 mod whisper;
 
 /// A provider.
@@ -142,6 +143,7 @@ pub fn find(name: &str) -> Result<Box<dyn Provider>, String> {
         "audioforge" => Box::new(audioforge::AudioForge),
         "openai" => Box::new(cloud::OpenAi),
         "elevenlabs" => Box::new(cloud::ElevenLabs),
+        "tiles" => Box::new(tiles::Tiles),
         other => {
             return Err(format!(
                 "unknown provider {other:?}: install a `scene-render-provider-{other}` program, set {env}, \

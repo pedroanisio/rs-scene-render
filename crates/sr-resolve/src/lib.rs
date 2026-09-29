@@ -381,6 +381,68 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
         out.push(r);
     }
 
+    // map tiles from online services, for every view the maps show
+    let doc = load(&text)?;
+    let tile_assets: Vec<&m::TilesAsset> = doc
+        .scene
+        .assets
+        .iter()
+        .flat_map(|a| a.children.iter())
+        .filter_map(|c| match c {
+            m::AssetsChild::Tiles(t) if t.url.is_some() && wanted(&t.id) => Some(t),
+            _ => None,
+        })
+        .collect();
+    for t in tile_assets {
+        let url = t.url.clone().unwrap_or_default();
+        let Some(cache_attr) = t.cache.clone() else {
+            out.push(error_row(&t.id, "tiles", "tiles", "", "tiles with @url need @cache".into()));
+            continue;
+        };
+        let cache = match local(&cache_attr, &base) {
+            Ok(c) => c,
+            Err(e) => {
+                out.push(error_row(&t.id, "tiles", "tiles", &cache_attr, e));
+                continue;
+            }
+        };
+        let set = match tile_set(&doc, t) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push(error_row(&t.id, "tiles", "tiles", &cache_attr, e));
+                continue;
+            }
+        };
+        let list: Vec<String> = set.iter().map(|(z, x, y)| format!("{z}/{x}/{y}")).collect();
+        let target = Target {
+            element: "tiles",
+            id: t.id.clone(),
+            cache,
+            cache_attr,
+            pinned: t.cache_sha256.as_ref().map(|s| s.to_string()),
+            req: Request {
+                protocol: PROTOCOL,
+                task: Some(Task::Generate),
+                kind: "tiles".into(),
+                id: t.id.clone(),
+                provider: "tiles".into(),
+                model: url,
+                prompt: Some(list.join(" ")),
+                sample_rate: rate,
+                bit_depth: bits,
+                timeline: Timeline { project_duration: doc.scene.project.duration.get(), start: None },
+                base_dir: base.display().to_string(),
+                ..Default::default()
+            },
+        };
+        let work = Scratch::new(&t.id)?;
+        let (r, pin) = settle(&target, o, &work.0);
+        if let Some(sha) = pin {
+            text = doc::set_attr(&text, "tiles", &target.id, "cacheSha256", &sha)?;
+        }
+        out.push(r);
+    }
+
     // transcriptions, from the mix as it now plays
     let doc = load(&text)?;
     let scene = &doc.scene;
@@ -474,6 +536,52 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
         }
     }
     Ok(out)
+}
+
+/// Every tile a document's maps show from the tiles asset `t` (frame by frame, at the zoom the
+/// renderer will draw), within its zoom limits.
+fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collections::BTreeSet<(u8, u32, u32)>, String> {
+    let ev = sr_eval::Evaluator::new(doc, &sr_eval::EvalOptions::default()).map_err(|e| format!("{e:?}"))?;
+    let p = ev.program();
+    let url = t.url.as_deref().unwrap_or("").to_ascii_lowercase();
+    let raster = [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| url.split('?').next().unwrap_or("").ends_with(e));
+    let size = t.tile_size.map(|s| s as f64).unwrap_or(if raster { 256.0 } else { 512.0 });
+    let (zmin, zmax) = (t.min_zoom as u8, t.max_zoom.min(24) as u8);
+    // the maps drawing these tiles, with each basemap's detail
+    let mut maps: Vec<(&m::MapAsset, f64)> = Vec::new();
+    for a in doc.scene.assets.iter().flat_map(|a| a.children.iter()) {
+        if let m::AssetsChild::Map(mp) = a {
+            for c in &mp.children {
+                if let m::MapAssetChild::Basemap(b) = c {
+                    if b.tiles == t.id {
+                        maps.push((mp, b.detail));
+                    }
+                }
+            }
+        }
+    }
+    let mut set = std::collections::BTreeSet::new();
+    if maps.is_empty() {
+        return Ok(set);
+    }
+    let fps = doc.scene.project.fps.as_f64().max(1.0);
+    let frames = (doc.scene.project.duration.get() * fps).ceil() as usize;
+    for f in 0..=frames {
+        let time = f as f64 / fps;
+        let g = ev.evaluate(time);
+        for (mp, detail) in &maps {
+            let cam = sr_eval::geo::camera(p, mp)?;
+            let props = g.elements.iter().find(|e| *e.key == *mp.id).map(|e| &e.props);
+            let animated = |name: &str| props.and_then(|p| p.get(name)).and_then(sr_eval::Value::as_num);
+            let view = sr_eval::geo::view(&cam, mp, &animated, time);
+            let proj = cam.map.projection(&view);
+            let z = sr_eval::geo::basemap_zoom(&proj, size, *detail, raster).clamp(zmin, zmax);
+            for tile in sr_geo::tiles::visible(&proj, z) {
+                set.insert((tile.z, tile.x, tile.y));
+            }
+        }
+    }
+    Ok(set)
 }
 
 fn error_row(id: &str, element: &'static str, provider: &str, cache: &str, message: String) -> Resolution {

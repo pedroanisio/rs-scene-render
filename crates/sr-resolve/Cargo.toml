@@ -12,6 +12,7 @@ sr-eval.workspace = true
 sr-audio.workspace = true
 sr-media.workspace = true
 sr-deliver.workspace = true
+sr-geo.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

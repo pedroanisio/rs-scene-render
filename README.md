@@ -487,9 +487,24 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 - `geo()` follows a spinning globe, and `geoVisible()` turns off on the far side.
 - A geoLayer naming a non-geo asset fails validation (R24).
 
-**Not yet.** Basemap tiles (vector PMTiles or raster), terrain and 3D buildings, label collision, and simplification of detailed data. The whole file is read into memory, so 1:10 m data is slow to fit; `fit` is cached per map setup.
+**Basemaps.** `<tiles>` names a tile archive and `<basemap tiles="…">` draws it under the map's other content.
+- **Archives:** tiles come from a PMTiles archive (`src`, version 3, with leaf directories and gzip; `sr-geo/pmtiles.rs`), such as a Protomaps basemap extract made with `pmtiles extract`. An online service (`url` with `{z}/{x}/{y}`) is fetched by `scene-render resolve --allow-cloud` into a PMTiles `cache` pinned by `cacheSha256`. The resolver works out the tiles from every frame's view at the zoom the renderer will draw, fetches them one at a time with an identifying User-Agent, and refuses more than `SR_TILES_MAX` (2000), so a render never touches the network and no service is bulk-downloaded.
+- **Tile selection:** tiles are chosen by walking the tile quadtree and keeping each tile whose outline, projected like any geometry, reaches the frame. A globe therefore gets its visible cap and a conic map what it covers. Vector tiles are drawn from the floor of the map zoom (as MapLibre does), and raster tiles at the zoom nearest their pixel size; beyond the archive's deepest zoom the parent tile's quarter is drawn. `detail` shifts the zoom.
+- **Vector tiles** (MVT; `sr-geo/mvt.rs`) are drawn through a MapLibre style (`mapStyle`: a style JSON file, or the built-in `protomaps-light` and `protomaps-dark`). The style engine (`sr-geo/style.rs`) evaluates filters, legacy functions and expressions: `match`, `case`, `coalesce`, `interpolate` (linear, exponential, cubic-bezier), `step`, `format`, comparisons, arithmetic, conversions and `let`/`var`.
+  - Fills of one paint are drawn as one shape, so tile and feature borders show no seam.
+  - Lines get width, dashes, caps, joins and casings.
+  - Circles are drawn as dots.
+  - Text labels are placed without overlap, the style's upper layers and lower sort keys first: at points with variable anchors, radial offsets and wrapping, or along roads, upright, with halos.
+  - Web Mercator views place tile geometry through an exact affine map; other projections go through the spherical pipeline.
+- **Raster tiles** are drawn as images cut into cells whose corners are projected, so they bend into any projection and stop at a globe's edge.
+- **Attribution:** the tiles' `attribution` (or the archive's) is drawn in the map's corner, as data licences require (`attribution="false"` leaves it out).
+- **Clipping:** a map is clipped to its frame.
+- **Not supported:** icons (sprites) and fonts named by the style (labels use the renderer's fonts with the style's weight and slant); line labels follow a straight segment, not the curve.
+- **Performance:** a five-second flight from the Atlantic down to Lisbon's streets renders at a median of 20 ms a frame at 720p on the RTX 6000 Ada.
 
-**Schema.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R26, R36, R37, C45 and C53 are part of the canonical schema, first implemented here. Other engines may not implement them yet.
+**Not yet.** Label collision for pins and geo layers (basemap labels avoid each other), and simplification of detailed data. The whole file is read into memory, so 1:10 m data is slow to fit; `fit` is cached per map setup.
+
+**Schema.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R26, R36, R37, C45 and C53 are part of the canonical schema, first implemented here. `<tiles>` and `<basemap>`, with the rules R27 and C46, are proposed for schema 1.2 in a draft SREP in sr-core, with this engine as the reference implementation. Other engines may not implement them yet.
 
 ## Generated media and transcription
 
@@ -518,6 +533,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - `audioforge`, music and sound effects from AudioForge's cue library (`SR_AUDIOFORGE`, else `PATH`): `model` is the cue, `prompt` its parameters, `seed` the performance seed. `duration=auto` fills the project after the track that plays it starts, and the audio format follows `audioMix`.
 - `openai` (speech with `/audio/speech`, images with `/images/generations`) and `elevenlabs` (speech) send the prompt to a cloud service, so they run only with `--allow-cloud`. They need `OPENAI_API_KEY` or `ELEVENLABS_API_KEY`, and `OPENAI_BASE_URL` and `ELEVENLABS_BASE_URL` point them at compatible servers. Requests go through `curl`, with the key in curl's configuration on standard input rather than on a command line.
 - Any other name runs the program in `SR_PROVIDER_<NAME>` or a `scene-render-provider-<name>` on `PATH`, which also overrides a built-in of that name. The program reads one JSON request on standard input (kind, provider, model, prompt, voice, language, seed, size, duration, the audio format, the timeline, the output path with the cache's extension, a scratch folder and, for transcription, the input WAV) and answers `{"ok": true, "version": "…"}` or `{"ok": false, "error": "…"}` as the last line of its output. A transcriber writes `{"segments": [{"start", "end", "text", "words": [{"start", "end", "text"}]}]}`. `scene-render-provider-example`, built with the crate, implements the protocol as a reference.
+- `tiles` fetches the map tiles an online `<tiles url>` service provides for the document's views into a PMTiles cache (see [Maps](#maps)); it too needs `--allow-cloud`.
 - A result whose extension differs from what the provider makes is converted by FFmpeg.
 
 **Schema.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are part of the canonical schema, first implemented here, and other engines may not implement them yet.
@@ -540,7 +556,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - **error**: the scene did not render;
 - **gap**: no probe exists because the engine has no feature for the technique.
 
-Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so fixing a defect means updating the manifest. The run writes `report.json`, `report.md` and `contact-sheet.png`, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 21 cases: 19 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
+Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so fixing a defect means updating the manifest. The run writes `report.json`, `report.md` and `contact-sheet.png`, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 22 cases: 20 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
 
 | Case | Outcome | Evidence |
 |---|---|---|
@@ -565,6 +581,7 @@ Each case records the outcome last accepted as `expect`, and any difference fail
 | path-traced still life (`renderer="pathtrace"`) | native | the traced set draws; the chrome ball reflects its surroundings |
 | stills beyond PNG/JPEG/WebP: HEIC in Display P3, JPEG XL, AVIF, PSD, TIFF | native | exact code values; the HEIC converts from P3 as LittleCMS does |
 | world map: Equal Earth, a highlighted country, a great-circle route, pins, a globe flying to Beijing | native | land, sea, route and pins where d3-geo projects them; the fly-to lands on target |
+| basemaps: Protomaps vector tiles of Lisbon in the Protomaps light style, raster tiles on a globe | native | the river in the style's water colour, labelled streets, the right raster tile, nothing past the limb |
 
 The animated-`z` and `object3D` depth cases cover the paint-order rule under [evaluation](#evaluation). A test also renders frames on either side of a restack in alternation with one renderer, at the root and inside an isolated group, so every render cache sees both orders.
 
@@ -605,7 +622,7 @@ crates/sr-3d/src/           import (glTF, OBJ, PLY, splats, FBX, USD), usdc (USD
 crates/sr-gpu/src/          gpu (device), color, resources (textures, images, pool), paint, render (planning,
                             caching, execution), video (decode conversion, frame blending, optical flow),
                             output (delivery conversion, readback ring), vector (shape, SVG, Lottie scenes,
-                            deformers), text (text, data graphics and captions), text_map (maps), fx (effect passes, LUTs),
+                            deformers), text (text, data graphics and captions), text_map (maps), text_basemap (basemaps), fx (effect passes, LUTs),
                             glsl and shader (custom GLSL through naga), render_fx (effects, adjustments,
                             transitions, motion blur, finishing), ocio (OpenColorIO through ociobakelut),
                             three (3D renderer), pathtrace (BVH, path tracer), render_three (3D scenes, cameras,
@@ -623,9 +640,10 @@ crates/sr-media/src/        probe, decode (video look-ahead, audio), encode (cod
                             heif (HEIF colour boxes)
 crates/sr-geo/src/          data (GeoJSON, TopoJSON, KML, GPX), sphere (spherical geometry), clip (antimeridian,
                             small circle, rectangle, rejoin), project (projections, resampling, fit), view (map
-                            camera, fly-to)
+                            camera, fly-to), pmtiles (archives), mvt (vector tiles), style (MapLibre styles),
+                            tiles (tile selection and placement); styles/ (the built-in Protomaps styles)
 crates/sr-resolve/src/      the resolve step: protocol (requests, keys), doc (in-place attribute edits), providers
-                            (whisper, piper, audioforge, openai, elevenlabs, external programs), and
+                            (whisper, piper, audioforge, openai, elevenlabs, tiles, external programs), and
                             bin/example_provider (the reference provider)
 crates/sr-audio/src/        layout, dsp, effects, loudness, mix, analysis, wav
 crates/sr-sim/src/          physics (Rapier world, joints, checkpoints), soft, particles, fields, timeline, flock,
@@ -639,8 +657,8 @@ examples/splat/             a synthetic 3DGS capture generator and a turntable s
 tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_sink.xml.in, perf_layers.py,
                             perf_video.py, perf_vector.py, perf_text.py, perf_effects.py, perf_3d.py,
                             perf_physics.py, evidence.py and evidence/ (cases, probe scenes),
-                            fixtures/ (Blender, usd-core, PyOpenColorIO, Pillow/LittleCMS and d3-geo scripts that
-                            write the test fixtures)
+                            fixtures/ (Blender, usd-core, PyOpenColorIO, Pillow/LittleCMS, d3-geo, pmtiles and
+                            MapLibre style-spec scripts that write the test fixtures)
 ```
 
 ## Tests
@@ -657,6 +675,6 @@ tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_
 - **3D and 360:** primitive volumes and outward winding, extrusion with holes and bevels, every importer (glTF with extensions, variants and animation, OBJ with MTL, ASCII PLY, 3DGS PLY, `.splat`, Z-up USDA, USDC and USDZ, FBX through ufbx including animation stacks), colour temperature, IES, environment prefiltering, the camera's projection and pitch and yaw conventions, MaterialX, naga validation of the 3D shaders; on the GPU, lit-side shading, shadows, glass over a backdrop, splat sorting, depth of field and dome lighting in the engine, then from documents a material sphere under default lights, shadows from `<lights>`, glass refracting 2D layers, an imported glTF with a material variant, a moving camera shifting 3D objects and 2.5D layers alike, 3D and 2.5D agreement, extruded text, group opacity, camera depth of field, lights following constraints, the four 360 layouts and stereo parallax; spherical metadata read back by ffprobe in both MP4 box orders.
 - **Simulation and accessibility:** free fall against ½gt², resting on the floor, bit-exact replay in any order, pendulum length and breaking welds, kinematic following and field forces, jelly and pinned cloth, particle counts, bursts, caps, floors and preroll; from documents, a falling layer, sparks with identical pixels under seeking, rain streaks, a landing jelly layer, reported constraint problems and the physics cache with its digest; validation of the soft-body substep limit; the flash detector at 15 Hz, 1 Hz, small areas, red and dim flicker, and delivery failing on flashes, low contrast and missing captions; `simulate` on the CLI; flocks, fluids, slime and erosion, clay meshing, screen-space lighting, cascaded shadows and path tracing as described in their sections; and a short fuzzing campaign on every test run.
 - **Still images:** every lossless format decoded to its exact pattern, HEIC within 3 steps of libheif, EXIF orientation, linear-light formats, the embedded colour descriptions each file reports, ICC-tagged images within 1/255 of LittleCMS, the declared-space override, a CMYK profile reported, an animated GIF played as video.
-- **Maps:** TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, and `geo()` placing a layer; the reference rules R26, R36, R37, C45 and C53.
+- **Maps:** PMTiles headers, tile ids and a real Protomaps extract's tiles decoded exactly as the Python `pmtiles` and `mapbox-vector-tile` readers decode them, and archives written with leaf directories read back; the Protomaps light style evaluated on those features at four zooms exactly as MapLibre's style-spec evaluates it (8,159 values and every filter decision); tile selection for flat maps and globes, and the affine fast path against the sphere; TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, `geo()` placing a layer, a vector basemap in its style's colours with labels, raster tiles on flat maps and globes with their credit, and maps clipped to their frame; online tiles fetched for the views and pinned, against a local tile server; the reference rules R26, R27, R36, R37, C45, C46 and C53.
 - **Resolve:** request keys, in-place attribute edits, prompt splitting and base64, whisper.cpp tokens joined into timed words, AudioForge's automatic duration, and the end-to-end runs described in [Generated media and transcription](#generated-media-and-transcription).
 - **CLI:** validate, inspect, eval, render, encode and explain end to end.

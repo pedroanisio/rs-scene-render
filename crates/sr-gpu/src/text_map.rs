@@ -45,6 +45,21 @@ fn keyed<'a>(e: &'a dyn Element, parent: &str) -> Vec<(&'a dyn Element, String)>
     out
 }
 
+/// Attribution text without HTML markup (tile services often give links).
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for c in s.chars() {
+        match c {
+            '<' => inside = true,
+            '>' => inside = false,
+            c if !inside => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&copy;", "©").replace("&amp;", "&")
+}
+
 /// Parses "lon,lat lon,lat …".
 fn lon_lats(s: &str) -> Vec<[f64; 2]> {
     s.split_whitespace()
@@ -85,13 +100,13 @@ fn polys_of_rings(rings: &[Vec<[f64; 2]>], closed: bool) -> Vec<Poly> {
         .collect()
 }
 
-struct Painter<'d> {
-    d: &'d mut Drawing,
+pub(super) struct Painter<'d> {
+    pub(super) d: &'d mut Drawing,
     tol: f64,
 }
 
 impl Painter<'_> {
-    fn fill(&mut self, polys: Vec<Poly>, paint: &Option<Paint>, opacity: f64) {
+    pub(super) fn fill(&mut self, polys: Vec<Poly>, paint: &Option<Paint>, opacity: f64) {
         if let (Some(paint), false) = (paint, polys.is_empty()) {
             if opacity > 0.0 {
                 self.d.scene.cmds.push(Cmd::Fill { polys, rule: FillRule::NonZero, paint: paint.clone(), opacity });
@@ -99,7 +114,7 @@ impl Painter<'_> {
         }
     }
 
-    fn stroke(&mut self, polys: &[Poly], paint: &Option<Paint>, width: f64, opacity: f64) {
+    pub(super) fn stroke(&mut self, polys: &[Poly], paint: &Option<Paint>, width: f64, opacity: f64) {
         if width <= 0.0 || polys.is_empty() {
             return;
         }
@@ -108,7 +123,15 @@ impl Painter<'_> {
         self.fill(outline, paint, opacity);
     }
 
-    fn dot(&mut self, c: [f64; 2], r: f64, fill: &Option<Paint>, stroke: &Option<Paint>, sw: f64, opacity: f64) {
+    pub(super) fn dot(
+        &mut self,
+        c: [f64; 2],
+        r: f64,
+        fill: &Option<Paint>,
+        stroke: &Option<Paint>,
+        sw: f64,
+        opacity: f64,
+    ) {
         if r <= 0.0 {
             return;
         }
@@ -258,6 +281,8 @@ pub fn map_drawing(tc: &mut TextCache, cx: &mut Cx, mp: &m::MapAsset) -> Result<
     let mut labels: Vec<(String, Style, [f64; 2], Align)> = Vec::new();
     let paint = |cx: &mut Cx, v: Option<Value>| v.and_then(|v| (cx.paint)(&v, bx));
 
+    let mut raster: Vec<sr_text::Bitmap> = Vec::new();
+    let mut credits: Vec<String> = Vec::new();
     {
         let mut pt = Painter { d: &mut d, tol };
         let sphere_outline = proj.project(&Geometry::Sphere);
@@ -267,7 +292,14 @@ pub fn map_drawing(tc: &mut TextCache, cx: &mut Cx, mp: &m::MapAsset) -> Result<
         for (c, ckey) in keyed(mp, key) {
             let ca = attrs(g, c, &ckey);
             let opacity = ca.num("opacity", 1.0);
-            if is(c, "geoLayer") {
+            if is(c, "basemap") {
+                let lib = tc.lib();
+                let out = super::basemap::draw(cx, lib, &mut pt, &proj, [w, h], &ca, tol)?;
+                raster.extend(out.bitmaps);
+                if ca.str("attribution").as_deref() != Some("false") {
+                    credits.extend(out.attribution.filter(|a| !credits.contains(a)));
+                }
+            } else if is(c, "geoLayer") {
                 let geo = ca.str("geo").unwrap_or_default();
                 let fs = sr_eval::geo::features(cx.p, &geo)?;
                 let fill = paint(cx, ca.paint("fill"));
@@ -454,6 +486,42 @@ pub fn map_drawing(tc: &mut TextCache, cx: &mut Cx, mp: &m::MapAsset) -> Result<
     }
     tc.font_assets = fonts;
     let lib = tc.lib();
+    d.bitmaps.extend(raster);
+
+    // the data's credit, small in the bottom-right corner
+    if !credits.is_empty() {
+        let text = strip_tags(&credits.join(" · "));
+        let st = Style {
+            size: (h / 60.0).clamp(9.0, 14.0),
+            color: Some(Paint::Solid { rgba: [0.1, 0.1, 0.1, 1.0], srgb: false }),
+            ..Default::default()
+        };
+        let width = w * 0.8;
+        let t = chart::text(lib, &text, &st, w - width - 6.0, h - st.size * 1.6, Align::End, width, tol);
+        let bg: Vec<Poly> = t
+            .scene
+            .cmds
+            .iter()
+            .flat_map(|c| match c {
+                Cmd::Fill { polys, .. } => polys.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let b = sr_vector::path::poly_bounds(&bg).0;
+        if b[2] > b[0] {
+            let pad = st.size * 0.3;
+            let plate =
+                shapes::rect(b[0] - pad, b[1] - pad, b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad, [0.0; 4])
+                    .flatten(tol);
+            d.scene.cmds.push(Cmd::Fill {
+                polys: plate,
+                rule: FillRule::NonZero,
+                paint: Paint::Solid { rgba: [1.0; 4], srgb: false },
+                opacity: 0.7,
+            });
+        }
+        d.extend(t);
+    }
     for (text, st, pos, align) in labels {
         let width = 1000.0;
         let x = match align {
@@ -463,5 +531,17 @@ pub fn map_drawing(tc: &mut TextCache, cx: &mut Cx, mp: &m::MapAsset) -> Result<
         };
         d.extend(chart::text(lib, &text, &st, x, pos[1], align, width, tol));
     }
+    // a map stops at its frame (projection keeps a margin for strokes; pins and labels reach over)
+    let content = std::mem::take(&mut d.scene);
+    d.scene.cmds.push(Cmd::Push { mask_init: 0.0 });
+    d.scene.extend(content);
+    d.scene.cmds.push(Cmd::Mask {
+        polys: shapes::rect(0.0, 0.0, w, h, [0.0; 4]).flatten(tol),
+        rule: FillRule::NonZero,
+        op: sr_vector::scene::MaskOp::Add,
+        opacity: 1.0,
+        invert: false,
+    });
+    d.scene.cmds.push(Cmd::Pop { opacity: 1.0 });
     Ok(d)
 }

@@ -18,6 +18,10 @@
 
 pub mod clip;
 pub mod data;
+pub mod mvt;
+pub mod pmtiles;
 pub mod project;
 pub mod sphere;
+pub mod style;
+pub mod tiles;
 pub mod view;

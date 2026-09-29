@@ -504,6 +504,11 @@ impl Projection {
         self
     }
 
+    /// The planar clip in force (the extent, narrowed for Mercator).
+    pub fn extent_rect(&self) -> Option<Rect> {
+        self.postclip()
+    }
+
     /// The pixel position of the centre.
     pub fn translate(&self) -> [f64; 2] {
         [self.tx, self.ty]

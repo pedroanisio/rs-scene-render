@@ -1,0 +1,2342 @@
+{
+"header": {
+"addressed_tiles_count": 6,
+"center_lat_e7": 387110000,
+"center_lon_e7": -91375000,
+"center_zoom": 12,
+"clustered": true,
+"internal_compression": 2,
+"leaf_directory_length": 0,
+"leaf_directory_offset": 1373,
+"max_lat_e7": 387140000,
+"max_lon_e7": -91329999,
+"max_zoom": 14,
+"metadata_length": 1179,
+"metadata_offset": 194,
+"min_lat_e7": 387080000,
+"min_lon_e7": -91420000,
+"min_zoom": 12,
+"root_length": 67,
+"root_offset": 127,
+"tile_compression": 2,
+"tile_contents_count": 6,
+"tile_data_length": 429995,
+"tile_data_offset": 1373,
+"tile_entries_count": 6,
+"tile_type": 1,
+"version": 3
+},
+"tile_ids": [
+[
+0,
+0,
+0,
+0
+],
+[
+0,
+0,
+0,
+0
+],
+[
+0,
+0,
+0,
+0
+],
+[
+0,
+0,
+0,
+0
+],
+[
+1,
+0,
+0,
+1
+],
+[
+1,
+1,
+0,
+4
+],
+[
+1,
+0,
+1,
+2
+],
+[
+1,
+1,
+1,
+3
+],
+[
+2,
+0,
+0,
+5
+],
+[
+2,
+3,
+0,
+20
+],
+[
+2,
+0,
+3,
+10
+],
+[
+2,
+2,
+2,
+13
+],
+[
+3,
+0,
+0,
+21
+],
+[
+3,
+7,
+0,
+84
+],
+[
+3,
+0,
+7,
+42
+],
+[
+3,
+7,
+5,
+65
+],
+[
+4,
+0,
+0,
+85
+],
+[
+4,
+15,
+0,
+340
+],
+[
+4,
+0,
+15,
+170
+],
+[
+4,
+4,
+12,
+181
+],
+[
+5,
+0,
+0,
+341
+],
+[
+5,
+31,
+0,
+1364
+],
+[
+5,
+0,
+31,
+682
+],
+[
+5,
+25,
+3,
+1313
+],
+[
+6,
+0,
+0,
+1365
+],
+[
+6,
+63,
+0,
+5460
+],
+[
+6,
+0,
+63,
+2730
+],
+[
+6,
+30,
+42,
+3175
+],
+[
+7,
+0,
+0,
+5461
+],
+[
+7,
+127,
+0,
+21844
+],
+[
+7,
+0,
+127,
+10922
+],
+[
+7,
+35,
+49,
+8441
+],
+[
+8,
+0,
+0,
+21845
+],
+[
+8,
+255,
+0,
+87380
+],
+[
+8,
+0,
+255,
+43690
+],
+[
+8,
+40,
+56,
+24277
+],
+[
+9,
+0,
+0,
+87381
+],
+[
+9,
+511,
+0,
+349524
+],
+[
+9,
+0,
+511,
+174762
+],
+[
+9,
+45,
+63,
+90211
+],
+[
+10,
+0,
+0,
+349525
+],
+[
+10,
+1023,
+0,
+1398100
+],
+[
+10,
+0,
+1023,
+699050
+],
+[
+10,
+50,
+70,
+363277
+],
+[
+11,
+0,
+0,
+1398101
+],
+[
+11,
+2047,
+0,
+5592404
+],
+[
+11,
+0,
+2047,
+2796202
+],
+[
+11,
+55,
+77,
+1406145
+]
+],
+"tiles": {
+"12/1943/1569": {
+"boundaries": {
+"extent": 4096,
+"features": 3,
+"first": [
+{
+"id": 35184735138470,
+"properties": {
+"kind": "locality",
+"kind_detail": 7,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184801098180,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+},
+{
+"id": 35185496042930,
+"properties": {
+"kind": "county",
+"kind_detail": 6,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+}
+],
+"sx": 752536.0,
+"sy": 605047.0,
+"vertices": 327
+},
+"buildings": {
+"extent": 4096,
+"features": 3,
+"first": [
+{
+"id": 35184396430180,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184398329380,
+"properties": {
+"height": 20.0,
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184405615580,
+"properties": {
+"height": 40.0,
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 12836451.0,
+"sy": 9509733.0,
+"vertices": 6047
+},
+"earth": {
+"extent": 4096,
+"features": 42,
+"first": [
+{
+"id": 35184528427271,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35184588885423,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35184592473535,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+}
+],
+"sx": 976854.0,
+"sy": 1230106.0,
+"vertices": 415
+},
+"landuse": {
+"extent": 4096,
+"features": 870,
+"first": [
+{
+"id": 35184391736519,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184391736610,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184395786393,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 33504786.0,
+"sy": 30444458.0,
+"vertices": 17146
+},
+"places": {
+"extent": 4096,
+"features": 168,
+"first": [
+{
+"id": 17592452002906,
+"properties": {
+"capital": "yes",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 4,
+"name": "Lisboa",
+"name:ar": "\u0644\u0634\u0628\u0648\u0646\u0629",
+"name:bg": "\u041b\u0438\u0441\u0430\u0431\u043e\u043d",
+"name:cs": "Lisabon",
+"name:da": "Lissabon",
+"name:de": "Lissabon",
+"name:el": "\u039b\u03b9\u03c3\u03b1\u03b2\u03cc\u03bd\u03b1",
+"name:en": "Lisbon",
+"name:es": "Lisboa",
+"name:et": "Lissabon",
+"name:fa": "\u0644\u06cc\u0633\u0628\u0648\u0646",
+"name:fi": "Lissabon",
+"name:fr": "Lisbonne",
+"name:ga": "Liosp\u00f3in",
+"name:he": "\u05dc\u05d9\u05e1\u05d1\u05d5\u05df",
+"name:hi": "\u0932\u093f\u0938\u094d\u092c\u0928",
+"name:hr": "Lisabon",
+"name:hu": "Lisszabon",
+"name:it": "Lisbona",
+"name:ja": "\u30ea\u30b9\u30dc\u30f3",
+"name:ko": "\ub9ac\uc2a4\ubcf8",
+"name:lt": "Lisabona",
+"name:lv": "Lisabona",
+"name:mr": "\u0932\u093f\u0938\u092c\u094b\u0928",
+"name:mt": "Li\u017cbona",
+"name:nl": "Lissabon",
+"name:pl": "Lizbona",
+"name:pt": "Lisboa",
+"name:ro": "Lisabona",
+"name:ru": "\u041b\u0438\u0441\u0441\u0430\u0431\u043e\u043d",
+"name:sk": "Lisabon",
+"name:sl": "Lizbona",
+"name:sv": "Lissabon",
+"name:tr": "Lizbon",
+"name:uk": "\u041b\u0456\u0441\u0430\u0431\u043e\u043d",
+"name:ur": "\u0644\u0632\u0628\u0646",
+"name:zh-Hans": "\u91cc\u65af\u672c",
+"name:zh-Hant": "\u91cc\u65af\u672c",
+"pgf:name:hi": "\uf8dd\uf8ef\uf8eb\uf8df\uf8fa",
+"pgf:name:mr": "\uf8dd\uf8ef\uf8f5\uf8df\uf8f1\uf8fa",
+"population": 552700,
+"population_rank": 12,
+"sort_key": -1281306,
+"wikidata": "Q597"
+},
+"type": "Point"
+},
+{
+"id": 17593791439513,
+"properties": {
+"capital": "7",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 8,
+"name": "Amadora",
+"name:ar": "\u0623\u0645\u062f\u0648\u0631\u0629",
+"name:pt": "Amadora",
+"name:uk": "\u0410\u043c\u0430\u0434\u043e\u0440\u0430",
+"population": 171454,
+"population_rank": 9,
+"sort_key": -199545,
+"wikidata": "Q189166"
+},
+"type": "Point"
+},
+{
+"id": 17592211663489,
+"properties": {
+"capital": "7",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 8,
+"name": "Almada",
+"name:ar": "\u062d\u0635\u0646 \u0627\u0644\u0645\u0639\u062f\u0646",
+"name:el": "\u0391\u03bb\u03bc\u03ac\u03bd\u03c4\u03b1",
+"name:uk": "\u0410\u043b\u043c\u0430\u0434\u0430",
+"population": 16718,
+"population_rank": 6,
+"sort_key": -199290,
+"wikidata": "Q328015"
+},
+"type": "Point"
+}
+],
+"sx": 306854.0,
+"sy": 353667.0,
+"vertices": 168
+},
+"pois": {
+"extent": 4096,
+"features": 106,
+"first": [
+{
+"id": 52776571016962,
+"properties": {
+"kind": "nature_reserve",
+"min_zoom": 11,
+"name": "Parque Florestal de Monsanto"
+},
+"type": "Point"
+},
+{
+"id": 52776564657016,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Alg\u00e9s"
+},
+"type": "Point"
+},
+{
+"id": 52776564652594,
+"properties": {
+"kind": "administrative",
+"min_zoom": 12,
+"name": "\u00c1guas Livres"
+},
+"type": "Point"
+}
+],
+"sx": 265204.0,
+"sy": 184449.0,
+"vertices": 106
+},
+"roads": {
+"extent": 4096,
+"features": 298,
+"first": [
+{
+"id": 35184376134180,
+"properties": {
+"is_link": true,
+"kind": "highway",
+"kind_detail": "motorway_link",
+"min_zoom": 4,
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184382161920,
+"properties": {
+"kind": "highway",
+"kind_detail": "motorway",
+"min_zoom": 4,
+"name": "Autoestrada do Sul",
+"network": "PT:national",
+"network_1": "PT:national",
+"ref": "A 2;IP 7",
+"shield_text": "IP7",
+"shield_text_1": "IP7",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184382161930,
+"properties": {
+"is_bridge": true,
+"kind": "highway",
+"kind_detail": "motorway",
+"min_zoom": 4,
+"name": "Ponte 25 de Abril",
+"name:de": "Br\u00fccke des 25. April",
+"network": "e-road",
+"network_1": "e-road",
+"network_2": "PT:national",
+"ref": "A 2",
+"shield_text": "E90",
+"shield_text_1": "E90",
+"shield_text_2": "IP7",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 41229236.0,
+"sy": 34092333.0,
+"vertices": 21226
+},
+"water": {
+"extent": 4096,
+"features": 11,
+"first": [
+{
+"id": 14164363,
+"properties": {
+"kind": "strait",
+"min_zoom": 12,
+"name": "Gargalo do Tejo",
+"sort_rank": 200
+},
+"type": "Point"
+},
+{
+"id": 35184554966007,
+"properties": {
+"kind": "river",
+"min_zoom": 10,
+"name": "Ribeira de Alg\u00e9s",
+"sort_rank": 200
+},
+"type": "LineString"
+},
+{
+"id": 35185072584621,
+"properties": {
+"kind": "river",
+"min_zoom": 10,
+"name": "Rio Tejo",
+"name:ar": "R\u00edo Tacho",
+"name:da": "Tajo",
+"name:el": "\u03a4\u03ac\u03b3\u03bf\u03c2",
+"name:en": "Tagus River",
+"name:es": "R\u00edo Tajo",
+"name:fr": "Fleuve Tage",
+"name:he": "\u05d8\u05d7\u05d5",
+"name:hu": "Tejo",
+"name:it": "fiume Tago",
+"name:lt": "Tachas",
+"name:nl": "Taag",
+"name:pl": "Tag",
+"name:pt": "Rio Tejo",
+"name:uk": "\u0422\u0430\u0433\u0443\u0441",
+"sort_rank": 200
+},
+"type": "LineString"
+}
+],
+"sx": 1294495.0,
+"sy": 1542011.0,
+"vertices": 579
+}
+},
+"12/1944/1569": {
+"boundaries": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 35184801098180,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+}
+],
+"sx": 96974.0,
+"sy": 283363.0,
+"vertices": 182
+},
+"buildings": {
+"extent": 4096,
+"features": 3,
+"first": [
+{
+"id": 35184381342740,
+"properties": {
+"height": 40.0,
+"kind": "building",
+"sort_rank": 400
+},
+"type": "Polygon"
+},
+{
+"id": 35184381343590,
+"properties": {
+"height": 20.0,
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184403819330,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 2168284.0,
+"sy": 2844077.0,
+"vertices": 2271
+},
+"earth": {
+"extent": 4096,
+"features": 9,
+"first": [
+{
+"id": 35184815679568,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35185563856288,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35185563856291,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+}
+],
+"sx": 229830.0,
+"sy": 176922.0,
+"vertices": 157
+},
+"landuse": {
+"extent": 4096,
+"features": 312,
+"first": [
+{
+"id": 35184377065571,
+"properties": {
+"kind": "pitch",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184391813992,
+"properties": {
+"kind": "village_green",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184398331587,
+"properties": {
+"kind": "railway",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 4541462.0,
+"sy": 6357359.0,
+"vertices": 5671
+},
+"places": {
+"extent": 4096,
+"features": 62,
+"first": [
+{
+"id": 17592452002906,
+"properties": {
+"capital": "yes",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 4,
+"name": "Lisboa",
+"name:ar": "\u0644\u0634\u0628\u0648\u0646\u0629",
+"name:bg": "\u041b\u0438\u0441\u0430\u0431\u043e\u043d",
+"name:cs": "Lisabon",
+"name:da": "Lissabon",
+"name:de": "Lissabon",
+"name:el": "\u039b\u03b9\u03c3\u03b1\u03b2\u03cc\u03bd\u03b1",
+"name:en": "Lisbon",
+"name:es": "Lisboa",
+"name:et": "Lissabon",
+"name:fa": "\u0644\u06cc\u0633\u0628\u0648\u0646",
+"name:fi": "Lissabon",
+"name:fr": "Lisbonne",
+"name:ga": "Liosp\u00f3in",
+"name:he": "\u05dc\u05d9\u05e1\u05d1\u05d5\u05df",
+"name:hi": "\u0932\u093f\u0938\u094d\u092c\u0928",
+"name:hr": "Lisabon",
+"name:hu": "Lisszabon",
+"name:it": "Lisbona",
+"name:ja": "\u30ea\u30b9\u30dc\u30f3",
+"name:ko": "\ub9ac\uc2a4\ubcf8",
+"name:lt": "Lisabona",
+"name:lv": "Lisabona",
+"name:mr": "\u0932\u093f\u0938\u092c\u094b\u0928",
+"name:mt": "Li\u017cbona",
+"name:nl": "Lissabon",
+"name:pl": "Lizbona",
+"name:pt": "Lisboa",
+"name:ro": "Lisabona",
+"name:ru": "\u041b\u0438\u0441\u0441\u0430\u0431\u043e\u043d",
+"name:sk": "Lisabon",
+"name:sl": "Lizbona",
+"name:sv": "Lissabon",
+"name:tr": "Lizbon",
+"name:uk": "\u041b\u0456\u0441\u0430\u0431\u043e\u043d",
+"name:ur": "\u0644\u0632\u0628\u0646",
+"name:zh-Hans": "\u91cc\u65af\u672c",
+"name:zh-Hant": "\u91cc\u65af\u672c",
+"pgf:name:hi": "\uf8dd\uf8ef\uf8eb\uf8df\uf8fa",
+"pgf:name:mr": "\uf8dd\uf8ef\uf8f5\uf8df\uf8f1\uf8fa",
+"population": 552700,
+"population_rank": 12,
+"sort_key": -1281306,
+"wikidata": "Q597"
+},
+"type": "Point"
+},
+{
+"id": 17592211663489,
+"properties": {
+"capital": "7",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 8,
+"name": "Almada",
+"name:ar": "\u062d\u0635\u0646 \u0627\u0644\u0645\u0639\u062f\u0646",
+"name:el": "\u0391\u03bb\u03bc\u03ac\u03bd\u03c4\u03b1",
+"name:uk": "\u0410\u043b\u043c\u0430\u0434\u0430",
+"population": 16718,
+"population_rank": 6,
+"sort_key": -199290,
+"wikidata": "Q328015"
+},
+"type": "Point"
+},
+{
+"id": 17593334886410,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Beato",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614245,
+"wikidata": "Q686717"
+},
+"type": "Point"
+}
+],
+"sx": 2077.0,
+"sy": 142141.0,
+"vertices": 62
+},
+"pois": {
+"extent": 4096,
+"features": 61,
+"first": [
+{
+"id": 35185441008409,
+"properties": {
+"kind": "low_emission_zone",
+"min_zoom": 12,
+"name": "Zona 2"
+},
+"type": "Point"
+},
+{
+"id": 52776564653321,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "S\u00e3o Jos\u00e9"
+},
+"type": "Point"
+},
+{
+"id": 35185441012739,
+"properties": {
+"kind": "low_emission_zone",
+"min_zoom": 12,
+"name": "Zona 1"
+},
+"type": "Point"
+}
+],
+"sx": 41953.0,
+"sy": 96397.0,
+"vertices": 61
+},
+"roads": {
+"extent": 4096,
+"features": 161,
+"first": [
+{
+"id": 35184395029300,
+"properties": {
+"kind": "major_road",
+"kind_detail": "trunk",
+"min_zoom": 7,
+"name": "Avenida Infante Dom Henrique",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184395701520,
+"properties": {
+"kind": "major_road",
+"kind_detail": "trunk",
+"min_zoom": 7,
+"name": "Avenida Infante Dom Henrique",
+"network": "PT:national",
+"network_1": "PT:national",
+"shield_text": "EN6",
+"shield_text_1": "EN6",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184395701570,
+"properties": {
+"kind": "major_road",
+"kind_detail": "trunk",
+"min_zoom": 7,
+"name": "Avenida Marechal Ant\u00f3nio de Sp\u00ednola",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 5515120.0,
+"sy": 9233015.0,
+"vertices": 7363
+},
+"water": {
+"extent": 4096,
+"features": 7,
+"first": [
+{
+"id": 28056653,
+"properties": {
+"kind": "bay",
+"min_zoom": 10,
+"name": "Mar da Palha",
+"name:es": "Mar de la Paja",
+"name:fr": "Mer de Paille",
+"sort_rank": 200
+},
+"type": "Point"
+},
+{
+"id": 35185072584620,
+"properties": {
+"kind": "river",
+"min_zoom": 10,
+"name": "Rio Tejo",
+"name:ar": "R\u00edo Tacho",
+"name:da": "Tajo",
+"name:el": "\u03a4\u03ac\u03b3\u03bf\u03c2",
+"name:en": "Tagus River",
+"name:es": "R\u00edo Tajo",
+"name:fr": "Fleuve Tage",
+"name:he": "\u05d8\u05d7\u05d5",
+"name:hu": "Tejo",
+"name:it": "fiume Tago",
+"name:lt": "Tachas",
+"name:nl": "Taag",
+"name:pl": "Tag",
+"name:pt": "Rio Tejo",
+"name:uk": "\u0422\u0430\u0433\u0443\u0441",
+"sort_rank": 200
+},
+"type": "LineString"
+},
+{
+"id": 1,
+"properties": {
+"kind": "ocean",
+"sort_rank": 200
+},
+"type": "Polygon"
+}
+],
+"sx": 320828.0,
+"sy": 276237.0,
+"vertices": 227
+}
+},
+"13/3887/3139": {
+"boundaries": {
+"extent": 4096,
+"features": 2,
+"first": [
+{
+"id": 35184801195160,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+},
+{
+"id": 35185496042930,
+"properties": {
+"kind": "county",
+"kind_detail": 6,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+}
+],
+"sx": 305556.0,
+"sy": 102131.0,
+"vertices": 113
+},
+"buildings": {
+"extent": 4096,
+"features": 12,
+"first": [
+{
+"id": 35184398669020,
+"properties": {
+"kind": "building",
+"layer": 1,
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184398828040,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184411716550,
+"properties": {
+"height": 10.0,
+"kind": "building",
+"layer": 1,
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 20549908.0,
+"sy": 10484404.0,
+"vertices": 8937
+},
+"earth": {
+"extent": 4096,
+"features": 18,
+"first": [
+{
+"id": 35184528427271,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35185068736592,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+},
+{
+"id": 35185068736597,
+"properties": {
+"kind": "cliff",
+"min_zoom": 13
+},
+"type": "LineString"
+}
+],
+"sx": 565541.0,
+"sy": 684817.0,
+"vertices": 235
+},
+"landuse": {
+"extent": 4096,
+"features": 311,
+"first": [
+{
+"id": 35184395786393,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184399347504,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184399372413,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 10644975.0,
+"sy": 7336342.0,
+"vertices": 5568
+},
+"places": {
+"extent": 4096,
+"features": 42,
+"first": [
+{
+"id": 17592452002906,
+"properties": {
+"capital": "yes",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 4,
+"name": "Lisboa",
+"name:ar": "\u0644\u0634\u0628\u0648\u0646\u0629",
+"name:bg": "\u041b\u0438\u0441\u0430\u0431\u043e\u043d",
+"name:cs": "Lisabon",
+"name:da": "Lissabon",
+"name:de": "Lissabon",
+"name:el": "\u039b\u03b9\u03c3\u03b1\u03b2\u03cc\u03bd\u03b1",
+"name:en": "Lisbon",
+"name:es": "Lisboa",
+"name:et": "Lissabon",
+"name:fa": "\u0644\u06cc\u0633\u0628\u0648\u0646",
+"name:fi": "Lissabon",
+"name:fr": "Lisbonne",
+"name:ga": "Liosp\u00f3in",
+"name:he": "\u05dc\u05d9\u05e1\u05d1\u05d5\u05df",
+"name:hi": "\u0932\u093f\u0938\u094d\u092c\u0928",
+"name:hr": "Lisabon",
+"name:hu": "Lisszabon",
+"name:it": "Lisbona",
+"name:ja": "\u30ea\u30b9\u30dc\u30f3",
+"name:ko": "\ub9ac\uc2a4\ubcf8",
+"name:lt": "Lisabona",
+"name:lv": "Lisabona",
+"name:mr": "\u0932\u093f\u0938\u092c\u094b\u0928",
+"name:mt": "Li\u017cbona",
+"name:nl": "Lissabon",
+"name:pl": "Lizbona",
+"name:pt": "Lisboa",
+"name:ro": "Lisabona",
+"name:ru": "\u041b\u0438\u0441\u0441\u0430\u0431\u043e\u043d",
+"name:sk": "Lisabon",
+"name:sl": "Lizbona",
+"name:sv": "Lissabon",
+"name:tr": "Lizbon",
+"name:uk": "\u041b\u0456\u0441\u0430\u0431\u043e\u043d",
+"name:ur": "\u0644\u0632\u0628\u0646",
+"name:zh-Hans": "\u91cc\u65af\u672c",
+"name:zh-Hant": "\u91cc\u65af\u672c",
+"pgf:name:hi": "\uf8dd\uf8ef\uf8eb\uf8df\uf8fa",
+"pgf:name:mr": "\uf8dd\uf8ef\uf8f5\uf8df\uf8f1\uf8fa",
+"population": 552700,
+"population_rank": 12,
+"sort_key": -1281306,
+"wikidata": "Q597"
+},
+"type": "Point"
+},
+{
+"id": 17592211663489,
+"properties": {
+"capital": "7",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 8,
+"name": "Almada",
+"name:ar": "\u062d\u0635\u0646 \u0627\u0644\u0645\u0639\u062f\u0646",
+"name:el": "\u0391\u03bb\u03bc\u03ac\u03bd\u03c4\u03b1",
+"name:uk": "\u0410\u043b\u043c\u0430\u0434\u0430",
+"population": 16718,
+"population_rank": 6,
+"sort_key": -199290,
+"wikidata": "Q328015"
+},
+"type": "Point"
+},
+{
+"id": 17601483619271,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Estrela",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614247,
+"wikidata": "Q423043"
+},
+"type": "Point"
+}
+],
+"sx": 96968.0,
+"sy": 55358.0,
+"vertices": 42
+},
+"pois": {
+"extent": 4096,
+"features": 88,
+"first": [
+{
+"id": 52776564560735,
+"properties": {
+"kind": "administrative",
+"min_zoom": 12,
+"name": "Alc\u00e2ntara"
+},
+"type": "Point"
+},
+{
+"id": 52776564653314,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Santo Condest\u00e1vel"
+},
+"type": "Point"
+},
+{
+"id": 52776564653306,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Prazeres"
+},
+"type": "Point"
+}
+],
+"sx": 200075.0,
+"sy": 103374.0,
+"vertices": 88
+},
+"roads": {
+"extent": 4096,
+"features": 182,
+"first": [
+{
+"id": 35184382161920,
+"properties": {
+"kind": "highway",
+"kind_detail": "motorway",
+"min_zoom": 4,
+"name": "Autoestrada do Sul",
+"network": "PT:national",
+"network_1": "PT:national",
+"ref": "A 2;IP 7",
+"shield_text": "IP7",
+"shield_text_1": "IP7",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184382161930,
+"properties": {
+"is_bridge": true,
+"kind": "highway",
+"kind_detail": "motorway",
+"min_zoom": 4,
+"name": "Ponte 25 de Abril",
+"name:de": "Br\u00fccke des 25. April",
+"network": "e-road",
+"network_1": "e-road",
+"network_2": "PT:national",
+"ref": "A 2",
+"shield_text": "E90",
+"shield_text_1": "E90",
+"shield_text_2": "IP7",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184391041880,
+"properties": {
+"is_link": true,
+"kind": "highway",
+"kind_detail": "motorway_link",
+"min_zoom": 4,
+"name": "Acesso \u00e0 Ponte 25 de Abril",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 22367657.0,
+"sy": 12967670.0,
+"vertices": 11046
+},
+"water": {
+"extent": 4096,
+"features": 8,
+"first": [
+{
+"id": 35185072584621,
+"properties": {
+"kind": "river",
+"min_zoom": 10,
+"name": "Rio Tejo",
+"name:ar": "R\u00edo Tacho",
+"name:da": "Tajo",
+"name:el": "\u03a4\u03ac\u03b3\u03bf\u03c2",
+"name:en": "Tagus River",
+"name:es": "R\u00edo Tajo",
+"name:fr": "Fleuve Tage",
+"name:he": "\u05d8\u05d7\u05d5",
+"name:hu": "Tejo",
+"name:it": "fiume Tago",
+"name:lt": "Tachas",
+"name:nl": "Taag",
+"name:pl": "Tag",
+"name:pt": "Rio Tejo",
+"name:uk": "\u0422\u0430\u0433\u0443\u0441",
+"sort_rank": 200
+},
+"type": "LineString"
+},
+{
+"id": 35184940784330,
+"properties": {
+"kind": "stream",
+"min_zoom": 14,
+"sort_rank": 200
+},
+"type": "MultiLineString"
+},
+{
+"id": 1,
+"properties": {
+"kind": "ocean",
+"sort_rank": 200
+},
+"type": "Polygon"
+}
+],
+"sx": 860620.0,
+"sy": 767005.0,
+"vertices": 344
+}
+},
+"13/3888/3139": {
+"boundaries": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 35184804252380,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+}
+],
+"sx": 48841.0,
+"sy": 35686.0,
+"vertices": 76
+},
+"buildings": {
+"extent": 4096,
+"features": 9,
+"first": [
+{
+"id": 35184381342749,
+"properties": {
+"height": 30.0,
+"kind": "building",
+"layer": 2,
+"sort_rank": 400
+},
+"type": "Polygon"
+},
+{
+"id": 35184381343590,
+"properties": {
+"height": 20.0,
+"kind": "building",
+"layer": 1,
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184449562800,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 2872062.0,
+"sy": 2364945.0,
+"vertices": 3715
+},
+"earth": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 1,
+"properties": {
+"kind": "earth"
+},
+"type": "Polygon"
+}
+],
+"sx": 44492.0,
+"sy": 73756.0,
+"vertices": 55
+},
+"landuse": {
+"extent": 4096,
+"features": 110,
+"first": [
+{
+"id": 35184411310406,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184468860263,
+"properties": {
+"kind": "pedestrian",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184469770572,
+"properties": {
+"kind": "pedestrian",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 1213411.0,
+"sy": 1236540.0,
+"vertices": 1682
+},
+"places": {
+"extent": 4096,
+"features": 20,
+"first": [
+{
+"id": 17592452002906,
+"properties": {
+"capital": "yes",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 4,
+"name": "Lisboa",
+"name:ar": "\u0644\u0634\u0628\u0648\u0646\u0629",
+"name:bg": "\u041b\u0438\u0441\u0430\u0431\u043e\u043d",
+"name:cs": "Lisabon",
+"name:da": "Lissabon",
+"name:de": "Lissabon",
+"name:el": "\u039b\u03b9\u03c3\u03b1\u03b2\u03cc\u03bd\u03b1",
+"name:en": "Lisbon",
+"name:es": "Lisboa",
+"name:et": "Lissabon",
+"name:fa": "\u0644\u06cc\u0633\u0628\u0648\u0646",
+"name:fi": "Lissabon",
+"name:fr": "Lisbonne",
+"name:ga": "Liosp\u00f3in",
+"name:he": "\u05dc\u05d9\u05e1\u05d1\u05d5\u05df",
+"name:hi": "\u0932\u093f\u0938\u094d\u092c\u0928",
+"name:hr": "Lisabon",
+"name:hu": "Lisszabon",
+"name:it": "Lisbona",
+"name:ja": "\u30ea\u30b9\u30dc\u30f3",
+"name:ko": "\ub9ac\uc2a4\ubcf8",
+"name:lt": "Lisabona",
+"name:lv": "Lisabona",
+"name:mr": "\u0932\u093f\u0938\u092c\u094b\u0928",
+"name:mt": "Li\u017cbona",
+"name:nl": "Lissabon",
+"name:pl": "Lizbona",
+"name:pt": "Lisboa",
+"name:ro": "Lisabona",
+"name:ru": "\u041b\u0438\u0441\u0441\u0430\u0431\u043e\u043d",
+"name:sk": "Lisabon",
+"name:sl": "Lizbona",
+"name:sv": "Lissabon",
+"name:tr": "Lizbon",
+"name:uk": "\u041b\u0456\u0441\u0430\u0431\u043e\u043d",
+"name:ur": "\u0644\u0632\u0628\u0646",
+"name:zh-Hans": "\u91cc\u65af\u672c",
+"name:zh-Hant": "\u91cc\u65af\u672c",
+"pgf:name:hi": "\uf8dd\uf8ef\uf8eb\uf8df\uf8fa",
+"pgf:name:mr": "\uf8dd\uf8ef\uf8f5\uf8df\uf8f1\uf8fa",
+"population": 552700,
+"population_rank": 12,
+"sort_key": -1281306,
+"wikidata": "Q597"
+},
+"type": "Point"
+},
+{
+"id": 17596546287398,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Madalena",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614248,
+"wikidata": "Q387982"
+},
+"type": "Point"
+},
+{
+"id": 17596597525985,
+"properties": {
+"kind": "locality",
+"kind_detail": "locality",
+"min_zoom": 13,
+"name": "Geomonumento da Rua da Judiaria",
+"population": 1000,
+"population_rank": 3,
+"sort_key": 1157247
+},
+"type": "Point"
+}
+],
+"sx": 9766.0,
+"sy": 16027.0,
+"vertices": 20
+},
+"pois": {
+"extent": 4096,
+"features": 52,
+"first": [
+{
+"id": 35185441012739,
+"properties": {
+"kind": "low_emission_zone",
+"min_zoom": 12,
+"name": "Zona 1"
+},
+"type": "Point"
+},
+{
+"id": 52776564653327,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "S\u00e3o Nicolau"
+},
+"type": "Point"
+},
+{
+"id": 52776564653311,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Santa Justa"
+},
+"type": "Point"
+}
+],
+"sx": 35161.0,
+"sy": 38908.0,
+"vertices": 52
+},
+"roads": {
+"extent": 4096,
+"features": 108,
+"first": [
+{
+"id": 35184376812720,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Rua da Palma",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184380106300,
+"properties": {
+"is_bridge": true,
+"is_link": true,
+"kind": "major_road",
+"kind_detail": "primary_link",
+"min_zoom": 8,
+"sort_rank": 400
+},
+"type": "LineString"
+},
+{
+"id": 35184392517600,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Pra\u00e7a Dom Jo\u00e3o da C\u00e2mara",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 3792152.0,
+"sy": 3175351.0,
+"vertices": 4572
+},
+"water": {
+"extent": 4096,
+"features": 5,
+"first": [
+{
+"id": 35185072584620,
+"properties": {
+"kind": "river",
+"min_zoom": 10,
+"name": "Rio Tejo",
+"name:ar": "R\u00edo Tacho",
+"name:da": "Tajo",
+"name:el": "\u03a4\u03ac\u03b3\u03bf\u03c2",
+"name:en": "Tagus River",
+"name:es": "R\u00edo Tajo",
+"name:fr": "Fleuve Tage",
+"name:he": "\u05d8\u05d7\u05d5",
+"name:hu": "Tejo",
+"name:it": "fiume Tago",
+"name:lt": "Tachas",
+"name:nl": "Taag",
+"name:pl": "Tag",
+"name:pt": "Rio Tejo",
+"name:uk": "\u0422\u0430\u0433\u0443\u0441",
+"sort_rank": 200
+},
+"type": "LineString"
+},
+{
+"id": 1,
+"properties": {
+"kind": "ocean",
+"sort_rank": 200
+},
+"type": "Polygon"
+},
+{
+"id": 2448823240,
+"properties": {
+"kind": "water",
+"sort_rank": 200
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 86777.0,
+"sy": 134086.0,
+"vertices": 99
+}
+},
+"14/7775/6278": {
+"boundaries": {
+"extent": 4096,
+"features": 2,
+"first": [
+{
+"id": 35184801195160,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+},
+{
+"id": 35185496042930,
+"properties": {
+"kind": "county",
+"kind_detail": 6,
+"sort_rank": 289
+},
+"type": "LineString"
+}
+],
+"sx": 220846.0,
+"sy": 125257.0,
+"vertices": 83
+},
+"buildings": {
+"extent": 4096,
+"features": 24,
+"first": [
+{
+"id": 35184411747700,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184411818067,
+"properties": {
+"kind": "building",
+"layer": 0,
+"sort_rank": 400
+},
+"type": "Polygon"
+},
+{
+"id": 35184467497810,
+"properties": {
+"height": 15.0,
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 38519616.0,
+"sy": 31056765.0,
+"vertices": 19379
+},
+"earth": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 1,
+"properties": {
+"kind": "earth"
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 130899.0,
+"sy": 237452.0,
+"vertices": 66
+},
+"landuse": {
+"extent": 4096,
+"features": 221,
+"first": [
+{
+"id": 35184395786393,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184399347504,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184399372413,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 7409450.0,
+"sy": 5662529.0,
+"vertices": 3034
+},
+"places": {
+"extent": 4096,
+"features": 19,
+"first": [
+{
+"id": 17601483619271,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Estrela",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614247,
+"wikidata": "Q423043"
+},
+"type": "Point"
+},
+{
+"id": 17601483619270,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Miseric\u00f3rdia",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614252,
+"wikidata": "Q1677202"
+},
+"type": "Point"
+},
+{
+"id": 17596546287608,
+"properties": {
+"kind": "neighbourhood",
+"kind_detail": "suburb",
+"min_zoom": 13,
+"name": "Santa Isabel",
+"population": 0,
+"population_rank": 1,
+"sort_key": 1168428
+},
+"type": "Point"
+}
+],
+"sx": 49233.0,
+"sy": 34256.0,
+"vertices": 19
+},
+"pois": {
+"extent": 4096,
+"features": 268,
+"first": [
+{
+"id": 52776564560739,
+"properties": {
+"kind": "administrative",
+"min_zoom": 12,
+"name": "Estrela"
+},
+"type": "Point"
+},
+{
+"id": 52776564653310,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Santa Isabel"
+},
+"type": "Point"
+},
+{
+"id": 52776564653299,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Lapa"
+},
+"type": "Point"
+}
+],
+"sx": 637018.0,
+"sy": 460407.0,
+"vertices": 268
+},
+"roads": {
+"extent": 4096,
+"features": 669,
+"first": [
+{
+"id": 35184391833970,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Avenida Pedro \u00c1lvares Cabral",
+"oneway": "no",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184391834000,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"sort_rank": 400
+},
+"type": "LineString"
+},
+{
+"id": 35184391834040,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Largo do Rato",
+"oneway": "yes",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 19180448.0,
+"sy": 14552251.0,
+"vertices": 8326
+},
+"water": {
+"extent": 4096,
+"features": 8,
+"first": [
+{
+"id": 35184940784330,
+"properties": {
+"kind": "stream",
+"min_zoom": 14,
+"sort_rank": 200
+},
+"type": "MultiLineString"
+},
+{
+"id": 35185520981480,
+"properties": {
+"kind": "stream",
+"layer": -1,
+"min_zoom": 14,
+"sort_rank": 200
+},
+"type": "MultiLineString"
+},
+{
+"id": 1,
+"properties": {
+"kind": "ocean",
+"sort_rank": 200
+},
+"type": "Polygon"
+}
+],
+"sx": 834290.0,
+"sy": 783806.0,
+"vertices": 415
+}
+},
+"14/7776/6278": {
+"boundaries": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 35184804252380,
+"properties": {
+"kind": "locality",
+"kind_detail": 8,
+"sort_rank": 289
+},
+"type": "MultiLineString"
+}
+],
+"sx": 105783.0,
+"sy": 77313.0,
+"vertices": 79
+},
+"buildings": {
+"extent": 4096,
+"features": 22,
+"first": [
+{
+"id": 35184381342749,
+"properties": {
+"height": 30.0,
+"kind": "building",
+"layer": 2,
+"sort_rank": 400
+},
+"type": "Polygon"
+},
+{
+"id": 35184381343590,
+"properties": {
+"height": 15.0,
+"kind": "building",
+"layer": 1,
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+},
+{
+"id": 35184399111800,
+"properties": {
+"kind": "building",
+"sort_rank": 400
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 23180996.0,
+"sy": 17301769.0,
+"vertices": 14036
+},
+"earth": {
+"extent": 4096,
+"features": 1,
+"first": [
+{
+"id": 1,
+"properties": {
+"kind": "earth"
+},
+"type": "Polygon"
+}
+],
+"sx": 103330.0,
+"sy": 174946.0,
+"vertices": 64
+},
+"landuse": {
+"extent": 4096,
+"features": 201,
+"first": [
+{
+"id": 35184411310406,
+"properties": {
+"kind": "park",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184468860263,
+"properties": {
+"kind": "pedestrian",
+"sort_rank": 189
+},
+"type": "Polygon"
+},
+{
+"id": 35184469770572,
+"properties": {
+"kind": "pedestrian",
+"sort_rank": 189
+},
+"type": "Polygon"
+}
+],
+"sx": 3534694.0,
+"sy": 4139672.0,
+"vertices": 2628
+},
+"places": {
+"extent": 4096,
+"features": 20,
+"first": [
+{
+"id": 17592452002906,
+"properties": {
+"capital": "yes",
+"kind": "locality",
+"kind_detail": "city",
+"min_zoom": 4,
+"name": "Lisboa",
+"name:ar": "\u0644\u0634\u0628\u0648\u0646\u0629",
+"name:bg": "\u041b\u0438\u0441\u0430\u0431\u043e\u043d",
+"name:cs": "Lisabon",
+"name:da": "Lissabon",
+"name:de": "Lissabon",
+"name:el": "\u039b\u03b9\u03c3\u03b1\u03b2\u03cc\u03bd\u03b1",
+"name:en": "Lisbon",
+"name:es": "Lisboa",
+"name:et": "Lissabon",
+"name:fa": "\u0644\u06cc\u0633\u0628\u0648\u0646",
+"name:fi": "Lissabon",
+"name:fr": "Lisbonne",
+"name:ga": "Liosp\u00f3in",
+"name:he": "\u05dc\u05d9\u05e1\u05d1\u05d5\u05df",
+"name:hi": "\u0932\u093f\u0938\u094d\u092c\u0928",
+"name:hr": "Lisabon",
+"name:hu": "Lisszabon",
+"name:it": "Lisbona",
+"name:ja": "\u30ea\u30b9\u30dc\u30f3",
+"name:ko": "\ub9ac\uc2a4\ubcf8",
+"name:lt": "Lisabona",
+"name:lv": "Lisabona",
+"name:mr": "\u0932\u093f\u0938\u092c\u094b\u0928",
+"name:mt": "Li\u017cbona",
+"name:nl": "Lissabon",
+"name:pl": "Lizbona",
+"name:pt": "Lisboa",
+"name:ro": "Lisabona",
+"name:ru": "\u041b\u0438\u0441\u0441\u0430\u0431\u043e\u043d",
+"name:sk": "Lisabon",
+"name:sl": "Lizbona",
+"name:sv": "Lissabon",
+"name:tr": "Lizbon",
+"name:uk": "\u041b\u0456\u0441\u0430\u0431\u043e\u043d",
+"name:ur": "\u0644\u0632\u0628\u0646",
+"name:zh-Hans": "\u91cc\u65af\u672c",
+"name:zh-Hant": "\u91cc\u65af\u672c",
+"pgf:name:hi": "\uf8dd\uf8ef\uf8eb\uf8df\uf8fa",
+"pgf:name:mr": "\uf8dd\uf8ef\uf8f5\uf8df\uf8f1\uf8fa",
+"population": 552700,
+"population_rank": 12,
+"sort_key": -1281306,
+"wikidata": "Q597"
+},
+"type": "Point"
+},
+{
+"id": 17596546287398,
+"properties": {
+"capital": "8",
+"kind": "locality",
+"kind_detail": "village",
+"min_zoom": 11,
+"name": "Madalena",
+"population": 2000,
+"population_rank": 4,
+"sort_key": 614248,
+"wikidata": "Q387982"
+},
+"type": "Point"
+},
+{
+"id": 17596597525985,
+"properties": {
+"kind": "locality",
+"kind_detail": "locality",
+"min_zoom": 13,
+"name": "Geomonumento da Rua da Judiaria",
+"population": 1000,
+"population_rank": 3,
+"sort_key": 1157247
+},
+"type": "Point"
+}
+],
+"sx": 26077.0,
+"sy": 35138.0,
+"vertices": 20
+},
+"pois": {
+"extent": 4096,
+"features": 209,
+"first": [
+{
+"id": 35185441012739,
+"properties": {
+"kind": "low_emission_zone",
+"min_zoom": 12,
+"name": "Zona 1"
+},
+"type": "Point"
+},
+{
+"id": 52776564653327,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "S\u00e3o Nicolau"
+},
+"type": "Point"
+},
+{
+"id": 52776564653311,
+"properties": {
+"kind": "historic",
+"min_zoom": 12,
+"name": "Santa Justa"
+},
+"type": "Point"
+}
+],
+"sx": 298172.0,
+"sy": 308251.0,
+"vertices": 209
+},
+"roads": {
+"extent": 4096,
+"features": 743,
+"first": [
+{
+"id": 35184376812720,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Rua da Palma",
+"oneway": "yes",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+},
+{
+"id": 35184392517600,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Pra\u00e7a Dom Jo\u00e3o da C\u00e2mara",
+"oneway": "no",
+"sort_rank": 400
+},
+"type": "LineString"
+},
+{
+"id": 35184465854220,
+"properties": {
+"kind": "major_road",
+"kind_detail": "primary",
+"min_zoom": 8,
+"name": "Avenida Almirante Reis",
+"oneway": "yes",
+"sort_rank": 400
+},
+"type": "MultiLineString"
+}
+],
+"sx": 10311039.0,
+"sy": 10243928.0,
+"vertices": 6835
+},
+"water": {
+"extent": 4096,
+"features": 6,
+"first": [
+{
+"id": 1,
+"properties": {
+"kind": "ocean",
+"sort_rank": 200
+},
+"type": "Polygon"
+},
+{
+"id": 2380491970,
+"properties": {
+"kind": "swimming_pool",
+"sort_rank": 200
+},
+"type": "MultiPolygon"
+},
+{
+"id": 2383266420,
+"properties": {
+"kind": "fountain",
+"sort_rank": 200
+},
+"type": "MultiPolygon"
+}
+],
+"sx": 249309.0,
+"sy": 385155.0,
+"vertices": 191
+}
+}
+}
+}

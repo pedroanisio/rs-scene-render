@@ -71,7 +71,9 @@
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
     <geo id="places" src="../media/places.geojson" sha256="{sha:places.geojson}"/>
+    <tiles id="streets" src="../media/streets.pmtiles" sha256="{sha:streets.pmtiles}" attribution="© OpenStreetMap contributors"/>
     <map id="atlas" width="800" height="400" projection="equal-earth" fit="places" fitPadding="10" background="#12324F" outline="#FFFFFF">
+      <basemap tiles="streets" mapStyle="protomaps-dark" detail="0.5"/>
       <graticule step="15"/>
       <geoLayer geo="places" fillBy="v" palette="#F7FBFF #08306B" label="name">
         <featureStyle key="a" fill="#E63946"/>

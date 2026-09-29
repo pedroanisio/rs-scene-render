@@ -228,3 +228,119 @@ fn expressions_place_layers_on_the_map() {
     let (_, _, o) = mark(1.5);
     assert_eq!(o, 0.0, "the far side is hidden");
 }
+
+fn geo_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sr-geo/tests/fixtures").join(name).display().to_string()
+}
+
+/// Straight sRGB 0‥1 → the renderer's linear values.
+fn lin(c: [f64; 4]) -> [f32; 4] {
+    [srgb_to_linear(c[0] as f32), srgb_to_linear(c[1] as f32), srgb_to_linear(c[2] as f32), 1.0]
+}
+
+#[test]
+fn vector_basemaps_draw_their_style() {
+    // Praça do Comércio and the Tagus at zoom 15.5 (z15 tiles, overzoomed from the archive's z14)
+    let doc = |labels: &str| {
+        map_doc(
+            400,
+            300,
+            &format!(
+                r##"<tiles id="t" src="{}"/>
+                    <map id="m" width="400" height="300" projection="web-mercator" centerLon="-9.1365" centerLat="38.7060" zoom="15.5">
+                      <basemap tiles="t" labels="{labels}" attribution="false"/></map>"##,
+                geo_fixture("baixa.pmtiles")
+            ),
+        )
+    };
+    let Some(r) = render(&doc("false")) else { return };
+    assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+    // the river, south of the square: the style's water colour at this zoom
+    let style = sr_geo::style::Style::parse(sr_geo::style::builtin("protomaps-light").unwrap()).unwrap();
+    let water = style.layers.iter().find(|l| l.id == "water").unwrap();
+    let props = serde_json::Map::new();
+    let cx = sr_geo::style::Ctx { zoom: 15.5, properties: &props, geometry: "Polygon", id: None };
+    let c = water.paint("fill-color", &cx).color().unwrap();
+    let [x, y] = {
+        let (m, _) = sr_geo::view::Map::new(
+            sr_geo::view::Kind::WebMercator,
+            None,
+            [400.0, 300.0],
+            &[],
+            0.0,
+            Some([-9.1365, 38.706]),
+        );
+        let p = m.projection(&sr_geo::view::View { lon: -9.1365, lat: 38.706, zoom: 15.5, rotation: 0.0 });
+        p.point(-9.1365, 38.7045).unwrap()
+    };
+    assert_px(&r, x as u32, y as u32, lin(c), 2e-3);
+    // labels add text
+    let Some(l) = render(&doc("true")) else { return };
+    let differ = (0..300)
+        .flat_map(|y| (0..400).map(move |x| (x, y)))
+        .filter(|&(x, y)| !close(r.at(x, y), l.at(x, y), 1e-3))
+        .count();
+    assert!(differ > 200, "labels changed only {differ} pixels");
+}
+
+#[test]
+fn raster_basemaps_warp_into_the_projection() {
+    // z0-2 tiles of solid colours (60·z, 40·x, 40·y); a 512-pixel Web Mercator world at zoom 0
+    // shows 256-pixel tiles of z1
+    let rgb8 = |r: u8, g: u8, b: u8| [lin8(r), lin8(g), lin8(b), 1.0];
+    let d = map_doc(
+        512,
+        512,
+        &format!(
+            r##"<tiles id="t" src="{}" attribution="Test tiles"/>
+                <map id="m" width="512" height="512" projection="web-mercator" centerLon="0" centerLat="0">
+                  <basemap tiles="t"/></map>"##,
+            geo_fixture("raster.pmtiles")
+        ),
+    );
+    let Some(r) = render(&d) else { return };
+    assert_px(&r, 128, 128, rgb8(60, 0, 0), 1e-3);
+    assert_px(&r, 384, 128, rgb8(60, 40, 0), 1e-3);
+    assert_px(&r, 128, 384, rgb8(60, 0, 40), 1e-3);
+    assert_px(&r, 300, 300, rgb8(60, 40, 40), 1e-3);
+    // the credit plate in the corner
+    assert!(!close(r.at(505, 505), rgb8(60, 40, 40), 1e-2), "{:?}", r.at(505, 505));
+    // on a globe: tiles on the near side, nothing beyond the limb
+    let d = map_doc(
+        256,
+        256,
+        &format!(
+            r##"<tiles id="t" src="{}"/>
+                <map id="m" width="256" height="256" projection="orthographic" centerLon="20" centerLat="20">
+                  <basemap tiles="t" attribution="false"/></map>"##,
+            geo_fixture("raster.pmtiles")
+        ),
+    );
+    let Some(g) = render(&d) else { return };
+    // a 256-pixel globe spans 2π·128 ≈ 804 pixels of world: z2 tiles; its centre (20°E, 20°N) is in
+    // tile (2, 1)
+    assert_px(&g, 128, 128, rgb8(120, 80, 40), 1e-3);
+    assert_px(&g, 2, 2, [0.0, 0.0, 0.0, 1.0], 1e-3);
+}
+
+#[test]
+fn maps_stop_at_their_frame() {
+    // a 200 × 200 map of a 512-pixel world (zoom 0: 256-pixel z1 tiles reach well past it) in a
+    // 400 × 200 frame: nothing may show right of x = 200
+    let d = map_doc(
+        400,
+        200,
+        &format!(
+            r##"<tiles id="t" src="{}"/><geo id="w" src="{}" object="countries"/>
+                <map id="m" width="200" height="200" projection="web-mercator" centerLon="30" centerLat="10">
+                  <basemap tiles="t" attribution="false"/><geoLayer geo="w" fill="#FFFFFF" stroke="#FF0000" strokeWidth="8"/></map>"##,
+            geo_fixture("raster.pmtiles"),
+            world()
+        ),
+    );
+    let Some(r) = render(&d) else { return };
+    for (x, y) in [(205, 100), (260, 20), (390, 190)] {
+        assert_px(&r, x, y, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    }
+    assert!(!close(r.at(195, 100), [0.0, 0.0, 0.0, 1.0], 1e-3));
+}
