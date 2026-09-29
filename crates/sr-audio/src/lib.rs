@@ -22,5 +22,5 @@ pub mod mix;
 pub mod wav;
 
 pub use layout::Layout;
-pub use loudness::Planar;
+pub use loudness::{Extent, Planar};
 pub use mix::{Curve, Duck, FadeCurve, Master, Mix, MixError, Mixed, Node, NodeKind, Normalize, Placement, Source};

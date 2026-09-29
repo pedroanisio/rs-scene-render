@@ -6,8 +6,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use sr_audio::effects::{Band, Effect, Kind};
-use sr_audio::{Curve, Duck, FadeCurve, Layout, Master, Mix, Mixed, Node, NodeKind, Normalize, Placement, Source};
+use sr_audio::{
+    Curve, Duck, Extent, FadeCurve, Layout, Master, Mix, Mixed, Node, NodeKind, Normalize, Placement, Source,
+};
 use sr_eval::{Analysis, Evaluator, Program, Value};
 #[allow(unused_imports)]
 use sr_model::element::Element;
@@ -358,19 +361,26 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
     }
     let mix = Mix { rate, layout, duration: p.duration, control_fps: fps, nodes, master };
     let mixed = mix.render()?;
-    // analysis: envelopes of every track and audio layer, beats from a beat grid's source
+    // analysis: envelopes of every track and audio layer (independent, so in parallel, over
+    // the extent the mix found for each), beats from a beat grid's source
     let frames = (p.duration * fps).ceil() as usize;
-    let mut analysis = Analysis { fps, tracks: HashMap::new(), beats: None };
-    for n in &mix.nodes {
-        if let (NodeKind::Track { .. }, Some(out)) = (&n.kind, mixed.nodes.get(&n.id)) {
-            analysis.tracks.insert(n.id.clone(), sr_audio::analysis::envelopes(out, rate as f64, fps, frames));
-        }
-    }
+    let extent = |id: &str, out: &sr_audio::Planar| mixed.extents.get(id).copied().unwrap_or_else(|| Extent::of(out));
+    let tracks: Vec<(String, [Vec<f32>; 4])> = mix
+        .nodes
+        .par_iter()
+        .filter_map(|n| {
+            let (NodeKind::Track { .. }, Some(out)) = (&n.kind, mixed.nodes.get(&n.id)) else { return None };
+            let env = sr_audio::analysis::envelopes_in(out, extent(&n.id, out), rate as f64, fps, frames);
+            Some((n.id.clone(), env))
+        })
+        .collect();
+    let mut analysis = Analysis { fps, tracks: tracks.into_iter().collect(), beats: None };
     if let Some(grid) = scene.markers.as_ref().and_then(|mk| {
         mk.children.iter().find_map(|c| if let m::MarkersChild::BeatGrid(b) = c { Some(b) } else { None })
     }) {
-        if let Some(src) = grid.source.as_ref().and_then(|s| mixed.nodes.get(s)) {
-            let (_, beats) = sr_audio::analysis::beats(src, rate as f64, Some(grid.bpm.get()), p.duration);
+        if let Some((id, src)) = grid.source.as_ref().and_then(|s| mixed.nodes.get_key_value(s)) {
+            let ext = extent(id, src);
+            let (_, beats) = sr_audio::analysis::beats_in(src, ext, rate as f64, Some(grid.bpm.get()), p.duration);
             analysis.beats = Some(beats);
         }
     }

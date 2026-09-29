@@ -1,14 +1,22 @@
 //! The mixing graph: tracks and video-layer audio feed buses, buses feed
 //! buses or the master; fades, automation, ducking, effects, loudness
 //! normalisation and the true-peak limiter.
+//!
+//! Every node renders into buffers spanning the whole programme, but each
+//! carries an [`Extent`] outside of which it is exactly zero, and every
+//! stage works on that extent only: silence costs nothing and the samples
+//! inside are computed with the same operations in the same order as a
+//! pass over the whole buffer.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::dsp::{coeff, db_to_lin, hermite, lin_to_db};
 use crate::effects::{self, Effect};
 use crate::layout::{route, Layout};
-use crate::loudness::{self, Planar};
+use crate::loudness::{self, Extent, Planar};
 
 /// Decoded source audio at the mix rate.
 #[derive(Debug, Clone)]
@@ -59,6 +67,14 @@ impl Curve {
                 let j = (i + 1).min(v.len() - 1);
                 v[i] + (v[j] - v[i]) * (x - i as f64).min(1.0)
             }
+        }
+    }
+
+    /// Whether every value satisfies `ok`.
+    fn all(&self, ok: impl Fn(f64) -> bool) -> bool {
+        match self {
+            Curve::Const(v) => ok(*v),
+            Curve::Frames(v) => v.iter().all(|x| ok(*x)),
         }
     }
 }
@@ -264,6 +280,10 @@ pub struct Mixed {
     pub master: Planar,
     /// Post-fader output of every node.
     pub nodes: HashMap<String, Planar>,
+    /// The extent of every node's output: zero outside it.
+    pub extents: HashMap<String, Extent>,
+    /// The extent of the master.
+    pub master_extent: Extent,
     /// Integrated loudness of the master before normalisation, LUFS.
     pub loudness_before: f64,
     /// Integrated loudness of the output, LUFS.
@@ -330,17 +350,45 @@ pub fn time_stretch(src: &Planar, factor: f64) -> Planar {
         .collect()
 }
 
+/// `sum += o` inside `ext`: `o` is zero elsewhere, and adding zero to a
+/// running sum (which is never a negative zero) changes nothing.
+fn add(sum: &mut Planar, o: &Planar, ext: Extent) {
+    for (s, c) in sum.iter_mut().zip(o) {
+        let e = ext.clip(s.len().min(c.len()));
+        for k in e.start..e.end {
+            s[k] += c[k];
+        }
+    }
+}
+
+/// Whether a fader of `volume` × `gain` dB keeps silence exactly silent: a
+/// finite, non-negative gain turns a zero into a positive zero. (Values
+/// beyond these are not meaningful; they only decide whether the fader has
+/// to visit every sample.)
+fn keeps_silence(volume: &Curve, gain: Option<&Curve>) -> bool {
+    volume.all(|v| (0.0..1e6).contains(&v)) && gain.is_none_or(|g| g.all(|d| (-1e6..6000.0).contains(&d)))
+}
+
 impl Mix {
     fn frames(&self) -> usize {
         (self.duration * self.rate as f64).round() as usize
     }
 
-    /// Renders a track's source onto the timeline (source channels, before routing).
-    fn place(&self, source: &Source, placement: &Placement, fade_in: f64, fade_out: f64, curve: FadeCurve) -> Planar {
+    /// Renders a track's source onto the timeline (source channels, before
+    /// routing), with the extent of what it wrote.
+    fn place(
+        &self,
+        source: &Source,
+        placement: &Placement,
+        fade_in: f64,
+        fade_out: f64,
+        curve: FadeCurve,
+    ) -> (Planar, Extent) {
         let rate = self.rate as f64;
         let total = self.frames();
         let chans = source.planar.len().max(1);
         let mut out = vec![vec![0f32; total]; chans];
+        let mut ext = Extent::EMPTY;
         match placement {
             Placement::Timeline { start, clip_in, clip_out, loops, speed, reverse, preserve_pitch, fit } => {
                 let a = ((clip_in * rate).round().max(0.0) as usize).min(source.len());
@@ -405,10 +453,20 @@ impl Mix {
                         out[c][t as usize] = (v as f64 * g) as f32;
                     }
                 }
+                let clamp = |t: i64| t.clamp(0, total as i64) as usize;
+                ext = Extent { start: clamp(start_s), end: clamp(start_s + len as i64) };
             }
             Placement::Mapped(times) => {
                 let fps = self.control_fps;
-                for i in 0..total {
+                // only samples of frames with a source time play: skip those more than a frame
+                // before the first or after the last such frame (a margin of two samples covers
+                // the rounding of the sample-to-frame mapping)
+                let (first, last) = (times.iter().position(Option::is_some), times.iter().rposition(Option::is_some));
+                let (Some(first), Some(last)) = (first, last) else { return (out, ext) };
+                let lo = ((first as f64 * rate / fps).floor() as i64 - 2).max(0) as usize;
+                let hi = ((((last + 1) as f64 * rate / fps).ceil() as i64 + 2).max(0) as usize).min(total);
+                let (mut wrote_lo, mut wrote_hi) = (usize::MAX, 0);
+                for i in lo..hi {
                     let x = i as f64 / rate * fps;
                     let k = x.floor() as usize;
                     let (Some(Some(s0)), s1) = (times.get(k), times.get(k + 1)) else { continue };
@@ -423,10 +481,16 @@ impl Mix {
                     for c in 0..chans {
                         out[c][i] = hermite(&source.planar[c], pos);
                     }
+                    wrote_lo = wrote_lo.min(i);
+                    wrote_hi = i + 1;
+                }
+                if wrote_lo < wrote_hi {
+                    ext = Extent { start: wrote_lo, end: wrote_hi };
                 }
             }
         }
-        out
+        let ext = Extent::within(&out, ext);
+        (out, ext)
     }
 
     fn order(&self) -> Result<Vec<usize>, MixError> {
@@ -474,103 +538,100 @@ impl Mix {
 
     /// Renders the mix.
     pub fn render(&self) -> Result<Mixed, MixError> {
+        self.render_inner(false)
+    }
+
+    /// [`render`](Mix::render); with `full`, every extent is the whole
+    /// programme, so every stage visits every sample (the reference the
+    /// extent-limited render is checked against).
+    fn render_inner(&self, full: bool) -> Result<Mixed, MixError> {
         let order = self.order()?;
         let rate = self.rate as f64;
         let total = self.frames();
         let chans = self.layout.channels();
         let silent = || vec![vec![0f32; total]; chans];
+        let bound = |e: Extent| if full { Extent::full(total) } else { e };
+        // tracks depend on no other node: place and route them in parallel
+        let mut placed: Vec<Option<(Planar, Extent)>> = self
+            .nodes
+            .par_iter()
+            .map(|n| match &n.kind {
+                NodeKind::Track { source, placement, fade_in, fade_out, fade_curve } => {
+                    let (placed, ext) = self.place(source, placement, *fade_in, *fade_out, *fade_curve);
+                    let ext = bound(ext);
+                    Some((self.route_block(&placed, source.layout, &n.pan, ext), ext))
+                }
+                NodeKind::Bus => None,
+            })
+            .collect();
         let mut outputs: HashMap<String, Planar> = HashMap::new();
+        let mut extents: HashMap<String, Extent> = HashMap::new();
         for &i in &order {
             let n = &self.nodes[i];
             // input in the mix layout
-            let mut buf = match &n.kind {
-                NodeKind::Track { source, placement, fade_in, fade_out, fade_curve } => {
-                    let placed = self.place(source, placement, *fade_in, *fade_out, *fade_curve);
-                    self.route_block(&placed, source.layout, &n.pan)
-                }
-                NodeKind::Bus => {
+            let (mut buf, mut ext) = match placed[i].take() {
+                Some(track) => track,
+                None => {
                     let mut sum = silent();
+                    let mut ext = Extent::EMPTY;
                     for m in self.nodes.iter().filter(|m| m.output.as_deref() == Some(n.id.as_str())) {
-                        if let Some(o) = outputs.get(&m.id) {
-                            for (s, c) in sum.iter_mut().zip(o) {
-                                for (a, b) in s.iter_mut().zip(c) {
-                                    *a += b;
-                                }
-                            }
+                        if let (Some(o), Some(&e)) = (outputs.get(&m.id), extents.get(&m.id)) {
+                            add(&mut sum, o, e);
+                            ext = ext.union(e);
                         }
                     }
-                    self.route_block(&sum, self.layout, &n.pan)
+                    let ext = bound(ext);
+                    (self.route_block(&sum, self.layout, &n.pan, ext), ext)
                 }
             };
-            for e in &n.effects {
-                let key = e.sidechain.as_ref().and_then(|k| outputs.get(k));
-                effects::process(e, &mut buf, rate, key);
-            }
-            // fader: volume × gain automation
-            for s in 0..total {
-                let t = s as f64 / rate;
-                let g = n.volume.at(t, self.control_fps) * db_to_lin(n.gain.at(t, self.control_fps));
-                for c in buf.iter_mut() {
-                    c[s] = (c[s] as f64 * g) as f32;
+            if n.effects.iter().any(|e| e.enabled) {
+                for e in &n.effects {
+                    let key = e.sidechain.as_ref().and_then(|k| outputs.get(k));
+                    effects::process(e, &mut buf, rate, key);
                 }
+                // an effect may ring on after its input, or fill silence: find what it left
+                ext = bound(Extent::of(&buf));
             }
+            ext = self.fade(&mut buf, ext, &n.volume, Some(&n.gain));
             if let Some(d) = &n.duck {
-                let key: Vec<f64> = (0..total)
-                    .map(|s| {
-                        d.under
-                            .iter()
-                            .filter_map(|u| outputs.get(u))
-                            .flat_map(|o| o.iter().map(move |c| (c[s] as f64).abs()))
-                            .fold(0.0, f64::max)
-                    })
-                    .collect();
-                let env_c = coeff(0.01, rate);
-                let (ca, cr) = (coeff(d.attack, rate), coeff(d.release, rate));
-                let (mut env, mut g) = (0.0, 0.0);
-                for s in 0..total {
-                    env = key[s].max(env * env_c);
-                    let target = if lin_to_db(env) > d.threshold { d.amount.min(0.0) } else { 0.0 };
-                    g = if target < g { target + (g - target) * ca } else { target + (g - target) * cr };
-                    let lin = db_to_lin(g);
-                    for c in buf.iter_mut() {
-                        c[s] = (c[s] as f64 * lin) as f32;
-                    }
-                }
+                ext = self.duck(&mut buf, ext, d, &outputs);
             }
             if n.mute {
                 buf = silent();
+                ext = bound(Extent::EMPTY);
             }
             outputs.insert(n.id.clone(), buf);
+            extents.insert(n.id.clone(), ext);
         }
         let mut master = silent();
+        let mut master_ext = Extent::EMPTY;
         for n in self.nodes.iter().filter(|n| n.output.is_none()) {
-            if let Some(o) = outputs.get(&n.id) {
-                for (s, c) in master.iter_mut().zip(o) {
-                    for (a, b) in s.iter_mut().zip(c) {
-                        *a += b;
-                    }
-                }
+            if let (Some(o), Some(&e)) = (outputs.get(&n.id), extents.get(&n.id)) {
+                add(&mut master, o, e);
+                master_ext = master_ext.union(e);
             }
         }
-        for e in &self.master.effects {
-            let key = e.sidechain.as_ref().and_then(|k| outputs.get(k));
-            effects::process(e, &mut master, rate, key);
-        }
-        for s in 0..total {
-            let g = self.master.volume.at(s as f64 / rate, self.control_fps);
-            for c in master.iter_mut() {
-                c[s] = (c[s] as f64 * g) as f32;
+        let mut master_ext = bound(master_ext);
+        if self.master.effects.iter().any(|e| e.enabled) {
+            for e in &self.master.effects {
+                let key = e.sidechain.as_ref().and_then(|k| outputs.get(k));
+                effects::process(e, &mut master, rate, key);
             }
+            master_ext = bound(Extent::of(&master));
         }
+        master_ext = self.fade(&mut master, master_ext, &self.master.volume, None);
         let weights = self.layout.loudness_weights();
-        let before = loudness::integrated(&master, rate, &weights);
+        let before = loudness::integrated_in(&master, master_ext, rate, &weights);
         match self.master.normalize {
             Normalize::None => {}
             Normalize::Integrated => {
                 if before > -70.0 {
                     let g = db_to_lin(self.master.loudness - before);
+                    if !g.is_finite() {
+                        master_ext = Extent::full(total);
+                    }
                     for c in master.iter_mut() {
-                        for v in c.iter_mut() {
+                        for v in &mut c[master_ext.start..master_ext.end] {
                             *v = (*v as f64 * g) as f32;
                         }
                     }
@@ -578,7 +639,7 @@ impl Mix {
             }
             Normalize::Dynamic => {
                 let hop = 0.1;
-                let st = loudness::short_term(&master, rate, &weights, hop);
+                let st = loudness::short_term_in(&master, master_ext, rate, &weights, hop);
                 let gains: Vec<f64> = st
                     .iter()
                     .map(|l| if *l > -50.0 { (self.master.loudness - l).clamp(-20.0, 20.0) } else { 0.0 })
@@ -591,8 +652,11 @@ impl Mix {
                     g = v + (g - v) * k;
                     sm.push(g);
                 }
+                if !sm.iter().all(|g| g.is_finite()) {
+                    master_ext = Extent::full(total);
+                }
                 // short-term block k covers [k·hop, k·hop + 3 s]: apply at its centre
-                for s in 0..total {
+                for s in master_ext.start..master_ext.end {
                     let x = ((s as f64 / rate - 1.5) / hop).max(0.0);
                     let i = (x as usize).min(sm.len().saturating_sub(1));
                     let gd = sm.get(i).copied().unwrap_or(0.0);
@@ -604,21 +668,94 @@ impl Mix {
             }
         }
         if self.master.limiter || self.master.normalize != Normalize::None {
-            loudness::limit(&mut master, rate, self.master.true_peak, 0.05);
+            loudness::limit_in(&mut master, master_ext, rate, self.master.true_peak, 0.05);
         }
-        let loudness = loudness::integrated(&master, rate, &weights);
-        let true_peak = loudness::true_peak(&master);
-        Ok(Mixed { master, nodes: outputs, loudness_before: before, loudness, true_peak })
+        let loudness = loudness::integrated_in(&master, master_ext, rate, &weights);
+        let true_peak = loudness::true_peak_in(&master, master_ext);
+        Ok(Mixed {
+            master,
+            nodes: outputs,
+            extents,
+            master_extent: master_ext,
+            loudness_before: before,
+            loudness,
+            true_peak,
+        })
     }
 
-    /// Routes `src` (in `layout`) into the mix layout with pan automation, per 256-sample block.
-    fn route_block(&self, src: &Planar, layout: Layout, pan: &Curve) -> Planar {
+    /// Applies a fader (`volume` × `gain` dB automation) to `buf` inside
+    /// `ext`, or everywhere when its gain could turn silence into something
+    /// else, and returns the extent it applied to.
+    fn fade(&self, buf: &mut Planar, ext: Extent, volume: &Curve, gain: Option<&Curve>) -> Extent {
+        let total = buf.first().map(Vec::len).unwrap_or(0);
+        let ext = if keeps_silence(volume, gain) { ext.clip(total) } else { Extent::full(total) };
+        let rate = self.rate as f64;
+        let fps = self.control_fps;
+        let constant = match (volume, gain) {
+            (Curve::Const(v), None) => Some(*v),
+            (Curve::Const(v), Some(Curve::Const(g))) => Some(v * db_to_lin(*g)),
+            _ => None,
+        };
+        if let Some(g) = constant {
+            for c in buf.iter_mut() {
+                for v in &mut c[ext.start..ext.end] {
+                    *v = (*v as f64 * g) as f32;
+                }
+            }
+        } else {
+            for s in ext.start..ext.end {
+                let t = s as f64 / rate;
+                let g = match gain {
+                    Some(gain) => volume.at(t, fps) * db_to_lin(gain.at(t, fps)),
+                    None => volume.at(t, fps),
+                };
+                for c in buf.iter_mut() {
+                    c[s] = (c[s] as f64 * g) as f32;
+                }
+            }
+        }
+        ext
+    }
+
+    /// Ducks `buf` under the outputs of `d.under`. The detector and gain
+    /// have memory, so they run from the start of the programme up to the
+    /// end of `ext`; the gain is applied inside `ext` only (a positive,
+    /// finite gain leaves zeros as they are). Returns the extent applied to.
+    fn duck(&self, buf: &mut Planar, ext: Extent, d: &Duck, outputs: &HashMap<String, Planar>) -> Extent {
+        let total = buf.first().map(Vec::len).unwrap_or(0);
+        let rate = self.rate as f64;
+        let env_c = coeff(0.01, rate);
+        let (ca, cr) = (coeff(d.attack, rate), coeff(d.release, rate));
+        let finite = [env_c, ca, cr, d.amount.min(0.0)].iter().all(|v| v.is_finite());
+        let ext = if finite { ext.clip(total) } else { Extent::full(total) };
+        let under: Vec<&Planar> = d.under.iter().filter_map(|u| outputs.get(u)).collect();
+        let (mut env, mut g) = (0.0, 0.0);
+        for s in 0..ext.end {
+            let key = under.iter().flat_map(|o| o.iter().map(|c| (c[s] as f64).abs())).fold(0.0, f64::max);
+            env = key.max(env * env_c);
+            let target = if lin_to_db(env) > d.threshold { d.amount.min(0.0) } else { 0.0 };
+            g = if target < g { target + (g - target) * ca } else { target + (g - target) * cr };
+            if s >= ext.start {
+                let lin = db_to_lin(g);
+                for c in buf.iter_mut() {
+                    c[s] = (c[s] as f64 * lin) as f32;
+                }
+            }
+        }
+        ext
+    }
+
+    /// Routes `src` (in `layout`) into the mix layout with pan automation,
+    /// per 256-sample block, over the blocks that touch `ext` (the others
+    /// would add zeros).
+    fn route_block(&self, src: &Planar, layout: Layout, pan: &Curve, ext: Extent) -> Planar {
         let total = src.first().map(Vec::len).unwrap_or(0);
         let chans = self.layout.channels();
         let mut out = vec![vec![0f32; total]; chans];
         let rate = self.rate as f64;
-        let mut s = 0;
-        while s < total {
+        let ext = ext.clip(total);
+        let mut s = ext.start / 256 * 256;
+        while s < ext.end {
             let e = (s + 256).min(total);
             let m = route(layout, self.layout, pan.at((s + e) as f64 * 0.5 / rate, self.control_fps));
             for (o, row) in m.iter().enumerate() {
@@ -635,5 +772,150 @@ impl Mix {
             s = e;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effects::Kind;
+
+    const RATE: u32 = 48000;
+
+    fn tone(f: f64, amp: f64, secs: f64) -> Vec<f32> {
+        (0..(secs * RATE as f64) as usize)
+            .map(|i| (amp * (2.0 * std::f64::consts::PI * f * i as f64 / RATE as f64).sin()) as f32)
+            .collect()
+    }
+
+    fn track(id: &str, source: Arc<Source>, placement: Placement) -> Node {
+        Node {
+            id: id.into(),
+            kind: NodeKind::Track {
+                source,
+                placement,
+                fade_in: 0.1,
+                fade_out: 0.25,
+                fade_curve: FadeCurve::EqualPower,
+            },
+            volume: Curve::Const(0.8),
+            gain: Curve::Const(0.0),
+            pan: Curve::Const(0.0),
+            mute: false,
+            output: None,
+            duck: None,
+            effects: Vec::new(),
+        }
+    }
+
+    fn timeline(start: f64) -> Placement {
+        Placement::Timeline {
+            start,
+            clip_in: 0.0,
+            clip_out: None,
+            loops: 0,
+            speed: 1.0,
+            reverse: false,
+            preserve_pitch: false,
+            fit: None,
+        }
+    }
+
+    fn same(a: &Planar, b: &Planar) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()))
+    }
+
+    /// A 20 s programme: clips placed early, late and inside, a mapped
+    /// layer, a bus, automation, ducking, an effect, a muted track.
+    fn programme(master: Master) -> Mix {
+        let fps = 30.0;
+        let mono = Arc::new(Source { layout: Layout::Mono, planar: vec![tone(440.0, 0.7, 2.0)] });
+        let stereo =
+            Arc::new(Source { layout: Layout::Stereo, planar: vec![tone(220.0, 0.6, 3.0), tone(330.0, 0.5, 3.0)] });
+        let frames = (20.0 * fps) as usize + 1;
+        let times: Vec<Option<f64>> =
+            (0..frames).map(|k| k as f64 / fps).map(|t| (15.5..16.5).contains(&t).then(|| t - 15.5)).collect();
+        let ramp: Vec<f64> = (0..frames).map(|k| 0.2 + 0.8 * (k as f64 / frames as f64)).collect();
+        let sweep: Vec<f64> = (0..frames).map(|k| (k as f64 / 40.0).sin()).collect();
+        let mut early = track("early", mono.clone(), timeline(1.0));
+        early.output = Some("bus".into());
+        let mut late = track("late", mono.clone(), timeline(15.0));
+        late.volume = Curve::Frames(ramp);
+        late.gain = Curve::Const(-3.0);
+        late.duck =
+            Some(Duck { under: vec!["layer".into()], amount: -12.0, threshold: -30.0, attack: 0.01, release: 0.3 });
+        let mut eq = track("eq", mono.clone(), timeline(9.0));
+        eq.effects.push(Effect { frequency: Some(1000.0), gain: 6.0, ..Effect::new(Kind::Eq) });
+        eq.gain = Curve::Frames(sweep.iter().map(|v| v * 3.0).collect());
+        let mut layer = track("layer", stereo, Placement::Mapped(times));
+        layer.pan = Curve::Frames(sweep);
+        let mut muted = track("muted", mono, timeline(4.0));
+        muted.mute = true;
+        let bus = Node {
+            id: "bus".into(),
+            kind: NodeKind::Bus,
+            volume: Curve::Const(0.9),
+            gain: Curve::Const(1.0),
+            pan: Curve::Const(-0.3),
+            mute: false,
+            output: None,
+            duck: None,
+            effects: Vec::new(),
+        };
+        Mix {
+            rate: RATE,
+            layout: Layout::Stereo,
+            duration: 20.0,
+            control_fps: fps,
+            nodes: vec![early, late, eq, layer, muted, bus],
+            master,
+        }
+    }
+
+    #[test]
+    fn extent_limited_render_is_bit_identical() {
+        for (normalize, limiter) in [
+            (Normalize::None, false),
+            (Normalize::None, true),
+            (Normalize::Integrated, false),
+            (Normalize::Dynamic, false),
+        ] {
+            let volume = Curve::Frames((0..601).map(|k| 1.0 - 0.3 * (k as f64 / 600.0)).collect());
+            let m = programme(Master { normalize, limiter, volume, ..Master::default() });
+            let a = m.render_inner(false).unwrap();
+            let b = m.render_inner(true).unwrap();
+            assert!(same(&a.master, &b.master), "master with {normalize:?}, limiter {limiter}");
+            for (id, buf) in &b.nodes {
+                assert!(same(&a.nodes[id], buf), "node {id} with {normalize:?}");
+            }
+            assert_eq!(a.loudness_before.to_bits(), b.loudness_before.to_bits());
+            assert_eq!(a.loudness.to_bits(), b.loudness.to_bits());
+            assert_eq!(a.true_peak.to_bits(), b.true_peak.to_bits());
+            assert!(a.loudness > -40.0, "the programme has content: {}", a.loudness);
+            // the extents are bounds: outside them every sample is a zero
+            let zero_outside = |buf: &Planar, e: Extent| {
+                buf.iter()
+                    .all(|ch| ch[..e.start.min(ch.len())].iter().chain(&ch[e.end.min(ch.len())..]).all(|v| *v == 0.0))
+            };
+            for (id, buf) in &a.nodes {
+                assert!(zero_outside(buf, a.extents[id]), "node {id}");
+            }
+            assert!(zero_outside(&a.master, a.master_extent));
+            // and tight enough to matter (the equal-power fade-in starts at exactly zero)
+            let s = RATE as usize;
+            let early = a.extents["early"];
+            assert!(early.start >= s && early.start <= s + 2 && early.end == 3 * s, "{early:?}");
+            let late = a.extents["late"];
+            assert!(late.start >= 15 * s && late.start <= 15 * s + 2 && late.end == 17 * s, "{late:?}");
+            assert!(a.extents["muted"].is_empty());
+            let layer = a.extents["layer"];
+            assert!(layer.start + 2 >= 15 * s + s / 2 && layer.end <= 16 * s + s / 2 + 2, "{layer:?}");
+            let eq = a.extents["eq"];
+            assert!(eq.start >= 9 * s && eq.start <= 9 * s + 2 && eq.end > 11 * s && eq.end < 12 * s, "{eq:?}");
+            assert_eq!(a.master_extent, Extent { start: early.start, end: 17 * s });
+        }
     }
 }

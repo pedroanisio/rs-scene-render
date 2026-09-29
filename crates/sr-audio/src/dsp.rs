@@ -90,6 +90,24 @@ impl Biquad {
             *v = self.tick(*v as f64) as f32;
         }
     }
+
+    /// State magnitude (2⁻²⁰⁰) below which, fed zeros, every later output
+    /// rounds to zero as an `f32` (which has no value below 2⁻¹⁴⁹; 2⁵⁰ is
+    /// left for the transient growth of a second-order section, a few hundred
+    /// at most for the sections designed here).
+    pub const SETTLED_F32: f64 = 6.223015277861142e-61;
+
+    /// State magnitude (2⁻⁶⁰⁰) below which, fed zeros, the square of every
+    /// later output is exactly zero in `f64` (`y * y` underflows below 2⁻⁵³⁷;
+    /// 2⁶³ is left for transient growth and a cascaded section).
+    pub const SETTLED_SQUARE: f64 = 2.409919865102884e-181;
+
+    /// Whether both state variables are below `below` in magnitude: fed zeros
+    /// from here the output only decays further. (The state never reaches
+    /// exactly zero: it settles in subnormal noise around 10⁻³²².)
+    pub fn settled(&self, below: f64) -> bool {
+        self.z[0].abs() < below && self.z[1].abs() < below
+    }
 }
 
 /// One-pole smoothing coefficient for a time constant in seconds.
@@ -218,6 +236,54 @@ mod tests {
         assert!((gain_at(pk, 2000.0) - 6.0).abs() < 0.05);
         let hs = Biquad::new(Shape::HighShelf, 48000.0, 1000.0, std::f64::consts::FRAC_1_SQRT_2, -12.0);
         assert!((gain_at(hs, 15000.0) + 12.0).abs() < 0.3);
+    }
+
+    #[test]
+    fn settled_thresholds_are_the_documented_powers_of_two() {
+        assert_eq!(Biquad::SETTLED_F32, 2f64.powi(-200));
+        assert_eq!(Biquad::SETTLED_SQUARE, 2f64.powi(-600));
+    }
+
+    #[test]
+    fn a_settled_section_fed_zeros_stays_silent() {
+        // every section the analysis and loudness code runs, at the common rates: after a
+        // burst, once the state is below the threshold no later output is non-zero as f32
+        // (or squared, for the K-weighting), and the state never climbs back near it
+        for rate in [44100.0, 48000.0, 96000.0, 192000.0] {
+            let q = std::f64::consts::FRAC_1_SQRT_2;
+            let bands = [
+                Biquad::new(Shape::LowPass, rate, 250.0, q, 0.0),
+                Biquad::new(Shape::HighPass, rate, 250.0, q, 0.0),
+                Biquad::new(Shape::LowPass, rate, 4000.0, q, 0.0),
+                Biquad::new(Shape::HighPass, rate, 4000.0, q, 0.0),
+            ];
+            let [shelf, hp] = crate::loudness::k_weighting(rate);
+            let sections = bands
+                .into_iter()
+                .map(|f| (f, Biquad::SETTLED_F32, false))
+                .chain([(shelf, Biquad::SETTLED_SQUARE, true), (hp, Biquad::SETTLED_SQUARE, true)]);
+            for (mut f, below, square) in sections {
+                let mut rng = Rng::new(7);
+                for _ in 0..4800 {
+                    f.tick(rng.uniform() * 2.0 - 1.0);
+                }
+                let mut n = 0;
+                while !f.settled(below) {
+                    f.tick(0.0);
+                    n += 1;
+                    assert!(n < 2_000_000, "never settles at {rate}");
+                }
+                for _ in 0..1_000_000 {
+                    let y = f.tick(0.0);
+                    if square {
+                        assert_eq!(y * y, 0.0);
+                    } else {
+                        assert_eq!(y as f32, 0.0);
+                    }
+                    assert!(f.settled(below * 1048576.0), "state grew back within 2^20 of the threshold at {rate}");
+                }
+            }
+        }
     }
 
     #[test]
