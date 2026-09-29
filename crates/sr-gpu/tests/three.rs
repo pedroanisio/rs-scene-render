@@ -139,6 +139,7 @@ fn splats_sort_back_to_front() {
         rot: vec![[0.0, 0.0, 0.0, 1.0]],
         color: vec![c],
         basis: Mat4::IDENTITY,
+        ..Default::default()
     };
     let mut s = mk(0.0, [1.0, 0.0, 0.0, 0.95]);
     let far = mk(50.0, [0.0, 0.0, 1.0, 0.95]);
@@ -230,10 +231,85 @@ fn splats_beside_the_camera_are_culled() {
         rot: vec![[0.0, 0.0, 0.0, 1.0]],
         color: vec![[1.0, 1.0, 1.0, 0.9]],
         basis: Mat4::IDENTITY,
+        ..Default::default()
     };
     let gpu = eng.upload_splats(&s);
     let mut sc = sc0;
     sc.splats.push(SplatDraw { gpu, model: Mat4::IDENTITY, opacity: 1.0 });
     let px = eng.render_now(&sc, None);
     assert_eq!(at(&px, 64, 64)[3], 0.0, "the off-frame splat must not cover the frame");
+}
+
+/// 3D Gaussian Splatting's SH colour (reference implementation's basis), encoded, clamped at 0.
+fn sh_reference(c: &[f32; 48], deg: u32, d: Vec3) -> [f32; 3] {
+    let k = |i: usize| Vec3::new(c[i * 3], c[i * 3 + 1], c[i * 3 + 2]);
+    let (x, y, z) = (d.x, d.y, d.z);
+    let mut r = 0.282_094_8 * k(0);
+    if deg >= 1 {
+        r += -0.488_602_5 * y * k(1) + 0.488_602_5 * z * k(2) - 0.488_602_5 * x * k(3);
+    }
+    if deg >= 2 {
+        let (xx, yy, zz) = (x * x, y * y, z * z);
+        r += 1.092_548_4 * x * y * k(4) - 1.092_548_4 * y * z * k(5) + 0.315_391_57 * (2.0 * zz - xx - yy) * k(6)
+            - 1.092_548_4 * x * z * k(7)
+            + 0.546_274_2 * (xx - yy) * k(8);
+        if deg >= 3 {
+            r += -0.590_043_6 * y * (3.0 * xx - yy) * k(9) + 2.890_611_4 * x * y * z * k(10)
+                - 0.457_045_8 * y * (4.0 * zz - xx - yy) * k(11)
+                + 0.373_176_33 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * k(12)
+                - 0.457_045_8 * x * (4.0 * zz - xx - yy) * k(13)
+                + 1.445_305_7 * z * (xx - yy) * k(14)
+                - 0.590_043_6 * x * (xx - 3.0 * yy) * k(15);
+        }
+    }
+    (r + Vec3::splat(0.5)).max(Vec3::ZERO).to_array()
+}
+
+#[test]
+fn splat_colour_follows_its_spherical_harmonics() {
+    // one opaque degree-3 splat, turned so the camera sees it from two directions in its own
+    // frame: the centre pixel is the reference SH colour for each direction
+    let Some(mut eng) = engine() else { return };
+    let mut c = [0.0f32; 48];
+    for (i, v) in c.iter_mut().enumerate() {
+        *v = ((i as f32 * 1.618).fract() - 0.5) * 0.6;
+    }
+    c[0] = 0.4;
+    c[1] = -0.2;
+    c[2] = 0.1;
+    let s = sr_3d::Splats {
+        pos: vec![[0.0, 0.0, 0.0]],
+        scale: vec![[14.0, 14.0, 14.0]],
+        rot: vec![[0.0, 0.0, 0.0, 1.0]],
+        color: vec![[0.5, 0.5, 0.5, 1.0]],
+        sh: vec![c],
+        sh_degree: 3,
+        basis: Mat4::IDENTITY,
+    };
+    let gpu = eng.upload_splats(&s);
+    let mut seen = Vec::new();
+    for yaw in [0.0f32, 70.0] {
+        let sc0 = scene(Vec::new(), Vec::new());
+        let eye = sc0.cam.view.inverse().transform_point3(Vec3::ZERO);
+        let model = Mat4::from_translation(Vec3::new(64.0, 64.0, 0.0)) * Mat4::from_rotation_y(yaw.to_radians());
+        let mut sc = sc0;
+        sc.splats.push(SplatDraw { gpu: gpu.clone(), model, opacity: 1.0 });
+        let px = eng.render_now(&sc, None);
+        let got = at(&px, 64, 64);
+        let cam_local = model.inverse().transform_point3(eye);
+        let dir = (Vec3::ZERO - cam_local).normalize();
+        let enc = sh_reference(&c, 3, dir);
+        // at the centre the splat is at its full (capped) opacity: premultiplied linear colour
+        let a = got[3];
+        assert!((a - 0.99).abs() < 0.01, "{got:?}");
+        for ch in 0..3 {
+            let e = enc[ch].min(1.0);
+            let lin = if e <= 0.04045 { e / 12.92 } else { ((e + 0.055) / 1.055).powf(2.4) };
+            let want = lin * a;
+            assert!((got[ch] - want).abs() < 0.01, "yaw {yaw}: channel {ch}: {} vs reference {want}", got[ch]);
+        }
+        seen.push(got);
+    }
+    let change = (0..3).map(|k| (seen[0][k] - seen[1][k]).abs()).fold(0.0, f32::max);
+    assert!(change > 0.05, "the colour must depend on the view: {seen:?}");
 }

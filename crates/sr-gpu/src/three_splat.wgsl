@@ -15,11 +15,56 @@ struct Splat {
 
 struct SplatObject {
     model: mat4x4<f32>,
-    // opacity, unused ×3
+    // scene space → the splats' own space
+    model_inv: mat4x4<f32>,
+    // opacity, SH degree, unused ×2
     params: vec4<f32>,
 };
 
 @group(1) @binding(2) var<uniform> sobj: SplatObject;
+// 16 RGB spherical-harmonic coefficients a splat (coefficient-major), when the degree is > 0
+@group(1) @binding(3) var<storage, read> sh: array<f32>;
+
+fn sh_c(i: u32, k: u32) -> vec3<f32> {
+    let o = i * 48u + k * 3u;
+    return vec3(sh[o], sh[o + 1u], sh[o + 2u]);
+}
+
+// View-dependent colour of 3D Gaussian Splatting (Kerbl et al. 2023, reference
+// implementation's SH basis), in the capture's encoded colour; d is the unit direction from
+// the camera to the splat in the splats' own space.
+fn sh_color(i: u32, deg: u32, d: vec3<f32>) -> vec3<f32> {
+    let c0 = 0.28209479177387814;
+    var r = c0 * sh_c(i, 0u);
+    if (deg >= 1u) {
+        let c1 = 0.4886025119029199;
+        r += -c1 * d.y * sh_c(i, 1u) + c1 * d.z * sh_c(i, 2u) - c1 * d.x * sh_c(i, 3u);
+    }
+    if (deg >= 2u) {
+        let xx = d.x * d.x; let yy = d.y * d.y; let zz = d.z * d.z;
+        r += 1.0925484305920792 * d.x * d.y * sh_c(i, 4u)
+            - 1.0925484305920792 * d.y * d.z * sh_c(i, 5u)
+            + 0.31539156525252005 * (2.0 * zz - xx - yy) * sh_c(i, 6u)
+            - 1.0925484305920792 * d.x * d.z * sh_c(i, 7u)
+            + 0.5462742152960396 * (xx - yy) * sh_c(i, 8u);
+        if (deg >= 3u) {
+            r += -0.5900435899266435 * d.y * (3.0 * xx - yy) * sh_c(i, 9u)
+                + 2.890611442640554 * d.x * d.y * d.z * sh_c(i, 10u)
+                - 0.4570457994644658 * d.y * (4.0 * zz - xx - yy) * sh_c(i, 11u)
+                + 0.3731763325901154 * d.z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * sh_c(i, 12u)
+                - 0.4570457994644658 * d.x * (4.0 * zz - xx - yy) * sh_c(i, 13u)
+                + 1.445305721320277 * d.z * (xx - yy) * sh_c(i, 14u)
+                - 0.5900435899266435 * d.x * (xx - 3.0 * yy) * sh_c(i, 15u);
+        }
+    }
+    return max(r + 0.5, vec3(0.0));
+}
+
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return select(hi, lo, c <= vec3(0.04045));
+}
 
 struct SOut {
     @builtin(position) clip: vec4<f32>,
@@ -69,7 +114,14 @@ fn vs_splat(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
     o.clip = center + vec4(off_px * vec2(2.0 * fr.screen.z, -2.0 * fr.screen.w) * center.w, 0.0, 0.0);
     o.d = off_px;
     o.conic = vec3(c, -b, a) / det;
-    o.color = vec4(sp.color.rgb, sp.color.a * sobj.params.x);
+    var rgb = sp.color.rgb;
+    let deg = u32(sobj.params.y);
+    if (deg > 0u) {
+        let cam = (sobj.model_inv * vec4(fr.eye.xyz, 1.0)).xyz;
+        let dir = normalize(sp.pos.xyz - cam);
+        rgb = srgb_decode(min(sh_color(order[ii], deg, dir), vec3(1.0)));
+    }
+    o.color = vec4(rgb, sp.color.a * sobj.params.x);
     return o;
 }
 

@@ -504,3 +504,41 @@ fn usdc_values_decode_as_usd_reads_them() {
         }
     }
 }
+
+#[test]
+fn splat_ply_spherical_harmonics_import_in_coefficient_order() {
+    // 3DGS writes f_rest channel-major (15 red, then 15 green, then 15 blue coefficients)
+    for (rest, degree) in [(9usize, 1u32), (24, 2), (45, 3)] {
+        let mut gs = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\n".to_vec();
+        let mut names: Vec<String> =
+            ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"].map(String::from).to_vec();
+        names.extend((0..rest).map(|k| format!("f_rest_{k}")));
+        names
+            .extend(["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"].map(String::from));
+        for p in &names {
+            gs.extend_from_slice(format!("property float {p}\n").as_bytes());
+        }
+        gs.extend_from_slice(b"end_header\n");
+        let per = rest / 3;
+        let mut vals = vec![0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3];
+        // f_rest value encodes (channel, coefficient) so the mapping can be read back
+        vals.extend((0..rest).map(|k| (k / per) as f32 * 100.0 + (k % per) as f32 + 1.0));
+        vals.extend([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        for v in vals {
+            gs.extend_from_slice(&v.to_le_bytes());
+        }
+        let Asset::Splats(s) = import::load(&tmp(&format!("sh{rest}.ply"), &gs), None).unwrap() else { panic!() };
+        assert_eq!(s.sh_degree, degree);
+        let c = s.sh[0];
+        assert_eq!([c[0], c[1], c[2]], [0.1, 0.2, 0.3], "DC first");
+        for j in 1..=per {
+            for ch in 0..3 {
+                assert_eq!(
+                    c[j * 3 + ch],
+                    ch as f32 * 100.0 + j as f32,
+                    "degree {degree}: coefficient {j} channel {ch}"
+                );
+            }
+        }
+    }
+}

@@ -610,7 +610,28 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
         let op = col("opacity");
         let r0 = col("rot_0").ok_or("splats without rot_0")?;
         let mut s = Splats { basis: Mat4::from_scale(Vec3::splat(100.0)), ..Default::default() };
+        // higher-order SH: f_rest_* holds (degree + 1)² − 1 coefficients per channel, channel-major
+        let rest = (0..).take_while(|k| col(&format!("f_rest_{k}")).is_some()).count();
+        let per = rest / 3;
+        let degree = match per {
+            3 => 1,
+            8 => 2,
+            15 => 3,
+            _ => 0,
+        };
+        let rest0 = col("f_rest_0");
+        s.sh_degree = degree;
         for v in &verts {
+            if degree > 0 {
+                let mut c = [0.0f32; 48];
+                for ch in 0..3 {
+                    c[ch] = v[dc0 + ch] as f32;
+                    for j in 0..per {
+                        c[(j + 1) * 3 + ch] = v[rest0.unwrap_or(0) + ch * per + j] as f32;
+                    }
+                }
+                s.sh.push(c);
+            }
             s.pos.push([v[x] as f32, v[y] as f32, v[z] as f32]);
             s.scale.push([0, 1, 2].map(|k| v[s0 + k].exp() as f32));
             let q = Quat::from_xyzw(v[r0 + 1] as f32, v[r0 + 2] as f32, v[r0 + 3] as f32, v[r0] as f32).normalize();

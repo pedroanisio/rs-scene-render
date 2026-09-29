@@ -54,6 +54,9 @@ pub struct EnvGpu {
 /// Splats on the GPU (model space).
 pub struct SplatGpu {
     pub buf: wgpu::Buffer,
+    /// Spherical-harmonic coefficients (48 floats a splat), or one dummy entry.
+    pub sh: wgpu::Buffer,
+    pub sh_degree: u32,
     pub n: u32,
     pub lo: Vec3,
     pub hi: Vec3,
@@ -257,6 +260,9 @@ struct SortU {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SplatObjU {
     model: [[f32; 4]; 4],
+    /// Scene space to the splats' own space (for view directions of their SH colour).
+    model_inv: [[f32; 4]; 4],
+    /// opacity, SH degree, unused ×2
     params: [f32; 4],
 }
 
@@ -533,7 +539,12 @@ impl ThreeEngine {
         let bgl_mat = bgl(&mat_entries, "three-material");
         let bgl_obj = bgl(&[buf_entry(0, VS_FS, uni, true)], "three-object");
         let bgl_splat = bgl(
-            &[buf_entry(0, VS_FS, ro, false), buf_entry(1, VS_FS, ro, false), buf_entry(2, VS_FS, uni, false)],
+            &[
+                buf_entry(0, VS_FS, ro, false),
+                buf_entry(1, VS_FS, ro, false),
+                buf_entry(2, VS_FS, uni, false),
+                buf_entry(3, VS_FS, ro, false),
+            ],
             "three-splat",
         );
         let bgl_post = bgl(
@@ -921,7 +932,21 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(&data),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        Arc::new(SplatGpu { buf, n: s.len() as u32, lo, hi })
+        let has_sh = s.sh_degree > 0 && s.sh.len() == s.len() && !s.is_empty();
+        let dummy = [[0.0f32; 48]];
+        let sh = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("splat-sh"),
+            contents: bytemuck::cast_slice(if has_sh { &s.sh[..] } else { &dummy[..] }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        Arc::new(SplatGpu {
+            buf,
+            sh,
+            sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 },
+            n: s.len() as u32,
+            lo,
+            hi,
+        })
     }
 
     fn mat_bind(&mut self, maps: &Maps, uniform: &wgpu::Buffer) -> [u64; 6] {
@@ -1615,7 +1640,11 @@ impl ThreeEngine {
                 }
             }
             // four passes end back in the "a" buffers
-            let so = SplatObjU { model: sp.model.to_cols_array_2d(), params: [sp.opacity, 0.0, 0.0, 0.0] };
+            let so = SplatObjU {
+                model: sp.model.to_cols_array_2d(),
+                model_inv: sp.model.inverse().to_cols_array_2d(),
+                params: [sp.opacity, sp.gpu.sh_degree as f32, 0.0, 0.0],
+            };
             let obuf = buf(bytemuck::bytes_of(&so), wgpu::BufferUsages::UNIFORM, "splat-object");
             let sb = d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("splat"),
@@ -1624,6 +1653,7 @@ impl ThreeEngine {
                     wgpu::BindGroupEntry { binding: 0, resource: sp.gpu.buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: va.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: obuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: sp.gpu.sh.as_entire_binding() },
                 ],
             });
             splat_binds.push((sb, sp.gpu.n));

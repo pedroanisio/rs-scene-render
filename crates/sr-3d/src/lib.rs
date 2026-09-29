@@ -246,8 +246,14 @@ pub struct Splats {
     pub scale: Vec<[f32; 3]>,
     /// Unit quaternion (x, y, z, w).
     pub rot: Vec<[f32; 4]>,
-    /// Linear sRGB colour and opacity.
+    /// Linear sRGB colour and opacity (the view-independent colour).
     pub color: Vec<[f32; 4]>,
+    /// Spherical-harmonic colour of 3D Gaussian Splatting captures, when present: 16 RGB
+    /// coefficients per splat (coefficient-major; coefficient 0 is the DC term), of which the
+    /// first (`sh_degree` + 1)² are used. Evaluated as 3DGS does: 0.5 + Σ Yₖ(d) cₖ in the
+    /// capture's encoded colour, for the direction d from the camera in the splats' own frame.
+    pub sh: Vec<[f32; 48]>,
+    pub sh_degree: u32,
     /// Source space to scene space.
     pub basis: Mat4,
 }
