@@ -881,7 +881,14 @@ impl Renderer {
     /// Applies a light's transform constraints: look-at aims it, copy-position moves it to the
     /// target (plus offset), follow-path rides a path, distance clamps its range. `parent` is part
     /// of the light's pose (`pose_world`).
-    fn constrain_light(plan: &mut Plan, g: &FrameGraph, lights: &[m::Light], e: &dyn Element, id: &str, lt: &mut Light3) {
+    fn constrain_light(
+        plan: &mut Plan,
+        g: &FrameGraph,
+        lights: &[m::Light],
+        e: &dyn Element,
+        id: &str,
+        lt: &mut Light3,
+    ) {
         for c in sr_model::element::children(e) {
             if c.element_name() != "transformConstraint" {
                 continue;

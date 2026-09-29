@@ -406,7 +406,10 @@ fn object3d_instances_evaluate_once_per_index() {
 
 #[test]
 fn bare_assignment_declares_a_variable() {
-    let d = doc("", r#"<layer id="a" asset="img"><expression property="x">t0 = [40, 50][0]; a = 50; t0 + 2 * a</expression></layer>"#);
+    let d = doc(
+        "",
+        r#"<layer id="a" asset="img"><expression property="x">t0 = [40, 50][0]; a = 50; t0 + 2 * a</expression></layer>"#,
+    );
     assert_eq!(node(&eval(&d, 0.0), "a").props.get("x"), Some(&Value::Len(Length::px(140.0))));
 }
 

@@ -486,7 +486,9 @@ fn positive_2_5d_rotations_turn_the_right_and_top_edges_away() {
         let d = doc(
             r##"width="64" height="64" background="#000000""##,
             "",
-            &format!(r#"<layer id="flat" asset="white" x="32" y="32" anchorX="2" anchorY="2" scaleX="8" scaleY="8" threeD="true" {rot}="40"/>"#),
+            &format!(
+                r#"<layer id="flat" asset="white" x="32" y="32" anchorX="2" anchorY="2" scaleX="8" scaleY="8" threeD="true" {rot}="40"/>"#
+            ),
         );
         render(&d)
     };

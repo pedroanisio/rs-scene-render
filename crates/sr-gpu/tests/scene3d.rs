@@ -288,7 +288,8 @@ fn parented_cameras_are_placed_in_their_parents_frame() {
 #[test]
 fn the_dome_turns_by_its_yaw_and_pitch_and_decodes_srgb() {
     let dome = |angles: &str| {
-        let lights = format!(r#"<light id="sky" type="dome" environment="sky.png" environmentVisible="true" {angles}/>"#);
+        let lights =
+            format!(r#"<light id="sky" type="dome" environment="sky.png" environmentVisible="true" {angles}/>"#);
         render(&scene("", "", r#"<object3D id="s" primitive="sphere" radius="1" x="0" y="0" z="-500"/>"#, &lights))
     };
     let red = |p: [f32; 4]| p[0] > 0.5 && p[1] < 0.1;
@@ -331,7 +332,9 @@ fn default_lights_are_the_neutral_rig_and_ambient_reflects_on_metals() {
 fn the_torus_tube_defaults_to_0_35_of_the_radius() {
     let mats = r##"<material id="u" baseColor="#FFFFFF" unlit="true" doubleSided="true"/>"##;
     // seen along its axis (rotationX 90 turns the ring into the frame plane): ring radius 40, tube 14
-    let body = |h: &str| format!(r#"<object3D id="t" primitive="torus" radius="40" {h} x="64" y="64" rotationX="90" material="u"/>"#);
+    let body = |h: &str| {
+        format!(r#"<object3D id="t" primitive="torus" radius="40" {h} x="64" y="64" rotationX="90" material="u"/>"#)
+    };
     let Some(r) = render(&scene("", mats, &body(""), "")) else { return };
     let row: Vec<u32> = (0..128).filter(|x| r.at(*x, 64)[3] > 0.5).collect();
     // on the centre row: the tube spans 26..54 px from the centre on each side
