@@ -32,6 +32,10 @@ Contents: [document model](#document-model) · [evaluation](#evaluation) · [GPU
 
 The generator accepts exactly the XSD subset the schema uses and aborts the build on anything else, so an unsupported construct cannot be ignored silently.
 
+### The schema is vendored from sr-core
+
+The canonical copy of the schema lives in [sr-core](https://github.com/pedroanisio/sr-core) (`schema/scene-render.xsd` and `.sch`), shared by every scene-render engine. This repository vendors a released version unchanged under its own file names and records the tag and SHA-256 of each file in `schema/UPSTREAM` (currently schema 1.1.2). The schema changes only through an accepted Scene Render Enhancement Proposal (SREP) in sr-core; this engine is the reference implementation an SREP needs before review, and takes the released files once it is accepted.
+
 ### Loading runs four stages over one parse
 
 | Stage | Module | Codes | What it enforces |
@@ -361,7 +365,7 @@ Physics and particles accumulate state over time, which conflicts with rendering
 
 ## 2D simulations, clay, lighting and path tracing
 
-**Schema extension.** `schema/scene-render-1.1.xsd` carries rs-scene-render extensions, marked as such: the composition nodes `<flock>`, `<fluid>` (with `<fluidSource>`), `<slime>` and `<erosion>`; `object3D primitive="clay"` with `<blob>` children and the attributes `resolution`, `fingerprints`, `boil` and `seed`; the camera attributes `ambientOcclusion`, `aoRadius`, `aoIntensity`, `screenSpaceReflections`, `renderer`, `pathSamples`, `maxBounces` and `denoise`; and the light attributes `contactShadows` and `contactShadowLength`. Every addition is optional, with defaults that leave documents that do not use it unchanged. Other scene-render 1.1 implementations may not recognise these elements and attributes.
+**Schema.** Beyond the original scene-render 1.1 elements, the canonical schema includes, first implemented here: the composition nodes `<flock>`, `<fluid>` (with `<fluidSource>`), `<slime>` and `<erosion>`; `object3D primitive="clay"` with `<blob>` children and the attributes `resolution`, `fingerprints`, `boil` and `seed`; the camera attributes `ambientOcclusion`, `aoRadius`, `aoIntensity`, `screenSpaceReflections`, `renderer`, `pathSamples`, `maxBounces` and `denoise`; and the light attributes `contactShadows` and `contactShadowLength`. Every addition is optional, with defaults that leave documents that do not use it unchanged. Other engines may not implement them yet.
 
 **2D simulations.** All four run on the node's own timeline in 1/60 s steps (`sr-sim/timeline.rs`) with a checkpoint every simulated second, so frames can be requested in any order and match a straight run. For states too large to copy every second (millions of slime agents), checkpoints are thinned to a 256 MB budget.
 - `<flock>` is Reynolds' boids: separation, alignment and cohesion within `perception`, capped at `maxSpeed` and `maxForce`, with a cruise `speed`, kept in the box by `bounds` (steer, bounce or wrap), and pushed by the named force fields. It draws like particles: streaks oriented to the velocity, discs or sprites.
@@ -485,7 +489,7 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 
 **Not yet.** Basemap tiles (vector PMTiles or raster), terrain and 3D buildings, label collision, and simplification of detailed data. The whole file is read into memory, so 1:10 m data is slow to fit; `fit` is cached per map setup.
 
-**Schema extension.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R24–R26 and C45 are rs-scene-render extensions of `schema/scene-render-1.1.xsd` and `.sch`, marked as such. Other scene-render 1.1 implementations may not recognise them.
+**Schema.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R24–R26 and C45 are part of the canonical schema, first implemented here. Other engines may not implement them yet.
 
 ## Generated media and transcription
 
@@ -516,7 +520,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - Any other name runs the program in `SR_PROVIDER_<NAME>` or a `scene-render-provider-<name>` on `PATH`, which also overrides a built-in of that name. The program reads one JSON request on standard input (kind, provider, model, prompt, voice, language, seed, size, duration, the audio format, the timeline, the output path with the cache's extension, a scratch folder and, for transcription, the input WAV) and answers `{"ok": true, "version": "…"}` or `{"ok": false, "error": "…"}` as the last line of its output. A transcriber writes `{"segments": [{"start", "end", "text", "words": [{"start", "end", "text"}]}]}`. `scene-render-provider-example`, built with the crate, implements the protocol as a reference.
 - A result whose extension differs from what the provider makes is converted by FFmpeg.
 
-**Schema extension.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are rs-scene-render extensions that other scene-render 1.1 implementations may not recognise.
+**Schema.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are part of the canonical schema, first implemented here, and other engines may not implement them yet.
 
 **Tests.**
 - With the example provider: speech and its captions are made and pinned, the captions start where the track plays, the document validates afterwards with nothing else changed, and a second run makes nothing.

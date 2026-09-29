@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.1">
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.1.2">
   <xs:annotation>
     <xs:documentation>
-      scene-render scene format 1.1. This schema is the interchange contract for
-      the deterministic C17 renderer. Every document valid under 1.0 is valid
+      scene-render scene format 1.1. This schema is the interchange contract
+      shared by every scene-render engine (C, Rust, Python, JavaScript). Its
+      canonical copy is sr-core/schema/; it changes only through an accepted
+      SREP (sr-core/srep/). Every document valid under 1.0 is valid
       under 1.1 (with one exception: colour channels above 1, which 1.0 matched
       by accident, are now rejected). New sections, elements and asset kinds
       require version="1.1"; new attributes on 1.0 elements are accepted in both
-      versions. The companion Schematron rules (scene-render-1.1.sch) enforce the
+      versions. The companion Schematron rules (scene-render.sch) enforce the
       version gate and the cross-field rules XSD 1.0 cannot express.
 
       Conventions used everywhere:
@@ -1061,7 +1063,7 @@
       Media produced by an external generator (text-to-speech, image, video or
       music model, transcription). The renderer never calls the provider while
       rendering: it reads @cache and fails unless the file's SHA-256 equals
-      @cacheSha256. `scene-render resolve` fills the cache from
+      @cacheSha256. A resolve step, run before rendering, fills the cache from
       @provider/@model/@prompt/@voice/@seed and pins @cacheSha256. This keeps
       renders deterministic.
     </xs:documentation></xs:annotation>
@@ -1994,7 +1996,7 @@
     <xs:attribute name="shutterAngle" type="nonNegativeDecimal"/>
     <xs:attribute name="exposure" type="xs:double" default="0"/>
     <xs:attribute name="lensDistortion" type="xs:double" default="0"/>
-    <!-- rs-scene-render extensions: screen-space lighting of the raster renderer, and a
+    <!-- Screen-space lighting of the raster renderer, and a
          progressive path tracer for final frames -->
     <xs:attribute name="ambientOcclusion" type="xs:boolean" default="false"/>
     <xs:attribute name="aoRadius" type="positiveDecimal" default="40"/>
@@ -2222,7 +2224,7 @@
   </xs:complexType>
 
   <!-- ============================================================ 2D simulations
-       Extensions of rs-scene-render: each simulates at a fixed step from its start
+       Each simulates at a fixed step from its start
        with a checkpoint every simulated second, like physics and particles, and is drawn in
        its own box (flock: as particles in frame space). -->
   <xs:simpleType name="simBoundsType">
@@ -2655,7 +2657,7 @@
         <xs:minInclusive value="16"/><xs:maxInclusive value="8192"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <!-- rs-scene-render extension: screen-space contact shadows for detail the
+    <!-- Screen-space contact shadows for detail the
          shadow map cannot resolve -->
     <xs:attribute name="contactShadows" type="xs:boolean" default="false"/>
     <xs:attribute name="contactShadowLength" type="positiveDecimal" default="20"/>
@@ -2953,7 +2955,7 @@
     <xs:annotation><xs:documentation>
       Captions from inline cues, a subtitle file (@src), or a transcription of
       audio track @transcribe. Transcriptions are read from @cache (verified by
-      @cacheSha256) so renders stay deterministic; `scene-render resolve` writes
+      @cacheSha256) so renders stay deterministic; a resolve step, run before rendering, writes
       the cache from the track as it plays in the mix, in composition time. mode=burn draws them into the
       picture using @preset and @style; sidecar writes a file next to each output.
     </xs:documentation></xs:annotation>
@@ -2979,15 +2981,15 @@
     <xs:attribute name="cacheSha256" type="sha256Type"/>
     <xs:attribute name="provider" type="xs:string" default="whisper">
       <xs:annotation><xs:documentation>
-        rs-scene-render extension: the transcriber `scene-render resolve` runs to fill @cache
-        (whisper: whisper.cpp; or any provider program). Rendering only reads the cache.
+        The transcriber the resolve step runs to fill @cache: whisper (the Whisper speech
+        recognition models), or the name of any provider program. Rendering only reads the cache.
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="model" type="xs:string" default="base">
-      <xs:annotation><xs:documentation>rs-scene-render extension: the transcriber's model (whisper: tiny, base, small, medium, large-v3, with .en for English-only; or a model file).</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>The transcriber's model (whisper: tiny, base, small, medium, large-v3, with .en for English-only; or a model file).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="prompt" type="xs:string">
-      <xs:annotation><xs:documentation>rs-scene-render extension: text that primes the transcriber (names, spellings, vocabulary).</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Text that primes the transcriber (names, spellings, vocabulary).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="mode" default="burn">
       <xs:simpleType><xs:restriction base="xs:string">

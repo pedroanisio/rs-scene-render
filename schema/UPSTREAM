@@ -1,0 +1,9 @@
+Canonical scene-render schema, vendored unchanged from sr-core
+(https://github.com/pedroanisio/sr-core), tag schema-1.1.2.
+
+  scene-render-1.1.xsd  <- schema/scene-render.xsd  sha256 75294d9b3b6d67b837f068d5542788ce6157b6b4609fd26faf667aae8f713a05
+  scene-render-1.1.sch  <- schema/scene-render.sch  sha256 d56520fbcd0135324f1f76daf462579774502c4e3b8c0f8f359b155352c33fad
+
+The files change only through an accepted SREP in sr-core (srep/, process in
+srep/srep-0000.md); a new release is vendored here by replacing both files and
+updating this record. Documents keep version="1.1".
