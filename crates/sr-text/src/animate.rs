@@ -684,8 +684,8 @@ struct Acc {
     ax: f64,
     ay: f64,
     clip_line: bool,
-    /// Highlight box: paint, fraction, unit.
-    highlight: Option<(Paint, f64, usize)>,
+    /// Highlight box behind the unit.
+    highlight: Option<crate::glyph::Highlight>,
     /// Pivot: the centre of the glyph's unit box on its line (the last animator that moved it).
     pivot: Option<(f64, f64)>,
 }
@@ -816,7 +816,13 @@ pub fn apply(
             let s = amounts.get(u).copied().unwrap_or(0.0);
             if let Some(hp) = &ex.highlight {
                 if s > 1e-4 {
-                    ag.highlight = Some((hp.clone(), s.min(1.0), u));
+                    ag.highlight = Some(crate::glyph::Highlight {
+                        paint: hp.clone(),
+                        fraction: s.min(1.0),
+                        unit: u,
+                        pad: 0.0,
+                        radius: 0.0,
+                    });
                 }
             }
             if clip {

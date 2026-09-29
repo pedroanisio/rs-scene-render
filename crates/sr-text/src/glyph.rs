@@ -72,9 +72,21 @@ pub struct GlyphFx {
     /// Variable-font axis targets, reached by `variation_mix` from the style's values.
     pub variation: Vec<([u8; 4], f32)>,
     pub variation_mix: f64,
-    /// Highlight box behind the glyph's unit (the highlight preset): paint, the fraction
-    /// of the unit's width it covers from its start, and the unit.
-    pub highlight: Option<(Paint, f64, usize)>,
+    /// Highlight box behind the glyph's unit (the highlight animator preset, boxed-word captions).
+    pub highlight: Option<Highlight>,
+}
+
+/// A box behind a unit of glyphs: the unit's extent on its line and the line box's height,
+/// grown by `pad` (half of it vertically) with corner `radius`, covering `fraction` of that
+/// width from the unit's start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    pub paint: Paint,
+    pub fraction: f64,
+    /// Glyphs with the same unit on a line share one box.
+    pub unit: usize,
+    pub pad: f64,
+    pub radius: f64,
 }
 
 impl Default for GlyphFx {
@@ -444,20 +456,23 @@ fn draw_glyphs(lib: &FontLib, lay: &Layout, fx: Option<&[GlyphFx]>, decor: &Deco
         for l in &lay.lines {
             let mut k = l.glyphs.start;
             while k < l.glyphs.end {
-                let Some((paint, frac, unit)) = &fx.get(k).and_then(|f| f.highlight.as_ref()) else {
+                let Some(h) = fx.get(k).and_then(|f| f.highlight.as_ref()) else {
                     k += 1;
                     continue;
                 };
                 let mut j = k;
-                while j < l.glyphs.end && fx.get(j).and_then(|f| f.highlight.as_ref()).is_some_and(|h| h.2 == *unit) {
+                while j < l.glyphs.end && fx.get(j).and_then(|f| f.highlight.as_ref()).is_some_and(|o| o.unit == h.unit)
+                {
                     j += 1;
                 }
                 let (a, b) = (&lay.glyphs[k], &lay.glyphs[j - 1]);
                 let (x0, x1) = (a.x.min(b.x), (a.x + a.advance).max(b.x + b.advance));
-                let w = (x1 - x0) * frac.min(1.0);
-                let hx = if a.x > b.x { x1 - w } else { x0 }; // right to left: from the right
-                let path = shapes::rect(hx, l.rect[1], w, l.rect[3], [0.0; 4]).transform(&fx[k].xf);
-                s.fill(&path, FillRule::NonZero, paint.clone(), 1.0, tol);
+                let w = (x1 - x0 + 2.0 * h.pad) * h.fraction.min(1.0);
+                // right to left: from the right
+                let hx = if a.x > b.x { x1 + h.pad - w } else { x0 - h.pad };
+                let r = [hx, l.rect[1] - h.pad * 0.5, w, l.rect[3] + h.pad];
+                let path = rrect(r, 0.0, h.radius).transform(&fx[k].xf);
+                s.fill(&path, FillRule::NonZero, h.paint.clone(), 1.0, tol);
                 k = j;
             }
         }

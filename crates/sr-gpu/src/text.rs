@@ -1009,6 +1009,7 @@ fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
         tr.max_words_per_line.map(|x| x as usize),
         tr.max_chars_per_line as usize,
         tr.max_lines as usize,
+        at.str("preset").as_deref() == Some("one-word"),
     );
     let mode = at.str("mode").unwrap_or_default();
     Ok(Track {
@@ -1071,17 +1072,25 @@ pub fn caption_scene(
         let width = len_px(&tr.width, frame[0], frame);
         let (cxp, cyp) = (len_px(&tr.x, frame[0], frame), len_px(&tr.y, frame[1], frame));
         let bx = [0.0, 0.0, width, frame[1]];
-        let size = (frame[1] * 0.055).max(12.0);
+        // CONVENTIONS 5.12: the Python renderer's default style (4.4 % of the frame height,
+        // white DejaVu Sans at its regular weight, line height 1.2)
+        let size = (frame[1] * 0.044 * 100.0).round() / 100.0;
         let default = Style {
             size,
-            weight: 700,
-            color: Some(Paint::Solid { rgba: [1.0; 4], srgb: false }),
-            shadow: Some(([0.0, 0.0, 0.0, 0.8], 0.0, size * 0.06, size * 0.12)),
+            families: vec!["DejaVu Sans".into()],
+            // resolved like document colours, so that karaoke cross-fades mix like with like
+            color: paint(&Value::Color([1.0; 4]), bx),
             ..Default::default()
         };
         let fonts = std::mem::take(&mut tc.font_assets);
         let cue_style = tr.cues.get(page.cue).and_then(|c| c.style.clone());
-        let st = style_for(p, cue_style.as_deref().or(tr.style.as_deref()), default, &base, paint, tokens, &fonts, bx);
+        let mut st =
+            style_for(p, cue_style.as_deref().or(tr.style.as_deref()), default, &base, paint, tokens, &fonts, bx);
+        let size = st.size;
+        if tr.preset == captions::Preset::Classic && st.shadow.is_none() && st.stroke.is_none() {
+            // classic adds a soft drop shadow to a style with neither shadow nor stroke
+            st.shadow = Some(([0.0, 0.0, 0.0, 0.8], 0.0, size * 0.04, size * 0.12));
+        }
         let active_st =
             tr.active_style.as_deref().map(|id| style_for(p, Some(id), st.clone(), &base, paint, tokens, &fonts, bx));
         tc.font_assets = fonts;
@@ -1089,25 +1098,36 @@ pub fn caption_scene(
             .as_ref()
             .and_then(|s| s.color.clone())
             .or_else(|| tr.active_color.as_ref().and_then(|v| paint(v, bx)))
-            .unwrap_or(Paint::Solid { rgba: [1.0, 0.83, 0.0, 1.0], srgb: true });
-        let boxed = matches!(tr.preset, captions::Preset::BoxedLine | captions::Preset::BoxedWord);
+            .or_else(|| paint(&Value::Color([1.0, 212.0 / 255.0, 0.0, 1.0]), bx))
+            .unwrap_or(Paint::Solid { rgba: [1.0, 212.0 / 255.0, 0.0, 1.0], srgb: true });
+        let boxed = tr.preset == captions::Preset::BoxedLine;
         let para = Para {
             runs: vec![Run { text: page.text(), style: 0, role: None }],
             styles: vec![st],
-            opts: Opts { width, align: Align::Center, emoji_color: false, ..Default::default() },
+            // lines break where the pagination put them, never at the width
+            opts: Opts {
+                width,
+                align: Align::Center,
+                wrap: Wrap::None,
+                emoji_color: false,
+                line_height: 1.2,
+                ..Default::default()
+            },
         };
         let lay = cached_layout(tc, layout_key(&format!("caption:{}", tr.id), &para), &para);
         let decor = Decor {
-            background: boxed.then_some(Paint::Solid { rgba: [0.0, 0.0, 0.0, 0.65], srgb: true }),
-            mode: if tr.preset == captions::Preset::BoxedWord { BgMode::Word } else { BgMode::Line },
-            padding: size * 0.18,
-            radius: size * 0.15,
+            background: boxed.then_some(Paint::Solid { rgba: [0.0, 0.0, 0.0, 0xB3 as f64 / 255.0], srgb: true }),
+            mode: BgMode::Line,
+            padding: size * 0.25,
+            radius: size * 0.2,
         };
         let fx = captions::effects(tr.preset, &lay, page, t, &active);
+        if fx.iter().all(|f| f.opacity <= 0.0) {
+            continue;
+        }
         let d = glyph::draw(tc.lib(), &lay, Some(&fx), &decor, 0.1);
-        // (x, y) is the centre of the caption block's bottom edge
-        let hgt = lay.lines.last().map(|l| l.rect[1] + l.rect[3]).unwrap_or(0.0);
-        scene.extend(d.scene.transformed(&Xf::translate(cxp - width * 0.5, cyp - hgt)));
+        // (x, y) is the centre of the caption block's top edge
+        scene.extend(d.scene.transformed(&Xf::translate(cxp - width * 0.5, cyp)));
         hsh = sr_eval::rng::hash(&[hsh, hash_str(&tr.id), (t * 1000.0) as u64, page.start.to_bits()]);
     }
     (!scene.cmds.is_empty()).then_some((scene, hsh))

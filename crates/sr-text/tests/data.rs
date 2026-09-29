@@ -147,7 +147,7 @@ fn preset_table_timing() {
     assert!((fx[0].fill_mix - 1.0).abs() < 1e-9 && (fx[3].fill_mix - 0.5).abs() < 1e-9 && fx[6].fill.is_none());
     // highlight: a box per word wiping in, no fill change
     let fx = at(Preset::Highlight, 0.5);
-    assert!(fx[0].fill.is_none() && fx[3].highlight.as_ref().is_some_and(|h| (h.1 - 0.5).abs() < 1e-9));
+    assert!(fx[0].fill.is_none() && fx[3].highlight.as_ref().is_some_and(|h| (h.fraction - 0.5).abs() < 1e-9));
     // scramble: hidden before its start, then the unrevealed characters are random letters
     let a = Animator { preset: Some((Preset::Scramble, 1.0, 1.0)), ..Default::default() };
     assert!(animate::apply(&lib, &l, &roles, &[a.clone()], 0.5).0.iter().all(|f| f.opacity == 0.0));
@@ -231,7 +231,7 @@ fn caption_parsers() {
         text: "one two three four five six seven eight".into(),
         ..Default::default()
     };
-    let pages = captions::paginate(std::slice::from_ref(&cue), Some(2), 32, 2);
+    let pages = captions::paginate(std::slice::from_ref(&cue), Some(2), 32, 2, false);
     assert_eq!(pages.len(), 2);
     assert_eq!(pages[0].text(), "one two\nthree four");
     assert!(captions::to_vtt(std::slice::from_ref(&cue)).starts_with("WEBVTT\n\n00:00:00.000 --> 00:00:04.000\n"));
@@ -243,19 +243,34 @@ fn caption_parsers() {
 fn caption_effects_track_the_active_word() {
     let mut lib = lib();
     let cue = captions::Cue { start: 0.0, end: 3.0, text: "aa bb cc".into(), ..Default::default() };
-    let page = captions::paginate(&[cue], None, 32, 2).remove(0);
+    let pages = captions::paginate(std::slice::from_ref(&cue), None, 32, 2, false);
+    let page = pages[0].clone();
+    assert_eq!((page.start, page.end), (0.0, 3.0), "one page spans its cue");
     let l = lay(&mut lib, &[(&page.text(), None)]);
     let active = Paint::Solid { rgba: [1.0, 0.8, 0.0, 1.0], srgb: true };
-    // at 1.5 s the second word is current
-    let fx = captions::effects(CapPreset::OneWord, &l, &page, 1.5, &active);
-    for (g, f) in l.glyphs.iter().zip(&fx) {
-        if !l.chars[g.ch].is_whitespace() {
-            assert_eq!(f.hidden, g.word != 1);
-        }
-    }
-    let fx = captions::effects(CapPreset::Karaoke, &l, &page, 1.5, &active);
-    assert!(fx.iter().zip(&l.glyphs).filter(|(_, g)| g.word == 0).all(|(f, _)| f.fill_mix == 1.0));
-    assert!(fx.iter().zip(&l.glyphs).filter(|(_, g)| g.word == 2).all(|(f, _)| f.fill_mix == 0.0));
+    // one-word: a page per word, from the previous word's end to the next word's start
+    let ones = captions::paginate(std::slice::from_ref(&cue), None, 32, 2, true);
+    assert_eq!(ones.iter().map(|p| p.text()).collect::<Vec<_>>(), ["aa", "bb", "cc"]);
+    assert_eq!((ones[0].start, ones[2].end), (0.0, 3.0));
+    assert!((ones[1].start - ones[0].end).abs() < 1e-12);
+    // karaoke lights whole words: done words are lit, the current word cross-fades, later ones wait
+    let words = page.words();
+    let (w1, t) = (words[1], 1.5);
+    let q = (t - w1.start) / (w1.end - w1.start);
+    let fx = captions::effects(CapPreset::Karaoke, &l, &page, t, &active);
+    let mix = |w: usize| -> Vec<f64> {
+        fx.iter()
+            .zip(&l.glyphs)
+            .filter(|(_, g)| g.word == w && !l.chars[g.ch].is_whitespace())
+            .map(|(f, _)| f.fill_mix)
+            .collect()
+    };
+    assert!(mix(0).iter().all(|m| *m == 1.0));
+    assert!(mix(1).iter().all(|m| (m - q).abs() < 1e-9), "{:?} vs {q}", mix(1));
+    assert!(mix(2).iter().all(|m| *m == 0.0));
+    // fade: pages fade in and out over 0.15 s
+    let fx = captions::effects(CapPreset::Fade, &l, &page, 0.075, &active);
+    assert!(fx.iter().all(|f| (f.opacity - 0.5).abs() < 1e-9));
     for p in [
         "classic",
         "boxed-line",

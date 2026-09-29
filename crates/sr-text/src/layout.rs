@@ -672,7 +672,15 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
         let lw: f64 = glyphs.iter().map(|g| g.2).sum();
         let rtl_para = para.level.is_rtl();
         let start_side = |al: Align| -> f64 {
-            let free = if limit.is_finite() { limit - lw } else { 0.0 };
+            // alignment is within the box even when lines do not wrap
+            let bw = if vertical { o.height } else { o.width };
+            let free = if limit.is_finite() {
+                limit - lw
+            } else if bw.is_finite() {
+                bw - lw
+            } else {
+                0.0
+            };
             match (al, rtl_para) {
                 (Align::Center, _) => free * 0.5,
                 (Align::End, false) | (Align::Start, true) => free,
