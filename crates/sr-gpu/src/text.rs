@@ -252,9 +252,10 @@ pub fn asset_of<'p>(p: &'p Program, key: &str) -> Option<(&'p AssetsChild, usize
     Some((a, *doc as usize))
 }
 
-fn register_fonts(tc: &mut TextCache, p: &Program) {
+/// Loads the documents' font assets once; returns the ones that could not be read as fonts.
+fn register_fonts(tc: &mut TextCache, p: &Program) -> Vec<String> {
     if !tc.font_assets.is_empty() {
-        return;
+        return Vec::new();
     }
     tc.font_assets.insert(String::new(), None);
     // fonts are referenced by text styles (fontAsset), never by layers, so they are not in the program's
@@ -270,13 +271,16 @@ fn register_fonts(tc: &mut TextCache, p: &Program) {
         }
     }
     let lib = tc.lib();
+    let mut failed = Vec::new();
     for (k, v) in &found {
         if let Some((path, idx)) = v {
-            lib.file(path, *idx);
+            if lib.file(path, *idx).is_none() {
+                failed.push(format!("font asset {k}: {} is not a font this renderer can read", path.display()));
+            }
         }
-        let _ = k;
     }
     tc.font_assets.extend(found);
+    failed
 }
 
 fn opts_of(t: &m::TextAsset) -> (Opts, Decor) {
@@ -755,7 +759,8 @@ fn para_of(tc: &mut TextCache, cx: &mut Cx, t: &m::TextAsset) -> (Para, Decor, V
 
 /// Draws a text or data-graphics asset in its own box (0, 0, width, height).
 pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild) -> Option<Result<Drawing, String>> {
-    register_fonts(tc, cx.p);
+    let failed = register_fonts(tc, cx.p);
+    cx.unsupported.extend(failed);
     let tol = cx.tol;
     Some(match a {
         AssetsChild::Text(t) => {
@@ -1185,7 +1190,8 @@ pub fn outline_polygons(
     size: f64,
     tol: f64,
 ) -> Vec<Vec<[f64; 2]>> {
-    register_fonts(tc, p);
+    // a font that fails to load is reported when the document's text is drawn
+    let _ = register_fonts(tc, p);
     let mut st = Style { size, ..Default::default() };
     if let Some(f) = family.filter(|f| !f.is_empty()) {
         st.families = f.split(',').map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).collect();

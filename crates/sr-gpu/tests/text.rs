@@ -117,13 +117,35 @@ fn per_character_blur_spreads_glyphs() {
 #[test]
 fn text_animators_move_variable_font_axes() {
     let body = |anim: &str| format!(r##"<layer id="lt" asset="t" x="0" y="0">{anim}</layer>"##);
-    let asset = r##"<text id="t" text="Heavy" width="200" height="100" size="48" color="#FFFFFF" font="Lora"/>"##;
+    // a variable font made by tools/fixtures/make_variable_font.py: the stem of "I" widens along wght
+    let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fonts/wght-test.ttf");
+    let asset = format!(
+        r##"<font id="vf" src="{}" family="SR Wght Test"/><text id="t" text="IIII" width="200" height="100" size="48" color="#FFFFFF" font="SR Wght Test"/>"##,
+        font.display()
+    );
+    let asset = asset.as_str();
     let Some(regular) = render_times(&doc_text(asset, "", &body(""), 200, 100), &[0.0]) else { return };
     let bold =
         render_times(&doc_text(asset, "", &body(r#"<textAnimator variation="wght 700"/>"#), 200, 100), &[0.0]).unwrap();
     assert!(bold.stats.unsupported.iter().all(|m| !m.contains("variation")), "{:?}", bold.stats.unsupported);
     let (a, b) = (sum(&regular, 0, 0, 200, 100, 0), sum(&bold, 0, 0, 200, 100, 0));
     assert!(b > a * 1.2, "wght 700 inks more than the default 400: {b} vs {a}");
+}
+
+#[test]
+fn unreadable_font_assets_are_reported() {
+    // a font file the renderer cannot read falls back to another family, and says so
+    let bad = std::env::temp_dir().join(format!("sr-bad-font-{}.ttf", std::process::id()));
+    std::fs::write(&bad, b"not a font").unwrap();
+    let asset = format!(
+        r##"<font id="broken" src="{}" family="Broken"/><text id="t" text="I" width="50" height="50" size="20" color="#FFFFFF" font="Broken"/>"##,
+        bad.display()
+    );
+    let body = r##"<layer id="lt" asset="t"/>"##;
+    let r = render_times(&doc_text(&asset, "", body, 50, 50), &[0.0]);
+    std::fs::remove_file(&bad).ok();
+    let Some(r) = r else { return };
+    assert!(r.stats.unsupported.iter().any(|m| m.contains("font asset broken")), "{:?}", r.stats.unsupported);
 }
 
 #[test]

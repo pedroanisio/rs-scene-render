@@ -519,6 +519,19 @@ impl EncodeSpec {
                 if pix.starts_with("yuvj") { "pc" } else { range }
             ));
         }
+        if !rgb_out {
+            // tag the frames too: FFmpeg 8.1 drops -color_primaries and -color_trc (below) when the
+            // frames arrive untagged
+            let mut tags = Vec::new();
+            if !self.color.primaries.is_empty() {
+                tags.push(format!("color_primaries={}", self.color.primaries));
+            }
+            if !self.color.transfer.is_empty() {
+                tags.push(format!("color_trc={}", self.color.transfer));
+            }
+            tags.push(format!("colorspace={matrix}:range={range}"));
+            filters.push(format!("setparams={}", tags.join(":")));
+        }
         if vaapi {
             filters.push("format=nv12,hwupload".into());
         }

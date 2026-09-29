@@ -20,54 +20,44 @@ fn videos() -> Option<std::path::PathBuf> {
     let dir = fixtures();
     let ok = *D.get_or_init(|| {
         let p = |n: &str| dir.join(n).display().to_string();
-        let counter = "color=c=black:s=32x16:r=25:d=4,format=yuv420p,geq=lum='mod(N*4\\,256)':cb=128:cr=128";
-        ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            counter,
-            "-c:v",
-            "libx264",
-            "-qp",
-            "0",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-colorspace",
-            "bt709",
-            &p("counter.mp4"),
-        ]) && ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=32x16:r=25:d=1,format=yuv420p10le",
-            "-c:v",
-            "ffv1",
-            &p("red10.mkv"),
-        ]) && ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=16x16:r=25:d=1",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=blue:s=16x16:r=25:d=1",
-            "-filter_complex",
-            "[0][1]hstack,format=yuv444p",
-            "-c:v",
-            "ffv1",
-            &p("halves.mkv"),
-        ]) && ffmpeg(&[
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=white@0.5:s=16x16:r=25:d=1,format=rgba",
-            "-c:v",
-            "png",
-            &p("alpha.mov"),
-        ])
+        // tagged limited-range BT.709 in the graph: FFmpeg 8.1 would otherwise treat the generated
+        // frames as full range and squeeze the codes into 16-235 while encoding
+        let counter = "color=c=black:s=32x16:r=25:d=4,format=yuv420p,geq=lum='mod(N*4\\,256)':cb=128:cr=128,\
+                       setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+        ffmpeg(&["-f", "lavfi", "-i", counter, "-c:v", "libx264", "-qp", "0", &p("counter.mp4")])
+            && ffmpeg(&[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=32x16:r=25:d=1,format=yuv420p10le",
+                "-c:v",
+                "ffv1",
+                &p("red10.mkv"),
+            ])
+            && ffmpeg(&[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=16x16:r=25:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=16x16:r=25:d=1",
+                "-filter_complex",
+                "[0][1]hstack,format=yuv444p",
+                "-c:v",
+                "ffv1",
+                &p("halves.mkv"),
+            ])
+            && ffmpeg(&[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=white@0.5:s=16x16:r=25:d=1,format=rgba",
+                "-c:v",
+                "png",
+                &p("alpha.mov"),
+            ])
     });
     ok.then_some(dir)
 }
