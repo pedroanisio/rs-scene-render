@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 3D rigid bodies: a tilted crate tumbles off another onto a static ground mesh, a ball on a
+     ball joint swings past, and a torus drops as its convex hull. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="3" background="#101418"/>
+  <materials>
+    <material id="red" baseColor="#E63946" roughness="0.7"/>
+    <material id="stone" baseColor="#A8B0BC" roughness="1"/>
+    <material id="gold" baseColor="#F4C430" roughness="0.4"/>
+    <material id="teal" baseColor="#2A9D8F" roughness="0.6"/>
+  </materials>
+  <composition>
+    <object3D id="ground" primitive="box" width="640" height="20" depth="300" x="320" y="340" material="stone">
+      <rigidBody type="static" shape="trimesh"/>
+    </object3D>
+    <object3D id="low" primitive="box" width="60" height="60" depth="60" x="200" y="200" material="red"><rigidBody/></object3D>
+    <object3D id="high" primitive="box" width="60" height="60" depth="60" x="218" y="80" rotationY="30" rotationX="15" material="red"><rigidBody/></object3D>
+    <object3D id="hook" primitive="sphere" radius="4" x="440" y="40" material="stone"><rigidBody type="static" collisionGroup="1" collidesWith="1"/></object3D>
+    <object3D id="bob" primitive="sphere" radius="20" x="560" y="40" material="gold"><rigidBody/></object3D>
+    <object3D id="ring" primitive="torus" radius="30" x="360" y="60" rotationX="60" material="teal"><rigidBody restitution="0.4"/></object3D>
+  </composition>
+  <lights>
+    <light id="sun" type="directional" intensity="3" pitch="-50" yaw="30"/>
+    <light id="sky" type="ambient" intensity="0.4"/>
+  </lights>
+  <physics>
+    <constraint id="swing" type="ball" a="bob" b="hook"/>
+  </physics>
+</scene>

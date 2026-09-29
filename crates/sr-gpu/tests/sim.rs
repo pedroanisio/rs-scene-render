@@ -90,10 +90,23 @@ fn physics_cache_round_trip() {
     );
     let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
     let bytes = ev.physics_cache().unwrap();
-    assert!(bytes.starts_with(b"SRPHYS01"));
+    assert!(bytes.starts_with(b"SRPHYS02"));
     use sha2::Digest;
     let sha: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(fixtures().join("fall.physics"), &bytes).unwrap();
+    // a version 1 file (no 3D bodies: no count after the soft-body sizes) reads the same
+    let mut v1 = b"SRPHYS01".to_vec();
+    v1.extend_from_slice(&bytes[8..40]);
+    v1.extend_from_slice(&bytes[48..]);
+    assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 0, "no 3D bodies");
+    let sha1: String = sha2::Sha256::digest(&v1).iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(fixtures().join("fall-v1.physics"), &v1).unwrap();
+    let old = scene(
+        r#"<layer id="box" asset="red" x="24" y="0" scaleX="4" scaleY="4"><rigidBody/></layer>"#,
+        &format!(r#"<physics bounds="floor" pixelsPerMeter="20" cache="fall-v1.physics" cacheSha256="{sha1}"/>"#),
+    );
+    let g1 = sr_eval::Evaluator::new(&old, &Default::default()).unwrap().evaluate(1.5);
+    assert!(g1.problems.is_empty(), "{:?}", g1.problems);
     let simulated = ev.evaluate(1.5);
     let cached = scene(
         r#"<layer id="box" asset="red" x="24" y="0" scaleX="4" scaleY="4"><rigidBody/></layer>"#,
@@ -104,6 +117,7 @@ fn physics_cache_round_trip() {
     assert!(g.problems.is_empty(), "{:?}", g.problems);
     let world = |g: &sr_eval::FrameGraph| g.nodes.iter().find(|n| &*n.id == "box").unwrap().world;
     assert_eq!(world(&g), world(&simulated), "the cache replays the simulation exactly");
+    assert_eq!(world(&g1), world(&simulated), "and so does a version 1 cache");
     // a wrong digest fails validation (A02); unverified, the evaluator reports it and simulates instead
     let bad = format!(
         r##"<scene version="1.1"><project width="64" height="64" fps="30" duration="4" background="#00000000"/>{ASSETS}<composition><layer id="box" asset="red" x="24" y="0" scaleX="4" scaleY="4"><rigidBody/></layer></composition><physics bounds="floor" pixelsPerMeter="20" cache="fall.physics" cacheSha256="{}"/></scene>"##,
@@ -116,6 +130,8 @@ fn physics_cache_round_trip() {
     let g3 = sr_eval::Evaluator::new(&d3, &Default::default()).unwrap().evaluate(1.5);
     assert!(g3.problems.iter().any(|m| m.contains("SHA-256")), "{:?}", g3.problems);
     assert_eq!(world(&g3), world(&simulated));
+    std::fs::remove_file(fixtures().join("fall.physics")).ok();
+    std::fs::remove_file(fixtures().join("fall-v1.physics")).ok();
 }
 
 fn same(a: &Rendered, b: &Rendered) -> bool {
@@ -160,4 +176,111 @@ fn simulated_content_inside_isolated_groups_follows_the_frame() {
         let warm = render_times(&d, &[0.5, 1.0, 1.5]).unwrap();
         assert!(same(&cold, &warm), "{inner}: a warm frame differs from a cold one");
     }
+}
+
+// ------------------------------------------------------------------ 3D bodies
+
+fn pose3(g: &sr_eval::FrameGraph, id: &str) -> [f64; 16] {
+    g.nodes.iter().find(|n| &*n.id == id).and_then(|n| n.pose3).unwrap_or_else(|| panic!("{id} has no 3D pose"))
+}
+
+fn scene3(objects: &str, physics: &str) -> sr_model::Document {
+    let xml = format!(
+        r##"<scene version="1.1"><project width="200" height="200" fps="30" duration="4" background="#000000"/>
+          <materials><material id="red" baseColor="#FF0000" roughness="1"/></materials>
+          <composition>{objects}</composition>
+          <lights><light id="amb" type="ambient" intensity="1"/></lights>{physics}</scene>"##
+    );
+    let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) };
+    sr_model::load_str(&xml, &opts).unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
+}
+
+#[test]
+fn objects_fall_and_feel_fields_in_3d() {
+    // a sphere of radius 10 falls 1 s: ½ g t² = 4.903 m = 490 px at 100 px/m
+    let d = scene3(
+        r#"<object3D id="s" primitive="sphere" radius="10" x="100" y="0" z="0"><rigidBody linearDamping="0"/></object3D>"#,
+        r#"<physics/>"#,
+    );
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let g = ev.evaluate(1.0);
+    assert!(g.problems.is_empty(), "{:?}", g.problems);
+    let m = pose3(&g, "s");
+    assert!((m[13] - 490.3).abs() < 3.0 && (m[12] - 100.0).abs() < 1e-6 && m[14].abs() < 1e-6, "{m:?}");
+    // pushed toward the camera (forceZ, +z toward the viewer): scene z goes negative
+    let d = scene3(
+        r#"<object3D id="s" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D>"#,
+        r#"<physics gravityY="0"><forceField id="f" type="directional" forceZ="2"/></physics>"#,
+    );
+    let g = sr_eval::Evaluator::new(&d, &Default::default()).unwrap().evaluate(1.0);
+    let m = pose3(&g, "s");
+    assert!((m[14] + 100.0).abs() < 3.0 && (m[13] - 100.0).abs() < 1e-6, "{m:?}");
+    // gravityZ does the same
+    let d = scene3(
+        r#"<object3D id="s" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D>"#,
+        r#"<physics gravityY="0" gravityZ="2"/>"#,
+    );
+    let g = sr_eval::Evaluator::new(&d, &Default::default()).unwrap().evaluate(1.0);
+    assert!((pose3(&g, "s")[14] + 100.0).abs() < 3.0);
+}
+
+#[test]
+fn boxes_stack_on_a_static_mesh_and_seek_deterministically() {
+    // a static torus-free ground (a wide box as a triangle mesh) and two boxes dropped on it
+    let objects = r#"
+      <object3D id="ground" primitive="box" width="400" height="20" depth="400" x="100" y="190"><rigidBody type="static" shape="trimesh"/></object3D>
+      <object3D id="a" primitive="box" width="30" height="30" depth="30" x="100" y="100" material="red"><rigidBody/></object3D>
+      <object3D id="b" primitive="box" width="30" height="30" depth="30" x="102" y="40" rotationY="20" material="red"><rigidBody/></object3D>
+      <object3D id="rider" primitive="sphere" radius="4" y="-19" parent="b"/>"#;
+    let d = scene3(objects, r#"<physics/>"#);
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let g = ev.evaluate(3.0);
+    assert!(g.problems.is_empty(), "{:?}", g.problems);
+    let (a, b) = (pose3(&g, "a"), pose3(&g, "b"));
+    assert!((a[13] - 165.0).abs() < 1.5, "a rests on the ground (top at 180): {a:?}");
+    assert!((b[13] - 135.0).abs() < 1.5, "b rests on a: {b:?}");
+    // seeking: a later time first, then back, gives the same pose bit for bit
+    let fresh = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let late = fresh.evaluate(3.5);
+    let _ = late;
+    assert_eq!(pose3(&fresh.evaluate(1.2), "b"), pose3(&ev.evaluate(1.2), "b"));
+    // on the GPU: the red boxes are drawn where the simulation put them; the rider follows b
+    let Some(r) = render_times(&d, &[3.0]) else { return };
+    let red = |x: u32, y: u32| {
+        let c = r.at(x, y);
+        c[0] > 0.2 && c[1] < 0.05
+    };
+    assert!(red(100, 165) && red(100, 135), "both boxes are drawn at rest");
+    assert!(!red(100, 60), "nothing left in the air");
+    assert!(r.at(102, 116)[0] > 0.1 || r.at(101, 116)[0] > 0.1, "the rider sits on b");
+}
+
+#[test]
+fn ball_joints_swing_and_3d_caches_replay() {
+    // a pendulum on a ball joint to a static hook: the bob keeps its distance from the hook
+    let objects = r#"<object3D id="hook" primitive="sphere" radius="2" x="100" y="40"><rigidBody type="static" collisionGroup="1" collidesWith="1"/></object3D>
+      <object3D id="bob" primitive="sphere" radius="8" x="160" y="40" z="0"><rigidBody/></object3D>"#;
+    let physics =
+        |extra: &str| format!(r#"<physics{extra}><constraint id="j" type="ball" a="bob" b="hook"/></physics>"#);
+    let d = scene3(objects, &physics(""));
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    for t in [0.5, 1.0, 1.7] {
+        let g = ev.evaluate(t);
+        assert!(g.problems.is_empty(), "{:?}", g.problems);
+        let m = pose3(&g, "bob");
+        let r = ((m[12] - 100.0).powi(2) + (m[13] - 40.0).powi(2) + m[14].powi(2)).sqrt();
+        assert!((r - 60.0).abs() < 1.0, "t = {t}: {r}");
+    }
+    assert!(pose3(&ev.evaluate(0.4), "bob")[13] > 60.0, "it swings down");
+    // the cache stores 3D poses and replays them exactly
+    let bytes = ev.physics_cache().unwrap();
+    use sha2::Digest;
+    let sha: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(fixtures().join("bob.physics"), &bytes).unwrap();
+    let cached = scene3(objects, &physics(&format!(r#" cache="bob.physics" cacheSha256="{sha}""#)));
+    let ev2 = sr_eval::Evaluator::new(&cached, &Default::default()).unwrap();
+    let g = ev2.evaluate(1.7);
+    std::fs::remove_file(fixtures().join("bob.physics")).ok();
+    assert!(g.problems.is_empty(), "{:?}", g.problems);
+    assert_eq!(pose3(&g, "bob"), pose3(&ev.evaluate(1.7), "bob"));
 }

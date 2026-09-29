@@ -466,6 +466,11 @@ impl<'a> Eval<'a> {
                 let r27 = self.sets.tiles_assets.contains(&v("tiles").as_str());
                 self.check(r27, n, "R27", || "basemap/@tiles must name a tiles asset.".into());
             }
+            // p43
+            "rigidBody" if parent_is("object3D") => {
+                let ok = a("shape") != Some("trimesh") || matches!(a("type"), Some("static" | "kinematic"));
+                self.check(ok, n, "C48", || "a trimesh rigidBody must be static or kinematic.".into());
+            }
             "tiles" if parent_is("assets") => {
                 let ok = has("src") || (has("url") && has("cache") && has("cacheSha256"));
                 self.check(ok, n, "C46", || "tiles need @src, or @url with @cache and @cacheSha256.".into());

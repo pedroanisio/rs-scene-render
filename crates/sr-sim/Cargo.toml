@@ -9,3 +9,4 @@ description = "Deterministic simulation for scene-render: Rapier 2D physics, sof
 
 [dependencies]
 rapier2d-f64 = { version = "0.36", features = ["enhanced-determinism"] }
+rapier3d-f64 = { version = "0.36", features = ["enhanced-determinism"] }

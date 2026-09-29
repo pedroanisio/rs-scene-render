@@ -174,6 +174,10 @@ impl Renderer {
     /// a 2D parent contributes its 2D world), else the enclosing 2D world.
     fn world3(g: &FrameGraph, lights: &[m::Light], i: usize, depth: u32) -> Mat4 {
         let n = &g.nodes[i];
+        // a rigid body's simulated pose replaces its own transform and parent
+        if let Some(m) = &n.pose3 {
+            return Mat4::from_cols_array(&m.map(|v| v as f32));
+        }
         let own = local3(&attrs(n));
         if let Some(pw) = Self::parent_world(g, lights, &*n.elem, depth) {
             return pw * own;

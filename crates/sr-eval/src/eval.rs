@@ -208,6 +208,10 @@ pub struct FrameNode {
     /// The picture of a grid simulation (fluid, slime, erosion), filling the node's box.
     #[serde(skip)]
     pub sim_image: Option<Arc<crate::agents::SimImage>>,
+    /// A 3D rigid body's pose: the object's world matrix (column-major, scene space), replacing
+    /// its own transform and parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pose3: Option<[f64; 16]>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -990,6 +994,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             soft: None,
             particles: None,
             sim_image: None,
+            pose3: None,
             elem: node.elem.clone(),
         });
         let own_box = node.box_size.map(|[w, h]| [resolve_len(w, bx[0], p.size), resolve_len(h, bx[1], p.size)]);

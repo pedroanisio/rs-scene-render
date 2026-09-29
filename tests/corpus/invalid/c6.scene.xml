@@ -155,7 +155,9 @@
     <repeat id="grid" count="3">
       <shape id="dot" shape="ellipse" width="20" height="20" fill="#ffffff"/>
     </repeat>
-    <object3D id="bot" primitive="mesh" material="chrome"/>
+    <object3D id="bot" primitive="mesh" material="chrome">
+      <rigidBody type="static" shape="trimesh"/>
+    </object3D>
     <object3D id="earth" primitive="globe" map="atlas" radius="120" textureSize="512"/>
     <object3D id="ground" primitive="map" map="atlas" terrain="streets" terrainEncoding="mapbox" exaggeration="2" buildings="true"/>
     <particleEmitter id="sparks" color="#ffcc00">
@@ -181,6 +183,7 @@
   <physics>
     <forceField id="gravity" type="directional"/>
     <constraint id="pin1" type="pin" a="sparks" x="0" y="0"/>
+    <constraint id="socket" type="ball" a="bot" b="earth" x="0" y="0" z="0"/>
   </physics>
   <audioMix>
     <audioTrack id="music-track" asset="music" bus="fx" duckUnder="vo-track"/>

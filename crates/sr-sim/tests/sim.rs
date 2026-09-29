@@ -144,6 +144,8 @@ fn kinematic_bodies_follow_and_fields_push() {
         seed: 1,
         bodies: true,
         particles: true,
+        z: 0.0,
+        force_z: 0.0,
     };
     let mut w = world(vec![body(100.0, 100.0)], vec![], vec![], Bounds::None);
     let f = w.frame_at(1.0, &mut Still(vec![field]));
@@ -161,6 +163,8 @@ fn kinematic_bodies_follow_and_fields_push() {
         seed: 1,
         bodies: true,
         particles: true,
+        z: 0.0,
+        force_z: 0.0,
     };
     let a = radial.accel([10.0, 0.0], [0.0; 2], 0.0);
     assert!(a[0] > 49.0 && a[1].abs() < 1e-9);

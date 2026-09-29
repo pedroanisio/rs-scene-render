@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- expect: R8 -->
+<!-- expect: C48 -->
 <!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
 <scene version="1.1">
   <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
@@ -123,7 +123,7 @@
     <group id="hero" x="50%" y="50%" effects="glow-fx grade" startMarker="drop">
       <mask type="ellipse" width="800" height="800"/>
       <layer id="bg" asset="clip" fit="cover" boxWidth="1920" boxHeight="1080" audioBus="fx"/>
-      <layer id="title-layer" asset="title" matte="logo" parent="hero">
+      <layer id="title-layer" asset="title" matte="bg" parent="hero">
         <textAnimator preset="typewriter"/>
         <animate property="opacity">
           <key time="0" value="0"/>
@@ -156,7 +156,7 @@
       <shape id="dot" shape="ellipse" width="20" height="20" fill="#ffffff"/>
     </repeat>
     <object3D id="bot" primitive="mesh" mesh="robot" material="chrome">
-      <rigidBody type="static" shape="trimesh"/>
+      <rigidBody shape="trimesh"/>
     </object3D>
     <object3D id="earth" primitive="globe" map="atlas" radius="120" textureSize="512"/>
     <object3D id="ground" primitive="map" map="atlas" terrain="streets" terrainEncoding="mapbox" exaggeration="2" buildings="true"/>

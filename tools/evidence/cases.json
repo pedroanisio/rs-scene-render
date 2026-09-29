@@ -1019,6 +1019,85 @@
           "why": "Baixa's buildings stand up in their material"
         }
       ]
+    },
+    {
+      "id": "rigid-3d",
+      "reference": "3D physics motion graphics (tumbling crates, pendulums)",
+      "technique": "rigidBody on object3D: box, sphere and convex-hull shapes, a static triangle-mesh ground and a ball joint",
+      "scene": "scenes/rigid-3d.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            185,
+            60,
+            30,
+            30
+          ],
+          "rgb": "#D03742",
+          "tol": 0.08,
+          "min": 0.8,
+          "why": "the tilted crate starts where it is authored"
+        },
+        {
+          "type": "coverage",
+          "t": 2.5,
+          "region": [
+            185,
+            60,
+            30,
+            30
+          ],
+          "rgb": "#D03742",
+          "tol": 0.08,
+          "max": 0.05,
+          "why": "and has fallen"
+        },
+        {
+          "type": "coverage",
+          "t": 2.5,
+          "region": [
+            290,
+            285,
+            30,
+            30
+          ],
+          "rgb": "#D43944",
+          "tol": 0.08,
+          "min": 0.8,
+          "why": "tumbling off the lower crate onto the ground"
+        },
+        {
+          "type": "coverage",
+          "t": 1.0,
+          "region": [
+            322,
+            79,
+            12,
+            12
+          ],
+          "rgb": "#D9AF2C",
+          "tol": 0.1,
+          "min": 0.8,
+          "why": "the bob swings on its ball joint"
+        },
+        {
+          "type": "coverage",
+          "t": 2.5,
+          "region": [
+            350,
+            294,
+            20,
+            6
+          ],
+          "rgb": "#3BB0A1",
+          "tol": 0.1,
+          "min": 0.6,
+          "why": "the torus lies flat on the ground"
+        }
+      ]
     }
   ]
 }

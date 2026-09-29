@@ -24,6 +24,7 @@ pub mod flock;
 pub mod fluid;
 pub mod particles;
 pub mod physics;
+pub mod physics3d;
 pub mod rng;
 pub mod slime;
 pub mod soft;

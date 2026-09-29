@@ -365,4 +365,9 @@
       <sch:assert id="C53" test="not(str:tokenize(normalize-space(@domain),' ')[position() &gt; 1][number(.) &lt;= number(preceding-sibling::*[1])])">@domain values must increase.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p43">
+    <sch:rule context="object3D/rigidBody">
+      <sch:assert id="C48" test="not(@shape='trimesh') or @type='static' or @type='kinematic'">a trimesh rigidBody must be static or kinematic.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

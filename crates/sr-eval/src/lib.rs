@@ -30,6 +30,7 @@ pub mod program;
 pub mod rig;
 pub mod rng;
 pub mod sim;
+mod sim3d;
 pub mod value;
 
 /// Closest candidate within a small edit distance ("did you mean").

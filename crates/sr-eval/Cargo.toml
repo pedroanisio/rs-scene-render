@@ -19,6 +19,8 @@ thiserror.workspace = true
 libm.workspace = true
 sr-vector.workspace = true
 sr-sim = { path = "../sr-sim" }
+sr-3d = { path = "../sr-3d" }
+glam = "0.30"
 image.workspace = true
 sha2.workspace = true
 

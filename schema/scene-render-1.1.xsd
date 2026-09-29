@@ -1579,6 +1579,52 @@
     <xs:attribute name="bullet" type="xs:boolean" default="false"/>
     <xs:attribute name="activateAt" type="xs:double" default="0"/>
   </xs:complexType>
+  <xs:complexType name="rigidBody3DType">
+    <xs:annotation><xs:documentation>
+      rs-scene-render extension. A rigid body in 3D on an object3D: the simulation moves the
+      object from its pose at physics@start (its position and rotations, in its parent's frame);
+      from then on the simulation, not its own attributes, places it (a kinematic body follows
+      its animation).
+      shape="auto" takes the primitive's own form (box, sphere, cylinder, cone, capsule; a plane
+      is a thin box) and the convex hull of any other mesh; convex-hull, trimesh (exact triangles,
+      for static and kinematic scenery) and decomposition (convex parts of a closed mesh) use the
+      object's triangles. Sizes follow the object's scale at the start. Velocities are pixels
+      per second in scene axes (y down, z away from the camera), angular velocities degrees per
+      second about the scene axes.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="type" default="dynamic">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="static"/><xs:enumeration value="kinematic"/>
+        <xs:enumeration value="dynamic"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="shape" default="auto">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="auto"/><xs:enumeration value="box"/>
+        <xs:enumeration value="sphere"/><xs:enumeration value="capsule"/>
+        <xs:enumeration value="cylinder"/><xs:enumeration value="cone"/>
+        <xs:enumeration value="convex-hull"/><xs:enumeration value="trimesh"/>
+        <xs:enumeration value="decomposition"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="mass" type="positiveDecimal" default="1"/>
+    <xs:attribute name="friction" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="restitution" type="unitDecimal" default="0"/>
+    <xs:attribute name="linearDamping" type="unitDecimal" default="0.01"/>
+    <xs:attribute name="angularDamping" type="unitDecimal" default="0.01"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityY" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="collisionGroup" type="xs:nonNegativeInteger" default="0"/>
+    <xs:attribute name="collidesWith" type="xs:string" default="all"/>
+    <xs:attribute name="sensor" type="xs:boolean" default="false"/>
+    <xs:attribute name="fixedRotation" type="xs:boolean" default="false"/>
+    <xs:attribute name="bullet" type="xs:boolean" default="false"/>
+    <xs:attribute name="activateAt" type="xs:double" default="0"/>
+  </xs:complexType>
   <xs:complexType name="softBodyType">
     <xs:attribute name="mass" type="positiveDecimal" default="1"/>
     <xs:attribute name="stiffness" type="positiveDecimal" default="20"/>
@@ -1945,6 +1991,7 @@
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
       <xs:element name="blob" type="clayBlobType"/>
+      <xs:element name="rigidBody" type="rigidBody3DType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
@@ -2764,8 +2811,14 @@
     </xs:attribute>
     <xs:attribute name="x" type="xs:double" default="0"/>
     <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0">
+      <xs:annotation><xs:documentation>rs-scene-render extension: depth of a radial or vortex centre for 3D bodies.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="forceX" type="xs:double" default="0"/>
     <xs:attribute name="forceY" type="xs:double" default="0"/>
+    <xs:attribute name="forceZ" type="xs:double" default="0">
+      <xs:annotation><xs:documentation>rs-scene-render extension: m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="strength" type="xs:double" default="0"/>
     <xs:attribute name="falloff" type="xs:double" default="0"/>
     <xs:attribute name="radius" type="nonNegativeDecimal"/>
@@ -2785,6 +2838,9 @@
       spring/distance/rope/hinge/slider/weld/motor join bodies a and b; pin ties
       body a to the world point x, y (b is not allowed) and is rigid unless
       stiffness is given. breakForce removes the constraint when exceeded.
+      rs-scene-render extension: between 3D bodies (object3D rigidBody) the anchor is x, y, z;
+      hinge, motor and slider turn about or slide along axisX, axisY, axisZ (scene axes; z by
+      default for hinges and motors, x for sliders); ball is a ball-and-socket joint.
     </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="type" use="required">
@@ -2793,12 +2849,17 @@
         <xs:enumeration value="pin"/><xs:enumeration value="rope"/>
         <xs:enumeration value="hinge"/><xs:enumeration value="slider"/>
         <xs:enumeration value="weld"/><xs:enumeration value="motor"/>
+        <xs:enumeration value="ball"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="a" type="xs:IDREF" use="required"/>
     <xs:attribute name="b" type="xs:IDREF"/>
     <xs:attribute name="x" type="xs:double"/>
     <xs:attribute name="y" type="xs:double"/>
+    <xs:attribute name="z" type="xs:double"/>
+    <xs:attribute name="axisX" type="xs:double"/>
+    <xs:attribute name="axisY" type="xs:double"/>
+    <xs:attribute name="axisZ" type="xs:double"/>
     <xs:attribute name="restLength" type="xs:double"/>
     <xs:attribute name="stiffness" type="xs:double"/>
     <xs:attribute name="damping" type="xs:double"/>
@@ -2822,6 +2883,9 @@
     <xs:attribute name="fixedStep" type="positiveDecimal" default="0.008333333333333333"/>
     <xs:attribute name="gravityX" type="xs:double" default="0"/>
     <xs:attribute name="gravityY" type="xs:double" default="-9.80665"/>
+    <xs:attribute name="gravityZ" type="xs:double" default="0">
+      <xs:annotation><xs:documentation>rs-scene-render extension: m/s² toward the camera, for 3D bodies.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="pixelsPerMeter" type="positiveDecimal" default="100"/>
     <xs:attribute name="solverIterations" type="xs:positiveInteger" default="8"/>
     <xs:attribute name="start" type="xs:double" default="0"/>

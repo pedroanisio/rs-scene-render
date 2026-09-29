@@ -168,6 +168,7 @@ CASES = [
     ("c47", ["C47"], sub('<object3D id="earth" primitive="globe" map="atlas"', '<object3D id="earth" primitive="globe"')),
     ("r28", ["R28"], sub('primitive="globe" map="atlas"', 'primitive="globe" map="streets"')),
     ("r29", ["R29"], sub('terrain="streets"', 'terrain="atlas"')),
+    ("c48", ["C48"], sub('<rigidBody type="static" shape="trimesh"/>', '<rigidBody shape="trimesh"/>')),
     ("c46", ["C46"], sub('<tiles id="streets" src="../media/streets.pmtiles"', '<tiles id="streets"')),
 ]
 for attr, anchor, repl in [
