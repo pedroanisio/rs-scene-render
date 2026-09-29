@@ -1826,16 +1826,413 @@ impl Builder<'_> {
         let mut v = [[0.0f32; 4]; 8];
         v[0] = [p as f32, a.num("softness", 0.1) as f32, a.num("angle", 0.0).to_radians() as f32, dir];
         v[1] = v4(color);
-        let blur = !matches!(a.str("motionBlur").as_deref(), Some("false" | "0"));
-        v[2] = [if blur { 8.0 } else { 1.0 }, 0.0, 0.0, 0.0];
-        // D24 seed of the seeded types (glitch, light-leak), as bits: the transition's CRC-32 seed
-        let ts = cx.map(|c| {
-            sr_eval::rng::element_seed(c.seed, e.element_id().unwrap_or(""), None, &format!("transition:{kind}"))
-        });
-        let ts = ts.unwrap_or(0);
-        v[3] = [f32::from_bits(ts as u32), f32::from_bits((ts >> 32) as u32), 0.0, 0.0];
+        let (fw, fh) = (size[0] as f64, size[1] as f64);
+        let (has_a, has_b) = (from.size != [1, 1] || size == [1, 1], to.size != [1, 1] || size == [1, 1]);
+        v[2] = [0.0, has_a as u32 as f32, has_b as u32 as f32, 0.0];
+        v[3] = [0.0, 0.0, fw as f32, fh as f32];
+        let x = TransitionExtras::new(kind, p, e, a, velocity, cx, [fw, fh], has_b, color);
+        v[4..8].copy_from_slice(&x.v);
+        let mut aux2 = luma.clone();
+        // warp_affine pre-filters shrinking axes: σ = 0.45 / k along each axis with k < 0.6
+        let pre = |b: &mut Self, t: &Arc<Tex>, k: [f64; 2]| {
+            let s = k.map(|k| if k < 0.6 && k > 0.0 { 0.45 / k } else { 0.0 });
+            if s[0] > 0.0 || s[1] > 0.0 {
+                b.py_gaussian(t, s[0], s[1], false, false)
+            } else {
+                t.clone()
+            }
+        };
+        let (from, to) = (&pre(self, from, x.shrink[0]), &pre(self, to, x.shrink[1]));
+        match kind {
+            "blur" => {
+                // the Python renderer's blur: both sides blurred (σ peaks at the cut), mixed by m
+                let sigma = pparam(e, "amount", 0.03) * fw.max(fh) * (1.0 - (2.0 * p - 1.0).abs());
+                let m = sstep(0.3, 0.7, p);
+                let fa = if m < 1.0 { self.py_gaussian(from, sigma, sigma, true, true) } else { from.clone() };
+                let fb = if m > 0.0 { self.py_gaussian(to, sigma, sigma, true, true) } else { to.clone() };
+                v[0][0] = m as f32;
+                return Ok(self.run(Entry::Trans, [1, 0, 0, 0], v, &fa, Aux::Tex(fb), None, None, size));
+            }
+            "pixelize" => {
+                // mix, then average over blocks aligned with the frame centre
+                let m = sstep(0.4, 0.6, p);
+                v[0][0] = m as f32;
+                let base = self.run(Entry::Trans, [1, 0, 0, 0], v, from, Aux::Tex(to.clone()), None, None, size);
+                let bsf = 1.0 + (pparam(e, "amount", 0.05) * fw.max(fh) - 1.0) * (1.0 - (2.0 * p - 1.0).abs());
+                let bs = bsf.round_ties_even() as i64;
+                if bs <= 1 {
+                    return Ok(base);
+                }
+                let (w, h) = (size[0] as i64, size[1] as i64);
+                let (ox, oy) = ((-(w / 2)).rem_euclid(bs), (-(h / 2)).rem_euclid(bs));
+                let blocks = [((ox + w + bs - 1) / bs) as u32, ((oy + h + bs - 1) / bs) as u32];
+                v[4] = [bs as f32, ox as f32, oy as f32, 0.0];
+                let avg = self.run(Entry::Trans, [34, 0, 0, 0], v, &base, Aux::None, None, None, blocks);
+                return Ok(self.run(Entry::Trans, [35, 0, 0, 0], v, &avg, Aux::None, None, None, size));
+            }
+            "glitch" | "light-leak" => {
+                if !x.table.is_empty() {
+                    let t = self.eng.data_table(self.pool, self.bgl1, &x.table);
+                    self.temps.push(t.clone());
+                    aux2 = Some(t);
+                }
+            }
+            _ => {}
+        }
         let has_luma = luma.is_some();
-        Ok(self.run(Entry::Trans, [k as u32, has_luma as u32, 0, 0], v, from, Aux::Tex(to.clone()), luma, None, size))
+        Ok(self.run(Entry::Trans, [k as u32, has_luma as u32, 0, 0], v, from, Aux::Tex(to.clone()), aux2, None, size))
+    }
+}
+
+impl Builder<'_> {
+    /// The Python renderer's transition gaussian (`transitions.gaussian`): three box passes per
+    /// axis of width ⌊√(4σ² + 1)⌋ (odd), edges transparent or extended (`clamp`); an isotropic
+    /// σ > 2.5 runs on a copy downsampled by f = min(8, max(2, ⌊σ / 2.5⌋)).
+    pub fn py_gaussian(&mut self, src: &Arc<Tex>, sx: f64, sy: f64, clamp: bool, iso: bool) -> Arc<Tex> {
+        if iso && sx > 2.5 && src.size[0].min(src.size[1]) > 64 {
+            let f = (sx / 2.5).floor().clamp(2.0, 8.0);
+            let fi = f as u32;
+            let small = [src.size[0].div_ceil(fi), src.size[1].div_ceil(fi)];
+            let mut v = [[0.0f32; 4]; 8];
+            v[4] = [f as f32, 0.0, 0.0, 0.0];
+            let down = self.run(Entry::Trans, [37, 0, 0, 0], v, src, Aux::None, None, None, small);
+            let blurred = self.py_gaussian(&down, sx / f, sx / f, clamp, true);
+            return self.run(Entry::Trans, [38, 0, 0, 0], v, &blurred, Aux::None, None, None, src.size);
+        }
+        let mut cur = src.clone();
+        for (axis, sg) in [(0.0, sx), (1.0, sy)] {
+            if sg < 0.4 {
+                continue;
+            }
+            let mut w = ((12.0 * sg * sg / 3.0 + 1.0).sqrt() as i64).max(1);
+            w += (w + 1) % 2;
+            let mut v = [[0.0f32; 4]; 8];
+            v[4] = [w as f32, axis, clamp as u32 as f32, 0.0];
+            for _ in 0..3 {
+                cur = self.run(Entry::Trans, [36, 0, 0, 0], v, &cur, Aux::None, None, None, cur.size);
+            }
+        }
+        cur
+    }
+}
+
+/// Smoothstep with the Python renderer's clamping (`transitions.sstep`).
+fn sstep(e0: f64, e1: f64, x: f64) -> f64 {
+    let t = ((x - e0) / (e1 - e0).max(1e-9)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A transition's `<param name value>` (the Python renderer's `transitions.param`).
+fn pparam(e: &dyn Element, name: &str, default: f64) -> f64 {
+    params_of(e).into_iter().find(|p| p.0 == name).and_then(|p| p.1.first().map(|v| *v as f64)).unwrap_or(default)
+}
+
+/// The per-type parameters of the Python renderer's transitions (CONVENTIONS 5.17), in v4..v7,
+/// and the data table of the seeded types (in aux2).
+struct TransitionExtras {
+    v: [[f32; 4]; 4],
+    table: Vec<[f32; 4]>,
+    /// The column scales (x, y) of the affine warps of a and b (for their pre-filter).
+    shrink: [[f64; 2]; 2],
+}
+
+impl TransitionExtras {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kind: &str,
+        p: f64,
+        e: &dyn Element,
+        a: &Attrs,
+        velocity: f64,
+        cx: Option<&Cx>,
+        frame: [f64; 2],
+        has_b: bool,
+        color: [f64; 4],
+    ) -> TransitionExtras {
+        use std::f64::consts::PI;
+        let mut v = [[0.0f32; 4]; 4];
+        let mut table = Vec::new();
+        let mut shrink = [[1.0; 2]; 2];
+        let (w, h) = (frame[0], frame[1]);
+        let dname = a.str("direction").unwrap_or_else(|| "left".into());
+        let d = match dname.as_str() {
+            "right" => [1.0, 0.0],
+            "up" => [0.0, -1.0],
+            "down" => [0.0, 1.0],
+            "angle" => {
+                let r = a.num("angle", 0.0).to_radians();
+                [r.cos(), r.sin()]
+            }
+            _ => [-1.0, 0.0],
+        };
+        let extent = d[0].abs() * w + d[1].abs() * h;
+        let fps = cx.map(|c| c.fps).unwrap_or(30.0).max(1e-9);
+        let blur_on = !matches!(a.str("motionBlur").as_deref(), Some("false" | "0"));
+        // a 180° shutter: the streak of a picture moving `travel` px per unit progress
+        let shutter = |travel: f64| if blur_on { (velocity * travel).abs() * 0.5 / fps } else { 0.0 };
+        let center = [pparam(e, "cx", 0.5) * w, pparam(e, "cy", 0.5) * h];
+        // snapped to an axis; up/down run transposed; sign +1 when the incoming comes from the right
+        let axis = if d[0].abs() >= d[1].abs() {
+            if d[0] < 0.0 {
+                "left"
+            } else {
+                "right"
+            }
+        } else if d[1] < 0.0 {
+            "up"
+        } else {
+            "down"
+        };
+        let sign = if matches!(axis, "left" | "up") { 1.0 } else { -1.0 };
+        let vertical = matches!(axis, "up" | "down");
+        let outgoing_weight = |m: f64| if !has_b { 1.0 - m } else { 1.0 - sstep(0.4, 1.0, p) };
+        match kind {
+            "circle-open" | "iris" | "circle-close" | "clock-wipe" | "radial-wipe" | "luma" => {
+                let corners = [[0.0, 0.0], [w, 0.0], [0.0, h], [w, h]];
+                let maxr = corners.iter().map(|c| (c[0] - center[0]).hypot(c[1] - center[1])).fold(0.0f64, f64::max);
+                v[0] = [center[0] as f32, center[1] as f32, maxr as f32, pparam(e, "invert", 0.0) as f32];
+            }
+            "slide" | "push" | "cover" | "reveal" => v[0] = [shutter(extent) as f32, extent as f32, 0.0, 0.0],
+            "whip-pan" => {
+                let k = 6.0f64;
+                let t = |x: f64| x.tanh();
+                let q = 0.5 + 0.5 * t(k * (p - 0.5)) / t(k / 2.0);
+                let dq = 0.5 * k * (1.0 - t(k * (p - 0.5)).powi(2)) / t(k / 2.0);
+                let dq0 = 0.5 * k * (1.0 - t(k / 2.0).powi(2)) / t(k / 2.0);
+                let mut bl = extent * 0.12 * (dq - dq0).max(0.0);
+                if !blur_on {
+                    bl *= 0.25;
+                }
+                v[0] = [bl as f32, extent as f32, q as f32, 0.0];
+            }
+            "zoom-in" | "zoom-out" => {
+                let amt = pparam(e, "amount", 3.0);
+                let (a_end, b_start): (f64, f64) = if kind == "zoom-in" { (amt, 1.0 / 1.8) } else { (1.0 / amt, 1.8) };
+                let m = sstep(0.2, 0.8, p);
+                let (ka, kb) = (a_end.powf(p), b_start.powf(1.0 - p));
+                v[0] = [center[0] as f32, center[1] as f32, ka as f32, kb as f32];
+                v[1] = [m as f32, outgoing_weight(m) as f32, 0.0, 0.0];
+                shrink = [[ka; 2], [kb; 2]];
+            }
+            "spin" => {
+                let total = if dname == "angle" {
+                    let t = a.num("angle", 180.0);
+                    if t == 0.0 {
+                        180.0
+                    } else {
+                        t
+                    }
+                } else {
+                    180.0
+                };
+                let half = if matches!(dname.as_str(), "left" | "up") { -1.0 } else { 1.0 } * total / 2.0;
+                let m = sstep(0.25, 0.75, p);
+                v[0] = [
+                    center[0] as f32,
+                    center[1] as f32,
+                    (half * p).to_radians() as f32,
+                    (half * (p - 1.0)).to_radians() as f32,
+                ];
+                v[1] = [(1.0 + 0.6 * p) as f32, (0.4 + 0.6 * p) as f32, m as f32, outgoing_weight(m) as f32];
+                shrink = [[1.0 + 0.6 * p; 2], [0.4 + 0.6 * p; 2]];
+            }
+            "squash" => {
+                let c = [w / 2.0, h / 2.0];
+                let lead = [c[0] + d[0] * extent / 2.0, c[1] + d[1] * extent / 2.0];
+                let trail = [c[0] - d[0] * extent / 2.0, c[1] - d[1] * extent / 2.0];
+                v[0] = [lead[0] as f32, lead[1] as f32, (1.0 - p) as f32, 0.0];
+                v[1] = [trail[0] as f32, trail[1] as f32, p as f32, 0.0];
+                // the columns of I + (k − 1) d dᵀ
+                let col = |k: f64| {
+                    let (a, b, c) =
+                        (1.0 + (k - 1.0) * d[0] * d[0], (k - 1.0) * d[0] * d[1], 1.0 + (k - 1.0) * d[1] * d[1]);
+                    [a.hypot(b), b.hypot(c)]
+                };
+                shrink = [col(1.0 - p), col(p)];
+            }
+            "shuffle" => {
+                let o = (PI * p).sin() * 0.55 * extent;
+                let s = sstep(0.15, 0.85, p);
+                v[0] = [o as f32, (1.0 - 0.12 * s) as f32, (0.88 + 0.12 * s) as f32, (p < 0.5) as u32 as f32];
+                shrink = [[1.0 - 0.12 * s; 2], [0.88 + 0.12 * s; 2]];
+            }
+            "blinds" => v[0] = [pparam(e, "count", 8.0).max(1.0).trunc() as f32, 0.0, 0.0, 0.0],
+            "stripe" => {
+                v[0] = [
+                    pparam(e, "count", 10.0).max(1.0).trunc() as f32,
+                    pparam(e, "stagger", 0.4).max(0.0) as f32,
+                    0.0,
+                    0.0,
+                ]
+            }
+            "page-curl" => {
+                let r = (pparam(e, "radius", 0.1) * extent).max(2.0);
+                let c = extent - p * (extent + r);
+                v[0] = [extent as f32, r as f32, c as f32, (0.45 * (PI * p).sin().max(0.0).sqrt()) as f32];
+            }
+            "flip" | "cube" | "carousel" => {
+                let pw = if vertical { h } else { w };
+                let cam = 2.0 * pw;
+                let plane = |yaw: f64, x: f64, z: f64| {
+                    [yaw.to_radians().cos() as f32, yaw.to_radians().sin() as f32, x as f32, z as f32]
+                };
+                let shade = |yaw: f64, k: f64| (1.0 - k * (1.0 - yaw.to_radians().cos().abs())) as f32;
+                let facing = |yaw: f64, x: f64, z: f64| {
+                    let (s, c) = (yaw.to_radians().sin(), yaw.to_radians().cos());
+                    s * -x + -c * (-cam - z) > 1e-6
+                };
+                let mut flags = if vertical { 16u32 } else { 0 };
+                match kind {
+                    "flip" => {
+                        let tz = (PI * p).sin() * 0.4 * pw;
+                        let yaw = -sign * 180.0 * p;
+                        let (yaw, is_b) = if p < 0.5 { (yaw, false) } else { (yaw + sign * 180.0, true) };
+                        v[0] = plane(yaw, 0.0, tz);
+                        v[2] = [shade(yaw, 0.35), 1.0, cam as f32, 0.0];
+                        flags |= facing(yaw, 0.0, tz) as u32 | if is_b { 8 } else { 0 };
+                    }
+                    _ => {
+                        let (step, rr, tzk, k) = if kind == "cube" {
+                            (90.0, pw / 2.0, 0.35, 0.35)
+                        } else {
+                            let n = pparam(e, "panels", 6.0).trunc().max(3.0);
+                            (360.0 / n, 1.15 * pw / (2.0 * (PI / n).tan()), 0.6, 0.5)
+                        };
+                        let tz = (PI * p).sin() * tzk * pw;
+                        let pos = |yaw: f64| {
+                            let r = yaw.to_radians();
+                            (rr * r.sin(), rr - rr * r.cos() + tz)
+                        };
+                        let (ya, yb) = (-sign * step * p, sign * step * (1.0 - p));
+                        let ((xa, za), (xb, zb)) = (pos(ya), pos(yb));
+                        v[0] = plane(ya, xa, za);
+                        v[1] = plane(yb, xb, zb);
+                        v[2] = [shade(ya, k), shade(yb, k), cam as f32, 0.0];
+                        flags |= facing(ya, xa, za) as u32 | (facing(yb, xb, zb) as u32) << 1;
+                        if zb > za {
+                            flags |= 4;
+                        }
+                    }
+                }
+                v[2][3] = flags as f32;
+            }
+            "film-roll" => {
+                let pw = if vertical { h } else { w };
+                let gap = param(e, a, "gap", 0.06).max(0.0);
+                let length = pw * (1.0 + gap);
+                let sh = if blur_on { shutter(length) / length.max(1.0) } else { 0.0 };
+                let samples = if sh > 0.0 { ((sh * length).ceil()).clamp(1.0, 32.0) } else { 1.0 };
+                v[0] = [
+                    gap as f32,
+                    param(e, a, "border", 0.07).clamp(0.0, 0.4) as f32,
+                    param(e, a, "curvature", 0.85).clamp(0.0, 0.99) as f32,
+                    param(e, a, "holes", 12.0).round_ties_even().max(2.0) as f32,
+                ];
+                v[1] = [sign as f32, vertical as u32 as f32, sh as f32, samples as f32];
+            }
+            "glitch" => {
+                let k = (PI * p).sin().max(0.0).powf(0.8);
+                v[0] = [-1.0, 0.0, 0.0, (p >= 0.5) as u32 as f32];
+                if k >= 1e-3 {
+                    if let Some(cx) = cx {
+                        let seed = sr_eval::rng::element_seed(
+                            cx.seed,
+                            e.element_id().unwrap_or(""),
+                            None,
+                            "transition:glitch",
+                        );
+                        let frame = (cx.time * cx.fps).round_ties_even() as i64 as u64;
+                        // the Python renderer's Rng: one counter for uniform and normal draws
+                        let n = std::cell::Cell::new(0u64);
+                        let u = || {
+                            let x = sr_eval::rng::d24_unit(seed, frame, n.get());
+                            n.set(n.get() + 1);
+                            x
+                        };
+                        let (wi, hi) = (w, h);
+                        let bytes = |x: f64| [((x as u32 >> 8) & 255) as f32, (x as u32 & 255) as f32];
+                        let nsl = (3.0 + 18.0 * k) as usize;
+                        let mut slices = Vec::new();
+                        for _ in 0..nsl {
+                            let y0 = (hi * u()).floor();
+                            let hh = ((0.005 + 0.085 * u()) * hi * (0.4 + k)).max(1.0).trunc();
+                            let other = u() < 0.35 * k;
+                            let g = sr_eval::rng::gaussian(seed, frame, n.get());
+                            n.set(n.get() + 1);
+                            let off = (g * 0.06 * wi * k).trunc();
+                            let [a0, a1] = bytes(y0);
+                            let [b0, b1] = bytes(hh);
+                            let [c0, c1] = bytes(off.rem_euclid(wi));
+                            slices.extend([[a0, a1, b0, b1], [c0, c1, 0.0, other as u32 as f32]]);
+                        }
+                        let nb = (8.0 * k) as usize;
+                        let mut blocks = Vec::new();
+                        for _ in 0..nb {
+                            let bw = ((0.03 + 0.17 * u()) * wi).trunc();
+                            let bh = ((0.01 + 0.05 * u()) * hi).trunc();
+                            let int = |hi_excl: f64| (hi_excl * u()).floor();
+                            let x0 = int((wi - bw).max(1.0));
+                            let y0 = int((hi - bh).max(1.0));
+                            let sx = int((wi - bw).max(1.0));
+                            let sy = int((hi - bh).max(1.0));
+                            let other = u() < 0.5;
+                            let f = |x: f64| bytes(x);
+                            let ([a0, a1], [b0, b1], [c0, c1], [d0, d1], [e0, e1], [f0, f1]) =
+                                (f(x0), f(y0), f(bw), f(bh), f(sx), f(sy));
+                            blocks.extend([
+                                [a0, a1, b0, b1],
+                                [c0, c1, d0, d1],
+                                [e0, e1, f0, f1],
+                                [0.0, other as u32 as f32, 0.0, 0.0],
+                            ]);
+                        }
+                        let s = (0.012 * wi * k * if u() < 0.5 { 1.0 } else { -1.0 }).round_ties_even();
+                        table.extend(slices);
+                        table.extend(blocks);
+                        v[0] = [nsl as f32, nb as f32, s as f32, (p >= 0.5) as u32 as f32];
+                    }
+                }
+            }
+            "light-leak" => {
+                let m = sstep(0.35, 0.65, p);
+                let k = (PI * p).sin().max(0.0).powf(1.2) * pparam(e, "amount", 1.3);
+                v[3] = [m as f32, k as f32, 0.0, 0.0];
+                if let (true, Some(cx)) = (k >= 1e-3, cx) {
+                    let seed =
+                        sr_eval::rng::element_seed(cx.seed, e.element_id().unwrap_or(""), None, "transition:leak");
+                    let mut n = 0u64;
+                    let mut uni = |lo: f64, hi: f64| {
+                        let x = sr_eval::rng::d24_unit(seed, 0, n);
+                        n += 1;
+                        lo + (hi - lo) * x
+                    };
+                    // an explicit @color tints the blobs (the default #000000FF reads as none)
+                    let explicit = color != cx.working.from_literal([0.0, 0.0, 0.0, 1.0]);
+                    let palette = [[1.0, 0.56, 0.18], [1.0, 0.28, 0.12], [1.0, 0.86, 0.52]];
+                    let dd = w.max(h);
+                    for (i, col) in palette.iter().enumerate() {
+                        let rgb = if explicit {
+                            [color[0], color[1], color[2]]
+                        } else {
+                            let c = cx.working.from_literal([col[0], col[1], col[2], 1.0]);
+                            [c[0], c[1], c[2]]
+                        };
+                        let (cx0, cy0) = (uni(0.15, 0.85) * w, uni(0.1, 0.9) * h);
+                        let travel = uni(0.5, 0.9) * dd;
+                        let bx = cx0 + d[0] * travel * (p - 0.5);
+                        let by = cy0 + d[1] * travel * (p - 0.5) + uni(-0.1, 0.1) * h * (p - 0.5);
+                        let sig = uni(0.18, 0.35) * dd;
+                        let amp = uni(0.6, 1.0);
+                        if i < 3 {
+                            v[i] = [bx as f32, by as f32, sig as f32, amp as f32];
+                        }
+                        table.push([rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, 1.0]);
+                    }
+                }
+            }
+            _ => {}
+        }
+        TransitionExtras { v, table, shrink }
     }
 }
 

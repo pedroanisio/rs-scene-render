@@ -946,6 +946,8 @@ fn fs_flow(in: VOut) -> @location(0) vec4<f32> {
 
 // src = outgoing, aux = incoming, aux2 = luma matte. v0: progress, softness, angle rad, direction (0 l, 1 r, 2 u, 3 d, 4 angle);
 // v1 colour; v2.x motion-blur samples. i.x kind (order of the schema enumeration).
+// The frame size in pixels (v3.zw): a missing side is a 1×1 texture.
+fn fdims() -> vec2<f32> { return fx.v[3].zw; }
 fn dir_vec() -> vec2<f32> {
     let dd = u32(fx.v[0].w);
     switch dd {
@@ -969,7 +971,7 @@ fn d19_b(s: f32, p: f32, soft: f32) -> f32 {
 }
 // The coordinate along the travel, 0 on the side the edge starts from and 1 on the far side.
 fn d19_axis(uv: vec2<f32>, dir: vec2<f32>) -> f32 {
-    let d = dims();
+    let d = fdims();
     let proj = dot(uv * d, dir);
     let c = vec4(0.0, d.x * dir.x, d.y * dir.y, d.x * dir.x + d.y * dir.y);
     let lo = min(min(c.x, c.y), min(c.z, c.w));
@@ -977,31 +979,171 @@ fn d19_axis(uv: vec2<f32>, dir: vec2<f32>) -> f32 {
     return (proj - lo) / max(hi - lo, 1e-6);
 }
 // Distance from the centre over half the diagonal.
+// With <param> cx, cy the centre moves (v4.xy, pixels) and the radius is over the distance to the
+// farthest corner (v4.z), as in the Python renderer.
 fn d19_radius(uv: vec2<f32>) -> f32 {
-    let d = dims();
-    return length((uv - 0.5) * d) / max(length(d) * 0.5, 1e-6);
+    return length(uv * fdims() - fx.v[4].xy) / max(fx.v[4].z, 1e-6);
 }
 // The angle clockwise on screen from the ray at `start` radians (clockwise from +x), in turns.
 fn d19_angle(uv: vec2<f32>, start: f32) -> f32 {
-    let q = (uv - 0.5) * dims();
+    let q = uv * fdims() - fx.v[4].xy;
     return fract((atan2(q.y, q.x) - start) / (2.0 * PI) + 2.0);
 }
 // The travel of a picture moved fully off the frame along dir, in uv units.
 fn d19_travel(dir: vec2<f32>) -> vec2<f32> {
-    let d = dims();
+    let d = fdims();
     return dir * (abs(dir.x) * d.x + abs(dir.y) * d.y) / d;
 }
-fn Fb(uv: vec2<f32>, o: vec2<f32>) -> vec4<f32> {
-    let n = max(i32(fx.v[2].x), 1);
-    var a = vec4(0.0);
-    for (var k = 0; k < n; k++) { a += F(uv + o * ((f32(k) + 0.5) / f32(n) - 0.5)); }
-    return a / f32(n);
+// ---- the Python renderer's transitions (CONVENTIONS 5.17), in frame pixels (centres at i + ½)
+
+// x snapped to a nearby integer: GPU division is not correctly rounded, and slats and stripes
+// must switch exactly where the float64 reference does.
+fn snap(x: f32) -> f32 {
+    let r = round(x);
+    return select(x, r, abs(x - r) < 1e-5 * max(1.0, abs(x)));
 }
-fn Tb(uv: vec2<f32>, o: vec2<f32>) -> vec4<f32> {
-    let n = max(i32(fx.v[2].x), 1);
-    var a = vec4(0.0);
-    for (var k = 0; k < n; k++) { a += T(uv + o * ((f32(k) + 0.5) / f32(n) - 0.5)); }
-    return a / f32(n);
+
+// Bilinear sample of t at pixel coordinates q, transparent outside (scenerender.transitions.sample).
+fn bil(t: texture_2d<f32>, q: vec2<f32>) -> vec4<f32> {
+    let dd = vec2<i32>(textureDimensions(t));
+    let pp = q - 0.5;
+    let f0 = floor(pp);
+    let f = pp - f0;
+    let i0 = vec2<i32>(f0);
+    var acc = vec4(0.0);
+    for (var j = 0; j < 2; j++) {
+        for (var i = 0; i < 2; i++) {
+            let c = i0 + vec2(i, j);
+            let w = select(1.0 - f.x, f.x, i == 1) * select(1.0 - f.y, f.y, j == 1);
+            if (w > 0.0 && all(c >= vec2(0)) && all(c < dd)) { acc += textureLoad(t, c, 0) * w; }
+        }
+    }
+    return acc;
+}
+// Sides at pixel coordinates, optionally transposed (up/down run the horizontal code transposed).
+fn PA(q: vec2<f32>, tr: bool) -> vec4<f32> { return bil(src, select(q, q.yx, tr)); }
+fn PB(q: vec2<f32>, tr: bool) -> vec4<f32> { return bil(aux, select(q, q.yx, tr)); }
+
+// translate(px, o) then streak(length bl along d): scenerender.transitions.moved. The translated
+// picture is a frame-sized image, so the streak reads nothing outside the frame.
+fn in_frame(q: vec2<f32>) -> bool { return all(q >= vec2(0.0)) && all(q < fdims()); }
+fn moved(t: texture_2d<f32>, q: vec2<f32>, o: vec2<f32>, bl: f32, d: vec2<f32>) -> vec4<f32> {
+    let n = round(bl);
+    if (bl < 1.0 || n < 2.0) { return bil(t, q - o); }
+    if (abs(d.x) > 0.999 || abs(d.y) > 0.999) {
+        let w = i32(n) | 1;
+        let r = w / 2;
+        let ax = select(vec2(0.0, 1.0), vec2(1.0, 0.0), abs(d.x) > 0.999);
+        var acc = vec4(0.0);
+        for (var j = -r; j <= r; j++) {
+            let qq = q - ax * f32(j);
+            if (in_frame(qq)) { acc += bil(t, qq - o); }
+        }
+        return acc / f32(w);
+    }
+    let k = i32(min(24.0, max(3.0, ceil(bl / 3.0))));
+    var acc = vec4(0.0);
+    for (var i = 0; i < k; i++) {
+        let qq = q - d * ((f32(i) / f32(k - 1) - 0.5) * bl);
+        if (in_frame(qq)) { acc += bil(t, qq - o); }
+    }
+    return acc / f32(k);
+}
+
+// A picture of size wh turned by (cos, sin) of its yaw about its vertical centre line, centred at
+// (x0, 0, z0), seen by a pinhole camera at distance cam (scenerender.transitions.plane_homography),
+// sampled at output pixel q; transparent behind the camera.
+fn plane_px(t: texture_2d<f32>, q: vec2<f32>, pl: vec4<f32>, wh: vec2<f32>, cam: f32, tr: bool, shade: f32) -> vec4<f32> {
+    let c = pl.x; let s = pl.y; let x0 = pl.z; let z0 = pl.w;
+    // H = P · A with A = [[c, 0, x0 − c w/2], [0, 1, −h/2], [s, 0, z0 − s w/2 + cam]]
+    let a0 = vec3(c, 0.0, x0 - c * wh.x * 0.5);
+    let a1 = vec3(0.0, 1.0, -wh.y * 0.5);
+    let a2 = vec3(s, 0.0, z0 - s * wh.x * 0.5 + cam);
+    let h0 = a0 * cam + a2 * (wh.x * 0.5);
+    let h1 = a1 * cam + a2 * (wh.y * 0.5);
+    let h2 = a2;
+    // solve H · (sx, sy, 1)ᵀ ∝ (qx, qy, 1)ᵀ by Cramer's rule on the rows
+    let g0 = h0 - h2 * q.x;
+    let g1 = h1 - h2 * q.y;
+    let den = g0.x * g1.y - g0.y * g1.x;
+    if (abs(den) < 1e-12) { return vec4(0.0); }
+    let sx = (-g0.z * g1.y + g0.y * g1.z) / den;
+    let sy = (-g0.x * g1.z + g0.z * g1.x) / den;
+    let fw = h2.x * sx + h2.y * sy + h2.z;
+    if (fw <= 1e-6) { return vec4(0.0); }
+    let v = bil(t, select(vec2(sx, sy), vec2(sy, sx), tr));
+    return vec4(v.rgb * shade, v.a);
+}
+
+// Film roll's strip at time t (scenerender.transitions.fx.film_roll's render), in the
+// (transposed) frame of size wh; v4 gap, border, curvature, holes; v5.x sign.
+fn film_strip(q: vec2<f32>, t: f32, wh: vec2<f32>, tr: bool, col: vec4<f32>) -> vec4<f32> {
+    let w = wh.x; let h = wh.y;
+    let gap = fx.v[4].x; let border = fx.v[4].y; let bend = fx.v[4].z; let holes = fx.v[4].w;
+    let sgn = fx.v[5].x;
+    let strength = sin(PI * t);
+    let k = bend * strength;
+    let v = (q.x / w - 0.5) * 2.0;
+    var curved = q.x;
+    if (k > 1e-7) { curved = w * (0.5 + 0.5 * asin(clamp(v * k, -1.0, 1.0)) / max(asin(k), 1e-7)); }
+    let length = w * (1.0 + gap);
+    let coord = curved + sgn * t * length;
+    let rail = border * h * strength;
+    let sy = (q.y - rail) / max(h - 2.0 * rail, 1.0) * h;
+    let interior = q.y >= rail && q.y < h - rail;
+    var movie = vec4(0.0);
+    let ua = coord;
+    let ub = coord - sgn * length;
+    if (ua >= 0.0 && ua < w && interior) { movie += PA(vec2(ua, sy), tr); }
+    if (ub >= 0.0 && ub < w && interior) { movie += PB(vec2(ub, sy), tr); }
+    let in_frame = (ua >= 0.0 && ua < w) || (ub >= 0.0 && ub < w);
+    if (!(interior && in_frame)) { movie += col; }
+    let pitch = length / holes;
+    let m = coord + pitch * 0.5;
+    let hx = abs(m - floor(m / pitch) * pitch - pitch * 0.5) < pitch * 0.22;
+    let hy = abs(q.y - rail * 0.5) < rail * 0.24 || abs(q.y - (h - rail * 0.5)) < rail * 0.24;
+    if (hx && hy) { movie = vec4(0.0); }
+    let shade = sqrt(max(1.0 - (v * k) * (v * k), 0.0));
+    return vec4(movie.rgb * (1.0 - 0.3 * strength * (1.0 - shade)), movie.a);
+}
+
+// A u16 stored as two bytes in a data texel pair (hi, lo).
+fn u16_at(t: vec4<f32>, k: u32) -> f32 {
+    if (k == 0u) { return round(t.x) * 256.0 + round(t.y); }
+    return round(t.z) * 256.0 + round(t.w);
+}
+// Glitch: the picture before its RGB split at pixel xy (i32 coordinates, wrapped in x).
+fn glitch_res(x: i32, y: i32, wh: vec2<i32>, swap: bool) -> vec4<f32> {
+    let xw = ((x % wh.x) + wh.x) % wh.x;
+    var o = select(textureLoad(src, vec2(xw, y), 0), textureLoad(aux, vec2(xw, y), 0), swap);
+    let nsl = i32(fx.v[4].x);
+    for (var k = 0; k < nsl; k++) {
+        let t0 = textureLoad(aux2, vec2(2 * k, 0), 0);
+        let t1 = textureLoad(aux2, vec2(2 * k + 1, 0), 0);
+        let y0 = i32(u16_at(t0, 0u)); let hh = i32(u16_at(t0, 1u));
+        let off = i32(u16_at(t1, 0u)); let other = u16_at(t1, 1u) > 0.5;
+        if (y >= y0 && y < y0 + hh) {
+            let sx = (((xw - off) % wh.x) + wh.x) % wh.x;
+            o = select(textureLoad(src, vec2(sx, y), 0), textureLoad(aux, vec2(sx, y), 0), other != swap);
+        }
+    }
+    let nb = i32(fx.v[4].y);
+    let base = 2 * nsl;
+    for (var k = 0; k < nb; k++) {
+        let t0 = textureLoad(aux2, vec2(base + 4 * k, 0), 0);
+        let t1 = textureLoad(aux2, vec2(base + 4 * k + 1, 0), 0);
+        let t2 = textureLoad(aux2, vec2(base + 4 * k + 2, 0), 0);
+        let t3 = textureLoad(aux2, vec2(base + 4 * k + 3, 0), 0);
+        let x0 = i32(u16_at(t0, 0u)); let y0 = i32(u16_at(t0, 1u));
+        let bw = i32(u16_at(t1, 0u)); let bh = i32(u16_at(t1, 1u));
+        let sx = i32(u16_at(t2, 0u)); let sy = i32(u16_at(t2, 1u));
+        let other = u16_at(t3, 0u) > 0.5;
+        if (xw >= x0 && xw < x0 + bw && y >= y0 && y < y0 + bh) {
+            let c = vec2(sx + xw - x0, sy + y - y0);
+            o = select(textureLoad(src, c, 0), textureLoad(aux, c, 0), other != swap);
+        }
+    }
+    return o;
 }
 
 @fragment
@@ -1013,7 +1155,6 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
     let asp = d.x / d.y;
     let dir = dir_vec();
     let col = vec4(fx.v[1].rgb, 1.0) * fx.v[1].a;
-    let speed = 4.0 * p * (1.0 - p); // motion-blur length, peaks mid-transition
     switch fx.i.x {
         case 0u: { return select(F(uv), T(uv), p >= 0.5); }                       // cut
         case 1u: { return mix(F(uv), T(uv), p); }                                  // crossfade
@@ -1023,146 +1164,227 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             return mix(col, T(uv), (p - 0.5) * 2.0);
         }
         case 4u: { return mix(F(uv), T(uv), d19_b(d19_axis(uv, dir), p, soft)); } // wipe (D19)
-        case 5u, 6u, 7u, 8u: { // slide (= cover), push, cover, reveal (D19): pictures travel the frame's span
-            let tv = d19_travel(dir);
-            let blur = tv * speed * 0.08;
-            if (fx.i.x == 5u || fx.i.x == 7u) { return over(Tb(uv + tv * (1.0 - p), blur), F(uv)); }
-            if (fx.i.x == 6u) { return over(Tb(uv + tv * (1.0 - p), blur), Fb(uv - tv * p, blur)); }
-            return over(Fb(uv - tv * p, blur), T(uv));
+        case 5u, 6u, 7u, 8u: { // slide (= cover), push, cover, reveal (D19); v4.x streak px, v4.y span
+            let q = uv * fdims();
+            let bl = fx.v[4].x;
+            let e = fx.v[4].y;
+            if (fx.i.x == 6u) { return over(moved(aux, q, dir * e * (p - 1.0), bl, dir), moved(src, q, dir * e * p, bl, dir)); }
+            if (fx.i.x == 8u) { return over(moved(src, q, dir * e * p, bl, dir), bil(aux, q)); }
+            return over(moved(aux, q, dir * e * (p - 1.0), bl, dir), bil(src, q));
         }
-        case 9u, 10u: { // zoom in / zoom out
-            let zin = fx.i.x == 9u;
-            let s1 = select(1.0 - 0.5 * p, 1.0 + p, zin);
-            let s2 = select(2.0 - p, 0.5 + 0.5 * p, zin);
-            let a = F(0.5 + (uv - 0.5) / s1);
-            let b = T(0.5 + (uv - 0.5) / s2);
-            return mix(a, b, smoothstep(0.3, 0.7, p));
+        case 9u, 10u: { // zoom in / out: v4 centre, ka, kb; v5 m, wa
+            let q = uv * fdims();
+            let c = fx.v[4].xy;
+            var a = vec4(0.0);
+            var b = vec4(0.0);
+            if (fx.v[5].y > 0.0) { a = bil(src, c + (q - c) / fx.v[4].z) * fx.v[5].y; }
+            if (fx.v[5].x > 0.0) { b = bil(aux, c + (q - c) / fx.v[4].w); }
+            return over(b * fx.v[5].x, a);
         }
-        case 11u: { // spin: rotate out and in about the centre
-            let a = p * 2.0 * PI;
-            let q = (uv - 0.5) * vec2(asp, 1.0);
-            let r = vec2(q.x * cos(a) - q.y * sin(a), q.x * sin(a) + q.y * cos(a)) / vec2(asp, 1.0) + 0.5;
-            let s = 1.0 - sin(p * PI) * 0.5;
-            let rr = 0.5 + (r - 0.5) / s;
-            return select(F(rr), T(rr), p >= 0.5);
+        case 11u: { // spin: v4 centre, rotation of a and b (rad); v5 ka, kb, m, wa
+            let q = uv * fdims() - fx.v[4].xy;
+            let ra = -fx.v[4].z; let rb = -fx.v[4].w;
+            let qa = vec2(q.x * cos(ra) - q.y * sin(ra), q.x * sin(ra) + q.y * cos(ra)) / fx.v[5].x + fx.v[4].xy;
+            let qb = vec2(q.x * cos(rb) - q.y * sin(rb), q.x * sin(rb) + q.y * cos(rb)) / fx.v[5].y + fx.v[4].xy;
+            var a = vec4(0.0);
+            var b = vec4(0.0);
+            if (fx.v[5].w > 0.0) { a = bil(src, qa) * fx.v[5].w; }
+            if (fx.v[5].z > 0.0) { b = bil(aux, qb); }
+            return over(b * fx.v[5].z, a);
         }
-        case 12u: { // whip pan: fast push with heavy directional blur
-            let e = p * p * (3.0 - 2.0 * p);
-            let blur = dir * speed * 0.5;
-            return over(Tb(uv + dir * (1.0 - e), blur), Fb(uv - dir * e, blur));
+        case 12u: { // whip pan: v4 streak px, span, eased travel q
+            let q = uv * fdims();
+            let bl = fx.v[4].x; let e = fx.v[4].y; let tq = fx.v[4].z;
+            return over(moved(aux, q, dir * e * (tq - 1.0), bl, dir), moved(src, q, dir * e * tq, bl, dir));
         }
         case 13u, 15u: { return mix(F(uv), T(uv), d19_b(d19_radius(uv), p, soft)); } // circle open, iris (D19)
         case 14u: { return mix(F(uv), T(uv), 1.0 - d19_b(d19_radius(uv), 1.0 - p, soft)); } // circle close: a closes
         case 16u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, -0.5 * PI), p, soft)); } // clock wipe from 12
         case 17u: { return mix(F(uv), T(uv), d19_b(d19_angle(uv, fx.v[0].z), p, soft)); } // radial wipe from @angle
         case 18u: { return mix(F(uv), T(uv), d19_b(abs(d19_axis(uv, dir) - 0.5) * 2.0, p, soft)); } // barn door
-        case 19u: { // blinds: 10 slats across the direction
-            let x = fract(dot(uv, abs(dir)) * 10.0);
-            return mix(F(uv), T(uv), edge(p * (1.0 + soft) - soft * 0.5 - x, soft));
-        }
         case 20u: { // luma (D19): the matte's working-space Rec. 709 luminance; without one, a wipe
             var l = d19_axis(uv, dir);
-            if (fx.i.y != 0u) { l = clamp(luma(A2(uv).rgb), 0.0, 1.0); }
+            if (fx.i.y != 0u) {
+                l = clamp(luma(A2(uv).rgb), 0.0, 1.0);
+                if (fx.v[4].w >= 0.5) { l = 1.0 - l; } // <param name="invert">
+            }
             return mix(F(uv), T(uv), d19_b(l, p, soft));
         }
-        case 21u: { // blur through
-            let r = sin(p * PI) * 0.02;
+        case 19u: { // blinds: v4.x slats
+            let t = snap(d19_axis(uv, dir) * fx.v[4].x);
+            return mix(F(uv), T(uv), d19_b(t - floor(t), p, soft));
+        }
+        case 22u: { // glitch: v4 slices, blocks, RGB split px, swap; slices and blocks in aux2
+            let wh = vec2<i32>(fdims());
+            let xy = vec2<i32>(floor(uv * fdims()));
+            if (fx.v[4].x < 0.0) { return select(textureLoad(src, xy, 0), textureLoad(aux, xy, 0), fx.v[4].w > 0.5); }
+            let sw = fx.v[4].w > 0.5;
+            let sh = i32(fx.v[4].z);
+            let o = glitch_res(xy.x, xy.y, wh, sw);
+            if (sh == 0) { return o; }
+            let r = glitch_res(xy.x - sh, xy.y, wh, sw).r;
+            let b = glitch_res(xy.x + sh, xy.y, wh, sw).b;
+            return vec4(min(vec3(r, o.g, b), vec3(max(o.a, 0.0))), o.a);
+        }
+        case 24u, 25u, 31u: { // flip, cube, carousel: planes in perspective (v4, v5; v6 shades, cam, flags)
+            let tr = fx.v[6].w >= 16.0;
+            let fl = u32(fx.v[6].w);
+            var wh = fdims();
+            if (tr) { wh = wh.yx; }
+            var q = uv * fdims();
+            if (tr) { q = q.yx; }
+            var acc = vec4(0.0);
+            // planes far to near: bit 2 says plane 1 is farther; bits 0, 1 visibility; bits 3 which side plane 0 shows
+            let first_is_1 = (fl & 4u) != 0u;
+            for (var k = 0; k < 2; k++) {
+                let idx = select(k, 1 - k, first_is_1);
+                if ((fl & (1u << u32(idx))) == 0u) { continue; }
+                let pl = select(fx.v[4], fx.v[5], idx == 1);
+                let shade = select(fx.v[6].x, fx.v[6].y, idx == 1);
+                let is_b = select(idx == 1, (fl & 8u) != 0u, fx.i.x == 24u);
+                var c: vec4<f32>;
+                if (is_b) { c = plane_px(aux, q, pl, wh, fx.v[6].z, tr, shade); } else { c = plane_px(src, q, pl, wh, fx.v[6].z, tr, shade); }
+                acc = over(c, acc);
+            }
+            return acc;
+        }
+        case 26u: { // page curl: v4 span, radius, axis position, shadow strength
+            let q = uv * fdims();
+            let e = fx.v[4].x; let r = fx.v[4].y; let c = fx.v[4].z;
+            let u = e * (1.0 - d19_axis(uv, dir));
+            var res = bil(aux, q);
+            let beyond = max((u - (c + r)) / (0.8 * r), 0.0);
+            let shadow = 1.0 - fx.v[4].w * exp(-beyond) * select(0.0, 1.0, u > c);
+            res = vec4(res.rgb * shadow, res.a);
+            let flat_ = clamp(c - u + 0.5, 0.0, 1.0);
+            if (flat_ > 0.0) { res = over(bil(src, q) * flat_, res); }
+            if (u >= c - 0.5 && u <= c + r) {
+                let t = clamp((u - c) / r, 0.0, 1.0);
+                let phi1 = asin(t);
+                let du = c + r * phi1 - u;
+                var front = bil(src, q - du * dir);
+                front = vec4(front.rgb * (0.55 + 0.45 * cos(phi1)), front.a);
+                res = over(front, res);
+            }
+            let phi2 = PI - asin(clamp((u - c) / r, 0.0, 1.0));
+            let ub = select(c + PI * r + (c - u), c + r * phi2, u >= c);
+            let back = bil(src, q - (ub - u) * dir);
+            if (u <= c + r) {
+                let ba = back.a;
+                let shade = select(0.95, 0.75 + 0.25 * sin(clamp(phi2, 0.0, PI)), u >= c);
+                let paper = vec3(0.82, 0.82, 0.8);
+                res = over(vec4((back.rgb * 0.18 + paper * ba * 0.82) * shade, ba), res);
+            }
+            return res;
+        }
+        case 27u: { // film roll: v4 gap, border, curvature, holes; v5 sign, transposed, shutter, samples
+            let tr = fx.v[5].y > 0.5;
+            var wh = fdims();
+            var q = uv * fdims();
+            if (tr) { wh = wh.yx; q = q.yx; }
+            if (p <= 0.0) { return PA(q, tr); }
+            if (p >= 1.0) { return PB(q, tr); }
+            let n = i32(fx.v[5].w);
+            var acc = vec4(0.0);
+            for (var i = 0; i < n; i++) {
+                let dt = ((f32(i) + 0.5) / f32(n) - 0.5) * fx.v[5].z;
+                acc += film_strip(q, clamp(p + dt, 0.0, 1.0), wh, tr, col);
+            }
+            return acc / f32(n);
+        }
+        case 28u: { // stripe: v4 count, stagger
+            let n = fx.v[4].x; let st = fx.v[4].y;
+            var t = d19_axis(uv, dir);
+            let k = min(floor(snap(d19_axis(uv, vec2(-dir.y, dir.x)) * n)), n - 1.0);
+            if (k - 2.0 * floor(k / 2.0) > 0.5) { t = 1.0 - t; }
+            let v = (t + st * k / max(1.0, n - 1.0)) / (1.0 + st);
+            return mix(F(uv), T(uv), d19_b(v, p, soft));
+        }
+        case 29u: { // squash: v4 lead, ka, (unused); v5 trail, kb
+            let q = uv * fdims();
             var a = vec4(0.0);
             var b = vec4(0.0);
-            for (var k = 0; k < 16; k++) {
-                let ang = f32(k) * 2.39996;
-                let o = vec2(cos(ang), sin(ang)) * r * sqrt(f32(k + 1) / 16.0) * vec2(1.0, asp);
-                a += F(uv + o);
-                b += T(uv + o);
+            let ka = fx.v[4].z; let kb = fx.v[5].z;
+            if (ka > 1e-8) { a = bil(src, fx.v[4].xy + (q - fx.v[4].xy) + dir * dot(q - fx.v[4].xy, dir) * (1.0 / ka - 1.0)); }
+            if (kb > 1e-8) { b = bil(aux, fx.v[5].xy + (q - fx.v[5].xy) + dir * dot(q - fx.v[5].xy, dir) * (1.0 / kb - 1.0)); }
+            return over(b, a);
+        }
+        case 30u: { // shuffle: v4 offset, ka, kb, a on top
+            let q = uv * fdims();
+            let c = fdims() * 0.5;
+            let o = dir * fx.v[4].x;
+            let a = bil(src, c + (q - o - c) / fx.v[4].y);
+            let b = bil(aux, c + (q + o - c) / fx.v[4].z);
+            return select(over(b, a), over(a, b), fx.v[4].w > 0.5);
+        }
+        case 32u: { // light leak: v4..v6 blobs (centre, σ, strength), v7 m, k; colours in aux2
+            let q = uv * fdims();
+            let base = mix(bil(src, q), bil(aux, q), fx.v[7].x);
+            if (fx.v[7].y < 1e-3) { return base; }
+            var l = vec3(0.0);
+            for (var i = 0; i < 3; i++) {
+                let bl = fx.v[4 + i];
+                let dq = q - bl.xy;
+                let blob = exp(-dot(dq, dq) / (2.0 * bl.z * bl.z));
+                l += blob * textureLoad(aux2, vec2(i, 0), 0).rgb * bl.w;
             }
-            return mix(a, b, p) / 16.0;
+            l = clamp(l * fx.v[7].y, vec3(0.0), vec3(1.0));
+            return vec4(base.rgb + l * (base.a - base.rgb), base.a);
         }
-        case 22u: { // glitch
-            let row = floor(uv.y * 24.0);
-            let h = d24_unit(tr_seed(), vec2(u32(floor(p * 20.0)), 0u), vec2(u32(row), 0u));
-            let o = (h - 0.5) * 0.2 * sin(p * PI);
-            let w = select(0.0, 1.0, h < p);
-            return mix(F(uv + vec2(o, 0.0)), T(uv + vec2(o * 0.5, 0.0)), w);
-        }
-        case 23u: { // pixelize
-            let cells = mix(256.0, 12.0, sin(p * PI));
-            let q = (floor(uv * vec2(cells * asp, cells)) + 0.5) / vec2(cells * asp, cells);
-            return mix(F(q), T(q), smoothstep(0.4, 0.6, p));
-        }
-        case 24u: { // flip around the vertical axis
-            let s = abs(cos(p * PI));
-            let x = (uv.x - 0.5) / max(s, 1e-3) + 0.5;
-            let q = vec2(x, uv.y);
-            return select(F(q), T(vec2(1.0 - x, uv.y) * vec2(-1.0, 1.0) + vec2(1.0, 0.0)), p >= 0.5);
-        }
-        case 25u: { // cube: two faces on a rotating box (perspective approximation)
-            let a = p * PI * 0.5;
-            let wf = cos(a);
-            let wt = sin(a);
-            let split = wf / (wf + wt);
-            if (uv.x < split * 1.0 && wf > 1e-3) {
-                let x = uv.x / split;
-                let sh = 1.0 - 0.15 * wt * (1.0 - x);
-                return F(vec2(x, 0.5 + (uv.y - 0.5) / sh));
+        case 34u: { // pixelize, block averages (output: one texel per block): v4 block size, offsets
+            let bs = i32(fx.v[4].x);
+            let o = vec2<i32>(fx.v[4].yz);
+            let wh = vec2<i32>(fdims());
+            let b0 = vec2<i32>(in.pos.xy) * bs - o;
+            var acc = vec4(0.0);
+            var cnt = 0.0;
+            for (var j = 0; j < bs; j++) {
+                for (var i = 0; i < bs; i++) {
+                    let c = b0 + vec2(i, j);
+                    if (all(c >= vec2(0)) && all(c < wh)) { acc += textureLoad(src, c, 0); cnt += 1.0; }
+                }
             }
-            let x = (uv.x - split) / max(1.0 - split, 1e-3);
-            let sh = 1.0 - 0.15 * wf * x;
-            return T(vec2(x, 0.5 + (uv.y - 0.5) / sh));
+            return acc / max(cnt, 1.0);
         }
-        case 26u: { // page curl from the right edge
-            let x = uv.x;
-            let edge_x = 1.0 - p * 1.2;
-            if (x > edge_x + 0.1) { return T(uv); }
-            if (x > edge_x) {
-                let f = (x - edge_x) / 0.1;
-                let back = F(vec2(edge_x - (x - edge_x), uv.y));
-                return over(vec4(back.rgb * (0.6 + 0.4 * f), back.a) * (1.0 - f * 0.2), T(uv));
+        case 36u: { // box filter of the Python renderer's gaussian: v4 width (odd), axis (0 x, 1 y), clamp
+            let r = i32(fx.v[4].x) / 2;
+            let ax = select(vec2(1, 0), vec2(0, 1), fx.v[4].y > 0.5);
+            let dd = vec2<i32>(textureDimensions(src));
+            let xy = vec2<i32>(in.pos.xy);
+            var acc = vec4(0.0);
+            for (var j = -r; j <= r; j++) {
+                var c = xy + ax * j;
+                if (fx.v[4].z > 0.5) { c = clamp(c, vec2(0), dd - 1); }
+                if (all(c >= vec2(0)) && all(c < dd)) { acc += textureLoad(src, c, 0); }
             }
-            let shadow = clamp((edge_x - x) * 8.0, 0.0, 1.0);
-            return F(uv) * mix(0.7, 1.0, shadow);
+            return acc / fx.v[4].x;
         }
-        case 27u: { // film roll: vertical scroll with frame gap
-            let y = uv.y + p;
-            let blur = vec2(0.0, speed * 0.1);
-            if (y < 1.0) { return Fb(vec2(uv.x, y), blur); }
-            return Tb(vec2(uv.x, y - 1.0), blur);
+        case 37u: { // block mean by factor v4.x, the edge extended (downsampling for large blurs)
+            let f = i32(fx.v[4].x);
+            let dd = vec2<i32>(textureDimensions(src));
+            let b0 = vec2<i32>(in.pos.xy) * f;
+            var acc = vec4(0.0);
+            for (var j = 0; j < f; j++) {
+                for (var i = 0; i < f; i++) { acc += textureLoad(src, clamp(b0 + vec2(i, j), vec2(0), dd - 1), 0); }
+            }
+            return acc / f32(f * f);
         }
-        case 28u: { // stripes: alternating bands slide in
-            let band = floor(uv.y * 8.0);
-            let s = select(-1.0, 1.0, (i32(band) & 1) == 0);
-            let o = (1.0 - p) * s;
-            let q = vec2(uv.x + o, uv.y);
-            return over(T(q), F(uv));
+        case 38u: { // separable bilinear upsampling by v4.x, edge clamped
+            let f = fx.v[4].x;
+            let dd = vec2<i32>(textureDimensions(src));
+            let c = clamp((floor(in.pos.xy) + 0.5) / f - 0.5, vec2(0.0), vec2<f32>(dd - 1));
+            let i0 = vec2<i32>(floor(c));
+            let i1 = min(i0 + 1, dd - 1);
+            let fr = c - vec2<f32>(i0);
+            let top = mix(textureLoad(src, i0, 0), textureLoad(src, vec2(i1.x, i0.y), 0), fr.x);
+            let bot = mix(textureLoad(src, vec2(i0.x, i1.y), 0), textureLoad(src, i1, 0), fr.x);
+            return mix(top, bot, fr.y);
         }
-        case 29u: { // squash: outgoing squashes to a line, incoming stretches out
-            if (p < 0.5) { let s = 1.0 - p * 2.0; return F(vec2(uv.x, 0.5 + (uv.y - 0.5) / max(s, 1e-3))); }
-            let s = (p - 0.5) * 2.0;
-            return T(vec2(uv.x, 0.5 + (uv.y - 0.5) / max(s, 1e-3)));
-        }
-        case 30u: { // shuffle: outgoing slides out and under while incoming comes over
-            let e = sin(p * PI);
-            let a = F(uv - vec2(e * 0.5, 0.0));
-            let b = T(uv + vec2(e * 0.5, 0.0));
-            return select(over(a, b), over(b, a), p >= 0.5);
-        }
-        case 31u: { // carousel: outgoing moves left and shrinks, incoming arrives from the right
-            let sa = 1.0 - 0.3 * p;
-            let sb = 0.7 + 0.3 * p;
-            let a = F(0.5 + (uv - vec2(0.5 - 0.6 * p, 0.5)) / sa);
-            let b = T(0.5 + (uv - vec2(0.5 + 0.6 * (1.0 - p), 0.5)) / sb);
-            return select(over(a, b), over(b, a), p >= 0.5);
-        }
-        case 32u: { // light leak: warm burn over a crossfade
-            let n = d24_fbm(uv * 2.0 + vec2(p, 0.0), tr_seed(), 5.0, 0.0);
-            let burn = sin(p * PI) * smoothstep(0.3, 0.9, n + uv.x * 0.4);
-            let base = mix(F(uv), T(uv), smoothstep(0.35, 0.65, p));
-            return base + vec4(col.rgb * burn * 2.0, 0.0) * max(base.a, burn);
-        }
-        case 33u: { // morph: displace both by their luminance difference while crossfading
-            let a = F(uv);
-            let b = T(uv);
-            let dlt = (luma(unpre(b)) - luma(unpre(a))) * 0.1;
-            return mix(F(uv + vec2(dlt, dlt) * p), T(uv - vec2(dlt, dlt) * (1.0 - p)), p);
+        case 35u: { // pixelize, expansion: src is the block texture; v4 block size, offsets
+            let bs = i32(fx.v[4].x);
+            let o = vec2<i32>(fx.v[4].yz);
+            let xy = vec2<i32>(floor(uv * fdims()));
+            return textureLoad(src, (xy + o) / bs, 0);
         }
         default: { return mix(F(uv), T(uv), p); }
     }

@@ -299,6 +299,36 @@ fn transitions_mid_way() {
     assert_px(&dip, 52, 10, [0.0, 1.0, 0.0, 1.0], 3e-2);
 }
 
+/// CONVENTIONS 5.17: the types D19 leaves open, their <param> children and the motion blur of
+/// moving types are the Python renderer's.
+#[test]
+fn undefined_transition_types_follow_the_python_renderer() {
+    let Some(_) = gpu() else { return };
+    let render = |kind: &str, extra: &str, inner: &str| {
+        let body = format!(
+            r#"<layer id="a" asset="red" x="0" y="0" scaleX="16" scaleY="8" end="2"/>
+               <layer id="b" asset="wide" x="0" y="0" scaleX="8" scaleY="8" start="2"/>
+               <transition type="{kind}" from="a" to="b" duration="1" curve="linear" {extra}>{inner}</transition>"#
+        );
+        render_times(&doc_with("", "", &body, ""), &[2.0]).unwrap()
+    };
+    let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    // blinds: <param name="count"> slats across the travel, each wiping along it (b where the
+    // slat coordinate is below p = ½)
+    let r = render("blinds", r#"direction="down" softness="0""#, r#"<param name="count" value="2"/>"#);
+    assert!(close(r.at(52, 4), blue, 3e-2) && close(r.at(52, 20), blue, 3e-2), "{:?}", r.at(52, 4));
+    assert!(close(r.at(52, 12), red, 3e-2) && close(r.at(52, 28), red, 3e-2));
+    // push smears along its motion by default (180° shutter), and not with motionBlur="false"
+    let sharp = render("push", r#"motionBlur="false""#, "");
+    let smeared = render("push", "", "");
+    let diff = (0..64).map(|x| (0..4).map(|c| (sharp.at(x, 10)[c] - smeared.at(x, 10)[c]).abs()).fold(0.0, f32::max));
+    assert!(diff.fold(0.0, f32::max) > 0.1, "the blur changes the seams");
+    assert_eq!(render("push", r#"motionBlur="false""#, "").px, sharp.px);
+    // glitch is deterministic
+    let g = render("glitch", "", "");
+    assert_eq!(g.px, render("glitch", "", "").px);
+}
+
 /// CONVENTIONS 5.17: D19's coordinates in frame pixels, at p = ½ with no softness (b is
 /// blue at x ≥ 32, a is red; the frame is 64 × 32 with its centre at (32, 16)).
 #[test]
