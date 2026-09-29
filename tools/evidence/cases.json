@@ -463,42 +463,225 @@
     {
       "id": "fluid",
       "reference": "Liquid / smoke simulation",
-      "technique": "grid or particle fluid solver",
-      "scene": null,
-      "expect": "gap",
-      "known": "sr-sim has rigid bodies, soft bodies, particles and force fields; there is no fluid solver."
+      "technique": "<fluid> stable fluids (MAC grid) with buoyancy and vorticity",
+      "scene": "scenes/fluid.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 2.0,
+          "region": [
+            170,
+            0,
+            300,
+            300
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.05,
+          "min": 0.05,
+          "why": "the plume rises from the source"
+        },
+        {
+          "type": "changes",
+          "t": [
+            1.0,
+            2.0
+          ],
+          "region": [
+            170,
+            0,
+            300,
+            360
+          ],
+          "min": 0.002,
+          "why": "the smoke moves"
+        }
+      ]
     },
     {
       "id": "flocking",
       "reference": "Swarms and crowds",
-      "technique": "boids / agent steering",
-      "scene": null,
-      "expect": "gap",
-      "known": "Particles respond to fields only; no neighbour-aware steering."
+      "technique": "<flock> boids",
+      "scene": "scenes/flocking.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 2.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.05,
+          "min": 0.01,
+          "why": "the agents draw"
+        },
+        {
+          "type": "changes",
+          "t": [
+            1.0,
+            1.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "they fly"
+        }
+      ]
     },
     {
       "id": "erosion-slime",
-      "reference": "Generative growth (erosion, slime-mould trails)",
-      "technique": "agent + diffusion-decay trail maps",
-      "scene": null,
-      "expect": "gap",
-      "known": "No feedback-buffer simulation primitive."
+      "reference": "Generative growth (slime-mould trails)",
+      "technique": "<slime> Physarum network",
+      "scene": "scenes/slime.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 3.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#000000",
+          "tol": 0.05,
+          "min": 0.05,
+          "why": "the network grows"
+        },
+        {
+          "type": "changes",
+          "t": [
+            1.0,
+            3.0
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.005,
+          "why": "it spreads"
+        }
+      ]
+    },
+    {
+      "id": "erosion",
+      "reference": "Landscape erosion",
+      "technique": "<erosion> droplet hydraulic erosion",
+      "scene": "scenes/erosion.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 2.0,
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "not_rgb": "#000000",
+          "tol": 0.02,
+          "min": 0.9,
+          "why": "the terrain covers its box"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.2,
+            2.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.001,
+          "why": "droplets carve it"
+        }
+      ]
     },
     {
       "id": "clay-3d",
       "reference": "3D claymation look",
-      "technique": "SDF sculpting, fingerprint displacement, subsurface",
-      "scene": null,
-      "expect": "gap",
-      "known": "Meshes are imported or primitive; no sculpting, displacement maps or subsurface scattering."
+      "technique": "object3D primitive=clay: SDF blobs, fingerprints, boil",
+      "scene": "scenes/clay-3d.scene.xml",
+      "expect": "native",
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.5,
+          "region": [
+            180,
+            80,
+            200,
+            200
+          ],
+          "rgb": "#C8643C",
+          "tol": 0.35,
+          "min": 0.2,
+          "why": "the clay body draws in its colour"
+        },
+        {
+          "type": "changes",
+          "t": [
+            0.5,
+            2.5
+          ],
+          "region": [
+            0,
+            0,
+            640,
+            360
+          ],
+          "min": 0.002,
+          "why": "a blob pulls away"
+        }
+      ]
     },
     {
       "id": "path-tracing",
       "reference": "Offline-quality global illumination",
-      "technique": "path-traced lighting",
-      "scene": null,
-      "expect": "gap",
-      "known": "The 3D renderer is a rasteriser with shadow maps; no path tracer."
+      "technique": "camera renderer=pathtrace",
+      "scene": "scenes/path-tracing.scene.xml",
+      "expect": "native",
+      "bench": true,
+      "checks": [
+        {
+          "type": "coverage",
+          "t": 0.0,
+          "region": [
+            100,
+            100,
+            300,
+            120
+          ],
+          "not_rgb": "#101418",
+          "tol": 0.05,
+          "min": 0.3,
+          "why": "the traced set draws"
+        },
+        {
+          "type": "not_color",
+          "t": 0.0,
+          "x": 250,
+          "y": 150,
+          "rgb": "#000000",
+          "tol": 0.05,
+          "why": "the chrome ball reflects its surroundings"
+        }
+      ]
     },
     {
       "id": "fbx-animation",

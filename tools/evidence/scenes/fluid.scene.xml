@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Smoke: a buoyant dye plume with vorticity confinement in a closed box. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="3" background="#101418"/>
+  <composition>
+    <fluid id="smoke" x="170" y="0" width="300" height="360" resolution="96" vorticity="3" buoyancy="120" dissipation="0.2">
+      <fluidSource x="150" y="330" radius="18" color="#FF8030" density="4" velocityY="-120"/>
+    </fluid>
+  </composition>
+</scene>

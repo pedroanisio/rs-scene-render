@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Claymation: SDF blobs with fingerprints and boil; one blob pulls away from the body. -->
+<scene version="1.1">
+  <project width="640" height="360" fps="24" duration="3" background="#2A2F36"/>
+  <materials><material id="clay" baseColor="#C8643C" roughness="0.75"/></materials>
+  <composition>
+    <object3D id="blobby" primitive="clay" material="clay" x="280" y="190" fingerprints="0.5" boil="12" resolution="96">
+      <blob radius="60"/>
+      <blob y="-70" radius="38" blend="18"/>
+      <blob radius="28" blend="20"><animate property="x"><key time="0" value="40"/><key time="3" value="190"/></animate></blob>
+    </object3D>
+  </composition>
+  <lights><light id="a" type="ambient" intensity="0.35"/><light id="k" type="directional" intensity="3" yaw="-30" pitch="-35"/></lights>
+</scene>
