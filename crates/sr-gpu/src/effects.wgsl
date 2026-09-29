@@ -37,6 +37,23 @@ fn A2(uv: vec2<f32>) -> vec4<f32> { return textureSampleLevel(aux2, smp, uv, 0.0
 fn dims() -> vec2<f32> { return vec2<f32>(textureDimensions(src)); }
 fn in_unit(uv: vec2<f32>) -> bool { return all(uv >= vec2(0.0)) && all(uv <= vec2(1.0)); }
 fn Sz(uv: vec2<f32>) -> vec4<f32> { return select(vec4(0.0), S(uv), in_unit(uv)); }
+// Bilinear sample of src with transparent texels beyond its edges.
+fn St(uv: vec2<f32>) -> vec4<f32> {
+    let d = vec2<i32>(textureDimensions(src));
+    let q = uv * vec2<f32>(d) - 0.5;
+    let i = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    var acc = vec4(0.0);
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1u);
+        let p = i + o;
+        if (all(p >= vec2(0)) && all(p < d)) {
+            let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+            acc += textureLoad(src, p, 0) * w;
+        }
+    }
+    return acc;
+}
 
 fn unpre(c: vec4<f32>) -> vec3<f32> { return select(vec3(0.0), c.rgb / c.a, c.a > 1e-6); }
 fn lin(c: vec3<f32>) -> vec3<f32> {
@@ -580,9 +597,19 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             }
             return acc / 16.0;
         }
-        case 14u, 15u: { // chromatic aberration (radial, v0.x px at edge) / rgb split (v0.xy px)
-            var o = v[0].xy / d;
-            if (fx.i.x == 14u) { o = (in.uv - c) * 2.0 * v[0].x / d; }
+        case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner (CONVENTIONS 5.18)
+            // red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach; outside
+            // the frame is transparent
+            let pc = c * d;
+            let x = in.uv * d;
+            let l = v[0].x / max(max(length(pc), length(d - pc)), 1.0);
+            let r = St((pc + (x - pc) / max(1.0 - l, 0.01)) / d);
+            let g = S(in.uv);
+            let b = St((pc + (x - pc) / max(1.0 + l, 0.01)) / d);
+            return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
+        }
+        case 15u: { // rgb split (v0.xy px)
+            let o = v[0].xy / d;
             let r = Sz(in.uv + o);
             let g = S(in.uv);
             let b = Sz(in.uv - o);

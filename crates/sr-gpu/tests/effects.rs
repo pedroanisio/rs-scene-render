@@ -127,6 +127,26 @@ fn vignette_follows_d9() {
 }
 
 #[test]
+fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
+    // CONVENTIONS 5.18: red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
+    // (35.8 px here); samples beyond the frame are transparent
+    let Some(r) = render(&fx_doc(
+        r##"background="#00000000""##,
+        r#"<layer id="w" asset="white" scaleX="16" scaleY="8"/><adjustment id="a" effects="c"/>"#,
+        r#"<effect id="c" type="chromatic-aberration" amount="4"/>"#,
+    )) else {
+        return;
+    };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    // the left edge: red reads 3.5 px beyond the frame, blue and green inside
+    let e = r.at(0, 16);
+    assert!(e[0] < 0.02 && e[1] > 0.98 && e[2] > 0.98, "{e:?}");
+    // 4 px in, red reads inside again
+    assert!(r.at(4, 16)[0] > 0.98, "{:?}", r.at(4, 16));
+    assert_px(&r, 32, 16, [1.0; 4], 1e-3);
+}
+
+#[test]
 fn colour_operations_match_reference_formulas() {
     let body = r#"<layer id="e" asset="gray" x="0" y="0" scaleX="2" scaleY="2" effects="exp"/>
         <layer id="s" asset="src" x="8" y="0" scaleX="2" scaleY="2" effects="sat"/>

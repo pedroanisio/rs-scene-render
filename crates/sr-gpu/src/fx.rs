@@ -1489,7 +1489,7 @@ impl Builder<'_> {
                         }
                     }
                     "chromatic-aberration" => {
-                        v[0] = [(amount * 4.0 * px) as f32, 0.0, 0.0, 0.0];
+                        v[0] = [(amount * px) as f32, 0.0, 0.0, 0.0];
                         14
                     }
                     "rgb-split" => {
