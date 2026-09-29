@@ -62,6 +62,20 @@ fn phi(x: f64) -> f64 {
 }
 
 #[test]
+fn blur_samples_outside_its_input_are_transparent() {
+    // CONVENTIONS 5.7: an adjustment layer's blur reads transparency outside the frame, and the
+    // layer replaces the backdrop by its effect within its coverage (D17), so a blurred opaque
+    // frame loses half its alpha at the frame's edge (transparent background).
+    let fx = r##"<effect id="b" type="blur" radius="3"/>"##;
+    let body = r#"<layer id="a" asset="white" scaleX="16" scaleY="8"/><adjustment id="adj" effects="b"/>"#;
+    let Some(r) = render(&fx_doc(r##"background="#00000000""##, body, fx)) else { return };
+    let (edge, inside) = (r.at(0, 16)[3], r.at(32, 16)[3]);
+    assert!((inside - 1.0).abs() < 1e-2, "{inside}");
+    let want = phi(0.5 / 3.0) as f32;
+    assert!((edge - want).abs() < 0.03, "edge alpha {edge}, want {want}");
+}
+
+#[test]
 fn blur_radius_is_the_standard_deviation() {
     // CONVENTIONS 5.7 (D9): `radius` is σ; a drop shadow's `radius` is 2σ. Radii are in the node's units,
     // so on a layer scaled 10× these are σ = 3 px. A straight edge at x = 32 blurred with σ covers Φ(d / σ)

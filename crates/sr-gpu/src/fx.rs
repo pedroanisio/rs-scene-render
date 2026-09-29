@@ -1079,7 +1079,8 @@ impl Builder<'_> {
             b.run(Entry::Color, ids(op), v, input, aux, None, None, input.size)
         };
         Ok(match kind {
-            "blur" => self.blur(input, r),
+            // the Python renderer's separable Gaussian (σ = radius), edges transparent
+            "blur" => self.gauss(input, r),
             "glow" | "bloom" | "halation" => {
                 let tint = match kind {
                     "halation" => lin(colour("color", [1.0, 0.3, 0.12, 1.0])),
@@ -1352,7 +1353,7 @@ impl Builder<'_> {
                 } else {
                     let field =
                         self.run(Entry::Color, [75, ids[1], ids[2], 0], v, input, Aux::None, None, None, input.size);
-                    let blurred = self.blur(&field, 2.0 * sigma);
+                    let blurred = self.gauss(&field, sigma);
                     v[0][3] = (2.0 * std::f64::consts::PI.sqrt() * sigma).max(1.0) as f32;
                     self.run(Entry::Color, ids, v, input, Aux::Tex(blurred), None, None, input.size)
                 }
@@ -1885,6 +1886,25 @@ impl Builder<'_> {
 }
 
 impl Builder<'_> {
+    /// The Python renderer's effect gaussian (`effects.gaussian`): separable, edges transparent
+    /// (CONVENTIONS 5.7); σ > 4 as three box passes of width ⌊√(4σ² + 1)⌋ (odd), else the
+    /// kernel sampled over ±⌈3σ⌉.
+    pub fn gauss(&mut self, src: &Arc<Tex>, sigma: f64) -> Arc<Tex> {
+        if sigma < 0.3 {
+            return src.clone();
+        }
+        if sigma > 4.0 {
+            return self.py_gaussian(src, sigma, sigma, false, false);
+        }
+        let mut cur = src.clone();
+        for axis in [0.0, 1.0] {
+            let mut v = [[0.0f32; 4]; 8];
+            v[4] = [sigma as f32, axis, 0.0, 0.0];
+            cur = self.run(Entry::Trans, [39, 0, 0, 0], v, &cur, Aux::None, None, None, cur.size);
+        }
+        cur
+    }
+
     /// The Python renderer's transition gaussian (`transitions.gaussian`): three box passes per
     /// axis of width ⌊√(4σ² + 1)⌋ (odd), edges transparent or extended (`clamp`); an isotropic
     /// σ > 2.5 runs on a copy downsampled by f = min(8, max(2, ⌊σ / 2.5⌋)).

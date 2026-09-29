@@ -442,7 +442,12 @@ impl Renderer {
         let (mask_off, mask_count) = self.masks_of(plan, n, mask_box, clip);
         let d = Draw {
             opacity: op as f32,
-            blend: if self.bare.contains(&n.id) { 0 } else { blend_index(e) },
+            blend: match (self.bare.contains(&n.id), blend_index(e)) {
+                (true, _) => 0,
+                // an adjustment layer replaces the backdrop by its effect within its coverage (D17)
+                (false, 0) if n.kind == "adjustment" => BLEND_ADJUST,
+                (false, b) => b,
+            },
             src_kind: src::TEXTURE,
             mask_off,
             mask_count,

@@ -136,6 +136,8 @@ struct GenJob {
 /// The `behind` blend code; a draw with it and no backdrop copy uses the fixed-function
 /// destination-over pipeline (the project background).
 const BLEND_UNDER: u32 = 34;
+/// Adjustment layers: backdrop + (effect − backdrop) · coverage (D17, CONVENTIONS 5.6).
+pub(crate) const BLEND_ADJUST: u32 = 35;
 
 #[derive(Clone, Copy)]
 struct Space {

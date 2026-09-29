@@ -131,12 +131,16 @@ fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
 fn fs_copy(in: VOut) -> @location(0) vec4<f32> { return S(in.uv); }
 
 // Dual-Kawase downsample (output half size); v0.x = offset in source texels.
+// The blur pyramid reads the input bilinearly with transparent texels outside it (CONVENTIONS
+// 5.7: samples outside the effect's input are transparent, never clamped to the edge).
+fn Z(uv: vec2<f32>) -> vec4<f32> { return bil(src, uv * dims()); }
+
 @fragment
 fn fs_down(in: VOut) -> @location(0) vec4<f32> {
     let t = 1.0 / dims() * fx.v[0].x;
-    var s = S(in.uv) * 4.0;
-    s += S(in.uv + vec2(-t.x, -t.y)) + S(in.uv + vec2(t.x, t.y));
-    s += S(in.uv + vec2(t.x, -t.y)) + S(in.uv + vec2(-t.x, t.y));
+    var s = Z(in.uv) * 4.0;
+    s += Z(in.uv + vec2(-t.x, -t.y)) + Z(in.uv + vec2(t.x, t.y));
+    s += Z(in.uv + vec2(t.x, -t.y)) + Z(in.uv + vec2(-t.x, t.y));
     return s / 8.0;
 }
 
@@ -144,9 +148,9 @@ fn fs_down(in: VOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_up(in: VOut) -> @location(0) vec4<f32> {
     let t = 1.0 / dims() * fx.v[0].x;
-    var s = S(in.uv + vec2(-2.0 * t.x, 0.0)) + S(in.uv + vec2(2.0 * t.x, 0.0));
-    s += S(in.uv + vec2(0.0, -2.0 * t.y)) + S(in.uv + vec2(0.0, 2.0 * t.y));
-    s += (S(in.uv + vec2(-t.x, t.y)) + S(in.uv + vec2(t.x, t.y)) + S(in.uv + vec2(t.x, -t.y)) + S(in.uv + vec2(-t.x, -t.y))) * 2.0;
+    var s = Z(in.uv + vec2(-2.0 * t.x, 0.0)) + Z(in.uv + vec2(2.0 * t.x, 0.0));
+    s += Z(in.uv + vec2(0.0, -2.0 * t.y)) + Z(in.uv + vec2(0.0, 2.0 * t.y));
+    s += (Z(in.uv + vec2(-t.x, t.y)) + Z(in.uv + vec2(t.x, t.y)) + Z(in.uv + vec2(t.x, -t.y)) + Z(in.uv + vec2(-t.x, -t.y))) * 2.0;
     return s / 12.0;
 }
 
@@ -1358,6 +1362,22 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
                 if (all(c >= vec2(0)) && all(c < dd)) { acc += textureLoad(src, c, 0); }
             }
             return acc / fx.v[4].x;
+        }
+        case 39u: { // sampled Gaussian along an axis, zero outside: v4 σ, axis (0 x, 1 y)
+            let sg = fx.v[4].x;
+            let r = max(1, i32(ceil(sg * 3.0)));
+            let ax = select(vec2(1, 0), vec2(0, 1), fx.v[4].y > 0.5);
+            let dd = vec2<i32>(textureDimensions(src));
+            let xy = vec2<i32>(in.pos.xy);
+            var acc = vec4(0.0);
+            var norm = 0.0;
+            for (var j = -r; j <= r; j++) {
+                let w = exp(-f32(j * j) / (2.0 * sg * sg));
+                norm += w;
+                let c = xy + ax * j;
+                if (all(c >= vec2(0)) && all(c < dd)) { acc += textureLoad(src, c, 0) * w; }
+            }
+            return acc / norm;
         }
         case 37u: { // block mean by factor v4.x, the edge extended (downsampling for large blurs)
             let f = i32(fx.v[4].x);

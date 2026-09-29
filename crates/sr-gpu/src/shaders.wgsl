@@ -330,6 +330,9 @@ fn composite(mode: u32, bd: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
 
 // ------------------------------------------------------------------ fragment shading
 
+// The coverage (masks, matte, opacity) shade() applied last.
+var<private> COV: f32 = 1.0;
+
 fn shade(v: VOut) -> vec4<f32> {
   let d = draws[v.draw];
   let pixel = vec2<u32>(v.pos.xy);
@@ -371,6 +374,7 @@ fn shade(v: VOut) -> vec4<f32> {
     cov = cov * clamp(mv, 0.0, 1.0);
   }
   c = c * cov;
+  COV = cov;
   if (d.blend == 1u) {                                                   // dissolve (D14, C's hash)
     let r = dissolve_hash(pixel.x, pixel.y, vec2(globals.seed, globals.pad0));
     if (c.a > 0.0 && r < c.a) { c = vec4(c.rgb / c.a, 1.0); } else { c = vec4(0.0); }
@@ -388,6 +392,7 @@ fn fs_blend(v: VOut) -> @location(0) vec4<f32> {
   let d = draws[v.draw];
   let s = shade(v);
   let bd = textureLoad(backdrop, vec2<i32>(v.pos.xy), 0);
+  if (d.blend == 35u) { return s + bd * (1.0 - COV); } // adjustment: mix(backdrop, effect, coverage)
   return composite(d.blend, bd, s);
 }
 
