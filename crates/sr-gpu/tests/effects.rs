@@ -70,10 +70,8 @@ fn blur_radius_is_the_standard_deviation() {
         <effect id="s" type="drop-shadow" radius="0.6" offsetX="0" offsetY="0" color="#000000"/>"##;
     let edge = |e: &str| {
         let body = format!(r#"<layer id="a" asset="white" x="32" y="-4" scaleX="10" scaleY="10" effects="{e}"/>"#);
-        render(&fx_doc(r##"background="#00000000""##, &body, fx)).map(|r| {
-            assert!(problems(&r).is_empty(), "{:?}", problems(&r));
-            r
-        })
+        render(&fx_doc(r##"background="#00000000""##, &body, fx))
+            .inspect(|r| assert!(problems(r).is_empty(), "{:?}", problems(r)))
     };
     let Some(b) = edge("b") else { return };
     for x in [27u32, 29, 31, 33, 35, 37] {
