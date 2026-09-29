@@ -408,7 +408,7 @@ use wgpu::util::DeviceExt;
 /// Samples a trace dispatch takes.
 const PER_DISPATCH: u32 = 4;
 /// Spacing of per-dispatch parameter slots in the uniform buffer.
-const SLOT: u64 = 256;
+const SLOT: u64 = (std::mem::size_of::<Params>() as u64).div_ceil(256) * 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

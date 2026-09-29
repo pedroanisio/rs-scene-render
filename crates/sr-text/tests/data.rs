@@ -150,7 +150,7 @@ fn preset_table_timing() {
     assert!(fx[0].fill.is_none() && fx[3].highlight.as_ref().is_some_and(|h| (h.fraction - 0.5).abs() < 1e-9));
     // scramble: hidden before its start, then the unrevealed characters are random letters
     let a = Animator { preset: Some((Preset::Scramble, 1.0, 1.0)), ..Default::default() };
-    assert!(animate::apply(&lib, &l, &roles, &[a.clone()], 0.5).0.iter().all(|f| f.opacity == 0.0));
+    assert!(animate::apply(&lib, &l, &roles, std::slice::from_ref(&a), 0.5).0.iter().all(|f| f.opacity == 0.0));
     let chars: Vec<char> = "ab cd ef".chars().collect();
     let s: String = animate::scramble_text(&chars, &|_| true, &a, 1.0, 1.0, 1.5).into_iter().collect();
     assert_eq!(&s[..4], "ab c", "the first four slots are revealed");

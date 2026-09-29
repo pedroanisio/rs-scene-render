@@ -186,7 +186,9 @@ mod tests {
         close(noise(1, 0, 0.25), -0.2591138999211539);
         close(noise(42, 7, -1.3), -0.22195948101587748);
         close(noise(12345, 3, 99.75), 0.052042264166522356);
-        close(noise(7, 1024, 3.14159), 0.14007526307765447);
+        #[allow(clippy::approx_constant)] // a sample point shared with the Python golden values, not π
+        let x = 3.14159;
+        close(noise(7, 1024, x), 0.14007526307765447);
         assert_eq!(noise(0, 0, 2.0), 0.0);
         close(fractal(1, 0, 0.37, 1), -0.29073717200676585);
         close(fractal(1, 0, 0.37, 4), -0.11429312869138876);
