@@ -66,7 +66,7 @@ fn clay_blobs(n: &sr_eval::FrameNode) -> Vec<sr_3d::clay::Blob> {
     let mut out = Vec::new();
     for (k, c) in sr_model::element::children(&*n.elem).iter().filter(|c| c.element_name() == "blob").enumerate() {
         let key = format!("{}/blob[{k}]", n.id);
-        let props = n.parts.iter().find(|p| &*p.key == key).map(|p| &p.props);
+        let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
         let a = Attrs { e: *c, props };
         let f = |name: &str, d: f64| a.num(name, d) as f32;
         let rot = glam::Quat::from_euler(
