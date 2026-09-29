@@ -38,8 +38,22 @@ pub fn rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
     path
 }
 
-/// Ellipse inscribed in the box, clockwise from the top.
+/// Ellipse about (cx, cy), starting at 3 o'clock and running clockwise on screen, as SVG 2 draws
+/// `<ellipse>` (CONVENTIONS 5.21: trims and dashes start there).
 pub fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
+    let (kx, ky) = (rx * KAPPA, ry * KAPPA);
+    let mut path = Path::default();
+    path.move_to(p(cx + rx, cy));
+    path.cubic_to(p(cx + rx, cy + ky), p(cx + kx, cy + ry), p(cx, cy + ry));
+    path.cubic_to(p(cx - kx, cy + ry), p(cx - rx, cy + ky), p(cx - rx, cy));
+    path.cubic_to(p(cx - rx, cy - ky), p(cx - kx, cy - ry), p(cx, cy - ry));
+    path.cubic_to(p(cx + kx, cy - ry), p(cx + rx, cy - ky), p(cx + rx, cy));
+    path.close();
+    path
+}
+
+/// Ellipse about (cx, cy), clockwise from the top (Lottie's ellipse).
+pub fn ellipse_top(cx: f64, cy: f64, rx: f64, ry: f64) -> Path {
     let (kx, ky) = (rx * KAPPA, ry * KAPPA);
     let mut path = Path::default();
     path.move_to(p(cx, cy - ry));
