@@ -261,9 +261,25 @@ fn index_of(g: &FrameGraph, id: &str) -> Option<usize> {
 // ------------------------------------------------------------------ force fields
 
 struct FieldSrc {
-    /// (element key, static field) per `<forceField>`.
+    /// (element key, static field in document units) per `<forceField>`.
     fields: Vec<(String, Field, f64, Option<f64>)>,
     animated: bool,
+    /// physics@pixelsPerMeter.
+    ppm: f64,
+}
+
+/// A field in document units (m/s² with +y up, radius in metres; positive radial strength
+/// attracts) as the simulation's pixel-space field (px/s², +y down; positive radial repels).
+/// Conventions 5.9 and the C renderer's D8.
+fn to_pixels(mut f: Field, ppm: f64) -> Field {
+    f.force = [f.force[0] * ppm, -f.force[1] * ppm];
+    f.radius = f.radius.map(|r| r * ppm);
+    f.strength *= match f.kind {
+        FieldKind::Radial => -ppm,
+        FieldKind::Drag => 1.0,
+        _ => ppm,
+    };
+    f
 }
 
 impl FieldSrc {
@@ -283,7 +299,7 @@ impl FieldSrc {
                         f.radius = Some(r);
                     }
                 }
-                f
+                to_pixels(f, self.ppm)
             })
             .collect()
     }
@@ -301,8 +317,9 @@ impl FieldSrc {
 }
 
 fn build_fields(p: &Program) -> FieldSrc {
-    let mut out = FieldSrc { fields: Vec::new(), animated: false };
+    let mut out = FieldSrc { fields: Vec::new(), animated: false, ppm: 100.0 };
     let Some(ph) = p.scene.physics.as_ref() else { return out };
+    out.ppm = ph.pixels_per_meter.get();
     for c in &ph.children {
         let sr_model::model::PhysicsChild::ForceField(f) = c else { continue };
         let e: &dyn Element = f;

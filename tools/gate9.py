@@ -34,7 +34,7 @@ def scene(dur):
     <particleEmitter id="snow" preset="snow" x="960" y="-10" emitterShape="line" emitterWidth="1920" rate="800" seed="3"/>
   </composition>
   <physics bounds="frame" pixelsPerMeter="100">
-    <forceField id="swirl" type="vortex" x="960" y="540" strength="60" radius="900" falloff="1"/>
+    <forceField id="swirl" type="vortex" x="960" y="540" strength="0.6" radius="9" falloff="1"/>
   </physics>
 </scene>
 '''

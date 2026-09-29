@@ -1,6 +1,7 @@
 //! Force fields. Every field is an acceleration in pixels per second² (y
 //! down), applied alike to particles and, through the body mass, to physics
-//! bodies.
+//! bodies. Documents give fields in m/s² with +y up and radii in metres;
+//! `sr-eval` converts them to this pixel space.
 
 use crate::rng;
 

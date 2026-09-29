@@ -602,3 +602,23 @@ fn flex_layout_alignment_and_fit_boxes() {
     assert_eq!(origin(node(&f, "r")), [900.0 - 100.0, 450.0 - 50.0]);
     assert_eq!(origin(node(&f, "c")), [450.0, 225.0]);
 }
+
+#[test]
+fn force_fields_are_in_metres_per_second_squared_with_y_up() {
+    // conventions 5.9: 2 m/s² for 1 s moves a body ½·2·1² = 1 m = 100 px
+    let fall = |field: &str| {
+        let d = doc_after(
+            "",
+            r#"<layer id="b" asset="img" x="500" y="250"><rigidBody/></layer>"#,
+            &format!(r#"<physics gravityY="0" pixelsPerMeter="100">{field}</physics>"#),
+        );
+        origin(node(&eval(&d, 1.0), "b"))
+    };
+    let up = fall(r#"<forceField id="f" type="directional" forceY="2"/>"#);
+    assert!((up[1] - 150.0).abs() < 3.0 && (up[0] - 500.0).abs() < 1e-6, "+y is up: {up:?}");
+    // positive radial strength attracts; the radius is in metres (the body centre is 3.5 m away)
+    let pull = fall(r#"<forceField id="f" type="radial" x="900" y="275" strength="2" radius="5" falloff="0"/>"#);
+    assert!((pull[0] - 600.0).abs() < 3.0 && (pull[1] - 250.0).abs() < 1e-6, "attracted: {pull:?}");
+    let out = fall(r#"<forceField id="f" type="radial" x="900" y="275" strength="2" radius="3" falloff="0"/>"#);
+    assert!((out[0] - 500.0).abs() < 1e-6, "outside the radius: {out:?}");
+}
