@@ -458,6 +458,9 @@ pub struct Program {
     pub slots: Vec<Slot>,
     /// Slot evaluation order (dependencies first).
     pub order: Vec<u32>,
+    /// Whether another slot's expression or link reads the slot: one nobody reads is not evaluated while
+    /// its node is off screen (see eval::Frame::slots).
+    pub slot_read: Vec<bool>,
     /// Channels.
     pub channels: Vec<Channel>,
     /// Expressions.
@@ -2358,6 +2361,26 @@ impl Builder {
         format!("{owner}.{}", slot.prop)
     }
 
+    /// For each slot, whether another slot's expression or link reads it.
+    fn slot_read(&self) -> Vec<bool> {
+        let mut read = vec![false; self.slots.len()];
+        for (i, s) in self.slots.iter().enumerate() {
+            if let Some(x) = s.expr {
+                for &d in &self.exprs[x as usize].code.deps {
+                    if d as usize != i {
+                        read[d as usize] = true;
+                    }
+                }
+            }
+            if let Some(l) = s.link {
+                if let LinkSource::Prop(p) = self.links[l as usize].source {
+                    read[p as usize] = true;
+                }
+            }
+        }
+        read
+    }
+
     /// Topological order of slots; reports cycles.
     fn order(&mut self) -> Vec<u32> {
         let n = self.slots.len();
@@ -2569,6 +2592,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     b.globals();
     b.compile_pending();
     let order = b.order();
+    let slot_read = b.slot_read();
     b.fill_tf_slots();
     // transition handles: extend visibility of the nodes on both sides
     let windows: Vec<(Option<u32>, Option<u32>, (f64, f64))> =
@@ -2663,6 +2687,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         roots,
         slots: b.slots,
         order,
+        slot_read,
         channels: b.channels,
         exprs: b.exprs,
         links: b.links,

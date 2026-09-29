@@ -13,7 +13,7 @@ use sr_model::model::{Node, TimeBase};
 use sr_model::values::Length;
 
 use crate::expr::vm::{self, Band, Host, LoopKind, Var, V};
-use crate::program::{marker_time, tfi, Clock, Kind, LinkSource, Program};
+use crate::program::{marker_time, tfi, Clock, Kind, LinkSource, Owner, Program};
 use crate::rng;
 use crate::value::Value;
 
@@ -286,6 +286,8 @@ struct Frame<'p> {
     regs: Vec<V>,
     /// Layout and alignment adjustments, applied before a node's local transform.
     adjust: Vec<Option<Affine>>,
+    /// Whether each node and its ancestors are inside their windows (conditions not yet applied).
+    alive: Vec<bool>,
 }
 
 /// A node's local transform and the quantities layout needs.
@@ -576,16 +578,36 @@ fn component(v: &Value, c: Option<u8>) -> Option<Value> {
 impl<'p> Frame<'p> {
     fn timelines(&mut self) {
         let p = self.p;
-        let mut stack: Vec<(u32, f64)> = p.roots.iter().rev().map(|&r| (r, self.t)).collect();
-        while let Some((n, t)) = stack.pop() {
+        let mut stack: Vec<(u32, f64, bool)> = p.roots.iter().rev().map(|&r| (r, self.t, true)).collect();
+        while let Some((n, t, up)) = stack.pop() {
             self.tl[n as usize] = t;
             let node = &p.nodes[n as usize];
+            let alive = up
+                && match node.kind {
+                    Kind::Plain => t >= node.vis_start && node.vis_end.is_none_or(|e| t < e),
+                    _ => true,
+                };
+            self.alive[n as usize] = alive;
             let ct = clock_map(&node.clock, t);
             self.child[n as usize] = ct;
             for &c in node.children.iter().rev() {
-                stack.push((c, ct));
+                stack.push((c, ct, alive));
             }
         }
+    }
+
+    /// Whether slot s can be left unevaluated this frame: nothing reads it and its owner is off screen
+    /// (outside its window or under a node that is), so no drawn pixel depends on its expression.
+    fn idle(&self, s: u32) -> bool {
+        let p = self.p;
+        if p.slot_read[s as usize] {
+            return false;
+        }
+        let node = match p.slots[s as usize].owner {
+            Owner::Node(n) => Some(n),
+            Owner::Element(e) => p.elements[e as usize].node,
+        };
+        node.is_some_and(|n| !self.alive[n as usize])
     }
 
     fn slots(&mut self) {
@@ -599,7 +621,7 @@ impl<'p> Frame<'p> {
                     v = lv;
                 }
             }
-            if let Some(x) = slot.expr {
+            if let Some(x) = slot.expr.filter(|_| !self.idle(s)) {
                 let mut regs = std::mem::take(&mut self.regs);
                 let r = {
                     let mut h = ExprHost {
@@ -846,6 +868,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         values: vec![Value::Num(0.0); p.slots.len()],
         regs: Vec::new(),
         adjust: vec![None; n],
+        alive: vec![false; n],
     };
     f.timelines();
     f.slots();
