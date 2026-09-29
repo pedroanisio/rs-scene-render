@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.1.2">
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.1.3">
   <xs:annotation>
     <xs:documentation>
       scene-render scene format 1.1. This schema is the interchange contract
@@ -121,6 +121,24 @@
   </xs:simpleType>
   <xs:simpleType name="paintRefType">
     <xs:restriction base="xs:string"><xs:pattern value="url\(#[A-Za-z_][A-Za-z0-9_.\-]*\)"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="colorListType">
+    <xs:annotation><xs:documentation>Whitespace-separated colours, as a palette.</xs:documentation></xs:annotation>
+    <xs:list itemType="colorType"/>
+  </xs:simpleType>
+  <xs:simpleType name="latitudeType">
+    <xs:annotation><xs:documentation>Degrees north, in [-90, 90].</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:double"><xs:minInclusive value="-90"/><xs:maxInclusive value="90"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="longitudeType">
+    <xs:annotation><xs:documentation>Degrees east, in [-180, 180].</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:double"><xs:minInclusive value="-180"/><xs:maxInclusive value="180"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="geoPointsType">
+    <xs:annotation><xs:documentation>"lon,lat lon,lat ..." in degrees: at least two points.</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="\s*[\-+]?[0-9]*\.?[0-9]+([eE][\-+]?[0-9]+)?,[\-+]?[0-9]*\.?[0-9]+([eE][\-+]?[0-9]+)?(\s+[\-+]?[0-9]*\.?[0-9]+([eE][\-+]?[0-9]+)?,[\-+]?[0-9]*\.?[0-9]+([eE][\-+]?[0-9]+)?)+\s*"/>
+    </xs:restriction>
   </xs:simpleType>
   <xs:simpleType name="paintType">
     <xs:annotation><xs:documentation>A colour or url(#id) of a paints/* gradient, pattern or noise.</xs:documentation></xs:annotation>
@@ -1157,7 +1175,7 @@
     <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="0.5"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
     <xs:attribute name="fillBy" type="xs:string"/>
-    <xs:attribute name="palette" type="xs:string"/>
+    <xs:attribute name="palette" type="colorListType"/>
     <xs:attribute name="domain" type="numberListType"/>
     <xs:attribute name="scale" default="linear">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -1188,8 +1206,8 @@
     </xs:documentation></xs:annotation>
     <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
     <xs:attribute name="id" type="xs:ID"/>
-    <xs:attribute name="lon" type="xs:double" use="required"/>
-    <xs:attribute name="lat" type="xs:double" use="required"/>
+    <xs:attribute name="lon" type="longitudeType" use="required"/>
+    <xs:attribute name="lat" type="latitudeType" use="required"/>
     <xs:attribute name="radius" type="nonNegativeDecimal" default="6"/>
     <xs:attribute name="fill" type="paintType" default="#FF3B30"/>
     <xs:attribute name="stroke" type="paintType" default="#FFFFFF"/>
@@ -1208,7 +1226,7 @@
     </xs:documentation></xs:annotation>
     <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
     <xs:attribute name="id" type="xs:ID"/>
-    <xs:attribute name="points" type="xs:string"/>
+    <xs:attribute name="points" type="geoPointsType"/>
     <xs:attribute name="geo" type="xs:IDREF"/>
     <xs:attribute name="filter" type="xs:string"/>
     <xs:attribute name="progress" type="unitDecimal" default="1"/>
@@ -1229,8 +1247,8 @@
     </xs:documentation></xs:annotation>
     <xs:attribute name="begin" type="xs:double" use="required"/>
     <xs:attribute name="duration" type="durationType"/>
-    <xs:attribute name="lon" type="xs:double" use="required"/>
-    <xs:attribute name="lat" type="xs:double" use="required"/>
+    <xs:attribute name="lon" type="longitudeType" use="required"/>
+    <xs:attribute name="lat" type="latitudeType" use="required"/>
     <xs:attribute name="zoom" type="xs:double" default="0"/>
     <xs:attribute name="rho" type="positiveDecimal" default="1.4142135623730951"/>
     <xs:attribute name="easing" type="curveType" default="ease-in-out"/>
@@ -1258,8 +1276,8 @@
     <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
     <xs:attribute name="projection" type="projectionType" default="equal-earth"/>
     <xs:attribute name="parallels" type="numberListType"/>
-    <xs:attribute name="centerLon" type="xs:double"/>
-    <xs:attribute name="centerLat" type="xs:double"/>
+    <xs:attribute name="centerLon" type="longitudeType"/>
+    <xs:attribute name="centerLat" type="latitudeType"/>
     <xs:attribute name="zoom" type="xs:double" default="0"/>
     <xs:attribute name="rotation" type="xs:double" default="0"/>
     <xs:attribute name="fit" type="xs:IDREFS"/>

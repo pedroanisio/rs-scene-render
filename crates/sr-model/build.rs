@@ -50,6 +50,7 @@ const HANDWRITTEN: &[(&str, &str)] = &[
     ("timecodeType", "crate::values::Timecode"),
     ("languageTagType", "crate::values::LanguageTag"),
     ("numberListType", "Vec<f64>"),
+    ("colorListType", "Vec<crate::values::Color>"),
     ("pointType", "crate::values::Point2"),
     ("relativeLength", "crate::values::Length"),
     ("positiveRelativeLength", "crate::values::Length"),

@@ -95,12 +95,13 @@ pub fn camera(p: &Program, mp: &m::MapAsset) -> Result<Arc<Camera>, String> {
     }
     let refs: Vec<&Geometry> = geoms.iter().collect();
     let size = [mp.width as f64, mp.height as f64];
-    let center = mp.center_lon.zip(mp.center_lat).map(|(a, b)| [a, b]);
+    let (clon, clat) = (mp.center_lon.map(|v| v.get()), mp.center_lat.map(|v| v.get()));
+    let center = clon.zip(clat).map(|(a, b)| [a, b]);
     let (mut map, mut c) = Map::new(kind, parallels, size, &refs, mp.fit_padding.get(), center);
-    if let Some(lon) = mp.center_lon {
+    if let Some(lon) = clon {
         c[0] = lon;
     }
-    if let Some(lat) = mp.center_lat {
+    if let Some(lat) = clat {
         c[1] = lat;
     }
     map.precision = mp.precision.get();
@@ -115,14 +116,14 @@ pub fn camera(p: &Program, mp: &m::MapAsset) -> Result<Arc<Camera>, String> {
 /// animated map attribute (`centerLon`, `centerLat`, `zoom`, `rotation`) when it has one.
 pub fn view(cam: &Camera, mp: &m::MapAsset, animated: &dyn Fn(&str) -> Option<f64>, t: f64) -> View {
     let base = View {
-        lon: animated("centerLon").or(mp.center_lon).unwrap_or(cam.center[0]),
-        lat: animated("centerLat").or(mp.center_lat).unwrap_or(cam.center[1]),
+        lon: animated("centerLon").or(mp.center_lon.map(|v| v.get())).unwrap_or(cam.center[0]),
+        lat: animated("centerLat").or(mp.center_lat.map(|v| v.get())).unwrap_or(cam.center[1]),
         zoom: animated("zoom").unwrap_or(mp.zoom),
         rotation: animated("rotation").unwrap_or(mp.rotation),
     };
     let rest = View {
-        lon: mp.center_lon.unwrap_or(cam.center[0]),
-        lat: mp.center_lat.unwrap_or(cam.center[1]),
+        lon: mp.center_lon.map(|v| v.get()).unwrap_or(cam.center[0]),
+        lat: mp.center_lat.map(|v| v.get()).unwrap_or(cam.center[1]),
         zoom: mp.zoom,
         rotation: base.rotation,
     };
@@ -133,8 +134,8 @@ pub fn view(cam: &Camera, mp: &m::MapAsset, animated: &dyn Fn(&str) -> Option<f6
             flies.push(Fly {
                 begin: f.begin,
                 duration: f.duration.map(|d| d.get()),
-                lon: f.lon,
-                lat: f.lat,
+                lon: f.lon.get(),
+                lat: f.lat.get(),
                 zoom: f.zoom,
                 rho: f.rho.get(),
             });

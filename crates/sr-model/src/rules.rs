@@ -1,4 +1,4 @@
-//! The Schematron rules of `schema/scene-render-1.1.sch` (patterns p1–p41).
+//! The Schematron rules of `schema/scene-render-1.1.sch` (patterns p1–p42 and p50–p60).
 //!
 //! Each rule reproduces its XPath 1.0 test exactly, including the edge cases
 //! the XPath semantics imply:
@@ -10,8 +10,9 @@
 //!   defaults;
 //! * string comparisons are literal (`@reverse='false'` does not accept `0`).
 //!
-//! Diagnostic codes are the Schematron assert ids (`V1`–`V4`, `C1`–`C44`,
-//! `R1`–`R23`, `R24-<attr>`, `R25-<attr>`).
+//! Diagnostic codes are the Schematron assert ids (`V1`–`V7`, `C1`–`C53`,
+//! `R1`–`R37`, with per-attribute families `R24-<attr>`, `R25-<attr>`,
+//! `R30-<attr>` and `R31-<attr>`).
 
 use std::collections::HashSet;
 
@@ -56,30 +57,49 @@ const V3_ELEMENTS: [&str; 15] = [
     "shapeModifier",
     "transformConstraint",
 ];
-const V4_ASSETS: [&str; 11] = [
-    "imageSequence",
-    "lottie",
-    "font",
-    "generator",
-    "chart",
-    "audiogram",
-    "code",
-    "formula",
-    "generated",
+const V4_ASSETS: [&str; 9] =
+    ["imageSequence", "lottie", "font", "generator", "chart", "audiogram", "code", "formula", "generated"];
+const V6_ELEMENTS: [&str; 19] = [
+    "audioEffect",
+    "blob",
+    "burst",
+    "bus",
+    "destination",
+    "erosion",
+    "flock",
+    "fluid",
     "geo",
     "map",
+    "master",
+    "param",
+    "pin",
+    "poster",
+    "representation",
+    "shake",
+    "slime",
+    "span",
+    "thumbnail",
 ];
-const PARENTED: [&str; 10] = [
-    "layer",
-    "shape",
-    "group",
-    "sequence",
-    "instance",
-    "repeat",
-    "particleEmitter",
-    "object3D",
-    "adjustment",
-    "include",
+const V7_PRIMITIVES: [&str; 7] = ["capsule", "clay", "cone", "cylinder", "extrude", "text", "torus"];
+/// More paint attributes checked for `url(#id)` (p51, `R30-<attr>`).
+const PAINT_REF_ATTRS: [&str; 7] = ["colorEnd", "colorHigh", "colorLow", "headFill", "noData", "outline", "paint2"];
+/// More colour attributes checked for `var(--name)` (p52, `R31-<attr>`).
+const TOKEN_REF_ATTRS: [&str; 15] = [
+    "attenuationColor",
+    "baseColor",
+    "colorEnd",
+    "colorHigh",
+    "colorLow",
+    "emissive",
+    "foreground",
+    "headFill",
+    "keyColor",
+    "noData",
+    "outline",
+    "paint2",
+    "shadowColor",
+    "sheenColor",
+    "specularColor",
 ];
 
 // ------------------------------------------------------------------ XPath helpers
@@ -188,6 +208,11 @@ struct Sets<'a> {
     font_assets: HashSet<&'a str>,
     mesh_assets: HashSet<&'a str>,
     geo_assets: Vec<&'a str>,
+    image_assets: HashSet<&'a str>,
+    /// Image, image sequence, video and generator assets (sprites).
+    sprite_assets: HashSet<&'a str>,
+    /// `@id` of every `/scene/physics/forceField`.
+    force_fields: Vec<&'a str>,
     audio_assets: HashSet<&'a str>,
     generated_audio: HashSet<&'a str>,
     video_with_audio: HashSet<&'a str>,
@@ -222,6 +247,12 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
         for a in assets.children().filter(|c| c.is_element()) {
             let Some(i) = a.attribute("id") else { continue };
             s.assets.insert(i);
+            if is(a, "image") || is(a, "imageSequence") || is(a, "video") || is(a, "generator") {
+                s.sprite_assets.insert(i);
+            }
+            if is(a, "image") {
+                s.image_assets.insert(i);
+            }
             if is(a, "text") {
                 s.text_assets.insert(i);
             } else if is(a, "font") {
@@ -273,6 +304,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     }
     for p in kids(scene, "paints") {
         s.paints.extend(p.children().filter(|c| c.is_element()).filter_map(|c| c.attribute("id")));
+    }
+    for p in kids(scene, "physics") {
+        s.force_fields.extend(kids(p, "forceField").map(|x| x.attribute("id").unwrap_or("")));
     }
     for e in kids(scene, "effects") {
         s.effects.extend(kids(e, "effect").map(|x| x.attribute("id").unwrap_or("")));
@@ -349,6 +383,22 @@ impl<'a> Eval<'a> {
                 });
                 let v4 = kids(n, "assets").any(|s| s.children().any(|c| V4_ASSETS.iter().any(|e| is(c, e))));
                 self.check(!v4, n, "V4", || "version=\"1.0\" documents cannot use 1.1 asset kinds.".into());
+                // p50
+                let v6 = n.descendants().skip(1).any(|d| V6_ELEMENTS.iter().any(|e| is(d, e)));
+                self.check(!v6, n, "V6", || {
+                    "version=\"1.0\" documents cannot use 1.1 elements (simulation nodes, geo and map assets, clay \
+                     blobs, audio buses and effects, output posters, thumbnails and destinations, camera shake, \
+                     representations, text spans, effect params); set version=\"1.1\"."
+                        .into()
+                });
+                let v7 = n
+                    .descendants()
+                    .any(|d| is(d, "object3D") && d.attribute("primitive").is_some_and(|p| V7_PRIMITIVES.contains(&p)));
+                self.check(!v7, n, "V7", || {
+                    "version=\"1.0\" documents cannot use the 1.1 object3D primitives (capsule, clay, cone, \
+                     cylinder, extrude, text, torus); set version=\"1.1\"."
+                        .into()
+                });
             }
             // p2
             "vector" => {
@@ -392,12 +442,12 @@ impl<'a> Eval<'a> {
             }
             // p42
             "geoLayer" => {
-                let r24 = self.sets.geo_assets.contains(&v("geo").as_str());
-                self.check(r24, n, "R24", || "geoLayer/@geo must name a geo asset.".into());
+                let r36 = self.sets.geo_assets.contains(&v("geo").as_str());
+                self.check(r36, n, "R36", || "geoLayer/@geo must name a geo asset.".into());
             }
             "route" => {
-                let r25 = !has("geo") || self.sets.geo_assets.contains(&v("geo").as_str());
-                self.check(r25, n, "R25", || "route/@geo must name a geo asset.".into());
+                let r37 = !has("geo") || self.sets.geo_assets.contains(&v("geo").as_str());
+                self.check(r37, n, "R37", || "route/@geo must name a geo asset.".into());
                 self.check(has("points") || has("geo"), n, "C45", || "route needs @points or @geo.".into());
             }
             "map" => {
@@ -636,8 +686,8 @@ impl<'a> Eval<'a> {
             self.check(has("id") && a("matte") != a("id"), n, "R9", || "a node cannot be its own matte.".into());
         }
         // p30
-        if has("parent") && PARENTED.contains(&local) {
-            self.check(has("id") && a("parent") != a("id"), n, "R10", || "a node cannot parent itself.".into());
+        if has("parent") && has("id") {
+            self.check(a("parent") != a("id"), n, "R10", || "a node cannot parent itself.".into());
         }
         // p35
         if matches!(local, "project" | "layout" | "captionTrack") && has("safeArea") {
@@ -685,6 +735,75 @@ impl<'a> Eval<'a> {
                     });
                 }
             }
+        }
+        // p51
+        if PAINT_REF_ATTRS.iter().any(|p| has(p)) {
+            for attr in PAINT_REF_ATTRS {
+                let val = v(attr);
+                if val.starts_with("url(#") {
+                    let ok = self.sets.paints.contains(between(&val, "url(#").as_str());
+                    self.check(ok, n, &format!("R30-{attr}"), || {
+                        format!("@{attr}: url(#id) must name an element of paints.")
+                    });
+                }
+            }
+        }
+        // p52
+        if TOKEN_REF_ATTRS.iter().any(|p| has(p)) {
+            for attr in TOKEN_REF_ATTRS {
+                let val = v(attr);
+                if val.starts_with("var(--") {
+                    let ok = self.sets.token_names.contains(between(&val, "var(--").as_str());
+                    self.check(ok, n, &format!("R31-{attr}"), || {
+                        format!("@{attr}: var(--name) must name a styles/token.")
+                    });
+                }
+            }
+        }
+        let flock_or_emitter = matches!(local, "flock" | "particleEmitter");
+        // p53
+        if flock_or_emitter && a("shape") == Some("sprite") {
+            self.check(has("sprite"), n, "C50", || "shape=\"sprite\" requires @sprite.".into());
+        }
+        // p54
+        if flock_or_emitter && has("sprite") {
+            self.check(contains(&self.sets.sprite_assets, a("sprite")), n, "R32", || {
+                "@sprite must name an image, image sequence, video or generator asset.".into()
+            });
+        }
+        // p55
+        if local == "erosion" && has("heightmap") {
+            self.check(contains(&self.sets.image_assets, a("heightmap")), n, "R33", || {
+                "erosion/@heightmap must name an image asset.".into()
+            });
+        }
+        // p56
+        if let Some(list) = a("forceFields") {
+            let ok = every_token_names(list, &self.sets.force_fields);
+            self.check(ok, n, "R34", || {
+                format!("every id in @forceFields of \"{}\" must name a physics/forceField.", v("id"))
+            });
+        }
+        // p57
+        if has("textStyle") {
+            self.check(contains(&self.sets.text_styles, a("textStyle")), n, "R35", || {
+                "@textStyle must name a styles/textStyle.".into()
+            });
+        }
+        // p58
+        if local == "object3D" && a("primitive") == Some("clay") {
+            self.check(has_kid(n, "blob"), n, "C51", || "object3D primitive=\"clay\" needs at least one blob.".into());
+        }
+        // p59
+        if local == "fluidSource" && has("start") && has("end") {
+            let ok = xpath_number(&v("end")) > xpath_number(&v("start"));
+            self.check(ok, n, "C52", || "fluidSource end must be after start.".into());
+        }
+        // p60
+        if local == "geoLayer" && has("domain") {
+            let d: Vec<f64> = normalize_space(&v("domain")).split(' ').map(xpath_number).collect();
+            let ok = !d.windows(2).any(|w| w[1] <= w[0]);
+            self.check(ok, n, "C53", || "@domain values must increase.".into());
         }
     }
 }

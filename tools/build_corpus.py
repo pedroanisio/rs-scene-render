@@ -145,10 +145,25 @@ CASES = [
     ("r22", ["R22"], sub('basedOn="heading"', 'basedOn="title"')),
     ("r22-style", ["R22"], sub('size="72" style="heading"', 'size="72" style="logo"')),
     ("r23", ["R23"], sub('fontAsset="inter"', 'fontAsset="logo"')),
-    ("r24", ["R24"], sub('<geoLayer geo="places"', '<geoLayer geo="logo"')),
-    ("r25", ["R25"], sub('<route geo="places"', '<route geo="logo"')),
+    ("r36", ["R36"], sub('<geoLayer geo="places"', '<geoLayer geo="logo"')),
+    ("r37", ["R37"], sub('<route geo="places"', '<route geo="logo"')),
     ("r26", ["R26"], sub('fit="places"', 'fit="places logo"')),
     ("c45", ["C45"], sub('<route points="0,0 20,20"', '<route')),
+    # ---- schema 1.1.3
+    ("v6-elements", ["V6"], lambda t: v10('<particleEmitter id="p"><burst time="1" count="2"/></particleEmitter>')),
+    ("v7-primitives", ["V7"], lambda t: v10('<object3D id="o" primitive="torus"/>')),
+    ("r10-any-node", ["R10"], ins_comp('<flock id="fk" width="10" height="10" parent="fk"/>')),
+    ("r30-outline", ["R30-outline"], sub('outline="#FFFFFF"', 'outline="url(#nope)"')),
+    ("r31-baseColor", ["R31-baseColor"], sub('<material id="chrome" metallic="1"', '<material id="chrome" baseColor="var(--nope)" metallic="1"')),
+    ("c50", ["C50"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" shape="sprite">')),
+    ("r32", ["R32"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" sprite="music">')),
+    ("r33", ["R33"], ins_comp('<erosion id="er" width="10" height="10" heightmap="music"/>')),
+    ("r34", ["R34"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" forceFields="gravity music">')),
+    ("r35", ["R35"], sub('<pin lon="5" lat="5" label="Here"/>', '<pin lon="5" lat="5" label="Here" textStyle="logo"/>')),
+    ("c51", ["C51"], ins_comp('<object3D id="cl" primitive="clay"/>')),
+    ("c52", ["C52"], ins_comp('<fluid id="fl" width="10" height="10"><fluidSource start="2" end="1"/></fluid>')),
+    ("c53", ["C53"], sub('palette="#F7FBFF #08306B"', 'palette="#F7FBFF #08306B" domain="3 1"')),
+    ("s06-latitude", ["S06"], sub('<pin lon="5" lat="5"', '<pin lon="5" lat="95"')),
 ]
 for attr, anchor, repl in [
     ("fill", 'shape="rounded-rect" width="400" height="300" fill="var(--bg)"', 'shape="rounded-rect" width="400" height="300" fill="url(#logo)"'),
@@ -172,6 +187,38 @@ for attr, anchor, repl in [
     ("strokeColor", '<span color="#ffffff">', '<span color="#ffffff" strokeColor="var(--nope)">'),
 ]:
     CASES.append((f"r25-{attr}", [f"R25-{attr}"], sub(anchor, repl)))
+
+# the paint and colour attributes 1.1.3 added to the url(#) and var(--) checks: one insertion point each
+EXTRA_REF_SITES = {
+    "paint2": '<generator id="noise" kind="fractal-noise"',
+    "foreground": '<code id="qr" kind="qr"',
+    "noData": '<geoLayer geo="places"',
+    "headFill": '<route points="0,0 20,20"',
+    "attenuationColor": '<material id="chrome"',
+    "baseColor": '<material id="chrome"',
+    "emissive": '<material id="chrome"',
+    "sheenColor": '<material id="chrome"',
+    "specularColor": '<material id="chrome"',
+    "colorEnd": '<particleEmitter id="sparks"',
+    "keyColor": '<effect id="glow-fx"',
+    "shadowColor": '<span color="#ffffff"',
+}
+
+def with_attr(attr, value):
+    if attr in ("colorHigh", "colorLow"):
+        return ins_comp(f'<erosion id="er" width="10" height="10" {attr}="{value}"/>')
+    if attr == "outline":  # the map already has an outline: replace it
+        return sub('outline="#FFFFFF"', f'outline="{value}"')
+    site = EXTRA_REF_SITES[attr]
+    return sub(site, f'{site} {attr}="{value}"')
+
+for attr in ["colorEnd", "colorHigh", "colorLow", "headFill", "noData", "outline", "paint2"]:
+    if attr != "outline":
+        CASES.append((f"r30-{attr}", [f"R30-{attr}"], with_attr(attr, "url(#nope)")))
+for attr in ["attenuationColor", "baseColor", "colorEnd", "colorHigh", "colorLow", "emissive", "foreground", "headFill",
+             "keyColor", "noData", "outline", "paint2", "shadowColor", "sheenColor", "specularColor"]:
+    if attr != "baseColor":
+        CASES.append((f"r31-{attr}", [f"R31-{attr}"], with_attr(attr, "var(--nope)")))
 
 # Asset cases: the oracle sees a valid document; the Rust verifier must not.
 ASSET_CASES = [

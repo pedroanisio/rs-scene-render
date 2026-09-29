@@ -193,7 +193,7 @@ fn bad_geo_references_fail_validation() {
         <composition><layer id="l" asset="m"/></composition></scene>"#;
     let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(geo_dir()) };
     let err = format!("{:?}", sr_model::load_str(xml, &opts).unwrap_err());
-    assert!(err.contains("R24"), "{err}");
+    assert!(err.contains("R36"), "{err}");
 }
 
 #[test]

@@ -185,7 +185,7 @@
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p30">
-    <sch:rule context="*[@parent][self::layer or self::shape or self::group or self::sequence or self::instance or self::repeat or self::particleEmitter or self::object3D or self::adjustment or self::include]">
+    <sch:rule context="*[@parent][@id]">
       <sch:assert id="R10" test="@parent != @id">a node cannot parent itself.</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -264,14 +264,96 @@
   </sch:pattern>
   <sch:pattern id="p42">
     <sch:rule context="geoLayer">
-      <sch:assert id="R24" test="/scene/assets/geo[@id=current()/@geo]">geoLayer/@geo must name a geo asset.</sch:assert>
+      <sch:assert id="R36" test="/scene/assets/geo[@id=current()/@geo]">geoLayer/@geo must name a geo asset.</sch:assert>
     </sch:rule>
     <sch:rule context="route">
-      <sch:assert id="R25" test="not(@geo) or /scene/assets/geo[@id=current()/@geo]">route/@geo must name a geo asset.</sch:assert>
+      <sch:assert id="R37" test="not(@geo) or /scene/assets/geo[@id=current()/@geo]">route/@geo must name a geo asset.</sch:assert>
       <sch:assert id="C45" test="@points or @geo">route needs @points or @geo.</sch:assert>
     </sch:rule>
     <sch:rule context="map">
       <sch:assert id="R26" test="not(@fit) or count(str:tokenize(normalize-space(@fit),' ')) = count(/scene/assets/geo[contains(concat(' ',normalize-space(current()/@fit),' '), concat(' ',@id,' '))])">every id in map/@fit must name a geo asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <!-- ============================================================ SREP 8: version gate, references, bounds -->
+  <sch:pattern id="p50">
+    <sch:rule context="/scene[@version='1.0']">
+      <sch:assert id="V6" test="not(.//audioEffect|.//blob|.//burst|.//bus|.//destination|.//erosion|.//flock|.//fluid|.//geo|.//map|.//master|.//param|.//pin|.//poster|.//representation|.//shake|.//slime|.//span|.//thumbnail)">
+        version="1.0" documents cannot use 1.1 elements (simulation nodes, geo and map assets, clay blobs,
+        audio buses and effects, output posters, thumbnails and destinations, camera shake, representations,
+        text spans, effect params); set version="1.1".</sch:assert>
+      <sch:assert id="V7" test="not(.//object3D[@primitive='capsule' or @primitive='clay' or @primitive='cone' or @primitive='cylinder' or @primitive='extrude' or @primitive='text' or @primitive='torus'])">
+        version="1.0" documents cannot use the 1.1 object3D primitives (capsule, clay, cone, cylinder, extrude, text, torus); set version="1.1".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p51">
+    <sch:rule context="*[@colorEnd or @colorHigh or @colorLow or @headFill or @noData or @outline or @paint2]">
+      <sch:assert id="R30-colorEnd" test="not(starts-with(@colorEnd,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@colorEnd,'url(#'),')')]">@colorEnd: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-colorHigh" test="not(starts-with(@colorHigh,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@colorHigh,'url(#'),')')]">@colorHigh: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-colorLow" test="not(starts-with(@colorLow,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@colorLow,'url(#'),')')]">@colorLow: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-headFill" test="not(starts-with(@headFill,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@headFill,'url(#'),')')]">@headFill: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-noData" test="not(starts-with(@noData,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@noData,'url(#'),')')]">@noData: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-outline" test="not(starts-with(@outline,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@outline,'url(#'),')')]">@outline: url(#id) must name an element of paints.</sch:assert>
+      <sch:assert id="R30-paint2" test="not(starts-with(@paint2,'url(#')) or /scene/paints/*[@id=substring-before(substring-after(current()/@paint2,'url(#'),')')]">@paint2: url(#id) must name an element of paints.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p52">
+    <sch:rule context="*[@attenuationColor or @baseColor or @colorEnd or @colorHigh or @colorLow or @emissive or @foreground or @headFill or @keyColor or @noData or @outline or @paint2 or @shadowColor or @sheenColor or @specularColor]">
+      <sch:assert id="R31-attenuationColor" test="not(starts-with(@attenuationColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@attenuationColor,'var(--'),')')]">@attenuationColor: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-baseColor" test="not(starts-with(@baseColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@baseColor,'var(--'),')')]">@baseColor: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-colorEnd" test="not(starts-with(@colorEnd,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@colorEnd,'var(--'),')')]">@colorEnd: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-colorHigh" test="not(starts-with(@colorHigh,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@colorHigh,'var(--'),')')]">@colorHigh: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-colorLow" test="not(starts-with(@colorLow,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@colorLow,'var(--'),')')]">@colorLow: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-emissive" test="not(starts-with(@emissive,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@emissive,'var(--'),')')]">@emissive: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-foreground" test="not(starts-with(@foreground,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@foreground,'var(--'),')')]">@foreground: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-headFill" test="not(starts-with(@headFill,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@headFill,'var(--'),')')]">@headFill: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-keyColor" test="not(starts-with(@keyColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@keyColor,'var(--'),')')]">@keyColor: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-noData" test="not(starts-with(@noData,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@noData,'var(--'),')')]">@noData: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-outline" test="not(starts-with(@outline,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@outline,'var(--'),')')]">@outline: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-paint2" test="not(starts-with(@paint2,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@paint2,'var(--'),')')]">@paint2: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-shadowColor" test="not(starts-with(@shadowColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@shadowColor,'var(--'),')')]">@shadowColor: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-sheenColor" test="not(starts-with(@sheenColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@sheenColor,'var(--'),')')]">@sheenColor: var(--name) must name a styles/token.</sch:assert>
+      <sch:assert id="R31-specularColor" test="not(starts-with(@specularColor,'var(--')) or /scene/styles/token[@name=substring-before(substring-after(current()/@specularColor,'var(--'),')')]">@specularColor: var(--name) must name a styles/token.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p53">
+    <sch:rule context="*[@shape='sprite'][self::flock or self::particleEmitter]">
+      <sch:assert id="C50" test="@sprite">shape="sprite" requires @sprite.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p54">
+    <sch:rule context="*[@sprite][self::flock or self::particleEmitter]">
+      <sch:assert id="R32" test="/scene/assets/*[self::image or self::imageSequence or self::video or self::generator][@id=current()/@sprite]">@sprite must name an image, image sequence, video or generator asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p55">
+    <sch:rule context="erosion[@heightmap]">
+      <sch:assert id="R33" test="/scene/assets/image[@id=current()/@heightmap]">erosion/@heightmap must name an image asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p56">
+    <sch:rule context="*[@forceFields]">
+      <sch:assert id="R34" test="count(str:tokenize(normalize-space(@forceFields),' ')) = count(/scene/physics/forceField[contains(concat(' ',normalize-space(current()/@forceFields),' '), concat(' ',@id,' '))])">
+        every id in @forceFields of "<sch:value-of select="@id"/>" must name a physics/forceField.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p57">
+    <sch:rule context="*[@textStyle]">
+      <sch:assert id="R35" test="/scene/styles/textStyle[@id=current()/@textStyle]">@textStyle must name a styles/textStyle.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p58">
+    <sch:rule context="object3D[@primitive='clay']">
+      <sch:assert id="C51" test="blob">object3D primitive="clay" needs at least one blob.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p59">
+    <sch:rule context="fluidSource[@start and @end]">
+      <sch:assert id="C52" test="number(@end) &gt; number(@start)">fluidSource end must be after start.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p60">
+    <sch:rule context="geoLayer[@domain]">
+      <sch:assert id="C53" test="not(str:tokenize(normalize-space(@domain),' ')[position() &gt; 1][number(.) &lt;= number(preceding-sibling::*[1])])">@domain values must increase.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

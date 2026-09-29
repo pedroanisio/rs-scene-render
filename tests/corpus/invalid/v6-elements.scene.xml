@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: V6 -->
+<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/><composition><particleEmitter id="p"><burst time="1" count="2"/></particleEmitter></composition></scene>

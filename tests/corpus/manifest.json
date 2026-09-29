@@ -144,6 +144,18 @@
     "c5.scene.xml": [
       "C5"
     ],
+    "c50.scene.xml": [
+      "C50"
+    ],
+    "c51.scene.xml": [
+      "C51"
+    ],
+    "c52.scene.xml": [
+      "C52"
+    ],
+    "c53.scene.xml": [
+      "C53"
+    ],
     "c6.scene.xml": [
       "C6"
     ],
@@ -158,6 +170,9 @@
     ],
     "r1.scene.xml": [
       "R1"
+    ],
+    "r10-any-node.scene.xml": [
+      "R10"
     ],
     "r10.scene.xml": [
       "R10"
@@ -237,9 +252,6 @@
     "r24-strokeColor.scene.xml": [
       "R24-strokeColor"
     ],
-    "r24.scene.xml": [
-      "R24"
-    ],
     "r25-activeColor.scene.xml": [
       "R25-activeColor"
     ],
@@ -264,14 +276,95 @@
     "r25-strokeColor.scene.xml": [
       "R25-strokeColor"
     ],
-    "r25.scene.xml": [
-      "R25"
-    ],
     "r26.scene.xml": [
       "R26"
     ],
     "r3.scene.xml": [
       "R3"
+    ],
+    "r30-colorEnd.scene.xml": [
+      "R30-colorEnd"
+    ],
+    "r30-colorHigh.scene.xml": [
+      "R30-colorHigh"
+    ],
+    "r30-colorLow.scene.xml": [
+      "R30-colorLow"
+    ],
+    "r30-headFill.scene.xml": [
+      "R30-headFill"
+    ],
+    "r30-noData.scene.xml": [
+      "R30-noData"
+    ],
+    "r30-outline.scene.xml": [
+      "R30-outline"
+    ],
+    "r30-paint2.scene.xml": [
+      "R30-paint2"
+    ],
+    "r31-attenuationColor.scene.xml": [
+      "R31-attenuationColor"
+    ],
+    "r31-baseColor.scene.xml": [
+      "R31-baseColor"
+    ],
+    "r31-colorEnd.scene.xml": [
+      "R31-colorEnd"
+    ],
+    "r31-colorHigh.scene.xml": [
+      "R31-colorHigh"
+    ],
+    "r31-colorLow.scene.xml": [
+      "R31-colorLow"
+    ],
+    "r31-emissive.scene.xml": [
+      "R31-emissive"
+    ],
+    "r31-foreground.scene.xml": [
+      "R31-foreground"
+    ],
+    "r31-headFill.scene.xml": [
+      "R31-headFill"
+    ],
+    "r31-keyColor.scene.xml": [
+      "R31-keyColor"
+    ],
+    "r31-noData.scene.xml": [
+      "R31-noData"
+    ],
+    "r31-outline.scene.xml": [
+      "R31-outline"
+    ],
+    "r31-paint2.scene.xml": [
+      "R31-paint2"
+    ],
+    "r31-shadowColor.scene.xml": [
+      "R31-shadowColor"
+    ],
+    "r31-sheenColor.scene.xml": [
+      "R31-sheenColor"
+    ],
+    "r31-specularColor.scene.xml": [
+      "R31-specularColor"
+    ],
+    "r32.scene.xml": [
+      "R32"
+    ],
+    "r33.scene.xml": [
+      "R33"
+    ],
+    "r34.scene.xml": [
+      "R34"
+    ],
+    "r35.scene.xml": [
+      "R35"
+    ],
+    "r36.scene.xml": [
+      "R36"
+    ],
+    "r37.scene.xml": [
+      "R37"
     ],
     "r4.scene.xml": [
       "R4"
@@ -333,6 +426,9 @@
     "s06-integer.scene.xml": [
       "S06"
     ],
+    "s06-latitude.scene.xml": [
+      "S06"
+    ],
     "s06-length.scene.xml": [
       "S06"
     ],
@@ -359,6 +455,12 @@
     ],
     "v4-assets.scene.xml": [
       "V4"
+    ],
+    "v6-elements.scene.xml": [
+      "V6"
+    ],
+    "v7-primitives.scene.xml": [
+      "V7"
     ]
   },
   "valid": {

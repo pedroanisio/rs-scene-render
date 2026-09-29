@@ -176,6 +176,12 @@ impl ParseValue for Color {
     }
 }
 
+impl ParseValue for Vec<Color> {
+    fn parse_value(s: &str) -> Result<Self, ValueError> {
+        s.split_whitespace().map(Color::parse_value).collect()
+    }
+}
+
 impl fmt::Display for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

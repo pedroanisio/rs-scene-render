@@ -92,6 +92,11 @@ impl ToAttr for Vec<f64> {
         AttrValue::Numbers(self.clone())
     }
 }
+impl ToAttr for Vec<Color> {
+    fn to_attr(&self) -> AttrValue {
+        AttrValue::Tokens(self.iter().map(|c| c.to_string()).collect())
+    }
+}
 impl ToAttr for Length {
     fn to_attr(&self) -> AttrValue {
         AttrValue::Length(*self)

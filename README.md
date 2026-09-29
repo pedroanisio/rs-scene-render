@@ -27,21 +27,21 @@ Contents: [document model](#document-model) · [evaluation](#evaluation) · [GPU
 `crates/sr-model/build.rs` reads `schema/scene-render-1.1.xsd` and `schema/scene-render-1.1.sch` at build time and emits three files, so a schema change reaches the validator and the model in the same build:
 
 - **Schema tables** — all simple types with their facets and all complex types with attribute declarations and content particles. `xsd::structure` interprets them.
-- **Typed model** (~20,000 lines) — 124 enums for the enumerations, 16 checked newtypes for the numeric restrictions (`UnitDecimal::new(1.5)` fails), one struct per complex type with defaults applied, and shared enums for the model groups (`Node`, `Animation`, `NodeBehaviour`, `BodyBehaviour`).
-- **Assert catalogue** — id, context, test and message of all 87 Schematron asserts, used by `scene-render explain`.
+- **Typed model** (~20,000 lines) — 134 enums for the enumerations, 18 checked newtypes for the numeric restrictions (`UnitDecimal::new(1.5)` fails), one struct per complex type with defaults applied, and shared enums for the model groups (`Node`, `Animation`, `NodeBehaviour`, `BodyBehaviour`).
+- **Assert catalogue** — id, context, test and message of all 123 Schematron asserts, used by `scene-render explain`.
 
 The generator accepts exactly the XSD subset the schema uses and aborts the build on anything else, so an unsupported construct cannot be ignored silently.
 
 ### The schema is vendored from sr-core
 
-The canonical copy of the schema lives in [sr-core](https://github.com/pedroanisio/sr-core) (`schema/scene-render.xsd` and `.sch`), shared by every scene-render engine. This repository vendors a released version unchanged under its own file names and records the tag and SHA-256 of each file in `schema/UPSTREAM` (currently schema 1.1.2). The schema changes only through an accepted Scene Render Enhancement Proposal (SREP) in sr-core; this engine is the reference implementation an SREP needs before review, and takes the released files once it is accepted.
+The canonical copy of the schema lives in [sr-core](https://github.com/pedroanisio/sr-core) (`schema/scene-render.xsd` and `.sch`), shared by every scene-render engine. This repository vendors a released version unchanged under its own file names and records the tag and SHA-256 of each file in `schema/UPSTREAM` (currently schema 1.1.3). The schema changes only through an accepted Scene Render Enhancement Proposal (SREP) in sr-core; this engine is the reference implementation an SREP needs before review, and takes the released files once it is accepted.
 
 ### Loading runs four stages over one parse
 
 | Stage | Module | Codes | What it enforces |
 |---|---|---|---|
 | Structure | `xsd::structure`, `xsd::simple` | `S01`–`S12`, `W01` | Content models, attribute declarations, lexical forms, enumerations, bounds, patterns, `xs:ID` uniqueness, `xs:IDREF` resolution |
-| Rules | `rules` | `V1`–`V4`, `C1`–`C44`, `R1`–`R25-*` | The 41 Schematron patterns, including the 1.0/1.1 version gate |
+| Rules | `rules` | `V1`–`V7`, `C1`–`C53`, `R1`–`R37` (with the `R24-*`, `R25-*`, `R30-*` and `R31-*` families) | The 53 Schematron patterns, including the 1.0/1.1 version gate |
 | Assets | `assets` | `A01`–`A06` | Existence of every input URI, SHA-256 of every `@sha256`/`@cacheSha256` (generated media, transcriptions, physics caches), every frame of every image sequence |
 | Model | `model`, `document` | `M01` | Typed construction and the ID index |
 
@@ -51,7 +51,7 @@ Structure and rules always both run, so one pass reports every problem. The mode
 
 `tools/oracle.py` validates with libxml2's XSD validator and ISO Schematron on libxslt, the engines the schema names. Two results follow from it:
 
-- **Corpus** — `tools/build_corpus.py` writes 122 documents into `tests/corpus`: a kitchen-sink document that exercises every section, one mutation per Schematron assert (all 87 ids, including every `R24`/`R25` paint attribute), one per structural and asset code, and the oracle's verdict for each. `cargo test` requires the Rust validator to produce exactly the manifest's codes for every document.
+- **Corpus** — `tools/build_corpus.py` writes 160 documents into `tests/corpus`: a kitchen-sink document that exercises every section, one mutation per Schematron assert (all 123 ids, including every paint and colour attribute of the `R24`, `R25`, `R30` and `R31` families), one per structural and asset code, and the oracle's verdict for each. `cargo test` requires the Rust validator to produce exactly the manifest's codes for every document.
 - **Differential fuzzing** — `tools/oracle_diff.py COUNT SEED` mutates the kitchen sink at random and compares the XSD verdict and the multiset of (assert id, line) pairs. Seeds 1–4 (7,000 mutants, about 5,300 failed asserts) produce zero disagreements.
 
 sr-model is stricter than libxml2 in three places, each required by XSD 1.0: it resolves `xs:IDREF` values (`S10`), rejects whitespace-only `xs:IDREFS`, and rejects `1e` as an `xs:double`. XPath `number()` follows libxml2, which parses exponent forms (`2.4e1` compares as 24), because the Schematron file names libxslt as its engine.
@@ -474,7 +474,7 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 
 **Placing any layer.** The expressions `geo('map', lon, lat)` and `geoVisible('map', lon, lat)` give where a place lands on a map now (in map pixels, following its animation and fly-to moves) and whether it is visible, so a photo or a caption can ride on a spinning globe and fade as it turns away.
 
-**Validation.** R24–R26 require `geoLayer/@geo`, `route/@geo` and every id in `map/@fit` to name geo assets, and C45 requires a route to have `points` or `geo`.
+**Validation.** R36, R37 and R26 require `geoLayer/@geo`, `route/@geo` and every id in `map/@fit` to name geo assets, latitudes and longitudes are bounded, `route/@points` must be `lon,lat` pairs, C53 requires a `domain` to increase, and C45 requires a route to have `points` or `geo`.
 
 **Tests.**
 - World features land where they belong on an equirectangular map, with a border pixel filled without a seam.
@@ -489,7 +489,7 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 
 **Not yet.** Basemap tiles (vector PMTiles or raster), terrain and 3D buildings, label collision, and simplification of detailed data. The whole file is read into memory, so 1:10 m data is slow to fit; `fit` is cached per map setup.
 
-**Schema.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R24–R26 and C45 are part of the canonical schema, first implemented here. Other engines may not implement them yet.
+**Schema.** `colorProfile`, `<geo>`, `<map>` with its children, the two expression functions and the rules R26, R36, R37, C45 and C53 are part of the canonical schema, first implemented here. Other engines may not implement them yet.
 
 ## Generated media and transcription
 
@@ -655,6 +655,6 @@ tools/                      oracle.py, build_corpus.py, oracle_diff.py, kitchen_
 - **3D and 360:** primitive volumes and outward winding, extrusion with holes and bevels, every importer (glTF with extensions, variants and animation, OBJ with MTL, ASCII PLY, 3DGS PLY, `.splat`, Z-up USDA, USDC and USDZ, FBX through ufbx including animation stacks), colour temperature, IES, environment prefiltering, the camera's projection and pitch and yaw conventions, MaterialX, naga validation of the 3D shaders; on the GPU, lit-side shading, shadows, glass over a backdrop, splat sorting, depth of field and dome lighting in the engine, then from documents a material sphere under default lights, shadows from `<lights>`, glass refracting 2D layers, an imported glTF with a material variant, a moving camera shifting 3D objects and 2.5D layers alike, 3D and 2.5D agreement, extruded text, group opacity, camera depth of field, lights following constraints, the four 360 layouts and stereo parallax; spherical metadata read back by ffprobe in both MP4 box orders.
 - **Simulation and accessibility:** free fall against ½gt², resting on the floor, bit-exact replay in any order, pendulum length and breaking welds, kinematic following and field forces, jelly and pinned cloth, particle counts, bursts, caps, floors and preroll; from documents, a falling layer, sparks with identical pixels under seeking, rain streaks, a landing jelly layer, reported constraint problems and the physics cache with its digest; validation of the soft-body substep limit; the flash detector at 15 Hz, 1 Hz, small areas, red and dim flicker, and delivery failing on flashes, low contrast and missing captions; `simulate` on the CLI; flocks, fluids, slime and erosion, clay meshing, screen-space lighting, cascaded shadows and path tracing as described in their sections; and a short fuzzing campaign on every test run.
 - **Still images:** every lossless format decoded to its exact pattern, HEIC within 3 steps of libheif, EXIF orientation, linear-light formats, the embedded colour descriptions each file reports, ICC-tagged images within 1/255 of LittleCMS, the declared-space override, a CMYK profile reported, an animated GIF played as video.
-- **Maps:** TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, and `geo()` placing a layer; the reference rules R24–R26 and C45.
+- **Maps:** TopoJSON decoding against topojson-client; projected countries, fits and fly-to paths against d3-geo; on the GPU, land and sea, choropleths, animated feature styles, globes and fly-to moves, routes, KML and GPX, Web Mercator tile geometry, and `geo()` placing a layer; the reference rules R26, R36, R37, C45 and C53.
 - **Resolve:** request keys, in-place attribute edits, prompt splitting and base64, whisper.cpp tokens joined into timed words, AudioForge's automatic duration, and the end-to-end runs described in [Generated media and transcription](#generated-media-and-transcription).
 - **CLI:** validate, inspect, eval, render, encode and explain end to end.

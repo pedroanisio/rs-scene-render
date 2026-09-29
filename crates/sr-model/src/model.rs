@@ -112,8 +112,9 @@ mod coverage {
                 if let Some(e) = r.enums.first() {
                     return e.to_string();
                 }
-                if r.pattern.is_some() {
-                    return "brand-1".into();
+                if let Some(p) = r.pattern {
+                    // lon,lat pairs (geoPointsType); otherwise a token-like string
+                    return if p.contains(',') { "0,0 1,1".into() } else { "brand-1".into() };
                 }
                 let integer = !matches!(root_builtin(ty), Some(Builtin::Double | Builtin::String));
                 let lo = r.min_inclusive.or(r.min_exclusive.map(|m| m + 1.0));
