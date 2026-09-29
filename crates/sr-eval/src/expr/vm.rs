@@ -424,6 +424,10 @@ pub struct Code {
     pub reads_value: bool,
     /// Number of `random` call sites.
     pub random_sites: u32,
+    /// Audio tracks named by `audioAmplitude()` with a literal track id.
+    pub audio_tracks: Vec<String>,
+    /// True when an `audioAmplitude()` call names its track with a computed value.
+    pub audio_dynamic: bool,
 }
 
 /// A compile error with its source offset.
@@ -452,6 +456,8 @@ struct Compiler<'r> {
     deps: Vec<u32>,
     reads_value: bool,
     random_sites: u32,
+    audio_tracks: Vec<String>,
+    audio_dynamic: bool,
     resolver: &'r mut dyn Resolver,
 }
 
@@ -764,6 +770,10 @@ impl<'r> Compiler<'r> {
             _ => {}
         }
         if f == Func::Audio {
+            match args.first() {
+                Some(Expr::Str(t)) => self.audio_tracks.push(t.to_string()),
+                _ => self.audio_dynamic = true,
+            }
             if let Some(Expr::Str(b)) = args.get(1) {
                 if Band::parse(b).is_none() {
                     return Err(CompileError {
@@ -842,6 +852,8 @@ pub fn compile(src: &str, resolver: &mut dyn Resolver) -> Result<Code, CompileEr
         deps: Vec::new(),
         reads_value: false,
         random_sites: 0,
+        audio_tracks: Vec::new(),
+        audio_dynamic: false,
         resolver,
     };
     let k = c.konst(V::Undef);
@@ -861,6 +873,8 @@ pub fn compile(src: &str, resolver: &mut dyn Resolver) -> Result<Code, CompileEr
         deps: c.deps,
         reads_value: c.reads_value,
         random_sites: c.random_sites,
+        audio_tracks: c.audio_tracks,
+        audio_dynamic: c.audio_dynamic,
     })
 }
 

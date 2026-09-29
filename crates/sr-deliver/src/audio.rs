@@ -60,6 +60,32 @@ fn find_asset<'p>(p: &'p Program, key: &str) -> Option<(&'p AssetsChild, usize)>
     Some((a, *doc as usize))
 }
 
+/// Tracks whose envelopes something reads: `audioAmplitude()` calls, `audio:` links and
+/// audiograms. `None` when an expression names its track with a computed value.
+fn analysed_tracks(p: &Program) -> Option<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    for x in &p.exprs {
+        if x.code.audio_dynamic {
+            return None;
+        }
+        out.extend(x.code.audio_tracks.iter().cloned());
+    }
+    for l in &p.links {
+        if let sr_eval::program::LinkSource::Audio(t, _) = &l.source {
+            out.insert(t.clone());
+        }
+    }
+    let scenes = std::iter::once(&p.scene).chain(p.includes.iter().map(|(_, s)| s));
+    for s in scenes {
+        for a in s.assets.iter().flat_map(|a| a.children.iter()) {
+            if let AssetsChild::Audiogram(au) = a {
+                out.insert(au.source.clone());
+            }
+        }
+    }
+    Some(out)
+}
+
 fn effect_of(e: &m::AudioEffect) -> Option<Effect> {
     let kind = Kind::parse(e.r#type.as_str())?;
     let bands = e
@@ -365,9 +391,11 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
     // the extent the mix found for each), beats from a beat grid's source
     let frames = (p.duration * fps).ceil() as usize;
     let extent = |id: &str, out: &sr_audio::Planar| mixed.extents.get(id).copied().unwrap_or_else(|| Extent::of(out));
+    let wanted = analysed_tracks(p);
     let tracks: Vec<(String, [Vec<f32>; 4])> = mix
         .nodes
         .par_iter()
+        .filter(|n| wanted.as_ref().is_none_or(|w| w.contains(&n.id)))
         .filter_map(|n| {
             let (NodeKind::Track { .. }, Some(out)) = (&n.kind, mixed.nodes.get(&n.id)) else { return None };
             let env = sr_audio::analysis::envelopes_in(out, extent(&n.id, out), rate as f64, fps, frames);

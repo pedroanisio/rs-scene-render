@@ -95,7 +95,13 @@ fn gpu() -> Option<sr_gpu::Gpu> {
 #[test]
 fn mix_and_analysis_table() {
     let Some(dir) = fixtures() else { return };
-    let d = doc(&dir, SCENE);
+    // envelopes are computed for the tracks something reads: an expression and a link here
+    let xml = SCENE.replace(
+        r#"<layer id="v" asset="clip"/>"#,
+        r#"<layer id="v" asset="clip"><expression property="opacity">audioAmplitude("v")</expression>
+      <link property="rotation" source="audio:music" scale="0"/></layer>"#,
+    );
+    let d = doc(&dir, &xml);
     let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
     let sa = sr_deliver::audio::mix_scene(&ev, 25.0, None).unwrap().expect("scene has audio");
     assert_eq!(sa.mix.nodes.len(), 2, "music track and the video layer's audio");
@@ -109,6 +115,16 @@ fn mix_and_analysis_table() {
     let opts = sr_eval::EvalOptions { analysis: sa.analysis.clone(), ..Default::default() };
     let ev2 = sr_eval::Evaluator::new(&d, &opts).unwrap();
     assert!(ev2.program().analysis.amplitude("v", sr_eval::expr::vm::Band::Full, 1.0) > 0.3);
+}
+
+#[test]
+fn unread_tracks_are_not_analysed() {
+    let Some(dir) = fixtures() else { return };
+    let d = doc(&dir, SCENE);
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let sa = sr_deliver::audio::mix_scene(&ev, 25.0, None).unwrap().expect("scene has audio");
+    assert!(sa.analysis.tracks.is_empty(), "{:?}", sa.analysis.tracks.keys().collect::<Vec<_>>());
+    assert_eq!(sa.analysis.beats.as_ref().map(Vec::len), Some(4), "beats still come from the grid's source");
 }
 
 #[test]
