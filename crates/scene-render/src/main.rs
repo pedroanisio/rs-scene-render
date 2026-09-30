@@ -1314,12 +1314,22 @@ fn encode(
         }
     };
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if let Some(g) = gpu.as_ref() {
+        // say which adapter renders: a software or GL fallback would otherwise only show up as a very slow encode
+        eprintln!("rendering on {} ({:?}, {:?})", g.info.name, g.info.backend, g.info.device_type);
+        if g.is_software() {
+            eprintln!("warning: {} is a software or GL adapter; expect encodes far slower than on the GPU", g.info.name);
+        }
+    }
     let mut failed = false;
     for o in &outputs {
         // On a terminal: a live counter. Otherwise (a log file, a CI job) a line about every 10 s with the
         // rate and the time left, so a long encode never runs blind.
         let started = std::time::Instant::now();
         let mut last_line = started;
+        // per interval: frames, stage times, process CPU time; and the best rate seen, to flag a collapse
+        let mut last = (0u64, sr_deliver::pipeline::meter::snapshot(), process_cpu_seconds());
+        let mut best_rate = 0.0f64;
         let mut progress = |done: u64, total: u64| {
             if tty {
                 if done % 10 == 0 || done == total {
@@ -1332,11 +1342,31 @@ fn encode(
                 last_line = std::time::Instant::now();
                 let fps = done as f64 / started.elapsed().as_secs_f64().max(1e-9);
                 let left = total.saturating_sub(done) as f64 / fps.max(1e-9);
+                let dt = last_line.duration_since(started).as_secs_f64();
+                let (d0, st0, cpu0) = last;
+                let (st1, cpu1) = (sr_deliver::pipeline::meter::snapshot(), process_cpu_seconds());
+                let span = (dt - LAST_SPAN.with(|c| c.replace(dt))).max(1e-9);
+                let n = (done - d0).max(1) as f64;
+                let rate = (done - d0) as f64 / span;
+                let ms = |i: usize| 1e3 * (st1[i] - st0[i]) / n;
+                let cpu = match (cpu0, cpu1) {
+                    (Some(a), Some(b)) => format!(", CPU {:.0} %", 100.0 * (b - a) / span),
+                    _ => String::new(),
+                };
                 eprintln!(
-                    "{}: frame {done}/{total} ({:.1} %), {fps:.1} frames/s, about {left:.0} s left",
+                    "{}: frame {done}/{total} ({:.1} %), {fps:.1} frames/s, about {left:.0} s left; last {span:.0} s: {rate:.1} frames/s, per frame evaluate {:.0} ms, render {:.0} ms, GPU wait {:.0} ms, encoder {:.0} ms{cpu}",
                     o.path,
-                    100.0 * done as f64 / total.max(1) as f64
+                    100.0 * done as f64 / total.max(1) as f64,
+                    ms(0), ms(1), ms(2), ms(3)
                 );
+                if dt > 60.0 && best_rate > 0.0 && rate < best_rate / 3.0 {
+                    eprintln!(
+                        "warning: {}: the rate fell to {rate:.1} frames/s from {best_rate:.1}; see the per-frame stage times above (CPU near 100 % with little GPU wait means the CPU work itself got slower or starved; a long GPU wait means the GPU is shared or stalled)",
+                        o.path
+                    );
+                }
+                best_rate = best_rate.max(rate);
+                last = (done, st1, cpu1);
             }
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
@@ -1407,6 +1437,19 @@ fn encode(
         }
     }
     Ok(if failed { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+thread_local! {
+    /// Seconds from the encode's start to the previous progress line.
+    static LAST_SPAN: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// User plus system CPU time of this process (Linux /proc), for the progress lines.
+fn process_cpu_seconds() -> Option<f64> {
+    let s = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+    let ticks = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+    Some(ticks / 100.0)
 }
 
 fn main() -> ExitCode {

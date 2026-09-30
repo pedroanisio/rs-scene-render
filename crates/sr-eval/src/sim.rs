@@ -252,7 +252,7 @@ impl Graphs<'_> {
             return g.clone();
         }
         let g = Arc::new((self.base)(t));
-        if self.cache.len() >= 4 {
+        if self.cache.len() >= 8 {
             self.cache.remove(0);
         }
         self.cache.push((key, g.clone()));
@@ -1250,6 +1250,8 @@ struct EDriver<'a, 'b> {
     start: f64,
     node: u32,
     at: f64,
+    /// Seconds between samples of an animated emitter's transform and rate (one frame).
+    grid: f64,
 }
 
 impl EDriver<'_, '_> {
@@ -1277,6 +1279,14 @@ impl EDriver<'_, '_> {
                 return v;
             }
         }
+        if self.invariant.is_none() && clocks.is_empty() && self.physics.is_none() {
+            // An animated emitter on the plain composition clock, in a document without physics: its transform
+            // and rate are sampled on the frame grid, which every emitter shares and the next frame reuses, and
+            // interpolated in between. Evaluating the scene at every sub-frame step instead cost (emitters x steps
+            // x scene size) per frame: 180 ms a frame for four jets in a 7 MB film, growing with the film.
+            // Remapped clocks and physics keep the exact per-step path below.
+            return self.on_grid(t);
+        }
         let mut g = if clocks.is_empty() {
             self.graphs.at(t)
         } else {
@@ -1295,6 +1305,34 @@ impl EDriver<'_, '_> {
             }
         }
         v
+    }
+}
+
+impl EDriver<'_, '_> {
+    fn on_grid(&mut self, t: f64) -> ([f64; 6], f64) {
+        const ABSENT: ([f64; 6], f64) = ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
+        let ta = (t / self.grid + 1e-9).floor() * self.grid;
+        let u = ((t - ta) / self.grid).clamp(0.0, 1.0);
+        let a = self.sample(ta);
+        if u < 1e-9 {
+            return a.unwrap_or(ABSENT);
+        }
+        let b = self.sample(ta + self.grid);
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let m: [f64; 6] = std::array::from_fn(|k| a.0[k] + (b.0[k] - a.0[k]) * u);
+                (m, a.1 + (b.1 - a.1) * u)
+            }
+            (Some(a), None) if u < 0.5 => a,
+            (None, Some(b)) if u >= 0.5 => b,
+            _ => ABSENT,
+        }
+    }
+
+    /// The emitter's world transform and rate in the frame graph at `t`, if it is in it.
+    fn sample(&mut self, t: f64) -> Option<([f64; 6], f64)> {
+        let g = self.graphs.at(t);
+        index_of(&g, &self.id).map(|i| (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)))
     }
 }
 
@@ -1328,6 +1366,9 @@ pub struct Runtime {
     physics: Option<PhysicsRt>,
     emitters: HashMap<Arc<str>, EmitterRt>,
     agents: crate::agents::Sims,
+    /// Frame graphs without simulation, kept across frames: animated emitters sample them on the frame grid,
+    /// so the previous frame's graph is still here when the next frame's steps need it.
+    graph_cache: Vec<(u64, Arc<FrameGraph>)>,
     /// Problems found while building (reported once).
     pub problems: Vec<String>,
 }
@@ -1392,7 +1433,7 @@ fn apply_physics(ph: &mut PhysicsRt, g: &mut FrameGraph, graphs: &mut Graphs<'_>
 impl Runtime {
     /// Applies simulation to `g` (evaluated at `t`); `base` evaluates without simulation.
     pub fn apply(&mut self, p: &Program, g: &mut FrameGraph, t: f64, base: &dyn Fn(f64) -> FrameGraph) {
-        let mut graphs = Graphs { base, cache: Vec::new() };
+        let mut graphs = Graphs { base, cache: std::mem::take(&mut self.graph_cache) };
         if !self.built {
             self.built = true;
             let fields = build_fields(p);
@@ -1429,6 +1470,7 @@ impl Runtime {
                 start: rt.emitter.start(),
                 node: rt.node,
                 at: t,
+                grid: 1.0 / p.scene.project.fps.as_f64().max(1.0),
                 invariant: &mut rt.invariant,
             };
             let time = g.nodes[i].timeline_time;
@@ -1437,6 +1479,7 @@ impl Runtime {
         }
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
+        self.graph_cache = graphs.cache;
     }
 }
 
@@ -1624,6 +1667,39 @@ mod tests {
         assert!(!time_invariant(p, index(p, "rated")));
         assert!(!time_invariant(p, index(p, "carried")));
         assert!(!time_invariant(p, index(p, "bound")));
+    }
+
+    #[test]
+    fn an_animated_emitter_samples_the_scene_once_a_frame_not_once_a_step() {
+        // an emitter carried by a moving group is stepped many times a frame; its transform comes from the frame
+        // grid (and the graph cache that outlives the frame), so the scene is evaluated about once a frame
+        let ev = program(
+            r#"<group id="g"><animate property="x"><key time="0" value="0"/><key time="10" value="60"/></animate>
+               <particleEmitter id="e" rate="50" lifetime="1" speed="10"/></group>"#,
+        );
+        let p = ev.program();
+        let calls = std::cell::Cell::new(0u32);
+        let base = |ts: f64| {
+            calls.set(calls.get() + 1);
+            crate::eval::evaluate(p, ts)
+        };
+        let mut rt = Runtime::default();
+        let frames = 30u32;
+        let mut last = None;
+        for k in 0..frames {
+            let t = k as f64 * 0.1;
+            let mut g = crate::eval::evaluate(p, t);
+            rt.apply(p, &mut g, t, &base);
+            last = Some(g);
+        }
+        assert!(calls.get() <= frames + 8, "{} scene evaluations for {frames} frames", calls.get());
+        // the particles still ride with the group (x = 6 per second): the newest ones are near x = 17.4 at 2.9 s
+        let g = last.expect("frames");
+        let e = g.nodes.iter().find(|n| &*n.id == "e").expect("emitter");
+        let parts = e.particles.as_ref().expect("particles");
+        assert!(!parts.pos.is_empty());
+        let max_x = parts.pos.iter().map(|q| q[0]).fold(f32::MIN, f32::max) as f64;
+        assert!(max_x > 12.0, "particles follow the moving group: max x {max_x}");
     }
 
     #[test]

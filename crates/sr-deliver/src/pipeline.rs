@@ -451,20 +451,20 @@ impl Video<'_> {
                     over,
                 );
                 let t2 = Instant::now();
-                report.stage_seconds[0] += (t1 - t0).as_secs_f64();
-                report.stage_seconds[1] += (t2 - t1).as_secs_f64();
+                meter::add(&mut report.stage_seconds, 0, (t1 - t0).as_secs_f64());
+                meter::add(&mut report.stage_seconds, 1, (t2 - t1).as_secs_f64());
                 if let Some((_, prev)) = pending.replace((t, next)) {
                     let w = Instant::now();
                     let bytes = self.stage.wait(prev);
-                    report.stage_seconds[2] += w.elapsed().as_secs_f64();
-                    report.stage_seconds[3] += sink(bytes)?;
+                    meter::add(&mut report.stage_seconds, 2, w.elapsed().as_secs_f64());
+                    meter::add(&mut report.stage_seconds, 3, sink(bytes)?);
                 }
                 if k + 1 == times.len() {
                     if let Some((_, last)) = pending.take() {
                         let w = Instant::now();
                         let bytes = self.stage.wait(last);
-                        report.stage_seconds[2] += w.elapsed().as_secs_f64();
-                        report.stage_seconds[3] += sink(bytes)?;
+                        meter::add(&mut report.stage_seconds, 2, w.elapsed().as_secs_f64());
+                        meter::add(&mut report.stage_seconds, 3, sink(bytes)?);
                     }
                 }
             }
@@ -1418,5 +1418,25 @@ mod run_tests {
         assert_eq!(middle_of_longest_run(&[7]), Some(7));
         assert_eq!(middle_of_longest_run(&[0, 1, 5, 6, 7, 8, 9, 20]), Some(7));
         assert_eq!(middle_of_longest_run(&[3, 4, 10, 11]), Some(3));
+    }
+}
+
+/// Live stage times of the frames rendered so far in this process, readable while an encode runs, so a progress
+/// line can say where the time goes (a slow encode must not be a mystery until it ends).
+pub mod meter {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    static STAGE_NS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+    /// Adds `secs` to stage `i` of `report` and of the live meter (0 evaluate, 1 render, 2 GPU and readback wait,
+    /// 3 encoder blocked).
+    pub(crate) fn add(report: &mut [f64; 4], i: usize, secs: f64) {
+        report[i] += secs;
+        STAGE_NS[i].fetch_add((secs.max(0.0) * 1e9) as u64, Relaxed);
+    }
+
+    /// Seconds spent in each stage so far, summed over every render worker of this process.
+    pub fn snapshot() -> [f64; 4] {
+        std::array::from_fn(|i| STAGE_NS[i].load(Relaxed) as f64 * 1e-9)
     }
 }
