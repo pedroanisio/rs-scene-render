@@ -103,3 +103,18 @@ fn parented_layers_follow_rigid_body_parent() {
     assert!(body[0] > 190.0, "body moved: {body:?}; problems {:?}", f.problems);
     assert!((rider[0] - body[0] - 20.0).abs() < 0.01, "body {body:?}, rider {rider:?}");
 }
+
+#[test]
+fn bursts_happen_at_their_composition_time_like_animation_keys() {
+    // an emitter that starts at 1 s with a burst at 1 s bursts at 1 s, not at 2 s: burst times
+    // are on the same clock as the emitter's keys (composition time), not offset by its start
+    let emitter = r#"<particleEmitter id="p" start="1" x="100" y="100" emitterShape="point" seed="1" rate="0" speed="50" lifetime="3">
+        <burst time="1" count="5"/><burst time="1.5" count="7"/></particleEmitter>"#;
+    let ev = evaluator(emitter, "");
+    let count = |t: f64| {
+        ev.evaluate(t).nodes.iter().find(|n| &*n.id == "p").unwrap().particles.as_ref().map_or(0, |p| p.pos.len())
+    };
+    assert_eq!(count(1.1), 5);
+    assert_eq!(count(1.4), 5);
+    assert_eq!(count(1.6), 12);
+}

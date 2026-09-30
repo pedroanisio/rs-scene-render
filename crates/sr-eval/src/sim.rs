@@ -1093,7 +1093,8 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
         .iter()
         .filter(|c| c.element_name() == "burst")
         .map(|c| Burst {
-            time: start + num(*c, "time", 0.0),
+            // on the emitter's clock, like its keys (composition time base), not offset by its start
+            time: num(*c, "time", 0.0),
             count: num(*c, "count", 1.0) as u64,
             repeat: num(*c, "repeat", 0.0) as u64,
             interval: num(*c, "interval", 1.0),
