@@ -49,6 +49,7 @@ fn spec(path: &Path, codec: Codec, input: InputFormat) -> EncodeSpec {
         },
         hdr: Hdr::default(),
         metadata: vec![("title".into(), "scene-render test".into())],
+        chapters: None,
         hardware: Hardware::Software,
         audio_bits: 24,
     }

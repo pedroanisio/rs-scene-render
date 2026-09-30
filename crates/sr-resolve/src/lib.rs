@@ -443,18 +443,39 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
         out.push(r);
     }
 
-    // transcriptions, from the mix as it now plays
+    // transcriptions, from the mix as it now plays: the composition's tracks in composition time, an
+    // output's own tracks alone in output time
     let doc = load(&text)?;
     let scene = &doc.scene;
-    let tracks: Vec<&m::CaptionTrack> = scene
+    let mut tracks: Vec<(&m::CaptionTrack, Option<&m::Output>)> = scene
         .captions
         .iter()
         .flat_map(|c| c.caption_tracks.iter())
         .filter(|t| t.transcribe.is_some() && wanted(&t.id))
+        .map(|t| (t, None))
         .collect();
+    for o in &scene.outputs {
+        tracks.extend(o.children.iter().filter_map(|c| match c {
+            m::OutputChild::CaptionTrack(t) if t.transcribe.is_some() && wanted(&t.id) => Some((t, Some(o))),
+            _ => None,
+        }));
+    }
     if !tracks.is_empty() {
-        let mixed = mix(&doc);
-        for tr in tracks {
+        let scene_mix = if tracks.iter().any(|(_, o)| o.is_none()) { mix(&doc) } else { Err(String::new()) };
+        for (tr, owner) in tracks {
+            let own_mix;
+            let (mixed, duration) = match owner {
+                None => (&scene_mix, scene.project.duration.get()),
+                Some(o) => {
+                    own_mix =
+                        sr_deliver::segment_audio::own_tracks(&doc, o).map_err(|e| format!("output {}: {e}", o.path));
+                    let d = own_mix
+                        .as_ref()
+                        .ok()
+                        .and_then(|(r, n)| n.values().next().map(|b| b[0].len() as f64 / *r as f64));
+                    (&own_mix, d.unwrap_or(0.0))
+                }
+            };
             let source = tr.transcribe.clone().unwrap_or_default();
             let provider = tr.provider.clone();
             let Some(cache_attr) = tr.cache.clone() else {
@@ -469,7 +490,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
                 }
             };
             let work = Scratch::new(&tr.id)?;
-            let input = match &mixed {
+            let input = match mixed {
                 Ok((rate, nodes)) => match nodes.get(&source) {
                     Some(buf) => {
                         let wav = work.0.join("input.wav");
@@ -510,7 +531,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
                     language: Some(tr.language.to_string()),
                     sample_rate: rate,
                     bit_depth: bits,
-                    timeline: Timeline { project_duration: scene.project.duration.get(), start: None },
+                    timeline: Timeline { project_duration: duration, start: None },
                     input_sha256: file_sha256(&input).ok(),
                     input: Some(input.display().to_string()),
                     base_dir: base.display().to_string(),

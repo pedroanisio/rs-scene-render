@@ -264,6 +264,8 @@ pub struct Renderer {
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
     /// Burn only this caption track (an output's `burnCaptions`); otherwise tracks with mode burn or both.
     pub burn_captions: Option<String>,
+    /// Burn no captions at all: an output with segments burns its own, in output time.
+    pub captions_off: bool,
     /// Largest texture dimension used for images.
     pub max_texture: u32,
     /// Preferred asset representation (`proxy`, …); the asset's own `src` otherwise.
@@ -660,6 +662,7 @@ impl Renderer {
             clay_keys: HashMap::new(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
+            captions_off: false,
             audio: None,
             persistent_isf: None,
             tiles: Default::default(),
@@ -2168,7 +2171,7 @@ impl Renderer {
 
     /// Burned-in captions over everything, in frame space.
     fn burn_captions(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
-        if ctx.p.scene.captions.is_none() {
+        if ctx.p.scene.captions.is_none() || self.captions_off {
             return;
         }
         let probe = self.contrast_probe.then(|| {

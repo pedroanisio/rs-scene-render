@@ -94,6 +94,38 @@ fn speech_and_its_captions_resolve_and_pin() {
 }
 
 #[test]
+fn an_outputs_own_voice_is_transcribed_in_output_time() {
+    setup();
+    // the output plays 3..6 s of the composition, and its own voice from output time 1 s
+    let xml = format!(
+        r#"<scene version="1.2">
+  <project width="320" height="180" fps="10" duration="6"/>
+  <output id="short" path="short.mp4" codec="h264">
+    <segment from="3" to="6"/>
+    <audioTrack id="short-vo" asset="vo" start="1"/>
+    <captionTrack id="short-subs" language="en" transcribe="short-vo" provider="example" prompt="Hello"
+                  cache="gen/short-subs.json" cacheSha256="{ZERO}"/>
+  </output>
+  <assets>
+    <generated id="vo" kind="speech" provider="example" model="m" prompt="one two"
+               cache="gen/vo.wav" cacheSha256="{ZERO}"/>
+  </assets>
+  <composition/>
+</scene>
+"#
+    );
+    let d = project("own", &xml);
+    let doc = d.join("scene.scene.xml");
+    let rows = resolve(&doc, &opts(&d)).unwrap();
+    assert_eq!(status(&rows, "short-subs"), Status::Made, "{rows:?}");
+    assert!(sr_model::load_file(&doc, &sr_model::LoadOptions::default()).is_ok());
+    let t: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("gen/short-subs.json")).unwrap()).unwrap();
+    let w = &t["segments"][0]["words"][0];
+    assert!((w["start"].as_f64().unwrap() - 1.0).abs() < 0.011, "{t}");
+}
+
+#[test]
 fn changes_remake_what_they_affect_and_check_changes_nothing() {
     setup();
     let d = project("change", &narrated("hello there world"));

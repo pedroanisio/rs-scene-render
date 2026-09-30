@@ -131,3 +131,22 @@ fn joins_crossfade_without_a_click() {
     let worst = x.windows(2).map(|w| (w[1] - w[0]).abs() as f64).fold(0.0, f64::max);
     assert!(worst < step * 1.5, "largest step {worst}, a tone step is at most {step}");
 }
+
+#[test]
+fn own_tracks_play_without_segments_from_the_outputs_start() {
+    let d = fixtures("plain");
+    // no scene audio at all; the output starts at composition 1 s and its track at output 0.5 s
+    let xml = r##"<scene version="1.2"><project width="64" height="36" fps="25" duration="4" background="#000000"/>
+          <output path="plain.wav" codec="audio-only" start="1"><audioTrack id="sting" asset="a1000" start="0.5"/></output>
+          <assets><audio id="a1000" src="a1000.wav"/></assets>
+          <composition/></scene>"##;
+    let path = d.join("plain.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let r = sr_deliver::deliver(&doc, &doc.scene.outputs[0], None, &Default::default(), &mut |_, _| {}).unwrap();
+    let a = sr_media::decode_audio(&r.path, 0, RATE).unwrap();
+    let x: Vec<f32> = a.samples.chunks(a.channels as usize).map(|f| f[0]).collect();
+    assert_eq!(x.len(), 3 * RATE as usize);
+    assert!(rms(&x, 0.0, 0.49) < 1e-6);
+    assert!((frequency(&x, 0.6, 2.9) - 1000.0).abs() < 1.0);
+}

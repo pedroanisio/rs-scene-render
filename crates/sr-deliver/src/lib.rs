@@ -8,6 +8,7 @@
 
 pub mod access;
 pub mod audio;
+pub mod captions;
 pub mod destinations;
 pub mod overlay;
 pub mod pipeline;

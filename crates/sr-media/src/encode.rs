@@ -286,6 +286,8 @@ pub struct EncodeSpec {
     pub color: ColorTags,
     pub hdr: Hdr,
     pub metadata: Vec<(String, String)>,
+    /// Chapters to embed: an FFmetadata file (containers without chapters ignore it).
+    pub chapters: Option<PathBuf>,
     pub hardware: Hardware,
     /// Audio sample format bits for PCM outputs.
     pub audio_bits: u16,
@@ -473,6 +475,20 @@ impl EncodeSpec {
             a.push(p.display().to_string());
         }
         let container = self.container();
+        // chapters come from their own input, mapped by index after the video and audio inputs
+        let chapters = self.chapters.as_ref().filter(|_| {
+            self.pass.as_ref().is_none_or(|p| p.0 == 2)
+                && matches!(
+                    container,
+                    Some(Container::Mp4 | Container::Mov | Container::Mkv | Container::Webm | Container::M4a)
+                )
+        });
+        let mut map_chapters = Vec::new();
+        if let Some(c) = chapters {
+            let index = usize::from(!self.codec.is_audio_only()) + usize::from(audio.is_some());
+            s(&mut a, &["-f", "ffmetadata", "-i", &c.display().to_string()]);
+            map_chapters = vec!["-map_chapters".to_string(), index.to_string()];
+        }
         if self.codec.is_audio_only() {
             let (codec, bits) = match container {
                 Some(Container::Mp3) => ("libmp3lame".to_string(), 0),
@@ -498,6 +514,7 @@ impl EncodeSpec {
             if !codec.starts_with("pcm") {
                 s(&mut a, &["-b:a", &self.audio.as_ref().map(|x| x.2).unwrap_or(192000).to_string()]);
             }
+            a.extend(map_chapters);
             self.tail(&mut a, container);
             return Ok((a, codec));
         }
@@ -771,6 +788,7 @@ impl EncodeSpec {
             s(&mut a, &["-an", "-f", "null", if cfg!(windows) { "NUL" } else { "/dev/null" }]);
             return Ok((a, encoder));
         }
+        a.extend(map_chapters);
         self.tail(&mut a, container);
         Ok((a, encoder))
     }

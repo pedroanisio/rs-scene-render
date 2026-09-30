@@ -228,3 +228,119 @@ fn the_overlay_is_drawn_in_output_time_over_the_layout() {
     // and in the second segment, still over the picture, which shows red below it
     assert!(near(&frames[12], 32, 4, [255, 255, 255]) && near(&frames[12], 10, 20, [255, 0, 0]));
 }
+
+/// A 160 × 90 scene for captions (large enough to read them in pixels).
+fn captioned(dir: &Path, output: &str, captions: &str) -> String {
+    format!(
+        r##"<scene version="1.2"><project width="160" height="90" fps="10" duration="3" background="#203040"/>
+          {output}
+          <markers><marker id="m1" time="0.5"/></markers>
+          <composition><shape id="c" shape="rect" width="160" height="90" x="0" y="0" fill="#406080"/></composition>
+          {captions}</scene>"##
+    )
+    .replace("DIR", &dir.display().to_string())
+}
+
+fn same(a: &image::RgbaImage, b: &image::RgbaImage) -> bool {
+    a.pixels().zip(b.pixels()).all(|(x, y)| x.0.iter().zip(y.0).all(|(p, q)| p.abs_diff(q) <= 1))
+}
+
+#[test]
+fn composition_captions_burn_once_in_output_time() {
+    if gpu().is_none() {
+        return;
+    }
+    // at half speed the cue at 0.2‥0.8 s shows at output 0.4‥1.6 s: burned mapped over the output's
+    // frame, exactly as an output-time track with those times, and not burned again by the composition
+    let out =
+        r#"<output path="DIR/f_%03d.png" codec="png-sequence"><segment from="0" to="1" speed="0.5"/>OWN</output>"#;
+    let style = r#"language="en" preset="boxed-line""#;
+    let (da, db, dc) = (dir("cap-a"), dir("cap-b"), dir("cap-c"));
+    let a = captioned(
+        &da,
+        &out.replace("OWN", ""),
+        &format!(
+            r#"<captions><captionTrack id="cc" {style}><cue start="0.2" end="0.8" text="HELLO"/></captionTrack></captions>"#
+        ),
+    );
+    let b = captioned(
+        &db,
+        &out.replace(
+            "OWN",
+            &format!(r#"<captionTrack id="own" {style}><cue start="0.4" end="1.6" text="HELLO"/></captionTrack>"#),
+        ),
+        "",
+    );
+    let c = captioned(&dc, &out.replace("OWN", ""), "");
+    let ((fa, _), (fb, _), (fc, _)) = (render(&da, &a), render(&db, &b), render(&dc, &c));
+    assert_eq!(fa.len(), 20);
+    for k in 0..20 {
+        assert!(same(&fa[k], &fb[k]), "frame {k}");
+    }
+    assert!(same(&fa[2], &fc[2]) && !same(&fa[4], &fc[4]) && !same(&fa[15], &fc[15]) && same(&fa[16], &fc[16]));
+}
+
+#[test]
+fn stills_sidecars_and_chapters_are_in_output_time() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("stills");
+    // segments 0..1 and 2..3: chapters at 0.5 and 2.5 land at 0.5 and 1.5, the one at 1.5 is skipped
+    // (Matroska keeps chapter times as given; FFmpeg's MP4 muxer starts the first chapter at 0);
+    // the poster's marker (0.5) is the output's frame at 0.5
+    let xml = captioned(
+        &d,
+        r#"<output path="DIR/short.mkv" codec="h264" preset="ultrafast" audio="false">
+             <poster path="DIR/poster.png" format="png" marker="m1"/>
+             <segment from="0" to="1"/><segment from="2" to="3"/>
+           </output>"#,
+        r#"<captions><captionTrack id="cc" language="en" mode="sidecar">
+             <cue start="0.2" end="0.8" text="first"/><cue start="1.2" end="1.9" text="skipped"/><cue start="2.1" end="2.9" text="second"/>
+           </captionTrack></captions>"#,
+    )
+    .replace(
+        r#"<marker id="m1" time="0.5"/>"#,
+        r#"<marker id="m1" time="0.5"/><marker time="0.5" kind="chapter" label="Intro"/><marker time="1.5" kind="chapter" label="Gone"/><marker time="2.5" kind="chapter" label="Main"/>"#,
+    );
+    let path = d.join("scene.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let gpu = gpu().unwrap();
+    let opts = sr_deliver::Options { hardware: sr_media::encode::Hardware::Software, ..Default::default() };
+    let r = sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu), &opts, &mut |_, _| {}).unwrap();
+    let vtt = std::fs::read_to_string(d.join("short.cc.en.vtt")).unwrap();
+    assert_eq!(vtt, "WEBVTT\n\n00:00:00.200 --> 00:00:00.800\nfirst\n\n00:00:01.100 --> 00:00:01.900\nsecond\n\n");
+    // the first cue shows for 0.6 s
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    let probe = std::process::Command::new(sr_media::ffprobe())
+        .args(["-v", "error", "-show_chapters", "-of", "json"])
+        .arg(d.join("short.mkv"))
+        .output()
+        .unwrap();
+    let ch: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+    let ch = ch["chapters"].as_array().unwrap();
+    let got: Vec<(String, String)> = ch
+        .iter()
+        .map(|c| (c["start_time"].as_str().unwrap().to_string(), c["tags"]["title"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(got, vec![("0.500000".into(), "Intro".into()), ("1.500000".into(), "Main".into())]);
+    assert_eq!(image::open(d.join("poster.png")).unwrap().to_rgba8().dimensions(), (160, 90));
+}
+
+#[test]
+fn a_segment_on_an_empty_frame_is_reported() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("empty");
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="3" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence"><segment id="late" from="1" to="3"/></output>
+          <composition><shape id="c" shape="rect" width="10" height="10" start="0" end="2" fill="#FFFFFF"/></composition></scene>"##,
+        d.display()
+    );
+    let (_, r) = render(&d, &xml);
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    assert!(r.warnings[0].starts_with("late ends"), "{:?}", r.warnings);
+}

@@ -194,6 +194,28 @@ impl TimeMap {
         Ok(Some(TimeMap { segments, joins, duration: start, project: p.duration }))
     }
 
+    /// One segment playing the composition from `a` to `b` as it is: an output without segments.
+    pub fn span_of(p: &Program, a: f64, b: f64) -> Result<TimeMap, String> {
+        if b <= a {
+            return Err(format!("empty range {a}..{b}"));
+        }
+        let elem = m::Segment {
+            loc: Default::default(),
+            id: None,
+            from: Some(a),
+            to: Some(b),
+            from_marker: None,
+            to_marker: None,
+            speed: m::PositiveDecimal::new(1.0).map_err(|e| e.to_string())?,
+            audio: m::SegmentAudio::Stretch,
+            focus_x: None,
+            focus_y: None,
+            children: Vec::new(),
+        };
+        let seg = Segment { start: 0.0, duration: b - a, map: Map::Span { a, s: 1.0 }, focus: [None, None], elem };
+        Ok(TimeMap { segments: vec![seg], joins: Vec::new(), duration: b - a, project: p.duration })
+    }
+
     /// Composition time of segment `i` at local time `u`, extended past the segment's ends and clamped.
     pub fn composition(&self, i: usize, u: f64) -> f64 {
         self.unclamped(i, u).clamp(0.0, self.project)

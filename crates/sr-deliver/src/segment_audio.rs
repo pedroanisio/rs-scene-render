@@ -48,6 +48,14 @@ fn selected(o: &m::Output, id: &str, role: &str, bus: Option<&str>) -> bool {
         || b.as_ref().zip(bus).is_some_and(|(v, bus)| v.iter().any(|x| x == bus))
 }
 
+/// Whether the output selects the composition's audio track `id`.
+pub(crate) fn track_selected(p: &Program, o: &m::Output, id: &str) -> bool {
+    p.scene.audio_mix.iter().flat_map(|am| &am.children).any(|c| match c {
+        m::AudioMixChild::AudioTrack(t) if t.id == id => selected(o, id, t.role.as_str(), t.bus.as_deref()),
+        _ => false,
+    })
+}
+
 /// The nodes that `n` reads besides its inputs: ducking keys and effect sidechains.
 fn reads(n: &Node) -> impl Iterator<Item = &String> {
     n.duck.iter().flat_map(|d| d.under.iter()).chain(n.effects.iter().filter_map(|e| e.sidechain.as_ref()))
@@ -85,25 +93,7 @@ pub fn render(
         })
         .collect();
     // the output's own tracks, in output time
-    let mut sources = Sources::new(rate);
-    let fixed = |_: &str, _: &'static str, v: f64| Curve::Const(v);
-    let mut own = Vec::new();
-    for c in &output.children {
-        let m::OutputChild::AudioTrack(t) = c else { continue };
-        let at = match &t.start_marker {
-            // a marker is composition time: the output time that first shows it
-            Some(mk) => {
-                let c = sr_eval::eval::marker(p, mk)
-                    .ok_or_else(|| DeliverError::Invalid(format!("audio track {}: no marker {mk:?}", t.id)))?;
-                tm.output_of(c).ok_or_else(|| {
-                    DeliverError::Invalid(format!("audio track {}: marker {mk:?} is in no segment", t.id))
-                })?
-            }
-            None => 0.0,
-        };
-        let start = t.start.get() + at;
-        own.push(audio::track_node(p, t, start, tm.duration, representation, &fixed, &mut sources)?);
-    }
+    let own = own_nodes(p, output, tm, rate, representation)?;
     let tracks: Vec<&Node> = sa.mix.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Track { .. })).collect();
     let buses: Vec<&Node> = sa.mix.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Bus)).collect();
     let play: HashSet<&str> = tracks
@@ -179,6 +169,78 @@ pub fn render(
     let mix = Mix { rate, layout: sa.mix.layout, duration: tm.duration, control_fps: fps, nodes, master };
     let mixed = mix.render()?;
     Ok(OutputAudio { master: mixed.master, loudness: mixed.loudness, true_peak: mixed.true_peak })
+}
+
+/// The mix nodes of the output's own audio tracks, in output time.
+fn own_nodes(
+    p: &Program,
+    output: &m::Output,
+    tm: &TimeMap,
+    rate: u32,
+    representation: Option<&str>,
+) -> Result<Vec<Node>, DeliverError> {
+    let mut sources = Sources::new(rate);
+    let fixed = |_: &str, _: &'static str, v: f64| Curve::Const(v);
+    let mut own = Vec::new();
+    for c in &output.children {
+        let m::OutputChild::AudioTrack(t) = c else { continue };
+        let at = match &t.start_marker {
+            // a marker is composition time: the output time that first shows it
+            Some(mk) => {
+                let c = sr_eval::eval::marker(p, mk)
+                    .ok_or_else(|| DeliverError::Invalid(format!("audio track {}: no marker {mk:?}", t.id)))?;
+                tm.output_of(c).ok_or_else(|| {
+                    DeliverError::Invalid(format!("audio track {}: marker {mk:?} is in no segment", t.id))
+                })?
+            }
+            None => 0.0,
+        };
+        let start = t.start.get() + at;
+        own.push(audio::track_node(p, t, start, tm.duration, representation, &fixed, &mut sources)?);
+    }
+    Ok(own)
+}
+
+/// The output's time map: its segments, or without them the composition from `output/@start` to its
+/// end played as it is.
+pub fn output_map(p: &Program, output: &m::Output) -> Result<TimeMap, DeliverError> {
+    match TimeMap::of(p, output).map_err(DeliverError::Invalid)? {
+        Some(tm) => Ok(tm),
+        None => {
+            let end = output.end.unwrap_or(p.duration).min(p.duration);
+            TimeMap::span_of(p, output.start, end).map_err(DeliverError::Invalid)
+        }
+    }
+}
+
+/// Each of the output's own audio tracks alone, post-fader, in output time (what a transcriber hears),
+/// with the sample rate: for the resolve step.
+pub fn own_tracks(
+    doc: &sr_model::Document,
+    output: &m::Output,
+) -> Result<(u32, std::collections::HashMap<String, Planar>), DeliverError> {
+    let ev = sr_eval::Evaluator::new(
+        doc,
+        &sr_eval::EvalOptions { variant: output.variant.clone(), layout: output.layout.clone(), ..Default::default() },
+    )
+    .map_err(DeliverError::Document)?;
+    let p = ev.program();
+    let tm = output_map(p, output)?;
+    let am = p.scene.audio_mix.as_ref();
+    let rate = am.map(|a| a.sample_rate as u32).unwrap_or(48000);
+    let layout = am
+        .map(|a| sr_audio::Layout::parse(a.channel_layout.as_str(), a.channels as u32))
+        .unwrap_or(sr_audio::Layout::Stereo);
+    let mut nodes = own_nodes(p, output, &tm, rate, None)?;
+    // alone: no ducking under, or keying from, anything else
+    for n in &mut nodes {
+        n.duck = None;
+        n.output = None;
+        n.effects.retain(|e| e.sidechain.is_none());
+    }
+    let fps = output.fps.map(|f| f.as_f64()).unwrap_or(p.fps.as_f64());
+    let mix = Mix { rate, layout, duration: tm.duration, control_fps: fps, nodes, master: Default::default() };
+    Ok((rate, mix.render()?.nodes))
 }
 
 /// The crossfade window of each join, in output seconds: the transition's, or `join_fade` centred

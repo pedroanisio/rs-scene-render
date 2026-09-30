@@ -1132,6 +1132,9 @@ fn encode(
                 for u in &r.unsupported {
                     writeln!(out.w, "  note: not rendered yet: {u}")?;
                 }
+                for w in &r.warnings {
+                    writeln!(out.w, "  warning: {w}")?;
+                }
                 for a in &r.accessibility {
                     writeln!(out.w, "  accessibility: {a}")?;
                 }

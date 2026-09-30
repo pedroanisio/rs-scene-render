@@ -119,6 +119,9 @@ pub struct Report {
     /// The finding that fails delivery (a check set to `error`).
     #[serde(skip)]
     pub accessibility_error: Option<String>,
+    /// Delivery warnings: content that renders but is likely a mistake (a segment starting on an
+    /// empty frame, a caption shown too briefly to read).
+    pub warnings: Vec<String>,
     /// Remote locations the files were delivered to.
     pub uploads: Vec<String>,
     /// Encoded passes (2 for two-pass, more when fitting a file size).
@@ -211,6 +214,8 @@ struct Video<'a> {
     segments: Option<(&'a crate::segments::TimeMap, Vec<crate::segments::FrameTime>)>,
     /// The symbol drawn over every frame in output time.
     overlay: Option<crate::overlay::Overlay>,
+    /// Without segments, the composition time of output time 0 (`output/@start`).
+    origin: f64,
     /// Output-sized working textures: the two placed sides of a join, and their combination.
     join_tex: Option<[std::sync::Arc<sr_gpu::resources::Tex>; 3]>,
 }
@@ -255,6 +260,43 @@ impl Video<'_> {
             return Err(DeliverError::Render { time: t, message: e.clone() });
         }
         Ok(frame)
+    }
+
+    /// The picture of a frame and how to place it: the render `frame` of segment time `f`, or inside a
+    /// join both sides, each through its own map and placed with its own focus, combined in the
+    /// output's frame.
+    fn picture(
+        &mut self,
+        frame: &sr_gpu::Frame,
+        f: Option<&crate::segments::FrameTime>,
+        unsupported: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(std::sync::Arc<sr_gpu::resources::Tex>, sr_gpu::output::Placement), DeliverError> {
+        let tm = self.segments.as_ref().map(|(tm, _)| *tm);
+        let Some(j) = tm.zip(f).and_then(|(tm, f)| tm.join_at(f.output)) else {
+            return Ok((frame.texture.clone(), self.placement(f)));
+        };
+        let (ev, working) = (self.ev, self.renderer.working());
+        let tex = self.join_tex.get_or_insert_with(|| [(); 3].map(|_| self.renderer.texture(self.size))).clone();
+        let own = if f.is_some_and(|f| f.segment == j.from.segment) { 0 } else { 1 };
+        let sides = [j.from, j.to];
+        self.stage.place(&frame.texture, &working, &tex[own], self.placement(Some(&sides[own])));
+        let other = sides[1 - own];
+        let go = ev.evaluate(other.composition);
+        let f2 = self.render_side(&go, other.composition, Some(&other))?;
+        unsupported.extend(f2.stats.unsupported.iter().cloned());
+        self.stage.place(&f2.texture, &working, &tex[1 - own], self.placement(Some(&other)));
+        let problems = self.renderer.join(
+            ev.program(),
+            &j.join.elem,
+            &tex[0],
+            &tex[1],
+            j.progress,
+            j.velocity,
+            j.from.output,
+            &tex[2],
+        );
+        unsupported.extend(problems);
+        Ok((tex[2].clone(), sr_gpu::output::Placement::default()))
     }
 }
 
@@ -328,8 +370,6 @@ impl Video<'_> {
                 };
                 let t1 = Instant::now();
                 let ft = self.segments.as_ref().map(|(_, frames)| frames[k]);
-                let tm = self.segments.as_ref().map(|(tm, _)| *tm);
-                let join = tm.zip(ft).and_then(|(tm, f)| tm.join_at(f.output));
                 let frame = self.render_side(&g, t, ft.as_ref())?;
                 unsupported.extend(frame.stats.unsupported.iter().cloned());
                 if let Some(det) = flash.as_mut() {
@@ -344,36 +384,8 @@ impl Video<'_> {
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
-                let mut picture = frame.texture.clone();
-                let mut placement = self.placement(ft.as_ref());
-                if let Some(j) = join {
-                    // both sides of a join, each through its own map and placed with its own focus,
-                    // combined in the output's frame
-                    let tex =
-                        self.join_tex.get_or_insert_with(|| [(); 3].map(|_| self.renderer.texture(self.size))).clone();
-                    let own = if ft.is_some_and(|f| f.segment == j.from.segment) { 0 } else { 1 };
-                    let sides = [j.from, j.to];
-                    self.stage.place(&frame.texture, &working, &tex[own], self.placement(Some(&sides[own])));
-                    let other = sides[1 - own];
-                    let go = ev.evaluate(other.composition);
-                    let f2 = self.render_side(&go, other.composition, Some(&other))?;
-                    unsupported.extend(f2.stats.unsupported.iter().cloned());
-                    self.stage.place(&f2.texture, &working, &tex[1 - own], self.placement(Some(&other)));
-                    let problems = self.renderer.join(
-                        p,
-                        &j.join.elem,
-                        &tex[0],
-                        &tex[1],
-                        j.progress,
-                        j.velocity,
-                        j.from.output,
-                        &tex[2],
-                    );
-                    unsupported.extend(problems);
-                    picture = tex[2].clone();
-                    placement = sr_gpu::output::Placement::default();
-                }
-                let out_t = ft.map_or(t, |f| f.output);
+                let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
+                let out_t = ft.map_or(t - self.origin, |f| f.output);
                 let over = match self.overlay.as_mut() {
                     Some(o) => {
                         let (tex, problems) = o.draw(&mut self.stage, out_t)?;
@@ -543,14 +555,27 @@ pub fn deliver(
     let tmp =
         std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
     std::fs::create_dir_all(&tmp)?;
+    // captions in output time: with segments the composition's are mapped; the output's own tracks
+    let captions = crate::captions::output_captions(p, output, segments.as_ref())?;
+    report.warnings.extend(captions.warnings.iter().cloned());
+    let mut chapters = None;
+    if let Some(tm) = &segments {
+        report.warnings.extend(empty_ends(&ev, tm));
+        chapters = write_chapters(p, tm, start, end, &tmp)?;
+    }
     // with segments the programme is the output's own mix in output time (its own tracks may be its
     // only audio)
     let takes_audio = output.audio && (codec.takes_audio() || codec.is_audio_only());
     let own_tracks = output.children.iter().any(|c| matches!(c, m::OutputChild::AudioTrack(_)));
-    if segments.is_some() && takes_audio && scene_audio.is_none() && own_tracks {
+    if takes_audio && scene_audio.is_none() && own_tracks {
         scene_audio = Some(audio::silent(p, fps));
     }
-    let programme = match (&segments, &scene_audio) {
+    // without segments, the output's own tracks play in output time from output/@start
+    let plain = match (&segments, own_tracks) {
+        (None, true) => Some(crate::segment_audio::output_map(p, output)?),
+        _ => None,
+    };
+    let programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
         (Some(tm), Some(sa)) if takes_audio => {
             let t = Instant::now();
             let a = crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref())?;
@@ -562,7 +587,10 @@ pub fn deliver(
     let wants_audio = takes_audio && scene_audio.is_some() && (segments.is_none() || programme.is_some());
     let mut audio_file = None;
     if let (true, Some(sa)) = (wants_audio, &scene_audio) {
-        let part = audio::slice(programme.as_ref().unwrap_or(&sa.mixed.master), sa.mix.rate, start, end);
+        // the output's own programme starts at output/@start, the scene's master at 0
+        let origin = if plain.is_some() { output.start } else { 0.0 };
+        let master = programme.as_ref().unwrap_or(&sa.mixed.master);
+        let part = audio::slice(master, sa.mix.rate, start - origin, end - origin);
         let weights = sa.mix.layout.loudness_weights();
         // integrated loudness needs at least one 400 ms gating block
         let l = sr_audio::loudness::integrated(&part, sa.mix.rate as f64, &weights);
@@ -590,7 +618,7 @@ pub fn deliver(
             let Some(f) = audio_file.clone() else {
                 return Err(DeliverError::Invalid("audio-only output, but the scene has no audio".into()));
             };
-            let spec = base_spec(
+            let mut spec = base_spec(
                 output,
                 &report.path,
                 codec,
@@ -602,6 +630,7 @@ pub fn deliver(
                 p,
                 opts,
             );
+            spec.chapters = chapters.clone();
             let enc = Encoder::start(&spec)?;
             report.encoder = enc.encoder.clone();
             enc.finish()?;
@@ -640,6 +669,8 @@ pub fn deliver(
         let mut renderer = Renderer::new(gpu.clone(), p);
         renderer.representation = representation.clone();
         renderer.burn_captions = output.burn_captions.clone();
+        // with segments, captions burn in output time over the placed picture
+        renderer.captions_off = segments.is_some();
         if let Some(sa) = scene_audio.as_mut() {
             // the mix is done with these buffers (the master was sliced to disk above), so
             // the shaders take them over rather than doubling a programme's worth of audio
@@ -671,12 +702,14 @@ pub fn deliver(
             fps,
             reframe: p.reframe,
             segments: segments.as_ref().zip(frame_times),
-            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &gpu)?,
+            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu)?,
+            origin: if segments.is_some() { 0.0 } else { output.start },
             join_tex: None,
         };
         let audio_in = audio_file.clone().map(|f| (f, output.audio_codec.clone(), output.audio_bitrate));
         let mut spec = base_spec(output, &report.path, codec, size, fps, format, &color, audio_in, p, opts);
         spec.start_number = (start * fps).round() as u64;
+        spec.chapters = chapters.clone();
         let fit = output.max_file_size;
         let t_video = Instant::now();
         report.segments = 1;
@@ -700,6 +733,7 @@ pub fn deliver(
                 alpha: false,
                 hdr: Hdr::default(),
                 metadata: Vec::new(),
+                chapters: None,
                 bitrate: None,
                 ..spec.clone()
             };
@@ -885,20 +919,57 @@ pub fn deliver(
         // posters and thumbnails
         for c in &output.children {
             let (m::OutputChild::Poster(st) | m::OutputChild::Thumbnail(st)) = c else { continue };
-            let t = match (&st.marker, &segments) {
-                (Some(mk), _) => sr_eval::eval::marker(p, mk).unwrap_or(st.time),
-                // a still's time is output time
-                (None, Some(tm)) => tm.at(st.time.clamp(0.0, tm.duration)).composition,
-                (None, None) => st.time,
-            };
-            let g = ev.evaluate(t.clamp(0.0, p.duration));
-            let mut sub = |st: f64| ev.evaluate(st);
-            let frame = video.renderer.render_with(&g, p, Some(&mut sub));
-            let psize = [p.size[0].round() as u32, p.size[1].round() as u32];
             let srgb = OutputColor::new(m::ColorSpace::Srgb, m::Transfer::Srgb, true);
-            let pending =
-                video.stage.submit(&frame.texture, &video.renderer.working(), &srgb, InputFormat::Rgba8, psize, true);
-            let rgba = video.stage.wait(pending);
+            let (rgba, psize) = match &segments {
+                // with segments a still is the output's frame at an output time: a marker stands for the
+                // first output time that shows it
+                Some(tm) => {
+                    let t = match &st.marker {
+                        Some(mk) => {
+                            let c = sr_eval::eval::marker(p, mk)
+                                .ok_or_else(|| DeliverError::Invalid(format!("{}: no marker {mk:?}", st.path)))?;
+                            tm.output_of(c).ok_or_else(|| {
+                                DeliverError::Invalid(format!("{}: marker {mk:?} is in no segment", st.path))
+                            })?
+                        }
+                        None => st.time.clamp(0.0, tm.duration),
+                    };
+                    let f = tm.at(t);
+                    let g = ev.evaluate(f.composition);
+                    let mut unsupported = std::collections::BTreeSet::new();
+                    let frame = video.render_side(&g, f.composition, Some(&f))?;
+                    let (picture, placement) = video.picture(&frame, Some(&f), &mut unsupported)?;
+                    let over = match video.overlay.as_mut() {
+                        Some(o) => Some(o.draw(&mut video.stage, t)?.0),
+                        None => None,
+                    };
+                    let working = video.renderer.working();
+                    let pending = video.stage.submit_placed(
+                        &picture,
+                        &working,
+                        &srgb,
+                        InputFormat::Rgba8,
+                        size,
+                        true,
+                        placement,
+                        over,
+                    );
+                    (video.stage.wait(pending), size)
+                }
+                None => {
+                    let t = match &st.marker {
+                        Some(mk) => sr_eval::eval::marker(p, mk).unwrap_or(st.time),
+                        None => st.time,
+                    };
+                    let g = ev.evaluate(t.clamp(0.0, p.duration));
+                    let mut sub = |st: f64| ev.evaluate(st);
+                    let frame = video.renderer.render_with(&g, p, Some(&mut sub));
+                    let psize = [p.size[0].round() as u32, p.size[1].round() as u32];
+                    let working = video.renderer.working();
+                    let pending = video.stage.submit(&frame.texture, &working, &srgb, InputFormat::Rgba8, psize, true);
+                    (video.stage.wait(pending), psize)
+                }
+            };
             let path = resolve(&base, &st.path);
             let fmt = StillFormat::parse(st.format.as_str()).unwrap_or(StillFormat::Jpeg);
             sr_media::encode::write_still(
@@ -914,13 +985,22 @@ pub fn deliver(
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
-    if segments.is_some() {
-        if p.scene.captions.is_some() {
-            report.unsupported.push("caption files of an output with segments are not written yet".into());
-        }
-    } else {
-        report.files.extend(write_sidecars(p, output, &report.path, start, end)?);
+    // caption files: the output-time tracks (with segments, the composition's mapped), and without
+    // segments the composition's own, cut to the rendered range
+    let base_dir = p.base_dirs.first().cloned().unwrap_or_default();
+    if segments.is_none() {
+        let tracks = p.scene.captions.as_ref().map(|c| c.caption_tracks.as_slice()).unwrap_or_default();
+        report.files.extend(write_sidecars(tracks, &base_dir, output, &report.path, start, end)?);
     }
+    let origin = if segments.is_some() { 0.0 } else { output.start };
+    report.files.extend(write_sidecars(
+        &captions.tracks,
+        &base_dir,
+        output,
+        &report.path,
+        start - origin,
+        end - origin,
+    )?);
     if opts.upload {
         let dests: Vec<&m::Destination> = output
             .children
@@ -1016,6 +1096,7 @@ fn base_spec(
             mastering_display: o.mastering_display.clone(),
         },
         metadata: if o.embed_metadata { metadata(&p.scene) } else { Vec::new() },
+        chapters: None,
         hardware: opts.hardware,
         audio_bits: p.scene.audio_mix.as_ref().map(|a| a.bit_depth.as_str().parse().unwrap_or(24)).unwrap_or(24),
     }
@@ -1068,23 +1149,101 @@ fn replay(inter: &Path, spec: &EncodeSpec, format: InputFormat, size: [u32; 2]) 
 /// Caption sidecars: tracks listed in the output's `captions`, or with mode
 /// sidecar or both, written next to the output as `<stem>.<track>.<language>.vtt`
 /// (`.srt` when the track's source is SRT), with times relative to the range start.
-fn write_sidecars(
+/// Warnings for segments whose span begins or ends where nothing is drawn above the background.
+fn empty_ends(ev: &Evaluator, tm: &crate::segments::TimeMap) -> Vec<String> {
+    let fps = ev.program().fps.as_f64();
+    let drawn = |c: f64| {
+        ev.evaluate(c).nodes.iter().any(|n| {
+            n.draw
+                && !n.is_matte
+                && n.world_opacity > 1e-3
+                && !matches!(n.kind, "group" | "camera" | "instance" | "repeat" | "transition" | "null")
+        })
+    };
+    let mut out = Vec::new();
+    for (i, seg) in tm.segments.iter().enumerate() {
+        let name = seg.elem.id.clone().unwrap_or_else(|| format!("segment {}", i + 1));
+        let last = (seg.duration - 1.0 / fps).max(0.0);
+        for (edge, u) in [("starts", 0.0), ("ends", last)] {
+            let c = tm.composition(i, u);
+            if !drawn(c) {
+                out.push(format!("{name} {edge} at {c:.3} s, where nothing is drawn above the background"));
+            }
+        }
+    }
+    out
+}
+
+/// The output's chapters (markers of kind `chapter` at the first output time each maps to; those in
+/// skipped spans are dropped), cut to `start`..`end`, as an FFmetadata file in `dir`.
+fn write_chapters(
     p: &sr_eval::Program,
+    tm: &crate::segments::TimeMap,
+    start: f64,
+    end: f64,
+    dir: &Path,
+) -> Result<Option<PathBuf>, DeliverError> {
+    let mut marks: Vec<(f64, String)> = p
+        .scene
+        .markers
+        .iter()
+        .flat_map(|mk| &mk.children)
+        .filter_map(|c| match c {
+            m::MarkersChild::Marker(mk) if mk.kind.as_str() == "chapter" => {
+                let t = tm.output_of(mk.time)?;
+                Some((t, mk.label.clone().or_else(|| mk.id.clone()).unwrap_or_default()))
+            }
+            _ => None,
+        })
+        .filter(|(t, _)| *t >= start - 1e-9 && *t < end)
+        .collect();
+    if marks.is_empty() {
+        return Ok(None);
+    }
+    marks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let ms = |t: f64| ((t - start) * 1000.0).round().max(0.0) as u64;
+    let esc = |s: &str| {
+        s.chars().fold(String::new(), |mut o, c| {
+            if matches!(c, '=' | ';' | '#' | '\\' | '\n') {
+                o.push('\\');
+            }
+            o.push(c);
+            o
+        })
+    };
+    let mut text = String::from(";FFMETADATA1\n");
+    for (k, (t, title)) in marks.iter().enumerate() {
+        let next = marks.get(k + 1).map_or(end, |m| m.0);
+        text.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={}\nEND={}\ntitle={}\n",
+            ms(*t),
+            ms(next),
+            esc(title)
+        ));
+    }
+    let path = dir.join("chapters.txt");
+    std::fs::write(&path, text)?;
+    Ok(Some(path))
+}
+
+/// Writes the caption files of `tracks` next to `out`: tracks the output lists in `captions`, and
+/// every track that is not burn-only, cut to `start`..`end` and starting at `start`.
+fn write_sidecars(
+    tracks: &[m::CaptionTrack],
+    base: &Path,
     output: &m::Output,
     out: &std::path::Path,
     start: f64,
     end: f64,
 ) -> Result<Vec<PathBuf>, DeliverError> {
-    let Some(caps) = p.scene.captions.as_ref() else { return Ok(Vec::new()) };
-    let base = p.base_dirs.first().cloned().unwrap_or_default();
     let mut files = Vec::new();
-    for tr in &caps.caption_tracks {
+    for tr in tracks {
         let listed = output.captions.as_ref().is_some_and(|ids| ids.contains(&tr.id));
         let mode = tr.mode.to_string();
         if !listed && mode == "burn" {
             continue;
         }
-        let cues = sr_gpu::text::track_cues(tr, &base).map_err(DeliverError::Invalid)?;
+        let cues = sr_gpu::text::track_cues(tr, base).map_err(DeliverError::Invalid)?;
         let cues: Vec<sr_text::captions::Cue> = cues
             .into_iter()
             .filter(|c| c.end > start && c.start < end)
