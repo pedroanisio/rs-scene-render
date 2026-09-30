@@ -576,19 +576,17 @@ pub fn deliver(
     if takes_audio && scene_audio.is_none() && own_tracks {
         scene_audio = Some(audio::silent(p, fps));
     }
-    // Selection also needs an output programme without segments or output-owned tracks.
-    // Own tracks retain their output/@start origin; a selection alone follows the
-    // effective render range, including command-line overrides.
-    let selects_audio = output.audio_tracks.is_some() || output.audio_roles.is_some() || output.audio_buses.is_some();
-    let plain = match (&segments, own_tracks, selects_audio) {
-        (None, true, _) => Some(crate::segment_audio::output_map(p, output)?),
-        (None, false, true) => Some(crate::segments::TimeMap::span_of(p, start, end).map_err(DeliverError::Invalid)?),
+    // Without segments, selection attributes have no effect. Only output-owned
+    // tracks need a programme of their own, starting at output/@start.
+    let plain = match (&segments, own_tracks) {
+        (None, true) => Some(crate::segment_audio::output_map(p, output)?),
         _ => None,
     };
     let programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
         (Some(tm), Some(sa)) if takes_audio => {
             let t = Instant::now();
-            let a = crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref())?;
+            let a =
+                crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref(), segments.is_some())?;
             report.audio_seconds += t.elapsed().as_secs_f64();
             Some(a.master)
         }

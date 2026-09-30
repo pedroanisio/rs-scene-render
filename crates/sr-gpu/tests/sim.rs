@@ -284,3 +284,32 @@ fn ball_joints_swing_and_3d_caches_replay() {
     assert!(g.problems.is_empty(), "{:?}", g.problems);
     assert_eq!(pose3(&g, "bob"), pose3(&ev.evaluate(1.7), "bob"));
 }
+
+/// Columns covered on row `y`.
+fn width_at(r: &Rendered, y: u32) -> u32 {
+    (0..r.size[0]).filter(|x| r.at(*x, y)[3] > 0.5).count() as u32
+}
+
+#[test]
+fn preroll_emits_before_the_start_as_at_the_start() {
+    // 2 s of preroll at 10 px/s: at time 0 the particles already reach 20 px from the emitter (8 px dots)
+    let body = r#"<particleEmitter id="e" x="8" y="32" preroll="2" rate="40" lifetime="10" speed="10" direction="0" spread="0" size="8"/>"#;
+    let Some(r) = render(&scene(body, "")) else { return };
+    let w = width_at(&r, 32);
+    assert!((26..=30).contains(&w), "covered {w} columns");
+}
+
+#[test]
+fn force_fields_act_on_the_simulations_that_take_them() {
+    // a directional push of 10 px/s² over a 2 s preroll moves the oldest particle 20 px: an emitter that
+    // lists the field and one with no list take it; one with useForceFields="false" does not
+    let body = r#"<particleEmitter id="listed" x="8" y="10" preroll="2" rate="40" lifetime="10" speed="0" size="8" forceFields="push"/>
+        <particleEmitter id="all" x="8" y="30" preroll="2" rate="40" lifetime="10" speed="0" size="8"/>
+        <particleEmitter id="none" x="8" y="50" preroll="2" rate="40" lifetime="10" speed="0" size="8" useForceFields="false"/>"#;
+    let physics =
+        r#"<physics gravityY="0"><forceField id="push" type="directional" forceX="0.1" start="-2"/></physics>"#;
+    let Some(r) = render(&scene(body, physics)) else { return };
+    let (listed, all, none) = (width_at(&r, 10), width_at(&r, 30), width_at(&r, 50));
+    assert!((26..=30).contains(&listed) && (26..=30).contains(&all), "pushed: {listed}, {all}");
+    assert!((7..=9).contains(&none), "not pushed: {none}");
+}

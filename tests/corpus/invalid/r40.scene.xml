@@ -32,7 +32,7 @@
   <output id="social" path="out/social.mp4" codec="h264" layout="square" variant="dark" burnCaptions="en">
     <poster path="out/poster.png" time="1"/>
   </output>
-  <output id="short" path="out/short.mp4" codec="h264" layout="square" overlay="logo" audioTracks="music-track" audioRoles="effects music" audioBuses="fx" joinFade="0.02" captions="short-subs" burnCaptions="short-subs">
+  <output id="short" start="0" path="out/short.mp4" codec="h264" layout="square" overlay="logo" audioTracks="music-track" audioRoles="effects music" audioBuses="fx" joinFade="0.02" captions="short-subs" burnCaptions="short-subs">
     <segment from="0" to="4" speed="2" focusX="0.3">
       <animate property="focusY">
         <key time="0" value="0.4"/>

@@ -1385,18 +1385,32 @@ impl Renderer {
         Self::clip_fix(space, cam_size) * cam.view_proj() * back
     }
 
-    /// Whether node `i` starts a 3D run (or draws alone) and, if so, emits the run as one layer.
-    /// The 3D objects that share node `i`'s parent and render together in one pass (one depth buffer, one
-    /// environment dome). Motion blur accumulates this whole pass over the shutter, driven by its first member:
-    /// rendering blurred objects one pass each would repaint the dome over the objects drawn before them.
+    /// The 3D objects of node `i`'s block, which render together in one pass (one depth buffer, one
+    /// environment dome): the run of its siblings, in paint order, that no drawn 2D sibling interrupts
+    /// (cameras and 2.5D nodes belong to the 3D content and do not end a block). Blocks
+    /// composite in document order like other nodes. Motion blur accumulates a whole pass over the
+    /// shutter, driven by its first member: rendering blurred objects one pass each would repaint the dome
+    /// over the objects drawn before them.
     pub(super) fn three_members(g: &FrameGraph, i: usize) -> Vec<usize> {
         let parent = g.nodes[i].parent;
-        g.nodes
-            .iter()
-            .enumerate()
-            .filter(|(j, m)| m.kind == "object3D" && m.parent == parent && visible3(g, *j))
-            .map(|(j, _)| j)
-            .collect()
+        let mut run = Vec::new();
+        let mut found = false;
+        for (j, m) in g.nodes.iter().enumerate().filter(|(_, m)| m.parent == parent) {
+            let three = m.kind == "object3D" || m.kind == "camera" || m.three_d.is_some();
+            if !three && m.draw {
+                // a drawn 2D sibling ends the block
+                if found {
+                    break;
+                }
+                run.clear();
+                continue;
+            }
+            if m.kind == "object3D" && visible3(g, j) {
+                run.push(j);
+            }
+            found |= j == i;
+        }
+        run
     }
 
     #[allow(clippy::too_many_arguments)]

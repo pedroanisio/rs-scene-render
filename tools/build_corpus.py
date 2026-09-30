@@ -151,7 +151,7 @@ CASES = [
     ("r26", ["R26"], sub('fit="places"', 'fit="places logo"')),
     ("c45", ["C45"], sub('<route points="0,0 20,20"', '<route')),
     # ---- output segments
-    ("c54", ["C54"], sub('<output id="short" path', '<output id="short" start="1" path')),
+    ("c54", ["C54"], sub('<output id="short" start="0" path', '<output id="short" start="1" path')),
     ("c55", ["C55"], sub('<segment fromMarker="drop" to="8"', '<segment fromMarker="drop"')),
     ("c56", ["C56"], sub('<segment from="0" to="4"', '<segment from="4" to="2"')),
     ("c57", ["C57"], sub('<segment fromMarker="drop" to="8"', '<segment from="3" fromMarker="drop" to="8"')),
@@ -159,6 +159,8 @@ CASES = [
     ("c59", ["C59"], sub('<transition type="crossfade" duration="0.3" alignment="end"/>', '<transition type="morph" duration="0.3"/>')),
     ("r38", ["R38"], sub('fromMarker="drop"', 'fromMarker="hero"')),
     ("r39", ["R39"], sub('audioTracks="music-track"', 'audioTracks="music-track fx"')),
+    ("r39-bus", ["R39"], sub('audioBuses="fx"', 'audioBuses="fx music-track"')),
+    ("c59-luma", ["C59"], sub('<transition type="crossfade" duration="0.3" alignment="end"/>', '<transition type="luma" matte="card" duration="0.3"/>')),
     ("r40", ["R40"], sub('overlay="card"', 'overlay="logo"')),
     ("r41", ["R41"], sub('transcribe="short-vo"', 'transcribe="vo-track"')),
     # ---- schema 1.1.3

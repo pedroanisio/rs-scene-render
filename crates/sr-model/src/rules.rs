@@ -418,6 +418,7 @@ impl<'a> Eval<'a> {
                     || n.descendants().any(|d| {
                         is(d, "basemap")
                             || (is(d, "rigidBody") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                            || (is(d, "object3D") && matches!(d.attribute("primitive"), Some("map" | "globe")))
                     })
                     || kids(n, "output").any(|o| {
                         o.children().any(|c| is(c, "segment") || is(c, "audioTrack") || is(c, "captionTrack"))
@@ -544,9 +545,10 @@ impl<'a> Eval<'a> {
                     "transition type=\"luma\" requires @matte.".into()
                 });
                 if parent_is("segment") {
-                    let c59 = !(has("from") || has("to")) && a("type") != Some("morph");
+                    let c59 = !(has("from") || has("to")) && !matches!(a("type"), Some("morph" | "luma"));
                     self.check(c59, n, "C59", || {
-                        "a segment transition joins two rendered pictures: no from, no to, and not morph.".into()
+                        "a segment transition joins two rendered pictures: no from, no to, not morph and not luma."
+                            .into()
                     });
                 }
                 let siblings = |id: &str| match n.parent() {
@@ -651,13 +653,19 @@ impl<'a> Eval<'a> {
                 let c44 = !has("end") || (!has("start") && num(n, "end") > 0.0) || num(n, "end") > num(n, "start");
                 self.check(c44, n, "C44", || "output end must be after start.".into());
                 // p61
-                self.check(!has_kid(n, "segment") || !(has("start") || has("end")), n, "C54", || {
+                // a start of 0 is the default, which validators that fill in defaults supply
+                let c54 = !has_kid(n, "segment") || ((!has("start") || num(n, "start") == 0.0) && !has("end"));
+                self.check(c54, n, "C54", || {
                     "an output with segments cannot also set start or end; put the range in a segment instead.".into()
                 });
-                if let Some(list) = a("audioTracks") {
-                    let ok = every_token_names(list, &self.sets.mix_tracks);
-                    self.check(ok, n, "R39", || "every id in output/@audioTracks must name an audioMix track.".into());
-                }
+                let tracks_ok =
+                    a("audioTracks").is_none_or(|l| l.split_whitespace().all(|t| self.sets.mix_tracks.contains(&t)));
+                let buses_ok =
+                    a("audioBuses").is_none_or(|l| l.split_whitespace().all(|b| self.sets.buses.contains(b)));
+                self.check(tracks_ok && buses_ok, n, "R39", || {
+                    "every id in output/@audioTracks must name an audioMix track, and every id in output/@audioBuses a bus."
+                        .into()
+                });
                 self.check(!has("overlay") || contains(&self.sets.symbols, a("overlay")), n, "R40", || {
                     "output/@overlay must name a symbol.".into()
                 });

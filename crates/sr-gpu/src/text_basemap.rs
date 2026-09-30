@@ -90,6 +90,8 @@ enum Anchor {
 pub struct Output {
     pub bitmaps: Vec<Bitmap>,
     pub attribution: Option<String>,
+    /// Style layer types the basemap skipped (not drawn by this engine).
+    pub skipped: Vec<String>,
 }
 
 /// Draws the basemap child `ba` of a map.
@@ -109,7 +111,7 @@ pub fn draw(
     let opacity = ba.num("opacity", 1.0);
     let detail = ba.num("detail", 0.0);
     let attribution = asset.attribution.clone().or_else(|| arch.metadata["attribution"].as_str().map(str::to_string));
-    let mut out = Output { bitmaps: Vec::new(), attribution };
+    let mut out = Output { bitmaps: Vec::new(), attribution, skipped: Vec::new() };
     if opacity <= 0.0 {
         return Ok(out);
     }
@@ -157,7 +159,11 @@ pub fn draw(
                     f(pt, ps);
                 }
             }
-            _ => {}
+            other => {
+                if !out.skipped.iter().any(|k| k == other) {
+                    out.skipped.push(other.to_string());
+                }
+            }
         }
     }
     if ba.str("labels").as_deref() != Some("false") {

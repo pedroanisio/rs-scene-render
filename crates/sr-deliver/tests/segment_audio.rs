@@ -108,7 +108,7 @@ fn outputs_select_their_sources() {
 }
 
 #[test]
-fn selected_audio_honours_command_line_range_overrides() {
+fn nonsegmented_audio_honours_command_line_range_overrides() {
     let d = fixtures("select-range");
     let opts = sr_deliver::Options { start: Some(0.0), end: Some(3.0), ..Default::default() };
     let (x, _) = deliver_with_options(
@@ -124,22 +124,22 @@ fn selected_audio_honours_command_line_range_overrides() {
 }
 
 #[test]
-fn outputs_select_sources_without_segments() {
+fn outputs_without_segments_keep_all_sources() {
     let d = fixtures("select-plain");
     let mix = r#"<audioTrack id="music" asset="a440" role="music" bus="fx"/>
                  <audioTrack id="voice" asset="a1000" role="dialogue"/>
                  <bus id="fx"/>"#;
-    for (attr, want) in
-        [(r#"audioRoles="dialogue""#, 1000.0), (r#"audioTracks="music""#, 440.0), (r#"audioBuses="fx""#, 440.0)]
+    let (all, _) = deliver(&d, r#"<output path="all.wav" codec="audio-only" start="1" end="2"/>"#, mix);
+    for attr in [r#"audioRoles="dialogue""#, r#"audioTracks="music""#, r#"audioBuses="fx""#, r#"audioRoles="effects""#]
     {
         let (x, _) =
             deliver(&d, &format!(r#"<output path="sel.wav" codec="audio-only" start="1" end="2" {attr}/>"#), mix);
         assert_eq!(x.len(), RATE as usize);
-        let f = frequency(&x, 0.1, 0.9);
-        assert!((f - want).abs() < 1.0, "{attr}: {f} Hz");
+        assert!(
+            x.iter().zip(&all).all(|(a, b)| (a - b).abs() < 1e-6),
+            "{attr} must not filter an output without segments"
+        );
     }
-    let (x, _) = deliver(&d, r#"<output path="silent.wav" codec="audio-only" audioRoles="effects"/>"#, mix);
-    assert!(rms(&x, 0.1, 0.9) < 1e-6, "selecting no sources produces silence");
 }
 
 #[test]
@@ -192,4 +192,38 @@ fn own_tracks_play_without_segments_from_the_outputs_start() {
     assert_eq!(x.len(), 3 * RATE as usize);
     assert!(rms(&x, 0.0, 0.49) < 1e-6);
     assert!((frequency(&x, 0.6, 2.9) - 1000.0).abs() < 1.0);
+}
+
+#[test]
+fn selection_acts_only_with_segments() {
+    let d = fixtures("noselect");
+    // without segments, audioRoles has no effect: the composition's music plays under the output's own track
+    let xml = r##"<scene version="1.2"><project width="64" height="36" fps="25" duration="4" background="#000000"/>
+          <output path="all.wav" codec="audio-only" audioRoles="effects"><audioTrack id="sting" asset="a1000" start="2"/></output>
+          <assets><audio id="a440" src="a440.wav"/><audio id="a1000" src="a1000.wav"/></assets>
+          <composition/><audioMix><audioTrack id="music" asset="a440" role="music"/></audioMix></scene>"##;
+    let path = d.join("all.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let r = sr_deliver::deliver(&doc, &doc.scene.outputs[0], None, &Default::default(), &mut |_, _| {}).unwrap();
+    let a = sr_media::decode_audio(&r.path, 0, RATE).unwrap();
+    let x: Vec<f32> = a.samples.chunks(a.channels as usize).map(|f| f[0]).collect();
+    assert!((frequency(&x, 0.1, 1.9) - 440.0).abs() < 1.0);
+}
+
+#[test]
+fn stretching_keeps_loudness() {
+    let d = fixtures("stretchloud");
+    let loud = |speed: &str| {
+        let (_, r) = deliver(
+            &d,
+            &format!(
+                r#"<output path="l{speed}.wav" codec="audio-only"><segment from="0" to="3" speed="{speed}"/></output>"#
+            ),
+            r#"<audioTrack id="t" asset="a440"/>"#,
+        );
+        r.loudness.unwrap()
+    };
+    let (a, b) = (loud("1"), loud("2"));
+    assert!((a - b).abs() < 0.5, "{a} LUFS at speed 1, {b} LUFS stretched to half");
 }

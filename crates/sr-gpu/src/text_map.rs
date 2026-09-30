@@ -312,6 +312,12 @@ pub fn map_drawing_as(
             if is(c, "basemap") {
                 let lib = tc.lib();
                 let out = super::basemap::draw(cx, lib, &mut pt, &proj, [w, h], &ca, tol)?;
+                for k in &out.skipped {
+                    let msg = format!("{}: basemap style layers of type {k} are not drawn", mp.id);
+                    if !cx.unsupported.contains(&msg) {
+                        cx.unsupported.push(msg);
+                    }
+                }
                 raster.extend(out.bitmaps);
                 if ca.str("attribution").as_deref() != Some("false") {
                     credits.extend(out.attribution.filter(|a| !credits.contains(a)));
@@ -503,6 +509,18 @@ pub fn map_drawing_as(
     }
     tc.font_assets = fonts;
     let lib = tc.lib();
+    // raster tiles are drawn beneath all of the map's vector content, its background included
+    let opaque_bg = at.paint("background").is_some_and(|v| match (cx.paint)(&v, bx) {
+        Some(Paint::Solid { rgba, .. }) => rgba[3] > 0.0,
+        Some(_) => true,
+        None => false,
+    });
+    if !raster.is_empty() && opaque_bg {
+        let msg = format!("{}: the raster basemap is drawn beneath the map's background", mp.id);
+        if !cx.unsupported.contains(&msg) {
+            cx.unsupported.push(msg);
+        }
+    }
     d.bitmaps.extend(raster);
 
     // the data's credit, small in the bottom-right corner

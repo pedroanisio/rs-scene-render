@@ -72,7 +72,9 @@ fn map_curve(c: &Curve, tm: &TimeMap, fps: f64) -> Curve {
     }
 }
 
-/// Renders the output's audio.
+/// Renders the output's audio. `select` applies the output's `audioTracks`, `audioRoles` and
+/// `audioBuses`; without segments (an output whose own tracks join the composition's audio) every
+/// source plays, since those attributes act only on outputs with segments.
 pub fn render(
     p: &Program,
     sa: &SceneAudio,
@@ -80,6 +82,7 @@ pub fn render(
     tm: &TimeMap,
     fps: f64,
     representation: Option<&str>,
+    select: bool,
 ) -> Result<OutputAudio, DeliverError> {
     let rate = sa.mix.rate;
     let roles: std::collections::HashMap<&str, &str> = p
@@ -98,7 +101,10 @@ pub fn render(
     let buses: Vec<&Node> = sa.mix.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Bus)).collect();
     let play: HashSet<&str> = tracks
         .iter()
-        .filter(|n| selected(output, &n.id, roles.get(n.id.as_str()).copied().unwrap_or("other"), n.output.as_deref()))
+        .filter(|n| {
+            !select
+                || selected(output, &n.id, roles.get(n.id.as_str()).copied().unwrap_or("other"), n.output.as_deref())
+        })
         .map(|n| n.id.as_str())
         .collect();
     let mut needed: HashSet<&str> = play.clone();

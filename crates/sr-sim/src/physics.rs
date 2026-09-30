@@ -314,7 +314,13 @@ impl World {
         let wall = |st: &mut State, cx: f64, cy: f64, hx: f64, hy: f64| {
             let h = st.bodies.insert(RigidBodyBuilder::fixed().translation(m([cx, cy])).build());
             st.colliders.insert_with_parent(
-                ColliderBuilder::cuboid(hx / ppm, hy / ppm).friction(0.5).build(),
+                // coefficient 0 under the Max rule: a contact takes the body's own friction and restitution
+                ColliderBuilder::cuboid(hx / ppm, hy / ppm)
+                    .friction(0.0)
+                    .friction_combine_rule(CoefficientCombineRule::Max)
+                    .restitution(0.0)
+                    .restitution_combine_rule(CoefficientCombineRule::Max)
+                    .build(),
                 h,
                 &mut st.bodies,
             );

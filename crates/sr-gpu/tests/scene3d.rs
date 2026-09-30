@@ -640,3 +640,19 @@ fn path_tracing_denoiser_smooths_noise_and_keeps_the_mean() {
     assert!(tv1 < tv0 * 0.5, "variation {tv0} -> {tv1}");
     assert!((m1 - m0).abs() < 0.05 * m0, "mean {m0} -> {m1}");
 }
+
+#[test]
+fn a_2d_node_between_3d_objects_ends_their_block() {
+    // The first sphere and the second are separate blocks, composited in document order around the
+    // full-frame blue rectangle between them: the rectangle hides the first, and the second shows over it,
+    // wherever the first lies (here far away, as a set parked off-screen)
+    let body = r##"<object3D id="far" primitive="sphere" radius="5" x="20000" y="64" material="rmat"/>
+        <object3D id="under" primitive="sphere" radius="20" x="32" y="64" material="rmat"/>
+        <shape id="wall" shape="rect" x="0" y="0" width="128" height="128" fill="#0000FF"/>
+        <object3D id="over" primitive="sphere" radius="20" x="96" y="64" material="rmat"/>"##;
+    let Some(r) = render(&scene("", RED, body, "")) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    let (under, over) = (r.at(32, 64), r.at(96, 64));
+    assert!(under[2] > under[0] * 5.0, "the wall covers the earlier block: {under:?}");
+    assert!(over[0] > over[2] * 5.0, "the later block is drawn over the wall: {over:?}");
+}

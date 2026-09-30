@@ -248,16 +248,22 @@ impl TimeMap {
 
     /// The first output time showing composition time `c`, including reversed or frozen remaps.
     pub fn output_of(&self, c: f64) -> Option<f64> {
+        (0..self.segments.len()).find_map(|i| self.shows(i, c))
+    }
+
+    /// The first output time at which segment `i` shows composition time `c`.
+    /// Remaps use the first actual crossing, including reversals and freezes but
+    /// excluding jumps over the target and the segment's half-open end.
+    pub fn shows(&self, i: usize, c: f64) -> Option<f64> {
         if !c.is_finite() || !(0.0..=self.project).contains(&c) {
             return None;
         }
-        self.segments.iter().enumerate().find_map(|(i, seg)| {
-            let u = match self.span(i) {
-                Some((a, s)) => (c - a) / s,
-                None => self.remap_time(i, c)?,
-            };
-            (u >= -1e-9 && u < seg.duration - 1e-9).then(|| seg.start + u.max(0.0))
-        })
+        let seg = &self.segments[i];
+        let u = match self.span(i) {
+            Some((a, s)) => (c - a) / s,
+            None => self.remap_time(i, c)?,
+        };
+        (u >= -1e-9 && u < seg.duration - 1e-9).then(|| seg.start + u.max(0.0))
     }
 
     /// Find crossings in chronological order on a 1 ms grid, splitting at every key and
@@ -410,6 +416,7 @@ mod tests {
             ));
             let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
             let got = tm.output_of(composition);
+            assert_eq!(tm.shows(0, composition), got);
             match (got, expected) {
                 (Some(a), Some(b)) => assert!((a - b).abs() < 1e-7, "{keys}: {a} != {b}"),
                 (None, None) => {}
@@ -501,6 +508,21 @@ mod tests {
         assert_eq!(tm.focus(&tm.at(0.5), [0.5, 0.5]), [0.2, 0.5]);
         assert_eq!(tm.focus(&tm.at(1.25), [0.5, 0.5]), [0.5, 0.25]);
         assert!(tm.has_focus() && !tm.has_transitions());
+    }
+
+    #[test]
+    fn markers_are_found_in_remaps() {
+        let (p, o) = program(
+            r#"<output path="a.mp4" codec="h264">
+                 <segment from="0" to="0.5"/>
+                 <segment><timeRemap><key time="0" value="3" interpolation="linear"/><key time="1" value="1"/></timeRemap></segment>
+               </output>"#,
+        );
+        let tm = TimeMap::of(p.program(), &o).unwrap().unwrap();
+        // composition 2.5 is shown only by the backwards remap, 0.25 s into it
+        assert!((tm.output_of(2.5).unwrap() - 0.75).abs() < 1e-6);
+        assert_eq!(tm.output_of(0.25), Some(0.25));
+        assert_eq!(tm.output_of(0.75), None);
     }
 
     #[test]

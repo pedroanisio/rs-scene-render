@@ -19,7 +19,7 @@
   </sch:pattern>
   <sch:pattern id="p1b">
     <sch:rule context="/scene[@version='1.0' or @version='1.1']">
-      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|output/segment|output/audioTrack|output/captionTrack)">
+      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
         documents before version="1.2" cannot use 1.2 elements or asset kinds; set version="1.2".</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -378,8 +378,10 @@
   </sch:pattern>
   <sch:pattern id="p61">
     <sch:rule context="output">
-      <sch:assert id="C54" test="not(segment) or not(@start or @end)">an output with segments cannot also set start or end; put the range in a segment instead.</sch:assert>
-      <sch:assert id="R39" test="not(@audioTracks) or count(str:tokenize(normalize-space(@audioTracks),' ')) = count(/scene/audioMix/audioTrack[contains(concat(' ',normalize-space(current()/@audioTracks),' '), concat(' ',@id,' '))])">every id in output/@audioTracks must name an audioMix track.</sch:assert>
+      <sch:let name="mixTracks" value="/scene/audioMix/audioTrack/@id"/>
+      <sch:let name="mixBuses" value="/scene/audioMix/bus/@id"/>
+      <sch:assert id="C54" test="not(segment) or ((not(@start) or number(@start) = 0) and not(@end))">an output with segments cannot also set start or end; put the range in a segment instead.</sch:assert>
+      <sch:assert id="R39" test="not(str:tokenize(normalize-space(@audioTracks),' ')[not(. = $mixTracks)]) and not(str:tokenize(normalize-space(@audioBuses),' ')[not(. = $mixBuses)])">every id in output/@audioTracks must name an audioMix track, and every id in output/@audioBuses a bus.</sch:assert>
       <sch:assert id="R40" test="not(@overlay) or /scene/symbols/symbol[@id=current()/@overlay]">output/@overlay must name a symbol.</sch:assert>
     </sch:rule>
     <sch:rule context="segment">
@@ -390,7 +392,7 @@
       <sch:assert id="R38" test="(not(@fromMarker) or /scene/markers/marker[@id=current()/@fromMarker]) and (not(@toMarker) or /scene/markers/marker[@id=current()/@toMarker])">segment markers must name markers.</sch:assert>
     </sch:rule>
     <sch:rule context="segment/transition">
-      <sch:assert id="C59" test="not(@from or @to) and not(@type='morph')">a segment transition joins two rendered pictures: no from, no to, and not morph.</sch:assert>
+      <sch:assert id="C59" test="not(@from or @to) and not(@type='morph' or @type='luma')">a segment transition joins two rendered pictures: no from, no to, not morph and not luma.</sch:assert>
     </sch:rule>
     <sch:rule context="output/captionTrack[@transcribe]">
       <sch:assert id="R41" test="../audioTrack[@id=current()/@transcribe]">an output caption track transcribes one of that output's own audio tracks.</sch:assert>

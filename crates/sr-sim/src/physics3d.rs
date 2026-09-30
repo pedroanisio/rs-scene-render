@@ -295,7 +295,13 @@ impl World3 {
         let slab = |st: &mut State, centre: [f64; 3], half: [f64; 3]| {
             let h = st.bodies.insert(RigidBodyBuilder::fixed().translation(m(centre)).build());
             st.colliders.insert_with_parent(
-                ColliderBuilder::cuboid(half[0] / ppm, half[1] / ppm, half[2] / ppm).friction(0.5).build(),
+                // coefficient 0 under the Max rule: a contact takes the body's own friction and restitution
+                ColliderBuilder::cuboid(half[0] / ppm, half[1] / ppm, half[2] / ppm)
+                    .friction(0.0)
+                    .friction_combine_rule(CoefficientCombineRule::Max)
+                    .restitution(0.0)
+                    .restitution_combine_rule(CoefficientCombineRule::Max)
+                    .build(),
                 h,
                 &mut st.bodies,
             );

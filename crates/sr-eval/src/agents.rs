@@ -2,7 +2,7 @@
 //! elements, steps them on the node's own timeline (1/60 s steps, checkpointed) and attaches
 //! the result to the frame: flocks as particles in frame space, the grid simulations as a
 //! picture filling the node's box. Force fields named in `forceFields` (all of them when
-//! absent) act on flocks and fluids, evaluated at each step's time.
+//! absent, none with `useForceFields="false"`) act on flocks and fluids, evaluated at each step's time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,7 +112,7 @@ fn build(p: &Program, n: &FrameNode, problems: &mut Vec<String>) -> Sim {
     let e: &dyn Element = &*n.elem;
     let size = [num(e, "width", 1.0), num(e, "height", 1.0)];
     let sd = seed(e, &n.id);
-    let fields = text(e, "forceFields").map(|s| s.split_whitespace().map(str::to_string).collect());
+    let fields = crate::sim::field_names(e);
     let kind = match n.kind {
         "flock" => {
             let spec = flock::FlockSpec {

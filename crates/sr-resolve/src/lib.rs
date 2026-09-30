@@ -567,7 +567,10 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
     let url = t.url.as_deref().unwrap_or("").to_ascii_lowercase();
     let raster = [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| url.split('?').next().unwrap_or("").ends_with(e));
     let size = t.tile_size.map(|s| s as f64).unwrap_or(if raster { 256.0 } else { 512.0 });
-    let (zmin, zmax) = (t.min_zoom as u8, t.max_zoom.min(24) as u8);
+    let (zmin, zmax) = (t.min_zoom.get().min(24) as u8, t.max_zoom.get().min(24) as u8);
+    if zmin > zmax {
+        return Err(format!("tiles {}: minZoom {zmin} is above maxZoom {zmax}", t.id));
+    }
     // the maps drawing these tiles, with each basemap's detail
     let mut maps: Vec<(&m::MapAsset, f64)> = Vec::new();
     for a in doc.scene.assets.iter().flat_map(|a| a.children.iter()) {
@@ -581,8 +584,47 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
             }
         }
     }
+    // 3D maps (SREP 10): elevation tiles for a ground's terrain, over each frame's view at the DEM zoom
+    // the renderer draws; a globe's basemaps over the whole world, at the zoom its drape draws them
+    let map_of = |id: &str| {
+        doc.scene.assets.iter().flat_map(|a| a.children.iter()).find_map(|a| match a {
+            m::AssetsChild::Map(mp) if mp.id == id => Some(mp),
+            _ => None,
+        })
+    };
+    let mut terrains: Vec<(&m::MapAsset, u64)> = Vec::new();
     let mut set = std::collections::BTreeSet::new();
-    if maps.is_empty() {
+    for (_, n) in doc.composition_nodes() {
+        let m::Node::Object3D(o) = n else { continue };
+        let Some(mp) = o.map.as_deref().and_then(map_of) else { continue };
+        if o.terrain.as_deref() == Some(t.id.as_str()) {
+            terrains.push((mp, o.resolution.clamp(8, 256)));
+        }
+        if o.primitive == m::Object3DPrimitive::Globe {
+            // the drape's frame: the whole world, 2H × H map pixels
+            let h = mp.height as f64;
+            let (world, c) = sr_geo::view::Map::new(
+                sr_geo::view::Kind::Equirectangular,
+                None,
+                [2.0 * h, h],
+                &[],
+                0.0,
+                Some([0.0, 0.0]),
+            );
+            let proj = world.projection(&sr_geo::view::View { lon: c[0], lat: c[1], zoom: 0.0, rotation: 0.0 });
+            for c in &mp.children {
+                if let m::MapAssetChild::Basemap(b) = c {
+                    if b.tiles == t.id {
+                        let z = sr_eval::geo::basemap_zoom(&proj, size, b.detail, raster).clamp(zmin, zmax);
+                        for tile in sr_geo::tiles::visible(&proj, z) {
+                            set.insert((tile.z, tile.x, tile.y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if maps.is_empty() && terrains.is_empty() {
         return Ok(set);
     }
     let fps = doc.scene.project.fps.as_f64().max(1.0);
@@ -598,6 +640,18 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
             let proj = cam.map.projection(&view);
             let z = sr_eval::geo::basemap_zoom(&proj, size, *detail, raster).clamp(zmin, zmax);
             for tile in sr_geo::tiles::visible(&proj, z) {
+                set.insert((tile.z, tile.x, tile.y));
+            }
+        }
+        for (mp, res) in &terrains {
+            let cam = sr_eval::geo::camera(p, mp)?;
+            let props = g.elements.iter().find(|e| *e.key == *mp.id).map(|e| &e.props);
+            let animated = |name: &str| props.and_then(|p| p.get(name)).and_then(sr_eval::Value::as_num);
+            let proj = cam.map.projection(&sr_eval::geo::view(&cam, mp, &animated, time));
+            // a DEM pixel per grid cell: 256-pixel tiles at the map zoom less log2(cell), as the renderer
+            let cell = (mp.width.max(mp.height) as f64) / *res as f64;
+            let zd = (sr_geo::tiles::map_zoom(&proj) + 1.0 - cell.log2()).round().clamp(zmin as f64, zmax as f64) as u8;
+            for tile in sr_geo::tiles::visible(&proj, zd) {
                 set.insert((tile.z, tile.x, tile.y));
             }
         }

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- expect: R25-strokeColor -->
+<!-- expect: C59 -->
 <!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
 <scene version="1.2">
   <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
@@ -38,7 +38,7 @@
         <key time="0" value="0.4"/>
         <key time="2" value="0.6"/>
       </animate>
-      <transition type="crossfade" duration="0.3" alignment="end"/>
+      <transition type="luma" matte="card" duration="0.3"/>
     </segment>
     <segment fromMarker="drop" to="8" audio="resample"/>
     <segment audio="mute">
@@ -68,7 +68,7 @@
     <audio id="music" src="../media/music.wav" sha256="4872b61c768dff943f9e021453d816f06e35adc8edd88ef183301f03e31b94a5"/>
     <text id="title" text="{{headline}}" width="1600" height="200" size="72" style="heading" minSize="24" maxSize="96" letterSpacing="2"/>
     <text id="rich" width="800" height="100" size="40">
-      <span color="#ffffff" strokeColor="var(--nope)">Rich </span>
+      <span color="#ffffff">Rich </span>
       <span color="url(#sunset)" fontStyle="italic">text</span>
     </text>
     <vector id="badge" shape="star" width="200" height="200" fill="url(#sunset)" stroke="var(--brand)" strokeWidth="4"/>
