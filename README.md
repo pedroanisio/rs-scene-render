@@ -554,7 +554,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - `tiles` fetches the map tiles an online `<tiles url>` service provides for the document's views into a PMTiles cache (see [Maps](#maps)); it too needs `--allow-cloud`.
 - A result whose extension differs from what the provider makes is converted by FFmpeg.
 
-**Schema.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are part of the canonical schema, first implemented here, and other engines may not implement them yet.
+**Schema.** `captionTrack` gains `provider` (default `whisper`), `model` (default `base`) and `prompt` for the transcriber; these are part of the canonical schema, first implemented here. This is the only active scene-render engine; the C and Python engines are discontinued for now (sr-core SREP 25).
 
 **Tests.**
 - With the example provider: speech and its captions are made and pinned, the captions start where the track plays, the document validates afterwards with nothing else changed, and a second run makes nothing.
