@@ -475,20 +475,8 @@ impl EncodeSpec {
             a.push(p.display().to_string());
         }
         let container = self.container();
-        // chapters come from their own input, mapped by index after the video and audio inputs
-        let chapters = self.chapters.as_ref().filter(|_| {
-            self.pass.as_ref().is_none_or(|p| p.0 == 2)
-                && matches!(
-                    container,
-                    Some(Container::Mp4 | Container::Mov | Container::Mkv | Container::Webm | Container::M4a)
-                )
-        });
-        let mut map_chapters = Vec::new();
-        if let Some(c) = chapters {
-            let index = usize::from(!self.codec.is_audio_only()) + usize::from(audio.is_some());
-            s(&mut a, &["-f", "ffmetadata", "-i", &c.display().to_string()]);
-            map_chapters = vec!["-map_chapters".to_string(), index.to_string()];
-        }
+        let index = usize::from(!self.codec.is_audio_only()) + usize::from(audio.is_some());
+        let map_chapters = self.chapter_input(&mut a, container, index);
         if self.codec.is_audio_only() {
             let (codec, bits) = match container {
                 Some(Container::Mp3) => ("libmp3lame".to_string(), 0),
@@ -796,6 +784,22 @@ impl EncodeSpec {
     /// Joins video `segments`, each encoded with this spec (without audio) and each starting on a
     /// keyframe, into `self.path` in order: the video is stream-copied and `self.audio` is muxed
     /// as a single encode would mux it. `list` is where the concat list is written.
+    /// Adds the chapters' FFmetadata input to `a` as input `index`, when there are chapters, the pass
+    /// writes the file and the container holds chapters; returns the options that map them.
+    fn chapter_input(&self, a: &mut Vec<String>, container: Option<Container>, index: usize) -> Vec<String> {
+        let holds = matches!(
+            container,
+            Some(Container::Mp4 | Container::Mov | Container::Mkv | Container::Webm | Container::M4a)
+        );
+        match &self.chapters {
+            Some(c) if holds && self.pass.as_ref().is_none_or(|p| p.0 == 2) => {
+                a.extend(["-f".into(), "ffmetadata".into(), "-i".into(), c.display().to_string()]);
+                vec!["-map_chapters".into(), index.to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub fn join(&self, segments: &[PathBuf], list: &Path) -> Result<(), MediaError> {
         let quote = |p: &Path| format!("file '{}'\n", p.display().to_string().replace('\'', r"'\''"));
         std::fs::write(list, segments.iter().map(|p| quote(p)).collect::<String>())?;
@@ -811,6 +815,7 @@ impl EncodeSpec {
             a.push(p.display().to_string());
         }
         let container = self.container();
+        let map_chapters = self.chapter_input(&mut a, container, 1 + usize::from(audio.is_some()));
         a.extend(["-map", "0:v:0", "-c:v", "copy"].iter().map(|x| x.to_string()));
         if matches!(self.codec, Codec::H265) && matches!(container, Some(Container::Mp4 | Container::Mov)) {
             a.extend(["-tag:v".into(), "hvc1".into()]);
@@ -823,6 +828,7 @@ impl EncodeSpec {
             }
             a.push("-shortest".into());
         }
+        a.extend(map_chapters);
         self.tail(&mut a, container);
         if let Some(dir) = self.path.parent() {
             if !dir.as_os_str().is_empty() {

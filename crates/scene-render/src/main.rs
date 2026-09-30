@@ -1091,7 +1091,11 @@ fn encode(
                 last_line = std::time::Instant::now();
                 let fps = done as f64 / started.elapsed().as_secs_f64().max(1e-9);
                 let left = total.saturating_sub(done) as f64 / fps.max(1e-9);
-                eprintln!("{}: frame {done}/{total} ({:.1} %), {fps:.1} frames/s, about {left:.0} s left", o.path, 100.0 * done as f64 / total.max(1) as f64);
+                eprintln!(
+                    "{}: frame {done}/{total} ({:.1} %), {fps:.1} frames/s, about {left:.0} s left",
+                    o.path,
+                    100.0 * done as f64 / total.max(1) as f64
+                );
             }
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {

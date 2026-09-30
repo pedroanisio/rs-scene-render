@@ -330,10 +330,16 @@ impl Video<'_> {
         // opacity is at its maximum over the encode. A label fading in passes through every ratio down to
         // 1:1 on its way to rest, which is not what a reader faces; text held dim is judged dim.
         let mut lowest: std::collections::BTreeMap<String, (f64, f64, f64)> = Default::default(); // (opacity, ratio, t)
-        // text inside isolated groups: (frame index, opacity) where each appears (measured after the pass)
+                                                                                                  // text inside isolated groups: (frame index, opacity) where each appears (measured after the pass)
         let mut unprobed: std::collections::BTreeMap<String, Vec<(usize, f64)>> = Default::default();
-        let opacity_of = |g: &sr_eval::FrameGraph, id: &str| g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0);
-        let keep = |lowest: &mut std::collections::BTreeMap<String, (f64, f64, f64)>, id: &str, op: f64, ratio: f64, t: f64| {
+        let opacity_of = |g: &sr_eval::FrameGraph, id: &str| {
+            g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0)
+        };
+        let keep = |lowest: &mut std::collections::BTreeMap<String, (f64, f64, f64)>,
+                    id: &str,
+                    op: f64,
+                    ratio: f64,
+                    t: f64| {
             let e = lowest.entry(id.to_string()).or_insert((f64::MIN, f64::MAX, t));
             if op > e.0 + 1e-3 {
                 *e = (op, ratio, t);
@@ -713,7 +719,7 @@ pub fn deliver(
         let fit = output.max_file_size;
         let t_video = Instant::now();
         report.segments = 1;
-        let segments = segment_count(output, codec, opts, &ev, end - start).min(n as usize);
+        let workers = segment_count(output, codec, opts, &ev, end - start).min(n as usize);
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed
             let inter = tmp.join("intermediate.mkv");
@@ -775,12 +781,12 @@ pub fn deliver(
                     None => break,
                 }
             }
-        } else if segments > 1 {
-            // `segments` workers, each with its own renderer and encoder, take contiguous chunks of
+        } else if workers > 1 {
+            // `workers` workers, each with its own renderer and encoder, take contiguous chunks of
             // the range in order (about three per worker, so a heavy stretch does not hold up the
             // rest); every chunk starts on a keyframe and the chunks are joined by stream copy
             use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
-            let chunks = (segments * 3).min(((end - start) / 10.0).floor() as usize).max(segments).min(n as usize);
+            let chunks = (workers * 3).min(((end - start) / 10.0).floor() as usize).max(workers).min(n as usize);
             let bounds: Vec<usize> = (0..=chunks).map(|i| (i as u64 * n / chunks as u64) as usize).collect();
             let ext = report.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
             let parts: Vec<PathBuf> = (0..chunks).map(|i| tmp.join(format!("segment{i:04}.{ext}"))).collect();
@@ -789,13 +795,17 @@ pub fn deliver(
                 audio: None,
                 faststart: false,
                 metadata: Vec::new(),
+                chapters: None,
                 ..spec.clone()
             };
             let (audio, keep_alpha) = (video.renderer.audio.clone(), video.keep_alpha);
+            // with output segments, the frame time of each entry of `times`
+            let all_frames = video.segments.as_ref().map(|(_, f)| f.clone());
+            let map = segments.as_ref();
             let next = AtomicUsize::new(0);
             let done = AtomicU64::new(0);
             let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
-                let handles: Vec<_> = (0..segments)
+                let handles: Vec<_> = (0..workers)
                     .map(|_| {
                         sc.spawn(|| -> Result<(Report, String), DeliverError> {
                             // a device of its own: renderers sharing one device slowed each other
@@ -805,8 +815,24 @@ pub fn deliver(
                             renderer.representation = representation.clone();
                             renderer.burn_captions = output.burn_captions.clone();
                             renderer.audio = audio.clone();
+                            renderer.captions_off = map.is_some();
                             let stage = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
-                            let mut worker = Video { ev: &ev, renderer, stage, color, format, size, keep_alpha };
+                            let overlay = crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu)?;
+                            let mut worker = Video {
+                                ev: &ev,
+                                renderer,
+                                stage,
+                                color,
+                                format,
+                                size,
+                                keep_alpha,
+                                fps,
+                                reframe: p.reframe,
+                                segments: None,
+                                overlay,
+                                origin: if map.is_some() { 0.0 } else { output.start },
+                                join_tex: None,
+                            };
                             let (mut part, mut encoder) = (Report::default(), String::new());
                             loop {
                                 let i = next.fetch_add(1, Relaxed);
@@ -816,6 +842,9 @@ pub fn deliver(
                                 let chunk = (|| {
                                     let mut feeder = Feeder::start(&part_spec(i))?;
                                     worker.stage.seek((spec.start_number + bounds[i] as u64) as u32);
+                                    worker.segments = map
+                                        .zip(all_frames.as_ref())
+                                        .map(|(tm, f)| (tm, f[bounds[i]..bounds[i + 1]].to_vec()));
                                     worker.run(&times[bounds[i]..bounds[i + 1]], &mut part, |b| {
                                         done.fetch_add(1, Relaxed);
                                         feeder.send(b)
@@ -863,7 +892,7 @@ pub fn deliver(
             spec.join(&parts, &tmp.join("segments.txt"))?;
             report.frames = n;
             report.passes = 1;
-            report.segments = segments as u32;
+            report.segments = workers as u32;
         } else {
             let mut feeder = Feeder::start(&spec)?;
             let mut done = 0;

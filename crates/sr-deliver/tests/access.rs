@@ -155,7 +155,6 @@ fn contrast_is_measured_inside_isolated_groups() {
     assert!(matches!(faded, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck")), "{faded}");
 }
 
-
 #[test]
 fn text_fading_in_is_judged_at_rest() {
     let Some(dir) = fixtures() else { return };
