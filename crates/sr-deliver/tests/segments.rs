@@ -3,8 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
+/// One device for the whole binary: tests run in parallel, and creating a device per test has
+/// deadlocked and crashed the driver.
 fn gpu() -> Option<sr_gpu::Gpu> {
-    sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()
+    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
+    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
 }
 
 fn dir(name: &str) -> PathBuf {
@@ -158,4 +161,70 @@ fn motion_blur_spans_the_composition_time_of_the_shutter() {
     };
     let (slow, fast) = (smear("1", "0.4", "blur1"), smear("4", "1", "blur4"));
     assert!(fast >= slow + 4, "speed 4 smears wider: {fast} vs {slow} columns");
+}
+
+#[test]
+fn a_crossfade_joins_segments_each_through_its_own_clamped_map() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("join");
+    // blue (2..3) into red (0..1), a linear crossfade of 0.5 s centred on the join at 1 s: 0.75‥1.25
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="3" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence">
+            <segment from="2" to="3"><transition type="crossfade" duration="0.5" curve="linear"/></segment>
+            <segment from="0" to="1"/>
+          </output>
+          <composition>{CLOCK}</composition></scene>"##,
+        d.display()
+    );
+    let (frames, r) = render(&d, &xml);
+    assert_eq!(frames.len(), 20);
+    assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+    // outside the window each segment is alone
+    assert!(near(&frames[7], 32, 18, [0, 0, 255]), "{:?}", rgb(&frames[7], 32, 18));
+    assert!(near(&frames[13], 32, 18, [255, 0, 0]), "{:?}", rgb(&frames[13], 32, 18));
+    // before the join the incoming side is extended before its start and clamped at 0 (red), after
+    // it the outgoing side runs on past 3 s and is clamped there (blue): no frame is empty
+    let mix = |k: usize| {
+        let c = rgb(&frames[k], 32, 18);
+        assert!(c[1] < 3 && c[0] as u32 + c[2] as u32 > 200, "frame {k}: {c:?}");
+        c
+    };
+    let (a, b, c) = (mix(8), mix(10), mix(12));
+    assert!(a[2] > a[0] && c[0] > c[2], "{a:?} {c:?}");
+    assert!(b[0].abs_diff(b[2]) < 3, "{b:?}");
+}
+
+#[test]
+fn the_overlay_is_drawn_in_output_time_over_the_layout() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("overlay");
+    // a white square keyed on at output time 0.4 in the corner of a 36 × 36 cropped layout, over
+    // segments that play the composition at other times and speeds
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="3" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence" layout="sq" overlay="tag">
+            <segment from="2" to="3" speed="2"/>
+            <segment from="0" to="1"/>
+          </output>
+          <layouts><layout id="sq" width="36" height="36" reframe="crop"/></layouts>
+          <symbols><symbol id="tag">
+            <shape id="w" shape="rect" width="8" height="8" x="28" y="0" fill="#FFFFFF" opacity="0">
+              <animate property="opacity"><key time="0" value="0" interpolation="hold"/><key time="0.4" value="1"/></animate>
+            </shape>
+          </symbol></symbols>
+          <composition>{CLOCK}</composition></scene>"##,
+        d.display()
+    );
+    let (frames, r) = render(&d, &xml);
+    assert_eq!(frames.len(), 15);
+    assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+    assert!(near(&frames[3], 32, 4, [0, 0, 255]), "{:?}", rgb(&frames[3], 32, 4));
+    assert!(near(&frames[4], 32, 4, [255, 255, 255]), "{:?}", rgb(&frames[4], 32, 4));
+    // and in the second segment, still over the picture, which shows red below it
+    assert!(near(&frames[12], 32, 4, [255, 255, 255]) && near(&frames[12], 10, 20, [255, 0, 0]));
 }

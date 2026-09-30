@@ -209,16 +209,20 @@ struct Video<'a> {
     reframe: Option<sr_eval::program::Reframe>,
     /// The output's segments, and the frame time of each entry of `times`.
     segments: Option<(&'a crate::segments::TimeMap, Vec<crate::segments::FrameTime>)>,
+    /// The symbol drawn over every frame in output time.
+    overlay: Option<crate::overlay::Overlay>,
+    /// Output-sized working textures: the two placed sides of a join, and their combination.
+    join_tex: Option<[std::sync::Arc<sr_gpu::resources::Tex>; 3]>,
 }
 
 impl Video<'_> {
-    /// The placement of frame `k` in the output.
-    fn placement(&self, k: usize) -> sr_gpu::output::Placement {
+    /// The placement in the output of a frame of segment time `f` (the output's own frame without segments).
+    fn placement(&self, f: Option<&crate::segments::FrameTime>) -> sr_gpu::output::Placement {
         use sr_gpu::output::Placement;
         let Some(r) = self.reframe else { return Placement::default() };
-        let focus = match &self.segments {
-            Some((tm, frames)) => tm.focus(&frames[k], r.focus),
-            None => r.focus,
+        let focus = match (&self.segments, f) {
+            (Some((tm, _)), Some(f)) => tm.focus(f, r.focus),
+            _ => r.focus,
         };
         match r.mode {
             m::Reframe::Crop => Placement::Crop { focus },
@@ -226,6 +230,31 @@ impl Video<'_> {
             // the focus only places cropped or blurred-fit frames; a plain fit is centred
             _ => Placement::Fit { focus: [0.5, 0.5] },
         }
+    }
+}
+
+impl Video<'_> {
+    /// Renders the graph `g` of composition time `t`, the frame of segment time `f` when the output
+    /// has segments. A sub-frame sample dt seconds from the frame (motion blur, video lookups) is
+    /// taken dt output seconds away and mapped through the frame's segment, so blur covers the
+    /// composition time the shutter spans at that speed.
+    fn render_side(
+        &mut self,
+        g: &sr_eval::FrameGraph,
+        t: f64,
+        f: Option<&crate::segments::FrameTime>,
+    ) -> Result<sr_gpu::Frame, DeliverError> {
+        let (ev, p, fps) = (self.ev, self.ev.program(), self.fps);
+        let seg = self.segments.as_ref().zip(f).map(|((tm, _), f)| (*tm, *f));
+        let mut sub = |st: f64| match seg {
+            Some((tm, f)) if (st - t).abs() < 1.0 / fps => ev.evaluate(tm.sample(&f, st - t)),
+            _ => ev.evaluate(st),
+        };
+        let frame = self.renderer.render_with(g, p, Some(&mut sub));
+        if let Some(e) = frame.stats.errors.first() {
+            return Err(DeliverError::Render { time: t, message: e.clone() });
+        }
+        Ok(frame)
     }
 }
 
@@ -298,19 +327,10 @@ impl Video<'_> {
                     None => ev.evaluate(t),
                 };
                 let t1 = Instant::now();
-                // sub-frame samples (motion blur, video lookups) evaluate on this thread; in a
-                // segment, a sample dt seconds from the frame is taken dt output seconds away and
-                // mapped, so blur covers the composition time the shutter spans at that speed
-                let seg = self.segments.as_ref().map(|(tm, frames)| (*tm, frames[k]));
-                let fps_out = self.fps;
-                let mut sub = |st: f64| match seg {
-                    Some((tm, f)) if (st - t).abs() < 1.0 / fps_out => ev.evaluate(tm.sample(&f, st - t)),
-                    _ => ev.evaluate(st),
-                };
-                let frame = self.renderer.render_with(&g, p, Some(&mut sub));
-                if let Some(e) = frame.stats.errors.first() {
-                    return Err(DeliverError::Render { time: t, message: e.clone() });
-                }
+                let ft = self.segments.as_ref().map(|(_, frames)| frames[k]);
+                let tm = self.segments.as_ref().map(|(tm, _)| *tm);
+                let join = tm.zip(ft).and_then(|(tm, f)| tm.join_at(f.output));
+                let frame = self.render_side(&g, t, ft.as_ref())?;
                 unsupported.extend(frame.stats.unsupported.iter().cloned());
                 if let Some(det) = flash.as_mut() {
                     let cells = self.renderer.flash_grid(&frame.texture);
@@ -324,15 +344,53 @@ impl Video<'_> {
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
-                let placement = self.placement(k);
+                let mut picture = frame.texture.clone();
+                let mut placement = self.placement(ft.as_ref());
+                if let Some(j) = join {
+                    // both sides of a join, each through its own map and placed with its own focus,
+                    // combined in the output's frame
+                    let tex =
+                        self.join_tex.get_or_insert_with(|| [(); 3].map(|_| self.renderer.texture(self.size))).clone();
+                    let own = if ft.is_some_and(|f| f.segment == j.from.segment) { 0 } else { 1 };
+                    let sides = [j.from, j.to];
+                    self.stage.place(&frame.texture, &working, &tex[own], self.placement(Some(&sides[own])));
+                    let other = sides[1 - own];
+                    let go = ev.evaluate(other.composition);
+                    let f2 = self.render_side(&go, other.composition, Some(&other))?;
+                    unsupported.extend(f2.stats.unsupported.iter().cloned());
+                    self.stage.place(&f2.texture, &working, &tex[1 - own], self.placement(Some(&other)));
+                    let problems = self.renderer.join(
+                        p,
+                        &j.join.elem,
+                        &tex[0],
+                        &tex[1],
+                        j.progress,
+                        j.velocity,
+                        j.from.output,
+                        &tex[2],
+                    );
+                    unsupported.extend(problems);
+                    picture = tex[2].clone();
+                    placement = sr_gpu::output::Placement::default();
+                }
+                let out_t = ft.map_or(t, |f| f.output);
+                let over = match self.overlay.as_mut() {
+                    Some(o) => {
+                        let (tex, problems) = o.draw(&mut self.stage, out_t)?;
+                        unsupported.extend(problems);
+                        Some(tex)
+                    }
+                    None => None,
+                };
                 let next = self.stage.submit_placed(
-                    &frame.texture,
+                    &picture,
                     &working,
                     &self.color,
                     self.format,
                     self.size,
                     self.keep_alpha,
                     placement,
+                    over,
                 );
                 let t2 = Instant::now();
                 report.stage_seconds[0] += (t1 - t0).as_secs_f64();
@@ -582,9 +640,6 @@ pub fn deliver(
         let frame_times: Option<Vec<crate::segments::FrameTime>> = segments.as_ref().map(|tm| {
             tm.frames(fps).into_iter().filter(|f| f.output >= start - 1e-9 && f.output < end - 1e-9).collect()
         });
-        if segments.as_ref().is_some_and(|tm| tm.has_transitions()) {
-            report.unsupported.push("segment transitions are not drawn yet: the joins are cuts".into());
-        }
         let times: Vec<f64> = match &frame_times {
             Some(f) => f.iter().map(|f| f.composition).collect(),
             None => {
@@ -604,6 +659,8 @@ pub fn deliver(
             fps,
             reframe: p.reframe,
             segments: segments.as_ref().zip(frame_times),
+            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &gpu)?,
+            join_tex: None,
         };
         let audio_in = audio_file.clone().map(|f| (f, output.audio_codec.clone(), output.audio_bitrate));
         let mut spec = base_spec(output, &report.path, codec, size, fps, format, &color, audio_in, p, opts);

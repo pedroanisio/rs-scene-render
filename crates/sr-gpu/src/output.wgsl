@@ -20,7 +20,7 @@ struct Out {
   mode: u32,              // outside the frame: 0 transparent, 1 a blurred cover of the frame (fit-blur)
   bg_offset: vec2<f32>,   // cover placement (output pixels)
   bg_scale: f32,          // cover scale (output pixels per frame pixel)
-  pad1: u32,
+  overlay: u32,           // 1: composite the output-sized overlay over the placed frame
   pad2: u32,
   pad3: u32,
 };
@@ -30,6 +30,8 @@ struct Out {
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var<storage, read_write> dst: array<u32>;
 @group(0) @binding(4) var blurred: texture_2d<f32>;  // the frame, reduced and blurred (fit-blur)
+@group(0) @binding(5) var over: texture_2d<f32>;     // the output's overlay, output-sized
+@group(0) @binding(6) var placed_out: texture_storage_2d<rgba16float, write>;  // cs_place's target
 
 fn hash(p: vec2<u32>, s: u32) -> f32 {
   var h = p.x * 1664525u + p.y * 1013904223u + s * 2654435761u;
@@ -46,15 +48,24 @@ fn blurred_cover(p: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(blurred, samp, q / fs, 0.0);
 }
 
+// the frame placed in the output at output pixel centre p, in the working representation
+fn placed(p: vec2<f32>) -> vec4<f32> {
+  let q = (p - o.offset) / o.scale;
+  if (all(q >= vec2(0.0)) && all(q <= vec2<f32>(o.fsize))) {
+    return textureSampleLevel(frame, samp, q / vec2<f32>(o.fsize), 0.0);
+  } else if (o.mode == 1u) {
+    return blurred_cover(p);
+  }
+  return vec4(0.0);
+}
+
 // straight, output-encoded RGB and alpha of output pixel (x, y); linear premultiplied for float output
 fn px(x: u32, y: u32) -> vec4<f32> {
   let p = vec2<f32>(f32(x), f32(y)) + 0.5;
-  let q = (p - o.offset) / o.scale;
-  var c = vec4(0.0);
-  if (all(q >= vec2(0.0)) && all(q <= vec2<f32>(o.fsize))) {
-    c = textureSampleLevel(frame, samp, q / vec2<f32>(o.fsize), 0.0);
-  } else if (o.mode == 1u) {
-    c = blurred_cover(p);
+  var c = placed(p);
+  if (o.overlay == 1u) {
+    let v = textureLoad(over, vec2<u32>(x, y), 0);
+    c = v + c * (1.0 - v.a);
   }
   var a = clamp(c.a, 0.0, 1.0);
   var rgb = select(vec3(0.0), c.rgb / a, a > 0.0);
@@ -169,4 +180,11 @@ fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
   dst[wi] = word;
+}
+
+// the placed frame, unconverted: a transition then combines two of them in the output's frame
+@compute @workgroup_size(8, 8)
+fn cs_place(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= o.osize.x || id.y >= o.osize.y) { return; }
+  textureStore(placed_out, id.xy, placed(vec2<f32>(id.xy) + 0.5));
 }

@@ -9,6 +9,7 @@
 pub mod access;
 pub mod audio;
 pub mod destinations;
+pub mod overlay;
 pub mod pipeline;
 pub mod segments;
 

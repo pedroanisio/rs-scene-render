@@ -6,7 +6,9 @@
 //! `timeRemap` curve. Outside a segment (at a transition) a span continues
 //! linearly and a remap continues with the slope of its end keys; every
 //! composition time is then clamped to the project. Frame k is at output time
-//! k/fps and belongs to the segment whose half-open interval holds it.
+//! k/fps and belongs to the segment whose half-open interval holds it. A
+//! segment's `transition` child joins it to the next over a window around the
+//! join, in which both sides are drawn, each through its own map.
 
 use sr_eval::channel::{Channel, ChannelSpec, Lookup};
 use sr_eval::value::PropKind;
@@ -42,11 +44,35 @@ pub struct Segment {
     pub elem: m::Segment,
 }
 
+/// A transition from segment `from` to the next, over output times [window.0, window.1).
+#[derive(Debug, Clone)]
+pub struct Join {
+    pub from: usize,
+    pub window: (f64, f64),
+    ease: sr_eval::curve::Ease,
+    /// The transition element.
+    pub elem: m::Transition,
+}
+
+/// Both sides of a frame inside a join's window, and the transition's eased progress.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinFrame<'a> {
+    pub join: &'a Join,
+    pub from: FrameTime,
+    pub to: FrameTime,
+    /// Eased progress in [0, 1].
+    pub progress: f64,
+    /// d(progress)/dt in 1/s of output time.
+    pub velocity: f64,
+}
+
 /// The segments of an output.
 #[derive(Debug, Clone)]
 pub struct TimeMap {
     /// Segments in playing order.
     pub segments: Vec<Segment>,
+    /// Transitions between consecutive segments, in order.
+    pub joins: Vec<Join>,
     /// Output duration: the sum of the segments' durations.
     pub duration: f64,
     /// The project's duration: composition times are clamped to [0, project].
@@ -143,7 +169,27 @@ impl TimeMap {
         if segments.is_empty() {
             return Ok(None);
         }
-        Ok(Some(TimeMap { segments, duration: start, project: p.duration }))
+        // a transition joins its segment to the next over δ = min(duration, dᵢ, dᵢ₊₁), placed on the
+        // join by its alignment; the last segment's transition has nothing to join
+        let mut joins = Vec::new();
+        for (i, w) in segments.windows(2).enumerate() {
+            let Some(tr) = w[0].elem.children.iter().find_map(|c| match c {
+                m::SegmentChild::Transition(t) => Some(t),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let cut = w[1].start;
+            let d = tr.duration.get().min(w[0].duration).min(w[1].duration);
+            let window = match tr.alignment {
+                m::TransitionAlignment::Center => (cut - d / 2.0, cut + d / 2.0),
+                m::TransitionAlignment::End => (cut - d, cut),
+                m::TransitionAlignment::Start => (cut, cut + d),
+            };
+            let ease = sr_eval::curve::resolve(tr.curve, &Default::default());
+            joins.push(Join { from: i, window, ease, elem: tr.clone() });
+        }
+        Ok(Some(TimeMap { segments, joins, duration: start, project: p.duration }))
     }
 
     /// Composition time of segment `i` at local time `u`, extended past the segment's ends and clamped.
@@ -193,9 +239,31 @@ impl TimeMap {
         [pick(0), pick(1)]
     }
 
-    /// Whether any segment has a transition child.
+    /// Whether any two segments are joined by a transition.
     pub fn has_transitions(&self) -> bool {
-        self.segments.iter().any(|s| s.elem.children.iter().any(|c| matches!(c, m::SegmentChild::Transition(_))))
+        !self.joins.is_empty()
+    }
+
+    /// Segment `i` at output time `t`, which may lie outside it (extended and clamped).
+    fn side(&self, i: usize, t: f64) -> FrameTime {
+        let local = t - self.segments[i].start;
+        FrameTime { output: t, segment: i, local, composition: self.composition(i, local) }
+    }
+
+    /// Both sides of output time `t` when it is inside a join's window.
+    pub fn join_at(&self, t: f64) -> Option<JoinFrame<'_>> {
+        let join = self.joins.iter().find(|j| t >= j.window.0 - 1e-9 && t < j.window.1 - 1e-9)?;
+        let (w0, w1) = join.window;
+        let u = ((t - w0) / (w1 - w0)).clamp(0.0, 1.0);
+        let (lo, hi) = ((u - 1e-3).max(0.0), (u + 1e-3).min(1.0));
+        let velocity = (join.ease.apply(hi) - join.ease.apply(lo)) / (hi - lo) / (w1 - w0);
+        Some(JoinFrame {
+            join,
+            from: self.side(join.from, t),
+            to: self.side(join.from + 1, t),
+            progress: join.ease.apply(u).clamp(0.0, 1.0),
+            velocity,
+        })
     }
 
     /// Whether any segment moves the reframing focus.
@@ -297,5 +365,32 @@ mod tests {
         assert_eq!(tm.focus(&tm.at(0.5), [0.5, 0.5]), [0.2, 0.5]);
         assert_eq!(tm.focus(&tm.at(1.25), [0.5, 0.5]), [0.5, 0.25]);
         assert!(tm.has_focus() && !tm.has_transitions());
+    }
+
+    #[test]
+    fn joins_take_their_window_from_the_alignment_and_the_shorter_side() {
+        let (p, o) = program(
+            r#"<output path="a.mp4" codec="h264">
+                 <segment from="2" to="3"><transition type="crossfade" duration="0.5" curve="linear"/></segment>
+                 <segment from="0" to="1"><transition type="wipe" duration="1" alignment="end"/></segment>
+                 <segment from="1" to="1.2"><transition type="crossfade"/></segment>
+               </output>"#,
+        );
+        let tm = TimeMap::of(p.program(), &o).unwrap().unwrap();
+        // centred on the join at 1: 0.75‥1.25; the second is capped by the next segment's 0.2 s and ends
+        // on its join at 2; the last segment's transition has nothing to join
+        assert_eq!(tm.joins.len(), 2);
+        assert_eq!(tm.joins[0].window, (0.75, 1.25));
+        let w = tm.joins[1].window;
+        assert!((w.0 - 1.8).abs() < 1e-12 && (w.1 - 2.0).abs() < 1e-12, "{w:?}");
+        // before the join both sides are drawn: the incoming one extended before its start, clamped at 0
+        let j = tm.join_at(0.8).unwrap();
+        assert_eq!((j.from.segment, j.to.segment), (0, 1));
+        assert!((j.from.composition - 2.8).abs() < 1e-12);
+        assert_eq!(j.to.composition, 0.0);
+        assert!((j.progress - 0.1).abs() < 1e-9 && (j.velocity - 2.0).abs() < 1e-6);
+        // after it, the outgoing one runs on past its end
+        assert!((tm.join_at(1.1).unwrap().from.composition - 3.0).abs() < 1e-12);
+        assert!(tm.join_at(0.7).is_none() && tm.join_at(1.25).is_none());
     }
 }

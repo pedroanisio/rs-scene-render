@@ -1354,6 +1354,117 @@ impl Renderer {
         self.frame_rect = None;
     }
 
+    /// A texture of `size` the caller keeps across renders (the placed sides of a join).
+    pub fn texture(&self, size: [u32; 2]) -> Arc<Tex> {
+        Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "kept"))
+    }
+
+    /// Combines two finished, frame-sized pictures with a transition element into `into`: the join
+    /// between two segments of an output (SREP 13). `time` is output time. Returns what was not drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn join(
+        &mut self,
+        p: &Program,
+        tr: &m::Transition,
+        from: &Arc<Tex>,
+        to: &Arc<Tex>,
+        progress: f64,
+        velocity: f64,
+        time: f64,
+        into: &Tex,
+    ) -> Vec<String> {
+        let mut plan = Plan::default();
+        let a = Attrs { e: tr, props: None };
+        let color = a.paint("color").and_then(|v| self.color_value(&v)).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let who = tr.id.clone().unwrap_or_else(|| "segment transition".into());
+        let mut problems = Vec::new();
+        if tr.matte.is_some() {
+            problems.push(format!("{who}: a matte names a node, and a join between segments has none; no matte"));
+        }
+        let base = Self::base_dir(p);
+        let mut kind = tr.r#type.as_str().to_string();
+        let shader = match &tr.shader {
+            Some(src) if kind == "shader" => match crate::glsl::load_source(src, &base) {
+                Ok((code, _)) => {
+                    Some((code, std::path::PathBuf::from(if src.starts_with("data:") { "data:" } else { src })))
+                }
+                Err(err) => {
+                    problems.push(format!("{who}: shader {src}: {err}; crossfade"));
+                    None
+                }
+            },
+            _ => None,
+        };
+        if kind == "shader" && shader.is_none() {
+            kind = "crossfade".to_string();
+        }
+        let size = into.size;
+        let (fw, fh) = (size[0] as f64, size[1] as f64);
+        let to_uv = move |q: [f64; 2]| [q[0] / fw, q[1] / fh];
+        let (working, tokens) = (self.working, self.tokens.clone());
+        let colorf = move |v: &Value| -> Option<[f64; 4]> {
+            match v {
+                Value::Color(c) => Some(working.from_literal(*c)),
+                Value::Str(s) if s.starts_with("token:") => tokens.get(&s[6..]).map(|c| working.from_literal(*c)),
+                _ => None,
+            }
+        };
+        let gradient = |_: &Value| None;
+        let fps = fps_of(p);
+        let cx = Cx {
+            px: 1.0,
+            scale: 1.0,
+            lin: [1.0, 0.0, 0.0, 1.0],
+            to_uv: &to_uv,
+            center: [0.5, 0.5],
+            content: None,
+            time,
+            frame: (time * fps).round() as i64,
+            color: &colorf,
+            gradient: &gradient,
+            source: None,
+            lights: Vec::new(),
+            working: self.working,
+            base: &base,
+            fps,
+            local_time: time,
+            offset: [0.0, 0.0],
+            frame_size: [fw, fh],
+            node: who.clone(),
+            named: HashMap::new(),
+            audio: self.audio.clone(),
+            seed: self.seed,
+        };
+        let mut b = self.builder(&plan);
+        let shader_ref = shader.as_ref().map(|(c, p)| (c.clone(), p.as_path()));
+        let mut r = b.transition(&kind, from, to, None, progress, tr, &a, color, shader_ref, velocity, Some(&cx));
+        if kind == "shader" && r.is_err() {
+            if let Err(msg) = &r {
+                b.problems.push(msg.clone());
+            }
+            r = b.transition("crossfade", from, to, None, progress, tr, &a, color, None, 0.0, None);
+        }
+        let (passes, temps, bproblems) =
+            (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
+        Self::finish_builder(&mut plan, passes, temps, bproblems, &who);
+        let out = match r {
+            Ok(t) => t,
+            Err(msg) => {
+                plan.stats.unsupported.push(format!("{who}: {msg}"));
+                to.clone()
+            }
+        };
+        // the result is a pooled temporary: copy it out before the pool hands it to the next render
+        let keep = out.clone();
+        let stats = self.execute(plan, 0, None, &[]);
+        let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("join") });
+        Self::copy(&mut enc, &keep, into, [0, 0, size[0], size[1]]);
+        self.last_submit = Some(self.gpu.queue.submit([enc.finish()]));
+        problems.extend(stats.unsupported);
+        problems.extend(stats.errors);
+        problems
+    }
+
     /// Scene-referred finishing: looks (LUT or ASC CDL), exposure and tone mapping on the frame.
     pub(super) fn finishing(&mut self, plan: &mut Plan, p: &Program, frame: &Arc<Tex>) {
         let Some(cm) = p.scene.color_management.as_ref() else { return };
