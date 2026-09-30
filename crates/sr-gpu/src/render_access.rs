@@ -9,6 +9,17 @@
 
 use super::*;
 
+/// The integer frame-space rectangle (x, y, w, h) covering a node's box, grown by `pad`, clamped to the frame.
+fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, pad: f64) -> Option<[u32; 4]> {
+    let [nw, nh] = n.size?;
+    let pts = [[0.0, 0.0], [nw, 0.0], [nw, nh], [0.0, nh]].map(|p| n.world.apply(p));
+    let x0 = (pts.iter().map(|p| p[0]).fold(f64::MAX, f64::min) - pad).floor().clamp(0.0, w as f64);
+    let y0 = (pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min) - pad).floor().clamp(0.0, h as f64);
+    let x1 = (pts.iter().map(|p| p[0]).fold(f64::MIN, f64::max) + pad).ceil().clamp(0.0, w as f64);
+    let y1 = (pts.iter().map(|p| p[1]).fold(f64::MIN, f64::max) + pad).ceil().clamp(0.0, h as f64);
+    (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then(|| [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
+}
+
 impl Renderer {
     fn is_text_layer(&self, ctx: &Ctx, n: &FrameNode) -> bool {
         n.kind == "layer"
@@ -149,18 +160,12 @@ impl Renderer {
         out
     }
 
-    /// WCAG relative luminance of a stored working-space pixel (composited over black).
+    /// WCAG relative luminance of a stored working-space pixel (composited over black). Encoding to
+    /// display sRGB and decoding it again, as WCAG's formula reads, cancels out on the clamped range,
+    /// so the luminance is taken from the clamped linear sRGB directly (no transfer-function pows).
     fn luminance(&self, p: [f32; 4]) -> f64 {
-        let d = self.working.to_display_srgb([p[0] as f64, p[1] as f64, p[2] as f64]);
-        let lin = |c: f64| {
-            let c = c.clamp(0.0, 1.0);
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * lin(d[0]) + 0.7152 * lin(d[1]) + 0.0722 * lin(d[2])
+        let l = self.working.to_display_linear_srgb([p[0] as f64, p[1] as f64, p[2] as f64]);
+        0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]
     }
 
     /// Contrast ratio of the text a probe covered against the backdrop behind its glyphs; the project
@@ -179,8 +184,25 @@ impl Renderer {
 
     /// Contrast of the pixels that changed between `before` (backdrop) and `after` (with text).
     fn contrast_of(&self, before: &[[f32; 4]], after: &[[f32; 4]]) -> Option<f64> {
-        let lb: Vec<f64> = before.iter().map(|p| self.luminance(*p)).collect();
-        let la: Vec<f64> = after.iter().map(|p| self.luminance(*p)).collect();
+        // Only pixels the text changed can be glyphs. Find them on the stored values first and take the
+        // luminance (two transfer-function pows per channel) of those alone: over a full frame the
+        // luminance of every pixel cost ~24 million pows per measured text and dominated encodes.
+        // Film grain, vignettes and later layers change every pixel a little, so keep the pixels whose raw
+        // change is at least a fifth of the largest: a superset of the glyph interiors selected below.
+        let n = before.len().min(after.len());
+        let raw: Vec<f32> = (0..n)
+            .map(|k| {
+                let (a, b) = (before[k], after[k]);
+                (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs()
+            })
+            .collect();
+        let top = raw.iter().copied().fold(0.0f32, f32::max);
+        if top <= 1e-6 {
+            return None;
+        }
+        let changed: Vec<usize> = (0..n).filter(|&k| raw[k] >= top * 0.2).collect();
+        let lb: Vec<f64> = changed.iter().map(|&k| self.luminance(before[k])).collect();
+        let la: Vec<f64> = changed.iter().map(|&k| self.luminance(after[k])).collect();
         let delta: Vec<f64> = lb.iter().zip(&la).map(|(a, b)| (a - b).abs()).collect();
         let max = delta.iter().copied().fold(0.0, f64::max);
         if max < 1e-4 {
@@ -215,11 +237,13 @@ impl Renderer {
         // read each frame back before the next render: frame targets may be pooled
         let with = self.render_with(g, p, Some(&mut *sub)).texture;
         let [w, h] = with.size;
-        let after = self.read_rect(&with, [0, 0, w, h]);
+        // read back only around the node (its box in frame space, plus room for glows), not the whole frame
+        let r = node_rect(&g.nodes[k], w, h, 48.0).unwrap_or([0, 0, w, h]);
+        let after = self.read_rect(&with, r);
         let mut hidden = g.clone();
         hidden.nodes[k].draw = false;
         let without = self.render_with(&hidden, p, Some(&mut *sub)).texture;
-        let before = self.read_rect(&without, [0, 0, w, h]);
+        let before = self.read_rect(&without, r);
         self.contrast_probe = probe;
         self.contrast_of(&before, &after)
     }

@@ -424,6 +424,14 @@ impl Working {
         }
     }
 
+    /// Converts a stored working value to linear sRGB, clamped to the display range: what
+    /// `to_display_srgb` encodes, before the transfer function.
+    pub fn to_display_linear_srgb(&self, c: [f64; 3]) -> [f64; 3] {
+        let lin = self.to_linear(c);
+        let m = convert(self.space, ColorSpace::LinearSrgb);
+        apply(&m, lin).map(|v| v.clamp(0.0, 1.0))
+    }
+
     /// Converts a stored working value to 8-bit-ready display sRGB (encoded, straight).
     pub fn to_display_srgb(&self, c: [f64; 3]) -> [f64; 3] {
         let lin = self.to_linear(c);

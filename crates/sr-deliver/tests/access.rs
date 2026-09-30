@@ -154,3 +154,24 @@ fn contrast_is_measured_inside_isolated_groups() {
     let faded = deliver(&with("#FFFFFF", r#"isolate="true" opacity="0.12""#)).unwrap_err();
     assert!(matches!(faded, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck")), "{faded}");
 }
+
+
+#[test]
+fn text_fading_in_is_judged_at_rest() {
+    let Some(dir) = fixtures() else { return };
+    if sr_gpu::Gpu::new().is_err() {
+        return;
+    }
+    // A label fading in passes through every ratio down to 1:1 on its way to rest; the check judges
+    // it at its most visible, so white text on black passes while it fades in, in a group or not.
+    for group in ["", r#"isolate="true""#] {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="64" fps="30" duration="0.4" background="#000000"/><metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata><output id="o" path="out/f.mp4" codec="h264" preset="ultrafast" audio="false"/><assets><text id="label" text="AB" width="56" height="32" size="28" color="#FFFFFF" font="DejaVu Sans"/></assets><composition><group id="g" {group}><layer id="t" asset="label" x="4" y="16"><animate property="opacity"><key time="0" value="0"/><key time="0.3" value="1"/></animate></layer></group></composition></scene>"##
+        );
+        let path = dir.join("fade.scene.xml");
+        std::fs::write(&path, xml).unwrap();
+        let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = deliver(&doc).unwrap_or_else(|e| panic!("group {group:?}: {e}"));
+        assert!(r.accessibility.is_empty(), "group {group:?}: {:?}", r.accessibility);
+    }
+}

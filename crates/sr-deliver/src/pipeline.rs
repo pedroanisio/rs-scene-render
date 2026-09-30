@@ -231,9 +231,21 @@ impl Video<'_> {
         let min_contrast = acc.as_ref().map(|a| a.min_contrast.get()).unwrap_or(4.5);
         let mut flash = (flash_mode != "off").then(crate::access::FlashDetector::default);
         self.renderer.contrast_probe = contrast_mode != "off";
-        let mut lowest: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
-        // text inside isolated groups: frame indices where each appears (measured after the pass)
-        let mut unprobed: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+        // Each text is judged at its most visible: the lowest ratio among the frames where its accumulated
+        // opacity is at its maximum over the encode. A label fading in passes through every ratio down to
+        // 1:1 on its way to rest, which is not what a reader faces; text held dim is judged dim.
+        let mut lowest: std::collections::BTreeMap<String, (f64, f64, f64)> = Default::default(); // (opacity, ratio, t)
+        // text inside isolated groups: (frame index, opacity) where each appears (measured after the pass)
+        let mut unprobed: std::collections::BTreeMap<String, Vec<(usize, f64)>> = Default::default();
+        let opacity_of = |g: &sr_eval::FrameGraph, id: &str| g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0);
+        let keep = |lowest: &mut std::collections::BTreeMap<String, (f64, f64, f64)>, id: &str, op: f64, ratio: f64, t: f64| {
+            let e = lowest.entry(id.to_string()).or_insert((f64::MIN, f64::MAX, t));
+            if op > e.0 + 1e-3 {
+                *e = (op, ratio, t);
+            } else if (op - e.0).abs() <= 1e-3 && ratio < e.1 {
+                *e = (e.0, ratio, t);
+            }
+        };
         let ev = self.ev;
         // Without a simulation, evaluation is a pure function of time, so a helper thread
         // evaluates the next frame while this one renders: the channel holds one graph and
@@ -274,13 +286,10 @@ impl Video<'_> {
                     det.push(t, &cells);
                 }
                 for id in &frame.stats.contrast_unprobed {
-                    unprobed.entry(id.clone()).or_default().push(k);
+                    unprobed.entry(id.clone()).or_default().push((k, opacity_of(&g, id)));
                 }
                 for (id, ratio) in &frame.stats.contrast {
-                    let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
-                    if *ratio < e.0 {
-                        *e = (*ratio, t);
-                    }
+                    keep(&mut lowest, id, opacity_of(&g, id), *ratio, t);
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
@@ -309,16 +318,16 @@ impl Video<'_> {
         report.unsupported = unsupported.into_iter().collect();
         // text the inline probe could not reach: measure once, at the middle of the longest run of
         // frames in which it is drawn, by rendering that frame with and without it
-        for (id, frames) in &unprobed {
-            let Some(t) = middle_of_longest_run(frames).map(|k| times[k]) else { continue };
+        for (id, seen) in &unprobed {
+            // among the frames where the text is at its most visible, the middle of the longest run
+            let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
+            let frames: Vec<usize> = seen.iter().filter(|s| s.1 >= top - 1e-3).map(|s| s.0).collect();
+            let Some(t) = middle_of_longest_run(&frames).map(|k| times[k]) else { continue };
             let g = self.ev.evaluate(t);
             let ev = &self.ev;
             let mut sub = |st: f64| ev.evaluate(st);
             if let Some(ratio) = self.renderer.contrast_with_without(&g, p, id, &mut sub) {
-                let e = lowest.entry(id.clone()).or_insert((f64::MAX, t));
-                if ratio < e.0 {
-                    *e = (ratio, t);
-                }
+                keep(&mut lowest, id, top, ratio, t);
             }
         }
         // accessibility verdicts
@@ -333,7 +342,7 @@ impl Video<'_> {
         if let Some(msg) = flash.as_ref().and_then(|d| d.verdict()) {
             fail(&flash_mode, msg, report);
         }
-        for (id, (ratio, at)) in &lowest {
+        for (id, (_, ratio, at)) in &lowest {
             if *ratio < min_contrast {
                 fail(&contrast_mode, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
             }

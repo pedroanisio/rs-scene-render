@@ -1075,12 +1075,23 @@ fn encode(
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut failed = false;
     for o in &outputs {
+        // On a terminal: a live counter. Otherwise (a log file, a CI job) a line about every 10 s with the
+        // rate and the time left, so a long encode never runs blind.
+        let started = std::time::Instant::now();
+        let mut last_line = started;
         let mut progress = |done: u64, total: u64| {
-            if tty && (done % 10 == 0 || done == total) {
-                eprint!("\r{}: frame {done}/{total}", o.path);
-                if done == total {
-                    eprintln!();
+            if tty {
+                if done % 10 == 0 || done == total {
+                    eprint!("\r{}: frame {done}/{total}", o.path);
+                    if done == total {
+                        eprintln!();
+                    }
                 }
+            } else if done > 0 && (last_line.elapsed().as_secs_f64() >= 10.0 || done == total) {
+                last_line = std::time::Instant::now();
+                let fps = done as f64 / started.elapsed().as_secs_f64().max(1e-9);
+                let left = total.saturating_sub(done) as f64 / fps.max(1e-9);
+                eprintln!("{}: frame {done}/{total} ({:.1} %), {fps:.1} frames/s, about {left:.0} s left", o.path, 100.0 * done as f64 / total.max(1) as f64);
             }
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
