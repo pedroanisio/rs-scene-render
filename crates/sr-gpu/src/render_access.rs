@@ -17,7 +17,7 @@ fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, pad: f64) -> Option<[u32; 4
     let y0 = (pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min) - pad).floor().clamp(0.0, h as f64);
     let x1 = (pts.iter().map(|p| p[0]).fold(f64::MIN, f64::max) + pad).ceil().clamp(0.0, w as f64);
     let y1 = (pts.iter().map(|p| p[1]).fold(f64::MIN, f64::max) + pad).ceil().clamp(0.0, h as f64);
-    (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then(|| [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
+    (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then_some([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
 }
 
 impl Renderer {
