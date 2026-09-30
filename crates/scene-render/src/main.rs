@@ -64,6 +64,10 @@ enum EvalFormat {
     Json,
 }
 
+fn parse_parallel(s: &str) -> Result<sr_deliver::Parallel, String> {
+    sr_deliver::Parallel::parse(s).ok_or_else(|| format!("expected auto or a positive count, got {s:?}"))
+}
+
 fn parse_param(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -224,6 +228,11 @@ enum Command {
         /// Skip destinations.
         #[arg(long)]
         no_upload: bool,
+        /// Time segments of a video output rendered and encoded at once, then joined without
+        /// re-encoding: `auto` (3 with a hardware encoder, else half the cores up to 4, fewer for
+        /// short ranges) or a count; 1 renders serially.
+        #[arg(long, value_name = "auto|N", value_parser = parse_parallel, default_value = "auto")]
+        parallel: sr_deliver::Parallel,
         /// Parameter value, repeatable: --param id=value.
         #[arg(long = "param", value_name = "ID=VALUE", value_parser = parse_param)]
         params: Vec<(String, String)>,
@@ -1094,8 +1103,9 @@ fn encode(
                     let [e, s, w, b] = r.stage_seconds;
                     writeln!(
                         out.w,
-                        "  {} frames {}x{} at {} fps in {:.2} s: {:.1} frames/s (evaluate {:.2} s, render {:.2} s of which decode wait {:.2} s and vector geometry {:.2} s, GPU and readback wait {:.2} s, encoder blocked {:.2} s), {} pass(es)",
-                        r.frames, r.size[0], r.size[1], r.fps, r.seconds, r.render_fps, e, s, r.decode_wait_seconds, r.vector_seconds, w, b, r.passes
+                        "  {} frames {}x{} at {} fps in {:.2} s: {:.1} frames/s (evaluate {:.2} s, render {:.2} s of which decode wait {:.2} s and vector geometry {:.2} s, GPU and readback wait {:.2} s, encoder blocked {:.2} s), {} pass(es){}",
+                        r.frames, r.size[0], r.size[1], r.fps, r.seconds, r.render_fps, e, s, r.decode_wait_seconds, r.vector_seconds, w, b, r.passes,
+                        if r.segments > 1 { format!(", {} segments at once (stage times summed over them)", r.segments) } else { String::new() }
                     )?;
                 }
                 if let Some(tp) = r.true_peak {
@@ -1192,6 +1202,7 @@ fn main() -> ExitCode {
             start,
             end,
             no_upload,
+            parallel,
             params,
             row,
             data,
@@ -1207,6 +1218,7 @@ fn main() -> ExitCode {
                 upload: !no_upload,
                 params,
                 row: row.map(|r| (data, r)),
+                parallel,
             };
             encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
         }

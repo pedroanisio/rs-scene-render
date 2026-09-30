@@ -11,7 +11,7 @@ pub mod audio;
 pub mod destinations;
 pub mod pipeline;
 
-pub use pipeline::{adhoc_output, deliver, Options, Report};
+pub use pipeline::{adhoc_output, deliver, Options, Parallel, Report};
 
 /// Delivery errors.
 #[derive(Debug, thiserror::Error)]

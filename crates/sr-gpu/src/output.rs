@@ -198,6 +198,12 @@ impl OutputStage {
         }
     }
 
+    /// Makes the next submitted frame frame number `frame` of the programme: it seeds that
+    /// frame's dither, so a frame converts the same whichever frame a render started from.
+    pub fn seek(&mut self, frame: u32) {
+        self.frame_index = frame;
+    }
+
     /// Starts converting `frame` to `size` in `format`; returns a pending readback.
     pub fn submit(
         &mut self,

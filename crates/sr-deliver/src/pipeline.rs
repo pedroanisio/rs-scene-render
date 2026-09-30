@@ -39,6 +39,28 @@ pub struct Options {
     pub params: Vec<(String, String)>,
     /// Data row.
     pub row: Option<(Option<String>, usize)>,
+    /// Segments rendered at once for a single-pass video output.
+    pub parallel: Parallel,
+}
+
+/// How many time segments of a video output render and encode at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Parallel {
+    /// 3 with a hardware encoder, otherwise half the cores (at most 4); fewer for short ranges.
+    #[default]
+    Auto,
+    /// Exactly this many (1 renders serially).
+    Count(u32),
+}
+
+impl Parallel {
+    /// `auto` or a positive count.
+    pub fn parse(s: &str) -> Option<Parallel> {
+        match s {
+            "auto" => Some(Parallel::Auto),
+            n => n.parse().ok().filter(|&n| n > 0).map(Parallel::Count),
+        }
+    }
 }
 
 impl Default for Options {
@@ -52,6 +74,7 @@ impl Default for Options {
             upload: true,
             params: Vec::new(),
             row: None,
+            parallel: Parallel::Auto,
         }
     }
 }
@@ -100,6 +123,8 @@ pub struct Report {
     pub uploads: Vec<String>,
     /// Encoded passes (2 for two-pass, more when fitting a file size).
     pub passes: u32,
+    /// Time segments rendered and encoded at once (1 for a serial render).
+    pub segments: u32,
 }
 
 /// An `<output>` element built from command-line settings.
@@ -513,6 +538,8 @@ pub fn deliver(
         spec.start_number = (start * fps).round() as u64;
         let fit = output.max_file_size;
         let t_video = Instant::now();
+        report.segments = 1;
+        let segments = segment_count(output, codec, opts, &ev, end - start).min(n as usize);
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed
             let inter = tmp.join("intermediate.mkv");
@@ -537,6 +564,7 @@ pub fn deliver(
             };
             let mut feeder = Feeder::start(&ispec)?;
             let mut done = 0;
+            video.stage.seek(spec.start_number as u32);
             video.run(&times, &mut report, |b| {
                 done += 1;
                 progress(done, n);
@@ -572,9 +600,96 @@ pub fn deliver(
                     None => break,
                 }
             }
+        } else if segments > 1 {
+            // `segments` workers, each with its own renderer and encoder, take contiguous chunks of
+            // the range in order (about three per worker, so a heavy stretch does not hold up the
+            // rest); every chunk starts on a keyframe and the chunks are joined by stream copy
+            use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+            let chunks = (segments * 3).min(((end - start) / 10.0).floor() as usize).max(segments).min(n as usize);
+            let bounds: Vec<usize> = (0..=chunks).map(|i| (i as u64 * n / chunks as u64) as usize).collect();
+            let ext = report.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
+            let parts: Vec<PathBuf> = (0..chunks).map(|i| tmp.join(format!("segment{i:04}.{ext}"))).collect();
+            let part_spec = |i: usize| EncodeSpec {
+                path: parts[i].clone(),
+                audio: None,
+                faststart: false,
+                metadata: Vec::new(),
+                ..spec.clone()
+            };
+            let (audio, keep_alpha) = (video.renderer.audio.clone(), video.keep_alpha);
+            let next = AtomicUsize::new(0);
+            let done = AtomicU64::new(0);
+            let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
+                let handles: Vec<_> = (0..segments)
+                    .map(|_| {
+                        sc.spawn(|| -> Result<(Report, String), DeliverError> {
+                            let mut renderer = Renderer::new(gpu.clone(), p);
+                            renderer.representation = representation.clone();
+                            renderer.burn_captions = output.burn_captions.clone();
+                            renderer.audio = audio.clone();
+                            let stage = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
+                            let mut worker = Video { ev: &ev, renderer, stage, color, format, size, keep_alpha };
+                            let (mut part, mut encoder) = (Report::default(), String::new());
+                            loop {
+                                let i = next.fetch_add(1, Relaxed);
+                                if i >= chunks {
+                                    return Ok((part, encoder));
+                                }
+                                let chunk = (|| {
+                                    let mut feeder = Feeder::start(&part_spec(i))?;
+                                    worker.stage.seek((spec.start_number + bounds[i] as u64) as u32);
+                                    worker.run(&times[bounds[i]..bounds[i + 1]], &mut part, |b| {
+                                        done.fetch_add(1, Relaxed);
+                                        feeder.send(b)
+                                    })?;
+                                    feeder.finish()
+                                })();
+                                match chunk {
+                                    Ok(e) => encoder = e,
+                                    Err(e) => {
+                                        // stop the other workers at their next chunk
+                                        next.store(chunks, Relaxed);
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+                while !handles.iter().all(|h| h.is_finished()) {
+                    progress(done.load(Relaxed), n);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| Err(DeliverError::Invalid("a segment render panicked".into())))
+                    })
+                    .collect()
+            });
+            let mut unsupported = std::collections::BTreeSet::new();
+            for r in results {
+                let (part, encoder) = r?;
+                for (a, b) in report.stage_seconds.iter_mut().zip(part.stage_seconds) {
+                    *a += b;
+                }
+                report.decode_wait_seconds += part.decode_wait_seconds;
+                report.vector_seconds += part.vector_seconds;
+                unsupported.extend(part.unsupported);
+                if report.encoder.is_empty() {
+                    report.encoder = encoder;
+                }
+            }
+            report.unsupported = unsupported.into_iter().collect();
+            progress(n, n);
+            spec.join(&parts, &tmp.join("segments.txt"))?;
+            report.frames = n;
+            report.passes = 1;
+            report.segments = segments as u32;
         } else {
             let mut feeder = Feeder::start(&spec)?;
             let mut done = 0;
+            video.stage.seek(spec.start_number as u32);
             video.run(&times, &mut report, |b| {
                 done += 1;
                 progress(done, n);
@@ -661,6 +776,43 @@ pub fn deliver(
     }
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// Segments to render `output` in at once: 1 unless it is a single-pass video file whose frames
+/// render the same from a cold start (no simulation, no accessibility analysis across frames).
+fn segment_count(output: &m::Output, codec: Codec, opts: &Options, ev: &Evaluator, duration: f64) -> usize {
+    let p = ev.program();
+    let accessibility = p.scene.metadata.as_ref().is_some_and(|m| {
+        m.children.iter().any(|c| match c {
+            m::MetadataChild::Accessibility(a) => {
+                a.flash_check.to_string() != "off" || a.contrast_check.to_string() != "off"
+            }
+            _ => false,
+        })
+    });
+    if output.two_pass
+        || output.max_file_size.is_some()
+        || codec.is_sequence()
+        || codec.is_audio_only()
+        || matches!(codec, Codec::Gif | Codec::Apng | Codec::Webp)
+        || accessibility
+        || ev.has_simulation()
+    {
+        return 1;
+    }
+    let wanted = match opts.parallel {
+        Parallel::Count(n) => n as usize,
+        Parallel::Auto => {
+            // measured on a 229 s programme: NVENC levels off at 3, libx264 (CPU-bound) at 4 on 8 cores
+            let hardware = sr_media::encode::choose_encoder(codec, opts.hardware)
+                .is_ok_and(|e| ["_nvenc", "_videotoolbox", "_qsv", "_amf", "_vaapi"].iter().any(|s| e.ends_with(s)));
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            let n = if hardware { 3 } else { (cores / 2).clamp(1, 4) };
+            // every segment pays the renderer's start-up: keep them at least 20 s long
+            n.min((duration / 20.0).floor() as usize).max(1)
+        }
+    };
+    wanted.max(1)
 }
 
 #[allow(clippy::too_many_arguments)]

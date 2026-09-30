@@ -775,6 +775,63 @@ impl EncodeSpec {
         Ok((a, encoder))
     }
 
+    /// Joins video `segments`, each encoded with this spec (without audio) and each starting on a
+    /// keyframe, into `self.path` in order: the video is stream-copied and `self.audio` is muxed
+    /// as a single encode would mux it. `list` is where the concat list is written.
+    pub fn join(&self, segments: &[PathBuf], list: &Path) -> Result<(), MediaError> {
+        let quote = |p: &Path| format!("file '{}'\n", p.display().to_string().replace('\'', r"'\''"));
+        std::fs::write(list, segments.iter().map(|p| quote(p)).collect::<String>())?;
+        let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        a.push(list.display().to_string());
+        let audio =
+            self.audio.as_ref().filter(|_| self.codec.takes_audio() && self.pass.as_ref().is_none_or(|p| p.0 == 2));
+        if let Some((p, _, _)) = audio {
+            a.push("-i".into());
+            a.push(p.display().to_string());
+        }
+        let container = self.container();
+        a.extend(["-map", "0:v:0", "-c:v", "copy"].iter().map(|x| x.to_string()));
+        if matches!(self.codec, Codec::H265) && matches!(container, Some(Container::Mp4 | Container::Mov)) {
+            a.extend(["-tag:v".into(), "hvc1".into()]);
+        }
+        if let Some((_, codec, bitrate)) = audio {
+            let codec = if container == Some(Container::Webm) && codec == "aac" { "libopus" } else { codec.as_str() };
+            a.extend(["-map".into(), "1:a:0".into(), "-c:a".into(), codec.into()]);
+            if !codec.starts_with("pcm") {
+                a.extend(["-b:a".into(), bitrate.to_string()]);
+            }
+            a.push("-shortest".into());
+        }
+        self.tail(&mut a, container);
+        if let Some(dir) = self.path.parent() {
+            if !dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        let out = Command::new(crate::ffmpeg())
+            .args(&a)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| MediaError::Spawn { tool: crate::ffmpeg(), source: e })?;
+        if !out.status.success() {
+            return Err(MediaError::Failed {
+                tool: "ffmpeg".into(),
+                path: self.path.display().to_string(),
+                message: format!(
+                    "joining {} segments: {}",
+                    segments.len(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn tail(&self, a: &mut Vec<String>, container: Option<Container>) {
         for (k, v) in &self.metadata {
             a.push("-metadata".into());

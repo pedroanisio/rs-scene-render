@@ -127,6 +127,47 @@ fn unread_tracks_are_not_analysed() {
     assert_eq!(sa.analysis.beats.as_ref().map(Vec::len), Some(4), "beats still come from the grid's source");
 }
 
+/// Per-frame MD5 of the decoded video stream (`ffmpeg -f framemd5`).
+fn framemd5(path: &std::path::Path) -> String {
+    let out = std::process::Command::new(sr_media::ffmpeg())
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn parallel_segments_join_to_the_serial_frames() {
+    let Some(dir) = fixtures() else { return };
+    let Some(gpu) = gpu() else { return };
+    // a cold start partway into the range (a video layer here) must give the serial frames
+    let d = doc(&dir, SCENE);
+    let mut frames = Vec::new();
+    for (name, parallel, segments) in
+        [("serial", sr_deliver::Parallel::Count(1), 1), ("parallel", sr_deliver::Parallel::Count(2), 2)]
+    {
+        // lossless, so the joined file must decode to exactly the serial frames
+        let path = dir.join(format!("out/join-{name}.mkv"));
+        let o = sr_deliver::adhoc_output(&path.display().to_string(), "ffv1").unwrap();
+        let opts = sr_deliver::Options {
+            hardware: sr_media::encode::Hardware::Software,
+            parallel,
+            upload: false,
+            ..Default::default()
+        };
+        let r =
+            sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((r.frames, r.segments), (50, segments), "{name}");
+        assert!(!sr_media::probe(&path).unwrap().audio.is_empty(), "{name}: the mix is muxed");
+        frames.push(framemd5(&path));
+    }
+    assert_eq!(frames[0].lines().count(), 50);
+    assert_eq!(frames[0], frames[1], "joined segments differ from the serial encode");
+}
+
 #[test]
 fn outputs_render_encode_and_deliver() {
     let Some(dir) = fixtures() else { return };
