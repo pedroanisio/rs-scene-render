@@ -40,6 +40,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("A04", "assets", "Frames of an image sequence are missing; an error when missingFrame=\"error\"."),
     ("A05", "assets", "A referenced file exists but could not be read."),
     ("A06", "assets", "A physics cache is declared but absent; the simulation will be recomputed."),
+    ("A07", "assets", "An image's declared width and height differ from its local source file. Layout uses the declared dimensions, so a different aspect ratio distorts the image. Set the asset dimensions to the file's size and use the layer's boxWidth, boxHeight and fit for layout. Proxy representations are not compared."),
     ("P01", "rules", "A soft body is too stiff for its mass: stable integration needs more than 4096 substeps per physics@fixedStep."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];

@@ -111,7 +111,7 @@ pub struct Diagnostic {
     /// Error or warning.
     pub severity: Severity,
     /// Stable code: `XML`, `S01`–`S12` (structure), `V1`–`V4`, `C1`–`C44`,
-    /// `R1`–`R25-*` (Schematron assert ids), `A01`–`A06` (assets), `W01`.
+    /// `R1`–`R25-*` (Schematron assert ids), `A01`–`A07` (assets), `W01`.
     /// `scene-render explain <code>` describes each one.
     pub code: String,
     /// Human-readable message.

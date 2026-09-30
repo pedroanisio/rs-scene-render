@@ -160,6 +160,68 @@ fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
 }
 
 #[test]
+fn chromatic_aberration_edge_modes_preserve_opaque_frame_edges() {
+    for mode in [1, 2] {
+        let Some(r) = render(&fx_doc(
+            r##"background="#00000000""##,
+            r#"<layer id="w" asset="white" scaleX="16" scaleY="8"/><adjustment id="a" effects="c"/>"#,
+            &format!(
+                r#"<effect id="c" type="chromatic-aberration" amount="4"><param name="edgeMode" value="{mode}"/></effect>"#
+            ),
+        )) else {
+            return;
+        };
+        assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+        for (x, y) in [(0, 0), (63, 0), (0, 31), (63, 31), (0, 16), (32, 0)] {
+            assert_px(&r, x, y, [1.0; 4], 0.01);
+        }
+    }
+}
+
+#[test]
+fn chromatic_aberration_mirror_reflects_instead_of_clamping() {
+    let mut edges = Vec::new();
+    for mode in [1, 2] {
+        let Some(r) = render(&fx_doc(
+            r##"background="#00000000""##,
+            r##"<shape id="white-bg" shape="rect" width="64" height="32" fill="#FFFFFF"/>
+<shape id="black" shape="rect" width="2" height="32" fill="#000000"/>
+<adjustment id="a" effects="c"/>"##,
+            &format!(
+                r#"<effect id="c" type="chromatic-aberration" amount="8"><param name="edgeMode" value="{mode}"/></effect>"#
+            ),
+        )) else {
+            return;
+        };
+        edges.push(r.at(0, 16)[0]);
+    }
+    assert!(edges[0] < 0.01 && edges[1] > 0.99, "clamped and reflected red: {edges:?}");
+}
+
+#[test]
+fn warp_edge_modes_preserve_full_frame_colour() {
+    for (kind, attrs) in [
+        ("rgb-split", r#"offsetX="128" offsetY="64""#),
+        ("wave-warp", r#"amount="16" size="32""#),
+        ("lens-distortion", r#"amount="4""#),
+    ] {
+        for mode in [1, 2] {
+            let Some(r) = render(&fx_doc(
+                r##"background="#00000000""##,
+                r#"<layer id="w" asset="white" scaleX="16" scaleY="8"/><adjustment id="a" effects="e"/>"#,
+                &format!(r#"<effect id="e" type="{kind}" {attrs}><param name="edgeMode" value="{mode}"/></effect>"#),
+            )) else {
+                return;
+            };
+            assert!(problems(&r).is_empty(), "{kind}: {:?}", problems(&r));
+            for (x, y) in [(0, 0), (63, 0), (0, 31), (63, 31), (16, 0)] {
+                assert_px(&r, x, y, [1.0; 4], 0.01);
+            }
+        }
+    }
+}
+
+#[test]
 fn colour_operations_match_reference_formulas() {
     let body = r#"<layer id="e" asset="gray" x="0" y="0" scaleX="2" scaleY="2" effects="exp"/>
         <layer id="s" asset="src" x="8" y="0" scaleX="2" scaleY="2" effects="sat"/>

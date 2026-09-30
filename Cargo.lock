@@ -2486,6 +2486,7 @@ dependencies = [
 name = "sr-model"
 version = "0.1.0"
 dependencies = [
+ "image",
  "rayon",
  "regex",
  "roxmltree 0.20.0",

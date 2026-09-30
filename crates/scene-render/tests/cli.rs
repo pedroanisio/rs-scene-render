@@ -134,6 +134,47 @@ fn render_fixture(name: &str) -> PathBuf {
     dir
 }
 
+#[test]
+fn image_size_warning_can_be_explained_denied_and_skipped() {
+    let dir = render_fixture("image-size");
+    let file = dir.join("r.scene.xml");
+    let xml =
+        std::fs::read_to_string(&file).unwrap().replace("width=\"16\" height=\"16\"", "width=\"32\" height=\"16\"");
+    std::fs::write(&file, xml).unwrap();
+    let file = file.to_str().unwrap();
+    let o = run(&["validate", file, "--format", "json"]);
+    assert_eq!(o.status.code(), Some(0));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(r["files"][0]["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "A07"));
+    assert_eq!(run(&["validate", file, "--deny-warnings"]).status.code(), Some(1));
+    assert_eq!(run(&["validate", file, "--no-assets", "--deny-warnings"]).status.code(), Some(0));
+    let o = run(&["explain", "A07"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("dimensions"));
+}
+
+#[test]
+fn render_and_encode_surface_image_size_warnings() {
+    let dir = render_fixture("image-size-render");
+    let file = dir.join("r.scene.xml");
+    let xml =
+        std::fs::read_to_string(&file).unwrap().replace("width=\"16\" height=\"16\"", "width=\"32\" height=\"16\"");
+    std::fs::write(&file, xml).unwrap();
+    let file = file.to_str().unwrap();
+    let png = dir.join("poster.png");
+    let o = run(&["render", file, "-o", png.to_str().unwrap(), "--frame", "0"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("warning[A07]"));
+    let pattern = dir.join("encode_%03d.png");
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("A07")));
+}
+
 fn no_gpu(o: &Output) -> bool {
     let e = String::from_utf8_lossy(&o.stderr);
     if o.status.code() == Some(2) && e.contains("no GPU adapter") {
@@ -212,6 +253,9 @@ fn encode_writes_adhoc_outputs() {
     let r: serde_json::Value = serde_json::from_slice(&o.stdout).expect("JSON report");
     assert_eq!(r["frames"], 10);
     assert_eq!(r["size"], serde_json::json!([48, 32]));
+    for field in ["name", "backend", "device_type"] {
+        assert!(!r["render_adapter"][field].as_str().unwrap_or("").is_empty(), "{r}");
+    }
     assert!(r["unsupported"].as_array().is_none_or(|u| u.is_empty()), "{}", r["unsupported"]);
     assert!(std::fs::metadata(dir.join("clip.mp4")).unwrap().len() > 100);
     let seq = dir.join("f_%03d.png").display().to_string();
@@ -219,6 +263,7 @@ fn encode_writes_adhoc_outputs() {
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let text = String::from_utf8_lossy(&o.stdout);
     assert!(text.contains("(3 file(s), png)"), "{text}");
+    assert!(text.contains("render adapter:") && text.contains("GPU/readback blocked"), "{text}");
     assert!(dir.join("f_002.png").is_file());
 }
 

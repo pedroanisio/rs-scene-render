@@ -843,7 +843,7 @@ fn render(
         Ok(e) => e,
         Err(r) => return report_errors(out, &r),
     };
-    for w in ev.warnings() {
+    for w in doc.warnings().iter().chain(ev.warnings()) {
         out.diagnostic(file, &lines, w)?;
     }
     let eval_warnings = ev.warnings().len();
@@ -1114,11 +1114,14 @@ fn encode(
                 }
                 let bold = Style::new().bold();
                 writeln!(out.w, "{bold}wrote{bold:#} {} ({} file(s), {})", r.path.display(), r.files.len(), r.encoder)?;
+                if let Some(a) = &r.render_adapter {
+                    writeln!(out.w, "  render adapter: {} ({}, {})", a.name, a.backend, a.device_type)?;
+                }
                 if r.frames > 0 {
                     let [e, s, w, b] = r.stage_seconds;
                     writeln!(
                         out.w,
-                        "  {} frames {}x{} at {} fps in {:.2} s: {:.1} frames/s (evaluate {:.2} s, render {:.2} s of which decode wait {:.2} s and vector geometry {:.2} s, GPU and readback wait {:.2} s, encoder blocked {:.2} s), {} pass(es){}",
+                        "  {} frames {}x{} at {} fps in {:.2} s: {:.1} frames/s (evaluate {:.2} s, render {:.2} s of which decode wait {:.2} s and vector geometry {:.2} s, GPU/readback blocked {:.2} s, encoder blocked {:.2} s), {} pass(es){}",
                         r.frames, r.size[0], r.size[1], r.fps, r.seconds, r.render_fps, e, s, r.decode_wait_seconds, r.vector_seconds, w, b, r.passes,
                         if r.segments > 1 { format!(", {} segments at once (stage times summed over them)", r.segments) } else { String::new() }
                     )?;

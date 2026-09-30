@@ -79,6 +79,14 @@ impl Default for Options {
     }
 }
 
+/// Device chosen for scene rendering, independently of the video encoder.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RenderAdapter {
+    pub name: String,
+    pub backend: String,
+    pub device_type: String,
+}
+
 /// What a delivery produced and how long each stage took.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Report {
@@ -94,13 +102,16 @@ pub struct Report {
     pub fps: f64,
     /// Encoder in use.
     pub encoder: String,
+    /// Rendering device, independently selected from the video encoder. Absent for audio-only output.
+    pub render_adapter: Option<RenderAdapter>,
     /// Wall-clock seconds for the whole output.
     pub seconds: f64,
     /// Frames per second achieved for the video pass.
     pub render_fps: f64,
     /// Seconds spent evaluating (waiting for the next graph, when a helper thread evaluates
     /// ahead), rendering (CPU planning and submission), waiting for converted frames, and
-    /// blocked on the encoder.
+    /// blocked on the encoder. Waiting for converted frames is residual blocking after
+    /// overlapping work, not total GPU execution time; render may include internal waits.
     pub stage_seconds: [f64; 4],
     /// Seconds of the render stage spent waiting for video decoders.
     pub decode_wait_seconds: f64,
@@ -549,6 +560,7 @@ pub fn deliver(
     let effective_output = m::Output { start, end: Some(end), ..output.clone() };
     let output = &effective_output;
     let mut report = Report { path: resolve(&base, &output.path), fps, ..Default::default() };
+    report.warnings.extend(doc.warnings().iter().map(|d| format!("{}: {}", d.code, d.message)));
     // audio first: the mix feeds the analysis table
     let t_audio = Instant::now();
     let mut scene_audio: Option<SceneAudio> = audio::mix_scene(&ev0, fps, representation.as_deref())?;
@@ -657,6 +669,11 @@ pub fn deliver(
             Some(g) => g.clone(),
             None => Gpu::new()?,
         };
+        report.render_adapter = Some(RenderAdapter {
+            name: gpu.info.name.clone(),
+            backend: format!("{:?}", gpu.info.backend),
+            device_type: format!("{:?}", gpu.info.device_type),
+        });
         // 360 video renders at the scene360 size unless the output asks for another
         // a layout that crops or fits delivers at its own frame size
         let frame = p

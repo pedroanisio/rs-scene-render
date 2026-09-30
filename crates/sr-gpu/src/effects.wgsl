@@ -55,6 +55,21 @@ fn St(uv: vec2<f32>) -> vec4<f32> {
     return acc;
 }
 
+// Warp edgeMode: 0 keeps each effect's transparent boundary, 1 clamps,
+// 2 reflects periodically. Reflect before sampling to retain bilinear filtering.
+fn warp_uv(uv: vec2<f32>) -> vec2<f32> {
+    if (fx.v[7].w == 2.0) { return 1.0 - abs(1.0 - (uv - 2.0 * floor(uv / 2.0))); }
+    return clamp(uv, vec2(0.0), vec2(1.0));
+}
+fn Wz(uv: vec2<f32>) -> vec4<f32> {
+    if (fx.v[7].w > 0.0) { return S(warp_uv(uv)); }
+    return Sz(uv);
+}
+fn Wt(uv: vec2<f32>) -> vec4<f32> {
+    if (fx.v[7].w > 0.0) { return S(warp_uv(uv)); }
+    return St(uv);
+}
+
 fn unpre(c: vec4<f32>) -> vec3<f32> { return select(vec3(0.0), c.rgb / c.a, c.a > 1e-6); }
 fn lin(c: vec3<f32>) -> vec3<f32> {
     if (fx.i.w == 0u) { return c; }
@@ -695,16 +710,16 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             let pc = v[1].xy;
             let x = in.uv * d;
             let l = v[0].x / max(v[1].z, 1.0);
-            let r = St((pc + (x - pc) / max(1.0 - l, 0.01)) / d);
+            let r = Wt((pc + (x - pc) / max(1.0 - l, 0.01)) / d);
             let g = S(in.uv);
-            let b = St((pc + (x - pc) / max(1.0 + l, 0.01)) / d);
+            let b = Wt((pc + (x - pc) / max(1.0 + l, 0.01)) / d);
             return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
         }
         case 15u: { // rgb split (v0.xy px)
             let o = v[0].xy / d;
-            let r = Sz(in.uv + o);
+            let r = Wz(in.uv + o);
             let g = S(in.uv);
-            let b = Sz(in.uv - o);
+            let b = Wz(in.uv - o);
             return vec4(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
         }
         case 17u: { // vhs: v0 amount, time, seed
@@ -712,9 +727,9 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             let ch = vec2(u32(v[0].z), 0u);
             let j = d24_gaussian(fx_seed(), ch, vec2(u32(row), 0u)) * 0.4 * 6.0 * v[0].x / d.x;
             let bleed = 3.0 * v[0].x / d.x;
-            let g = Sz(in.uv + vec2(j, 0.0));
-            let r = Sz(in.uv + vec2(j + bleed, 0.0));
-            let b = Sz(in.uv + vec2(j - bleed, 0.0));
+            let g = Wz(in.uv + vec2(j, 0.0));
+            let r = Wz(in.uv + vec2(j + bleed, 0.0));
+            let b = Wz(in.uv + vec2(j - bleed, 0.0));
             let xy = vec2<u32>(floor(in.uv * d));
             let n = d24_gaussian(fx_seed(), ch, vec2(u32(d.y) + xy.y * u32(d.x) + xy.x, 0u)) * 0.018 * v[0].x;
             let line = 1.0 - 0.15 * v[0].x * step(0.5, fract(row * 0.5));
@@ -722,7 +737,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
         }
         default: {}
     }
-    return Sz(uv);
+    return Wz(uv);
 }
 
 // ------------------------------------------------------------ line sampling

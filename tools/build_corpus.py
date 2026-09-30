@@ -8,7 +8,7 @@
 * manifest.json — file -> expected codes.
 
 Every document's XSD and Schematron verdict is checked against lxml
-(tools/oracle.py). Asset codes (A01–A06) are outside the oracle's scope.
+(tools/oracle.py). Asset codes (A01–A07) are outside the oracle's scope.
 """
 import hashlib, json, re, sys
 from pathlib import Path

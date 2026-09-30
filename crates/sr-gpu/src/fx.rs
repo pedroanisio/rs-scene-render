@@ -1571,6 +1571,10 @@ impl Builder<'_> {
             | "vhs" => {
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 v[7] = [t as f32, 0.0, 0.0, 0.0];
+                let edge_mode = param(e, a, "edgeMode", 0.0);
+                if edge_mode == 1.0 || edge_mode == 2.0 {
+                    v[7][3] = edge_mode as f32;
+                }
                 let mut aux = Aux::None;
                 let op = match kind {
                     "displacement-map" => {

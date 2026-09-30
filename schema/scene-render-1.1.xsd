@@ -346,6 +346,7 @@
       colour, paint, path data, string). easeIn/easeOut are After Effects-style
       temporal handles "influence,speed" normalised to [0,1]; spatialIn/Out are
       motion-path tangents in pixels relative to the key value.
+      A key's interpolation governs the segment from that key to the next key.
     </xs:documentation></xs:annotation>
     <xs:attribute name="time" type="xs:double" use="required"/>
     <xs:attribute name="value" type="xs:string" use="required"/>
@@ -1413,6 +1414,11 @@
 
   <!-- ===================================================== node attributes -->
   <xs:attributeGroup name="transformAttributes">
+    <xs:annotation><xs:documentation>
+      anchorX and anchorY are in the node's local layout coordinates. On a fitted
+      layer this is the fit box, not the source image's pixel coordinates: the
+      centre of a 1920 by 1080 box is anchorX="960", anchorY="540".
+    </xs:documentation></xs:annotation>
     <xs:attribute name="x" type="lengthType" default="0"/>
     <xs:attribute name="y" type="lengthType" default="0"/>
     <xs:attribute name="rotation" type="xs:double" default="0"/>

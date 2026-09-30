@@ -9,7 +9,8 @@
 //!
 //! Codes: `A01` missing file, `A02` digest mismatch, `A03` remote input not
 //! verified offline, `A04` missing sequence frames, `A05` unreadable file,
-//! `A06` physics cache absent (recomputed at render time).
+//! `A06` physics cache absent (recomputed at render time), `A07` declared
+//! image dimensions differ from the local source file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -214,6 +215,22 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     let digests: HashMap<&PathBuf, std::io::Result<[u8; 32]>> =
         to_hash.into_par_iter().map(|p| (p, sha256_file(p))).collect::<Vec<_>>().into_iter().collect();
 
+    // Probe each original image once, without decoding its pixels. Proxies intentionally
+    // have different dimensions; formats delegated to FFmpeg at render time may not have
+    // a native reader, so an unavailable probe does not invalidate an otherwise usable asset.
+    let images: BTreeSet<&PathBuf> =
+        checks.iter().filter(|c| c.node.tag_name().name() == "image" && c.attr == "src").map(|c| &c.path).collect();
+    let sizes: HashMap<&PathBuf, Option<(u32, u32)>> = images
+        .into_par_iter()
+        .map(|p| {
+            let size = image::ImageReader::open(p)
+                .and_then(|r| r.with_guessed_format())
+                .ok()
+                .and_then(|r| r.into_dimensions().ok());
+            (p, size)
+        })
+        .collect();
+
     for c in &checks {
         let ename = c.node.tag_name().name();
         let loc = attr_loc(c.node, c.attr);
@@ -257,6 +274,21 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                 continue;
             }
             Ok(_) => {}
+        }
+        if ename == "image" && c.attr == "src" {
+            if let Some(Some((w, h))) = sizes.get(&c.path) {
+                let declared = |name| c.node.attribute(name).and_then(|s| s.trim().parse::<u64>().ok());
+                if let (Some(dw), Some(dh)) = (declared("width"), declared("height")) {
+                    if (dw, dh) != (*w as u64, *h as u64) {
+                        out.push(Diagnostic::warning(
+                            "A07",
+                            format!("image {shown} declares {dw}x{dh}, but the file is {w}x{h} (resolved to {})", c.path.display()),
+                            attr_loc(c.node, "width"),
+                            path.clone(),
+                        ).with_help("set width and height to the source image dimensions; use the layer's boxWidth, boxHeight and fit to size it in the scene"));
+                    }
+                }
+            }
         }
         let Some(expected) = c.expected else { continue };
         match &digests[&c.path] {
