@@ -685,3 +685,20 @@ fn texture_pool_stays_bounded_over_a_long_motion_blurred_render() {
     let max = *held.iter().max().unwrap();
     assert!(max <= 12, "pooled textures stay bounded: {held:?}");
 }
+
+#[test]
+fn agx_keeps_white_and_grey_neutral() {
+    // AgX's inset/outset matrices are defined for linear Rec.709 and must be given to WGSL column by column:
+    // transposed, they turned white pink. Greys stay grey through AgX, in any working space.
+    for ws in ["linear-srgb", "acescg"] {
+        let body = r##"<shape id="w" shape="rect" x="0" y="0" width="32" height="32" fill="#FFFFFF"/><shape id="g" shape="rect" x="32" y="0" width="32" height="32" fill="#808080"/>"##;
+        let cm = format!(r#"<colorManagement workingSpace="{ws}" toneMapping="agx"/>"#);
+        let Some(r) = render(&doc_with(&format!(r#"workingColorSpace="{ws}""#), &cm, body, "")) else { return };
+        assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+        for (x, what) in [(16, "white"), (48, "grey")] {
+            let p = r.at(x, 16);
+            let spread = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+            assert!(spread < 0.01, "{ws}: {what} through AgX is not neutral: {p:?}");
+        }
+    }
+}

@@ -733,6 +733,11 @@ fn unit_count(lay: &Layout, unit: Unit) -> ((), usize) {
     ((), n)
 }
 
+/// Whether a colour attribute's text is the text asset's schema default, opaque white.
+fn is_default_white(c: &str) -> bool {
+    matches!(c.trim().to_ascii_uppercase().as_str(), "#FFFFFFFF" | "#FFFFFF" | "#FFF" | "#FFFF")
+}
+
 /// The paragraph of a text asset (with the layer's resolved text).
 fn para_of(tc: &mut TextCache, cx: &mut Cx, t: &m::TextAsset) -> (Para, Decor, Vec<Option<String>>) {
     let (opts, mut decor) = opts_of(t);
@@ -743,7 +748,20 @@ fn para_of(tc: &mut TextCache, cx: &mut Cx, t: &m::TextAsset) -> (Para, Decor, V
     if let Some(id) = &t.style {
         apply_named(&mut base, id, &mut scx, 0);
     }
+    let styled = base.clone();
     apply(&mut base, t, &mut scx);
+    if t.style.is_some() {
+        // The model fills schema defaults in, so an asset that never set `color` or `lineHeight` still reports
+        // #FFFFFFFF and 1.2, which would override its style's colour and line height. With a style named, an
+        // attribute left at its default defers to the style.
+        let a = Attrs { e: t, props: None };
+        if a.str("color").is_some_and(|c| is_default_white(&c)) {
+            base.color = styled.color.clone();
+        }
+        if a.opt("lineHeight").is_some_and(|v| (v - 1.2).abs() < 1e-9) {
+            base.line_height = styled.line_height;
+        }
+    }
     if let Some(v) = (Attrs { e: t, props: None }).paint("background") {
         decor.background = (scx.paint)(&v, bx);
     }

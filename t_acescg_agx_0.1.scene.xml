@@ -1,0 +1,4 @@
+<scene version="1.1"><project width="200" height="100" fps="30" duration="1" background="#16181D" workingColorSpace="acescg"/>
+<colorManagement workingSpace="acescg" toneMapping="agx" exposure="0.1"/>
+<output id="o" path="x.mp4" codec="h264"/>
+<composition><shape id="w" shape="rect" x="0" y="0" width="100" height="100" fill="#FFFFFF"/><shape id="c" shape="rect" x="100" y="0" width="100" height="100" fill="#F2EBDD"/></composition></scene>

@@ -178,3 +178,27 @@ fn font_assets_are_loaded_even_though_no_layer_references_them() {
         "fontAsset must select the monospaced file: {mono_w} vs proportional {prop}"
     );
 }
+
+#[test]
+fn text_takes_its_colour_from_its_style_when_it_sets_none() {
+    // The model fills the text asset's schema default colour (#FFFFFFFF) in; it must not override the colour of
+    // the text's style, inherited through basedOn and given as a token. An explicit colour still wins.
+    let run = |attrs: &str| {
+        let a = ASSETS.replace(
+            "</assets>",
+            &format!(r##"<text id="t" text="HHHH" width="200" height="60" size="44" font="DejaVu Sans" style="t-red" {attrs}/></assets>"##),
+        );
+        let xml = format!(
+            r##"<scene version="1.1"><project width="200" height="60" fps="10" duration="1" background="#000000"/><styles><token name="brand-red" value="#FF0000"/><textStyle id="t-base" color="var(--brand-red)"/><textStyle id="t-red" basedOn="t-base" size="44"/></styles>{a}<composition><layer id="lt" asset="t" x="0" y="0"/></composition></scene>"##
+        );
+        let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) };
+        let d = sr_model::load_str(&xml, &opts).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = render(&d)?;
+        assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+        Some((sum(&r, 0, 0, 200, 60, 0), sum(&r, 0, 0, 200, 60, 1)))
+    };
+    let Some((red, green)) = run("") else { return };
+    assert!(red > 50.0 && green < red * 0.05, "styled text is red, not white: r {red} g {green}");
+    let Some((red, green)) = run(r##"color="#00FF00""##) else { return };
+    assert!(green > 50.0 && red < green * 0.05, "an explicit colour wins over the style: r {red} g {green}");
+}
