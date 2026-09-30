@@ -10,6 +10,7 @@
     <particleEmitter id="sparks" preset="sparks" x="480" y="300" rate="600" collide="true" seed="2"/>
   </composition>
   <physics bounds="frame" pixelsPerMeter="100">
-    <forceField id="swirl" type="vortex" x="320" y="180" strength="60" radius="300" falloff="1"/>
+    <!-- Keep the falling-body probe under gravity; the strong vortex drives the particles. -->
+    <forceField id="swirl" type="vortex" affects="particles" x="320" y="180" strength="60" radius="300" falloff="1"/>
   </physics>
 </scene>

@@ -17,6 +17,8 @@ contact-sheet.png in the output directory.
 
 Usage: tools/evidence.py [OUT_DIR] [--bin PATH] [--case ID]... [--bench]
 """
+import argparse
+import hashlib
 import json
 import math
 import os
@@ -171,7 +173,7 @@ def run_check(c, frames):
     if kind == "changes":
         a, b = (region(frames[t], c["region"]) for t in c["t"])
         delta = float(np.abs(a - b).mean())
-        return delta >= c["min"], round(delta, 4)
+        return c.get("min", 0.0) <= delta <= c.get("max", float("inf")), round(delta, 4)
     raise ValueError(f"unknown check type {kind}")
 
 
@@ -202,6 +204,8 @@ def prepare(case, work):
 
 
 def render(binary, scene, t, png):
+    if os.path.exists(png):
+        os.remove(png)
     r = subprocess.run([binary, "render", scene, "--strict", "--time", str(t), "-o", png],
                        capture_output=True, text=True)
     notes = [ln.strip() for ln in (r.stdout + r.stderr).splitlines()
@@ -228,6 +232,8 @@ def run_case(case, binary, out, do_bench):
     for t in check_times(case) or [0.0]:
         png = os.path.join(work, f"t{t:07.4f}.png")
         ok, strict_failed, n, log = render(binary, scene, t, png)
+        with open(png + ".log", "w") as f:
+            f.write(log + "\n")
         if not ok:
             res.update(outcome="error", checks=[], notes=[log[-2000:]], stills=[])
             return res
@@ -289,6 +295,8 @@ def markdown(report):
         for c in r["checks"]:
             ev.append(("✓ " if c["passed"] else "✗ ") + f"{c['why']} ({c['measured']})")
         ev += r["notes"]
+        if r.get("clip"):
+            ev.append(f"[Full clip]({r['clip']}); manual review: {r.get('review', '')}")
         if r.get("known"):
             ev.append(f"known: {r['known']}")
         if r.get("bench_median_ms") is not None:
@@ -302,26 +310,27 @@ def markdown(report):
 
 
 def main(argv):
-    out = "evidence-out"
-    binary = os.path.join(ROOT, "target", "release", "scene-render")
-    only, do_bench = [], False
-    it = iter(argv)
-    for a in it:
-        if a == "--bin":
-            binary = next(it)
-        elif a == "--case":
-            only.append(next(it))
-        elif a == "--bench":
-            do_bench = True
-        elif a in ("-h", "--help"):
-            print(__doc__)
-            return 0
-        else:
-            out = a
-    with open(os.path.join(HERE, "cases.json")) as f:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("out", nargs="?", default="evidence-out")
+    parser.add_argument("--bin", default=os.path.join(ROOT, "target", "release", "scene-render"))
+    parser.add_argument("--manifest", default=os.path.join(HERE, "cases.json"))
+    parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--bench", action="store_true")
+    parser.add_argument("--clips", action="store_true", help="encode complete review scenes as MP4")
+    args = parser.parse_args(argv)
+    out, binary, do_bench = args.out, args.bin, args.bench
+    with open(args.manifest) as f:
         cases = json.load(f)["cases"]
-    if only:
-        cases = [c for c in cases if c["id"] in only]
+    unknown = set(args.case) - {c["id"] for c in cases}
+    if unknown:
+        parser.error("unknown cases: " + ", ".join(sorted(unknown)))
+    if args.case:
+        cases = [c for c in cases if c["id"] in args.case]
+    if not cases:
+        parser.error("the manifest selects no cases")
+    for c in cases:
+        if c.get("scene"):
+            c["scene"] = os.path.abspath(os.path.join(os.path.dirname(args.manifest), c["scene"]))
     if os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(out)
@@ -330,10 +339,28 @@ def main(argv):
         r = run_case(case, binary, out, do_bench)
         mark = "" if r["outcome"] == r["expect"] else f"  (expected {r['expect']})"
         print(f"{r['outcome']:9} {r['id']}{mark}", flush=True)
+        if args.clips and case.get("review") and r["outcome"] in ("native", "degraded"):
+            scene = os.path.join(out, case["id"], os.path.basename(case["scene"]))
+            clip = os.path.join(out, case["id"], "review.mp4")
+            enc = subprocess.run([binary, "encode", scene, "-o", clip, "--hw", "software", "--parallel", "1", "--strict", "--no-upload"], capture_output=True, text=True)
+            with open(os.path.join(out, case["id"], "encode.log"), "w") as f:
+                f.write(enc.stdout + enc.stderr)
+            if enc.returncode:
+                r["outcome"] = "error"
+                r["notes"].append("review clip failed: " + enc.stderr[-2000:])
+            else:
+                r["clip"] = os.path.relpath(clip, out)
+            r["review"] = case["review"]
         results.append(r)
     counts = {o: sum(r["outcome"] == o for r in results) for o in OUTCOMES}
+    with open(binary, "rb") as f:
+        binary_sha256 = hashlib.sha256(f.read()).hexdigest()
     report = {
         "binary": binary,
+        "commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
+        "binary_sha256": binary_sha256,
+        "source_dirty": subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=ROOT).returncode != 0,
+        "renderer_version": subprocess.run([binary, "--version"], capture_output=True, text=True).stdout.strip(),
         "backend": os.environ.get("SR_GPU_BACKEND", "auto"),
         "date": time.strftime("%Y-%m-%d"),
         "counts": counts,

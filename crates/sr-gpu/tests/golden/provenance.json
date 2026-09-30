@@ -1,0 +1,50 @@
+{
+  "review_date": "2026-09-30",
+  "candidate_source": "aaf41ccf70f25565e240649c729caa5436722677 plus validation changes",
+  "historical_source": "dd6504651cb2b6a910859897fc7ec30f38673d09",
+  "adapter": "AdapterInfo { name: \"llvmpipe (LLVM 19.1.7, 256 bits)\", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: \"\", driver: \"llvmpipe\", driver_info: \"Mesa 25.0.7-2+deb13u1 (LLVM 19.1.7)\", backend: Vulkan, subgroup_min_size: 8, subgroup_max_size: 8, transient_saves_memory: Some(false), limit_bucket: None }",
+  "os": "Debian 13",
+  "thresholds": {
+    "minimum_psnr_db": 50,
+    "maximum_delta_e_2000": 1
+  },
+  "investigation": "Rendered all three times from the commit that last blessed the references and from the current source on the same adapter. Decoded RGBA pixels are identical between source versions. Inspected actual and amplified difference images; no structural change. The previous references have sparse channel differences of at most four code values. The original reference environment was not recorded, so the exact cause cannot be attributed to a specific driver change. Re-blessed locally without changing thresholds. Cross-driver equivalence still requires CI and hardware validation.",
+  "frames": [
+    {
+      "file": "kitchen_0.png",
+      "decoded_rgba_sha256": "f1da449c5c0b7a480d40c6828354a74c84827177061aeae0c77c6fda0987f644",
+      "old_source_matches_current_pixels": true,
+      "changed_pixels_from_previous_reference": 405,
+      "max_channel_difference_from_previous_reference": 4,
+      "previous_reference_comparison": {
+        "max_delta_e": 1.1754748058513662,
+        "mean_delta_e": 0.013789279503566974,
+        "psnr": 66.40902259790643
+      }
+    },
+    {
+      "file": "kitchen_1.png",
+      "decoded_rgba_sha256": "f8c2ba095123f2c1dfc86ef6986d6ab66fd8001b4b005f07d2a3c0ce55a4eaac",
+      "old_source_matches_current_pixels": true,
+      "changed_pixels_from_previous_reference": 417,
+      "max_channel_difference_from_previous_reference": 2,
+      "previous_reference_comparison": {
+        "max_delta_e": 1.2949098049818837,
+        "mean_delta_e": 0.013913988775205603,
+        "psnr": 66.65353058529777
+      }
+    },
+    {
+      "file": "kitchen_2.png",
+      "decoded_rgba_sha256": "eaf186c45dfce098613aa3511746aef695495bf7914f29ce9fb832d79a7c0c63",
+      "old_source_matches_current_pixels": true,
+      "changed_pixels_from_previous_reference": 413,
+      "max_channel_difference_from_previous_reference": 2,
+      "previous_reference_comparison": {
+        "max_delta_e": 1.1754748058513662,
+        "mean_delta_e": 0.014082076838820472,
+        "psnr": 66.712619181403
+      }
+    }
+  ]
+}

@@ -57,13 +57,18 @@ fn lossless_formats_decode_exactly() {
 }
 
 #[test]
-fn ffmpeg_reads_what_the_native_decoders_cannot() {
+fn external_tools_read_what_the_native_decoders_cannot() {
     if !ffmpeg_available() {
         return;
     }
     for (name, codec) in [("pattern.psd", "psd"), ("pattern.jp2", "jpeg2000"), ("pattern.avif", "av1")] {
         let s = still::open(&fixture(name)).unwrap();
-        assert!(s.decoder.starts_with("ffmpeg:") && s.decoder.contains(codec), "{name}: {}", s.decoder);
+        assert!(
+            (s.decoder.starts_with("ffmpeg:") && s.decoder.contains(codec))
+                || (codec == "av1" && s.decoder == "heif-convert"),
+            "{name}: {}",
+            s.decoder
+        );
     }
 }
 

@@ -3,10 +3,10 @@
 //! * PNG, JPEG, WebP, GIF, TIFF, BMP, TGA, QOI, PNM, ICO, DDS, farbfeld,
 //!   Radiance HDR and OpenEXR decode in-process (the `image` crate); JPEG XL
 //!   decodes in-process through `jxl-oxide`.
-//! * HEIC, HEIF and AVIF, and anything else the in-process decoders cannot read
-//!   (PSD, JPEG 2000, SGI, PCX, …), decode through FFmpeg, one frame. The
-//!   colour of HEIF files is read from their `colr` property, since FFmpeg does
-//!   not pass it on.
+//! * HEIC, HEIF and AVIF prefer libheif's `heif-convert` executable, with
+//!   FFmpeg as fallback. Override the executable with `SR_HEIF_CONVERT`.
+//!   Other formats the in-process decoders cannot read (PSD, JPEG 2000, SGI,
+//!   PCX, …) use FFmpeg. HEIF colour comes from the original `colr` property.
 //! * EXIF orientation is applied, so phone photos come out upright.
 //! * The embedded colour description is returned for the caller to honour:
 //!   an ICC profile (PNG `iCCP`, JPEG `APP2`, WebP `ICCP`, TIFF, JPEG XL, HEIF
@@ -82,7 +82,8 @@ pub fn open(path: &Path) -> Result<Still, String> {
             })
             .find(|c| !matches!(c, Colour::Unsupported(_)))
             .unwrap_or_default();
-        let mut s = ffmpeg_still(path)?;
+        let mut s = heif_still(path)
+            .or_else(|heif_error| ffmpeg_still(path).map_err(|e| format!("HEIF: {heif_error}; FFmpeg: {e}")))?;
         s.colour = colour;
         return Ok(s);
     }
@@ -106,6 +107,25 @@ fn native(path: &Path) -> Result<Still, String> {
     let linear = matches!(format, image::ImageFormat::Hdr | image::ImageFormat::OpenExr)
         || matches!(image, DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_));
     Ok(Still { image, colour, linear, decoder: format!("{format:?}").to_lowercase() })
+}
+
+/// libheif handles HEIF item layouts and identity-matrix AVIF correctly across
+/// FFmpeg versions; the original container's colour metadata is applied by the caller.
+fn heif_still(path: &Path) -> Result<Still, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let png = dir.path().join("image.png");
+    let tool = std::env::var_os("SR_HEIF_CONVERT").unwrap_or_else(|| "heif-convert".into());
+    let out = Command::new(tool)
+        .arg(path)
+        .arg(&png)
+        .output()
+        .map_err(|e| format!("cannot run heif-convert: {e}; install libheif-examples or set SR_HEIF_CONVERT"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    let mut still = native(&png)?;
+    still.decoder = "heif-convert".into();
+    Ok(still)
 }
 
 fn jxl(path: &Path) -> Result<Still, String> {

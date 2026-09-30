@@ -1,0 +1,22 @@
+<scene version="1.2">
+  <project width="640" height="360" fps="24" duration="3" background="#101C2A"/>
+  <assets>
+    <text id="title" text="FORM / MOTION" font="DejaVu Sans" size="34" weight="700" color="#F5EBDD" width="540" height="48"/>
+    <text id="caption" text="A study in timing, spacing and held movement" font="DejaVu Sans" size="14" color="#A9BCC9" width="540" height="24"/>
+  </assets>
+  <composition>
+    <layer id="heading" asset="title" x="48" y="40"/>
+    <layer id="subheading" asset="caption" x="50" y="94"/>
+    <shape id="rule" shape="rect" x="48" y="130" width="544" height="2" fill="#A9BCC9"/>
+    <group id="motif" x="48" y="175" effects="hold">
+      <animate property="x"><key time="0" value="48"/><key time="1.5" value="240" interpolation="hold"/><key time="3" value="240"/></animate>
+      <shape id="square" shape="rect" width="96" height="96" radius="12" fill="#F28E63"/>
+      <shape id="circle" shape="ellipse" x="116" width="96" height="96" fill="#6ED2BC"/>
+      <shape id="bar" shape="rect" x="232" y="28" width="96" height="40" fill="#F5EBDD"/>
+    </group>
+    <shape id="progress" shape="rect" width="1" x="48" y="315" height="3" fill="#F28E63">
+      <animate property="width"><key time="0" value="0"/><key time="3" value="544"/></animate>
+    </shape>
+  </composition>
+  <effects><effect id="hold" type="posterize-time" frequency="12"/></effects>
+</scene>

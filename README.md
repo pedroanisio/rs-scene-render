@@ -116,7 +116,7 @@ Evaluation errors use codes `E01`–`E16` (expression compile errors, unknown pr
 
 **Nothing unchanged is drawn twice.** Offscreens and mattes are keyed by a hash of their content: node state relative to the target, source time for time-dependent assets, and animated paint and generator values. An unchanged subtree reuses last frame's texture. At the root, the longest run of leading draws that did not change between the last two frames is stored as a snapshot; the next frame restores it with one copy and draws only what follows, so static layers cost one texture copy after the second frame (the project background, drawn last, is one more quad). A test checks that restored frames are bit-identical to fresh renders.
 
-**Golden frames.** `sr_gpu::golden` compares frames by PSNR and CIEDE2000 (verified against the Sharma–Wu–Dalal test data); a frame passes at PSNR ≥ 50 dB and maximum ΔE2000 ≤ 1. `crates/sr-gpu/tests/golden.rs` renders a scene that combines the compositor's features at three times and compares it with `tests/golden/kitchen_*.png`; `SR_BLESS=1` rewrites them. The goldens are produced on llvmpipe (Mesa lavapipe), the rasteriser CI uses.
+**Golden frames.** `sr_gpu::golden` compares frames by PSNR and CIEDE2000 (verified against the Sharma–Wu–Dalal test data); a frame passes at PSNR ≥ 50 dB and maximum ΔE2000 ≤ 1. `crates/sr-gpu/tests/golden.rs` renders a scene that combines the compositor's features at three times and compares it with `tests/golden/kitchen_*.png`; `SR_BLESS=1` explicitly creates or rewrites them locally, after visual review. Missing references and dimension mismatches fail; blessing is forbidden in CI. Every comparison writes actual, expected, ×16 difference PNGs and metrics with the adapter description to `target/golden-output/` (override with `SR_GOLDEN_OUT`). The goldens use llvmpipe (Mesa lavapipe); see [reference provenance](crates/sr-gpu/tests/golden/provenance.json).
 
 **Unsupported content is reported, not fatal.** Content the compositor cannot draw as authored is listed in `RenderStats::unsupported` and by the CLI (see [CLI](#cli)).
 
@@ -465,9 +465,9 @@ Every still the renderer reads (image layers, sequences, patterns, sprites, shad
 
 **Formats.**
 - In-process: PNG, JPEG, WebP, GIF, TIFF, BMP, TGA, QOI, PNM, ICO, DDS, farbfeld, Radiance HDR and OpenEXR (the `image` crate), and JPEG XL (`jxl-oxide`).
-- HEIC, HEIF and AVIF decode through FFmpeg, which the engine already needs; so does anything the in-process decoders refuse (PSD, JPEG 2000, SGI, PCX and others). One frame is read as 8- or 16-bit RGBA to match the source, since FFmpeg's own 8-to-16-bit widening rounds some values down.
+- HEIC, HEIF and AVIF prefer the `heif-convert` executable from libheif (`libheif-examples` on Ubuntu/Debian; override with `SR_HEIF_CONVERT`). This handles HEIF item layouts and identity-matrix AVIF that some FFmpeg versions decode incorrectly. If unavailable or unsuccessful, decoding falls back to FFmpeg. Install libheif for the verified HEIC/AVIF path. Formats the in-process decoders refuse (PSD, JPEG 2000, SGI, PCX and others) also use FFmpeg, reading one frame at the source bit depth.
 - Animated GIF and APNG play as `<video>` sources through FFmpeg; FFmpeg does not decode animated WebP, which loads its first frame.
-- The native AVIF and HEIC libraries (dav1d, libheif) are not linked: the distribution's versions are older than the Rust bindings accept, and FFmpeg covers both.
+- The AVIF and HEIC libraries are not linked into the renderer; external decoders run as subprocesses.
 
 **Orientation.** EXIF orientation is applied, so phone photos come out upright (JPEG XL's codestream orientation is applied by its decoder).
 
@@ -592,7 +592,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 
 ## Reference-clip evidence
 
-`tools/evidence.py [OUT_DIR] [--bin PATH] [--case ID]… [--bench]` measures how far the engine is from a set of reference clips instead of asserting it. Each case in `tools/evidence/cases.json` names a reference style and one technique it depends on, and either a probe scene in `tools/evidence/scenes/` or none. The harness writes the probe (generating any asset it needs: a Gaussian-splat torus, an animated glTF, an OCIO config), renders the frames its checks name with `render --strict`, compares pixels (a colour at a point, the share of a region near or away from a colour, the change of a region between two times) and classifies the case:
+`tools/evidence.py [OUT_DIR] [--bin PATH] [--case ID]… [--bench]` checks individual rendering techniques used by reference styles. These pixel checks establish technical behavior; they do not measure composition, continuity or artistic quality. Each case in `tools/evidence/cases.json` names a reference style and one technique it depends on, and either a probe scene in `tools/evidence/scenes/` or none. The harness writes the probe (generating any asset it needs: a Gaussian-splat torus, an animated glTF, an OCIO config), renders the frames its checks name with `render --strict`, compares pixels (a colour at a point, the share of a region near or away from a colour, the change of a region between two times) and classifies the case:
 
 - **native**: `--strict` passes and every check passes;
 - **degraded**: the checks pass, but the renderer reported a fallback;
@@ -600,7 +600,17 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - **error**: the scene did not render;
 - **gap**: no probe exists because the engine has no feature for the technique.
 
-Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so fixing a defect means updating the manifest. The run writes `report.json`, `report.md` and `contact-sheet.png`, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 24 cases: 22 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
+Each case records the outcome last accepted as `expect`, and any difference fails the run (exit status 1) in either direction, so changes to accepted outcomes require review. A failed `native` expectation must be investigated before changing the manifest. The run writes `report.json`, `report.md`, per-frame logs and `contact-sheet.png`, records the checkout commit, dirty status and renderer binary hash, with `--bench` adding frame times for cases marked `bench`. The manifest currently holds 24 cases: 22 expect native and 2 expect degraded. A clip whose technique has no probe yet enters as a `gap` with its reason. The OCIO case needs `ociobakelut` on `PATH` or in `SR_OCIOBAKELUT`.
+
+CI runs all 24 probes in an independent job and uploads their reports and images even when another job fails. Install the Python dependencies with `python3 -m pip install -r tools/evidence/requirements.txt`; the pinned OpenColorIO package supplies `ociobakelut`.
+
+Two complete micro-scenes add motion typography with held timing and a lit 3D product setup. Run them with:
+
+```sh
+python3 tools/evidence.py target/review --manifest tools/evidence/review.json --clips
+```
+
+Each produces a 3-second, 640×360, 24 fps MP4 plus sampled frames, motion/hold checks and manual review prompts. Review the full clips for spacing, cadence, silhouettes, lighting, flicker and transitions into the final holds. Passing the automated checks is not an artistic approval. Outputs are regenerated, so choose a disposable output directory.
 
 | Case | Outcome | Evidence |
 |---|---|---|
@@ -637,7 +647,7 @@ The animated-`z` and `object3D` depth cases cover the paint-order rule under [ev
 
 **Measuring a change.** `tools/perf_suite.py OUT.json` runs the fixture suite (the seven scenarios with `--bench`, `perf_video` and `perf_text` with `encode --end 5`, and with `--beta SCENE` a real programme: two frame ranges, a clip and the audio-only mix) and records every figure, the adapter and the commit; `--baseline BASE.json` prints the baseline/new ratio per fixture and their geometric mean, and exits 1 when a fixture regressed below 0.95. `tools/equivalence.py --baseline BIN --candidate BIN` renders frames of every fixture with both binaries as 16-bit PNG and compares the SHA-256 of the decoded pixels, and compares the audio-only mix of `perf_video` by the SHA-256 of its WAV data chunk: a performance change is accepted only when it passes unchanged (the golden tests tolerate small colour differences; this check does not). `--threads N` (or `SR_THREADS`) caps the CPU worker threads (the tile encoder, audio analysis), which does not change results but makes timings reproducible. `render --bench --pipelined` keeps one frame in flight, waiting for the previous frame's submission instead of draining the queue after each frame, so its figure is throughput rather than latency.
 
-**Verified platforms.** The CI workflow (`.github/workflows/ci.yml`) runs on Ubuntu with Mesa lavapipe, the software Vulkan driver (`SR_GPU_BACKEND=vulkan`), and FFmpeg's software encoders (`--hw software`). It checks formatting and clippy, runs the full test suite (GPU tests included) and the release-mode performance tests, evaluates the kitchen-sink document with `--bench`, runs short versions of each performance scenario, regenerates the conformance corpus and requires no diff, runs the differential oracle check (`tools/oracle_diff.py 2000 1`), and fuzzes for 600 seconds. Golden frames are produced on the same driver. Other GPUs, drivers and operating systems (Metal, DirectX 12, OpenGL, hardware encoders) are supported through wgpu and FFmpeg but are not exercised by CI.
+**Verified platforms.** The CI workflow (`.github/workflows/ci.yml`) uses Ubuntu 24.04 with Mesa lavapipe, the software Vulkan driver (`SR_GPU_BACKEND=vulkan`), and FFmpeg software encoders. Independent jobs run the full test suite, the evidence probes and review clips, performance smoke renders and 600-second fuzzing, and the conformance corpus plus differential oracle (`tools/oracle_diff.py 2000 1`). A golden failure does not prevent the other jobs from running. Diagnostic artifacts include GPU/driver and dependency versions; golden thresholds remain PSNR ≥ 50 dB and maximum ΔE2000 ≤ 1. Windows and macOS jobs check compilation and model/evaluator unit tests. Those checks do not establish visual equivalence on Metal, DirectX 12, discrete GPUs or hardware encoders; those still require rendering and review on the target hardware.
 
 ## CLI
 

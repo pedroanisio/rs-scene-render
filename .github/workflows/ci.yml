@@ -1,22 +1,53 @@
 name: ci
 on: [push, pull_request]
+permissions:
+  contents: read
+env:
+  SR_GPU_BACKEND: vulkan
+  CARGO_BUILD_JOBS: 2
 jobs:
   test:
-    runs-on: ubuntu-latest
-    env:
-      # GPU tests run on Mesa lavapipe, the software Vulkan driver the goldens were made with
-      SR_GPU_BACKEND: vulkan
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
       - run: python3 tools/check_release_hygiene.py --all
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      # FFmpeg decodes and encodes media; curl delivers to destinations
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 ffmpeg curl fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+      - run: python3 -m unittest discover -s tools/tests -v
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-diagnostics
+          path: |
+            target/environment/
+            target/golden-output/
+          if-no-files-found: warn
+  evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: cargo build --locked --release -p scene-render
+      - run: python3 tools/evidence.py target/evidence
+      - run: python3 tools/evidence.py target/review --manifest tools/evidence/review.json --clips
+        if: success() || failure()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: visual-evidence
+          path: |
+            target/environment/
+            target/evidence/
+            target/review/
+          if-no-files-found: warn
+  performance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
       - run: cargo test --release --test perf
       - run: cargo build --release && target/release/scene-render eval tests/corpus/valid/kitchen-sink.scene.xml --bench
       # smoke run: three transformed, feathered-mask image layers, rendered for a few frames
@@ -38,6 +69,37 @@ jobs:
       - run: python3 tools/perf_physics.py /tmp/perf_physics --duration 2 && target/release/scene-render render /tmp/perf_physics/perf_physics.scene.xml --bench --frames 60..64
       # 10-minute smoke run of the parser, evaluator and expression compiler; the fuzzer accepts a longer --seconds for extended runs
       - run: cargo run --release -p sr-fuzz -- --seconds 600
-      - run: pip install lxml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-environment
+          path: |
+            target/environment/
+            /tmp/perf_*/*.scene.xml
+          if-no-files-found: warn
+  oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
       - run: python3 tools/build_corpus.py && git diff --exit-code tests/corpus
       - run: cargo build --release && python3 tools/oracle_diff.py 2000 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oracle-environment
+          path: |
+            target/environment/
+            target/oracle*/
+          if-no-files-found: warn
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace --locked
+      - run: cargo test -p sr-model -p sr-eval --lib --locked

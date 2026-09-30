@@ -13,4 +13,5 @@ image.workspace = true
 jxl-oxide = { version = "0.12", features = ["image"] }
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 thiserror.workspace = true

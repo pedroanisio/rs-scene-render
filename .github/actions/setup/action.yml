@@ -1,0 +1,24 @@
+name: Renderer test environment
+description: Install and record the Linux renderer test dependencies
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools ffmpeg curl libheif-examples python3-venv python3-lxml fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
+        python3 -m venv --system-site-packages "$RUNNER_TEMP/evidence-python"
+        "$RUNNER_TEMP/evidence-python/bin/pip" install -r tools/evidence/requirements.txt
+        echo "$RUNNER_TEMP/evidence-python/bin" >> "$GITHUB_PATH"
+        icd=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
+        test -n "$icd"
+        echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+        echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/runtime" >> "$GITHUB_ENV"
+        mkdir -m 700 -p "$RUNNER_TEMP/runtime"
+    - shell: bash
+      run: |
+        mkdir -p target/environment
+        { git rev-parse HEAD; rustc -Vv; uname -a; dpkg-query -W mesa-vulkan-drivers libvulkan1 ffmpeg libheif-examples; python3 -m pip freeze; vulkaninfo --summary; } > target/environment/versions.txt 2>&1
