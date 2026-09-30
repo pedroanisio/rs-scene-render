@@ -502,7 +502,7 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
   - Text labels are placed without overlap, the style's upper layers and lower sort keys first: at points with variable anchors, radial offsets and wrapping, or along roads, upright, with halos.
   - Web Mercator views place tile geometry through an exact affine map; other projections go through the spherical pipeline.
 - **Raster tiles** are drawn as images cut into cells whose corners are projected, so they bend into any projection and stop at a globe's edge.
-- **Attribution:** the tiles' `attribution` (or the archive's) is drawn in the map's corner, as data licences require (`attribution="false"` leaves it out).
+- **Attribution:** the tiles' `attribution` (or the archive's) is drawn in the map's corner as a credit line (`attribution="false"` leaves it out).
 - **Clipping:** a map is clipped to its frame.
 - **Not supported:** icons (sprites) and fonts named by the style (labels use the renderer's fonts with the style's weight and slant); line labels follow a straight segment, not the curve.
 - **Performance:** a five-second flight from the Atlantic down to Lisbon's streets renders at a median of 20 ms a frame at 720p on the RTX 6000 Ada.

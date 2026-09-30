@@ -4,11 +4,10 @@
 //! `{s}` for subdomains a, b, c) and its `prompt` the tiles to fetch
 //! (`z/x/y` separated by spaces), which the resolver works out from every view
 //! the document's maps show. Tiles are fetched one at a time with curl
-//! (`SR_CURL`), identifying the program in the User-Agent as tile services ask;
-//! a missing tile (HTTP 404) is left out, anything else fails the run. More than
-//! `SR_TILES_MAX` tiles (default 2000) is refused: bulk downloading breaks most
-//! services' terms, OpenStreetMap's included. The service is on the network, so
-//! this provider runs only with `--allow-cloud`.
+//! (`SR_CURL`), identifying the program in the User-Agent; a missing tile
+//! (HTTP 404) is left out, anything else fails the run. More than
+//! `SR_TILES_MAX` tiles (default 2000) is refused, to keep fetches small. The
+//! service is on the network, so this provider runs only with `--allow-cloud`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -101,7 +100,7 @@ impl Provider for Tiles {
         if wanted.len() > max {
             return Err(format!(
                 "the maps need {} tiles, more than SR_TILES_MAX ({max}); lower the zoom or the length of the moves, \
-                 or use a downloaded PMTiles archive (bulk downloading breaks most tile services' terms)",
+                 or use a downloaded PMTiles archive",
                 wanted.len()
             ));
         }

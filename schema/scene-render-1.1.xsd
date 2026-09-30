@@ -1148,8 +1148,8 @@
       whose tiles a resolve step, run before rendering, downloads for the views the document's
       maps show into @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
       @tileSize is the pixel size tiles are drawn at (default 512 for vector tiles, 256 for
-      raster); @minZoom and @maxZoom bound the zooms fetched from a service. @attribution is the
-      credit the data requires.
+      raster); @minZoom and @maxZoom bound the zooms fetched from a service. @attribution is the tiles'
+      credit line.
     </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="src" type="xs:anyURI"/>
@@ -1179,7 +1179,7 @@
     <xs:attribute name="detail" type="xs:double" default="0"/>
     <xs:attribute name="labels" type="xs:boolean" default="true"/>
     <xs:attribute name="attribution" type="xs:boolean" default="true">
-      <xs:annotation><xs:documentation>Draws the tiles' credit (their @attribution, or the archive's) in the map's corner, as data licences such as OpenStreetMap's require.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Draws the tiles' credit (their @attribution, or the archive's) in the map's corner.</xs:documentation></xs:annotation>
     </xs:attribute>
   </xs:complexType>
   <xs:complexType name="featureStyleType">
