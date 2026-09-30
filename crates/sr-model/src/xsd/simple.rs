@@ -147,7 +147,19 @@ fn check_normalized(ty: usize, v: &str) -> Result<(), String> {
 
 fn check_builtin(b: Builtin, v: &str) -> Result<(), String> {
     match b {
-        Builtin::String | Builtin::AnyUri => Ok(()),
+        Builtin::String => Ok(()),
+        // libxml2 parses the URI: a % must start a two-digit hexadecimal escape
+        Builtin::AnyUri => {
+            let b = v.as_bytes();
+            let bad = b.iter().enumerate().any(|(i, &c)| {
+                c == b'%' && !(i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit())
+            });
+            if bad {
+                Err(format!("{v:?} is not a valid URI (a % must start a %XX escape)"))
+            } else {
+                Ok(())
+            }
+        }
         Builtin::Double => parse_xsd_double(v).map(|_| ()).ok_or_else(|| format!("{v:?} is not a number")),
         Builtin::Boolean => match v {
             "true" | "false" | "1" | "0" => Ok(()),

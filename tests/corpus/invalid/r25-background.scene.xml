@@ -32,6 +32,25 @@
   <output id="social" path="out/social.mp4" codec="h264" layout="square" variant="dark" burnCaptions="en">
     <poster path="out/poster.png" time="1"/>
   </output>
+  <output id="short" path="out/short.mp4" codec="h264" layout="square" overlay="card" audioTracks="music-track" audioRoles="effects music" audioBuses="fx" joinFade="0.02" captions="short-subs" burnCaptions="short-subs">
+    <segment from="0" to="4" speed="2" focusX="0.3">
+      <animate property="focusY">
+        <key time="0" value="0.4"/>
+        <key time="2" value="0.6"/>
+      </animate>
+      <transition type="crossfade" duration="0.3" alignment="end"/>
+    </segment>
+    <segment fromMarker="drop" to="8" audio="resample"/>
+    <segment audio="mute">
+      <timeRemap>
+        <key time="0" value="12"/>
+        <key time="2" value="10"/>
+      </timeRemap>
+    </segment>
+    <audioTrack id="short-bed" asset="music" clipIn="1" clipOut="6" duckUnder="short-vo"/>
+    <audioTrack id="short-vo" asset="voiceover" role="voiceover"/>
+    <captionTrack id="short-subs" language="en-US" transcribe="short-vo" cache="../media/transcript.vtt" cacheSha256="44856296552580d04ebfa293ec4a3a5bf07cb1556b07d3e475d875b1eb16e594"/>
+  </output>
   <layouts>
     <layout id="square" width="1080" height="1080" safeArea="broadcast">
       <override target="title" property="x" value="50%"/>

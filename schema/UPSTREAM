@@ -8,7 +8,9 @@ The files change only through an accepted SREP in sr-core (srep/, process in
 srep/srep-0000.md); a new release is vendored here by replacing both files and
 updating this record. Documents keep version="1.1".
 
-Local additions pending in sr-core: the draft SREPs for map tiles and
-basemaps, draped map ground and globes, and rigid bodies on object3D add
-their declarations and rules (R27-R29, C46-C48), scene/@version "1.2" and
-rule V5. They are replaced by the sr-core 1.2.0 files once released.
+Local additions pending in sr-core: SREPs 9 (map tiles and basemaps), 10
+(draped map ground and globes) and 11 (rigid bodies on object3D), in review,
+and 13 (segments in outputs), in draft, add their declarations and rules
+(R27-R29, R38-R41, C46-C48, C54-C59), scene/@version "1.2" and rule V5, and
+amend C20, C33 and R14. They are replaced by the sr-core 1.2.0 files once
+released.

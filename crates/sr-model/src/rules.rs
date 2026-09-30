@@ -225,6 +225,8 @@ struct Sets<'a> {
     paints: HashSet<&'a str>,
     buses: HashSet<&'a str>,
     audio_tracks: HashSet<&'a str>,
+    /// `@id` of every `/scene/audioMix/audioTrack` (empty string when absent).
+    mix_tracks: Vec<&'a str>,
     caption_tracks: HashSet<&'a str>,
     layouts: HashSet<&'a str>,
     variants: HashSet<&'a str>,
@@ -290,6 +292,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     collect("styles", "textStyle", &mut s.text_styles);
     collect("audioMix", "bus", &mut s.buses);
     collect("audioMix", "audioTrack", &mut s.audio_tracks);
+    for m in kids(scene, "audioMix") {
+        s.mix_tracks.extend(kids(m, "audioTrack").map(|x| x.attribute("id").unwrap_or("")));
+    }
     collect("captions", "captionTrack", &mut s.caption_tracks);
     collect("layouts", "layout", &mut s.layouts);
     collect("parameters", "variant", &mut s.variants);
@@ -413,6 +418,9 @@ impl<'a> Eval<'a> {
                     || n.descendants().any(|d| {
                         is(d, "basemap")
                             || (is(d, "rigidBody") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                    })
+                    || kids(n, "output").any(|o| {
+                        o.children().any(|c| is(c, "segment") || is(c, "audioTrack") || is(c, "captionTrack"))
                     });
                 self.check(!v5, n, "V5", || {
                     "documents before version=\"1.2\" cannot use 1.2 elements or asset kinds; set version=\"1.2\"."
@@ -484,7 +492,7 @@ impl<'a> Eval<'a> {
                 let ok = a("shape") != Some("trimesh") || matches!(a("type"), Some("static" | "kinematic"));
                 self.check(ok, n, "C48", || "a trimesh rigidBody must be static or kinematic.".into());
             }
-            "tiles" if parent_is("assets") => {
+            "tiles" => {
                 let ok = has("src") || (has("url") && has("cache") && has("cacheSha256"));
                 self.check(ok, n, "C46", || "tiles need @src, or @url with @cache and @cacheSha256.".into());
             }
@@ -526,13 +534,21 @@ impl<'a> Eval<'a> {
             }
             // p13
             "transition" => {
-                self.check(has("from") || has("to"), n, "C20", || "transition needs @from, @to or both.".into());
+                self.check(has("from") || has("to") || parent_is("segment"), n, "C20", || {
+                    "transition needs @from, @to or both.".into()
+                });
                 self.check(a("type") != Some("shader") || has("shader"), n, "C21", || {
                     "transition type=\"shader\" requires @shader.".into()
                 });
                 self.check(a("type") != Some("luma") || has("matte"), n, "C22", || {
                     "transition type=\"luma\" requires @matte.".into()
                 });
+                if parent_is("segment") {
+                    let c59 = !(has("from") || has("to")) && a("type") != Some("morph");
+                    self.check(c59, n, "C59", || {
+                        "a segment transition joins two rendered pictures: no from, no to, and not morph.".into()
+                    });
+                }
                 let siblings = |id: &str| match n.parent() {
                     Some(p) => p.children().filter(|c| c.is_element() && c.attribute("id") == Some(id)).count(),
                     None => 0,
@@ -598,6 +614,33 @@ impl<'a> Eval<'a> {
                     "generated media other than speech requires @prompt.".into()
                 });
             }
+            // p61
+            "segment" => {
+                let c55 =
+                    has_kid(n, "timeRemap") || ((has("from") || has("fromMarker")) && (has("to") || has("toMarker")));
+                self.check(c55, n, "C55", || {
+                    "a segment needs from (or fromMarker) and to (or toMarker), or a timeRemap.".into()
+                });
+                let duration = n
+                    .ancestors()
+                    .find(|x| is(*x, "scene"))
+                    .and_then(|sc| kids(sc, "project").next())
+                    .and_then(|pr| pr.attribute("duration"))
+                    .map(xpath_number)
+                    .unwrap_or(f64::NAN);
+                let (from, to) = (num(n, "from"), num(n, "to"));
+                let c56 = !(has("from") && has("to")) || (from >= 0.0 && to > from && to <= duration);
+                self.check(c56, n, "C56", || {
+                    "segment from and to must satisfy 0 <= from < to <= project/@duration.".into()
+                });
+                let c57 = !(has("from") && has("fromMarker")) && !(has("to") && has("toMarker"));
+                self.check(c57, n, "C57", || "a segment gives each end as a time or as a marker, not both.".into());
+                let c58 = kids(n, "timeRemap").count() <= 1 && kids(n, "transition").count() <= 1;
+                self.check(c58, n, "C58", || "a segment has at most one timeRemap and one transition.".into());
+                let r38 = (!has("fromMarker") || contains(&self.sets.markers, a("fromMarker")))
+                    && (!has("toMarker") || contains(&self.sets.markers, a("toMarker")));
+                self.check(r38, n, "R38", || "segment markers must name markers.".into());
+            }
             // p24, p32
             "output" => {
                 self.check(!has("proresProfile") || a("codec") == Some("prores"), n, "C42", || {
@@ -607,18 +650,28 @@ impl<'a> Eval<'a> {
                 self.check(c43, n, "C43", || "alpha=\"true\" needs a codec that carries alpha.".into());
                 let c44 = !has("end") || (!has("start") && num(n, "end") > 0.0) || num(n, "end") > num(n, "start");
                 self.check(c44, n, "C44", || "output end must be after start.".into());
+                // p61
+                self.check(!has_kid(n, "segment") || !(has("start") || has("end")), n, "C54", || {
+                    "an output with segments cannot also set start or end; put the range in a segment instead.".into()
+                });
+                if let Some(list) = a("audioTracks") {
+                    let ok = every_token_names(list, &self.sets.mix_tracks);
+                    self.check(ok, n, "R39", || "every id in output/@audioTracks must name an audioMix track.".into());
+                }
+                self.check(!has("overlay") || contains(&self.sets.symbols, a("overlay")), n, "R40", || {
+                    "output/@overlay must name a symbol.".into()
+                });
                 self.check(!has("layout") || contains(&self.sets.layouts, a("layout")), n, "R12", || {
                     "output/@layout must name a layout.".into()
                 });
                 self.check(!has("variant") || contains(&self.sets.variants, a("variant")), n, "R13", || {
                     "output/@variant must name a variant.".into()
                 });
-                self.check(
-                    !has("burnCaptions") || contains(&self.sets.caption_tracks, a("burnCaptions")),
-                    n,
-                    "R14",
-                    || "output/@burnCaptions must name a captionTrack.".into(),
-                );
+                let own_caption = |id: &str| kids(n, "captionTrack").any(|c| c.attribute("id") == Some(id));
+                let r14 = !has("burnCaptions")
+                    || contains(&self.sets.caption_tracks, a("burnCaptions"))
+                    || a("burnCaptions").is_some_and(own_caption);
+                self.check(r14, n, "R14", || "output/@burnCaptions must name a captionTrack.".into());
             }
             // p31
             "instance" => {
@@ -697,9 +750,16 @@ impl<'a> Eval<'a> {
             self.check(!has("transcribe") || (has("cache") && has("cacheSha256")), n, "C32", || {
                 "transcribed captions require @cache and @cacheSha256 (deterministic renders).".into()
             });
-            self.check(!has("transcribe") || contains(&self.sets.audio_tracks, a("transcribe")), n, "C33", || {
-                "captionTrack/@transcribe must name an audioTrack.".into()
-            });
+            let c33 = !has("transcribe") || parent_is("output") || contains(&self.sets.audio_tracks, a("transcribe"));
+            self.check(c33, n, "C33", || "captionTrack/@transcribe must name an audioTrack.".into());
+            if has("transcribe") && parent_is("output") {
+                let r41 = n
+                    .parent_element()
+                    .is_some_and(|o| kids(o, "audioTrack").any(|t| t.attribute("id") == a("transcribe")));
+                self.check(r41, n, "R41", || {
+                    "an output caption track transcribes one of that output's own audio tracks.".into()
+                });
+            }
         }
         // p20
         if local == "animate" || local == "timeRemap" {

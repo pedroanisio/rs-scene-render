@@ -19,7 +19,7 @@
   </sch:pattern>
   <sch:pattern id="p1b">
     <sch:rule context="/scene[@version='1.0' or @version='1.1']">
-      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody)">
+      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|output/segment|output/audioTrack|output/captionTrack)">
         documents before version="1.2" cannot use 1.2 elements or asset kinds; set version="1.2".</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -89,7 +89,7 @@
   </sch:pattern>
   <sch:pattern id="p13">
     <sch:rule context="transition">
-      <sch:assert id="C20" test="@from or @to">transition needs @from, @to or both.</sch:assert>
+      <sch:assert id="C20" test="@from or @to or parent::segment">transition needs @from, @to or both.</sch:assert>
       <sch:assert id="C21" test="not(@type='shader') or @shader">transition type="shader" requires @shader.</sch:assert>
       <sch:assert id="C22" test="not(@type='luma') or @matte">transition type="luma" requires @matte.</sch:assert>
       <sch:assert id="C23" test="not(@from) or count(../*[@id=current()/@from])=1">transition/@from must be a sibling of the transition.</sch:assert>
@@ -118,7 +118,7 @@
     <sch:rule context="captionTrack">
       <sch:assert id="C31" test="count(cue[1]|@src|@transcribe)=1">captionTrack "<sch:value-of select="@id"/>" needs exactly one source: cue children, @src or @transcribe.</sch:assert>
       <sch:assert id="C32" test="not(@transcribe) or (@cache and @cacheSha256)">transcribed captions require @cache and @cacheSha256 (deterministic renders).</sch:assert>
-      <sch:assert id="C33" test="not(@transcribe) or /scene/audioMix/audioTrack[@id=current()/@transcribe]">captionTrack/@transcribe must name an audioTrack.</sch:assert>
+      <sch:assert id="C33" test="not(@transcribe) or parent::output or /scene/audioMix/audioTrack[@id=current()/@transcribe]">captionTrack/@transcribe must name an audioTrack.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p18">
@@ -207,7 +207,7 @@
     <sch:rule context="output">
       <sch:assert id="R12" test="not(@layout) or /scene/layouts/layout[@id=current()/@layout]">output/@layout must name a layout.</sch:assert>
       <sch:assert id="R13" test="not(@variant) or /scene/parameters/variant[@id=current()/@variant]">output/@variant must name a variant.</sch:assert>
-      <sch:assert id="R14" test="not(@burnCaptions) or /scene/captions/captionTrack[@id=current()/@burnCaptions]">output/@burnCaptions must name a captionTrack.</sch:assert>
+      <sch:assert id="R14" test="not(@burnCaptions) or /scene/captions/captionTrack[@id=current()/@burnCaptions] or captionTrack[@id=current()/@burnCaptions]">output/@burnCaptions must name a captionTrack.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p33">
@@ -374,6 +374,26 @@
   <sch:pattern id="p43">
     <sch:rule context="object3D/rigidBody">
       <sch:assert id="C48" test="not(@shape='trimesh') or @type='static' or @type='kinematic'">a trimesh rigidBody must be static or kinematic.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p61">
+    <sch:rule context="output">
+      <sch:assert id="C54" test="not(segment) or not(@start or @end)">an output with segments cannot also set start or end; put the range in a segment instead.</sch:assert>
+      <sch:assert id="R39" test="not(@audioTracks) or count(str:tokenize(normalize-space(@audioTracks),' ')) = count(/scene/audioMix/audioTrack[contains(concat(' ',normalize-space(current()/@audioTracks),' '), concat(' ',@id,' '))])">every id in output/@audioTracks must name an audioMix track.</sch:assert>
+      <sch:assert id="R40" test="not(@overlay) or /scene/symbols/symbol[@id=current()/@overlay]">output/@overlay must name a symbol.</sch:assert>
+    </sch:rule>
+    <sch:rule context="segment">
+      <sch:assert id="C55" test="timeRemap or ((@from or @fromMarker) and (@to or @toMarker))">a segment needs from (or fromMarker) and to (or toMarker), or a timeRemap.</sch:assert>
+      <sch:assert id="C56" test="not(@from and @to) or (number(@from) &gt;= 0 and number(@to) &gt; number(@from) and number(@to) &lt;= number(/scene/project/@duration))">segment from and to must satisfy 0 &lt;= from &lt; to &lt;= project/@duration.</sch:assert>
+      <sch:assert id="C57" test="not(@from and @fromMarker) and not(@to and @toMarker)">a segment gives each end as a time or as a marker, not both.</sch:assert>
+      <sch:assert id="C58" test="count(timeRemap) &lt;= 1 and count(transition) &lt;= 1">a segment has at most one timeRemap and one transition.</sch:assert>
+      <sch:assert id="R38" test="(not(@fromMarker) or /scene/markers/marker[@id=current()/@fromMarker]) and (not(@toMarker) or /scene/markers/marker[@id=current()/@toMarker])">segment markers must name markers.</sch:assert>
+    </sch:rule>
+    <sch:rule context="segment/transition">
+      <sch:assert id="C59" test="not(@from or @to) and not(@type='morph')">a segment transition joins two rendered pictures: no from, no to, and not morph.</sch:assert>
+    </sch:rule>
+    <sch:rule context="output/captionTrack[@transcribe]">
+      <sch:assert id="R41" test="../audioTrack[@id=current()/@transcribe]">an output caption track transcribes one of that output's own audio tracks.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

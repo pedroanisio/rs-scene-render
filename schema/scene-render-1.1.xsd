@@ -2984,6 +2984,47 @@
     <xs:attribute name="duckAttack" type="nonNegativeDecimal" default="0.15"/>
     <xs:attribute name="duckRelease" type="nonNegativeDecimal" default="0.4"/>
   </xs:attributeGroup>
+  <xs:simpleType name="audioRoleType">
+    <xs:annotation><xs:documentation>What an audio track carries.</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="dialogue"/><xs:enumeration value="voiceover"/>
+      <xs:enumeration value="music"/><xs:enumeration value="effects"/>
+      <xs:enumeration value="ambience"/><xs:enumeration value="audio-description"/>
+      <xs:enumeration value="other"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="audioRoleListType">
+    <xs:list itemType="audioRoleType"/>
+  </xs:simpleType>
+  <xs:complexType name="segmentType">
+    <xs:annotation><xs:documentation>
+      A span of the composition played by an output: from..to (seconds) or fromMarker..toMarker at
+      speed, or a timeRemap child mapping segment time (key/@time, from 0) to composition time
+      (key/@value) for ramps, freezes and reversals. The output plays its segments in document order;
+      a transition child joins this segment to the next one. audio says how the span's sound is fitted
+      to its duration: stretch keeps pitch, resample changes pitch with speed, mute is silence.
+      focusX and focusY (animatable in segment time) replace the layout's reframing focus for crop
+      and fit-blur.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="timeRemap" type="timeRemapType"/>
+      <xs:element name="transition" type="transitionType"/>
+      <xs:element name="animate" type="animateType"/>
+    </xs:choice>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="from" type="xs:double"/>
+    <xs:attribute name="to" type="xs:double"/>
+    <xs:attribute name="fromMarker" type="xs:IDREF"/>
+    <xs:attribute name="toMarker" type="xs:IDREF"/>
+    <xs:attribute name="speed" type="positiveDecimal" default="1"/>
+    <xs:attribute name="audio" default="stretch">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="stretch"/><xs:enumeration value="resample"/><xs:enumeration value="mute"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="focusX" type="unitDecimal"/>
+    <xs:attribute name="focusY" type="unitDecimal"/>
+  </xs:complexType>
   <xs:complexType name="audioTrackType">
     <xs:annotation><xs:documentation>volume, pan and gain animate with nested animation elements (audio automation).</xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -3013,14 +3054,7 @@
     <xs:attribute name="preservePitch" type="xs:boolean" default="true"/>
     <xs:attribute name="reverse" type="xs:boolean" default="false"/>
     <xs:attribute name="mute" type="xs:boolean" default="false"/>
-    <xs:attribute name="role" default="other">
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="dialogue"/><xs:enumeration value="voiceover"/>
-        <xs:enumeration value="music"/><xs:enumeration value="effects"/>
-        <xs:enumeration value="ambience"/><xs:enumeration value="audio-description"/>
-        <xs:enumeration value="other"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
+    <xs:attribute name="role" type="audioRoleType" default="other"/>
     <xs:attribute name="language" type="languageTagType"/>
     <xs:attribute name="bus" type="xs:IDREF"/>
     <xs:attribute name="fitToDuration" type="xs:boolean" default="false">
@@ -3508,8 +3542,29 @@
       <xs:element name="poster" type="stillType"/>
       <xs:element name="thumbnail" type="stillType"/>
       <xs:element name="destination" type="destinationType"/>
+      <xs:element name="segment" type="segmentType"/>
+      <xs:element name="audioTrack" type="audioTrackType"/>
+      <xs:element name="captionTrack" type="captionTrackType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="audioTracks" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        With segments: the audioMix tracks this output plays. audioTracks, audioRoles and audioBuses
+        select together (a source matching any of them plays); with none of them, every source plays.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="audioRoles" type="audioRoleListType"/>
+    <xs:attribute name="audioBuses" type="xs:IDREFS"/>
+    <xs:attribute name="overlay" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        A symbol drawn over the output's picture in output time (series tags, calls to action, end cards).
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="joinFade" type="nonNegativeDecimal" default="0.01">
+      <xs:annotation><xs:documentation>
+        Seconds of equal-power audio crossfade centred on each cut between segments.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="path" type="xs:anyURI" use="required"/>
     <xs:attribute name="codec" use="required">
       <xs:simpleType><xs:restriction base="xs:string">

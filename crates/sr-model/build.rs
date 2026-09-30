@@ -51,6 +51,7 @@ const HANDWRITTEN: &[(&str, &str)] = &[
     ("languageTagType", "crate::values::LanguageTag"),
     ("numberListType", "Vec<f64>"),
     ("colorListType", "Vec<crate::values::Color>"),
+    ("audioRoleListType", "Vec<String>"),
     ("pointType", "crate::values::Point2"),
     ("relativeLength", "crate::values::Length"),
     ("positiveRelativeLength", "crate::values::Length"),
