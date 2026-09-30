@@ -44,21 +44,13 @@ pub struct Options {
 }
 
 /// How many time segments of a video output render and encode at once.
-///
-/// Serial is the default: some shader effects do not yet render a frame the same whichever frame
-/// a render started from, so segments can differ from a serial render in such shots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Parallel {
     /// 3 with a hardware encoder, otherwise half the cores (at most 4); fewer for short ranges.
+    #[default]
     Auto,
     /// Exactly this many (1 renders serially).
     Count(u32),
-}
-
-impl Default for Parallel {
-    fn default() -> Parallel {
-        Parallel::Count(1)
-    }
 }
 
 impl Parallel {

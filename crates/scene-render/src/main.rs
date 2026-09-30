@@ -229,9 +229,9 @@ enum Command {
         #[arg(long)]
         no_upload: bool,
         /// Time segments of a video output rendered and encoded at once, then joined without
-        /// re-encoding: a count, or `auto` (3 with a hardware encoder, else half the cores up to
-        /// 4, fewer for short ranges). 1, the default, renders serially.
-        #[arg(long, value_name = "auto|N", value_parser = parse_parallel, default_value = "1")]
+        /// re-encoding: `auto`, the default (3 with a hardware encoder, else half the cores up to
+        /// 4, fewer for short ranges), or a count; 1 renders serially.
+        #[arg(long, value_name = "auto|N", value_parser = parse_parallel, default_value = "auto")]
         parallel: sr_deliver::Parallel,
         /// Parameter value, repeatable: --param id=value.
         #[arg(long = "param", value_name = "ID=VALUE", value_parser = parse_param)]
