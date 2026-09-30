@@ -88,8 +88,11 @@ fn doc(dir: &std::path::Path, xml: &str) -> sr_model::Document {
     sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"))
 }
 
+/// One device for the whole binary: tests run in parallel, and creating a device per test has
+/// deadlocked and crashed the driver.
 fn gpu() -> Option<sr_gpu::Gpu> {
-    sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()
+    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
+    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
 }
 
 #[test]
@@ -262,19 +265,56 @@ fn server() -> (String, Requests) {
 
 #[test]
 fn network_destinations_sign_and_notify() {
-    let Some(dir) = fixtures() else { return };
-    let (url, log) = server();
-    // SAFETY: tests in this binary do not read these variables concurrently
-    unsafe {
-        std::env::set_var("SR_CREDENTIALS_TEST_AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
-        std::env::set_var("SR_CREDENTIALS_TEST_AWS_SECRET_ACCESS_KEY", "secret");
-        std::env::set_var("SR_CREDENTIALS_TEST_S3_ENDPOINT", &url);
-        std::env::set_var("SR_CREDENTIALS_TEST_GCS_TOKEN", "gtoken");
-        std::env::set_var("SR_CREDENTIALS_TEST_GCS_ENDPOINT", &url);
-        std::env::set_var("SR_CREDENTIALS_TEST_AZURE_SAS", "sv=2024&sig=abc");
-        std::env::set_var("SR_CREDENTIALS_TEST_TOKEN", "bearer-token");
-        std::env::set_var("SR_CREDENTIALS_TEST_WEBHOOK_SECRET", "hook-secret");
+    // The credentials come from the environment, which must not change while other tests' threads
+    // read it (the GPU driver does, outside Rust's lock): the delivery runs in a child process of
+    // this binary started with them set, and uploads to this process's server.
+    if let Some(url) = std::env::var_os("SR_TEST_UPLOAD_SERVER") {
+        return upload_to(&url.to_string_lossy());
     }
+    if fixtures().is_none() {
+        return;
+    }
+    let (url, log) = server();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "network_destinations_sign_and_notify", "--test-threads=1"])
+        .env("SR_TEST_UPLOAD_SERVER", &url)
+        .env("SR_CREDENTIALS_TEST_AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        .env("SR_CREDENTIALS_TEST_AWS_SECRET_ACCESS_KEY", "secret")
+        .env("SR_CREDENTIALS_TEST_S3_ENDPOINT", &url)
+        .env("SR_CREDENTIALS_TEST_GCS_TOKEN", "gtoken")
+        .env("SR_CREDENTIALS_TEST_GCS_ENDPOINT", &url)
+        .env("SR_CREDENTIALS_TEST_AZURE_SAS", "sv=2024&sig=abc")
+        .env("SR_CREDENTIALS_TEST_TOKEN", "bearer-token")
+        .env("SR_CREDENTIALS_TEST_WEBHOOK_SECRET", "hook-secret")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    assert!(child.status.success() && said.contains("1 passed"), "{said}");
+    let reqs = log.lock().unwrap().clone();
+    let find = |prefix: &str| {
+        reqs.iter().find(|r| r.0.starts_with(prefix)).unwrap_or_else(|| panic!("no request {prefix}: {reqs:?}")).clone()
+    };
+    let s3 = find("PUT /bucket/renders/mix.m4a");
+    let auth = &s3.1.iter().find(|(k, _)| k == "authorization").unwrap().1;
+    assert!(
+        auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+            && auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"),
+        "{auth}"
+    );
+    let gcs = find("POST /upload/storage/v1/b/gbucket/o?uploadType=media&name=p%2Fmix.m4a");
+    assert!(gcs.1.iter().any(|(k, v)| k == "authorization" && v == "Bearer gtoken"));
+    let az = find("PUT /container/p/mix.m4a?sv=2024&sig=abc");
+    assert!(az.1.iter().any(|(k, v)| k == "x-ms-blob-type" && v == "BlockBlob"));
+    let put = find("PUT /upload/mix.m4a");
+    assert!(put.2 > 1000 && put.1.iter().any(|(k, v)| k == "authorization" && v == "Bearer bearer-token"));
+    let hook = find("POST /hook");
+    assert!(hook.1.iter().any(|(k, v)| k == "x-scene-render-signature" && v.starts_with("sha256=") && v.len() == 71));
+    assert_eq!(reqs.iter().position(|r| r.0.starts_with("POST /hook")), Some(reqs.len() - 1), "webhook goes last");
+}
+
+/// The delivery of `network_destinations_sign_and_notify`, in its child process.
+fn upload_to(url: &str) {
+    let Some(dir) = fixtures() else { panic!("no fixtures") };
     let xml = SCENE.replace(
         r#"<output id="sound" path="out/mix.wav" codec="audio-only"/>"#,
         &format!(
@@ -299,26 +339,6 @@ fn network_destinations_sign_and_notify() {
             format!("{url}/upload/mix.m4a")
         ]
     );
-    let reqs = log.lock().unwrap().clone();
-    let find = |prefix: &str| {
-        reqs.iter().find(|r| r.0.starts_with(prefix)).unwrap_or_else(|| panic!("no request {prefix}: {reqs:?}")).clone()
-    };
-    let s3 = find("PUT /bucket/renders/mix.m4a");
-    let auth = &s3.1.iter().find(|(k, _)| k == "authorization").unwrap().1;
-    assert!(
-        auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
-            && auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"),
-        "{auth}"
-    );
-    let gcs = find("POST /upload/storage/v1/b/gbucket/o?uploadType=media&name=p%2Fmix.m4a");
-    assert!(gcs.1.iter().any(|(k, v)| k == "authorization" && v == "Bearer gtoken"));
-    let az = find("PUT /container/p/mix.m4a?sv=2024&sig=abc");
-    assert!(az.1.iter().any(|(k, v)| k == "x-ms-blob-type" && v == "BlockBlob"));
-    let put = find("PUT /upload/mix.m4a");
-    assert!(put.2 > 1000 && put.1.iter().any(|(k, v)| k == "authorization" && v == "Bearer bearer-token"));
-    let hook = find("POST /hook");
-    assert!(hook.1.iter().any(|(k, v)| k == "x-scene-render-signature" && v.starts_with("sha256=") && v.len() == 71));
-    assert_eq!(reqs.iter().position(|r| r.0.starts_with("POST /hook")), Some(reqs.len() - 1), "webhook goes last");
 }
 
 #[test]
