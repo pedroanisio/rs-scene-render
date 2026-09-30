@@ -788,6 +788,42 @@ struct EmitterRt {
     trail: f64,
     orient: bool,
     fields: Option<Vec<String>>,
+    /// The emitter's program node when its world transform and rate never change (see
+    /// `time_invariant`), and those values once read: stepping then needs no frame evaluation.
+    invariant: Invariant,
+}
+
+/// An emitter's program node when its world transform and rate never change, and those values (world
+/// transform, rate) once read.
+type Invariant = Option<(u32, Option<([f64; 6], f64)>)>;
+
+/// Whether node `n` has the same world transform and properties at every time it is drawn: neither it
+/// nor any ancestor is animated, computed by an expression, linked, conditional, laid out, constrained,
+/// posed by a skeleton or on a motion path.
+fn time_invariant(p: &Program, n: u32) -> bool {
+    let mut c = Some(n);
+    while let Some(k) = c {
+        let node = &p.nodes[k as usize];
+        let moving_slot = node.slots.iter().any(|&s| {
+            let sl = &p.slots[s as usize];
+            !sl.channels.is_empty() || sl.expr.is_some() || sl.link.is_some() || sl.time_node.is_some()
+        });
+        let constrained = children(&*node.elem).iter().any(|c| c.element_name() == "transformConstraint");
+        if moving_slot
+            || constrained
+            || node.motion.is_some()
+            || node.parent_link.is_some()
+            || node.cond.is_some()
+            || node.layout.is_some()
+            || node.align.is_some()
+            || node.fit.is_some()
+            || matches!(node.name, "skeleton" | "bone")
+        {
+            return false;
+        }
+        c = node.parent;
+    }
+    true
 }
 
 /// Preset values for attributes left at their schema defaults.
@@ -1119,6 +1155,13 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
         trail: a.num("trail", 0.0),
         orient: flag(e, "orientToVelocity", false),
         fields: text(e, "forceFields").map(|s| s.split_whitespace().map(str::to_string).collect()),
+        invariant: p
+            .nodes
+            .iter()
+            .position(|pn| pn.id == n.id)
+            .map(|k| k as u32)
+            .filter(|&k| time_invariant(p, k))
+            .map(|k| (k, None)),
     }
 }
 
@@ -1132,16 +1175,43 @@ struct EDriver<'a, 'b> {
     fields: &'a FieldSrc,
     names: Option<&'a [String]>,
     world: Option<&'a World>,
+    p: &'a Program,
+    invariant: &'a mut Invariant,
+}
+
+impl EDriver<'_, '_> {
+    /// The emitter's world transform and rate at `t`: for an emitter that never changes, read once and then
+    /// only checked against its time window, so a step does not evaluate the whole scene.
+    fn state(&mut self, t: f64) -> ([f64; 6], f64) {
+        const ABSENT: ([f64; 6], f64) = ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
+        if let Some((n, known)) = *self.invariant {
+            if !crate::eval::in_window(self.p, n, t) {
+                return ABSENT;
+            }
+            if let Some(v) = known {
+                return v;
+            }
+        }
+        let g = self.graphs.at(t);
+        let v = match index_of(&g, &self.id) {
+            Some(i) => (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)),
+            None => ABSENT,
+        };
+        if let Some((_, known)) = self.invariant.as_mut() {
+            if index_of(&g, &self.id).is_some() {
+                *known = Some(v);
+            }
+        }
+        v
+    }
 }
 
 impl EmitterDriver for EDriver<'_, '_> {
     fn origin(&mut self, t: f64) -> [f64; 6] {
-        let g = self.graphs.at(t);
-        index_of(&g, &self.id).map(|i| g.nodes[i].world.0).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        self.state(t).0
     }
     fn rate(&mut self, t: f64) -> f64 {
-        let g = self.graphs.at(t);
-        index_of(&g, &self.id).map(|i| node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)).unwrap_or(0.0)
+        self.state(t).1
     }
     fn fields(&mut self, t: f64) -> Vec<Field> {
         let g = if self.fields.animated { Some(self.graphs.at(t)) } else { None };
@@ -1256,7 +1326,15 @@ impl Runtime {
             let rt = self.emitters.get_mut(&id).expect("emitter");
             let world = self.physics.as_ref().and_then(|p| p.world.as_ref());
             let names = rt.fields.clone();
-            let mut drv = EDriver { graphs: &mut graphs, id: id.clone(), fields, names: names.as_deref(), world };
+            let mut drv = EDriver {
+                graphs: &mut graphs,
+                id: id.clone(),
+                fields,
+                names: names.as_deref(),
+                world,
+                p,
+                invariant: &mut rt.invariant,
+            };
             rt.emitter.at(t, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
@@ -1406,4 +1484,61 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn program(body: &str) -> crate::Evaluator {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="36" fps="10" duration="10" background="#000000"/>
+              <composition>{body}</composition></scene>"##
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e}"));
+        crate::Evaluator::new(&doc, &Default::default()).unwrap()
+    }
+
+    fn index(p: &Program, id: &str) -> u32 {
+        p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32
+    }
+
+    #[test]
+    fn emitters_that_never_change_are_recognised() {
+        let ev = program(
+            r#"<particleEmitter id="still" x="10" y="10" rate="20"/>
+               <particleEmitter id="rated" x="10" y="10"><animate property="rate"><key time="0" value="1"/><key time="1" value="9"/></animate></particleEmitter>
+               <group id="g"><animate property="x"><key time="0" value="0"/><key time="1" value="9"/></animate><particleEmitter id="carried" rate="20"/></group>
+               <particleEmitter id="bound" rate="20"><transformConstraint type="copy-position" target="still"/></particleEmitter>"#,
+        );
+        let p = ev.program();
+        assert!(time_invariant(p, index(p, "still")));
+        assert!(!time_invariant(p, index(p, "rated")));
+        assert!(!time_invariant(p, index(p, "carried")));
+        assert!(!time_invariant(p, index(p, "bound")));
+    }
+
+    #[test]
+    fn a_node_is_in_its_window_with_its_ancestors() {
+        // windows on the node and its group, and a group whose clock runs at twice the speed: the check
+        // agrees with the frame graph at every time
+        let xml = r##"<scene version="1.1"><project width="64" height="36" fps="10" duration="10" background="#000000"/>
+              <symbols><symbol id="s"><particleEmitter id="f" start="2" end="4" rate="20"/></symbol></symbols>
+              <composition><group id="g" start="2" end="6"><particleEmitter id="e" start="3" end="5" rate="20"/></group>
+              <instance id="h" symbol="s" start="1" speed="2"/></composition></scene>"##;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e}"));
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        let p = ev.program();
+        for id in ["e", "h/f"] {
+            let n = index(p, id);
+            let mut seen = [false, false];
+            for k in 0..100 {
+                let t = k as f64 * 0.1;
+                let drawn = ev.evaluate(t).nodes.iter().any(|x| &*x.id == id);
+                assert_eq!(crate::eval::in_window(p, n, t), drawn, "{id} at t = {t}");
+                seen[drawn as usize] = true;
+            }
+            assert!(seen[0] && seen[1], "{id} is both in and out of its window");
+        }
+    }
 }

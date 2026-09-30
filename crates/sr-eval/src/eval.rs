@@ -306,6 +306,30 @@ struct Local {
     anchor: [f64; 2],
 }
 
+/// Whether node `n` is inside its time window at composition time `t`, and so is every ancestor, each
+/// ancestor's clock mapping the time for its children: the node is then in the frame graph unless a
+/// condition hides it (conditions are not evaluated here).
+pub(crate) fn in_window(p: &Program, n: u32, t: f64) -> bool {
+    let mut chain = vec![n];
+    while let Some(parent) = p.nodes[*chain.last().expect("chain") as usize].parent {
+        chain.push(parent);
+    }
+    let mut tl = t;
+    for &k in chain.iter().rev() {
+        let node = &p.nodes[k as usize];
+        let on = match node.kind {
+            Kind::RepeatCopy { .. } => true,
+            Kind::Transition(_) => false,
+            Kind::Plain => tl >= node.vis_start && node.vis_end.is_none_or(|e| tl < e),
+        };
+        if !on {
+            return false;
+        }
+        tl = clock_map(&node.clock, tl);
+    }
+    true
+}
+
 fn clock_map(c: &Clock, t: f64) -> f64 {
     match c {
         Clock::Same => t,
