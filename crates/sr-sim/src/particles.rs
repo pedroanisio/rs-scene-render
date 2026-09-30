@@ -153,6 +153,11 @@ impl Emitter {
         Emitter { spec, state, checkpoints, per_checkpoint: per }
     }
 
+    /// The emitter's start in composition time (its preroll runs before it).
+    pub fn start(&self) -> f64 {
+        self.spec.start
+    }
+
     /// Simulation clock origin: the start minus the preroll.
     fn t0(&self) -> f64 {
         self.spec.start - self.spec.preroll

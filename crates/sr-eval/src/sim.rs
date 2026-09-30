@@ -1177,6 +1177,8 @@ struct EDriver<'a, 'b> {
     world: Option<&'a World>,
     p: &'a Program,
     invariant: &'a mut Invariant,
+    /// The emitter's start: during its preroll it emits as it does at its start.
+    start: f64,
 }
 
 impl EDriver<'_, '_> {
@@ -1184,6 +1186,8 @@ impl EDriver<'_, '_> {
     /// only checked against its time window, so a step does not evaluate the whole scene.
     fn state(&mut self, t: f64) -> ([f64; 6], f64) {
         const ABSENT: ([f64; 6], f64) = ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
+        // the preroll runs before the emitter's start, where it is not yet in the frame: it emits as at its start
+        let t = t.max(self.start);
         if let Some((n, known)) = *self.invariant {
             if !crate::eval::in_window(self.p, n, t) {
                 return ABSENT;
@@ -1333,6 +1337,7 @@ impl Runtime {
                 names: names.as_deref(),
                 world,
                 p,
+                start: rt.emitter.start(),
                 invariant: &mut rt.invariant,
             };
             rt.emitter.at(t, &mut drv);

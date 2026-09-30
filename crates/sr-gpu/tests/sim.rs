@@ -284,3 +284,17 @@ fn ball_joints_swing_and_3d_caches_replay() {
     assert!(g.problems.is_empty(), "{:?}", g.problems);
     assert_eq!(pose3(&g, "bob"), pose3(&ev.evaluate(1.7), "bob"));
 }
+
+/// Columns covered on row `y`.
+fn width_at(r: &Rendered, y: u32) -> u32 {
+    (0..r.size[0]).filter(|x| r.at(*x, y)[3] > 0.5).count() as u32
+}
+
+#[test]
+fn preroll_emits_before_the_start_as_at_the_start() {
+    // 2 s of preroll at 10 px/s: at time 0 the particles already reach 20 px from the emitter (8 px dots)
+    let body = r#"<particleEmitter id="e" x="8" y="32" preroll="2" rate="40" lifetime="10" speed="10" direction="0" spread="0" size="8"/>"#;
+    let Some(r) = render(&scene(body, "")) else { return };
+    let w = width_at(&r, 32);
+    assert!((26..=30).contains(&w), "covered {w} columns");
+}
