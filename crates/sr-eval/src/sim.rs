@@ -797,6 +797,15 @@ struct EmitterRt {
 /// transform, rate) once read.
 type Invariant = Option<(u32, Option<([f64; 6], f64)>)>;
 
+/// The force fields that act on a particle emitter, flock or fluid: `None` for every field of the scene
+/// (no `forceFields`), else those it lists; none at all when `useForceFields` is false.
+pub(crate) fn field_names(e: &dyn Element) -> Option<Vec<String>> {
+    if matches!(text(e, "useForceFields").as_deref(), Some("false" | "0")) {
+        return Some(Vec::new());
+    }
+    text(e, "forceFields").map(|s| s.split_whitespace().map(str::to_string).collect())
+}
+
 /// Whether node `n` has the same world transform and properties at every time it is drawn: neither it
 /// nor any ancestor is animated, computed by an expression, linked, conditional, laid out, constrained,
 /// posed by a skeleton or on a motion path.
@@ -1154,7 +1163,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
         sprite_fps: num(e, "spriteFps", 0.0),
         trail: a.num("trail", 0.0),
         orient: flag(e, "orientToVelocity", false),
-        fields: text(e, "forceFields").map(|s| s.split_whitespace().map(str::to_string).collect()),
+        fields: field_names(e),
         invariant: p
             .nodes
             .iter()

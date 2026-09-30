@@ -1981,7 +1981,17 @@
     <xs:attribute name="spriteRows" type="xs:positiveInteger" default="1"/>
     <xs:attribute name="spriteFps" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="trail" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The force fields that act on this simulation. Absent: every forceField of the scene. Present: only
+        those listed.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>
+        false: no force field acts on this simulation, whatever forceFields lists.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="collide" type="xs:boolean" default="false"/>
     <xs:attribute name="bounce" type="unitDecimal" default="0.3"/>
     <xs:attribute name="preroll" type="nonNegativeDecimal" default="0"/>
@@ -2394,7 +2404,17 @@
     <xs:attribute name="cohesion" type="nonNegativeDecimal" default="1"/>
     <xs:attribute name="bounds" type="simBoundsType" default="steer"/>
     <xs:attribute name="edgeMargin" type="nonNegativeDecimal" default="40"/>
-    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The force fields that act on this simulation. Absent: every forceField of the scene. Present: only
+        those listed.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>
+        false: no force field acts on this simulation, whatever forceFields lists.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="size" type="positiveDecimal" default="6"/>
     <xs:attribute name="color" type="paintType" default="#FFFFFFFF"/>
     <xs:attribute name="shape" default="streak">
@@ -2449,7 +2469,17 @@
         <xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="wrap"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The force fields that act on this simulation. Absent: every forceField of the scene. Present: only
+        those listed.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>
+        false: no force field acts on this simulation, whatever forceFields lists.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="blend" type="blendType" default="normal"/>
     <xs:attribute name="effects" type="xs:IDREFS"/>
   </xs:complexType>
