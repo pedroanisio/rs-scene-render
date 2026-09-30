@@ -169,7 +169,7 @@ fn render_and_encode_surface_image_size_warnings() {
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(String::from_utf8_lossy(&o.stdout).contains("warning[A07]"));
     let pattern = dir.join("encode_%03d.png");
-    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json"]);
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json", "--strict"]);
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("A07")));
@@ -320,4 +320,32 @@ fn strict_render_fails_on_shader_fallback() {
     let strict = run(&["--strict"]);
     assert_eq!(strict.status.code(), Some(1), "{}", String::from_utf8_lossy(&strict.stdout));
     assert!(String::from_utf8_lossy(&strict.stderr).contains("--strict"));
+}
+
+#[test]
+fn strict_encode_rejects_unresolved_placeholders_and_reports_them() {
+    let dir = render_fixture("strict-template");
+    let scene = dir.join("r.scene.xml");
+    std::fs::write(
+        &scene,
+        r#"<scene version="1.1"><project width="64" height="36" fps="10" duration="0.1"/>
+      <assets><text id="txt" text="Hello {{missing}}" width="64" height="36" size="12"/></assets>
+      <composition><layer id="title" asset="txt"/></composition></scene>"#,
+    )
+    .unwrap();
+    let output = dir.join("f_%03d.png");
+    let args = ["encode", scene.to_str().unwrap(), "-o", output.to_str().unwrap(), "--json"];
+    let normal = run(&args);
+    if no_gpu(&normal) {
+        return;
+    }
+    assert_eq!(normal.status.code(), Some(0), "{}", String::from_utf8_lossy(&normal.stderr));
+    let strict = run(&[args.as_slice(), &["--strict"]].concat());
+    assert_eq!(strict.status.code(), Some(1), "{}", String::from_utf8_lossy(&strict.stdout));
+    for o in [&normal, &strict] {
+        let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert!(report["evaluation_warnings"].as_array().unwrap().iter().any(|d| d["code"] == "E16"));
+    }
+    let human = run(&["encode", scene.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&human.stdout).contains("warning[E16]"));
 }

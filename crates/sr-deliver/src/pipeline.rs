@@ -133,6 +133,8 @@ pub struct Report {
     /// Delivery warnings: content that renders but is likely a mistake (a segment starting on an
     /// empty frame, a caption shown too briefly to read).
     pub warnings: Vec<String>,
+    /// Warnings raised by composition or overlay templating; strict delivery rejects these.
+    pub evaluation_warnings: Vec<sr_model::Diagnostic>,
     /// Remote locations the files were delivered to.
     pub uploads: Vec<String>,
     /// Encoded passes (2 for two-pass, more when fitting a file size).
@@ -573,6 +575,7 @@ pub fn deliver(
         None => ev0,
     };
     let p = ev.program();
+    report.evaluation_warnings.extend_from_slice(ev.warnings());
     if let Some(parent) = report.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -734,10 +737,26 @@ pub fn deliver(
             fps,
             reframe: p.reframe,
             segments: segments.as_ref().zip(frame_times),
-            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu, &eo)?,
+            overlay: crate::overlay::Overlay::new(
+                doc,
+                output,
+                timeline,
+                size,
+                &captions,
+                &gpu,
+                &eo,
+                representation.as_deref(),
+            )?,
             origin: if segments.is_some() { 0.0 } else { output.start },
             join_tex: None,
         };
+        if let Some(overlay) = &video.overlay {
+            for warning in overlay.warnings() {
+                if !report.evaluation_warnings.contains(warning) {
+                    report.evaluation_warnings.push(warning.clone());
+                }
+            }
+        }
         let audio_in = audio_file.clone().map(|f| (f, output.audio_codec.clone(), output.audio_bitrate));
         let mut spec = base_spec(output, &report.path, codec, size, fps, format, &color, audio_in, p, opts);
         spec.start_number = (start * fps).round() as u64;
@@ -843,8 +862,16 @@ pub fn deliver(
                             renderer.audio = audio.clone();
                             renderer.captions_off = map.is_some();
                             let stage = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
-                            let overlay =
-                                crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu, &eo)?;
+                            let overlay = crate::overlay::Overlay::new(
+                                doc,
+                                output,
+                                timeline,
+                                size,
+                                &captions,
+                                &gpu,
+                                &eo,
+                                representation.as_deref(),
+                            )?;
                             let mut worker = Video {
                                 ev: &ev,
                                 renderer,
@@ -976,9 +1003,9 @@ pub fn deliver(
         for c in &output.children {
             let (m::OutputChild::Poster(st) | m::OutputChild::Thumbnail(st)) = c else { continue };
             let srgb = OutputColor::new(m::ColorSpace::Srgb, m::Transfer::Srgb, true);
-            let (rgba, psize) = match &segments {
-                // with segments a still is the output's frame at an output time: a marker stands for the
-                // first output time that shows it
+            // A plain still's time is composition time; a segmented still's time is
+            // output time. Both use the delivered picture's placement and overlay clock.
+            let (t, f, output_time) = match &segments {
                 Some(tm) => {
                     let t = match &st.marker {
                         Some(mk) => {
@@ -991,41 +1018,35 @@ pub fn deliver(
                         None => st.time.clamp(0.0, tm.duration),
                     };
                     let f = tm.at(t);
-                    let g = ev.evaluate(f.composition);
-                    let mut unsupported = std::collections::BTreeSet::new();
-                    let frame = video.render_side(&g, f.composition, Some(&f))?;
-                    let (picture, placement) = video.picture(&frame, Some(&f), &mut unsupported)?;
-                    let over = match video.overlay.as_mut() {
-                        Some(o) => Some(o.draw(&mut video.stage, t)?.0),
-                        None => None,
-                    };
-                    let working = video.renderer.working();
-                    let pending = video.stage.submit_placed(
-                        &picture,
-                        &working,
-                        &srgb,
-                        InputFormat::Rgba8,
-                        size,
-                        true,
-                        placement,
-                        over,
-                    );
-                    (video.stage.wait(pending), size)
+                    (f.composition, Some(f), t)
                 }
                 None => {
                     let t = match &st.marker {
                         Some(mk) => sr_eval::eval::marker(p, mk).unwrap_or(st.time),
                         None => st.time,
-                    };
-                    let g = ev.evaluate(t.clamp(0.0, p.duration));
-                    let mut sub = |st: f64| ev.evaluate(st);
-                    let frame = video.renderer.render_with(&g, p, Some(&mut sub));
-                    let psize = [p.size[0].round() as u32, p.size[1].round() as u32];
-                    let working = video.renderer.working();
-                    let pending = video.stage.submit(&frame.texture, &working, &srgb, InputFormat::Rgba8, psize, true);
-                    (video.stage.wait(pending), psize)
+                    }
+                    .clamp(0.0, p.duration);
+                    (t, None, t - video.origin)
                 }
             };
+            let g = ev.evaluate(t);
+            let frame = video.render_side(&g, t, f.as_ref())?;
+            let mut unsupported = report.unsupported.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+            unsupported.extend(frame.stats.unsupported.iter().cloned());
+            let (picture, placement) = video.picture(&frame, f.as_ref(), &mut unsupported)?;
+            let over = match video.overlay.as_mut() {
+                Some(o) => {
+                    let (tex, problems) = o.draw(&mut video.stage, output_time)?;
+                    unsupported.extend(problems);
+                    Some(tex)
+                }
+                None => None,
+            };
+            let working = video.renderer.working();
+            let pending =
+                video.stage.submit_placed(&picture, &working, &srgb, InputFormat::Rgba8, size, true, placement, over);
+            let (rgba, psize) = (video.stage.wait(pending), size);
+            report.unsupported = unsupported.into_iter().collect();
             let path = resolve(&base, &st.path);
             let fmt = StillFormat::parse(st.format.as_str()).unwrap_or(StillFormat::Jpeg);
             sr_media::encode::write_still(

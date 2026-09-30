@@ -1100,10 +1100,10 @@ fn encode(
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
             Ok(r) => {
-                let problems = r.unsupported.len() + r.accessibility.len();
+                let problems = r.unsupported.len() + r.accessibility.len() + r.evaluation_warnings.len();
                 if strict && problems > 0 {
                     eprintln!(
-                        "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content or accessibility findings)",
+                        "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content, evaluator warnings or accessibility findings)",
                         o.path
                     );
                     failed = true;
@@ -1141,6 +1141,9 @@ fn encode(
                 }
                 for w in &r.warnings {
                     writeln!(out.w, "  warning: {w}")?;
+                }
+                for w in &r.evaluation_warnings {
+                    out.diagnostic(file, &lines, w)?;
                 }
                 for a in &r.accessibility {
                     writeln!(out.w, "  accessibility: {a}")?;

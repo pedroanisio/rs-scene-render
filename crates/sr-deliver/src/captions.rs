@@ -1,9 +1,9 @@
 //! An output's captions in output time (SREP 13).
 //!
 //! With segments, the composition's caption tracks (inline, from a file, or transcribed) are mapped
-//! through them: a cue meeting a segment's span appears once for that segment, over the output interval
-//! its clipped ends map to (swapped when the map runs backwards), keeping only the words inside the
-//! span; a cue left without words is dropped. A track that transcribes an audio track contributes only
+//! through them: each cue appears in every output interval that shows its composition span,
+//! including repeated visits and holds, with word times mapped and clipped to each interval.
+//! A cue left without words is dropped. A track that transcribes an audio track contributes only
 //! while that track is selected and the segment is not muted. The output's own caption tracks are in
 //! output time already. Every track comes out with inline cues, for burning and for sidecar files.
 
@@ -53,7 +53,8 @@ pub fn output_captions(p: &Program, output: &m::Output, tm: Option<&TimeMap>) ->
                     if tr.transcribe.is_some() && seg.elem.audio == m::SegmentAudio::Mute {
                         continue;
                     }
-                    mapped.extend(cues.iter().filter_map(|c| map_cue(c, tm, i)));
+                    let map = CueMap::new(tm, i);
+                    mapped.extend(cues.iter().flat_map(|c| map.cues(c)));
                 }
             }
             mapped.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -109,72 +110,117 @@ fn inline(tr: &m::CaptionTrack, cues: &[Cue]) -> m::CaptionTrack {
     t
 }
 
-/// The composition interval segment `i` plays, and output time as a function of composition time in it.
-fn span(tm: &TimeMap, i: usize) -> (f64, f64) {
-    let d = tm.segments[i].duration;
-    match tm.span(i) {
-        Some((a, s)) => (a, a + s * d),
-        None => {
-            let n = ((d * 1000.0).ceil() as usize).max(1);
-            (0..=n)
-                .map(|k| tm.unclamped(i, d * k as f64 / n as f64))
-                .fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c), hi.max(c)))
-        }
-    }
+/// Samples shared by all cues/words of a segment. Keys split the grid so short
+/// holds and jumps are represented too; crossings are refined against the actual curve.
+struct CueMap<'a> {
+    tm: &'a TimeMap,
+    segment: usize,
+    samples: Vec<(f64, f64)>,
 }
 
-/// The first output time at which segment `i` shows composition time `c` (inside its span).
-fn output_time(tm: &TimeMap, i: usize, c: f64) -> f64 {
-    let seg = &tm.segments[i];
-    match tm.span(i) {
-        Some((a, s)) => seg.start + (c - a) / s,
-        None => tm.shows(i, c).unwrap_or(seg.start + seg.duration),
+impl<'a> CueMap<'a> {
+    fn new(tm: &'a TimeMap, segment: usize) -> Self {
+        let mut samples = Vec::new();
+        if tm.span(segment).is_none() {
+            let duration = tm.segments[segment].duration;
+            samples.push((0.0, tm.composition(segment, 0.0)));
+            let mut start = 0.0;
+            for end in tm.keys(segment).iter().copied().filter(|&t| t > 0.0 && t < duration).chain([duration]) {
+                let n = ((end - start) * 1000.0).ceil().max(64.0) as usize;
+                for k in 1..=n {
+                    let t = start + (end - start) * k as f64 / n as f64;
+                    samples.push((t, tm.composition(segment, t)));
+                }
+                start = end;
+            }
+        }
+        Self { tm, segment, samples }
     }
-}
 
-/// Cue `c` as segment `i` shows it, if the segment's span meets it.
-fn map_cue(c: &Cue, tm: &TimeMap, i: usize) -> Option<Cue> {
-    let (lo, hi) = span(tm, i);
-    let frozen = lo == hi;
-    let (p, q) = (c.start.max(lo), c.end.min(hi));
-    // A freeze has no composition-time span, but holds the cue/word active at that instant.
-    let meets = if frozen { c.start <= lo && lo < c.end } else { p < q };
-    if !meets {
-        return None;
-    }
-    let at = |x: f64| output_time(tm, i, x);
-    let ends = |a: f64, b: f64| {
-        if frozen {
-            let seg = &tm.segments[i];
-            return (seg.start, seg.start + seg.duration);
+    /// All local output intervals whose composition times fall in [lo, hi).
+    fn intervals(&self, lo: f64, hi: f64) -> Vec<(f64, f64)> {
+        if hi <= lo {
+            return Vec::new();
         }
-        let (x, y) = (at(a), at(b));
-        if y < x {
-            (y, x)
-        } else {
-            (x, y)
+        let i = self.segment;
+        let duration = self.tm.segments[i].duration;
+        if let Some((a, speed)) = self.tm.span(i) {
+            let start = if lo <= self.tm.composition(i, 0.0) { 0.0 } else { (lo - a) / speed };
+            let end = if hi > self.tm.composition(i, duration) { duration } else { (hi - a) / speed };
+            let (start, end) = (start.clamp(0.0, duration), end.clamp(0.0, duration));
+            return if start < end { vec![(start, end)] } else { Vec::new() };
         }
-    };
-    let (start, end) = ends(p, q);
-    let mut words: Vec<Word> = c
-        .words
-        .iter()
-        .filter(|w| w.end > p && if frozen { w.start <= p } else { w.start < q })
-        .map(|w| {
-            let (start, end) = ends(w.start.max(p), w.end.min(q));
-            Word { start, end, ..w.clone() }
-        })
-        .collect();
-    if !c.words.is_empty() && words.is_empty() {
-        return None;
+        let mut cuts = vec![0.0, duration];
+        for pair in self.samples.windows(2) {
+            let [(t0, v0), (t1, v1)] = [pair[0], pair[1]];
+            for bound in [lo, hi] {
+                if (v0 < bound) == (v1 < bound) {
+                    continue;
+                }
+                let (mut left, mut right) = (t0, t1);
+                for _ in 0..48 {
+                    let mid = (left + right) * 0.5;
+                    if (self.tm.composition(i, mid) < bound) == (v0 < bound) {
+                        left = mid;
+                    } else {
+                        right = mid;
+                    }
+                }
+                // A jump across both bounds gives the same cut twice. Midpoint
+                // classification below excludes cues skipped by that jump.
+                cuts.push(right);
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-10);
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        for pair in cuts.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let value = self.tm.composition(i, (a + b) * 0.5);
+            if value < lo || value >= hi {
+                continue;
+            }
+            if let Some(last) = intervals.last_mut().filter(|last| (last.1 - a).abs() < 1e-10) {
+                last.1 = b;
+            } else {
+                intervals.push((a, b));
+            }
+        }
+        intervals
     }
-    words.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let text = if words.len() < c.words.len() {
-        words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
-    } else {
-        c.text.clone()
-    };
-    Some(Cue { start, end, text, words, ..c.clone() })
+
+    fn cues(&self, c: &Cue) -> Vec<Cue> {
+        let origin = self.tm.segments[self.segment].start;
+        let word_times: Vec<_> =
+            c.words.iter().map(|w| self.intervals(w.start.max(c.start), w.end.min(c.end))).collect();
+        self.intervals(c.start, c.end)
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let mut words = Vec::new();
+                let mut retained = 0;
+                for (w, times) in c.words.iter().zip(&word_times) {
+                    let before = words.len();
+                    for &(a, b) in times {
+                        let (a, b) = (a.max(start), b.min(end));
+                        if a < b {
+                            words.push(Word { start: origin + a, end: origin + b, ..w.clone() });
+                        }
+                    }
+                    retained += usize::from(words.len() > before);
+                }
+                if !c.words.is_empty() && words.is_empty() {
+                    return None;
+                }
+                words.sort_by(|a, b| a.start.total_cmp(&b.start));
+                let text = if retained < c.words.len() {
+                    words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                } else {
+                    c.text.clone()
+                };
+                Some(Cue { start: origin + start, end: origin + end, text, words, ..c.clone() })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +242,72 @@ mod tests {
         <cue start="1" end="3"><word start="1" end="1.5" text="one"/><word start="1.6" end="2.4" text="two"/><word start="2.5" end="3" text="three"/></cue>
         <cue start="5" end="6" text="later"/>
       </captionTrack></captions>"#;
+
+    #[test]
+    fn reversing_remap_repeats_cues_and_word_timings() {
+        let (ev, o) = eval(
+            r#"<output path="a.mp4" codec="h264"><segment><timeRemap>
+              <key time="0" value="0"/><key time="2" value="4"/><key time="4" value="0"/>
+              </timeRemap></segment></output>"#,
+            r#"<captions><captionTrack id="cc" language="en"><cue start="1" end="2">
+              <word start="1" end="1.5" text="one"/><word start="1.5" end="2" text="two"/>
+              </cue></captionTrack></captions>"#,
+        );
+        let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+        let caps = output_captions(ev.program(), &o, Some(&tm)).unwrap();
+        let cues = &caps.tracks[0].cues;
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        for (cue, (a, b)) in cues.iter().zip([(0.5, 1.0), (3.0, 3.5)]) {
+            assert!((cue.start - a).abs() < 1e-8 && (cue.end - b).abs() < 1e-8);
+            assert_eq!(cue.words.len(), 2);
+        }
+        assert_eq!(cues[1].words[0].text, "two");
+        assert!((cues[1].words[0].start - 3.0).abs() < 1e-8);
+        assert!((cues[1].words[0].end - 3.25).abs() < 1e-8);
+        assert!((cues[1].words[1].end - 3.5).abs() < 1e-8);
+    }
+
+    #[test]
+    fn held_remap_omits_skipped_cues_and_keeps_each_visible_hold() {
+        let (ev, o) = eval(
+            r#"<output path="a.mp4" codec="h264"><segment><timeRemap>
+              <key time="0" value="1" interpolation="hold"/><key time="1" value="3" interpolation="hold"/>
+              <key time="2" value="1" interpolation="hold"/><key time="3" value="1"/>
+              </timeRemap></segment></output>"#,
+            r#"<captions><captionTrack id="cc" language="en"><cue start="0.5" end="1.5" text="held"/>
+              <cue start="1.6" end="2.5" text="skipped"/></captionTrack></captions>"#,
+        );
+        let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+        let caps = output_captions(ev.program(), &o, Some(&tm)).unwrap();
+        let cues = &caps.tracks[0].cues;
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        for (cue, (a, b)) in cues.iter().zip([(0.0, 1.0), (2.0, 3.0)]) {
+            assert_eq!(cue.text.as_deref(), Some("held"));
+            assert!((cue.start - a).abs() < 1e-8 && (cue.end - b).abs() < 1e-8, "{cue:?}");
+        }
+    }
+
+    #[test]
+    fn eased_revisits_and_short_holds_follow_the_actual_remap() {
+        for keys in [
+            r#"<key time="0" value="0" interpolation="ease-in-out"/><key time="2" value="4" interpolation="ease-in-out"/><key time="4" value="0"/>"#,
+            r#"<key time="0" value="0" interpolation="hold"/><key time="0.0001" value="1.5" interpolation="hold"/><key time="0.0002" value="3" interpolation="hold"/><key time="4" value="3"/>"#,
+        ] {
+            let (ev, o) = eval(
+                &format!(
+                    r#"<output path="a.mp4" codec="h264"><segment><timeRemap>{keys}</timeRemap></segment></output>"#
+                ),
+                r#"<captions><captionTrack id="cc" language="en"><cue start="1" end="2" text="visible"/></captionTrack></captions>"#,
+            );
+            let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+            let caps = output_captions(ev.program(), &o, Some(&tm)).unwrap();
+            for t in (0..800).map(|k| (k as f64 + 0.25) / 200.0).chain([0.00005, 0.00015, 0.00025]) {
+                let source = tm.composition(0, t);
+                let visible = caps.tracks[0].cues.iter().any(|c| c.start <= t && t < c.end);
+                assert_eq!(visible, (1.0..2.0).contains(&source), "output {t}, composition {source}");
+            }
+        }
+    }
 
     #[test]
     fn freeze_keeps_active_cues_and_words_for_the_segment() {

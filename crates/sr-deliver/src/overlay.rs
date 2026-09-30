@@ -30,6 +30,7 @@ impl Overlay {
     /// The layer of `output`, or `None` when it has no overlay symbol and burns no caption in output
     /// time. `duration` is the output's duration, `size` its frame size and `captions` its caption
     /// tracks in output time.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         doc: &sr_model::Document,
         output: &m::Output,
@@ -38,6 +39,7 @@ impl Overlay {
         captions: &OutputCaptions,
         gpu: &Gpu,
         options: &EvalOptions,
+        representation: Option<&str>,
     ) -> Result<Option<Overlay>, DeliverError> {
         let symbol = match &output.overlay {
             Some(id) => Some(
@@ -71,9 +73,14 @@ impl Overlay {
         let ev =
             Evaluator::new(&d, &EvalOptions { layout: None, ..options.clone() }).map_err(DeliverError::Document)?;
         let mut renderer = Renderer::new(gpu.clone(), ev.program());
+        renderer.representation = representation.map(str::to_owned);
         renderer.burn_captions = output.burn_captions.clone();
         let tex = renderer.texture(size);
         Ok(Some(Overlay { ev, renderer, tex }))
+    }
+
+    pub fn warnings(&self) -> &[sr_model::Diagnostic] {
+        self.ev.warnings()
     }
 
     /// Renders the layer at output time `t` and fits it to the output's frame; returns the
