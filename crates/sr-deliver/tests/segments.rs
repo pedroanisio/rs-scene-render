@@ -1,0 +1,161 @@
+//! Outputs with segments (SREP 13) and layouts that reframe: which composition time each output
+//! frame shows, where the reframing focus puts the picture, and motion blur at segment speed.
+
+use std::path::{Path, PathBuf};
+
+fn gpu() -> Option<sr_gpu::Gpu> {
+    sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()
+}
+
+fn dir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("sr-segments-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Renders the document's first output (a PNG sequence) and returns its frames.
+fn render(dir: &Path, xml: &str) -> (Vec<image::RgbaImage>, sr_deliver::pipeline::Report) {
+    let path = dir.join("scene.xml");
+    std::fs::write(&path, xml).unwrap();
+    let d = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let gpu = gpu().expect("gpu");
+    let opts = sr_deliver::Options { hardware: sr_media::encode::Hardware::Software, ..Default::default() };
+    let o = &d.scene.outputs[0];
+    let r = sr_deliver::deliver(&d, o, Some(&gpu), &opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{e}"));
+    let frames = r.files.iter().map(|f| image::open(f).unwrap().to_rgba8()).collect();
+    (frames, r)
+}
+
+fn rgb(img: &image::RgbaImage, x: u32, y: u32) -> [u8; 3] {
+    let p = img.get_pixel(x, y).0;
+    [p[0], p[1], p[2]]
+}
+
+/// Whether pixel (x, y) is `want`, within 2 levels (colour conversion rounds).
+fn near(img: &image::RgbaImage, x: u32, y: u32, want: [u8; 3]) -> bool {
+    rgb(img, x, y).iter().zip(want).all(|(a, b)| (*a as i32 - b as i32).abs() <= 2)
+}
+
+/// A full-frame rectangle red on [0, 1), green on [1, 2), blue on [2, 3).
+const CLOCK: &str = r##"<shape id="c" shape="rect" width="64" height="36" x="0" y="0" fill="#FF0000">
+      <animate property="fill">
+        <key time="0" value="#FF0000" interpolation="hold"/>
+        <key time="1" value="#00FF00" interpolation="hold"/>
+        <key time="2" value="#0000FF" interpolation="hold"/>
+      </animate>
+    </shape>"##;
+
+#[test]
+fn segments_play_spans_in_order_at_their_speed() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("map");
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="3" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence">
+            <segment from="2" to="3"/>
+            <segment from="0" to="1" speed="2"/>
+          </output>
+          <composition>{CLOCK}</composition></scene>"##,
+        d.display()
+    );
+    let (frames, r) = render(&d, &xml);
+    // 1 s + 0.5 s at 10 fps
+    assert_eq!(frames.len(), 15);
+    assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+    // output 0.5 s → composition 2.5 s (blue); 1.2 s → 0.4 s (red)
+    assert!(near(&frames[5], 32, 18, [0, 0, 255]), "{:?}", rgb(&frames[5], 32, 18));
+    assert!(near(&frames[12], 32, 18, [255, 0, 0]), "{:?}", rgb(&frames[12], 32, 18));
+    // the frame exactly at the join (1.0 s) shows the incoming segment (red, composition 0)
+    assert!(near(&frames[10], 32, 18, [255, 0, 0]), "{:?}", rgb(&frames[10], 32, 18));
+    // the last frame of the first segment is still blue
+    assert!(near(&frames[9], 32, 18, [0, 0, 255]), "{:?}", rgb(&frames[9], 32, 18));
+}
+
+/// Left half red, right half blue, in a 64 × 36 frame.
+const HALVES: &str = r##"<shape id="l" shape="rect" width="32" height="36" x="0" y="0" fill="#FF0000"/>
+    <shape id="r" shape="rect" width="32" height="36" x="32" y="0" fill="#0000FF"/>"##;
+
+#[test]
+fn layouts_crop_by_focus_and_segments_move_it() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("crop");
+    // a square crop of the 64 × 36 frame: focusX 0 keeps the left (red), 1 the right (blue)
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="1" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence" layout="sq">
+            <segment from="0" to="0.2"/>
+            <segment from="0" to="0.2" focusX="1"/>
+            <segment from="0" to="0.2"><animate property="focusX"><key time="0" value="0"/><key time="0.2" value="1"/></animate></segment>
+          </output>
+          <layouts><layout id="sq" width="36" height="36" reframe="crop" focusX="0"/></layouts>
+          <composition>{HALVES}</composition></scene>"##,
+        d.display()
+    );
+    let (frames, _) = render(&d, &xml);
+    assert_eq!(frames.len(), 6);
+    assert_eq!(frames[0].dimensions(), (36, 36));
+    // the layout's focus 0 shows frame columns 0‥35: column 10 is red
+    assert!(near(&frames[0], 10, 18, [255, 0, 0]), "{:?}", rgb(&frames[0], 10, 18));
+    // the segment's focus 1 shows columns 28‥63: column 10 (frame 38) is blue
+    assert!(near(&frames[2], 10, 18, [0, 0, 255]), "{:?}", rgb(&frames[2], 10, 18));
+    // animated 0 → 1 over the segment: at segment time 0.1 the crop is centred (columns 14‥49)
+    assert!(near(&frames[5], 2, 18, [255, 0, 0]) && near(&frames[5], 33, 18, [0, 0, 255]));
+}
+
+#[test]
+fn fit_blur_fills_the_margins_with_the_picture() {
+    if gpu().is_none() {
+        return;
+    }
+    let d = dir("fitblur");
+    // 64 × 36 into 36 × 64: fitted in a 36 × 20 band, the rest a blurred cover of the frame
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.1" background="#000000"/>
+          <output path="{}/f_%03d.png" codec="png-sequence" layout="tall"/>
+          <layouts><layout id="tall" width="36" height="64" reframe="fit-blur"/></layouts>
+          <composition>{HALVES}</composition></scene>"##,
+        d.display()
+    );
+    let (frames, _) = render(&d, &xml);
+    let f = &frames[0];
+    assert_eq!(f.dimensions(), (36, 64));
+    // the band is sharp: red left, blue right
+    assert!(near(f, 2, 32, [255, 0, 0]) && near(f, 33, 32, [0, 0, 255]));
+    // the margin above it is not black: blurred picture, red towards the left
+    let top = rgb(f, 4, 4);
+    assert!(top[0] > 100 && top[1] < 30, "{top:?}");
+    // and a fit leaves it black
+    let d2 = dir("fit");
+    let (frames, _) =
+        render(&d2, &xml.replace("fit-blur", "fit").replace(&d.display().to_string(), &d2.display().to_string()));
+    assert!(near(&frames[0], 4, 4, [0, 0, 0]));
+}
+
+#[test]
+fn motion_blur_spans_the_composition_time_of_the_shutter() {
+    if gpu().is_none() {
+        return;
+    }
+    // a white bar moving 40 px/s with a 180° shutter: at speed 1 a frame smears over 2 px of motion
+    // (0.05 s), at speed 4 over 8 px (0.2 s of composition time)
+    let smear = |speed: &str, to: &str, name: &str| {
+        let d = dir(name);
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="1" background="#000000" motionBlur="true" shutterAngle="180" shutterPhase="0" motionBlurSamples="16"/>
+              <output path="{}/f_%03d.png" codec="png-sequence"><segment from="0" to="{to}" speed="{speed}"/></output>
+              <composition><shape id="b" shape="rect" width="4" height="36" y="0" fill="#FFFFFF">
+                <animate property="x"><key time="0" value="4"/><key time="1" value="44"/></animate></shape></composition></scene>"##,
+            d.display()
+        );
+        let (frames, _) = render(&d, &xml);
+        // columns touched by the bar in the second frame
+        let f = &frames[1];
+        (0..64).filter(|&x| f.get_pixel(x, 18).0[0] > 8).count()
+    };
+    let (slow, fast) = (smear("1", "0.4", "blur1"), smear("4", "1", "blur4"));
+    assert!(fast >= slow + 4, "speed 4 smears wider: {fast} vs {slow} columns");
+}

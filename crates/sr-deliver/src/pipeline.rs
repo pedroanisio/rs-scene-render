@@ -203,6 +203,30 @@ struct Video<'a> {
     format: InputFormat,
     size: [u32; 2],
     keep_alpha: bool,
+    /// Output frame rate.
+    fps: f64,
+    /// How frames are placed in the output (a layout's reframing).
+    reframe: Option<sr_eval::program::Reframe>,
+    /// The output's segments, and the frame time of each entry of `times`.
+    segments: Option<(&'a crate::segments::TimeMap, Vec<crate::segments::FrameTime>)>,
+}
+
+impl Video<'_> {
+    /// The placement of frame `k` in the output.
+    fn placement(&self, k: usize) -> sr_gpu::output::Placement {
+        use sr_gpu::output::Placement;
+        let Some(r) = self.reframe else { return Placement::default() };
+        let focus = match &self.segments {
+            Some((tm, frames)) => tm.focus(&frames[k], r.focus),
+            None => r.focus,
+        };
+        match r.mode {
+            m::Reframe::Crop => Placement::Crop { focus },
+            m::Reframe::FitBlur => Placement::FitBlur { focus },
+            // the focus only places cropped or blurred-fit frames; a plain fit is centred
+            _ => Placement::Fit { focus: [0.5, 0.5] },
+        }
+    }
 }
 
 impl Video<'_> {
@@ -274,8 +298,15 @@ impl Video<'_> {
                     None => ev.evaluate(t),
                 };
                 let t1 = Instant::now();
-                // sub-frame samples (motion blur, video lookups) evaluate on this thread
-                let mut sub = |st: f64| ev.evaluate(st);
+                // sub-frame samples (motion blur, video lookups) evaluate on this thread; in a
+                // segment, a sample dt seconds from the frame is taken dt output seconds away and
+                // mapped, so blur covers the composition time the shutter spans at that speed
+                let seg = self.segments.as_ref().map(|(tm, frames)| (*tm, frames[k]));
+                let fps_out = self.fps;
+                let mut sub = |st: f64| match seg {
+                    Some((tm, f)) if (st - t).abs() < 1.0 / fps_out => ev.evaluate(tm.sample(&f, st - t)),
+                    _ => ev.evaluate(st),
+                };
                 let frame = self.renderer.render_with(&g, p, Some(&mut sub));
                 if let Some(e) = frame.stats.errors.first() {
                     return Err(DeliverError::Render { time: t, message: e.clone() });
@@ -293,8 +324,16 @@ impl Video<'_> {
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
-                let next =
-                    self.stage.submit(&frame.texture, &working, &self.color, self.format, self.size, self.keep_alpha);
+                let placement = self.placement(k);
+                let next = self.stage.submit_placed(
+                    &frame.texture,
+                    &working,
+                    &self.color,
+                    self.format,
+                    self.size,
+                    self.keep_alpha,
+                    placement,
+                );
                 let t2 = Instant::now();
                 report.stage_seconds[0] += (t1 - t0).as_secs_f64();
                 report.stage_seconds[1] += (t2 - t1).as_secs_f64();
@@ -419,8 +458,11 @@ pub fn deliver(
     let ev0 = Evaluator::new(doc, &eo).map_err(DeliverError::Document)?;
     let p0 = ev0.program();
     let fps = output.fps.map(|f| f.as_f64()).unwrap_or(p0.fps.as_f64());
+    // with segments, the output has its own timeline: start and end (from the command line) are output times
+    let segments = crate::segments::TimeMap::of(p0, output).map_err(DeliverError::Invalid)?;
+    let timeline = segments.as_ref().map(|tm| tm.duration).unwrap_or(p0.duration);
     let start = opts.start.unwrap_or(output.start).max(0.0);
-    let end = opts.end.or(output.end).unwrap_or(p0.duration).min(p0.duration);
+    let end = opts.end.or(output.end).unwrap_or(timeline).min(timeline);
     if end <= start {
         return Err(DeliverError::Invalid(format!("empty range {start}..{end}")));
     }
@@ -443,7 +485,11 @@ pub fn deliver(
     let tmp =
         std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
     std::fs::create_dir_all(&tmp)?;
-    let wants_audio = output.audio && scene_audio.is_some() && (codec.takes_audio() || codec.is_audio_only());
+    let wants_audio =
+        output.audio && scene_audio.is_some() && (codec.takes_audio() || codec.is_audio_only()) && segments.is_none();
+    if segments.is_some() && output.audio && scene_audio.is_some() {
+        report.unsupported.push("audio of an output with segments is not rendered yet".into());
+    }
     let mut audio_file = None;
     if let (true, Some(sa)) = (wants_audio, &scene_audio) {
         let part = audio::slice(&sa.mixed.master, sa.mix.rate, start, end);
@@ -498,11 +544,13 @@ pub fn deliver(
             None => Gpu::new()?,
         };
         // 360 video renders at the scene360 size unless the output asks for another
+        // a layout that crops or fits delivers at its own frame size
         let frame = p
             .scene
             .scene360
             .as_ref()
             .map(|s| [s.width as u32, s.height as u32])
+            .or(p.reframe.map(|r| [r.size[0].round() as u32, r.size[1].round() as u32]))
             .unwrap_or([p.size[0].round() as u32, p.size[1].round() as u32]);
         let size =
             [output.width.map(|w| w as u32).unwrap_or(frame[0]), output.height.map(|h| h as u32).unwrap_or(frame[1])];
@@ -531,6 +579,20 @@ pub fn deliver(
             renderer.audio =
                 Some(std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: sa.mix.rate as f64, channels }));
         }
+        let frame_times: Option<Vec<crate::segments::FrameTime>> = segments.as_ref().map(|tm| {
+            tm.frames(fps).into_iter().filter(|f| f.output >= start - 1e-9 && f.output < end - 1e-9).collect()
+        });
+        if segments.as_ref().is_some_and(|tm| tm.has_transitions()) {
+            report.unsupported.push("segment transitions are not drawn yet: the joins are cuts".into());
+        }
+        let times: Vec<f64> = match &frame_times {
+            Some(f) => f.iter().map(|f| f.composition).collect(),
+            None => {
+                let n = ((end - start) * fps).round().max(1.0) as u64;
+                (0..n).map(|k| start + k as f64 / fps).collect()
+            }
+        };
+        let n = times.len() as u64;
         let mut video = Video {
             ev: &ev,
             renderer,
@@ -539,9 +601,10 @@ pub fn deliver(
             format,
             size,
             keep_alpha: output.alpha || rgb_image,
+            fps,
+            reframe: p.reframe,
+            segments: segments.as_ref().zip(frame_times),
         };
-        let n = ((end - start) * fps).round().max(1.0) as u64;
-        let times: Vec<f64> = (0..n).map(|k| start + k as f64 / fps).collect();
         let audio_in = audio_file.clone().map(|f| (f, output.audio_codec.clone(), output.audio_bitrate));
         let mut spec = base_spec(output, &report.path, codec, size, fps, format, &color, audio_in, p, opts);
         spec.start_number = (start * fps).round() as u64;
@@ -753,7 +816,12 @@ pub fn deliver(
         // posters and thumbnails
         for c in &output.children {
             let (m::OutputChild::Poster(st) | m::OutputChild::Thumbnail(st)) = c else { continue };
-            let t = st.marker.as_deref().and_then(|mk| sr_eval::eval::marker(p, mk)).unwrap_or(st.time);
+            let t = match (&st.marker, &segments) {
+                (Some(mk), _) => sr_eval::eval::marker(p, mk).unwrap_or(st.time),
+                // a still's time is output time
+                (None, Some(tm)) => tm.at(st.time.clamp(0.0, tm.duration)).composition,
+                (None, None) => st.time,
+            };
             let g = ev.evaluate(t.clamp(0.0, p.duration));
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = video.renderer.render_with(&g, p, Some(&mut sub));
@@ -777,7 +845,13 @@ pub fn deliver(
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
-    report.files.extend(write_sidecars(p, output, &report.path, start, end)?);
+    if segments.is_some() {
+        if p.scene.captions.is_some() {
+            report.unsupported.push("caption files of an output with segments are not written yet".into());
+        }
+    } else {
+        report.files.extend(write_sidecars(p, output, &report.path, start, end)?);
+    }
     if opts.upload {
         let dests: Vec<&m::Destination> = output
             .children

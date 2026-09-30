@@ -75,7 +75,38 @@ struct Params {
     kb: f32,
     words: u32,
     seed: u32,
+    mode: u32,
+    bg_offset: [f32; 2],
+    bg_scale: f32,
     pad: [u32; 3],
+}
+
+/// How a frame is placed in an output of another shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Placement {
+    /// Scaled to fit inside, transparent (black when opaque) around it.
+    Fit { focus: [f64; 2] },
+    /// Scaled to cover, the excess cut away.
+    Crop { focus: [f64; 2] },
+    /// Scaled to fit inside, over a blurred copy scaled to cover.
+    FitBlur { focus: [f64; 2] },
+}
+
+impl Default for Placement {
+    fn default() -> Placement {
+        Placement::Fit { focus: [0.5, 0.5] }
+    }
+}
+
+impl Placement {
+    /// Scale and offset (output pixels) of a `frame`-sized image placed in `size`: `cover` or fit, with
+    /// the free space shared out by `focus` (0 puts the image's left or top edge on the output's).
+    fn place(frame: [f32; 2], size: [u32; 2], cover: bool, focus: [f64; 2]) -> (f32, [f32; 2]) {
+        let (sx, sy) = (size[0] as f32 / frame[0], size[1] as f32 / frame[1]);
+        let scale = if cover { sx.max(sy) } else { sx.min(sy) };
+        let free = [size[0] as f32 - frame[0] * scale, size[1] as f32 - frame[1] * scale];
+        (scale, [free[0] * focus[0] as f32, free[1] * focus[1] as f32])
+    }
 }
 
 /// A conversion in flight: its staging buffer (out of the ring until [`OutputStage::wait`]
@@ -100,6 +131,13 @@ pub struct OutputStage {
     samp: wgpu::Sampler,
     /// Parameters, rewritten before every submission (queue writes land after earlier work).
     params: wgpu::Buffer,
+    /// The fit-blur background: downsample and Gaussian passes, their direction uniforms (down,
+    /// across, along), the two reduced textures they ping-pong between, and a 1×1 stand-in.
+    blur_pipe: wgpu::ComputePipeline,
+    blur_bgl: wgpu::BindGroupLayout,
+    blur_dirs: [wgpu::Buffer; 3],
+    blur_tex: Option<([u32; 2], [wgpu::TextureView; 2])>,
+    none_view: wgpu::TextureView,
     /// Packed output, grown when a larger frame needs it.
     packed: Option<wgpu::Buffer>,
     /// Staging buffers by slot; a slot is empty while its buffer is out in a [`Pending`].
@@ -158,8 +196,92 @@ impl OutputStage {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: c,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+        let blur_module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("output blur"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("output_blur.wgsl").into()),
+        });
+        let blur_bgl = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("output blur"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: c,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: c,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: c,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let blur_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&blur_bgl)],
+            immediate_size: 0,
+        });
+        let blur_pipe = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("output blur"),
+            layout: Some(&blur_layout),
+            module: &blur_module,
+            entry_point: Some("cs_blur"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let blur_dirs = [[0i32, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]].map(|v| {
+            let b = d.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("output blur direction"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&b, 0, bytemuck::cast_slice(&v));
+            b
+        });
+        let none_view = d
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("no blur"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&bgl)],
@@ -191,6 +313,11 @@ impl OutputStage {
             bgl,
             samp,
             params,
+            blur_pipe,
+            blur_bgl,
+            blur_dirs,
+            blur_tex: None,
+            none_view,
             packed: None,
             ring: [None, None, None],
             head: 0,
@@ -214,12 +341,32 @@ impl OutputStage {
         size: [u32; 2],
         keep_alpha: bool,
     ) -> Pending {
+        self.submit_placed(frame, working, out, format, size, keep_alpha, Placement::default())
+    }
+
+    /// [`submit`](Self::submit), with the frame placed in the output by `placement`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_placed(
+        &mut self,
+        frame: &Tex,
+        working: &Working,
+        out: &OutputColor,
+        format: InputFormat,
+        size: [u32; 2],
+        keep_alpha: bool,
+        placement: Placement,
+    ) -> Pending {
         let d = self.device.clone();
         let bytes = format.frame_bytes(size[0], size[1]);
         let words = bytes.div_ceil(4) as u32;
-        let (fw, fh) = (frame.size[0] as f32, frame.size[1] as f32);
-        let scale = (size[0] as f32 / fw).min(size[1] as f32 / fh);
-        let offset = [(size[0] as f32 - fw * scale) / 2.0, (size[1] as f32 - fh * scale) / 2.0];
+        let fsz = [frame.size[0] as f32, frame.size[1] as f32];
+        let (mode, (scale, offset), (bg_scale, bg_offset)) = match placement {
+            Placement::Fit { focus } => (0, Placement::place(fsz, size, false, focus), (1.0, [0.0; 2])),
+            Placement::Crop { focus } => (0, Placement::place(fsz, size, true, focus), (1.0, [0.0; 2])),
+            Placement::FitBlur { focus } => {
+                (1, Placement::place(fsz, size, false, focus), Placement::place(fsz, size, true, focus))
+            }
+        };
         let store = color::default_transfer(working.space);
         let p = Params {
             to_out: types::mat3(&color::convert(working.space, out.space)),
@@ -243,6 +390,9 @@ impl OutputStage {
             kb: out.matrix.1,
             words,
             seed: self.frame_index,
+            mode,
+            bg_offset,
+            bg_scale,
             pad: [0; 3],
         };
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -274,6 +424,49 @@ impl OutputStage {
                 mapped_at_creation: false,
             }),
         };
+        let mut enc = d.create_command_encoder(&Default::default());
+        if mode == 1 {
+            // the frame reduced 8× and blurred: down into [0], across into [1], down again into [0]
+            let small = [frame.size[0].div_ceil(8).max(1), frame.size[1].div_ceil(8).max(1)];
+            if self.blur_tex.as_ref().is_none_or(|(s, _)| *s != small) {
+                let make = || {
+                    d.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("fit-blur"),
+                        size: wgpu::Extent3d { width: small[0], height: small[1], depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+                };
+                self.blur_tex = Some((small, [make(), make()]));
+            }
+            let (_, views) = self.blur_tex.as_ref().expect("blur textures");
+            let steps: [(&wgpu::TextureView, &wgpu::TextureView, usize); 3] =
+                [(&frame.view, &views[0], 0), (&views[0], &views[1], 1), (&views[1], &views[0], 2)];
+            for (src, dst, k) in steps {
+                let g = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.blur_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst) },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.blur_dirs[k].as_entire_binding() },
+                    ],
+                });
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.blur_pipe);
+                pass.set_bind_group(0, &g, &[]);
+                pass.dispatch_workgroups(small[0].div_ceil(8), small[1].div_ceil(8), 1);
+            }
+        }
+        let blurred = match (&self.blur_tex, mode) {
+            (Some((_, v)), 1) => &v[0],
+            _ => &self.none_view,
+        };
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.bgl,
@@ -282,9 +475,9 @@ impl OutputStage {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&frame.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.samp) },
                 wgpu::BindGroupEntry { binding: 3, resource: storage.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(blurred) },
             ],
         });
-        let mut enc = d.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.pipe);

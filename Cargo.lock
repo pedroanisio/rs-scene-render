@@ -2392,6 +2392,7 @@ dependencies = [
 name = "sr-deliver"
 version = "0.1.0"
 dependencies = [
+ "image",
  "rayon",
  "serde",
  "serde_json",

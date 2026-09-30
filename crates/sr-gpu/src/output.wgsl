@@ -17,13 +17,19 @@ struct Out {
   kb: f32,
   words: u32,
   seed: u32,
-  pad: u32,
+  mode: u32,              // outside the frame: 0 transparent, 1 a blurred cover of the frame (fit-blur)
+  bg_offset: vec2<f32>,   // cover placement (output pixels)
+  bg_scale: f32,          // cover scale (output pixels per frame pixel)
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
 };
 
 @group(0) @binding(0) var<uniform> o: Out;
 @group(0) @binding(1) var frame: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(4) var blurred: texture_2d<f32>;  // the frame, reduced and blurred (fit-blur)
 
 fn hash(p: vec2<u32>, s: u32) -> f32 {
   var h = p.x * 1664525u + p.y * 1013904223u + s * 2654435761u;
@@ -33,12 +39,22 @@ fn hash(p: vec2<u32>, s: u32) -> f32 {
   return f32(h & 16777215u) / 16777216.0;
 }
 
+// the blurred frame, scaled to cover the output
+fn blurred_cover(p: vec2<f32>) -> vec4<f32> {
+  let fs = vec2<f32>(o.fsize);
+  let q = clamp((p - o.bg_offset) / o.bg_scale, vec2(0.0), fs);
+  return textureSampleLevel(blurred, samp, q / fs, 0.0);
+}
+
 // straight, output-encoded RGB and alpha of output pixel (x, y); linear premultiplied for float output
 fn px(x: u32, y: u32) -> vec4<f32> {
-  let q = (vec2<f32>(f32(x), f32(y)) + 0.5 - o.offset) / o.scale;
+  let p = vec2<f32>(f32(x), f32(y)) + 0.5;
+  let q = (p - o.offset) / o.scale;
   var c = vec4(0.0);
   if (all(q >= vec2(0.0)) && all(q <= vec2<f32>(o.fsize))) {
     c = textureSampleLevel(frame, samp, q / vec2<f32>(o.fsize), 0.0);
+  } else if (o.mode == 1u) {
+    c = blurred_cover(p);
   }
   var a = clamp(c.a, 0.0, 1.0);
   var rgb = select(vec3(0.0), c.rgb / a, a > 0.0);

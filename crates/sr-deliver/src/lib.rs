@@ -10,6 +10,7 @@ pub mod access;
 pub mod audio;
 pub mod destinations;
 pub mod pipeline;
+pub mod segments;
 
 pub use pipeline::{adhoc_output, deliver, Options, Parallel, Report};
 

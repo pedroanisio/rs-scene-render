@@ -451,8 +451,10 @@ pub struct Program {
     pub fps: Fps,
     /// Duration in seconds.
     pub duration: f64,
-    /// Frame size (layout size when a layout is selected).
+    /// Frame size (layout size when a layout that reflows is selected).
     pub size: [f64; 2],
+    /// A selected layout that crops or fits the composition instead of reflowing it.
+    pub reframe: Option<Reframe>,
     /// Project seed.
     pub seed: u64,
     /// Nodes; roots are the composition children.
@@ -780,6 +782,18 @@ struct Templated {
     scene: m::Scene,
     params: HashMap<String, V>,
     size: [f64; 2],
+    reframe: Option<Reframe>,
+}
+
+/// How a layout that does not reflow fits the composition, rendered at the project size, into its frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reframe {
+    /// `crop`, `fit` or `fit-blur`.
+    pub mode: m::Reframe,
+    /// `focusX`, `focusY`: where the composition is anchored in the frame (0‥1).
+    pub focus: [f64; 2],
+    /// The layout's frame size.
+    pub size: [f64; 2],
 }
 
 fn template(
@@ -944,10 +958,21 @@ fn template(
         }
     }
     let mut size = [scene.project.width as f64, scene.project.height as f64];
+    let mut reframe = None;
     if let Some(l) = &opts.layout {
         match scene.layouts.as_ref().and_then(|ls| ls.layouts.iter().find(|x| &x.id == l)).cloned() {
             Some(layout) => {
-                size = [layout.width as f64, layout.height as f64];
+                let frame = [layout.width as f64, layout.height as f64];
+                if layout.reframe == m::Reframe::Reflow {
+                    size = frame;
+                } else {
+                    // the composition renders at the project size; delivery fits it into the frame
+                    reframe = Some(Reframe {
+                        mode: layout.reframe,
+                        focus: [layout.focus_x.get(), layout.focus_y.get()],
+                        size: frame,
+                    });
+                }
                 for o in &layout.overrides {
                     apply_override(&mut scene, &o.target, &o.property, &o.value, o.loc, "layout override", diags);
                 }
@@ -1009,7 +1034,7 @@ fn template(
             }
         }
     });
-    Templated { scene, params, size }
+    Templated { scene, params, size, reframe }
 }
 
 // ------------------------------------------------------------------ builder
@@ -2721,6 +2746,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         fps: scene.project.fps,
         duration,
         size: t.size,
+        reframe: t.reframe,
         seed: b.project_seed,
         nodes: b.nodes,
         roots,
