@@ -15,7 +15,8 @@
 //! metres map into it through [`Y_UP_METRES`] (100 px per metre).
 
 // `as_chunks` (1.88) and `is_multiple_of` (1.87) are newer than the workspace's Rust 1.82.
-#![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
+// lints some clippy versions lack: allowed where known
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 
 pub mod anim;
 pub mod camera;

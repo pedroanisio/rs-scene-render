@@ -545,7 +545,7 @@ impl<'a> Eval<'a> {
                     "transition type=\"luma\" requires @matte.".into()
                 });
                 if parent_is("segment") {
-                    let c59 = !(has("from") || has("to")) && !matches!(a("type"), Some("morph" | "luma"));
+                    let c59 = !(has("from") || has("to") || matches!(a("type"), Some("morph" | "luma")));
                     self.check(c59, n, "C59", || {
                         "a segment transition joins two rendered pictures: no from, no to, not morph and not luma."
                             .into()
@@ -635,7 +635,7 @@ impl<'a> Eval<'a> {
                 self.check(c56, n, "C56", || {
                     "segment from and to must satisfy 0 <= from < to <= project/@duration.".into()
                 });
-                let c57 = !(has("from") && has("fromMarker")) && !(has("to") && has("toMarker"));
+                let c57 = !(has("from") && has("fromMarker") || has("to") && has("toMarker"));
                 self.check(c57, n, "C57", || "a segment gives each end as a time or as a marker, not both.".into());
                 let c58 = kids(n, "timeRemap").count() <= 1 && kids(n, "transition").count() <= 1;
                 self.check(c58, n, "C58", || "a segment has at most one timeRemap and one transition.".into());

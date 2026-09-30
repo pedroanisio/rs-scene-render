@@ -1,7 +1,7 @@
 //! sr-3d: primitives, importers, animation, lights, environments, cameras and MaterialX.
 
 // `as_chunks` needs Rust 1.88; the workspace supports 1.82.
-#![allow(clippy::chunks_exact_to_as_chunks)]
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
 use glam::{Vec2, Vec3};
 use sr_3d::{anim, camera, env, import, light, mtlx, prim, Asset, Primitive};
