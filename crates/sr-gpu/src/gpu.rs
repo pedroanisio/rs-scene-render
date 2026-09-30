@@ -207,6 +207,14 @@ pub struct Gpu {
     pub queue: Arc<wgpu::Queue>,
     /// Adapter description.
     pub info: wgpu::AdapterInfo,
+    /// The device has timestamp queries (GPU time of passes can be measured).
+    pub timestamps: bool,
+    /// The widest float format the device renders to that holds 3D view depth and reflectance
+    /// (32-bit float where it can; OpenGL may not render to RGBA32F).
+    pub gbuffer_depth: wgpu::TextureFormat,
+    /// The single-channel float format the device renders to for depth and blur-size maps
+    /// (R32Float where it can, else R16Float).
+    pub scalar_target: wgpu::TextureFormat,
 }
 
 impl Gpu {
@@ -227,14 +235,30 @@ impl Gpu {
         let info = adapter.get_info();
         let limits = wgpu::Limits { max_storage_buffers_per_shader_stage: 8, ..wgpu::Limits::downlevel_defaults() }
             .using_resolution(adapter.limits());
+        // timestamp queries, where the adapter has them, so renders can report GPU time
+        let features =
+            adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("scene-render"),
-            required_features: wgpu::Features::empty(),
+            required_features: features,
             required_limits: limits,
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
-        Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue), info })
+        let timestamps = features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let renderable = |f: wgpu::TextureFormat| {
+            adapter.get_texture_format_features(f).allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        };
+        let gbuffer_depth = [wgpu::TextureFormat::Rgba32Float, wgpu::TextureFormat::Rg32Float]
+            .into_iter()
+            .find(|f| renderable(*f))
+            .unwrap_or(wgpu::TextureFormat::Rgba16Float);
+        let scalar_target = if renderable(wgpu::TextureFormat::R32Float) {
+            wgpu::TextureFormat::R32Float
+        } else {
+            wgpu::TextureFormat::R16Float
+        };
+        Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue), info, timestamps, gbuffer_depth, scalar_target })
     }
 
     /// A new device on the same adapter, for work that needs a device of its own.

@@ -92,6 +92,16 @@ pub(super) fn posterized(t: f64, a: &Attrs) -> f64 {
     (t * rate + 1e-9).floor() / rate
 }
 
+/// Passes labelled with what they belong to, for GPU timings.
+fn labelled(mut passes: Vec<fx::Pass>, who: &str) -> Vec<fx::Pass> {
+    for p in &mut passes {
+        if p.label.is_empty() {
+            p.label = who.to_string();
+        }
+    }
+    passes
+}
+
 /// Effect targets that follow moving content round their size up to a multiple of this, so
 /// the texture sizes they ask the pool for repeat from frame to frame.
 const TARGET_STEP: f64 = 32.0;
@@ -298,12 +308,13 @@ impl Renderer {
             passes: Vec::new(),
             temps: Vec::new(),
             store,
+            max_samples: self.tier.line_samples,
             problems: Vec::new(),
         }
     }
 
     fn finish_builder(plan: &mut Plan, passes: Vec<fx::Pass>, temps: Vec<Arc<Tex>>, problems: Vec<String>, who: &str) {
-        let passes = fx::fuse_colour(passes);
+        let passes = labelled(fx::fuse_colour(passes), who);
         plan.fx_temps.extend(temps);
         plan.stats.unsupported.extend(problems.into_iter().map(|m| format!("{who}: {m}")));
         if !passes.is_empty() {
@@ -754,7 +765,8 @@ impl Renderer {
     ) -> bool {
         let g = ctx.g;
         let n = &g.nodes[i];
-        let effs: Vec<&m::Effect> = ids.iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
+        let effs: Vec<&m::Effect> =
+            ids.iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled && self.drawn_at_tier(e)).collect();
         if effs.is_empty() {
             return false;
         }
@@ -777,7 +789,7 @@ impl Renderer {
         let post =
             effs.iter().zip(&attrs).find(|(e, _)| e.r#type.as_str() == "posterize-time").map(|(_, a)| posterized(t, a));
         let echo = effs.iter().zip(&attrs).find(|(e, _)| e.r#type.as_str() == "echo").map(|(_, a)| {
-            let count = (a.num("samples", 16.0) as usize).clamp(2, 16);
+            let count = (a.num("samples", 16.0) as usize).min(self.tier.echo_samples).clamp(2, 16);
             (count, a.num("amount", 1.0) / fps_of(ctx.p))
         });
         let mut shown: Vec<f64> = match (post, echo) {
@@ -936,7 +948,7 @@ impl Renderer {
                         plan.stats.unsupported.push(format!("{}: echo needs a sub-frame provider", e.id));
                         continue;
                     }
-                    let count = (a.num("samples", 16.0) as usize).clamp(2, 16);
+                    let count = (a.num("samples", 16.0) as usize).min(self.tier.echo_samples).clamp(2, 16);
                     let delay = a.num("amount", 1.0) / fps;
                     let decay = a.num("intensity", 1.0).clamp(0.0, 1.0);
                     let weights: Vec<f64> =
@@ -959,7 +971,7 @@ impl Renderer {
                     }
                     let (passes, temps, problems) =
                         (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
-                    Self::finish_builder(plan, passes, temps, problems, &e.id);
+                    Self::finish_builder(plan, labelled(passes, &format!("{}/{}", n.id, e.id)), temps, problems, &e.id);
                     src = Some(acc);
                 }
                 _ => {}
@@ -1028,7 +1040,7 @@ impl Renderer {
                 let out = b.flow_blur(&now, slot, shutter, samples);
                 let (passes, temps, problems) =
                     (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
-                Self::finish_builder(plan, passes, temps, problems, &e.id);
+                Self::finish_builder(plan, labelled(passes, &format!("{}/{}", n.id, e.id)), temps, problems, &e.id);
                 cur = out;
                 continue;
             }
@@ -1050,7 +1062,7 @@ impl Renderer {
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
             let (passes, temps, problems) =
                 (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
-            Self::finish_builder(plan, passes, temps, problems, &e.id);
+            Self::finish_builder(plan, labelled(passes, &format!("{}/{}", n.id, e.id)), temps, problems, &e.id);
             match r {
                 Ok(t) => cur = t,
                 Err(msg) => plan.stats.unsupported.push(format!("{}: {msg}", e.id)),
@@ -1082,6 +1094,7 @@ impl Renderer {
             additive: false,
             clear: true,
             custom: None,
+            label: String::new(),
         });
         let (passes, temps, problems) =
             (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
@@ -1103,7 +1116,8 @@ impl Renderer {
         let g = ctx.g;
         let n = &g.nodes[i];
         let ids = effect_ids(&*n.elem);
-        let effs: Vec<&m::Effect> = ids.iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
+        let effs: Vec<&m::Effect> =
+            ids.iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled && self.drawn_at_tier(e)).collect();
         if effs.is_empty() || op <= 0.0 {
             return;
         }
@@ -1168,8 +1182,13 @@ impl Renderer {
         let hash = h(&[root_hash, ctx.elements, sr_eval::rng::hash_str(&ids.join(" ")), hf(op), hf(g.time), 0x6164]);
         self.composite(plan, ctx, i, space, op, cur, [0.0, 0.0, w, hgt], cmds, hash);
         if let Some(c) = cmds.last_mut() {
-            c.pre = Some(Box::new(AdjPre { snapshot, passes: fx::fuse_colour(passes), three: None }));
+            c.pre = Some(Box::new(AdjPre { snapshot, passes: labelled(fx::fuse_colour(passes), &n.id), three: None }));
         }
+    }
+
+    /// Whether the quality tier draws effect `e` (drafts leave out grain and noise).
+    fn drawn_at_tier(&self, e: &m::Effect) -> bool {
+        self.tier.grain || !matches!(e.r#type.as_str(), "film-grain" | "noise")
     }
 
     /// Whether node `i` has motion blur (its own setting, else its parents', else the project's).
@@ -1213,7 +1232,7 @@ impl Renderer {
         if angle <= 0.0 {
             return false;
         }
-        let count = (pr.motion_blur_samples as usize).clamp(1, 256);
+        let count = (pr.motion_blur_samples as usize).min(self.tier.motion_blur_samples).clamp(1, 256);
         let times: Vec<f64> = (0..count)
             .map(|k| g.time + (pr.shutter_phase / 360.0 + angle / 360.0 * (k as f64 + 0.5) / count as f64) / fps)
             .collect();
@@ -1837,7 +1856,7 @@ impl Renderer {
         plan.fx_temps.extend(temps);
         plan.stats.unsupported.extend(problems);
         if !passes.is_empty() {
-            plan.post = fx::fuse_colour(passes);
+            plan.post = labelled(fx::fuse_colour(passes), "finishing");
             plan.post_out = Some(cur);
         }
     }

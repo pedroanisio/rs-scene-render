@@ -84,9 +84,11 @@ impl Renderer {
                 .unwrap_or(false)
     }
 
+    /// The frame's own target: the document's coordinates at the quality tier's scale.
     fn is_root_space(&self, ctx: &Ctx, space: &Space) -> bool {
-        space.xform == Affine::IDENTITY
-            && space.size == [ctx.g.size[0].round() as u32, ctx.g.size[1].round() as u32]
+        let s = self.tier.scale;
+        space.xform == Affine::scale(s, s)
+            && space.size == [(ctx.g.size[0] * s).round().max(1.0) as u32, (ctx.g.size[1] * s).round().max(1.0) as u32]
             && self.view_override.is_none()
     }
 

@@ -104,3 +104,53 @@ fn gl_matches_the_native_backend_on_a_mixed_scene() {
     let db = psnr(&a, &b);
     assert!(db >= 40.0, "GL vs native: {db:.1} dB");
 }
+
+/// Renders `d` at `t` on `gpu`, with a sub-frame provider.
+fn render_doc_on(gpu: &Gpu, d: &sr_model::Document, t: f64) -> Option<Shot> {
+    let ev = sr_eval::Evaluator::new(d, &sr_eval::EvalOptions::default()).ok()?;
+    let mut r = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let g = ev.evaluate(t);
+    let mut sub = |st: f64| ev.evaluate(st);
+    let f = r.render_with(&g, ev.program(), Some(&mut sub));
+    Some(Shot { px: r.read(&f.texture), size: f.texture.size, stats: f.stats })
+}
+
+#[test]
+fn gl_matches_the_native_backend_on_the_conformance_corpus() {
+    // every valid corpus document that loads here (remote assets may not), at its start and
+    // its middle
+    let (Some(g), Some(n)) = (gl(), native()) else { return };
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
+    files.sort();
+    let (mut compared, mut failures, mut declared) = (0, Vec::new(), Vec::new());
+    for path in files {
+        let doc = match sr_model::load_file(&path, &sr_model::LoadOptions::default()) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("skipping {}: {e:?}", path.display());
+                continue;
+            }
+        };
+        for t in [0.0, doc.duration() / 2.0] {
+            let (Some(a), Some(b)) = (render_doc_on(&g, &doc, t), render_doc_on(&n, &doc, t)) else { continue };
+            // what GL cannot draw it must say (so --strict fails); such frames are not compared
+            let gaps: Vec<&String> = a.stats.unsupported.iter().filter(|m| !b.stats.unsupported.contains(m)).collect();
+            if !gaps.is_empty() {
+                declared.push(format!("{}: {gaps:?}", path.file_name().unwrap().to_string_lossy()));
+                continue;
+            }
+            compared += 1;
+            let db = common::psnr(&a.px, &b.px);
+            if db < 40.0 {
+                failures.push(format!("{} at {t:.2} s: {db:.1} dB", path.file_name().unwrap().to_string_lossy()));
+            }
+        }
+    }
+    for d in &declared {
+        eprintln!("declared GL gap, not compared: {d}");
+    }
+    assert!(compared > 0, "no corpus document rendered");
+    assert!(failures.is_empty(), "GL vs native:\n{}", failures.join("\n"));
+}

@@ -271,6 +271,157 @@ fn rendering_on_a_software_adapter_warns() {
 }
 
 #[test]
+fn quality_overrides_render_drafts_at_half_size_and_encode_at_full_size() {
+    // the fixture scene is 48×32
+    let dir = render_fixture("quality");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let png = dir.join("draft.png");
+    let o = run(&["render", &scene, "--frame", "3", "-o", png.to_str().unwrap(), "--quality", "draft"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let img = image::open(&png).unwrap();
+    assert_eq!((img.width(), img.height()), (24, 16), "a draft frame is half size");
+    let pattern = dir.join("enc_%03d.png");
+    let o = run(&["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2", "--quality", "draft", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(r["quality"], "draft", "{r}");
+    let img = image::open(dir.join("enc_000.png")).unwrap();
+    assert_eq!((img.width(), img.height()), (48, 32), "delivery scales a draft to the output size");
+    let o = run(&["render", &scene, "--frame", "0", "-o", png.to_str().unwrap(), "--quality", "rough"]);
+    assert_eq!(o.status.code(), Some(2), "an unknown quality is a usage error");
+}
+
+/// A 1 s, 10 fps scene: a shape for the whole second and one only in its second half.
+fn two_halves(name: &str, project: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("sr-cli-changed-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = dir.join("h.scene.xml");
+    std::fs::write(
+        &scene,
+        format!(
+            r##"<scene version="1.1"><project width="32" height="24" fps="10" duration="1" background="#102030" {project}/>
+<composition><shape id="a" shape="rect" x="2" y="2" width="10" height="10" fill="#FF0000"/>
+<shape id="b" shape="ellipse" start="0.5" x="16" y="8" width="12" height="12" fill="#00FF00"/></composition></scene>"##
+        ),
+    )
+    .unwrap();
+    (dir, scene)
+}
+
+fn rendered(o: &Output) -> (usize, usize) {
+    let text = String::from_utf8_lossy(&o.stdout);
+    let line = text.lines().find(|l| l.starts_with("rendered ")).unwrap_or_else(|| panic!("{text}"));
+    let w: Vec<&str> = line.split_whitespace().collect();
+    (w[1].parse().unwrap(), w[3].parse().unwrap())
+}
+
+#[test]
+fn changed_only_renders_the_frames_an_edit_changed() {
+    let (dir, scene) = two_halves("second-half", "");
+    let (scene, out) = (scene.display().to_string(), dir.join("f_%03d.png").display().to_string());
+    let args = ["render", &scene, "--frames", "0..10", "-o", &out, "--changed-only"];
+    let o = run(&args);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(rendered(&o), (10, 10));
+    assert_eq!(rendered(&run(&args)), (0, 10), "nothing changed");
+    let early = std::fs::metadata(dir.join("f_002.png")).unwrap().modified().unwrap();
+    // recolour the shape that only the second half shows
+    let text = std::fs::read_to_string(&scene).unwrap().replace("#00FF00", "#0000FF");
+    std::fs::write(&scene, text).unwrap();
+    assert_eq!(rendered(&run(&args)), (5, 10), "only frames 5..9 show the edited shape");
+    assert_eq!(std::fs::metadata(dir.join("f_002.png")).unwrap().modified().unwrap(), early);
+    let img = image::open(dir.join("f_007.png")).unwrap().to_rgba8();
+    assert!(img.get_pixel(22, 14)[2] > 200, "the edit is in the re-rendered frames");
+    // a missing output is rendered again
+    std::fs::remove_file(dir.join("f_001.png")).unwrap();
+    assert_eq!(rendered(&run(&args)), (1, 10));
+    // other settings are other pixels
+    assert_eq!(rendered(&run(&[&args[..], &["--quality", "draft"]].concat())), (10, 10));
+}
+
+#[test]
+fn with_motion_blur_an_edit_renders_every_frame() {
+    let (dir, scene) = two_halves("blur", r#"motionBlur="true""#);
+    let (scene, out) = (scene.display().to_string(), dir.join("f_%03d.png").display().to_string());
+    let args = ["render", &scene, "--frames", "0..10", "-o", &out, "--changed-only"];
+    let o = run(&args);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(rendered(&o), (10, 10));
+    let text = std::fs::read_to_string(&scene).unwrap().replace("#00FF00", "#0000FF");
+    std::fs::write(&scene, text).unwrap();
+    let o = run(&args);
+    assert_eq!(rendered(&o), (10, 10));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("motion blur"), "{}", String::from_utf8_lossy(&o.stdout));
+}
+
+#[test]
+fn watch_renders_again_what_an_edit_changed() {
+    let (dir, scene) = two_halves("watch", "");
+    let (scene_s, out) = (scene.display().to_string(), dir.join("w_%03d.png").display().to_string());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args(["watch", &scene_s, "--frames", "0..10", "-o", &out, "--interval", "100", "--max-runs", "2"])
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // wait for the first pass to write every frame
+    let started = std::time::Instant::now();
+    while !(0..10).all(|k| dir.join(format!("w_{k:03}.png")).exists()) {
+        if let Some(status) = child.try_wait().unwrap() {
+            let o = child.wait_with_output().unwrap();
+            if String::from_utf8_lossy(&o.stderr).contains("no GPU adapter") {
+                return;
+            }
+            panic!("watch exited early with {status}: {}", String::from_utf8_lossy(&o.stderr));
+        }
+        assert!(started.elapsed().as_secs() < 120, "the first pass did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let text = std::fs::read_to_string(&scene).unwrap().replace("#00FF00", "#0000FF");
+    std::fs::write(&scene, text).unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = String::from_utf8_lossy(&o.stdout);
+    let runs: Vec<&str> = text.lines().filter(|l| l.starts_with("rendered ")).collect();
+    assert_eq!(runs, ["rendered 10 of 10 frames (0 unchanged)", "rendered 5 of 10 frames (5 unchanged)"], "{text}");
+}
+
+#[test]
+fn bench_and_stats_report_gpu_time_where_the_adapter_measures_it() {
+    // llvmpipe has timestamp queries (as on CI); the GPU time is reported apart from the CPU's
+    let dir = render_fixture("gpu-time");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--stats", "--frames", "0..3"], &[("SR_GPU_ADAPTER", "llvmpipe")]);
+    if o.status.code() == Some(2) {
+        eprintln!("skipping: no llvmpipe adapter: {}", String::from_utf8_lossy(&o.stderr));
+        return;
+    }
+    let text = String::from_utf8_lossy(&o.stdout);
+    let line = text.lines().find(|l| l.starts_with("gpu:")).unwrap_or_else(|| panic!("no GPU time line: {text}"));
+    assert!(line.contains("median") && line.contains("ms"), "{line}");
+    let stats: Vec<serde_json::Value> = String::from_utf8_lossy(&o.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(stats.len(), 3);
+    for s in &stats {
+        assert!(s["gpu"]["frame_ms"].as_f64().is_some_and(|v| v > 0.0), "{s}");
+        assert!(s["gpu"]["passes"].is_array(), "{s}");
+    }
+}
+
+#[test]
 fn render_writes_png_frames() {
     let dir = render_fixture("png");
     let scene = dir.join("r.scene.xml").display().to_string();

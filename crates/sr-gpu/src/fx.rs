@@ -196,6 +196,109 @@ pub struct Pass {
     pub clear: bool,
     /// A custom GLSL program with its own bindings (then `entry` and the fixed inputs are unused).
     pub custom: Option<Box<crate::shader::CustomBind>>,
+    /// What the pass belongs to (a node or adjustment id), for GPU timings.
+    pub label: String,
+}
+
+/// GPU time of one effect pass.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PassTime {
+    /// The node or adjustment the pass belongs to, and the pass's entry point.
+    pub label: String,
+    /// Milliseconds.
+    pub ms: f64,
+}
+
+/// GPU time of a frame, from timestamp queries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GpuTimes {
+    /// The whole frame's command buffer, when the adapter can time inside an encoder.
+    pub frame_ms: Option<f64>,
+    /// Each effect pass (custom GLSL passes are not timed).
+    pub passes: Vec<PassTime>,
+}
+
+/// Timestamp queries of one frame: a begin and an end for each effect pass and, where the
+/// adapter can write them inside an encoder, for the frame.
+pub struct Timer {
+    pub(crate) set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+    capacity: u32,
+    used: u32,
+    /// Each timed pass's label and the index of its begin query (the end is the next).
+    labels: Vec<(String, u32)>,
+    /// The index of the frame's begin query.
+    pub(crate) frame: Option<u32>,
+}
+
+impl Timer {
+    /// Room for `pairs` begin/end pairs.
+    pub fn new(device: &wgpu::Device, pairs: u32) -> Timer {
+        let capacity = (pairs.clamp(1, 2048)) * 2;
+        let bytes = capacity as u64 * 8;
+        Timer {
+            set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: capacity,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("timestamps"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            read: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("timestamps read"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            capacity,
+            used: 0,
+            labels: Vec::new(),
+            frame: None,
+        }
+    }
+
+    /// The begin index of a free begin/end pair.
+    pub fn pair(&mut self) -> Option<u32> {
+        (self.used + 2 <= self.capacity).then(|| {
+            self.used += 2;
+            self.used - 2
+        })
+    }
+
+    /// Copies the queries written so far where `read` can map them.
+    pub fn resolve(&self, enc: &mut wgpu::CommandEncoder) {
+        if self.used > 0 {
+            enc.resolve_query_set(&self.set, 0..self.used, &self.resolve, 0);
+            enc.copy_buffer_to_buffer(&self.resolve, 0, &self.read, 0, self.used as u64 * 8);
+        }
+    }
+
+    /// The times, once the frame's work has completed (waits for it). `period` is
+    /// nanoseconds per tick.
+    pub fn read(&self, device: &wgpu::Device, period: f32) -> GpuTimes {
+        let mut ticks = vec![0u64; self.used as usize];
+        if self.used > 0 {
+            let slice = self.read.slice(..self.used as u64 * 8);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let bytes = slice.get_mapped_range().expect("mapped");
+            for (k, c) in bytes.chunks_exact(8).enumerate() {
+                ticks[k] = u64::from_le_bytes(c.try_into().expect("8 bytes"));
+            }
+            drop(bytes);
+            self.read.unmap();
+        }
+        let ms = |a: u32| ticks[a as usize + 1].saturating_sub(ticks[a as usize]) as f64 * period as f64 / 1e6;
+        GpuTimes {
+            frame_ms: self.frame.map(ms),
+            passes: self.labels.iter().map(|(label, a)| PassTime { label: label.clone(), ms: ms(*a) }).collect(),
+        }
+    }
 }
 
 impl Pass {
@@ -212,6 +315,7 @@ impl Pass {
             additive: false,
             clear: true,
             custom: Some(Box::new(bind)),
+            label: String::new(),
         }
     }
 }
@@ -233,6 +337,8 @@ pub struct FxEngine {
     dummy2: wgpu::TextureView,
     dummy3: wgpu::TextureView,
     luts: HashMap<String, Result<Arc<Lut3>, String>>,
+    /// Timestamps for the passes being recorded, when GPU time is measured.
+    pub timer: Option<Timer>,
     /// Custom GLSL programs by source hash (see `shader`).
     pub(crate) programs: HashMap<u64, Result<Arc<crate::shader::CustomPipe>, String>>,
     /// Built effect programs by (`src`, base directory): source loading and the GLSL rewrite
@@ -339,6 +445,7 @@ impl FxEngine {
             dummy2,
             dummy3,
             luts: HashMap::new(),
+            timer: None,
             programs: HashMap::new(),
             sources: HashMap::new(),
             feedback: HashMap::new(),
@@ -469,6 +576,11 @@ impl FxEngine {
             let bg = bg.clone();
             let Some(pipe) = self.pipeline(p.entry, p.additive) else { continue };
             let pipe = pipe.clone();
+            let stamp = self.timer.as_mut().and_then(|t| {
+                let a = t.pair()?;
+                t.labels.push((format!("{} {}", p.label, p.entry.name()).trim().to_string(), a));
+                Some((t.set.clone(), a))
+            });
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("fx"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -485,7 +597,11 @@ impl FxEngine {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: stamp.as_ref().map(|(set, a)| wgpu::RenderPassTimestampWrites {
+                    query_set: set,
+                    beginning_of_pass_write_index: Some(*a),
+                    end_of_pass_write_index: Some(*a + 1),
+                }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -987,6 +1103,8 @@ pub struct Builder<'a> {
     pub temps: Vec<Arc<Tex>>,
     pub store: u32,
     pub problems: Vec<String>,
+    /// Most samples along a line and lens-blur taps (the quality tier's).
+    pub max_samples: f64,
 }
 
 fn v4(a: [f64; 4]) -> [f32; 4] {
@@ -1099,6 +1217,7 @@ impl Builder<'_> {
             additive: false,
             clear: true,
             custom: None,
+            label: String::new(),
         });
         out
     }
@@ -1287,17 +1406,27 @@ impl Builder<'_> {
             }
             "directional-blur" => {
                 let d = dirv(r * 2.0, angle);
-                v[0] = [d[0], d[1], a.num("samples", 16.0).clamp(1.0, 256.0) as f32, 0.0];
+                v[0] = [d[0], d[1], a.num("samples", 16.0).min(self.max_samples).clamp(1.0, 256.0) as f32, 0.0];
                 self.simple(Entry::Line, 0, v, input, Aux::None)
             }
             "radial-blur" => {
                 let spin = if angle != 0.0 { angle } else { amount * 10.0 };
-                v[0] = [spin.to_radians() as f32, 0.0, a.num("samples", 16.0).clamp(1.0, 256.0) as f32, 0.0];
+                v[0] = [
+                    spin.to_radians() as f32,
+                    0.0,
+                    a.num("samples", 16.0).min(self.max_samples).clamp(1.0, 256.0) as f32,
+                    0.0,
+                ];
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 self.simple(Entry::Line, 1, v, input, Aux::None)
             }
             "zoom-blur" => {
-                v[0] = [(amount * 0.1) as f32, 0.0, a.num("samples", 16.0).clamp(1.0, 256.0) as f32, 0.0];
+                v[0] = [
+                    (amount * 0.1) as f32,
+                    0.0,
+                    a.num("samples", 16.0).min(self.max_samples).clamp(1.0, 256.0) as f32,
+                    0.0,
+                ];
                 v[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 self.simple(Entry::Line, 2, v, input, Aux::None)
             }
@@ -1306,8 +1435,12 @@ impl Builder<'_> {
                 v[1] = [1.0; 4];
                 let bright = self.simple(Entry::Pre, 0, v, input, Aux::None);
                 let mut v2 = [[0.0f32; 4]; 8];
-                v2[0] =
-                    [(amount * 0.5).clamp(0.0, 1.0) as f32, 0.0, a.num("samples", 16.0).clamp(4.0, 128.0) as f32, 0.97];
+                v2[0] = [
+                    (amount * 0.5).clamp(0.0, 1.0) as f32,
+                    0.0,
+                    a.num("samples", 16.0).min(self.max_samples).clamp(4.0, 128.0) as f32,
+                    0.97,
+                ];
                 v2[1] = [intensity as f32, 0.0, 0.0, 0.0];
                 v2[2] = [center[0] as f32, center[1] as f32, 0.0, 0.0];
                 self.simple(Entry::Line, 3, v2, input, Aux::Tex(bright))
@@ -1323,7 +1456,7 @@ impl Builder<'_> {
             }
             "lens-blur" | "tilt-shift" => {
                 let blades = a.num("levels", 8.0);
-                let rings = (a.num("samples", 16.0) / 3.0).sqrt().ceil().clamp(1.0, 6.0);
+                let rings = (a.num("samples", 16.0).min(self.max_samples) / 3.0).sqrt().ceil().clamp(1.0, 6.0);
                 v[0] = [
                     r as f32,
                     if blades >= 3.0 { blades as f32 } else { 0.0 },
@@ -1942,6 +2075,7 @@ impl Builder<'_> {
             additive: true,
             clear: first,
             custom: None,
+            label: String::new(),
         });
     }
 
@@ -1959,6 +2093,7 @@ impl Builder<'_> {
             additive: true,
             clear: first,
             custom: None,
+            label: String::new(),
         });
     }
 

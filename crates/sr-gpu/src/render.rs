@@ -273,6 +273,14 @@ pub struct Renderer {
     ies: HashMap<String, Result<Arc<Vec<f32>>, String>>,
     /// Camera replacement for 360 faces and stereo eyes.
     pub view_override: Option<render_three::ViewOverride>,
+    /// Quality tier overriding the document's `project@quality`.
+    pub quality: Option<m::ProjectQuality>,
+    /// Measure GPU time with timestamp queries (where the device has them); see `gpu_times`.
+    pub time_gpu: bool,
+    /// The last frame's timestamps.
+    last_timer: Option<fx::Timer>,
+    /// The tier of the frame being rendered.
+    tier: Tier,
     sphere: Option<render_three::SpherePipe>,
     particles: Option<Box<crate::particles::ParticleEngine>>,
     /// Measure the contrast of burned-in text (`accessibility@contrastCheck`).
@@ -323,6 +331,41 @@ struct FrameBufs {
     stops: GrowBuf,
     verts: GrowBuf,
     bg0: wgpu::BindGroup,
+}
+
+/// What a quality tier (`project@quality`) trades for speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tier {
+    /// Internal render scale: targets are this fraction of the document's size, drawn in its
+    /// coordinates (effects, strokes and masks keep their document-unit sizes).
+    pub scale: f64,
+    /// Most motion-blur samples per frame.
+    pub motion_blur_samples: usize,
+    /// Most echo copies.
+    pub echo_samples: usize,
+    /// Most samples along a line (directional, radial and zoom blur, god rays) and lens-blur taps.
+    pub line_samples: f64,
+    /// Film grain and noise are drawn.
+    pub grain: bool,
+}
+
+impl Tier {
+    /// The tier of a quality: `final` as authored; `preview` at full size with at most 4
+    /// motion-blur samples; `draft` at half size with at most 2 motion-blur samples, 4 echoes,
+    /// 8 line samples, and no grain or noise.
+    pub fn of(q: m::ProjectQuality) -> Tier {
+        match q {
+            m::ProjectQuality::Final => {
+                Tier { scale: 1.0, motion_blur_samples: 256, echo_samples: 16, line_samples: 256.0, grain: true }
+            }
+            m::ProjectQuality::Preview => {
+                Tier { scale: 1.0, motion_blur_samples: 4, echo_samples: 16, line_samples: 256.0, grain: true }
+            }
+            m::ProjectQuality::Draft => {
+                Tier { scale: 0.5, motion_blur_samples: 2, echo_samples: 4, line_samples: 8.0, grain: false }
+            }
+        }
+    }
 }
 
 /// Frames a cache entry may go unused before it is evicted.
@@ -755,6 +798,10 @@ impl Renderer {
             mtlx: HashMap::new(),
             ies: HashMap::new(),
             view_override: None,
+            quality: None,
+            time_gpu: false,
+            last_timer: None,
+            tier: Tier::of(m::ProjectQuality::Final),
             sphere: None,
             particles: None,
             contrast_probe: false,
@@ -788,6 +835,13 @@ impl Renderer {
     }
 
     /// The device.
+    /// GPU time of the last frame, with `time_gpu` on a device with timestamp queries; waits
+    /// for that frame's work to complete.
+    pub fn gpu_times(&self) -> Option<fx::GpuTimes> {
+        let t = self.last_timer.as_ref()?;
+        Some(t.read(&self.gpu.device, self.gpu.queue.get_timestamp_period()))
+    }
+
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
     }
@@ -2638,7 +2692,8 @@ impl Renderer {
     /// silhouettes act on the layers only.
     fn background(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
         let g = ctx.g;
-        let (w, hh) = (space.size[0] as f64, space.size[1] as f64);
+        // the document's frame, in document units (the space may draw it at another scale)
+        let (w, hh) = (g.size[0], g.size[1]);
         let tokens = self.tokens.clone();
         let tok = |t: &str| tokens.get(t).copied();
         let (kind, paint, tex) = match &g.background {
@@ -2702,7 +2757,7 @@ impl Renderer {
             opacity: 1.0,
             src_kind: kind,
             paint,
-            target_size: [w as f32, hh as f32],
+            target_size: [space.size[0] as f32, space.size[1] as f32],
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             blend: BLEND_UNDER,
             ..Default::default()
@@ -2781,6 +2836,7 @@ impl Renderer {
         if self.view_override.is_none() && p.scene.scene360.is_some() {
             return self.render_360(g, p, provider);
         }
+        self.tier = Tier::of(self.quality.unwrap_or(p.scene.project.quality));
         let created_before = self.pool.created;
         let released_before = self.pool.released;
         let subs = provider.map(|pv| SubFrames {
@@ -2788,7 +2844,8 @@ impl Renderer {
             cache: Default::default(),
             seconds: Default::default(),
         });
-        let size = [g.size[0].round().max(1.0) as u32, g.size[1].round().max(1.0) as u32];
+        let scale = self.tier.scale;
+        let size = [(g.size[0] * scale).round().max(1.0) as u32, (g.size[1] * scale).round().max(1.0) as u32];
         let mut plan = Plan::default();
         self.used.clear();
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];
@@ -2840,7 +2897,8 @@ impl Renderer {
                 plan.stats.unsupported.push(m.clone());
             }
         }
-        let space = Space { xform: Affine::IDENTITY, size };
+        // the document's coordinates at the tier's scale
+        let space = Space { xform: Affine::scale(scale, scale), size };
         let mut cmds = Vec::new();
         for r in Self::depth_sorted(g, &roots) {
             let rh = h(&[Self::subtree_hash(&ctx, r, &Affine::IDENTITY), hf(g.nodes[r].world_opacity), cam_hash]);
@@ -3064,6 +3122,27 @@ impl Renderer {
             })
         };
         let mut enc = d.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        // GPU time: a begin/end pair per effect pass, and for the frame when the device can
+        // write timestamps between passes
+        self.last_timer = None;
+        if self.time_gpu && self.gpu.timestamps {
+            let passes: usize = plan
+                .jobs
+                .iter()
+                .map(|j| {
+                    j.fx.len() + j.cmds.iter().filter_map(|c| c.pre.as_ref()).map(|p| p.passes.len()).sum::<usize>()
+                })
+                .sum::<usize>()
+                + plan.post.len();
+            let mut t = fx::Timer::new(&d, passes as u32 + 1);
+            if d.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+                if let Some(a) = t.pair() {
+                    enc.write_timestamp(&t.set, a);
+                    t.frame = Some(a);
+                }
+            }
+            self.fx.timer = Some(t);
+        }
         fn clear_pass<'e>(enc: &'e mut wgpu::CommandEncoder, t: &'e Tex, clear: bool) -> wgpu::RenderPass<'e> {
             enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
@@ -3224,6 +3303,13 @@ impl Renderer {
             if let (Some(out), Some(root)) = (&plan.post_out, jobs.iter().find(|j| j.root)) {
                 Self::copy(&mut enc, out, &root.target, [0, 0, root.target.size[0], root.target.size[1]]);
             }
+        }
+        if let Some(t) = self.fx.timer.take() {
+            if let Some(a) = t.frame {
+                enc.write_timestamp(&t.set, a + 1);
+            }
+            t.resolve(&mut enc);
+            self.last_timer = Some(t);
         }
         self.last_submit = Some(self.gpu.queue.submit([enc.finish()]));
         for (_, t) in scratch {

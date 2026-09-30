@@ -41,6 +41,8 @@ pub struct Options {
     pub row: Option<(Option<String>, usize)>,
     /// Segments rendered at once for a single-pass video output.
     pub parallel: Parallel,
+    /// Quality tier overriding the document's `project@quality`.
+    pub quality: Option<m::ProjectQuality>,
 }
 
 /// How many time segments of a video output render and encode at once.
@@ -75,6 +77,7 @@ impl Default for Options {
             params: Vec::new(),
             row: None,
             parallel: Parallel::default(),
+            quality: None,
         }
     }
 }
@@ -106,6 +109,8 @@ pub struct Report {
     pub encoder: String,
     /// Rendering device, independently selected from the video encoder. Absent for audio-only output.
     pub render_adapter: Option<RenderAdapter>,
+    /// Quality tier the frames were rendered at (`draft`, `preview` or `final`).
+    pub quality: String,
     /// Wall-clock seconds for the whole output.
     pub seconds: f64,
     /// Frames per second achieved for the video pass.
@@ -564,7 +569,12 @@ pub fn deliver(
     // audio, overlay and captions. Explicit segments retain their independent output clock.
     let effective_output = m::Output { start, end: Some(end), ..output.clone() };
     let output = &effective_output;
-    let mut report = Report { path: resolve(&base, &output.path), fps, ..Default::default() };
+    let mut report = Report {
+        path: resolve(&base, &output.path),
+        fps,
+        quality: opts.quality.unwrap_or(doc.scene.project.quality).as_str().to_string(),
+        ..Default::default()
+    };
     report.warnings.extend(doc.warnings().iter().map(|d| format!("{}: {}", d.code, d.message)));
     // audio first: the mix feeds the analysis table
     let t_audio = Instant::now();
@@ -717,6 +727,7 @@ pub fn deliver(
             OutputColor::new(output.color_space, output.transfer, output.color_range.as_str() == "full" || rgb_image)
         };
         let mut renderer = Renderer::new(gpu.clone(), p);
+        renderer.quality = opts.quality;
         renderer.representation = representation.clone();
         renderer.burn_captions = output.burn_captions.clone();
         // with segments, captions burn in output time over the placed picture
@@ -880,6 +891,7 @@ pub fn deliver(
                             // down to a crawl over a long programme (buffer creation dominated)
                             let gpu = shared.open_like()?;
                             let mut renderer = Renderer::new(gpu.clone(), p);
+                            renderer.quality = opts.quality;
                             renderer.representation = representation.clone();
                             renderer.burn_captions = output.burn_captions.clone();
                             renderer.audio = audio.clone();

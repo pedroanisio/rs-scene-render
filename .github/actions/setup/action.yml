@@ -9,7 +9,7 @@ runs:
     - shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools ffmpeg curl libheif-examples python3-venv python3-lxml fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libegl1 libgl1-mesa-dri ffmpeg curl libheif-examples python3-venv python3-lxml fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
         python3 -m venv --system-site-packages "$RUNNER_TEMP/evidence-python"
         "$RUNNER_TEMP/evidence-python/bin/pip" install -r tools/evidence/requirements.txt
         echo "$RUNNER_TEMP/evidence-python/bin" >> "$GITHUB_PATH"

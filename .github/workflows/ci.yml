@@ -43,6 +43,36 @@ jobs:
             target/evidence/
             target/review/
           if-no-files-found: warn
+  performance-gate:
+    # the renderer before and after this change, benched alternately on the same runner:
+    # a fixture more than 15% slower fails (tools/perf_gate.py)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - id: base
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && [ "$base" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "sha=$base" >> "$GITHUB_OUTPUT"
+          else
+            echo "no base commit to compare against"
+          fi
+      - if: steps.base.outputs.sha
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
+          cargo build --locked --release -p scene-render
+          (cd "$RUNNER_TEMP/base" && cargo build --locked --release -p scene-render)
+      - if: steps.base.outputs.sha
+        run: python3 tools/perf_gate.py "$RUNNER_TEMP/base/target/release/scene-render" target/release/scene-render --json target/perf-gate.json
+      - if: always() && steps.base.outputs.sha
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-gate
+          path: target/perf-gate.json
+          if-no-files-found: warn
   performance:
     runs-on: ubuntu-24.04
     steps:

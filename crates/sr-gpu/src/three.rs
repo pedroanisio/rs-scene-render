@@ -338,6 +338,10 @@ struct PipeKey {
 /// GPU state of the 3D renderer.
 pub struct ThreeEngine {
     device: Arc<wgpu::Device>,
+    /// Format of the view-depth and reflectance target of the screen-space pre-pass.
+    gbuffer: wgpu::TextureFormat,
+    /// Format of the resolved depth and the depth-of-field tile maps.
+    scalar: wgpu::TextureFormat,
     targets: Arc<std::sync::Mutex<TargetPool>>,
     queue: Arc<wgpu::Queue>,
     main_mod: wgpu::ShaderModule,
@@ -525,6 +529,18 @@ fn half4(v: [f32; 4]) -> [u16; 4] {
 
 impl ThreeEngine {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> ThreeEngine {
+        ThreeEngine::new_with(device, queue, wgpu::TextureFormat::Rgba32Float, wgpu::TextureFormat::R32Float)
+    }
+
+    /// An engine whose float targets use formats the device renders to: view depth and
+    /// reflectance in `gbuffer`, resolved depth and depth-of-field tiles in `scalar` (see
+    /// `Gpu::gbuffer_depth` and `Gpu::scalar_target`: 32-bit float where the device can).
+    pub fn new_with(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        gbuffer: wgpu::TextureFormat,
+        scalar: wgpu::TextureFormat,
+    ) -> ThreeEngine {
         let d = &*device;
         let module = |src: String, label: &str| {
             d.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -643,7 +659,7 @@ impl ThreeEngine {
                     module: &main_mod,
                     entry_point: Some("fs_prepass"),
                     compilation_options: Default::default(),
-                    targets: &[Some(FORMAT.into()), Some(wgpu::TextureFormat::Rgba32Float.into())],
+                    targets: &[Some(FORMAT.into()), Some(gbuffer.into())],
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -791,8 +807,8 @@ impl ThreeEngine {
         });
         let under_pipe = post("fs_under", FORMAT);
         let dof_pipe = post("fs_dof", FORMAT);
-        let tile_max_pipe = post("fs_tile_max", wgpu::TextureFormat::R32Float);
-        let tile_dilate_pipe = post("fs_tile_dilate", wgpu::TextureFormat::R32Float);
+        let tile_max_pipe = post("fs_tile_max", scalar);
+        let tile_dilate_pipe = post("fs_tile_dilate", scalar);
         let depth_layout = layout(&[&bgl_depth]);
         let depth_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("three-depth-resolve"),
@@ -810,7 +826,7 @@ impl ThreeEngine {
                 module: &depth_mod,
                 entry_point: Some("fs_depth_resolve"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::TextureFormat::R32Float.into())],
+                targets: &[Some(scalar.into())],
             }),
             multiview_mask: None,
             cache: None,
@@ -847,6 +863,8 @@ impl ThreeEngine {
             ..Default::default()
         });
         let mut eng = ThreeEngine {
+            gbuffer,
+            scalar,
             targets: Default::default(),
             white: Arc::new(TexGpu {
                 view: texture(d, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1, 1, 1, "white")
@@ -1627,8 +1645,7 @@ impl ThreeEngine {
         });
         // the visible sky at the source's resolution, apart from the prefiltered chain
         let sky_view = env.map(|e| &e.env.sky).unwrap_or(&self.black_env);
-        let no_tiles =
-            pool([1, 1], wgpu::TextureFormat::R32Float, 1, 1, 1, "three-no-tiles").create_view(&Default::default());
+        let no_tiles = pool([1, 1], self.scalar, 1, 1, 1, "three-no-tiles").create_view(&Default::default());
         let post_bind3 = |src: &wgpu::TextureView, aux: &wgpu::TextureView, tiles: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("three-post"),
@@ -1669,15 +1686,11 @@ impl ThreeEngine {
         };
         // ------------------------------------------------ screen-space targets
         let prepass = scene.ao.is_some() || scene.ssr || scene.lights.iter().any(|l| l.contact > 0.0);
-        let no_gbuffer = pool([1, 1], wgpu::TextureFormat::Rgba32Float, 1, 1, 1, "three-no-gbuffer")
-            .create_view(&Default::default());
+        let no_gbuffer = pool([1, 1], self.gbuffer, 1, 1, 1, "three-no-gbuffer").create_view(&Default::default());
         let (gb_n, gb_z, gb_d) = if prepass {
             (
                 Some(pool(size, FORMAT, 1, 1, 1, "three-gb-normal").create_view(&Default::default())),
-                Some(
-                    pool(size, wgpu::TextureFormat::Rgba32Float, 1, 1, 1, "three-gb-depth")
-                        .create_view(&Default::default()),
-                ),
+                Some(pool(size, self.gbuffer, 1, 1, 1, "three-gb-depth").create_view(&Default::default())),
                 Some(
                     pool(size, wgpu::TextureFormat::Depth32Float, 1, 1, 1, "three-gb-zbuffer")
                         .create_view(&Default::default()),
@@ -1987,7 +2000,7 @@ impl ThreeEngine {
             splat_binds.push((sb, sp.gpu.n));
         }
         // ------------------------------------------------ transmissive, splats, blended
-        let depth_t = pool(size, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-depth");
+        let depth_t = pool(size, self.scalar, 1, 1, 1, "three-depth");
         let depth_view = depth_t.create_view(&Default::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2073,10 +2086,8 @@ impl ThreeEngine {
         let resolved = ssr_view.as_ref().unwrap_or(&resolved);
         let pb = if scene.dof.is_some() {
             let tsize = [size[0].div_ceil(16), size[1].div_ceil(16)];
-            let a =
-                pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
-            let b = pool(tsize, wgpu::TextureFormat::R32Float, 1, 1, 1, "three-coc-dilated")
-                .create_view(&Default::default());
+            let a = pool(tsize, self.scalar, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
+            let b = pool(tsize, self.scalar, 1, 1, 1, "three-coc-dilated").create_view(&Default::default());
             post_pass(enc, &self.tile_max_pipe, &post_bind(resolved, &depth_view), &a);
             post_pass(enc, &self.tile_dilate_pipe, &post_bind(resolved, &a), &b);
             post_bind3(resolved, &depth_view, &b)

@@ -1,5 +1,7 @@
 //! `scene-render` — validate and inspect scene-render 1.1 documents.
 
+mod changes;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -39,6 +41,27 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+/// Quality tier (overrides the document's `project@quality`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum QualityArg {
+    /// Half-size render in the document's coordinates, at most 2 motion-blur samples, no grain.
+    Draft,
+    /// Full size, at most 4 motion-blur samples.
+    Preview,
+    /// As authored.
+    Final,
+}
+
+impl QualityArg {
+    fn model(self) -> sr_model::model::ProjectQuality {
+        match self {
+            QualityArg::Draft => sr_model::model::ProjectQuality::Draft,
+            QualityArg::Preview => sr_model::model::ProjectQuality::Preview,
+            QualityArg::Final => sr_model::model::ProjectQuality::Final,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -195,6 +218,36 @@ enum Command {
         /// accessibility findings. Output files are still written.
         #[arg(long)]
         strict: bool,
+        /// Quality tier overriding the document's project@quality (draft renders at half size).
+        #[arg(long, value_enum)]
+        quality: Option<QualityArg>,
+        /// Render only the frames whose file is missing or whose content changed since the last
+        /// --changed-only render into the same files (fingerprints in .scene-render-frames.json
+        /// beside them).
+        #[arg(long, conflicts_with = "bench")]
+        changed_only: bool,
+    },
+    /// Render frames to PNG files, then again whenever the document or a file it names changes,
+    /// rendering only the frames the edit changed (see render --changed-only).
+    Watch {
+        /// Scene document.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Frame range START..END (end exclusive) or START..=END (default: every frame).
+        #[arg(long, value_name = "RANGE", value_parser = parse_range)]
+        frames: Option<(u64, u64)>,
+        /// Output PNG path with %04d or {frame} for the frame number.
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Quality tier overriding the document's project@quality (draft renders at half size).
+        #[arg(long, value_enum)]
+        quality: Option<QualityArg>,
+        /// Milliseconds between checks for changes.
+        #[arg(long, default_value_t = 250)]
+        interval: u64,
+        /// Stop after this many renders (for scripts and tests).
+        #[arg(long, hide = true)]
+        max_runs: Option<u32>,
     },
     /// Render the document's outputs (or one ad-hoc output) to finished files.
     Encode {
@@ -250,6 +303,9 @@ enum Command {
         /// accessibility findings. Output files are still written.
         #[arg(long)]
         strict: bool,
+        /// Quality tier overriding the document's project@quality (draft renders at half size).
+        #[arg(long, value_enum)]
+        quality: Option<QualityArg>,
     },
     /// Simulate the document's physics and write its cache file (physics@cache).
     Simulate {
@@ -854,6 +910,8 @@ fn render(
     stats: bool,
     pipelined: bool,
     strict: bool,
+    quality: Option<sr_model::model::ProjectQuality>,
+    inc: Incremental,
     out: &mut Out,
 ) -> std::io::Result<ExitCode> {
     let text = match std::fs::read_to_string(file) {
@@ -887,18 +945,31 @@ fn render(
         out.diagnostic(file, &lines, w)?;
     }
     let eval_warnings = ev.warnings().len();
-    let gpu = match sr_gpu::Gpu::new() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return Ok(ExitCode::from(2));
+    // a renderer kept from an earlier render of this document (watch), while it still fits
+    let setup = changes::setup_key(&text);
+    let mut keep = inc.keep;
+    let kept = keep.as_mut().and_then(|k| k.take()).filter(|(key, _)| *key == setup).map(|(_, r)| r);
+    let mut r = match kept {
+        Some(r) => r,
+        None => {
+            let gpu = match sr_gpu::Gpu::new() {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Ok(ExitCode::from(2));
+                }
+            };
+            if let Some(w) = sr_gpu::gpu::software_warning(&gpu.info) {
+                writeln!(out.w, "warning: {w}")?;
+            }
+            sr_gpu::Renderer::new(gpu, ev.program())
         }
     };
-    let adapter = sr_gpu::gpu::describe(&gpu.info);
-    if let Some(w) = sr_gpu::gpu::software_warning(&gpu.info) {
-        writeln!(out.w, "warning: {w}")?;
-    }
-    let mut r = sr_gpu::Renderer::new(gpu, ev.program());
+    let adapter = sr_gpu::gpu::describe(&r.gpu().info);
+    r.quality = quality;
+    // GPU time, where the device has timestamp queries, with --stats: timing every pass costs
+    // time itself (much of it on a software rasteriser), so a plain --bench stays untimed
+    r.time_gpu = stats;
     let graphs = |f: u64| ev.evaluate_frame(f);
     let mut unsupported = std::collections::BTreeSet::new();
     if bench {
@@ -918,6 +989,7 @@ fn render(
         let mut eval_ms = Vec::new();
         let mut submit_ms = Vec::new();
         let mut last = sr_gpu::RenderStats::default();
+        let mut gpu_ms = Vec::new();
         let mut prev: Option<sr_gpu::SubmissionIndex> = None;
         for &f in &frames {
             let t0 = std::time::Instant::now();
@@ -941,8 +1013,13 @@ fn render(
             eval_ms.push((t1 - t0).as_secs_f64() * 1e3);
             times.push(t1.elapsed().as_secs_f64() * 1e3);
             unsupported.extend(last.unsupported.iter().cloned());
+            // pipelined, the frame's work may still run: read its times only when drained
+            let gpu = if pipelined { None } else { r.gpu_times() };
+            if let Some(ms) = gpu.as_ref().and_then(|g| g.frame_ms) {
+                gpu_ms.push(ms);
+            }
             if stats {
-                eprintln!("{}", serde_json::json!({ "frame": f, "stats": &last }));
+                eprintln!("{}", serde_json::json!({ "frame": f, "stats": &last, "gpu": gpu }));
             }
         }
         if let Some(p) = prev.take() {
@@ -952,7 +1029,7 @@ fn render(
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             v
         };
-        let (times, eval_ms, submit_ms) = (sorted(times), sorted(eval_ms), sorted(submit_ms));
+        let (times, eval_ms, submit_ms, gpu_ms) = (sorted(times), sorted(eval_ms), sorted(submit_ms), sorted(gpu_ms));
         let med = times[times.len() / 2];
         writeln!(
             out.w,
@@ -969,6 +1046,14 @@ fn render(
             submit_ms[submit_ms.len() / 2],
             eval_ms[eval_ms.len() / 2]
         )?;
+        if !gpu_ms.is_empty() {
+            writeln!(
+                out.w,
+                "gpu: median {:.3} ms, p95 {:.3} ms of GPU work per frame (timestamp queries)",
+                gpu_ms[gpu_ms.len() / 2],
+                gpu_ms[(gpu_ms.len() * 95 / 100).min(gpu_ms.len() - 1)]
+            )?;
+        }
         writeln!(
             out.w,
             "last frame: {} draws, {} targets, {} cache hits, {} restored, {} backdrop copies, {} effect passes, {} sub-frames",
@@ -985,6 +1070,17 @@ fn render(
             (None, false) => frames.iter().map(|&f| (Some(f), ev.program().fps.frame_time(f))).collect(),
         };
         let several = list.len() > 1;
+        let total = list.len();
+        // --changed-only: fingerprints of what decides each frame's pixels, and the last ones
+        // written beside the outputs
+        let prints = inc.changed_only.then(|| {
+            let effective = quality.unwrap_or(doc.scene.project.quality).as_str();
+            let settings = format!("{effective} {bit_depth} {:?}", opts);
+            changes::Fingerprints::new(&text, file, &doc, &settings)
+        });
+        let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+        let mut sidecar = inc.changed_only.then(|| changes::Sidecar::load(&dir));
+        let mut rendered = 0usize;
         for (f, t) in list {
             let path = match frame_path(&output, f.unwrap_or(0), several) {
                 Ok(p) => p,
@@ -994,6 +1090,13 @@ fn render(
                 }
             };
             let g = ev.evaluate(t);
+            let print = prints.as_ref().map(|p| format!("{:016x}", p.frame(&text, &g)));
+            let name = path.display().to_string();
+            if let (Some(p), Some(side)) = (&print, &sidecar) {
+                if path.exists() && side.frames.get(&name) == Some(p) {
+                    continue;
+                }
+            }
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&g, ev.program(), Some(&mut sub));
             unsupported.extend(frame.stats.unsupported.iter().cloned());
@@ -1001,10 +1104,11 @@ fn render(
                 eprintln!("error: frame at {:.3} s: {e}", g.time);
                 return Ok(ExitCode::from(1));
             }
-            if stats {
-                eprintln!("{}", serde_json::json!({ "frame": g.frame, "stats": &frame.stats }));
-            }
             let px = r.read(&frame.texture);
+            if stats {
+                let gpu = r.gpu_times();
+                eprintln!("{}", serde_json::json!({ "frame": g.frame, "stats": &frame.stats, "gpu": gpu }));
+            }
             let [w, h] = frame.texture.size;
             let res = if bit_depth == 16 {
                 let working = r.working();
@@ -1026,7 +1130,23 @@ fn render(
                 return Ok(ExitCode::from(2));
             }
             writeln!(out.w, "wrote {} (t = {:.4} s, {} draws)", path.display(), g.time, frame.stats.draws)?;
+            rendered += 1;
+            if let (Some(p), Some(side)) = (print, sidecar.as_mut()) {
+                side.frames.insert(name, p);
+            }
         }
+        if let (Some(side), Some(prints)) = (&sidecar, &prints) {
+            if let Err(e) = side.save() {
+                eprintln!("warning: cannot record frame fingerprints in {}: {e}", dir.display());
+            }
+            if let Some(why) = &prints.whole {
+                writeln!(out.w, "note: {why}: an edit to the composition renders every frame")?;
+            }
+            writeln!(out.w, "rendered {rendered} of {total} frames ({} unchanged)", total - rendered)?;
+        }
+    }
+    if let Some(k) = keep {
+        *k = Some((setup, r));
     }
     let problems = unsupported.len() + eval_warnings;
     for u in unsupported {
@@ -1037,6 +1157,69 @@ fn render(
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Incremental rendering: only changed frames, and a renderer kept between renders (watch).
+struct Incremental<'a> {
+    changed_only: bool,
+    keep: Option<&'a mut Option<(u64, sr_gpu::Renderer)>>,
+}
+
+/// The document and the files it names, with their sizes and modification times.
+fn watched_stamps(file: &Path) -> Vec<(PathBuf, Option<changes::Stamp>)> {
+    let mut files = vec![file.to_path_buf()];
+    if let Ok(doc) = sr_model::load_file(file, &LoadOptions::without_assets()) {
+        files.extend(changes::files(file, &doc));
+    }
+    files.into_iter().map(|f| (f.clone(), changes::stamp(&f))).collect()
+}
+
+fn watch(
+    file: &Path,
+    frames: Option<(u64, u64)>,
+    output: PathBuf,
+    quality: Option<sr_model::model::ProjectQuality>,
+    interval: u64,
+    max_runs: Option<u32>,
+    out: &mut Out,
+) -> std::io::Result<ExitCode> {
+    let mut keep: Option<(u64, sr_gpu::Renderer)> = None;
+    let mut runs = 0u32;
+    loop {
+        // taken before rendering, so an edit made while it renders starts another render
+        let before = watched_stamps(file);
+        let list: Vec<u64> = match frames {
+            Some((a, b)) => (a..b).collect(),
+            None => {
+                let n = sr_model::load_file(file, &LoadOptions::without_assets()).map(|d| d.frame_count()).unwrap_or(1);
+                (0..n.max(1)).collect()
+            }
+        };
+        let code = render(
+            file,
+            list,
+            None,
+            sr_eval::EvalOptions::default(),
+            Some(output.clone()),
+            8,
+            false,
+            false,
+            false,
+            false,
+            quality,
+            Incremental { changed_only: true, keep: Some(&mut keep) },
+            out,
+        )?;
+        runs += 1;
+        if max_runs.is_some_and(|m| runs >= m) {
+            return Ok(code);
+        }
+        writeln!(out.w, "watching {} for changes (Ctrl-C stops)", file.display())?;
+        out.w.flush()?;
+        while watched_stamps(file) == before {
+            std::thread::sleep(std::time::Duration::from_millis(interval.max(20)));
+        }
+    }
 }
 
 fn codec_for_path(p: &str) -> &'static str {
@@ -1168,6 +1351,9 @@ fn encode(
                 writeln!(out.w, "{bold}wrote{bold:#} {} ({} file(s), {})", r.path.display(), r.files.len(), r.encoder)?;
                 if let Some(a) = &r.render_adapter {
                     writeln!(out.w, "  render adapter: {} ({}, {})", a.name, a.backend, a.device_type)?;
+                    if r.quality != "final" {
+                        writeln!(out.w, "  quality: {} (see project@quality)", r.quality)?;
+                    }
                     if a.software {
                         writeln!(
                             out.w,
@@ -1255,6 +1441,8 @@ fn main() -> ExitCode {
             stats,
             pipelined,
             strict,
+            quality,
+            changed_only,
         } => {
             let opts =
                 sr_eval::EvalOptions { variant, layout, params, row: row.map(|r| (data, r)), ..Default::default() };
@@ -1274,8 +1462,13 @@ fn main() -> ExitCode {
                 stats,
                 pipelined,
                 strict,
+                quality.map(QualityArg::model),
+                Incremental { changed_only, keep: None },
                 &mut out,
             )
+        }
+        Command::Watch { file, frames, output, quality, interval, max_runs } => {
+            watch(&file, frames, output, quality.map(QualityArg::model), interval, max_runs, &mut out)
         }
         Command::Encode {
             file,
@@ -1294,6 +1487,7 @@ fn main() -> ExitCode {
             data,
             json,
             strict,
+            quality,
         } => {
             let opts = sr_deliver::Options {
                 out_dir,
@@ -1305,6 +1499,7 @@ fn main() -> ExitCode {
                 params,
                 row: row.map(|r| (data, r)),
                 parallel,
+                quality: quality.map(QualityArg::model),
             };
             encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
         }

@@ -167,7 +167,9 @@ pub(super) fn doc_lights(p: &Program) -> &[m::Light] {
 impl Renderer {
     pub(super) fn three_engine(&mut self) -> &mut ThreeEngine {
         let g = &self.gpu;
-        self.three.get_or_insert_with(|| Box::new(ThreeEngine::new(g.device.clone(), g.queue.clone())))
+        self.three.get_or_insert_with(|| {
+            Box::new(ThreeEngine::new_with(g.device.clone(), g.queue.clone(), g.gbuffer_depth, g.scalar_target))
+        })
     }
 
     /// World matrix of a 3D object: its parent's full 3D world (an object, camera or light;
@@ -1427,6 +1429,16 @@ impl Renderer {
         let g = ctx.g;
         let n = &g.nodes[i];
         let members = Self::three_members(g, i);
+        if self.gpu.info.backend == wgpu::Backend::Gl {
+            // the 3D pass resolves multisampled depth, which OpenGL shaders cannot read
+            if members.first() == Some(&i) {
+                plan.stats.unsupported.push(format!(
+                    "{}: 3D objects are not drawn on the OpenGL backend; SR_GPU_ADAPTER picks a Vulkan, Metal or DirectX 12 adapter (see scene-render gpus)",
+                    n.id
+                ));
+            }
+            return;
+        }
         if members.first() != Some(&i) || !visible3(g, i) {
             return;
         }
