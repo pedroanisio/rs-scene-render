@@ -623,6 +623,9 @@ pub fn deliver(
                 let handles: Vec<_> = (0..segments)
                     .map(|_| {
                         sc.spawn(|| -> Result<(Report, String), DeliverError> {
+                            // a device of its own: renderers sharing one device slowed each other
+                            // down to a crawl over a long programme (buffer creation dominated)
+                            let gpu = Gpu::new()?;
                             let mut renderer = Renderer::new(gpu.clone(), p);
                             renderer.representation = representation.clone();
                             renderer.burn_captions = output.burn_captions.clone();
