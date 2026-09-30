@@ -772,9 +772,10 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
 
 struct EmitterRt {
     emitter: Emitter,
-    /// Affine composition → emitter timeline. Simulation uses that timeline;
-    /// animated inputs are sampled back in composition time.
-    clock: Option<(f64, f64)>,
+    node: u32,
+    /// Replay source history when its composition-time mapping depends on the
+    /// requested frame (loops, remaps or a held clock).
+    replay_source: bool,
     size: f64,
     size_end: f64,
     size_curve: crate::curve::Ease,
@@ -820,7 +821,9 @@ fn time_invariant(p: &Program, n: u32) -> bool {
             let sl = &p.slots[s as usize];
             !sl.channels.is_empty() || sl.expr.is_some() || sl.link.is_some() || sl.time_node.is_some()
         });
-        let constrained = children(&*node.elem).iter().any(|c| c.element_name() == "transformConstraint");
+        let constrained = children(&*node.elem)
+            .iter()
+            .any(|c| matches!(c.element_name(), "transformConstraint" | "rigidBody" | "softBody"));
         if moving_slot
             || constrained
             || node.motion.is_some()
@@ -1056,18 +1059,14 @@ fn curve_of(e: &dyn Element, name: &str) -> crate::curve::Ease {
     crate::curve::resolve(c, &crate::curve::KeyParams::default())
 }
 
-fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut Vec<String>) -> EmitterRt {
+fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<String>) -> EmitterRt {
     let e: &dyn Element = &*n.elem;
     let a = Attr { e, preset: text(e, "preset").map(|s| preset(&s)).unwrap_or(&[]) };
     let step = p.scene.physics.as_ref().map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
     let node = p.nodes.iter().position(|pn| pn.id == n.id).expect("compiled emitter");
-    let clock = emitter_clock(p, node as u32);
-    let start = if clock.is_some() { p.nodes[node].start } else { t - n.local_time };
-    let end = if clock.is_some() {
-        p.nodes[node].end
-    } else {
-        p.nodes[node].end.map(|end| start + end - p.nodes[node].start)
-    };
+    let replay_source = !linear_emitter_clock(p, node as u32);
+    let start = p.nodes[node].start;
+    let end = p.nodes[node].end;
     let shape = match text(e, "emitterShape").as_deref() {
         Some("point") => EmitShape::Point,
         Some("ellipse") => EmitShape::Ellipse { w: num(e, "emitterWidth", 0.0), h: num(e, "emitterHeight", 0.0) },
@@ -1158,7 +1157,8 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     }
     EmitterRt {
         emitter: Emitter::new(spec),
-        clock,
+        node: node as u32,
+        replay_source,
         size,
         size_end: a.opt("sizeEnd").unwrap_or(size),
         size_curve: curve_of(e, "sizeCurve"),
@@ -1185,20 +1185,56 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     }
 }
 
-fn emitter_clock(p: &Program, n: u32) -> Option<(f64, f64)> {
+fn linear_emitter_clock(p: &Program, n: u32) -> bool {
     use crate::program::Clock;
-    let Some(parent) = p.nodes[n as usize].parent else { return Some((0.0, 1.0)) };
-    let (offset, scale) = emitter_clock(p, parent)?;
-    match &p.nodes[parent as usize].clock {
-        Clock::Same => Some((offset, scale)),
-        Clock::Affine { origin, offset: shift, scale: speed } => {
-            Some((origin + (offset - origin - shift) * speed, scale * speed))
-        }
-        Clock::Media(m) if m.remap.is_none() && m.freeze_at.is_none() && m.loops == 0 => {
-            Some((m.map(offset), scale * m.rate * if m.reverse { -1.0 } else { 1.0 }))
-        }
-        Clock::Media(_) => None,
+    let Some(parent) = p.nodes[n as usize].parent else { return true };
+    if !linear_emitter_clock(p, parent) {
+        return false;
     }
+    match &p.nodes[parent as usize].clock {
+        Clock::Same => true,
+        Clock::Affine { scale, .. } => *scale != 0.0,
+        Clock::Media(m) => m.remap.is_none() && m.freeze_at.is_none() && m.loops == 0 && m.rate != 0.0,
+    }
+}
+
+/// Map source history back through every ancestor. A looping/remapped source
+/// uses the branch nearest this output frame; overridden child clocks also let
+/// us simulate source frames skipped by jumps, trims and freezes.
+fn source_sample(p: &Program, node: u32, mut time: f64, at: f64) -> (f64, Vec<(u32, f64)>) {
+    use crate::program::Clock;
+    let mut clocks = Vec::new();
+    let mut parent = p.nodes[node as usize].parent;
+    while let Some(k) = parent {
+        let n = &p.nodes[k as usize];
+        let near = p.timeline_at(k, at);
+        clocks.push((k, time));
+        time = match &n.clock {
+            Clock::Same => time,
+            Clock::Affine { origin, offset, scale } if *scale != 0.0 => origin + offset + (time - origin) / scale,
+            Clock::Affine { .. } => near,
+            Clock::Media(m) => {
+                let local = m.freeze_at.unwrap_or(near - m.start);
+                if let Some(remap) = &m.remap {
+                    m.start + remap.time_for_value(time, local)
+                } else if m.rate != 0.0 {
+                    let mut source = time - m.clip_in;
+                    if m.reverse {
+                        source = m.len.unwrap_or(0.0) - source;
+                    }
+                    if let Some(len) = m.len.filter(|len| *len > 0.0 && m.loops > 0) {
+                        let cycle = (local * m.rate / len).floor().clamp(0.0, m.loops as f64);
+                        source += cycle * len;
+                    }
+                    m.start + source / m.rate
+                } else {
+                    near
+                }
+            }
+        };
+        parent = n.parent;
+    }
+    (time, clocks)
 }
 
 struct EDriver<'a, 'b> {
@@ -1206,37 +1242,48 @@ struct EDriver<'a, 'b> {
     id: Arc<str>,
     fields: &'a FieldSrc,
     names: Option<&'a [String]>,
-    world: Option<&'a World>,
+    physics: Option<&'a mut PhysicsRt>,
     p: &'a Program,
     invariant: &'a mut Invariant,
     /// The emitter's start: during its preroll it emits as it does at its start.
     start: f64,
-    clock: Option<(f64, f64)>,
+    node: u32,
+    at: f64,
 }
 
 impl EDriver<'_, '_> {
-    fn composition_time(&self, t: f64) -> f64 {
-        match self.clock {
-            Some((offset, scale)) if scale != 0.0 => (t - offset) / scale,
-            Some(_) => 0.0,
-            None => t,
-        }
+    fn sample_time(&self, t: f64) -> (f64, Vec<(u32, f64)>) {
+        source_sample(self.p, self.node, t, self.at)
     }
     /// The emitter's world transform and rate at `t`: for an emitter that never changes, read once and then
     /// only checked against its time window, so a step does not evaluate the whole scene.
     fn state(&mut self, t: f64) -> ([f64; 6], f64) {
         const ABSENT: ([f64; 6], f64) = ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
         // the preroll runs before the emitter's start, where it is not yet in the frame: it emits as at its start
-        let t = self.composition_time(t.max(self.start));
+        let (t, clocks) = self.sample_time(t.max(self.start));
         if let Some((n, known)) = *self.invariant {
-            if !crate::eval::in_window(self.p, n, t) {
+            let node = &self.p.nodes[n as usize];
+            let source = clocks.first().map(|(_, t)| *t).unwrap_or(t);
+            let present = if clocks.is_empty() {
+                crate::eval::in_window(self.p, n, t)
+            } else {
+                source >= node.vis_start && node.vis_end.is_none_or(|end| source < end)
+            };
+            if !present {
                 return ABSENT;
             }
             if let Some(v) = known {
                 return v;
             }
         }
-        let g = self.graphs.at(t);
+        let mut g = if clocks.is_empty() {
+            self.graphs.at(t)
+        } else {
+            Arc::new(crate::eval::evaluate_with_clocks(self.p, t, &clocks))
+        };
+        if let Some(ph) = self.physics.as_deref_mut() {
+            apply_physics(ph, Arc::make_mut(&mut g), self.graphs, self.fields, t);
+        }
         let v = match index_of(&g, &self.id) {
             Some(i) => (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)),
             None => ABSENT,
@@ -1258,7 +1305,7 @@ impl EmitterDriver for EDriver<'_, '_> {
         self.state(t).1
     }
     fn fields(&mut self, t: f64) -> Vec<Field> {
-        let t = self.composition_time(t);
+        let t = self.sample_time(t).0;
         let g = if self.fields.animated { Some(self.graphs.at(t)) } else { None };
         match self.names {
             Some(ids) => self.fields.named(ids, t, g.as_deref()),
@@ -1266,7 +1313,7 @@ impl EmitterDriver for EDriver<'_, '_> {
         }
     }
     fn hit(&mut self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
-        self.world.and_then(|w| w.hit(p))
+        self.physics.as_deref().and_then(|ph| ph.world.as_ref()).and_then(|w| w.hit(p))
     }
 }
 
@@ -1300,6 +1347,47 @@ pub fn needed(p: &Program) -> bool {
         })
 }
 
+fn apply_physics(ph: &mut PhysicsRt, g: &mut FrameGraph, graphs: &mut Graphs<'_>, fields: &FieldSrc, t: f64) {
+    if t >= ph.start {
+        let (frame, frame3) = if let Some(c) = &ph.cached {
+            (c.frame(t), c.frame3(t))
+        } else {
+            let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
+            let frame3 = match ph.three.as_mut() {
+                Some(three) => {
+                    let mut drv = crate::sim3d::Driver { graphs, bodies: &three.bodies, fields, statics: &statics };
+                    three.world.as_mut().expect("world").frame_at(t, &mut drv).bodies
+                }
+                None => Vec::new(),
+            };
+            let frame = match ph.world.as_mut() {
+                Some(w) => {
+                    let mut drv = PDriver { graphs, bodies: &ph.bodies, fields, statics };
+                    w.frame_at(t, &mut drv)
+                }
+                None => sr_sim::physics::Frame::default(),
+            };
+            (frame, frame3)
+        };
+        apply_bodies(g, &ph.bodies, &frame.bodies);
+        if let Some(three) = &ph.three {
+            crate::sim3d::apply(g, &three.bodies, &frame3);
+        }
+        for (k, s) in ph.softs.iter().enumerate() {
+            let Some(i) = index_of(g, &s.id) else { continue };
+            let Some(inv) = s.start_world.inverse() else { continue };
+            let pts = &frame.softs[k];
+            let offsets = pts.iter().zip(&s.rest_local).map(|(q, r)| {
+                let l = inv.apply(*q);
+                [l[0] - r[0], l[1] - r[1]]
+            });
+            let warp = SoftWarp { rows: s.rows, cols: s.cols, size: s.size, offsets: offsets.collect() };
+            set_world(g, i, s.start_world);
+            g.nodes[i].soft = Some(Arc::new(warp));
+        }
+    }
+}
+
 impl Runtime {
     /// Applies simulation to `g` (evaluated at `t`); `base` evaluates without simulation.
     pub fn apply(&mut self, p: &Program, g: &mut FrameGraph, t: f64, base: &dyn Fn(f64) -> FrameGraph) {
@@ -1315,74 +1403,34 @@ impl Runtime {
         let fields = self.fields.as_ref().expect("built");
         // ---- physics
         if let Some(ph) = self.physics.as_mut() {
-            if t >= ph.start {
-                let (frame, frame3) = if let Some(c) = &ph.cached {
-                    (c.frame(t), c.frame3(t))
-                } else {
-                    let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
-                    let frame3 = match ph.three.as_mut() {
-                        Some(three) => {
-                            let mut drv = crate::sim3d::Driver {
-                                graphs: &mut graphs,
-                                bodies: &three.bodies,
-                                fields,
-                                statics: &statics,
-                            };
-                            three.world.as_mut().expect("world").frame_at(t, &mut drv).bodies
-                        }
-                        None => Vec::new(),
-                    };
-                    let frame = match ph.world.as_mut() {
-                        Some(w) => {
-                            let mut drv = PDriver { graphs: &mut graphs, bodies: &ph.bodies, fields, statics };
-                            w.frame_at(t, &mut drv)
-                        }
-                        None => sr_sim::physics::Frame::default(),
-                    };
-                    (frame, frame3)
-                };
-                apply_bodies(g, &ph.bodies, &frame.bodies);
-                if let Some(three) = &ph.three {
-                    crate::sim3d::apply(g, &three.bodies, &frame3);
-                }
-                for (k, s) in ph.softs.iter().enumerate() {
-                    let Some(i) = index_of(g, &s.id) else { continue };
-                    let Some(inv) = s.start_world.inverse() else { continue };
-                    let pts = &frame.softs[k];
-                    let offsets = pts.iter().zip(&s.rest_local).map(|(q, r)| {
-                        let l = inv.apply(*q);
-                        [l[0] - r[0], l[1] - r[1]]
-                    });
-                    let warp = SoftWarp { rows: s.rows, cols: s.cols, size: s.size, offsets: offsets.collect() };
-                    set_world(g, i, s.start_world);
-                    g.nodes[i].soft = Some(Arc::new(warp));
-                }
-            }
+            apply_physics(ph, g, &mut graphs, fields, t);
         }
         // ---- particles
         let ids: Vec<usize> =
             g.nodes.iter().enumerate().filter(|(_, n)| n.kind == "particleEmitter").map(|(i, _)| i).collect();
         for i in ids {
             let id = g.nodes[i].id.clone();
-            if !self.emitters.contains_key(&id) {
-                let rt = build_emitter(p, &g.nodes[i], t, &mut self.problems);
+            if self.emitters.get(&id).is_none_or(|rt| rt.replay_source) {
+                // Nonlinear clocks can revisit the same source time on another
+                // branch. Replay its history with this frame's branch mapping.
+                let rt = build_emitter(p, &g.nodes[i], &mut self.problems);
                 self.emitters.insert(id.clone(), rt);
             }
             let rt = self.emitters.get_mut(&id).expect("emitter");
-            let world = self.physics.as_ref().and_then(|p| p.world.as_ref());
             let names = rt.fields.clone();
             let mut drv = EDriver {
                 graphs: &mut graphs,
                 id: id.clone(),
                 fields,
                 names: names.as_deref(),
-                world,
+                physics: self.physics.as_mut(),
                 p,
                 start: rt.emitter.start(),
-                clock: rt.clock,
+                node: rt.node,
+                at: t,
                 invariant: &mut rt.invariant,
             };
-            let time = if rt.clock.is_some() { g.nodes[i].timeline_time } else { t };
+            let time = g.nodes[i].timeline_time;
             rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }

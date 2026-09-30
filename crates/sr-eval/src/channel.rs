@@ -124,6 +124,56 @@ impl Channel {
         (self.keys[0].t, self.keys[self.keys.len() - 1].t)
     }
 
+    /// A numeric value's input time on the branch nearest `near`. Bracket within
+    /// individual key spans so jumps and nonmonotonic curves are handled too.
+    /// Unreachable values use the nearest sampled value; source-history callers
+    /// can override the child clock while retaining this composition time.
+    pub(crate) fn time_for_value(&self, value: f64, near: f64) -> f64 {
+        let at = |t| self.eval(t).as_num().unwrap_or(0.0);
+        let mut best = near;
+        let mut error = (at(near) - value).abs();
+        let mut consider = |t: f64, v: f64| {
+            let e = (v - value).abs();
+            if e < error - 1e-9 || ((e - error).abs() <= 1e-9 && (t - near).abs() < (best - near).abs()) {
+                best = t;
+                error = e;
+            }
+        };
+        for key in &self.keys {
+            consider(key.t, at(key.t));
+        }
+        for pair in self.keys.windows(2) {
+            let (start, end) = (pair[0].t, pair[1].t);
+            let mut left = start;
+            let mut a = at(left);
+            for step in 1..=128 {
+                let right = start + (end - start) * step as f64 / 128.0;
+                let b = at(right);
+                consider(right, b);
+                if (a < value && b > value) || (a > value && b < value) {
+                    let (mut lo, mut hi) = (left, right);
+                    for _ in 0..48 {
+                        let mid = (lo + hi) * 0.5;
+                        if (at(mid) < value) == (a < b) {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let t = (lo + hi) * 0.5;
+                    consider(t, at(t));
+                    // A step may jump over the requested value. Keep both sides
+                    // of its boundary so skipped history maps to the jump.
+                    consider(lo, at(lo));
+                    consider(hi, at(hi));
+                }
+                left = right;
+                a = b;
+            }
+        }
+        best
+    }
+
     /// Value at time `t` (in the channel's time base).
     pub fn eval(&self, t: f64) -> Value {
         let n = self.keys.len();

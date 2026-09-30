@@ -1,6 +1,6 @@
 //! Animation sampling, morph targets and skinning (on the CPU, per frame).
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::{Animation, Interp, Model, Path, Trs, Vertex};
 
@@ -149,7 +149,16 @@ pub fn draw_list(model: &Model, locals: &[Trs], weights: &[Vec<f32>], morph_over
                         m = Mat4::IDENTITY;
                     }
                     v.pos = m.transform_point3(Vec3::from(v.pos)).into();
-                    v.normal = m.transform_vector3(Vec3::from(v.normal)).normalize_or_zero().into();
+                    // Cofactors give det(M) * inverse-transpose(M), without
+                    // dividing by zero for a collapsed joint scale.
+                    let linear = Mat3::from_mat4(m);
+                    let cofactor = Mat3::from_cols(
+                        linear.y_axis.cross(linear.z_axis),
+                        linear.z_axis.cross(linear.x_axis),
+                        linear.x_axis.cross(linear.y_axis),
+                    );
+                    let sign = if linear.determinant() < 0.0 { -1.0 } else { 1.0 };
+                    v.normal = (cofactor * Vec3::from(v.normal) * sign).normalize_or_zero().into();
                     let t =
                         m.transform_vector3(Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2])).normalize_or_zero();
                     v.tangent = [t.x, t.y, t.z, v.tangent[3]];

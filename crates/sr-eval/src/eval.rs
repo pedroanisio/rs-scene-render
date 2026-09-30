@@ -624,19 +624,21 @@ fn component(v: &Value, c: Option<u8>) -> Option<Value> {
 }
 
 impl<'p> Frame<'p> {
-    fn timelines(&mut self) {
+    fn timelines(&mut self, clocks: &[(u32, f64)]) {
         let p = self.p;
         let mut stack: Vec<(u32, f64, bool)> = p.roots.iter().rev().map(|&r| (r, self.t, true)).collect();
         while let Some((n, t, up)) = stack.pop() {
             self.tl[n as usize] = t;
             let node = &p.nodes[n as usize];
+            let clock_override = clocks.iter().find(|(k, _)| *k == n).map(|(_, t)| *t);
             let alive = up
-                && match node.kind {
-                    Kind::Plain => t >= node.vis_start && node.vis_end.is_none_or(|e| t < e),
-                    _ => true,
-                };
+                && (clock_override.is_some()
+                    || match node.kind {
+                        Kind::Plain => t >= node.vis_start && node.vis_end.is_none_or(|e| t < e),
+                        _ => true,
+                    });
             self.alive[n as usize] = alive;
-            let ct = clock_map(&node.clock, t);
+            let ct = clock_override.unwrap_or_else(|| clock_map(&node.clock, t));
             self.child[n as usize] = ct;
             for &c in node.children.iter().rev() {
                 stack.push((c, ct, alive));
@@ -919,6 +921,12 @@ impl<'p> Frame<'p> {
 
 /// Evaluates one frame at composition time `t` (seconds).
 pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
+    evaluate_with_clocks(p, t, &[])
+}
+
+/// Sample source history that a remap jumps over or a freeze holds. Composition
+/// properties still use `t`; the supplied container clocks drive their children.
+pub(crate) fn evaluate_with_clocks(p: &Program, t: f64, clocks: &[(u32, f64)]) -> FrameGraph {
     let n = p.nodes.len();
     let mut f = Frame {
         p,
@@ -930,7 +938,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         adjust: vec![None; n],
         alive: vec![false; n],
     };
-    f.timelines();
+    f.timelines(clocks);
     f.slots();
 
     struct Out {
@@ -959,7 +967,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         let active = match node.kind {
             Kind::RepeatCopy { .. } => true,
             Kind::Transition(_) => false,
-            Kind::Plain => tl >= node.vis_start && node.vis_end.is_none_or(|e| tl < e),
+            Kind::Plain => f.alive[n as usize],
         };
         if !active || !f.condition(n) {
             return;
@@ -1043,7 +1051,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
         // parent referenced before it was visited: compute its chain directly
         let p = f.p;
         let node = &p.nodes[n as usize];
-        let (pw, bx) = match node.parent {
+        let (pw, bx) = match node.parent.filter(|_| node.parent_link.is_none()) {
             Some(c) => (world_of(f, o, c)?, p.size),
             None => ((Affine::IDENTITY, 1.0), p.size),
         };
@@ -1052,7 +1060,18 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             Some(pl) if pl != n => world_of(f, o, pl).map(|w| w.0).unwrap_or(pw.0),
             _ => pw.0,
         };
-        Some((base.then(&lc.aff), pw.1 * lc.opacity))
+        let mut opacity = lc.opacity;
+        if node.parent_link.is_some() {
+            // Opacity follows containment, independently of transform parenting.
+            let mut parent = node.parent;
+            while let Some(k) = parent {
+                opacity *= f.local(k, p.size).opacity;
+                parent = p.nodes[k as usize].parent;
+            }
+        } else {
+            opacity *= pw.1;
+        }
+        Some((base.then(&lc.aff), opacity))
     }
 
     if p.roots.iter().any(|&k| p.nodes[k as usize].align.is_some()) {

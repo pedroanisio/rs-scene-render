@@ -2234,11 +2234,11 @@ impl Builder {
                 self.nodes[n].matte = self.resolve(&scope, &mt);
             }
         }
-        // cycles through @parent
+        // Transform dependencies include the container when @parent is absent.
         for start in 0..self.nodes.len() {
             let mut seen = HashSet::new();
             let mut cur = start as u32;
-            while let Some(p) = self.nodes[cur as usize].parent_link {
+            while let Some(p) = self.nodes[cur as usize].parent_link.or(self.nodes[cur as usize].parent) {
                 if !seen.insert(cur) || p as usize == start {
                     let id = self.nodes[start].id.clone();
                     let loc = self.nodes[start].elem.loc();
