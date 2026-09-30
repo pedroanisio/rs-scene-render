@@ -180,6 +180,9 @@
     "c58.scene.xml": [
       "C58"
     ],
+    "c59-luma.scene.xml": [
+      "C59"
+    ],
     "c59.scene.xml": [
       "C59"
     ],
@@ -404,6 +407,9 @@
     ],
     "r38.scene.xml": [
       "R38"
+    ],
+    "r39-bus.scene.xml": [
+      "R39"
     ],
     "r39.scene.xml": [
       "R39"

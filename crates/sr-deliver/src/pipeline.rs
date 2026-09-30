@@ -584,7 +584,8 @@ pub fn deliver(
     let programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
         (Some(tm), Some(sa)) if takes_audio => {
             let t = Instant::now();
-            let a = crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref())?;
+            let a =
+                crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref(), segments.is_some())?;
             report.audio_seconds += t.elapsed().as_secs_f64();
             Some(a.master)
         }

@@ -150,3 +150,37 @@ fn own_tracks_play_without_segments_from_the_outputs_start() {
     assert!(rms(&x, 0.0, 0.49) < 1e-6);
     assert!((frequency(&x, 0.6, 2.9) - 1000.0).abs() < 1.0);
 }
+
+#[test]
+fn selection_acts_only_with_segments() {
+    let d = fixtures("noselect");
+    // without segments, audioRoles has no effect: the composition's music plays under the output's own track
+    let xml = r##"<scene version="1.2"><project width="64" height="36" fps="25" duration="4" background="#000000"/>
+          <output path="all.wav" codec="audio-only" audioRoles="effects"><audioTrack id="sting" asset="a1000" start="2"/></output>
+          <assets><audio id="a440" src="a440.wav"/><audio id="a1000" src="a1000.wav"/></assets>
+          <composition/><audioMix><audioTrack id="music" asset="a440" role="music"/></audioMix></scene>"##;
+    let path = d.join("all.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let r = sr_deliver::deliver(&doc, &doc.scene.outputs[0], None, &Default::default(), &mut |_, _| {}).unwrap();
+    let a = sr_media::decode_audio(&r.path, 0, RATE).unwrap();
+    let x: Vec<f32> = a.samples.chunks(a.channels as usize).map(|f| f[0]).collect();
+    assert!((frequency(&x, 0.1, 1.9) - 440.0).abs() < 1.0);
+}
+
+#[test]
+fn stretching_keeps_loudness() {
+    let d = fixtures("stretchloud");
+    let loud = |speed: &str| {
+        let (_, r) = deliver(
+            &d,
+            &format!(
+                r#"<output path="l{speed}.wav" codec="audio-only"><segment from="0" to="3" speed="{speed}"/></output>"#
+            ),
+            r#"<audioTrack id="t" asset="a440"/>"#,
+        );
+        r.loudness.unwrap()
+    };
+    let (a, b) = (loud("1"), loud("2"));
+    assert!((a - b).abs() < 0.5, "{a} LUFS at speed 1, {b} LUFS stretched to half");
+}

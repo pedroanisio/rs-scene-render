@@ -128,24 +128,7 @@ fn output_time(tm: &TimeMap, i: usize, c: f64) -> f64 {
     let seg = &tm.segments[i];
     match tm.span(i) {
         Some((a, s)) => seg.start + (c - a) / s,
-        None => {
-            // the first crossing of c on a 1 ms grid, refined linearly
-            let n = ((seg.duration * 1000.0).ceil() as usize).max(1);
-            let u = |k: usize| seg.duration * k as f64 / n as f64;
-            let mut prev = tm.unclamped(i, 0.0);
-            if prev == c {
-                return seg.start;
-            }
-            for k in 1..=n {
-                let v = tm.unclamped(i, u(k));
-                if (prev - c) * (v - c) <= 0.0 {
-                    let f = if v != prev { (c - prev) / (v - prev) } else { 0.0 };
-                    return seg.start + u(k - 1) + f * (u(k) - u(k - 1));
-                }
-                prev = v;
-            }
-            seg.start + seg.duration
-        }
+        None => tm.shows(i, c).unwrap_or(seg.start + seg.duration),
     }
 }
 

@@ -1141,6 +1141,9 @@
     <xs:attribute name="object" type="xs:string"/>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+  <xs:simpleType name="tileZoomType">
+    <xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="24"/></xs:restriction>
+  </xs:simpleType>
   <xs:complexType name="tilesAssetType">
     <xs:annotation><xs:documentation>
       Map tiles: a PMTiles archive (@src) of vector (MVT) or raster (PNG, JPEG, WebP) tiles; or
@@ -1157,10 +1160,10 @@
     <xs:attribute name="cache" type="xs:anyURI"/>
     <xs:attribute name="cacheSha256" type="sha256Type"/>
     <xs:attribute name="tileSize" type="xs:positiveInteger"/>
-    <xs:attribute name="minZoom" type="xs:nonNegativeInteger" default="0"/>
-    <xs:attribute name="maxZoom" type="xs:nonNegativeInteger" default="19"/>
+    <xs:attribute name="minZoom" type="tileZoomType" default="0"/>
+    <xs:attribute name="maxZoom" type="tileZoomType" default="19"/>
     <xs:attribute name="attribution" type="xs:string"/>
-    <xs:attributeGroup ref="assetProvenance"/>
+    <xs:attribute name="sha256" type="sha256Type"/>
   </xs:complexType>
   <xs:complexType name="basemapType">
     <xs:annotation><xs:documentation>
@@ -2025,7 +2028,7 @@
         <xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="exaggeration" type="xs:double" default="1"/>
+    <xs:attribute name="exaggeration" type="nonNegativeDecimal" default="1"/>
     <xs:attribute name="buildings" type="xs:boolean" default="false"/>
     <xs:attribute name="textureSize" default="2048">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="64"/><xs:maxInclusive value="8192"/></xs:restriction></xs:simpleType>

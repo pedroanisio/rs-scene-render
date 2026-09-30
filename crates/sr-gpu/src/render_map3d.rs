@@ -71,8 +71,18 @@ impl Renderer {
                 return;
             }
         };
-        // the ground wears the drape; the object's material dresses the buildings
-        let params = MaterialParams { base_color: [1.0; 4], roughness: 0.9, ..Default::default() };
+        // the ground wears the drape under the object's material (its base colour multiplies the drape;
+        // its roughness, metallic and unlit apply); the material dresses the buildings whole
+        let params = match &material {
+            Some((m, _)) => MaterialParams {
+                base_color: m.base_color,
+                roughness: m.roughness,
+                metallic: m.metallic,
+                unlit: m.unlit,
+                ..Default::default()
+            },
+            None => MaterialParams { base_color: [1.0; 4], roughness: 0.9, ..Default::default() },
+        };
         let mut maps = Maps::default();
         maps[0] = Some(drape);
         let (building_params, building_maps) = material.unwrap_or_else(|| {
@@ -148,9 +158,11 @@ impl Renderer {
         globe: bool,
         size: f64,
     ) -> Result<Arc<crate::three::TexGpu>, String> {
+        // laid out in map pixels (a globe's whole world 2H × H, H the map's height, so labels and lines
+        // keep their 2D size) and scaled to the texture: @textureSize sets only the resolution
         let (w, h) =
-            if globe { (2.0 * size.min(4096.0), size.min(4096.0)) } else { (mp.width as f64, mp.height as f64) };
-        let scale = if globe { 1.0 } else { size / w.max(h) };
+            if globe { (2.0 * mp.height as f64, mp.height as f64) } else { (mp.width as f64, mp.height as f64) };
+        let scale = if globe { size.min(4096.0) / h } else { size / w.max(h) };
         let (tw, th) = ((w * scale).round().max(1.0) as u32, (h * scale).round().max(1.0) as u32);
         let key = format!("drape|{}|{globe}|{tw}x{th}|{}", mp.id, map_state(ctx.g, mp));
         if let Some(t) = self.three_engine().textures.get(&key) {
