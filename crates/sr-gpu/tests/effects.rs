@@ -749,6 +749,40 @@ fn texture_pool_stays_bounded_over_a_long_motion_blurred_render() {
 }
 
 #[test]
+fn motion_blurred_shapes_sample_only_the_box_they_sweep() {
+    // each blurred node holds its samples until the frame is submitted: sized to the whole frame, a few hundred
+    // moving dots needed tens of GB of video memory. Rects and ellipses sample the box they sweep plus their
+    // stroke, and keep every pixel a full-frame sample had.
+    let mb = r##"background="#00000000" shutterAngle="180" shutterPhase="0" motionBlurSamples="8""##;
+    let mv = r#"<animate property="x"><key time="0" value="0"/><key time="4" value="200"/></animate>"#;
+    let paint = r##"fill="#FFFFFF" stroke="#FF0000" strokeWidth="4" strokePosition="outside" motionBlur="on""##;
+    let rect = format!(r#"<shape id="r" shape="rect" y="10" width="10" height="8" {paint}>{mv}</shape>"#);
+    // the same outline as a path, which samples the whole frame
+    let path = format!(r#"<shape id="r" shape="path" path="M0 0 H10 V8 H0 Z" y="10" width="10" height="8" {paint}>{mv}</shape>"#);
+    let Some(a) = render_sub(&doc_with(mb, "", &rect, ""), 0.1) else { return };
+    let b = render_sub(&doc_with(mb, "", &path, ""), 0.1).unwrap();
+    assert!(problems(&a).is_empty() && problems(&b).is_empty(), "{:?} {:?}", problems(&a), problems(&b));
+    assert!(a.stats.fx_passes > 0, "the rect is blurred");
+    let worst = (0..32).flat_map(|y| (0..64).map(move |x| (x, y))).map(|(x, y)| {
+        let (p, q) = (a.at(x, y), b.at(x, y));
+        (0..4).map(|c| (p[c] - q[c]).abs()).fold(0.0f32, f32::max)
+    });
+    let worst = worst.fold(0.0f32, f32::max);
+    assert!(worst < 0.02, "box-sized samples match full-frame ones: {worst}");
+    assert!(a.at(12, 7)[0] > 0.5 && a.at(12, 7)[1] < 0.2, "the outside stroke is kept: {:?}", a.at(12, 7));
+    let dots: String = (0..30)
+        .map(|k| {
+            format!(r##"<shape id="d{k}" shape="ellipse" y="{}" width="2" height="2" fill="#FFFFFF" motionBlur="on"><animate property="x"><key time="0" value="{}"/><key time="4" value="{}"/></animate></shape>"##,
+                k % 28, k * 2, k * 2 + 200)
+        })
+        .collect();
+    let r = render_sub(&doc_with(mb, "", &dots, ""), 0.1).unwrap();
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    let texels = r.renderer.pooled_texels();
+    assert!(texels < 30 * 64 * 32 / 4, "blur textures follow the dots, not the frame: {texels} texels");
+}
+
+#[test]
 fn agx_keeps_white_and_grey_neutral() {
     // AgX's inset/outset matrices are defined for linear Rec.709 and must be given to WGSL column by column:
     // transposed, they turned white pink. Greys stay grey through AgX, in any working space.

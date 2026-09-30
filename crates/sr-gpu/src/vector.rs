@@ -130,6 +130,26 @@ pub fn primitive(a: &Attrs, kind: &str, w: f64, h: f64) -> Result<Path, String> 
     })
 }
 
+/// How far (node units) a shape's ink can reach outside its box, when it stays near the box at all: a
+/// rect or ellipse without modifiers or deformers, whose only overhang is its stroke (a 90° miter at most)
+pub fn box_overhang(n: &FrameNode) -> Option<f64> {
+    let e: &dyn Element = &*n.elem;
+    let a = Attrs { e, props: Some(&n.props) };
+    if !matches!(a.str("shape").as_deref().unwrap_or("rect"), "rect" | "rounded-rect" | "ellipse") {
+        return None;
+    }
+    if children(e).into_iter().any(|c| is(c, "shapeModifier") || is(c, "deform")) {
+        return None;
+    }
+    let sw = if a.paint("stroke").is_some() { a.num("strokeWidth", 0.0).max(0.0) } else { 0.0 };
+    let side = match a.str("strokePosition").as_deref() {
+        Some("inside") => 0.0,
+        Some("outside") => 1.0,
+        _ => 0.5,
+    };
+    Some(sw * side * std::f64::consts::SQRT_2)
+}
+
 fn modifier_of(a: &Attrs) -> Option<Modifier> {
     let mode = a.str("mode");
     Some(match a.str("type")?.as_str() {

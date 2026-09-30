@@ -183,6 +183,8 @@ struct Plan {
     stats: RenderStats,
     /// Pooled textures used by effect passes this frame.
     fx_temps: Vec<Arc<Tex>>,
+    /// Video memory held by motion blur this frame (bytes, estimated).
+    blur_bytes: u64,
     /// Colour finishing on the frame, and its result (copied back into the frame).
     post: Vec<fx::Pass>,
     post_out: Option<Arc<Tex>>,
@@ -2810,6 +2812,11 @@ impl Renderer {
     /// Offscreen textures held for reuse between frames.
     pub fn pooled_textures(&self) -> usize {
         self.pool.held()
+    }
+
+    /// Texels of the pooled offscreen textures.
+    pub fn pooled_texels(&self) -> u64 {
+        self.pool.held_texels()
     }
 
     pub fn render_with(

@@ -126,6 +126,11 @@ impl Pool {
         self.free.values().map(Vec::len).sum()
     }
 
+    /// Texels of the textures held for reuse.
+    pub fn held_texels(&self) -> u64 {
+        self.free.iter().map(|(s, v)| s[0] as u64 * s[1] as u64 * v.len() as u64).sum()
+    }
+
     /// Returns a texture to the pool.
     pub fn put(&mut self, t: Arc<Tex>) {
         if Arc::strong_count(&t) == 1 {

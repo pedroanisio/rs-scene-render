@@ -38,6 +38,10 @@ pub(super) const TIME_VARYING: &[&str] = &[
     "pixel-motion-blur",
 ];
 
+/// Video memory one frame's motion blur may hold (bytes). A frame over it draws the remaining moving nodes
+/// sharp rather than failing to allocate.
+const MOTION_BLUR_BUDGET: u64 = 8 << 30;
+
 /// Effects whose reach is the whole frame (they draw light or pull pixels from far away).
 const UNBOUNDED: &[&str] = &[
     "lens-flare",
@@ -1255,17 +1259,23 @@ impl Renderer {
         if n.kind == "group" && !own_motion {
             return false;
         }
-        // samples cover the box swept across the shutter plus the effects' reach (sized leaf layers),
-        // else the whole target
+        // samples cover the box swept across the shutter plus the effects' reach (sized leaf layers, and
+        // shapes whose ink stays near their box), else the whole target
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
         let mut rect = [0.0, 0.0, fw, fh];
-        if n.kind == "layer" && ctx.kids[i].is_empty() && n.size.is_some() {
+        let overhang = match n.kind {
+            "layer" => Some(0.0),
+            "shape" => crate::vector::box_overhang(n),
+            _ => None,
+        };
+        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some()) {
             let effs: Vec<&m::Effect> =
                 effect_ids(&*n.elem).iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
-            let pad: f64 = effs
+            let pad: f64 = (effs
                 .iter()
                 .map(|e| reach(e, &Attrs { e: *e as &dyn Element, props: element_props(g, &e.id) }))
                 .sum::<f64>()
+                + over)
                 * Xf(space.xform.then(&n.world).0).max_scale();
             if pad.is_finite() && n.kind != "object3D" {
                 let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1297,6 +1307,13 @@ impl Renderer {
             }
         }
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
+        // what a blurred node holds until the frame is submitted: the accumulator and one reference (a rigid move),
+        // or the accumulator, one sample and each sample's vector raster. Past the budget a frame of many blurred
+        // full-frame nodes would exhaust video memory, so the rest draw sharp
+        let texture = size[0] as u64 * size[1] as u64 * 8;
+        if !Self::blur_budget(plan, 2 * texture) {
+            return false;
+        }
         let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
         let acc = self.temp(plan, size);
         if let Some((reference, origin, w_ref)) = self.rigid_reference(plan, ctx, i, space, iso_op, &times) {
@@ -1316,37 +1333,53 @@ impl Renderer {
             let (passes, temps, problems) =
                 (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
             Self::finish_builder(plan, passes, temps, problems, &n.id);
+            plan.blur_bytes += 2 * texture;
             self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
             return true;
         }
-        let mut samples = Vec::with_capacity(count);
+        if !Self::blur_budget(plan, (count as u64 + 2) * texture) {
+            return false;
+        }
+        plan.blur_bytes += (count as u64 + 2) * texture;
+        // one sample texture: each sample is drawn, then added to the accumulator, before the next is drawn
+        let tex = self.temp(plan, size);
+        let mut first_pass = true;
         for &t in &times {
             let sg = sub.at(t);
             let Some(&j) = sg.index.get(&n.id) else {
-                samples.push(None);
                 continue;
             };
             let sctx = ctx.at(&sg);
-            let tex = self.temp(plan, size);
             let mut c = Vec::new();
             self.sampling = true;
             self.emit(plan, &sctx, j, &inner, iso_op, &mut c, true, 0);
             self.flush_vec(plan, &mut c);
             self.sampling = false;
             plan.jobs.push(Job::draws(tex.clone(), true, c, false));
-            samples.push(Some(tex));
-        }
-        let mut b = self.builder(plan);
-        let mut first_pass = true;
-        for tex in samples.iter().flatten() {
-            b.accumulate(&acc, tex, 1.0 / count as f64, first_pass);
+            let mut b = self.builder(plan);
+            b.accumulate(&acc, &tex, 1.0 / count as f64, first_pass);
+            let (passes, temps, problems) =
+                (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
+            Self::finish_builder(plan, passes, temps, problems, &n.id);
             first_pass = false;
         }
-        let (passes, temps, problems) =
-            (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
-        Self::finish_builder(plan, passes, temps, problems, &n.id);
         self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
         true
+    }
+
+    /// Whether `bytes` more of motion blur fit in the frame's budget; reports it once when they do not.
+    fn blur_budget(plan: &mut Plan, bytes: u64) -> bool {
+        if plan.blur_bytes + bytes <= MOTION_BLUR_BUDGET {
+            return true;
+        }
+        let m = format!(
+            "motion blur: over the frame's {} MiB budget, some moving nodes were drawn without it",
+            MOTION_BLUR_BUDGET >> 20
+        );
+        if !plan.stats.unsupported.contains(&m) {
+            plan.stats.unsupported.push(m);
+        }
+        false
     }
 
     /// Draws a motion-blur accumulation covering `rect` of `space` in place of node `i`.
