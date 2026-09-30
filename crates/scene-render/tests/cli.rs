@@ -184,6 +184,70 @@ fn no_gpu(o: &Output) -> bool {
     false
 }
 
+fn run_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_scene-render"));
+    c.args(args).env("NO_COLOR", "1");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().expect("binary runs")
+}
+
+#[test]
+fn gpus_lists_adapters_and_marks_the_one_chosen() {
+    let o = run(&["gpus"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(text.lines().filter(|l| l.starts_with('*')).count(), 1, "{text}");
+    let r: serde_json::Value = serde_json::from_slice(&run(&["gpus", "--json"]).stdout).unwrap();
+    let list = r["adapters"].as_array().unwrap();
+    assert!(!list.is_empty());
+    assert_eq!(list.iter().filter(|a| a["chosen"] == true).count(), 1, "{r}");
+    assert!(list.iter().all(|a| a["name"].is_string() && a["backend"].is_string() && a["software"].is_boolean()));
+}
+
+#[test]
+fn an_unknown_adapter_name_is_an_error_that_lists_the_adapters() {
+    let dir = render_fixture("adapter-name");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_ADAPTER", "no-such-gpu-xyz")]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(2));
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(e.contains("no-such-gpu-xyz") && e.contains("available"), "{e}");
+}
+
+#[test]
+fn rendering_on_a_software_adapter_warns() {
+    let dir = render_fixture("software");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..2"], &[("SR_GPU_ADAPTER", "llvmpipe")]);
+    if o.status.code() == Some(2) {
+        eprintln!("skipping: no llvmpipe adapter: {}", String::from_utf8_lossy(&o.stderr));
+        return;
+    }
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("warning:") && text.contains("software"), "{text}");
+    let pattern = dir.join("sw_%03d.png");
+    let o = run_env(
+        &["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2", "--json"],
+        &[("SR_GPU_ADAPTER", "llvmpipe")],
+    );
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(r["render_adapter"]["software"], true, "{r}");
+    let o = run_env(
+        &["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2"],
+        &[("SR_GPU_ADAPTER", "llvmpipe")],
+    );
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("warning:") && text.contains("software adapter"), "{text}");
+}
+
 #[test]
 fn render_writes_png_frames() {
     let dir = render_fixture("png");

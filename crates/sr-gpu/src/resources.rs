@@ -25,20 +25,23 @@ pub struct Tex {
     pub bind: wgpu::BindGroup,
 }
 
-/// The bind group layout of a sampled layer source (one filterable 2D texture).
+/// The bind group layout of a sampled layer source: one filterable 2D texture, bound twice.
+/// Binding 0 is sampled clamped and binding 1 repeating (pattern paints); OpenGL allows one
+/// sampler per texture binding, so the repeating sampler needs a binding of its own.
 pub fn source_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let tex = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("source"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        }],
+        entries: &[tex(0), tex(1)],
     })
 }
 
@@ -62,25 +65,35 @@ pub fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32;
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+        ],
     });
     Tex { tex, view, size, bind }
 }
+
+/// Frames a size may go unrequested before its free textures are released.
+const KEEP_FRAMES: u64 = 8;
 
 /// Reuses offscreen textures by size between frames.
 #[derive(Default)]
 pub struct Pool {
     free: HashMap<[u32; 2], Vec<Arc<Tex>>>,
-    /// Sizes requested since the last `trim`.
-    wanted: std::collections::HashSet<[u32; 2]>,
+    /// The frame (count of `trim` calls) each size was last requested in.
+    wanted: HashMap<[u32; 2], u64>,
+    /// `trim` calls so far.
+    frame: u64,
     /// Textures created since the renderer started.
     pub created: usize,
+    /// Textures destroyed by `trim` since the renderer started.
+    pub released: usize,
 }
 
 impl Pool {
     /// A texture of `size`, reused when one is free.
     pub fn get(&mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2]) -> Arc<Tex> {
-        self.wanted.insert(size);
+        self.wanted.insert(size, self.frame);
         if let Some(t) = self.free.get_mut(&size).and_then(Vec::pop) {
             return t;
         }
@@ -88,12 +101,24 @@ impl Pool {
         Arc::new(create(device, layout, size, 1, "offscreen"))
     }
 
-    /// Frees the textures of every size not requested since the last call. Sizes that follow moving
-    /// content (motion-blur and effect bounds) change from frame to frame and would otherwise
-    /// accumulate without bound over a long render.
+    /// Ends a frame: frees the textures of every size not requested in the last `KEEP_FRAMES`
+    /// frames. Sizes that follow moving content (motion-blur and effect bounds, rounded to
+    /// steps so they repeat) come and go, and would otherwise accumulate over a long render;
+    /// keeping them a few frames lets a size that returns find its textures.
     pub fn trim(&mut self) {
-        let wanted = std::mem::take(&mut self.wanted);
-        self.free.retain(|size, _| wanted.contains(size));
+        let now = self.frame;
+        self.wanted.retain(|_, at| now - *at < KEEP_FRAMES);
+        let wanted = &self.wanted;
+        let mut released = 0;
+        self.free.retain(|size, list| {
+            let keep = wanted.contains_key(size);
+            if !keep {
+                released += list.len();
+            }
+            keep
+        });
+        self.released += released;
+        self.frame += 1;
     }
 
     /// Textures held for reuse.

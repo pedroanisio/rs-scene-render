@@ -287,6 +287,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List the GPU adapters found and mark the one renders use (see SR_GPU_ADAPTER, SR_GPU_BACKEND).
+    Gpus {
+        /// Print the list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Describe a diagnostic code, or list every code.
     Explain {
         /// Code such as S06, C21 or R24-fill; omit to list all codes.
@@ -427,7 +433,7 @@ fn validate(
                 }
             }
             (Some((text, report)), None) => {
-                let ok = !report.has_errors() && !(deny_warnings && report.warning_count() > 0);
+                let ok = !(report.has_errors() || deny_warnings && report.warning_count() > 0);
                 if !ok {
                     worst = worst.max(1);
                 }
@@ -603,6 +609,40 @@ fn inspect(file: &Path, json: bool, no_assets: bool, out: &mut Out) -> std::io::
         writeln!(out.w, "  warnings     {}", doc.warnings().len())?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn gpus(json: bool, out: &mut Out) -> std::io::Result<ExitCode> {
+    let (found, chosen) = sr_gpu::gpu::adapters(&sr_gpu::gpu::GpuOptions::from_env());
+    if found.is_empty() {
+        eprintln!("error: {}", sr_gpu::GpuError::NoAdapter("no adapter was found".into()));
+        return Ok(ExitCode::from(2));
+    }
+    let chosen = chosen.map_err(|e| eprintln!("error: {e}")).ok();
+    if json {
+        let list: Vec<_> = found
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                serde_json::json!({
+                    "name": a.name,
+                    "backend": format!("{:?}", a.backend),
+                    "device_type": format!("{:?}", a.device_type),
+                    "driver": a.driver,
+                    "software": sr_gpu::gpu::is_software(a),
+                    "chosen": chosen == Some(i),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({ "adapters": list });
+        writeln!(out.w, "{}", serde_json::to_string_pretty(&doc).expect("serialisable"))?;
+    } else {
+        for (i, a) in found.iter().enumerate() {
+            let mark = if chosen == Some(i) { '*' } else { ' ' };
+            let soft = if sr_gpu::gpu::is_software(a) { ", software" } else { "" };
+            writeln!(out.w, "{mark} {} ({:?}, {:?}{soft})", a.name, a.backend, a.device_type)?;
+        }
+    }
+    Ok(if chosen.is_some() { ExitCode::SUCCESS } else { ExitCode::from(2) })
 }
 
 fn explain(code: Option<&str>, out: &mut Out) -> std::io::Result<ExitCode> {
@@ -854,7 +894,10 @@ fn render(
             return Ok(ExitCode::from(2));
         }
     };
-    let adapter = format!("{} ({:?}, {:?})", gpu.info.name, gpu.info.backend, gpu.info.device_type);
+    let adapter = sr_gpu::gpu::describe(&gpu.info);
+    if let Some(w) = sr_gpu::gpu::software_warning(&gpu.info) {
+        writeln!(out.w, "warning: {w}")?;
+    }
     let mut r = sr_gpu::Renderer::new(gpu, ev.program());
     let graphs = |f: u64| ev.evaluate_frame(f);
     let mut unsupported = std::collections::BTreeSet::new();
@@ -1116,6 +1159,13 @@ fn encode(
                 writeln!(out.w, "{bold}wrote{bold:#} {} ({} file(s), {})", r.path.display(), r.files.len(), r.encoder)?;
                 if let Some(a) = &r.render_adapter {
                     writeln!(out.w, "  render adapter: {} ({}, {})", a.name, a.backend, a.device_type)?;
+                    if a.software {
+                        writeln!(
+                            out.w,
+                            "  warning: rendering on a software adapter ({}): expect renders many times slower than on a GPU; `scene-render gpus` lists the adapters found and SR_GPU_ADAPTER picks one",
+                            a.name
+                        )?;
+                    }
                 }
                 if r.frames > 0 {
                     let [e, s, w, b] = r.stage_seconds;
@@ -1160,6 +1210,9 @@ fn encode(
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // on WSL2 the GPU is reachable only through Mesa's D3D12 driver; Mesa reads these
+    // variables when a GL display opens, so set them before any thread starts
+    sr_gpu::gpu::prepare_environment();
     if let Some(n) = cli.threads.filter(|&n| n > 0) {
         sr_vector::set_threads(n);
         if std::env::var_os("RAYON_NUM_THREADS").is_none() {
@@ -1251,6 +1304,7 @@ fn main() -> ExitCode {
             let o = sr_resolve::Options { check, force, only, allow_cloud, store: no_store.then(PathBuf::new) };
             resolve(&file, &o, json, &mut out)
         }
+        Command::Gpus { json } => gpus(json, &mut out),
         Command::Explain { code } => explain(code.as_deref(), &mut out),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "scene-render", &mut std::io::stdout());

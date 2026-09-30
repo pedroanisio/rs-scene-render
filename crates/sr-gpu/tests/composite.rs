@@ -163,7 +163,8 @@ fn all_blend_modes_match_the_reference_formulas() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert!(r.stats.backdrop_copies >= 31, "{:?}", r.stats);
+    // every mode reads a copy of the backdrop except add and linear-dodge, which the blender does
+    assert!(r.stats.backdrop_copies >= 29, "{:?}", r.stats);
     for m in ["stencil-alpha", "stencil-luma"] {
         let body = format!(r#"{}<layer id="s" asset="src" blend="{m}"/>"#, BACKDROP.replace("HEIGHT", "32"));
         let d = doc(r##"background="#00000000""##, "", &body);

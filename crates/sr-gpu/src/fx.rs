@@ -36,6 +36,88 @@ pub type FlowSlot = Arc<std::sync::OnceLock<wgpu::TextureView>>;
 pub struct Params {
     pub v: [[f32; 4]; 8],
     pub i: [u32; 4],
+    /// A fused colour pass: operation k's parameters in `x[8k .. 8k + 8]`.
+    pub x: [[f32; 4]; 32],
+    /// A fused colour pass: operation k's code and seed (code 0 ends the list).
+    pub ops: [[u32; 4]; 4],
+}
+
+impl Params {
+    /// The parameters of a single pass.
+    pub fn new(v: [[f32; 4]; 8], i: [u32; 4]) -> Params {
+        Params { v, i, ..Default::default() }
+    }
+}
+
+/// Colour operations a fused pass can chain: pointwise, reading no texture but the pixel
+/// (curves 4, gradient map 12, gradient overlay 19 and LUTs 24 read tables).
+fn fusable_op(op: u32) -> bool {
+    (1..=64).contains(&op) && !matches!(op, 4 | 12 | 19 | 24)
+}
+
+/// At most this many operations share one fused pass.
+const FUSED_MAX: usize = 4;
+
+/// Merges runs of pointwise colour passes, each reading the previous one's output and that
+/// output used by nothing else, into single passes: one read and one write of the pixels
+/// instead of one per operation, with the pixel kept in registers between operations.
+pub fn fuse_colour(passes: Vec<Pass>) -> Vec<Pass> {
+    let simple = |p: &Pass| {
+        p.entry == Entry::Color
+            && p.custom.is_none()
+            && matches!(p.aux, Aux::None)
+            && p.aux2.is_none()
+            && p.lut.is_none()
+            && !p.additive
+            && p.clear
+            && fusable_op(p.params.i[0])
+    };
+    let uses = |t: &Arc<Tex>, ps: &[Pass]| {
+        ps.iter()
+            .filter(|p| {
+                Arc::ptr_eq(&p.src, t)
+                    || matches!(&p.aux, Aux::Tex(a) if Arc::ptr_eq(a, t))
+                    || p.aux2.as_ref().is_some_and(|a| Arc::ptr_eq(a, t))
+            })
+            .count()
+    };
+    // runs: consecutive simple passes where each reads the previous output, used only there
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut k = 0;
+    while k < passes.len() {
+        let mut end = k + 1;
+        if simple(&passes[k]) {
+            while end < passes.len()
+                && end - k < FUSED_MAX
+                && simple(&passes[end])
+                && Arc::ptr_eq(&passes[end].src, &passes[end - 1].out)
+                && passes[end].params.i[3] == passes[k].params.i[3]
+                && uses(&passes[end - 1].out, &passes) == 1
+            {
+                end += 1;
+            }
+        }
+        runs.push((k, end));
+        k = end;
+    }
+    let mut out = Vec::with_capacity(runs.len());
+    let mut it = passes.into_iter();
+    for (a, b) in runs {
+        let group: Vec<Pass> = it.by_ref().take(b - a).collect();
+        if group.len() == 1 {
+            out.extend(group);
+            continue;
+        }
+        let mut params = Params::new([[0.0; 4]; 8], [90, 0, 0, group[0].params.i[3]]);
+        for (k, p) in group.iter().enumerate() {
+            params.x[k * 8..k * 8 + 8].copy_from_slice(&p.params.v);
+            params.ops[k] = [p.params.i[0], p.params.i[1], p.params.i[2], 0];
+        }
+        let first_src = group[0].src.clone();
+        let last = group.into_iter().last().expect("a run has passes");
+        out.push(Pass { entry: Entry::Color, params, src: first_src, ..last });
+    }
+    out
 }
 
 /// A pass entry point.
@@ -52,6 +134,8 @@ pub enum Entry {
     Bokeh,
     Conv,
     Morph,
+    /// Jump flooding towards a distance field.
+    Jfa,
     Flow,
     Trans,
     /// A compiled GLSL shader, by source hash.
@@ -72,6 +156,7 @@ impl Entry {
             Entry::Bokeh => "fs_bokeh",
             Entry::Conv => "fs_conv",
             Entry::Morph => "fs_morph",
+            Entry::Jfa => "fs_jfa",
             Entry::Flow => "fs_flow",
             Entry::Trans => "fs_trans",
             Entry::Custom(_) => "main",
@@ -1005,7 +1090,7 @@ impl Builder<'_> {
         i[3] = self.store;
         self.passes.push(Pass {
             entry,
-            params: Params { v, i },
+            params: Params::new(v, i),
             src: src.clone(),
             aux,
             aux2,
@@ -1021,6 +1106,41 @@ impl Builder<'_> {
     fn simple(&mut self, entry: Entry, op: u32, v: [[f32; 4]; 8], src: &Arc<Tex>, aux: Aux) -> Arc<Tex> {
         let size = src.size;
         self.run(entry, [op, 0, 0, 0], v, src, aux, None, None, size)
+    }
+
+    /// Radii up to this many texels sample rings around each pixel (cheap and gap-free at that
+    /// size); wider ones read a distance field.
+    const RING_RADIUS: f64 = 4.0;
+
+    /// For a morphology radius `r` in texels, the distance field `fs_morph` reads (flagged in
+    /// `v[0].z`) when rings would be too sparse or too many.
+    fn morph_field(&mut self, src: &Arc<Tex>, r: f64, v: &mut [[f32; 4]; 8]) -> Aux {
+        if r <= Self::RING_RADIUS {
+            return Aux::None;
+        }
+        v[0][2] = 1.0;
+        Aux::Tex(self.distance_field(src, r))
+    }
+
+    /// Jump flooding (Rong and Tan): per texel, the offset to the nearest texel inside the input
+    /// (alpha ≥ 0.5) in rg and to the nearest texel outside it in ba, exact enough within `reach`
+    /// texels: one pass per power of two from the first above `reach` down to 1, plus one more at 1.
+    pub fn distance_field(&mut self, src: &Arc<Tex>, reach: f64) -> Arc<Tex> {
+        let size = src.size;
+        let mut cur = self.run(Entry::Jfa, [0; 4], [[0.0; 4]; 8], src, Aux::None, None, None, size);
+        let mut step = (reach.ceil() as u32 + 2).next_power_of_two();
+        let mut steps = Vec::new();
+        while step >= 1 {
+            steps.push(step);
+            step /= 2;
+        }
+        steps.push(1);
+        for s in steps {
+            let mut v = [[0.0; 4]; 8];
+            v[0][0] = s as f32;
+            cur = self.run(Entry::Jfa, [1, 0, 0, 0], v, &cur, Aux::None, None, None, size);
+        }
+        cur
     }
 
     /// Dual-Kawase approximation of a Gaussian blur of standard deviation `sigma` texels.
@@ -1724,7 +1844,8 @@ impl Builder<'_> {
                 if kind == "matte-choke" {
                     let choke = amount * px;
                     v[0] = [choke.abs() as f32, (choke > 0.0) as u8 as f32, 0.0, 0.0];
-                    let o = self.simple(Entry::Morph, 0, v, input, Aux::None);
+                    let aux = self.morph_field(input, choke.abs(), &mut v);
+                    let o = self.simple(Entry::Morph, 0, v, input, aux);
                     let soft = a.num("softness", 0.1) * px * 4.0;
                     return Ok(if soft >= 1.0 { self.blur(&o, soft * 0.5) } else { o });
                 }
@@ -1736,7 +1857,8 @@ impl Builder<'_> {
                 };
                 v[0] = [(sz.max(1.0) * px) as f32, 0.0, 0.0, pos];
                 v[1] = v4(c);
-                self.simple(Entry::Morph, if kind == "stroke" { 1 } else { 2 }, v, input, Aux::None)
+                let aux = self.morph_field(input, sz.max(1.0) * px, &mut v);
+                self.simple(Entry::Morph, if kind == "stroke" { 1 } else { 2 }, v, input, aux)
             }
             "shader" => return self.shader_effect(e, a, input, cx),
             other => return Err(format!("effect type {other} is not drawn")),
@@ -1802,12 +1924,33 @@ impl Builder<'_> {
     }
 
     /// Accumulates `src` into `acc` with weight `k` (motion blur, echo).
+    /// Adds `src` times `k` to `acc`, sampled through `m` (affine a, b, c, d, e, f taking
+    /// `acc` texel centres to `src` texels); transparent outside `src`.
+    pub fn accumulate_moved(&mut self, acc: &Arc<Tex>, src: &Arc<Tex>, k: f64, first: bool, m: [f64; 6]) {
+        let mut v = [[0.0f32; 4]; 8];
+        v[0][0] = k as f32;
+        v[1] = [m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32];
+        v[2] = [m[4] as f32, m[5] as f32, 0.0, 0.0];
+        self.passes.push(Pass {
+            entry: Entry::Combine,
+            params: Params::new(v, [9, 0, 0, self.store]),
+            src: src.clone(),
+            aux: Aux::Tex(src.clone()),
+            aux2: None,
+            lut: None,
+            out: acc.clone(),
+            additive: true,
+            clear: first,
+            custom: None,
+        });
+    }
+
     pub fn accumulate(&mut self, acc: &Arc<Tex>, src: &Arc<Tex>, k: f64, first: bool) {
         let mut v = [[0.0f32; 4]; 8];
         v[0][0] = k as f32;
         self.passes.push(Pass {
             entry: Entry::Combine,
-            params: Params { v, i: [8, 0, 0, self.store] },
+            params: Params::new(v, [8, 0, 0, self.store]),
             src: src.clone(),
             aux: Aux::Tex(src.clone()),
             aux2: None,

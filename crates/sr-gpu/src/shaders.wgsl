@@ -50,6 +50,8 @@ struct Mask {
 @group(0) @binding(6) var samp_repeat: sampler;
 @group(0) @binding(7) var<uniform> globals: Globals;
 @group(1) @binding(0) var src: texture_2d<f32>;
+// the same texture again, for the repeating sampler (GL allows one sampler per texture binding)
+@group(1) @binding(1) var src_rep: texture_2d<f32>;
 @group(2) @binding(0) var backdrop: texture_2d<f32>;
 @group(2) @binding(1) var matte: texture_2d<f32>;
 
@@ -343,7 +345,7 @@ fn shade(v: VOut) -> vec4<f32> {
   let t_main = textureSample(src, samp, v.uv);
   let pg = paints[d.paint];
   let puv = vec2(pg.xform0.x * v.local.x + pg.xform0.z * v.local.y + pg.xform1.x, pg.xform0.y * v.local.x + pg.xform0.w * v.local.y + pg.xform1.y);
-  let t_pattern = textureSample(src, samp_repeat, puv);
+  let t_pattern = textureSample(src_rep, samp_repeat, puv);
   var c: vec4<f32>;
   switch (d.src_kind) {
     case 0u: { c = t_main; }

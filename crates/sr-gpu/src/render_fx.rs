@@ -55,8 +55,6 @@ const UNBOUNDED: &[&str] = &[
     "displacement-map",
     "letterbox",
     "vignette",
-    "echo",
-    "posterize-time",
     "light-sweep",
     "fractal-noise",
 ];
@@ -86,6 +84,100 @@ fn fps_of(p: &Program) -> f64 {
 
 pub(super) fn element_props<'g>(g: &'g FrameGraph, key: &str) -> Option<&'g sr_eval::Props> {
     g.elements.iter().find(|e| &*e.key == key).map(|e| &e.props)
+}
+
+/// The time posterize-time shows at frame time `t`: the start of its step.
+pub(super) fn posterized(t: f64, a: &Attrs) -> f64 {
+    let rate = a.num("frequency", 1.0).max(1e-3);
+    (t * rate + 1e-9).floor() / rate
+}
+
+/// Effect targets that follow moving content round their size up to a multiple of this, so
+/// the texture sizes they ask the pool for repeat from frame to frame.
+const TARGET_STEP: f64 = 32.0;
+
+/// Rounds the span `a..b` up to a multiple of `TARGET_STEP` within `lo..hi`, growing towards
+/// `hi` first and then towards `lo`. A wider target covers the same content.
+fn round_span(a: f64, b: f64, lo: f64, hi: f64) -> (f64, f64) {
+    let q = (((b - a) / TARGET_STEP).ceil() * TARGET_STEP).min(hi - lo);
+    if a + q <= hi {
+        (a, a + q)
+    } else {
+        ((hi - q).max(lo), hi)
+    }
+}
+
+/// `round_span` on both axes of a rectangle, within the target's bounds.
+fn round_rect(r: [f64; 4], lo: [f64; 2], hi: [f64; 2]) -> [f64; 4] {
+    let (x0, x1) = round_span(r[0], r[2], lo[0], hi[0]);
+    let (y0, y1) = round_span(r[1], r[3], lo[1], hi[1]);
+    [x0, y0, x1, y1]
+}
+
+/// Children that move a node's geometry outside its box.
+const RESHAPING: &[&str] = &["shapeModifier", "deform", "modifier", "softBody"];
+
+/// Local-unit reach of a shape's stroke beyond its box: half the width centred, the whole width
+/// outside, lengthened at corners by the join (√2 at a rectangle's right angles, up to the miter
+/// limit where paths, polygons and stars can turn sharply; nothing for round outlines and joins).
+fn stroke_reach(n: &sr_eval::FrameNode) -> f64 {
+    if n.kind != "shape" {
+        return 0.0;
+    }
+    let a = Attrs { e: &*n.elem, props: Some(&n.props) };
+    let stroked = n.props.get("stroke").is_some() || n.elem.get_attr("stroke").is_some();
+    if !stroked {
+        return 0.0;
+    }
+    let w = a.num("strokeWidth", 1.0).max(0.0);
+    let outside = matches!(a.str("strokePosition").as_deref(), Some("outside"));
+    let base = if outside { w } else { w * 0.5 };
+    let join = match (a.str("shape").as_deref(), a.str("strokeJoin").as_deref()) {
+        (_, Some("round" | "bevel")) | (Some("ellipse" | "rounded-rect"), _) => 1.0,
+        (Some("rect"), _) => std::f64::consts::SQRT_2,
+        _ => a.num("miterLimit", 4.0).max(1.0),
+    };
+    base * join + 1.0
+}
+
+/// Target-space bounds of everything node `i` draws (its sized layers and shapes, their strokes
+/// and the reach of every effect on the way), not clipped to the target. `None` when something
+/// in it has no box to bound it (particles, 3D, reshaping modifiers, whole-frame effects).
+fn drawn_bounds(ctx: &Ctx, i: usize, space: &Space) -> Option<[f64; 4]> {
+    let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    // (node, reach of the effects of its ancestors within the subtree, in target pixels)
+    let mut stack = vec![(i, 0.0f64)];
+    while let Some((k, outer)) = stack.pop() {
+        let n = &ctx.g.nodes[k];
+        if n.three_d.is_some() || n.kind == "object3D" || n.particles.is_some() {
+            return None;
+        }
+        if sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name())) {
+            return None;
+        }
+        let w = space.xform.then(&n.world);
+        let scale = Xf(w.0).max_scale().max(1e-6);
+        let own: f64 = effect_ids(&*n.elem)
+            .iter()
+            .filter_map(|id| find_effect(ctx.p, id))
+            .filter(|e| e.enabled)
+            .map(|e| reach(e, &Attrs { e: e as &dyn Element, props: element_props(ctx.g, &e.id) }))
+            .sum::<f64>()
+            * scale;
+        if !own.is_finite() {
+            return None;
+        }
+        let reach_px = outer + own;
+        if ctx.kids[k].is_empty() {
+            let s = n.size?;
+            let m = reach_px + stroke_reach(n) * scale + 2.0;
+            for q in [[0.0, 0.0], [s[0], 0.0], [s[0], s[1]], [0.0, s[1]]].map(|p| w.apply(p)) {
+                b = [b[0].min(q[0] - m), b[1].min(q[1] - m), b[2].max(q[0] + m), b[3].max(q[1] + m)];
+            }
+        }
+        stack.extend(ctx.kids[k].iter().map(|&c| (c, reach_px)));
+    }
+    (b[2] > b[0] && b[3] > b[1]).then_some(b)
 }
 
 /// Document-pixel reach of an effect beyond the node's box (infinite: whole frame).
@@ -211,6 +303,7 @@ impl Renderer {
     }
 
     fn finish_builder(plan: &mut Plan, passes: Vec<fx::Pass>, temps: Vec<Arc<Tex>>, problems: Vec<String>, who: &str) {
+        let passes = fx::fuse_colour(passes);
         plan.fx_temps.extend(temps);
         plan.stats.unsupported.extend(problems.into_iter().map(|m| format!("{who}: {m}")));
         if !passes.is_empty() {
@@ -379,7 +472,7 @@ impl Renderer {
                 first_vertex,
                 count: 6,
                 src: itex,
-                backdrop: (blend >= 2).then_some(bounds),
+                backdrop: (blend >= 2 && !fixed_function_blend(blend)).then_some(bounds),
                 matte: Some(cover),
                 hash: h(&[
                     root_hash,
@@ -412,15 +505,7 @@ impl Renderer {
         let sub = ctx.sub?;
         let sg = sub.at(t);
         let j = *sg.index.get(id)?;
-        let sctx = Ctx {
-            g: &sg.g,
-            p: ctx.p,
-            kids: &sg.kids,
-            timed: ctx.timed,
-            generated: ctx.generated,
-            elements: sg.elements,
-            sub: ctx.sub,
-        };
+        let sctx = ctx.at(&sg);
         let was = std::mem::replace(&mut self.sampling, true);
         let t = self.bare_render(plan, &sctx, j, inner);
         self.sampling = was;
@@ -686,41 +771,107 @@ impl Renderer {
             .zip(&attrs)
             .map(|(e, a)| reach(e, a) * if e.r#type.as_str() == "shader" { render_scale } else { px })
             .sum();
-        let bounded = n.kind == "layer" && ctx.kids[i].is_empty() && n.size.is_some() && pad.is_finite();
+        // the times whose content the chain shows: posterize-time shows the start of its step
+        // instead of now, echo adds earlier frames
+        let t = g.time;
+        let post =
+            effs.iter().zip(&attrs).find(|(e, _)| e.r#type.as_str() == "posterize-time").map(|(_, a)| posterized(t, a));
+        let echo = effs.iter().zip(&attrs).find(|(e, _)| e.r#type.as_str() == "echo").map(|(_, a)| {
+            let count = (a.num("samples", 16.0) as usize).clamp(2, 16);
+            (count, a.num("amount", 1.0) / fps_of(ctx.p))
+        });
+        let mut shown: Vec<f64> = match (post, echo) {
+            (Some(tq), None) => vec![tq],
+            (post, Some((count, delay))) => (0..count).map(|k| t - k as f64 * delay).chain(post).collect(),
+            (None, None) => vec![t],
+        };
+        if ctx.sub.is_none() {
+            // without other frames the chain draws the node as it is now
+            shown = vec![t];
+        }
+        let graphs: Vec<Option<Arc<super::SubGraph>>> =
+            shown.iter().map(|&s| (s != t).then(|| ctx.sub.map(|sub| sub.at(s))).flatten()).collect();
+        // where the node is at each shown time: its box and its transform into the target
+        let boxes: Vec<(Affine, Option<[f64; 2]>)> = graphs
+            .iter()
+            .filter_map(|sg| match sg {
+                Some(sg) => sg.index.get(&n.id).map(|&j| (space.xform.then(&sg.g.nodes[j].world), sg.g.nodes[j].size)),
+                None => Some((ta, n.size)),
+            })
+            .collect();
+        let reshaped = sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name()));
+        let bounded = matches!(n.kind, "layer" | "shape")
+            && ctx.kids[i].is_empty()
+            && !reshaped
+            && !boxes.is_empty()
+            && boxes.iter().all(|(_, s)| s.is_some())
+            && pad.is_finite();
         let mut rect = [0.0, 0.0, fw, fh];
         if bounded {
-            let s = n.size.unwrap_or([0.0; 2]);
-            let pts = [[0.0, 0.0], [s[0], 0.0], [s[0], s[1]], [0.0, s[1]]].map(|p| ta.apply(p));
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-            for q in pts {
-                x0 = x0.min(q[0]);
-                y0 = y0.min(q[1]);
-                x1 = x1.max(q[0]);
-                y1 = y1.max(q[1]);
+            let mut reach_px: f64 = 0.0;
+            for (w, s) in &boxes {
+                let s = s.unwrap_or([0.0; 2]);
+                let scale = Xf(w.0).max_scale().max(1e-6);
+                // effects' reach (at the largest scale shown) plus the stroke, in target pixels
+                reach_px = reach_px.max(pad / px * scale + stroke_reach(n) * scale);
+                for q in [[0.0, 0.0], [s[0], 0.0], [s[0], s[1]], [0.0, s[1]]].map(|p| w.apply(p)) {
+                    x0 = x0.min(q[0]);
+                    y0 = y0.min(q[1]);
+                    x1 = x1.max(q[0]);
+                    y1 = y1.max(q[1]);
+                }
             }
             // custom shaders see tile: the layer's pixels with a 2 px margin,
             // reaching up to 64 px past the frame (their resolution and uv depend on it)
             let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
             let (m, lo, hx, hy) = if shader { (2.0, -64.0, fw + 64.0, fh + 64.0) } else { (1.0, 0.0, fw, fh) };
             rect = [
-                (x0 - pad - m).floor().max(lo),
-                (y0 - pad - m).floor().max(lo),
-                (x1 + pad + m).ceil().min(hx),
-                (y1 + pad + m).ceil().min(hy),
+                (x0 - reach_px - m).floor().max(lo),
+                (y0 - reach_px - m).floor().max(lo),
+                (x1 + reach_px + m).ceil().min(hx),
+                (y1 + reach_px + m).ceil().min(hy),
             ];
+            // custom shaders see the tile's size, so only built-in chains get the rounded target
+            if !shader {
+                rect = round_rect(rect, [lo, lo], [hx, hy]);
+            }
         }
         if rect[2] - rect[0] < 1.0 || rect[3] - rect[1] < 1.0 {
             return true;
         }
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
         let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
-        let time_dep = effs.iter().any(|e| TIME_VARYING.contains(&e.r#type.as_str()));
+        // what the result depends on: the node as the chain shows it (its own state and transform
+        // into the target, and its subtree), the elements it uses, its effects' parameters now,
+        // and the time for effects that change with it (posterize-time counts by its step)
+        let (src_ctx, j) = match (post, echo, graphs.first()) {
+            (Some(_), None, Some(Some(sg))) => match sg.index.get(&n.id) {
+                Some(&j) => (ctx.at(sg), j),
+                None => (ctx.at(sg), usize::MAX),
+            },
+            _ => (*ctx, i),
+        };
+        let shown_hash = if j == usize::MAX {
+            0
+        } else {
+            let sn = &src_ctx.g.nodes[j];
+            h(&[
+                Self::node_hash(&src_ctx, sn, &inner.xform.then(&sn.world)),
+                Self::content_hash(&src_ctx, j, &inner.xform),
+                Self::deps_hash(&src_ctx, j),
+            ])
+        };
+        let time_dep =
+            effs.iter().any(|e| TIME_VARYING.contains(&e.r#type.as_str()) && e.r#type.as_str() != "posterize-time");
+        let echo_times = if echo.is_some() { h(&shown.iter().map(|&s| hf(s)).collect::<Vec<_>>()) } else { 0 };
         let hash = h(&[
-            Self::content_hash(ctx, i, &inner.xform),
-            ctx.elements,
+            shown_hash,
+            Self::effects_state(ctx, n),
             size[0] as u64,
             size[1] as u64,
-            if time_dep { hf(g.time) } else { 0 },
+            if time_dep { hf(t) } else { 0 },
+            echo_times,
             sr_eval::rng::hash_str(&ids.join(" ")),
         ]);
         let key = format!("fx:{}:{}x{}", n.id, size[0], size[1]);
@@ -733,8 +884,12 @@ impl Renderer {
             _ => {
                 let target = match self.subtree.get(&key) {
                     Some((_, t)) if t.size == size && Arc::strong_count(t) <= 2 => t.clone(),
-                    _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "effects")),
+                    _ => {
+                        self.pool.created += 1;
+                        Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "effects"))
+                    }
                 };
+                plan.stats.effect_pixels += size[0] as u64 * size[1] as u64;
                 self.run_chain(plan, ctx, i, space, rect, &inner, &effs, &attrs, &target);
                 self.subtree.insert(key, (hash, target.clone()));
                 target
@@ -768,8 +923,7 @@ impl Renderer {
         for (e, a) in effs.iter().zip(attrs) {
             match e.r#type.as_str() {
                 "posterize-time" => {
-                    let rate = a.num("frequency", 1.0).max(1e-3);
-                    let tq = (t * rate + 1e-9).floor() / rate;
+                    let tq = posterized(t, a);
                     match self.bare_at(plan, ctx, &n.id, tq, inner) {
                         Some(tx) => src = Some(tx),
                         None => {
@@ -919,7 +1073,7 @@ impl Renderer {
         v[0][0] = 1.0;
         b.passes.push(fx::Pass {
             entry: fx::Entry::Copy,
-            params: fx::Params { v, i: [0; 4] },
+            params: fx::Params::new(v, [0; 4]),
             src: cur,
             aux: fx::Aux::None,
             aux2: None,
@@ -1014,7 +1168,7 @@ impl Renderer {
         let hash = h(&[root_hash, ctx.elements, sr_eval::rng::hash_str(&ids.join(" ")), hf(op), hf(g.time), 0x6164]);
         self.composite(plan, ctx, i, space, op, cur, [0.0, 0.0, w, hgt], cmds, hash);
         if let Some(c) = cmds.last_mut() {
-            c.pre = Some(Box::new(AdjPre { snapshot, passes, three: None }));
+            c.pre = Some(Box::new(AdjPre { snapshot, passes: fx::fuse_colour(passes), three: None }));
         }
     }
 
@@ -1108,12 +1262,16 @@ impl Renderer {
                         y1 = y1.max(q[1]);
                     }
                 }
-                rect = [
-                    (x0 - pad - 1.0).floor().max(0.0),
-                    (y0 - pad - 1.0).floor().max(0.0),
-                    (x1 + pad + 1.0).ceil().min(fw),
-                    (y1 + pad + 1.0).ceil().min(fh),
-                ];
+                rect = round_rect(
+                    [
+                        (x0 - pad - 1.0).floor().max(0.0),
+                        (y0 - pad - 1.0).floor().max(0.0),
+                        (x1 + pad + 1.0).ceil().min(fw),
+                        (y1 + pad + 1.0).ceil().min(fh),
+                    ],
+                    [0.0, 0.0],
+                    [fw, fh],
+                );
                 if rect[2] - rect[0] < 1.0 || rect[3] - rect[1] < 1.0 {
                     return true;
                 }
@@ -1122,6 +1280,26 @@ impl Renderer {
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
         let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
         let acc = self.temp(plan, size);
+        if let Some((reference, origin, w_ref)) = self.rigid_reference(plan, ctx, i, space, iso_op, &times) {
+            // one drawing, moved to where each sample has the node: render once, accumulate moved copies
+            let mut b = self.builder(plan);
+            for (k, &t) in times.iter().enumerate() {
+                let sg = sub.at(t);
+                let j = sg.index[&n.id];
+                let wk = space.xform.then(&sg.g.nodes[j].world);
+                let Some(inv) = wk.inverse() else { continue };
+                let m = Affine::translate(-origin[0], -origin[1])
+                    .then(&w_ref)
+                    .then(&inv)
+                    .then(&Affine::translate(rect[0], rect[1]));
+                b.accumulate_moved(&acc, &reference, 1.0 / count as f64, k == 0, m.0);
+            }
+            let (passes, temps, problems) =
+                (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
+            Self::finish_builder(plan, passes, temps, problems, &n.id);
+            self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
+            return true;
+        }
         let mut samples = Vec::with_capacity(count);
         for &t in &times {
             let sg = sub.at(t);
@@ -1129,15 +1307,7 @@ impl Renderer {
                 samples.push(None);
                 continue;
             };
-            let sctx = Ctx {
-                g: &sg.g,
-                p: ctx.p,
-                kids: &sg.kids,
-                timed: ctx.timed,
-                generated: ctx.generated,
-                elements: sg.elements,
-                sub: ctx.sub,
-            };
+            let sctx = ctx.at(&sg);
             let tex = self.temp(plan, size);
             let mut c = Vec::new();
             self.sampling = true;
@@ -1156,7 +1326,25 @@ impl Renderer {
         let (passes, temps, problems) =
             (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
         Self::finish_builder(plan, passes, temps, problems, &n.id);
-        let hash = h(&[root_hash, hf(g.time), sr_eval::rng::hash_str(&n.id), 0x6d62]);
+        self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
+        true
+    }
+
+    /// Draws a motion-blur accumulation covering `rect` of `space` in place of node `i`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_accumulated(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        i: usize,
+        space: &Space,
+        rect: [f64; 4],
+        acc: Arc<Tex>,
+        cmds: &mut Vec<Cmd>,
+        root_hash: u64,
+    ) {
+        let n = &ctx.g.nodes[i];
+        let hash = h(&[root_hash, hf(ctx.g.time), sr_eval::rng::hash_str(&n.id), 0x6d62]);
         // opacity, blend, masks and matte were applied inside each sample
         let d = Draw { opacity: 1.0, src_kind: src::TEXTURE, uv_rect: [0.0, 0.0, 1.0, 1.0], ..Default::default() };
         self.flush_vec(plan, cmds);
@@ -1180,7 +1368,61 @@ impl Renderer {
             self.bare.remove(&n.id);
         }
         self.frame_rect = None;
-        true
+    }
+
+    /// When node `i` looks the same at every sample time apart from where it is, draws it once,
+    /// at the middle of the shutter, into a target covering all it draws (not clipped to the
+    /// frame: other samples can bring parts that are outside it now into view). Returns the
+    /// drawing, the target-space position of its top-left texel and the node's transform then.
+    #[allow(clippy::too_many_arguments)]
+    fn rigid_reference(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        i: usize,
+        space: &Space,
+        iso_op: f64,
+        times: &[f64],
+    ) -> Option<(Arc<Tex>, [f64; 2], Affine)> {
+        let sub = ctx.sub?;
+        let n = &ctx.g.nodes[i];
+        if n.matte.is_some() || n.three_d.is_some() || n.kind == "object3D" {
+            return None;
+        }
+        let mut look = None;
+        for &t in times {
+            let sg = sub.at(t);
+            let j = *sg.index.get(&n.id)?;
+            let k = Self::appearance_hash(&ctx.at(&sg), j)?;
+            if look.is_some_and(|l| l != k) {
+                return None;
+            }
+            look = Some(k);
+        }
+        let sg = sub.at(times[times.len() / 2]);
+        let j = *sg.index.get(&n.id)?;
+        let sctx = ctx.at(&sg);
+        let b = drawn_bounds(&sctx, j, space)?;
+        // within a frame's width or height beyond the target: anything further never shows
+        let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
+        let b = round_rect(
+            [b[0].max(-fw).floor(), b[1].max(-fh).floor(), b[2].min(2.0 * fw).ceil(), b[3].min(2.0 * fh).ceil()],
+            [-fw, -fh],
+            [2.0 * fw, 2.0 * fh],
+        );
+        if b[2] - b[0] < 1.0 || b[3] - b[1] < 1.0 {
+            return None;
+        }
+        let size = [(b[2] - b[0]) as u32, (b[3] - b[1]) as u32];
+        let at = Space { xform: Affine::translate(-b[0], -b[1]).then(&space.xform), size };
+        let tex = self.temp(plan, size);
+        let mut c = Vec::new();
+        self.sampling = true;
+        self.emit(plan, &sctx, j, &at, iso_op, &mut c, true, 0);
+        self.flush_vec(plan, &mut c);
+        self.sampling = false;
+        plan.jobs.push(Job::draws(tex.clone(), true, c, false));
+        Some((tex, [b[0], b[1]], space.xform.then(&sg.g.nodes[j].world)))
     }
 
     /// Draws both sides of a transition and combines them.
@@ -1595,7 +1837,7 @@ impl Renderer {
         plan.fx_temps.extend(temps);
         plan.stats.unsupported.extend(problems);
         if !passes.is_empty() {
-            plan.post = passes;
+            plan.post = fx::fuse_colour(passes);
             plan.post_out = Some(cur);
         }
     }

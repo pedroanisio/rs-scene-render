@@ -85,6 +85,8 @@ pub struct RenderAdapter {
     pub name: String,
     pub backend: String,
     pub device_type: String,
+    /// True for a software rasteriser such as llvmpipe.
+    pub software: bool,
 }
 
 /// What a delivery produced and how long each stage took.
@@ -688,6 +690,7 @@ pub fn deliver(
             name: gpu.info.name.clone(),
             backend: format!("{:?}", gpu.info.backend),
             device_type: format!("{:?}", gpu.info.device_type),
+            software: gpu.is_software(),
         });
         // 360 video renders at the scene360 size unless the output asks for another
         // a layout that crops or fits delivers at its own frame size
@@ -776,7 +779,13 @@ pub fn deliver(
         let fit = output.max_file_size;
         let t_video = Instant::now();
         report.segments = 1;
-        let workers = segment_count(output, codec, opts, &ev, end - start).min(n as usize);
+        // llvmpipe already spreads one device over every core, so automatic parallelism would only add
+        // devices competing for them; an explicit worker count is still honoured
+        let workers = if gpu.is_software() && matches!(opts.parallel, Parallel::Auto) {
+            1
+        } else {
+            segment_count(output, codec, opts, &ev, end - start).min(n as usize)
+        };
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed
             let inter = tmp.join("intermediate.mkv");
@@ -861,13 +870,15 @@ pub fn deliver(
             let map = segments.as_ref();
             let next = AtomicUsize::new(0);
             let done = AtomicU64::new(0);
+            // each worker opens the adapter the delivery was given, not whichever ranks best
+            let shared = &gpu;
             let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = (0..workers)
                     .map(|_| {
                         sc.spawn(|| -> Result<(Report, String), DeliverError> {
                             // a device of its own: renderers sharing one device slowed each other
                             // down to a crawl over a long programme (buffer creation dominated)
-                            let gpu = Gpu::new()?;
+                            let gpu = shared.open_like()?;
                             let mut renderer = Renderer::new(gpu.clone(), p);
                             renderer.representation = representation.clone();
                             renderer.burn_captions = output.burn_captions.clone();

@@ -99,7 +99,11 @@ pub fn doc(project: &str, extra: &str, body: &str) -> sr_model::Document {
 
 /// Renders the document at times `ts` with one renderer; returns the last frame.
 pub fn render_times(d: &sr_model::Document, ts: &[f64]) -> Option<Rendered> {
-    let gpu = gpu()?;
+    render_times_on(gpu()?, d, ts)
+}
+
+/// Renders the document at times `ts` on `gpu`; returns the last frame.
+pub fn render_times_on(gpu: Gpu, d: &sr_model::Document, ts: &[f64]) -> Option<Rendered> {
     let ev = sr_eval::Evaluator::new(d, &sr_eval::EvalOptions::default()).unwrap();
     let mut r = Renderer::new(gpu, ev.program());
     let mut last = None;
@@ -148,6 +152,51 @@ pub fn doc_with(project: &str, pre: &str, body: &str, post: &str) -> sr_model::D
     match sr_model::load_str(&xml, &opts) {
         Ok(d) => d,
         Err(e) => panic!("{e:?}\n{xml}"),
+    }
+}
+
+/// Renders each of `ts` in turn with one renderer (so caches carry over) and a sub-frame
+/// provider; returns every frame.
+pub fn render_sub_frames(d: &sr_model::Document, ts: &[f64]) -> Option<Vec<Shot>> {
+    let gpu = gpu()?;
+    let ev = sr_eval::Evaluator::new(d, &sr_eval::EvalOptions::default()).unwrap();
+    let mut r = Renderer::new(gpu, ev.program());
+    let mut out = Vec::new();
+    for &t in ts {
+        let g = ev.evaluate(t);
+        let mut sub = |st: f64| ev.evaluate(st);
+        let f = r.render_with(&g, ev.program(), Some(&mut sub));
+        out.push(Shot { px: r.read(&f.texture), size: f.texture.size, stats: f.stats });
+    }
+    Some(out)
+}
+
+/// One rendered frame without its renderer.
+pub struct Shot {
+    pub px: Vec<[f32; 4]>,
+    pub size: [u32; 2],
+    pub stats: RenderStats,
+}
+
+impl Shot {
+    pub fn at(&self, x: u32, y: u32) -> [f32; 4] {
+        self.px[(y * self.size[0] + x) as usize]
+    }
+}
+
+/// Peak signal-to-noise ratio of two frames' linear RGBA, clamped to [0, 1], in dB.
+pub fn psnr(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let se: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(p, q)| (0..4).map(|c| ((p[c].clamp(0.0, 1.0) - q[c].clamp(0.0, 1.0)) as f64).powi(2)).sum::<f64>())
+        .sum();
+    let mse = se / (a.len() * 4) as f64;
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (1.0 / mse).log10()
     }
 }
 

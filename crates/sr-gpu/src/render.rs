@@ -49,6 +49,7 @@ use crate::paint::{token_table, PaintTable};
 use crate::raster::{Raster, RasterJob};
 use crate::resources::{self, Pool, Tex};
 use crate::types::{self, flag, src, Draw, Gen, Globals, Mask, Vertex};
+use crate::vector::Attrs;
 use sr_vector::{Scene, Xf};
 
 /// Counters for one rendered frame.
@@ -77,6 +78,14 @@ pub struct RenderStats {
     pub vector_seconds: f64,
     /// Effect, transition and finishing passes recorded.
     pub fx_passes: usize,
+    /// Pixels of the effect targets whose chains ran this frame (a measure of effect work).
+    pub effect_pixels: u64,
+    /// Offscreen textures allocated this frame for effects, motion blur and time effects.
+    pub textures_created: usize,
+    /// Offscreen and cached textures destroyed this frame.
+    pub textures_released: usize,
+    /// CPU seconds evaluating the scene at other times (sub-frames for motion blur and time effects).
+    pub subframe_seconds: f64,
     /// Sub-frames rendered for motion blur and time effects.
     pub subframes: usize,
     /// 3D mesh draws.
@@ -142,6 +151,13 @@ struct GenJob {
 /// The `behind` blend code; a draw with it and no backdrop copy uses the fixed-function
 /// destination-over pipeline (the project background).
 const BLEND_UNDER: u32 = 34;
+
+/// Blend modes the fixed-function blender computes exactly, so the shader needs no copy of the
+/// backdrop: add and linear-dodge are dst + src on premultiplied colour, with normal alpha.
+/// (Screen, multiply and plus-lighter clamp or multiply by the backdrop, which it cannot.)
+pub(crate) fn fixed_function_blend(blend: u32) -> bool {
+    matches!(blend, 2 | 17)
+}
 /// Adjustment layers: backdrop + (effect − backdrop) · coverage.
 pub(crate) const BLEND_ADJUST: u32 = 35;
 
@@ -205,6 +221,8 @@ pub struct Renderer {
     /// Premultiplied destination-over: the project background, drawn last beneath everything.
     under: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
+    /// Add and linear-dodge through the blender (see `fixed_function_blend`).
+    additive: wgpu::RenderPipeline,
     generator: wgpu::RenderPipeline,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
@@ -224,6 +242,10 @@ pub struct Renderer {
     generators: HashMap<u64, Arc<Tex>>,
     subtree: HashMap<String, (u64, Arc<Tex>)>,
     used: std::collections::HashSet<String>,
+    /// The frame each cache key was last used in (frames counted by `cache_frame`).
+    last_used: HashMap<String, u64>,
+    /// Frames rendered, for cache ages.
+    cache_frame: u64,
     prefix: Option<Prefix>,
     prev_root: Vec<u64>,
     pool: Pool,
@@ -303,6 +325,9 @@ struct FrameBufs {
     bg0: wgpu::BindGroup,
 }
 
+/// Frames a cache entry may go unused before it is evicted.
+const CACHE_KEEP: u64 = 4;
+
 fn h(words: &[u64]) -> u64 {
     sr_eval::rng::hash(words)
 }
@@ -321,6 +346,83 @@ fn elements_hash(elements: &[sr_eval::ElementState]) -> u64 {
         }
     }
     h(&[f.0])
+}
+
+/// Hash of each animated element outside the composition, by key, so a node's caches can
+/// depend on the elements it uses rather than on all of them.
+fn element_hashes(elements: &[sr_eval::ElementState]) -> HashMap<Arc<str>, u64> {
+    elements
+        .iter()
+        .map(|e| {
+            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+            f.str(e.element);
+            f.u64(e.props.0.len() as u64);
+            for (k, v) in &e.props.0 {
+                f.str(k);
+                f.value(v);
+            }
+            (e.key.clone(), f.0)
+        })
+        .collect()
+}
+
+/// Hash of animated values and of a node's parts, field by field, without formatting them as text.
+fn props_hash(props: &sr_eval::Props, parts: &[sr_eval::ElementState]) -> u64 {
+    let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+    f.u64(props.0.len() as u64);
+    for (k, v) in &props.0 {
+        f.str(k);
+        f.value(v);
+    }
+    f.u64(parts.len() as u64);
+    for p in parts {
+        f.str(&p.key);
+        f.str(p.element);
+        f.u64(p.props.0.len() as u64);
+        for (k, v) in &p.props.0 {
+            f.str(k);
+            f.value(v);
+        }
+    }
+    h(&[f.0])
+}
+
+/// Ids of paints a set of animated values refers to.
+fn paint_refs(props: &sr_eval::Props, out: &mut std::collections::BTreeSet<Arc<str>>) {
+    for (_, v) in &props.0 {
+        if let Value::PaintRef(id) = v {
+            out.insert(id.clone());
+        }
+    }
+}
+
+/// Every attribute the schema types as a paint.
+const PAINT_ATTRS: &[&str] = &[
+    "fill",
+    "stroke",
+    "color",
+    "colorEnd",
+    "colorLow",
+    "colorHigh",
+    "background",
+    "paint",
+    "strokeColor",
+    "outline",
+    "headFill",
+    "highlight",
+    "activeColor",
+    "noData",
+];
+
+/// Ids of paints that element `e` and its descendants name in their attributes.
+fn static_paint_refs(e: &dyn Element, out: &mut std::collections::BTreeSet<Arc<str>>) {
+    e.visit(&mut |d| {
+        for name in PAINT_ATTRS {
+            if let Some(AttrValue::Paint(sr_model::values::Paint::Ref(r))) = d.get_attr(name) {
+                out.insert(Arc::from(r.0.as_str()));
+            }
+        }
+    });
 }
 
 /// FNV-1a over tagged, length-prefixed fields.
@@ -477,8 +579,7 @@ impl Renderer {
                 },
             ],
         });
-        let bgl1 =
-            d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("source"), entries: &[tex(0)] });
+        let bgl1 = resources::source_layout(d);
         let bgl2 = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("backdrop+matte"),
             entries: &[tex(0), tex(1)],
@@ -561,6 +662,12 @@ impl Renderer {
         };
         let under = pipe("fs_over", Some(wgpu::BlendState { color: dst_over, alpha: dst_over }), "vs_main", &vbufs);
         let blend = pipe("fs_blend", None, "vs_main", &vbufs);
+        let add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let additive = pipe("fs_over", Some(wgpu::BlendState { color: add, alpha: premul.alpha }), "vs_main", &vbufs);
         let generator = pipe("fs_generator", None, "vs_full", &[]);
         let sampler = |mode: wgpu::AddressMode| {
             d.create_sampler(&wgpu::SamplerDescriptor {
@@ -613,6 +720,7 @@ impl Renderer {
             gpu,
             over,
             under,
+            additive,
             blend,
             generator,
             bgl0,
@@ -630,6 +738,8 @@ impl Renderer {
             generators: HashMap::new(),
             subtree: HashMap::new(),
             used: Default::default(),
+            last_used: HashMap::new(),
+            cache_frame: 0,
             prefix: None,
             prev_root: Vec::new(),
             pool: Pool::default(),
@@ -1356,14 +1466,13 @@ impl Renderer {
     }
 
     fn node_hash(ctx: &Ctx, n: &FrameNode, rel: &Affine) -> u64 {
-        let props = if n.props.0.is_empty() && n.parts.is_empty() {
-            0
-        } else {
-            sr_eval::rng::hash_str(&serde_json::to_string(&(&n.props, &n.parts)).unwrap_or_default())
-        };
+        let props = if n.props.0.is_empty() && n.parts.is_empty() { 0 } else { props_hash(&n.props, &n.parts) };
         let asset = n.asset.as_deref();
         let timed = asset.filter(|a| ctx.timed.contains(*a)).and(n.source_time).map(hf).unwrap_or(1);
-        let generated = if asset.is_some_and(|a| ctx.generated.contains(a)) { ctx.elements } else { 0 };
+        let generated = match asset.filter(|a| ctx.generated.contains(*a)) {
+            Some(a) => Self::element_state(ctx, a),
+            None => 0,
+        };
         h(&[
             Self::effects_state(ctx, n),
             sr_eval::rng::hash_str(&n.id),
@@ -1417,16 +1526,159 @@ impl Renderer {
         let mut timed = false;
         for id in &ids {
             let Some(e) = render_fx::find_effect(ctx.p, id) else { continue };
-            timed |= render_fx::TIME_VARYING.contains(&e.r#type.as_str());
-            let props = render_fx::element_props(ctx.g, id)
-                .map(|p| sr_eval::rng::hash_str(&serde_json::to_string(p).unwrap_or_default()))
-                .unwrap_or(9);
+            if e.r#type.as_str() == "posterize-time" {
+                // it shows the node as it was at the start of its step: the step is its time
+                let a = Attrs { e: e as &dyn Element, props: render_fx::element_props(ctx.g, id) };
+                words.push(hf(render_fx::posterized(ctx.g.time, &a)));
+            } else {
+                timed |= render_fx::TIME_VARYING.contains(&e.r#type.as_str());
+            }
+            let props = render_fx::element_props(ctx.g, id).map(|p| props_hash(p, &[])).unwrap_or(9);
             words.extend([sr_eval::rng::hash_str(id), props]);
         }
         if timed {
             words.push(hf(ctx.g.time));
         }
         h(&words)
+    }
+
+    /// The asset element with id `id` in the main document.
+    fn asset_element<'p>(p: &'p Program, id: &str) -> Option<&'p dyn Element> {
+        let assets = p.scene.assets.as_ref()?;
+        sr_model::element::children(assets).into_iter().find(|a| a.element_id() == Some(id))
+    }
+
+    /// Hash of one animated element and its animated descendants (`id/…` keys).
+    fn element_state(ctx: &Ctx, id: &str) -> u64 {
+        let mut words: Vec<u64> = ctx
+            .el
+            .iter()
+            .filter(|(k, _)| &***k == id || (k.starts_with(id) && k[id.len()..].starts_with('/')))
+            .map(|(k, v)| h(&[sr_eval::rng::hash_str(k), *v]))
+            .collect();
+        words.sort_unstable();
+        h(&words)
+    }
+
+    /// Hash of the animated elements outside the composition that node `i`, its subtree and
+    /// its mattes use (the paints they fill and stroke with, generator assets, and the paints
+    /// and lights of their effects), and of the camera. A node's cached effect result depends
+    /// on these and on nothing else outside its own subtree.
+    fn deps_hash(ctx: &Ctx, i: usize) -> u64 {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut stack = vec![i];
+        while let Some(k) = stack.pop() {
+            let n = &ctx.g.nodes[k];
+            paint_refs(&n.props, &mut ids);
+            // static references: the node's attributes and parts (spans, masks), and the asset it draws
+            for name in PAINT_ATTRS {
+                if let Some(AttrValue::Paint(sr_model::values::Paint::Ref(r))) = n.elem.get_attr(name) {
+                    ids.insert(Arc::from(r.0.as_str()));
+                }
+            }
+            for c in sr_model::element::children(&*n.elem) {
+                static_paint_refs(c, &mut ids);
+            }
+            if let Some(a) = n.asset.as_deref().and_then(|a| Self::asset_element(ctx.p, a)) {
+                static_paint_refs(a, &mut ids);
+            }
+            for part in &n.parts {
+                paint_refs(&part.props, &mut ids);
+            }
+            if let Some(a) = n.asset.as_deref().filter(|a| ctx.generated.contains(*a)) {
+                ids.insert(Arc::from(a));
+            }
+            for id in render_fx::effect_ids(&*n.elem) {
+                if let Some(p) = render_fx::element_props(ctx.g, &id) {
+                    paint_refs(p, &mut ids);
+                }
+                if let Some(e) = render_fx::find_effect(ctx.p, &id) {
+                    let e: &dyn Element = e;
+                    for name in ["lights", "paint", "source"] {
+                        match e.get_attr(name) {
+                            Some(AttrValue::Tokens(t)) => ids.extend(t.into_iter().map(Arc::from)),
+                            Some(AttrValue::Str(s)) => {
+                                ids.insert(Arc::from(s.trim_start_matches("url(#").trim_end_matches(')')));
+                            }
+                            Some(AttrValue::Paint(sr_model::values::Paint::Ref(r))) => {
+                                ids.insert(Arc::from(r.0.as_str()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if let Some(mt) = n.matte {
+                stack.push(mt as usize);
+            }
+            stack.extend(ctx.kids[k].iter().copied());
+        }
+        let mut words: Vec<u64> =
+            ids.iter().map(|id| h(&[sr_eval::rng::hash_str(id), Self::element_state(ctx, id)])).collect();
+        words.push(ctx.cam);
+        h(&words)
+    }
+
+    /// Hash of how node `i` looks, apart from where it is: everything its drawing depends on
+    /// except its own transform (its children are hashed relative to it). Equal hashes at two
+    /// times mean one drawing, moved, is the other. `None` when its transform cannot be inverted.
+    fn appearance_hash(ctx: &Ctx, i: usize) -> Option<u64> {
+        const WHERE: &[&str] = &[
+            "x",
+            "y",
+            "z",
+            "anchorX",
+            "anchorY",
+            "anchor",
+            "rotation",
+            "scaleX",
+            "scaleY",
+            "scale",
+            "skewX",
+            "skewY",
+            "skew",
+            "zDepth",
+            "rotationX",
+            "rotationY",
+        ];
+        let n = &ctx.g.nodes[i];
+        let local = n.world.inverse()?;
+        let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+        for (k, v) in n.props.0.iter().filter(|(k, _)| !WHERE.contains(&&**k)) {
+            f.str(k);
+            f.value(v);
+        }
+        // a motion path moves the node; its other parts (masks, spans) change how it looks
+        for p in n.parts.iter().filter(|p| p.element != "motionPath") {
+            f.str(&p.key);
+            for (k, v) in &p.props.0 {
+                f.str(k);
+                f.value(v);
+            }
+        }
+        let asset = n.asset.as_deref();
+        let mut words = vec![
+            f.0,
+            Self::effects_state(ctx, n),
+            Self::deps_hash(ctx, i),
+            sr_eval::rng::hash_str(&n.id),
+            Arc::as_ptr(&n.elem) as u64,
+            hf(n.world_opacity),
+            asset.filter(|a| ctx.timed.contains(*a)).and(n.source_time).map(hf).unwrap_or(1),
+            n.draw as u64,
+            n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
+            n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
+            n.sim_image.as_ref().map(|s| s.key).unwrap_or(6),
+            n.particles
+                .as_ref()
+                .map(|p| h(&p.pos.iter().flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>()))
+                .unwrap_or(7),
+            n.soft.as_ref().map(|s| h(&s.offsets.iter().flat_map(|o| o.map(hf)).collect::<Vec<u64>>())).unwrap_or(5),
+        ];
+        for &c in &ctx.kids[i] {
+            words.push(Self::subtree_hash(ctx, c, &local));
+        }
+        Some(h(&words))
     }
 
     fn content_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
@@ -1502,7 +1754,7 @@ impl Renderer {
             d.box_rect = local.map(|v| v as f32);
             d.flags |= flag::EDGE;
         }
-        let backdrop = (d.blend >= 2).then_some(bounds);
+        let backdrop = (d.blend >= 2 && !fixed_function_blend(d.blend)).then_some(bounds);
         plan.draws.push(d);
         cmds.push(Cmd {
             draw: (plan.draws.len() - 1) as u32,
@@ -2426,8 +2678,11 @@ impl Renderer {
             blend: BLEND_UNDER,
             ..Default::default()
         });
-        let hash =
-            sr_eval::rng::hash_str(&serde_json::to_string(&(&g.background, g.size, &g.elements)).unwrap_or_default());
+        let hash = {
+            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+            f.value(&g.background);
+            h(&[f.0, hf(g.size[0]), hf(g.size[1]), elements_hash(&g.elements)])
+        };
         cmds.push(Cmd {
             draw: (plan.draws.len() - 1) as u32,
             first_vertex,
@@ -2497,7 +2752,13 @@ impl Renderer {
         if self.view_override.is_none() && p.scene.scene360.is_some() {
             return self.render_360(g, p, provider);
         }
-        let subs = provider.map(|pv| SubFrames { provider: std::cell::RefCell::new(pv), cache: Default::default() });
+        let created_before = self.pool.created;
+        let released_before = self.pool.released;
+        let subs = provider.map(|pv| SubFrames {
+            provider: std::cell::RefCell::new(pv),
+            cache: Default::default(),
+            seconds: Default::default(),
+        });
         let size = [g.size[0].round().max(1.0) as u32, g.size[1].round().max(1.0) as u32];
         let mut plan = Plan::default();
         self.used.clear();
@@ -2533,6 +2794,7 @@ impl Renderer {
             h(&cv.view_proj().to_cols_array().map(|v| v.to_bits() as u64))
         };
         let elements = h(&[elements_hash(&g.elements), cam_hash]);
+        let el = element_hashes(&g.elements);
         let ctx = Ctx {
             g,
             p,
@@ -2540,6 +2802,8 @@ impl Renderer {
             timed: &timed,
             generated: &generated,
             elements,
+            el: &el,
+            cam: cam_hash,
             sub: subs.as_ref().map(|s| s as &dyn SubSource),
         };
         for m in &g.problems {
@@ -2569,6 +2833,7 @@ impl Renderer {
         self.finishing(&mut plan, p, &frame);
         if let Some(s) = &subs {
             plan.stats.subframes = s.count();
+            plan.stats.subframe_seconds = s.seconds.get();
         }
         // root prefix reuse
         let hashes: Vec<u64> = cmds.iter().enumerate().map(|(k, c)| h(&[c.hash, k as u64])).collect();
@@ -2603,13 +2868,38 @@ impl Renderer {
             }
             self.pool.put(snap);
         }
-        // evict cache entries not used this frame
-        let used = std::mem::take(&mut self.used);
-        self.subtree.retain(|k, _| used.contains(k));
-        self.generators.retain(|k, _| used.contains(&format!("gen:{k}")));
-        self.video_frames.retain(|k, _| used.contains(&format!("video:{k}")));
-        self.used = used;
+        // evict cache entries unused for CACHE_KEEP frames (a posterized group leaves its children's
+        // entries unused between steps); evicted offscreens go back to the pool rather than being
+        // destroyed now, while the GPU may still be reading them
+        let now = self.cache_frame;
+        self.cache_frame += 1;
+        for k in self.used.drain() {
+            self.last_used.insert(k, now);
+        }
+        self.last_used.retain(|_, at| now - *at < CACHE_KEEP);
+        let live = &self.last_used;
+        let mut evicted = Vec::new();
+        self.subtree.retain(|k, (_, t)| {
+            let keep = live.contains_key(k);
+            if !keep {
+                evicted.push(t.clone());
+            }
+            keep
+        });
+        self.generators.retain(|k, t| {
+            let keep = live.contains_key(&format!("gen:{k}"));
+            if !keep {
+                evicted.push(t.clone());
+            }
+            keep
+        });
+        self.video_frames.retain(|k, _| live.contains_key(&format!("video:{k}")));
+        for t in evicted {
+            self.pool.put(t);
+        }
         self.pool.trim();
+        stats.textures_created = self.pool.created - created_before;
+        stats.textures_released = self.pool.released - released_before;
         Frame { texture: frame, stats }
     }
 
@@ -2878,6 +3168,8 @@ impl Renderer {
                             &self.blend
                         } else if plan.draws[c.draw as usize].blend == BLEND_UNDER {
                             &self.under
+                        } else if fixed_function_blend(plan.draws[c.draw as usize].blend) {
+                            &self.additive
                         } else {
                             &self.over
                         });
@@ -2975,6 +3267,7 @@ impl Renderer {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Ctx<'a> {
     g: &'a FrameGraph,
     p: &'a Program,
@@ -2985,8 +3278,32 @@ struct Ctx<'a> {
     generated: &'a std::collections::HashSet<String>,
     /// Hash of all animated paint and generator values.
     elements: u64,
+    /// Hash of each animated element outside the composition, by key.
+    el: &'a HashMap<Arc<str>, u64>,
+    /// Hash of the camera, which projects every 2.5D and 3D draw.
+    cam: u64,
     /// The scene at other times (motion blur, time effects), when a provider was given.
     sub: Option<&'a dyn SubSource>,
+}
+
+impl<'a> Ctx<'a> {
+    /// The same context over the scene at another time.
+    fn at<'b>(&self, sg: &'b SubGraph) -> Ctx<'b>
+    where
+        'a: 'b,
+    {
+        Ctx {
+            g: &sg.g,
+            p: self.p,
+            kids: &sg.kids,
+            timed: self.timed,
+            generated: self.generated,
+            elements: sg.elements,
+            el: &sg.el,
+            cam: self.cam,
+            sub: self.sub,
+        }
+    }
 }
 
 /// Source of sub-frame graphs.
@@ -3001,12 +3318,15 @@ pub(crate) struct SubGraph {
     kids: Vec<Vec<usize>>,
     index: HashMap<Arc<str>, usize>,
     elements: u64,
+    el: HashMap<Arc<str>, u64>,
 }
 
 /// Evaluates and caches the scene at other times during one frame.
 pub(crate) struct SubFrames<'a> {
     provider: std::cell::RefCell<&'a mut dyn FnMut(f64) -> FrameGraph>,
     cache: std::cell::RefCell<HashMap<u64, Arc<SubGraph>>>,
+    /// Seconds spent in the provider.
+    seconds: std::cell::Cell<f64>,
 }
 
 impl SubSource for SubFrames<'_> {
@@ -3018,7 +3338,9 @@ impl SubSource for SubFrames<'_> {
         if let Some(s) = self.cache.borrow().get(&key) {
             return s.clone();
         }
+        let started = std::time::Instant::now();
         let g = (self.provider.borrow_mut())(t);
+        self.seconds.set(self.seconds.get() + started.elapsed().as_secs_f64());
         let mut kids = vec![Vec::new(); g.nodes.len()];
         let mut index = HashMap::new();
         for (i, n) in g.nodes.iter().enumerate() {
@@ -3027,8 +3349,9 @@ impl SubSource for SubFrames<'_> {
             }
             index.insert(n.id.clone(), i);
         }
-        let elements = sr_eval::rng::hash_str(&serde_json::to_string(&g.elements).unwrap_or_default());
-        let s = Arc::new(SubGraph { g, kids, index, elements });
+        let elements = elements_hash(&g.elements);
+        let el = element_hashes(&g.elements);
+        let s = Arc::new(SubGraph { g, kids, index, elements, el });
         self.cache.borrow_mut().insert(key, s.clone());
         s
     }

@@ -5,7 +5,17 @@
 struct Fx {
     v: array<vec4<f32>, 8>,
     i: vec4<u32>,
+    // a fused colour pass (i.x 90): up to four operations, op k's parameters in x[8k .. 8k + 7]
+    // and its code and seed in ops[k] (code 0 ends the list)
+    x: array<vec4<f32>, 32>,
+    ops: array<vec4<u32>, 4>,
 };
+
+// The colour operation being applied: its parameters, code and seed. fs_color sets them from
+// the pass (one operation) or from each entry of a fused pass in turn.
+var<private> gv: array<vec4<f32>, 8>;
+var<private> gop: u32;
+var<private> gseed: vec2<u32>;
 
 @group(0) @binding(0) var<uniform> fx: Fx;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -221,6 +231,14 @@ fn fs_combine(in: VOut) -> @location(0) vec4<f32> {
         }
         case 7u: { let q = p * k * s.a; return vec4(s.rgb + q.rgb * (1.0 - s.rgb * 0.0), s.a); }
         case 8u: { return p * k; }
+        case 9u: {
+            // aux moved: v1 = a, b, c, d and v2.xy = e, f map this texel's centre to aux texels
+            let q = in.pos.xy;
+            let m = fx.v[1];
+            let at = vec2(m.x * q.x + m.z * q.y + fx.v[2].x, m.y * q.x + m.w * q.y + fx.v[2].y);
+            let uv = at / vec2<f32>(textureDimensions(aux));
+            return select(vec4(0.0), A(uv), in_unit(uv)) * k;
+        }
         default: { return s; }
     }
 }
@@ -297,16 +315,16 @@ fn sample_px(p: vec2<f32>) -> vec4<f32> {
 fn grain_draws(px: vec2<f32>) -> vec3<f32> {
     let xy = vec2<u32>(floor(px));
     let base = (xy.y * u32(dims().x) + xy.x) * 3u;
-    let seed = vec2(fx.i.y, fx.i.z);
-    let ch = vec2(u32(fx.v[0].z), 0u);
+    let seed = gseed;
+    let ch = vec2(u32(gv[0].z), 0u);
     return vec3(d24_gaussian(seed, ch, vec2(base, 0u)), d24_gaussian(seed, ch, vec2(base + 1u, 0u)),
                 d24_gaussian(seed, ch, vec2(base + 2u, 0u)));
 }
 
 fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
     var c = c3;
-    let v = fx.v;
-    switch fx.i.x {
+    let v = gv;
+    switch gop {
         case 1u: { // color-grade: v0 saturation, contrast, brightness
             var e = enc(c);
             e = (e - 0.5) * v[0].y + 0.5 + v[0].z;
@@ -424,10 +442,10 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             let nc = u32(v[0].z);
             let base = (xy.y * u32(dims().x) + xy.x) * nc;
             let ch = vec2(u32(v[0].y), 0u);
-            var n = vec3(-1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base, 0u)));
+            var n = vec3(-1.0 + 2.0 * d24_unit(gseed, ch, vec2(base, 0u)));
             if (nc == 3u) {
-                n.y = -1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base + 1u, 0u));
-                n.z = -1.0 + 2.0 * d24_unit(fx_seed(), ch, vec2(base + 2u, 0u));
+                n.y = -1.0 + 2.0 * d24_unit(gseed, ch, vec2(base + 1u, 0u));
+                n.z = -1.0 + 2.0 * d24_unit(gseed, ch, vec2(base + 2u, 0u));
             }
             c = dec(max(enc(c) + n * v[0].x, vec3(0.0)));
         }
@@ -460,17 +478,48 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
 
 // Per-pixel family. Colour ops (i.x < 64) run on straight linear colour;
 // i.x ≥ 64 are generators and keyers.
+// One pointwise colour operation (gop, gv, gseed) on a premultiplied pixel: the grading
+// operations and the vignette, the ones a fused pass may chain.
+fn color_step(s: vec4<f32>, uv: vec2<f32>, px: vec2<f32>, d: vec2<f32>) -> vec4<f32> {
+    let v = gv;
+    if (gop < 64u) {
+        if (s.a <= 0.0) { return s; }
+        let c = grade(lin(unpre(s)), uv, px);
+        return vec4(stored(c) * s.a, s.a);
+    }
+    if (gop == 64u) { // vignette: v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
+        let r = length((uv - v[2].xy) * d) / (0.5 * length(d));
+        var k = select(0.0, 1.0, r >= v[0].y);
+        if (v[0].z > 0.0) { k = smoothstep(v[0].y, v[0].y + v[0].z, r); }
+        let w = k * v[0].x;
+        return vec4(mix(s.rgb, v[1].rgb * s.a, w), s.a);
+    }
+    return s;
+}
+
 @fragment
 fn fs_color(in: VOut) -> @location(0) vec4<f32> {
     let s = S(in.uv);
     let d = dims();
     let px = in.uv * d;
     let v = fx.v;
-    if (fx.i.x < 64u) {
-        if (s.a <= 0.0) { return s; }
-        let c = grade(lin(unpre(s)), in.uv, px);
-        return vec4(stored(c) * s.a, s.a);
+    if (fx.i.x == 90u) {
+        // fused: each operation in turn, the pixel kept in registers between them
+        var o = s;
+        for (var k = 0u; k < 4u; k++) {
+            let op = fx.ops[k];
+            if (op.x == 0u) { break; }
+            for (var j = 0u; j < 8u; j++) { gv[j] = fx.x[k * 8u + j]; }
+            gop = op.x;
+            gseed = op.yz;
+            o = color_step(o, in.uv, px, d);
+        }
+        return o;
     }
+    gv = fx.v;
+    gop = fx.i.x;
+    gseed = vec2(fx.i.y, fx.i.z);
+    if (fx.i.x <= 64u) { return color_step(s, in.uv, px, d); }
     switch fx.i.x {
         case 75u: { return vec4(grain_draws(px), 1.0); } // film grain's field, before its blur
         case 76u: { // glitch, rows and blocks: v0 amount px, row height, block weight, blocks; v1 frame, rows
@@ -505,13 +554,6 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
             let st = select(vec3(0.0), vec3(r.r, g.g, b.b) / a, a > 1e-6);
             let l = v[0].y - 1.0;
             return vec4(round(st * l) / l * a, a);
-        }
-        case 64u: { // vignette: v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
-            let r = length((in.uv - v[2].xy) * d) / (0.5 * length(d));
-            var k = select(0.0, 1.0, r >= v[0].y);
-            if (v[0].z > 0.0) { k = smoothstep(v[0].y, v[0].y + v[0].z, r); }
-            let w = k * v[0].x;
-            return vec4(mix(s.rgb, v[1].rgb * s.a, w), s.a);
         }
         case 65u: { // letterbox: v0.x target aspect, v1 colour
             let a = d.x / d.y;
@@ -916,15 +958,24 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let r = max(v[0].x, 0.0);
     var mx = s.a;
     var mn = s.a;
-    let rings = clamp(i32(ceil(r / 1.5)), 1, 12);
-    for (var ring = 1; ring <= rings; ring++) {
-        let rr = r * f32(ring) / f32(rings);
-        let cnt = 8 + ring * 4;
-        for (var k = 0; k < cnt; k++) {
-            let a = f32(k) / f32(cnt) * 2.0 * PI;
-            let q = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d).a;
-            mx = max(mx, q);
-            mn = min(mn, q);
+    if (v[0].z > 0.5) {
+        // aux: the jump-flooded field (fs_jfa). A texel whose nearest inside texel is `din` away
+        // is covered once the edge (half a texel out from that texel) moves out by din - 0.5,
+        // and one whose nearest outside texel is `dout` away stays covered while r < dout - 0.5.
+        let f = textureLoad(aux, vec2<i32>(in.pos.xy), 0);
+        mx = max(mx, clamp(r - length(f.xy) + 1.0, 0.0, 1.0));
+        mn = min(mn, clamp(length(f.zw) - r, 0.0, 1.0));
+    } else {
+        let rings = clamp(i32(ceil(r / 1.5)), 1, 12);
+        for (var ring = 1; ring <= rings; ring++) {
+            let rr = r * f32(ring) / f32(rings);
+            let cnt = 8 + ring * 4;
+            for (var k = 0; k < cnt; k++) {
+                let a = f32(k) / f32(cnt) * 2.0 * PI;
+                let q = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d).a;
+                mx = max(mx, q);
+                mn = min(mn, q);
+            }
         }
     }
     if (fx.i.x == 0u) {
@@ -941,6 +992,40 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     if (fx.i.x == 2u) { return col; }
     if (pos == 0u) { return s + col * (1.0 - s.a); }
     return col + s * (1.0 - col.a);
+}
+
+// ------------------------------------------------------------ jump flooding
+
+// i.x 0: seeds from src alpha; 1: one step of v0.x texels over the previous field (src).
+// rg: offset in texels to the nearest texel inside (alpha >= 0.5), ba: to the nearest outside;
+// FAR where none has been found yet.
+const FAR: f32 = 16384.0;
+
+@fragment
+fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
+    let size = vec2<i32>(textureDimensions(src));
+    let p = vec2<i32>(in.pos.xy);
+    if (fx.i.x == 0u) {
+        let a = textureLoad(src, p, 0).a;
+        return select(vec4(FAR, FAR, 0.0, 0.0), vec4(0.0, 0.0, FAR, FAR), a >= 0.5);
+    }
+    let step = i32(fx.v[0].x);
+    var best = textureLoad(src, p, 0);
+    var bi = dot(best.xy, best.xy);
+    var bo = dot(best.zw, best.zw);
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let o = vec2<i32>(dx, dy) * step;
+            let q = p + o;
+            if ((dx == 0 && dy == 0) || any(q < vec2(0)) || any(q >= size)) { continue; }
+            let f = textureLoad(src, q, 0);
+            let ci = f.xy + vec2<f32>(o);
+            let co = f.zw + vec2<f32>(o);
+            if (abs(f.x) < FAR * 0.5 && dot(ci, ci) < bi) { best = vec4(ci, best.zw); bi = dot(ci, ci); }
+            if (abs(f.z) < FAR * 0.5 && dot(co, co) < bo) { best = vec4(best.xy, co); bo = dot(co, co); }
+        }
+    }
+    return best;
 }
 
 // ------------------------------------------------------------ flow-guided blur
