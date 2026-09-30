@@ -82,6 +82,28 @@ fn params_attributes_and_defaults_feed_uniforms() {
 }
 
 #[test]
+fn an_animated_shader_parameter_redraws_a_cached_group() {
+    // the square never changes; only the effect's animated parameter does, inside an isolated
+    // group whose cached pixels must not outlive it
+    std::fs::write(
+        fixtures().join("level.glsl"),
+        "uniform float k;\nvoid main() { vec4 c = texture(inputTexture, uv); fragColor = vec4(k, 0.0, 0.0, 1.0) * c.a; }\n",
+    )
+    .unwrap();
+    let d = fx_doc(
+        &format!(r#"<group id="g" isolate="true">{}</group>"#, square("l")),
+        r#"<effect id="l" type="shader" src="level.glsl"><param name="k" value="0"/>
+             <animate property="k"><key time="0" value="0"/><key time="2" value="1"/></animate></effect>"#,
+    );
+    let Some(seq) = render_seq(&d, &[0.0, 0.5, 1.0]) else { return };
+    let cold = render_times(&d, &[1.0]).unwrap();
+    assert!(problems(&seq).is_empty(), "{:?}", problems(&seq));
+    assert_eq!(seq.at(16, 16), cold.at(16, 16), "sequential and cold renders of t = 1 differ");
+    // and the parameter did move: t = 1 is not the t = 0 picture
+    assert_ne!(seq.at(16, 16), render_times(&d, &[0.0]).unwrap().at(16, 16));
+}
+
+#[test]
 fn shadertoy_time_is_deterministic_and_animates() {
     let d = fx_doc(
         &square("r"),

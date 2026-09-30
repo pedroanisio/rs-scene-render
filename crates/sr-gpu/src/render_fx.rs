@@ -20,7 +20,7 @@ use crate::fx::{Builder, Cx};
 use crate::vector::Attrs;
 
 /// Effect types whose output changes with time on its own.
-const TIME_VARYING: &[&str] = &[
+pub(super) const TIME_VARYING: &[&str] = &[
     "film-grain",
     "noise",
     "light-leak",
@@ -61,14 +61,14 @@ const UNBOUNDED: &[&str] = &[
     "fractal-noise",
 ];
 
-fn effect_ids(e: &dyn Element) -> Vec<String> {
+pub(super) fn effect_ids(e: &dyn Element) -> Vec<String> {
     match e.get_attr("effects") {
         Some(AttrValue::Tokens(t)) => t,
         _ => Vec::new(),
     }
 }
 
-fn find_effect<'p>(p: &'p Program, id: &str) -> Option<&'p m::Effect> {
+pub(super) fn find_effect<'p>(p: &'p Program, id: &str) -> Option<&'p m::Effect> {
     p.scene.effects.as_ref()?.effects.iter().find(|e| e.id == id)
 }
 

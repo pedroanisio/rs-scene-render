@@ -1362,6 +1362,7 @@ impl Renderer {
         let timed = asset.filter(|a| ctx.timed.contains(*a)).and(n.source_time).map(hf).unwrap_or(1);
         let generated = if asset.is_some_and(|a| ctx.generated.contains(a)) { ctx.elements } else { 0 };
         h(&[
+            Self::effects_state(ctx, n),
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
             affine_hash(rel),
@@ -1401,6 +1402,30 @@ impl Renderer {
     }
 
     /// Hash of an isolated node's content: its children, not its own transform or opacity.
+    /// The state of the node's effects: their animated values, and the time for effects that
+    /// change with it (shaders see `iTime`). Without it a node whose only change is in an effect
+    /// (an animated shader parameter) kept its cached pixels from an earlier frame.
+    fn effects_state(ctx: &Ctx, n: &FrameNode) -> u64 {
+        let ids = render_fx::effect_ids(&*n.elem);
+        if ids.is_empty() {
+            return 8;
+        }
+        let mut words = Vec::with_capacity(ids.len() * 2 + 1);
+        let mut timed = false;
+        for id in &ids {
+            let Some(e) = render_fx::find_effect(ctx.p, id) else { continue };
+            timed |= render_fx::TIME_VARYING.contains(&e.r#type.as_str());
+            let props = render_fx::element_props(ctx.g, id)
+                .map(|p| sr_eval::rng::hash_str(&serde_json::to_string(p).unwrap_or_default()))
+                .unwrap_or(9);
+            words.extend([sr_eval::rng::hash_str(id), props]);
+        }
+        if timed {
+            words.push(hf(ctx.g.time));
+        }
+        h(&words)
+    }
+
     fn content_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
         let n = &ctx.g.nodes[i];
         let mut words = vec![
