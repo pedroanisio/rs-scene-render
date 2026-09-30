@@ -103,13 +103,12 @@ pub fn resolve(p: &CameraParams, w: f32, h: f32) -> CameraView {
     };
     let rot = match p.target {
         Some(t) if (t - eye).length_squared() > 1e-8 => {
-            // look-at with y down as "up" in camera space
+            // look-at in scene axes (+x right, +y down, +z forward): the same right-handed basis that
+            // orientation() gives for a yaw and pitch, so a look-at camera never mirrors the frame
             let f = (t - eye).normalize();
-            let up_hint = if f.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
-            let r = up_hint.cross(f).normalize();
-            let r = -r;
+            let down_hint = if f.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+            let r = down_hint.cross(f).normalize();
             let d = f.cross(r).normalize();
-            let d = -d;
             Mat4::from_cols(r.extend(0.0), d.extend(0.0), f.extend(0.0), glam::Vec4::W)
                 * Mat4::from_rotation_z(p.roll.to_radians())
         }
@@ -187,4 +186,30 @@ pub fn coc_scale(focal_mm: f32, f_stop: f32, sensor_mm: f32, width_px: f32) -> f
 /// moves amplitude · N₀ right and amplitude · N₁ down, rolls rotation · N₂ and zooms by 1 + zoom · N₃.
 pub fn shake(amplitude: f32, rotation: f32, zoom_amount: f32, n: [f64; 4]) -> (f32, f32, f32, f32) {
     (n[0] as f32 * amplitude, n[1] as f32 * amplitude, n[2] as f32 * rotation, 1.0 + n[3] as f32 * zoom_amount)
+}
+
+#[cfg(test)]
+mod look_at_tests {
+    use super::*;
+
+    fn params(position: Vec3, yaw: f32, pitch: f32, target: Option<Vec3>) -> CameraParams {
+        CameraParams { position: Some(position), yaw, pitch, target, ..CameraParams::default() }
+    }
+
+    /// A look-at camera sees the frame as a camera turned the same way by yaw and pitch does: same basis, no mirror.
+    #[test]
+    fn look_at_matches_the_equivalent_yaw_and_pitch() {
+        let eye = Vec3::new(100.0, -50.0, -400.0);
+        for (yaw, pitch) in [(0.0f32, 0.0f32), (30.0, 0.0), (-40.0, 15.0), (10.0, -25.0)] {
+            let aimed = params(eye, yaw, pitch, None);
+            let fwd = orientation(yaw, pitch, 0.0).transform_vector3(Vec3::Z);
+            let looked = params(eye, 0.0, 0.0, Some(eye + fwd * 300.0));
+            let (a, b) = (resolve(&aimed, 1920.0, 1080.0).view, resolve(&looked, 1920.0, 1080.0).view);
+            for p in [Vec3::new(150.0, -20.0, 0.0), Vec3::new(-80.0, 60.0, 200.0), Vec3::new(40.0, 0.0, -100.0)] {
+                let (pa, pb) = (a.transform_point3(p), b.transform_point3(p));
+                assert!((pa - pb).length() < 1e-2, "yaw {yaw} pitch {pitch}: {pa} vs {pb}");
+            }
+            assert!(b.determinant() > 0.0, "look-at view must not mirror");
+        }
+    }
 }
