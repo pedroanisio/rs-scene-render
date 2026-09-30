@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 2
+      SR_GPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check release version
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as f:
+              version = tomllib.load(f)['workspace']['package']['version']
+          assert os.environ['GITHUB_REF_NAME'] == f'v{version}', 'tag must match Cargo.toml'
+          PY
+          python3 tools/check_release_hygiene.py --all
+      - name: Install runtime dependencies for smoke tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libvulkan1 mesa-vulkan-drivers fonts-dejavu-core
+      - name: Build
+        run: cargo build --locked --release -p scene-render
+      - name: Smoke test the release binary
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"
+          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          target/release/scene-render --version
+          cat > "$RUNNER_TEMP/smoke.xml" <<'XML'
+          <scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="#000000"/><composition><shape id="box" shape="rect" width="16" height="16" fill="#FFFFFF"/></composition></scene>
+          XML
+          target/release/scene-render validate "$RUNNER_TEMP/smoke.xml"
+          target/release/scene-render render "$RUNNER_TEMP/smoke.xml" -o "$RUNNER_TEMP/smoke.png" --strict
+          target/release/scene-render encode "$RUNNER_TEMP/smoke.xml" -o "$RUNNER_TEMP/smoke.mkv" --codec ffv1 --hw software --parallel 1 --strict --no-upload
+          test "$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$RUNNER_TEMP/smoke.mkv")" = 2
+      - name: Package
+        run: |
+          package="scene-render-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir -p "dist/$package"
+          cp target/release/scene-render README.md LICENSE "dist/$package/"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$package/COMMIT"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          cd dist
+          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scene-render-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --verify-tag --title "scene-render $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
