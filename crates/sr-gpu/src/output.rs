@@ -226,6 +226,7 @@ impl OutputStage {
                     count: None,
                 },
                 texture(4),
+                texture(5),
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: c,
@@ -570,9 +571,26 @@ impl OutputStage {
     /// representation, without converting it: both sides of a transition between an output's
     /// segments are placed with their own focus before they are combined.
     pub fn place(&mut self, frame: &Tex, working: &Working, into: &Tex, placement: Placement) {
+        self.place_with_overlay(frame, working, into, placement, None);
+    }
+
+    /// Places and composites the picture exactly as delivery does, before output encoding.
+    /// Accessibility checks use this to inspect the output's frame, including overlays and captions.
+    pub fn place_with_overlay(
+        &mut self,
+        frame: &Tex,
+        working: &Working,
+        into: &Tex,
+        placement: Placement,
+        overlay: Option<&Tex>,
+    ) {
         let d = self.device.clone();
         let same = OutputColor::new(working.space, Transfer::Linear, true);
-        let p = Self::params(frame, working, &same, into.size, placement);
+        let mut p = Self::params(frame, working, &same, into.size, placement);
+        if let Some(o) = overlay {
+            assert_eq!(o.size, into.size, "the overlay is output-sized");
+            p.overlay = 1;
+        }
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         let mut enc = d.create_command_encoder(&Default::default());
         if p.mode == 1 {
@@ -590,6 +608,10 @@ impl OutputStage {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&frame.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.samp) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(blurred) },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(overlay.map_or(&self.none_view, |o| &o.view)),
+                },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&into.view) },
             ],
         });

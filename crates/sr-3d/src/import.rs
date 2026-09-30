@@ -300,18 +300,35 @@ pub fn gltf(path: &Path) -> Result<Model, String> {
         }
         mesh_prims.push(list);
     }
+    // Keep all node indices for skins and animation channels, but only attach geometry from
+    // the default scene (the first scene when none is selected). Sceneless assets keep all nodes.
+    let mut visible = vec![true; g.nodes().len()];
+    if let Some(scene) = g.default_scene().or_else(|| g.scenes().next()) {
+        visible.fill(false);
+        let mut pending: Vec<_> = scene.nodes().collect();
+        while let Some(node) = pending.pop() {
+            if !visible[node.index()] {
+                visible[node.index()] = true;
+                pending.extend(node.children());
+            }
+        }
+    }
     for node in g.nodes() {
         let (t, r, s) = node.transform().decomposed();
         m.nodes.push(Node {
             name: node.name().unwrap_or("").to_string(),
             parent: None,
             local: Trs { t: Vec3::from(t), r: Quat::from_array(r), s: Vec3::from(s) },
-            primitives: node.mesh().map(|me| mesh_prims[me.index()].clone()).unwrap_or_default(),
+            primitives: node
+                .mesh()
+                .filter(|_| visible[node.index()])
+                .map(|me| mesh_prims[me.index()].clone())
+                .unwrap_or_default(),
             skin: node.skin().map(|s| s.index()),
             weights: node
-                .mesh()
-                .and_then(|me| me.weights().map(|w| w.to_vec()))
-                .or_else(|| node.weights().map(|w| w.to_vec()))
+                .weights()
+                .map(|w| w.to_vec())
+                .or_else(|| node.mesh().and_then(|me| me.weights().map(|w| w.to_vec())))
                 .unwrap_or_default(),
         });
     }

@@ -142,6 +142,9 @@ pub struct FrameNode {
     /// Index of the container node in `FrameGraph::nodes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<u32>,
+    /// Transform parent (`@parent` when present, otherwise the container).
+    #[serde(skip)]
+    pub transform_parent: Option<u32>,
     /// Tree depth.
     pub depth: u32,
     /// Local transform.
@@ -989,6 +992,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
             id: node.id.clone(),
             kind: node.name,
             parent: parent_out,
+            transform_parent: parent_out,
             depth,
             local,
             world,
@@ -1064,6 +1068,7 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
     let mut hidden = vec![false; out.nodes.len()];
     for i in 0..out.nodes.len() {
         let node = &p.nodes[out.inst[i] as usize];
+        out.nodes[i].transform_parent = node.parent_link.and_then(|k| out.out_ix[k as usize]).or(out.nodes[i].parent);
         if let Some(m) = node.matte.and_then(|m| out.out_ix[m as usize]) {
             out.nodes[i].matte = Some(m);
             out.nodes[m as usize].is_matte = true;

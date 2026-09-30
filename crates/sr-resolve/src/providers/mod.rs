@@ -33,6 +33,29 @@ pub trait Provider {
     fn run(&self, req: &Request) -> Result<Response, String>;
 }
 
+/// Files that determine a built-in local model's output, using the adapter's own lookup rules.
+pub(crate) fn model_files(req: &Request) -> Vec<PathBuf> {
+    let model = match req.provider.as_str() {
+        "piper" => piper::voice(req).ok(),
+        "whisper" => {
+            let exe = tool("SR_WHISPER", "whisper-cli").unwrap_or_else(|| PathBuf::from("whisper-cli"));
+            whisper::model_file(req, &exe).ok()
+        }
+        _ => None,
+    };
+    let Some(model) = model else { return Vec::new() };
+    let mut files = vec![model.clone()];
+    if req.provider == "piper" {
+        let mut config = model.into_os_string();
+        config.push(".json");
+        let config = PathBuf::from(config);
+        if config.is_file() {
+            files.push(config);
+        }
+    }
+    files
+}
+
 /// An external provider program.
 pub struct External {
     name: String,

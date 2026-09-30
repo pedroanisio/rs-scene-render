@@ -772,6 +772,9 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
 
 struct EmitterRt {
     emitter: Emitter,
+    /// Affine composition → emitter timeline. Simulation uses that timeline;
+    /// animated inputs are sampled back in composition time.
+    clock: Option<(f64, f64)>,
     size: f64,
     size_end: f64,
     size_curve: crate::curve::Ease,
@@ -1057,6 +1060,14 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     let e: &dyn Element = &*n.elem;
     let a = Attr { e, preset: text(e, "preset").map(|s| preset(&s)).unwrap_or(&[]) };
     let step = p.scene.physics.as_ref().map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
+    let node = p.nodes.iter().position(|pn| pn.id == n.id).expect("compiled emitter");
+    let clock = emitter_clock(p, node as u32);
+    let start = if clock.is_some() { p.nodes[node].start } else { t - n.local_time };
+    let end = if clock.is_some() {
+        p.nodes[node].end
+    } else {
+        p.nodes[node].end.map(|end| start + end - p.nodes[node].start)
+    };
     let shape = match text(e, "emitterShape").as_deref() {
         Some("point") => EmitShape::Point,
         Some("ellipse") => EmitShape::Ellipse { w: num(e, "emitterWidth", 0.0), h: num(e, "emitterHeight", 0.0) },
@@ -1083,7 +1094,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
         .iter()
         .filter(|c| c.element_name() == "burst")
         .map(|c| Burst {
-            time: num(*c, "time", 0.0),
+            time: start + num(*c, "time", 0.0),
             count: num(*c, "count", 1.0) as u64,
             repeat: num(*c, "repeat", 0.0) as u64,
             interval: num(*c, "interval", 1.0),
@@ -1100,9 +1111,8 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     let size = a.num("size", 4.0);
     let spec = EmitterSpec {
         seed,
-        // the emitter's clock in composition time (its start and end are in its parent's time)
-        start: t - n.local_time,
-        end: opt(e, "end").map(|end| t - n.local_time + (end - node_start(e))),
+        start,
+        end,
         preroll: num(e, "preroll", 0.0),
         step,
         lifetime: a.num("lifetime", 1.0),
@@ -1148,6 +1158,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     }
     EmitterRt {
         emitter: Emitter::new(spec),
+        clock,
         size,
         size_end: a.opt("sizeEnd").unwrap_or(size),
         size_curve: curve_of(e, "sizeCurve"),
@@ -1174,8 +1185,20 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, t: f64, problems: &mut
     }
 }
 
-fn node_start(e: &dyn Element) -> f64 {
-    num(e, "start", 0.0)
+fn emitter_clock(p: &Program, n: u32) -> Option<(f64, f64)> {
+    use crate::program::Clock;
+    let Some(parent) = p.nodes[n as usize].parent else { return Some((0.0, 1.0)) };
+    let (offset, scale) = emitter_clock(p, parent)?;
+    match &p.nodes[parent as usize].clock {
+        Clock::Same => Some((offset, scale)),
+        Clock::Affine { origin, offset: shift, scale: speed } => {
+            Some((origin + (offset - origin - shift) * speed, scale * speed))
+        }
+        Clock::Media(m) if m.remap.is_none() && m.freeze_at.is_none() && m.loops == 0 => {
+            Some((m.map(offset), scale * m.rate * if m.reverse { -1.0 } else { 1.0 }))
+        }
+        Clock::Media(_) => None,
+    }
 }
 
 struct EDriver<'a, 'b> {
@@ -1188,15 +1211,23 @@ struct EDriver<'a, 'b> {
     invariant: &'a mut Invariant,
     /// The emitter's start: during its preroll it emits as it does at its start.
     start: f64,
+    clock: Option<(f64, f64)>,
 }
 
 impl EDriver<'_, '_> {
+    fn composition_time(&self, t: f64) -> f64 {
+        match self.clock {
+            Some((offset, scale)) if scale != 0.0 => (t - offset) / scale,
+            Some(_) => 0.0,
+            None => t,
+        }
+    }
     /// The emitter's world transform and rate at `t`: for an emitter that never changes, read once and then
     /// only checked against its time window, so a step does not evaluate the whole scene.
     fn state(&mut self, t: f64) -> ([f64; 6], f64) {
         const ABSENT: ([f64; 6], f64) = ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
         // the preroll runs before the emitter's start, where it is not yet in the frame: it emits as at its start
-        let t = t.max(self.start);
+        let t = self.composition_time(t.max(self.start));
         if let Some((n, known)) = *self.invariant {
             if !crate::eval::in_window(self.p, n, t) {
                 return ABSENT;
@@ -1227,6 +1258,7 @@ impl EmitterDriver for EDriver<'_, '_> {
         self.state(t).1
     }
     fn fields(&mut self, t: f64) -> Vec<Field> {
+        let t = self.composition_time(t);
         let g = if self.fields.animated { Some(self.graphs.at(t)) } else { None };
         match self.names {
             Some(ids) => self.fields.named(ids, t, g.as_deref()),
@@ -1347,9 +1379,11 @@ impl Runtime {
                 world,
                 p,
                 start: rt.emitter.start(),
+                clock: rt.clock,
                 invariant: &mut rt.invariant,
             };
-            rt.emitter.at(t, &mut drv);
+            let time = if rt.clock.is_some() { g.nodes[i].timeline_time } else { t };
+            rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
         // ---- flocks and grid simulations
@@ -1389,10 +1423,21 @@ fn render_frame(rt: &EmitterRt, s: &sr_sim::particles::Store) -> ParticleFrame {
     f
 }
 
-/// Replaces world transforms of body nodes; structural descendants follow.
+/// Replaces body poses in transform-parent order, so a simulated child's own
+/// pose wins over inherited movement, regardless of paint order.
 fn apply_bodies(g: &mut FrameGraph, bodies: &[BodyNode], poses: &[PxPose]) {
-    for (b, pose) in bodies.iter().zip(poses) {
-        let Some(i) = index_of(g, &b.id) else { continue };
+    let mut ordered: Vec<_> =
+        bodies.iter().zip(poses).filter_map(|(b, pose)| index_of(g, &b.id).map(|i| (i, b, pose))).collect();
+    ordered.sort_by_key(|(i, _, _)| {
+        let mut depth = 0;
+        let mut parent = g.nodes[*i].transform_parent;
+        while let Some(k) = parent {
+            depth += 1;
+            parent = g.nodes[k as usize].transform_parent;
+        }
+        depth
+    });
+    for (i, b, pose) in ordered {
         let [sx, sy] = b.scale;
         let (s, c) = pose.angle.to_radians().sin_cos();
         // T(pos) · R · S · T(−centre)
@@ -1413,20 +1458,20 @@ fn set_world(g: &mut FrameGraph, i: usize, w: Affine) {
     // Affine::then composes right to left: a.then(&b) applies b first
     let delta = w.then(&inv);
     g.nodes[i].world = w;
-    if let Some(pi) = g.nodes[i].parent {
+    if let Some(pi) = g.nodes[i].transform_parent {
         if let Some(pinv) = g.nodes[pi as usize].world.inverse() {
             g.nodes[i].local = pinv.then(&w);
         }
     }
     // descendants: every node whose parent chain reaches i
     for j in 0..g.nodes.len() {
-        let mut k = g.nodes[j].parent;
+        let mut k = g.nodes[j].transform_parent;
         while let Some(pk) = k {
             if pk as usize == i {
                 g.nodes[j].world = delta.then(&g.nodes[j].world);
                 break;
             }
-            k = g.nodes[pk as usize].parent;
+            k = g.nodes[pk as usize].transform_parent;
         }
     }
 }

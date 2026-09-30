@@ -14,7 +14,7 @@ use crate::protocol::{Request, Response};
 
 pub struct Piper;
 
-fn voice(req: &Request) -> Result<PathBuf, String> {
+pub(crate) fn voice(req: &Request) -> Result<PathBuf, String> {
     let m = PathBuf::from(&req.model);
     let direct = if m.is_absolute() { m.clone() } else { PathBuf::from(&req.base_dir).join(&m) };
     if direct.is_file() {

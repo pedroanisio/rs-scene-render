@@ -89,6 +89,97 @@ fn loudness_is_normalised_on_the_output_programme() {
 }
 
 #[test]
+fn unselected_buses_still_trigger_output_ducking() {
+    let d = fixtures("bus-duck");
+    let mix = r#"<audioTrack id="voice" asset="a440" role="dialogue" bus="speech"/>
+                 <bus id="speech" output="dialogue"/><bus id="dialogue"/>"#;
+    let mut reference: Option<f64> = None;
+    for key in ["voice", "speech", "dialogue"] {
+        let (x, _) = deliver(
+            &d,
+            &format!(
+                r#"<output path="duck.wav" codec="audio-only" audioRoles="effects">
+              <segment from="1" to="3"/><audioTrack id="own" asset="a1000" duckUnder="{key}"
+                duckAmount="-20" duckThreshold="-40" duckAttack="0.01"/>
+              </output>"#
+            ),
+            mix,
+        );
+        let level = rms(&x, 0.5, 1.5);
+        assert!((level - 0.01768).abs() < 0.001, "{key}: ducked RMS {level}");
+        assert!((frequency(&x, 0.5, 1.5) - 1000.0).abs() < 1.0, "excluded voice must not become audible");
+        if let Some(previous) = reference {
+            assert!((level - previous).abs() < 1e-6, "unity buses preserve the key signal");
+        }
+        reference = Some(level);
+    }
+}
+
+#[test]
+fn bus_keys_keep_selected_and_output_owned_inputs() {
+    let d = fixtures("bus-key-inputs");
+    for (mix, own, direct) in [
+        (
+            r#"<audioTrack id="voice" asset="a440" role="dialogue" bus="speech"/>
+             <audioTrack id="bed" asset="a1000" role="effects" bus="speech" volume="0.05"/>
+             <bus id="speech"/>"#,
+            "",
+            "voice",
+        ),
+        (
+            r#"<audioTrack id="voice" asset="a440" role="dialogue" volume="0" bus="speech"/><bus id="speech"/>"#,
+            r#"<audioTrack id="narration" asset="a440" bus="speech"/>"#,
+            "narration",
+        ),
+    ] {
+        let render = |key: &str| {
+            deliver(
+                &d,
+                &format!(
+                    r#"<output path="key.wav" codec="audio-only" audioRoles="effects">
+              <segment from="1" to="3"/>{own}<audioTrack id="music" asset="a1000" duckUnder="{key}"
+                duckAmount="-20" duckThreshold="-40" duckAttack="0.01"/>
+              </output>"#
+                ),
+                mix,
+            )
+            .0
+        };
+        let reference = render(direct);
+        let via_bus = render("speech");
+        assert!(
+            reference.iter().zip(&via_bus).all(|(a, b)| (a - b).abs() < 1e-6),
+            "bus key must retain its inputs without leaking or duplicating them in the master: {direct}"
+        );
+    }
+}
+
+#[test]
+fn bus_keys_feed_effect_sidechains_and_apply_bus_gain() {
+    let d = fixtures("bus-key-fx");
+    let render = |key: &str, gain: i32| {
+        deliver(
+            &d,
+            &format!(
+                r#"<output path="key.wav" codec="audio-only" audioRoles="effects">
+          <segment from="0" to="2"/><audioTrack id="music" asset="a1000">
+            <audioEffect type="compressor" threshold="-30" ratio="10" attack="0.01" sidechain="{key}"/>
+          </audioTrack></output>"#
+            ),
+            &format!(
+                r#"<audioTrack id="voice" asset="a440" role="dialogue" bus="speech"/><bus id="speech" gain="{gain}"/>"#
+            ),
+        )
+        .0
+    };
+    let reference = render("voice", 0);
+    let via_bus = render("speech", 0);
+    assert!(reference.iter().zip(&via_bus).all(|(a, b)| (a - b).abs() < 1e-6), "effect must hear the bus key");
+    let quiet_key = render("speech", -60);
+    assert!(rms(&quiet_key, 0.5, 1.5) > 2.0 * rms(&via_bus, 0.5, 1.5), "bus gain must affect the key");
+}
+
+#[test]
 fn outputs_select_their_sources() {
     let d = fixtures("select");
     let mix = r#"<audioTrack id="music" asset="a440" role="music" bus="fx"/>
@@ -121,6 +212,62 @@ fn nonsegmented_audio_honours_command_line_range_overrides() {
     for t in [0.1, 1.1, 2.1] {
         assert!((frequency(&x, t, t + 0.5) - 440.0).abs() < 1.0);
     }
+}
+
+#[test]
+fn own_tracks_honour_command_line_range_overrides() {
+    let d = fixtures("own-range");
+    for (start, end) in [(0.0, 3.0), (1.5, 3.5)] {
+        let opts = sr_deliver::Options { start: Some(start), end: Some(end), ..Default::default() };
+        let (x, _) = deliver_with_options(
+            &d,
+            r#"<output path="range.wav" codec="audio-only" start="1" end="2">
+                 <audioTrack id="own" asset="a1000" volume="0"/>
+               </output>"#,
+            r#"<audioTrack id="music" asset="a440"/>"#,
+            &opts,
+        );
+        assert_eq!(x.len(), ((end - start) * RATE as f64) as usize);
+        for t in [0.1, end - start - 0.6] {
+            assert!(rms(&x, t, t + 0.5) > 0.1, "composition audio throughout overridden range");
+            assert!((frequency(&x, t, t + 0.5) - 440.0).abs() < 1.0);
+        }
+    }
+}
+
+fn check_own_automation(property: &str, before: f64, after: f64, rises: bool) {
+    let d = fixtures(&format!("own-{property}"));
+    // The same automation is in output time with and without a composition time map.
+    for (attrs, segments) in [(r#"start="1" end="3""#, ""), ("", r#"<segment from="2" to="4"/>"#)] {
+        let (x, _) = deliver(
+            &d,
+            &format!(
+                r#"<output path="auto.wav" codec="audio-only" {attrs}>{segments}
+                  <audioTrack id="own" asset="a1000"><animate property="{property}">
+                    <key time="0" value="{before}" interpolation="hold"/><key time="1" value="{after}"/>
+                  </animate></audioTrack></output>"#
+            ),
+            r#"<audioTrack id="music" asset="a440" volume="0"/>"#,
+        );
+        let (early, late) = (rms(&x, 0.1, 0.8), rms(&x, 1.1, 1.8));
+        let (quiet, loud) = if rises { (early, late) } else { (late, early) };
+        assert!(quiet < 0.001 && loud > 0.1, "{property}: early RMS {early}, late RMS {late}");
+    }
+}
+
+#[test]
+fn own_tracks_animate_volume_in_output_time() {
+    check_own_automation("volume", 0.0, 1.0, true);
+}
+
+#[test]
+fn own_tracks_animate_gain_in_output_time() {
+    check_own_automation("gain", -60.0, 0.0, true);
+}
+
+#[test]
+fn own_tracks_animate_pan_in_output_time() {
+    check_own_automation("pan", -1.0, 1.0, false);
 }
 
 #[test]

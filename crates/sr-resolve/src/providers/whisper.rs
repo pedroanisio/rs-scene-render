@@ -40,7 +40,7 @@ fn dtw_preset(model: &str) -> Option<String> {
     PRESETS.contains(&m.as_str()).then_some(m)
 }
 
-fn model_file(req: &Request, exe: &Path) -> Result<PathBuf, String> {
+pub(crate) fn model_file(req: &Request, exe: &Path) -> Result<PathBuf, String> {
     let m = PathBuf::from(&req.model);
     let direct = if m.is_absolute() { m.clone() } else { PathBuf::from(&req.base_dir).join(&m) };
     if direct.is_file() {

@@ -114,6 +114,36 @@ fn segment_flash_checks_use_output_time() {
 }
 
 #[test]
+fn flash_checks_include_overlays_and_ignore_covered_flashes() {
+    let Some(dir) = fixtures() else { return };
+    if gpu().is_none() {
+        return;
+    }
+    let flash = flicker();
+    let cover = r##"<shape id="cover" shape="rect" width="64" height="64" fill="#000000"/>"##;
+    for (body, over, should_fail) in [("", flash.as_str(), true), (flash.as_str(), cover, false)] {
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="64" fps="30" duration="2" background="#000000"/>
+              <metadata><accessibility flashCheck="error" contrastCheck="off"/></metadata>
+              <output path="out/overlay.mkv" codec="ffv1" audio="false" overlay="tag"/>
+              <symbols><symbol id="tag">{over}</symbol></symbols><composition>{body}</composition></scene>"##
+        );
+        let path = dir.join("overlay.scene.xml");
+        std::fs::write(&path, xml).unwrap();
+        let doc = sr_model::load_file(path, &Default::default()).unwrap();
+        let result = deliver(&doc);
+        if should_fail {
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("flashCheck")),
+                "flashing overlay: {result:?}"
+            );
+        } else {
+            assert!(result.unwrap().accessibility.is_empty(), "opaque overlay hides the composition's flashes");
+        }
+    }
+}
+
+#[test]
 fn delivery_runs_the_checks() {
     let Some(dir) = fixtures() else { return };
     if gpu().is_none() {

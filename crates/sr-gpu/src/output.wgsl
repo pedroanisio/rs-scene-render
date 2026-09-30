@@ -59,14 +59,20 @@ fn placed(p: vec2<f32>) -> vec4<f32> {
   return vec4(0.0);
 }
 
-// straight, output-encoded RGB and alpha of output pixel (x, y); linear premultiplied for float output
-fn px(x: u32, y: u32) -> vec4<f32> {
+// Placed picture and output overlay in the premultiplied working representation.
+fn composited(x: u32, y: u32) -> vec4<f32> {
   let p = vec2<f32>(f32(x), f32(y)) + 0.5;
   var c = placed(p);
   if (o.overlay == 1u) {
     let v = textureLoad(over, vec2<u32>(x, y), 0);
     c = v + c * (1.0 - v.a);
   }
+  return c;
+}
+
+// straight, output-encoded RGB and alpha of output pixel (x, y); linear premultiplied for float output
+fn px(x: u32, y: u32) -> vec4<f32> {
+  let c = composited(x, y);
   var a = clamp(c.a, 0.0, 1.0);
   var rgb = select(vec3(0.0), c.rgb / a, a > 0.0);
   if (o.linear_light == 0u) { rgb = tf_decode3(o.store_transfer, rgb); }
@@ -186,5 +192,5 @@ fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn cs_place(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= o.osize.x || id.y >= o.osize.y) { return; }
-  textureStore(placed_out, id.xy, placed(vec2<f32>(id.xy) + 0.5));
+  textureStore(placed_out, id.xy, composited(id.x, id.y));
 }

@@ -180,14 +180,19 @@ pub enum NodeKind {
     },
     /// Sums the nodes routed to it.
     Bus,
+    /// Reads another node's post-fader signal, for routing it to an additional bus.
+    Tap {
+        /// Node whose processed signal is read.
+        source: String,
+    },
 }
 
-/// A track or bus.
+/// A node in the mixing graph.
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// Id (track, layer or bus).
+    /// Node id.
     pub id: String,
-    /// Track or bus.
+    /// Source, bus or post-fader tap.
     pub kind: NodeKind,
     /// `volume` automation (0–1).
     pub volume: Curve,
@@ -266,10 +271,10 @@ pub struct Mix {
 /// Mixing errors.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum MixError {
-    /// A bus, ducking source or sidechain names an unknown node.
+    /// Routing, ducking, a sidechain or a tap names an unknown node.
     #[error("{0} refers to unknown audio node {1:?}")]
     Unknown(String, String),
-    /// Routing, ducking and sidechains form a cycle.
+    /// Routing, ducking, sidechains or taps form a cycle.
     #[error("audio routing cycle: {0}")]
     Cycle(String),
 }
@@ -508,6 +513,10 @@ impl Mix {
                 let &j = index.get(k.as_str()).ok_or_else(|| MixError::Unknown(n.id.clone(), k.clone()))?;
                 deps[i].push(j);
             }
+            if let NodeKind::Tap { source } = &n.kind {
+                let &j = index.get(source.as_str()).ok_or_else(|| MixError::Unknown(n.id.clone(), source.clone()))?;
+                deps[i].push(j);
+            }
         }
         let mut state = vec![0u8; self.nodes.len()];
         let mut order = Vec::new();
@@ -562,7 +571,7 @@ impl Mix {
                     let ext = bound(ext);
                     Some((self.route_block(&placed, source.layout, &n.pan, ext), ext))
                 }
-                NodeKind::Bus => None,
+                NodeKind::Bus | NodeKind::Tap { .. } => None,
             })
             .collect();
         let mut outputs: HashMap<String, Planar> = HashMap::new();
@@ -570,9 +579,13 @@ impl Mix {
         for &i in &order {
             let n = &self.nodes[i];
             // input in the mix layout
-            let (mut buf, mut ext) = match placed[i].take() {
-                Some(track) => track,
-                None => {
+            let (mut buf, mut ext) = match (&n.kind, placed[i].take()) {
+                (_, Some(track)) => track,
+                (NodeKind::Tap { source }, None) => {
+                    let ext = extents[source];
+                    (self.route_block(&outputs[source], self.layout, &n.pan, ext), ext)
+                }
+                (_, None) => {
                     let mut sum = silent();
                     let mut ext = Extent::EMPTY;
                     for m in self.nodes.iter().filter(|m| m.output.as_deref() == Some(n.id.as_str())) {
@@ -874,6 +887,43 @@ mod tests {
             nodes: vec![early, late, eq, layer, muted, bus],
             master,
         }
+    }
+
+    #[test]
+    fn taps_route_post_fader_audio_and_validate_dependencies() {
+        let tone = tone(440.0, 0.25, 1.0);
+        let source = Arc::new(Source { layout: Layout::Stereo, planar: vec![tone.clone(), tone] });
+        let mut original = track("original", source, timeline(0.0));
+        original.gain = Curve::Const(-6.0);
+        original.output = Some("discard".into());
+        let tap = Node {
+            id: "tap".into(),
+            kind: NodeKind::Tap { source: "original".into() },
+            volume: Curve::Const(1.0),
+            gain: Curve::Const(0.0),
+            pan: Curve::Const(0.0),
+            mute: false,
+            output: None,
+            duck: None,
+            effects: Vec::new(),
+        };
+        let discard = Node { id: "discard".into(), kind: NodeKind::Bus, mute: true, ..tap.clone() };
+        let mut mix = Mix {
+            rate: RATE,
+            layout: Layout::Stereo,
+            duration: 1.0,
+            control_fps: 25.0,
+            nodes: vec![tap, discard, original],
+            master: Master::default(),
+        };
+        let out = mix.render().unwrap();
+        assert!(same(&out.nodes["original"], &out.nodes["tap"]), "fades and gain run only on the source");
+        assert!(same(&out.master, &out.nodes["tap"]), "the source is audible exactly once");
+        assert!(same(&out.master, &mix.render_inner(true).unwrap().master));
+        mix.nodes[0].kind = NodeKind::Tap { source: "missing".into() };
+        assert!(matches!(mix.render(), Err(MixError::Unknown(_, _))));
+        mix.nodes[0].kind = NodeKind::Tap { source: "tap".into() };
+        assert!(matches!(mix.render(), Err(MixError::Cycle(_))));
     }
 
     #[test]

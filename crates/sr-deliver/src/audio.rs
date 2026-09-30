@@ -280,14 +280,47 @@ pub(crate) fn master_of(ms: &m::Master, curve: &CurveOf) -> Master {
 }
 
 /// Samples of animated properties per control frame.
-struct Automation {
+#[derive(Default)]
+pub(crate) struct Automation {
     props: HashMap<String, HashMap<&'static str, Vec<f64>>>,
     layer_times: HashMap<String, Vec<Option<f64>>>,
     layer_volume: HashMap<String, Vec<f64>>,
 }
 
 impl Automation {
-    fn curve(&self, key: &str, prop: &'static str, fallback: f64) -> Curve {
+    /// Output-owned tracks use the evaluator's compiled automation, sampled in output time.
+    pub(crate) fn tracks(p: &Program, tracks: &[&m::AudioTrack], duration: f64, fps: f64) -> Self {
+        let mut auto = Self::default();
+        let ids: std::collections::HashSet<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        if !p.elements.iter().any(|e| ids.contains(&*e.key)) {
+            return auto;
+        }
+        let frames = (duration * fps).ceil() as usize + 1;
+        for k in 0..frames {
+            let g = sr_eval::eval::evaluate(p, k as f64 / fps);
+            for e in g.elements.iter().filter(|e| ids.contains(&*e.key)) {
+                auto.record(e, k, frames);
+            }
+        }
+        auto
+    }
+
+    fn record(&mut self, e: &sr_eval::ElementState, k: usize, frames: usize) {
+        for name in ["volume", "gain", "pan"] {
+            if let Some(v) = e.props.get(name).and_then(Value::as_num) {
+                let slot = self
+                    .props
+                    .entry(e.key.to_string())
+                    .or_default()
+                    .entry(name)
+                    .or_insert_with(|| Vec::with_capacity(frames));
+                slot.resize(k, v);
+                slot.push(v);
+            }
+        }
+    }
+
+    pub(crate) fn curve(&self, key: &str, prop: &'static str, fallback: f64) -> Curve {
         match self.props.get(key).and_then(|p| p.get(prop)) {
             Some(v) if v.iter().any(|x| (x - v[0]).abs() > 1e-12) => Curve::Frames(v.clone()),
             Some(v) if !v.is_empty() => Curve::Const(v[0]),
@@ -342,18 +375,7 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
         for k in 0..frames {
             let g = ev.evaluate(k as f64 / fps);
             for e in &g.elements {
-                for name in ["volume", "gain", "pan"] {
-                    if let Some(v) = e.props.get(name).and_then(Value::as_num) {
-                        let slot = auto
-                            .props
-                            .entry(e.key.to_string())
-                            .or_default()
-                            .entry(name)
-                            .or_insert_with(|| Vec::with_capacity(frames));
-                        slot.resize(k, v);
-                        slot.push(v);
-                    }
-                }
+                auto.record(e, k, frames);
             }
             let mut seen: HashMap<&str, ()> = HashMap::new();
             for n in &g.nodes {

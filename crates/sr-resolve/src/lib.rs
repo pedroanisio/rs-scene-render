@@ -133,9 +133,9 @@ fn store_dir(o: &Options) -> Option<PathBuf> {
     }
 }
 
-fn store_entry(store: &Path, req: &Request) -> PathBuf {
+fn store_entry(store: &Path, req: &Request, key: &str) -> PathBuf {
     let ext = Path::new(&req.output).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    store.join(format!("{}.{ext}", req.key()))
+    store.join(format!("{key}.{ext}"))
 }
 
 /// A scratch folder removed on drop.
@@ -241,7 +241,7 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
     }
     // 2. the store
     let version;
-    let stored = store.as_ref().map(|s| store_entry(s, &t.req)).filter(|p| !o.force && p.is_file());
+    let stored = store.as_ref().map(|s| store_entry(s, &t.req, &key)).filter(|p| !o.force && p.is_file());
     if let Some(src) = stored {
         if let Err(e) = std::fs::copy(&src, &t.cache) {
             return fail(r, format!("{}: {e}", t.cache.display()));
@@ -293,7 +293,7 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         return fail(r, e);
     }
     if let (Some(s), Status::Made) = (&store, r.status) {
-        let entry = store_entry(s, &t.req);
+        let entry = store_entry(s, &t.req, &side.key);
         let _ = std::fs::create_dir_all(s)
             .and_then(|_| std::fs::copy(&t.cache, &entry))
             .and_then(|_| std::fs::write(entry.with_extension("json"), &side_json));

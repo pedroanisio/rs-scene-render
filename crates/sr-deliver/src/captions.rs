@@ -135,12 +135,19 @@ fn output_time(tm: &TimeMap, i: usize, c: f64) -> f64 {
 /// Cue `c` as segment `i` shows it, if the segment's span meets it.
 fn map_cue(c: &Cue, tm: &TimeMap, i: usize) -> Option<Cue> {
     let (lo, hi) = span(tm, i);
+    let frozen = lo == hi;
     let (p, q) = (c.start.max(lo), c.end.min(hi));
-    if q <= p {
+    // A freeze has no composition-time span, but holds the cue/word active at that instant.
+    let meets = if frozen { c.start <= lo && lo < c.end } else { p < q };
+    if !meets {
         return None;
     }
     let at = |x: f64| output_time(tm, i, x);
     let ends = |a: f64, b: f64| {
+        if frozen {
+            let seg = &tm.segments[i];
+            return (seg.start, seg.start + seg.duration);
+        }
         let (x, y) = (at(a), at(b));
         if y < x {
             (y, x)
@@ -152,7 +159,7 @@ fn map_cue(c: &Cue, tm: &TimeMap, i: usize) -> Option<Cue> {
     let mut words: Vec<Word> = c
         .words
         .iter()
-        .filter(|w| w.end > p && w.start < q)
+        .filter(|w| w.end > p && if frozen { w.start <= p } else { w.start < q })
         .map(|w| {
             let (start, end) = ends(w.start.max(p), w.end.min(q));
             Word { start, end, ..w.clone() }
@@ -189,6 +196,30 @@ mod tests {
         <cue start="1" end="3"><word start="1" end="1.5" text="one"/><word start="1.6" end="2.4" text="two"/><word start="2.5" end="3" text="three"/></cue>
         <cue start="5" end="6" text="later"/>
       </captionTrack></captions>"#;
+
+    #[test]
+    fn freeze_keeps_active_cues_and_words_for_the_segment() {
+        let (ev, o) = eval(
+            r#"<output path="a.mp4" codec="h264"><segment from="8" to="9"/>
+              <segment><timeRemap><key time="0" value="2"/><key time="2" value="2"/></timeRemap></segment>
+              </output>"#,
+            r#"<captions><captionTrack id="cc" language="en">
+              <cue start="1" end="3" text="held"/>
+              <cue start="1" end="3"><word start="1" end="2" text="before"/>
+                <word start="2" end="2.5" text="during"/><word start="2.5" end="3" text="after"/></cue>
+              <cue start="0" end="2" text="ended"/><cue start="3" end="4" text="later"/>
+              </captionTrack></captions>"#,
+        );
+        let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+        let caps = output_captions(ev.program(), &o, Some(&tm)).unwrap();
+        let cues = &caps.tracks[0].cues;
+        assert_eq!(cues.len(), 2);
+        assert_eq!((cues[0].start, cues[0].end, cues[0].text.as_deref()), (1.0, 3.0, Some("held")));
+        assert_eq!((cues[1].start, cues[1].end, cues[1].text.as_deref()), (1.0, 3.0, Some("during")));
+        assert_eq!(cues[1].words.len(), 1);
+        assert_eq!((cues[1].words[0].start, cues[1].words[0].end), (1.0, 3.0));
+        assert!(caps.warnings.is_empty());
+    }
 
     #[test]
     fn cues_keep_the_words_inside_the_span_at_output_times() {

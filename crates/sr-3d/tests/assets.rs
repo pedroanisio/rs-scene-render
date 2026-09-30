@@ -126,6 +126,72 @@ const TRI_GLTF: &str = r#"{
 }"#;
 
 #[test]
+fn gltf_node_morph_weights_override_mesh_defaults() {
+    for (case, mesh, node, want) in [
+        ("override", Some(0.0), Some(1.0), 1.0),
+        ("zero", Some(1.0), Some(0.0), 0.0),
+        ("fallback", Some(0.5), None, 0.5),
+        ("node", None, Some(0.5), 0.5),
+        ("none", None, None, 0.0),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_str(TRI_GLTF).unwrap();
+        json["meshes"][0]["primitives"][0]["targets"] = serde_json::json!([{"POSITION":0}]);
+        if let Some(w) = mesh {
+            json["meshes"][0]["weights"] = serde_json::json!([w]);
+        }
+        if let Some(w) = node {
+            json["nodes"][0]["weights"] = serde_json::json!([w]);
+        }
+        let path = tmp(&format!("morph-{case}.gltf"), &serde_json::to_vec(&json).unwrap());
+        let m = import::gltf(&path).unwrap();
+        let (locals, weights) = anim::pose(&m, None, 0.0);
+        let items = anim::draw_list(&m, &locals, &weights, None);
+        let vs = items[0].vertices.as_ref().unwrap_or(&m.primitives[0].vertices);
+        assert_eq!(vs[1].pos[0], 1.0 + want, "{case}: node weights {weights:?}");
+    }
+}
+
+#[test]
+fn gltf_draws_the_selected_scene_and_keeps_node_indices() {
+    for (case, scene, scenes, want) in [
+        ("default", Some(1), true, vec![1]),
+        ("first", None, true, vec![2]),
+        ("empty", Some(2), true, vec![]),
+        ("sceneless", None, false, vec![1, 2]),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_str(TRI_GLTF).unwrap();
+        json["nodes"] = serde_json::json!([
+            {"children":[1]}, {"mesh":0,"translation":[1,0,0]}, {"mesh":0,"translation":[10,0,0]}
+        ]);
+        json["scenes"] = serde_json::json!([{"nodes":[2]}, {"nodes":[0]}, {"nodes":[]}]);
+        json.as_object_mut().unwrap().remove("scene");
+        if let Some(s) = scene {
+            json["scene"] = s.into();
+        }
+        if !scenes {
+            json.as_object_mut().unwrap().remove("scenes");
+        }
+        let path = tmp(&format!("scenes-{case}.gltf"), &serde_json::to_vec(&json).unwrap());
+        let m = import::gltf(&path).unwrap();
+        assert_eq!(m.nodes.len(), 3, "animation and skin indices must remain valid");
+        assert_eq!(m.nodes[1].parent, Some(0));
+        assert_eq!(m.animations[0].channels[0].node, 0);
+        let (locals, weights) = anim::pose(&m, None, 0.0);
+        let items = anim::draw_list(&m, &locals, &weights, None);
+        assert_eq!(items.iter().map(|i| i.node).collect::<Vec<_>>(), want, "{case}");
+        let (_, hi) = m.bounds();
+        let want_max = if want.contains(&2) {
+            1100.0
+        } else if want.is_empty() {
+            0.0
+        } else {
+            200.0
+        };
+        assert!((hi.x - want_max).abs() < 1e-3, "{case}: inactive geometry must not enlarge bounds");
+    }
+}
+
+#[test]
 fn gltf_with_extensions_variants_and_animation() {
     let p = tmp("tri.gltf", TRI_GLTF.as_bytes());
     let Asset::Model(m) = import::load(&p, None).unwrap() else { panic!("model") };

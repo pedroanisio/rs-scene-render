@@ -325,6 +325,7 @@ impl Video<'_> {
         let contrast_mode = acc.as_ref().map(|a| a.contrast_check.to_string()).unwrap_or_else(|| "off".into());
         let min_contrast = acc.as_ref().map(|a| a.min_contrast.get()).unwrap_or(4.5);
         let mut flash = (flash_mode != "off").then(crate::access::FlashDetector::default);
+        let flash_picture = flash.as_ref().map(|_| self.renderer.texture(self.size));
         self.renderer.contrast_probe = contrast_mode != "off";
         // Each text is judged at its most visible: the lowest ratio among the frames where its accumulated
         // opacity is at its maximum over the encode. A label fading in passes through every ratio down to
@@ -379,10 +380,6 @@ impl Video<'_> {
                 let out_t = ft.map_or(t - self.origin, |f| f.output);
                 let frame = self.render_side(&g, t, ft.as_ref())?;
                 unsupported.extend(frame.stats.unsupported.iter().cloned());
-                if let Some(det) = flash.as_mut() {
-                    let cells = self.renderer.flash_grid(&frame.texture);
-                    det.push(out_t, &cells);
-                }
                 for id in &frame.stats.contrast_unprobed {
                     unprobed.entry(id.clone()).or_default().push((k, opacity_of(&g, id)));
                 }
@@ -400,6 +397,11 @@ impl Video<'_> {
                     }
                     None => None,
                 };
+                if let Some((det, tex)) = flash.as_mut().zip(flash_picture.as_ref()) {
+                    self.stage.place_with_overlay(&picture, &working, tex, placement, over);
+                    let cells = self.renderer.flash_grid(tex);
+                    det.push(out_t, &cells);
+                }
                 let next = self.stage.submit_placed(
                     &picture,
                     &working,
@@ -542,6 +544,10 @@ pub fn deliver(
     if end <= start {
         return Err(DeliverError::Invalid(format!("empty range {start}..{end}")));
     }
+    // CLI overrides define the effective output, including the origin/duration of its own
+    // audio, overlay and captions. Explicit segments retain their independent output clock.
+    let effective_output = m::Output { start, end: Some(end), ..output.clone() };
+    let output = &effective_output;
     let mut report = Report { path: resolve(&base, &output.path), fps, ..Default::default() };
     // audio first: the mix feeds the analysis table
     let t_audio = Instant::now();

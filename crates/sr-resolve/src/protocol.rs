@@ -82,8 +82,8 @@ pub struct Request {
 }
 
 impl Request {
-    /// The request key: SHA-256 of the request without its paths and id, so the same request
-    /// in another document or at another cache path finds the same result.
+    /// SHA-256 of request settings and resolved local model contents. Cache paths,
+    /// scratch paths and ids are omitted so identical requests can share results.
     pub fn key(&self) -> String {
         let mut r = self.clone();
         r.id.clear();
@@ -94,7 +94,18 @@ impl Request {
         r.workdir.clear();
         r.base_dir.clear();
         r.input = None;
-        hex(&Sha256::digest(serde_json::to_vec(&r).expect("serialisable")))
+        let mut digest = Sha256::new();
+        digest.update(serde_json::to_vec(&r).expect("serialisable"));
+        // Relative paths can name different models in different projects. Hash their
+        // contents so identical models still share results across checkouts.
+        for model in crate::providers::model_files(self) {
+            digest.update(b"\0model\0");
+            match file_sha256(&model) {
+                Ok(sha) => digest.update(sha.as_bytes()),
+                Err(_) => digest.update(model.to_string_lossy().as_bytes()),
+            }
+        }
+        hex(&digest.finalize())
     }
 }
 

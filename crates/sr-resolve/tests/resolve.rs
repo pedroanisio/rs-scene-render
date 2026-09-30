@@ -395,6 +395,8 @@ fn online_tiles_are_fetched_for_the_views_and_pinned() {
             )
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
+            // Record before replying: resolve may finish as soon as the response body arrives.
+            log.lock().unwrap().push((path, headers));
             write!(
                 s,
                 "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -402,7 +404,6 @@ fn online_tiles_are_fetched_for_the_views_and_pinned() {
             )
             .unwrap();
             s.write_all(&png).unwrap();
-            log.lock().unwrap().push((path, headers));
         }
     });
     let d = project(

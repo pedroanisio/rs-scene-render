@@ -61,6 +61,21 @@ fn reads(n: &Node) -> impl Iterator<Item = &String> {
     n.duck.iter().flat_map(|d| d.under.iter()).chain(n.effects.iter().filter_map(|e| e.sidechain.as_ref()))
 }
 
+fn key_bus(id: &str) -> String {
+    format!("sr:key:{id}")
+}
+
+/// Bus keys read the complete signal, including sources excluded from audible playback.
+fn redirect_keys(n: &mut Node, buses: &HashSet<&str>) {
+    for id in
+        n.duck.iter_mut().flat_map(|d| &mut d.under).chain(n.effects.iter_mut().filter_map(|e| e.sidechain.as_mut()))
+    {
+        if buses.contains(id.as_str()) {
+            *id = key_bus(id);
+        }
+    }
+}
+
 /// Automation keyed in composition time, sampled at the output's control frames through the map.
 fn map_curve(c: &Curve, tm: &TimeMap, fps: f64) -> Curve {
     match c {
@@ -96,7 +111,7 @@ pub fn render(
         })
         .collect();
     // the output's own tracks, in output time
-    let own = own_nodes(p, output, tm, rate, representation)?;
+    let mut own = own_nodes(p, output, tm, rate, fps, representation)?;
     let tracks: Vec<&Node> = sa.mix.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Track { .. })).collect();
     let buses: Vec<&Node> = sa.mix.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Bus)).collect();
     let play: HashSet<&str> = tracks
@@ -112,6 +127,27 @@ pub fn render(
         needed.extend(reads(n).map(String::as_str));
     }
     needed.extend(sa.mix.master.effects.iter().filter_map(|e| e.sidechain.as_deref()));
+    // When selection removes sources, a bus used as a key needs a separate, inaudible signal.
+    // Include its entire input tree. With every source playing, the existing buses suffice.
+    let mut key_buses: HashSet<&str> = buses
+        .iter()
+        .filter(|b| play.len() < tracks.len() && needed.contains(b.id.as_str()))
+        .map(|b| b.id.as_str())
+        .collect();
+    loop {
+        let before = key_buses.len();
+        for node in &sa.mix.nodes {
+            if node.output.as_deref().is_some_and(|id| key_buses.contains(id)) {
+                needed.insert(node.id.as_str());
+                if matches!(node.kind, NodeKind::Bus) {
+                    key_buses.insert(node.id.as_str());
+                }
+            }
+        }
+        if key_buses.len() == before {
+            break;
+        }
+    }
     let windows = windows(tm, output.join_fade.get());
     let n = (tm.duration * rate as f64).round() as usize;
     let stems: Vec<Node> = tracks
@@ -149,7 +185,24 @@ pub fn render(
         })
         .collect();
     let mut nodes = stems;
-    if nodes.iter().any(|s| s.output.as_deref() == Some(UNPLAYED)) {
+    // Taps share post-fader audio with the audible graph, so selected and output-owned tracks
+    // feed keys without having their effects or ducking applied a second time.
+    for source in tracks.iter().copied().chain(own.iter()) {
+        if let Some(bus) = source.output.as_deref().filter(|id| key_buses.contains(id)) {
+            nodes.push(Node {
+                id: format!("sr:tap:{}", source.id),
+                kind: NodeKind::Tap { source: source.id.clone() },
+                volume: Curve::Const(1.0),
+                gain: Curve::Const(0.0),
+                pan: Curve::Const(0.0),
+                mute: false,
+                output: Some(key_bus(bus)),
+                duck: None,
+                effects: Vec::new(),
+            });
+        }
+    }
+    if !key_buses.is_empty() || nodes.iter().any(|s| s.output.as_deref() == Some(UNPLAYED)) {
         nodes.push(Node {
             id: UNPLAYED.into(),
             kind: NodeKind::Bus,
@@ -167,10 +220,27 @@ pub fn render(
         b.volume = map_curve(&b.volume, tm, fps);
         b.gain = map_curve(&b.gain, tm, fps);
         b.pan = map_curve(&b.pan, tm, fps);
+        redirect_keys(&mut b, &key_buses);
+        if key_buses.contains(b.id.as_str()) {
+            let mut key = b.clone();
+            key.id = key_bus(&b.id);
+            key.output = Some(
+                b.output.as_deref().filter(|id| key_buses.contains(id)).map(key_bus).unwrap_or_else(|| UNPLAYED.into()),
+            );
+            nodes.push(key);
+        }
         nodes.push(b);
+    }
+    for node in &mut own {
+        redirect_keys(node, &key_buses);
     }
     nodes.extend(own);
     let mut master = sa.mix.master.clone();
+    for key in master.effects.iter_mut().filter_map(|e| e.sidechain.as_mut()) {
+        if key_buses.contains(key.as_str()) {
+            *key = key_bus(key);
+        }
+    }
     master.volume = map_curve(&master.volume, tm, fps);
     let mix = Mix { rate, layout: sa.mix.layout, duration: tm.duration, control_fps: fps, nodes, master };
     let mixed = mix.render()?;
@@ -183,13 +253,22 @@ fn own_nodes(
     output: &m::Output,
     tm: &TimeMap,
     rate: u32,
+    fps: f64,
     representation: Option<&str>,
 ) -> Result<Vec<Node>, DeliverError> {
     let mut sources = Sources::new(rate);
-    let fixed = |_: &str, _: &'static str, v: f64| Curve::Const(v);
+    let tracks: Vec<_> = output
+        .children
+        .iter()
+        .filter_map(|c| match c {
+            m::OutputChild::AudioTrack(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let auto = audio::Automation::tracks(p, &tracks, tm.duration, fps);
+    let curve = |key: &str, prop: &'static str, v: f64| auto.curve(key, prop, v);
     let mut own = Vec::new();
-    for c in &output.children {
-        let m::OutputChild::AudioTrack(t) = c else { continue };
+    for t in tracks {
         let at = match &t.start_marker {
             // a marker is composition time: the output time that first shows it
             Some(mk) => {
@@ -202,7 +281,7 @@ fn own_nodes(
             None => 0.0,
         };
         let start = t.start.get() + at;
-        own.push(audio::track_node(p, t, start, tm.duration, representation, &fixed, &mut sources)?);
+        own.push(audio::track_node(p, t, start, tm.duration, representation, &curve, &mut sources)?);
     }
     Ok(own)
 }
@@ -237,14 +316,14 @@ pub fn own_tracks(
     let layout = am
         .map(|a| sr_audio::Layout::parse(a.channel_layout.as_str(), a.channels as u32))
         .unwrap_or(sr_audio::Layout::Stereo);
-    let mut nodes = own_nodes(p, output, &tm, rate, None)?;
+    let fps = output.fps.map(|f| f.as_f64()).unwrap_or(p.fps.as_f64());
+    let mut nodes = own_nodes(p, output, &tm, rate, fps, None)?;
     // alone: no ducking under, or keying from, anything else
     for n in &mut nodes {
         n.duck = None;
         n.output = None;
         n.effects.retain(|e| e.sidechain.is_none());
     }
-    let fps = output.fps.map(|f| f.as_f64()).unwrap_or(p.fps.as_f64());
     let mix = Mix { rate, layout, duration: tm.duration, control_fps: fps, nodes, master: Default::default() };
     Ok((rate, mix.render()?.nodes))
 }
