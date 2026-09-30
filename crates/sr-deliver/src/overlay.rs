@@ -37,6 +37,7 @@ impl Overlay {
         size: [u32; 2],
         captions: &OutputCaptions,
         gpu: &Gpu,
+        options: &EvalOptions,
     ) -> Result<Option<Overlay>, DeliverError> {
         let symbol = match &output.overlay {
             Some(id) => Some(
@@ -65,8 +66,10 @@ impl Overlay {
         s.scene360 = None;
         // the document's captions are in composition time: the layer burns the output's
         s.captions = burns.then(|| m::Captions { loc: Default::default(), caption_tracks: captions.tracks.clone() });
-        let ev = Evaluator::new(&d, &EvalOptions { variant: output.variant.clone(), ..Default::default() })
-            .map_err(DeliverError::Document)?;
+        // Keep caller inputs, but use the symbol/output frame established above rather than
+        // reapplying the composition's layout to this independent layer.
+        let ev =
+            Evaluator::new(&d, &EvalOptions { layout: None, ..options.clone() }).map_err(DeliverError::Document)?;
         let mut renderer = Renderer::new(gpu.clone(), ev.program());
         renderer.burn_captions = output.burn_captions.clone();
         let tex = renderer.texture(size);

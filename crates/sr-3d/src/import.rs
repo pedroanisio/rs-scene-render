@@ -118,6 +118,15 @@ fn ext_v3(m: &serde_json::Map<String, serde_json::Value>, name: &str, d: [f32; 3
 /// Loads glTF 2.0 (`.gltf` with external or embedded buffers, or `.glb`).
 pub fn gltf(path: &Path) -> Result<Model, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    if data.starts_with(b"glTF") {
+        let header = data.get(..12).ok_or("truncated GLB header")?;
+        let length = u32::from_le_bytes(header[8..12].try_into().expect("four header bytes")) as usize;
+        // gltf 1.4 subtracts the header size before checking the declared length, which
+        // panics on short lengths in debug builds. Validate the envelope before parsing.
+        if length < 12 || length != data.len() {
+            return Err(format!("invalid GLB length {length}: file contains {} bytes", data.len()));
+        }
+    }
     let g = gltf::Gltf::from_slice(&data).map_err(|e| e.to_string())?;
     let base = path.parent().unwrap_or(Path::new("."));
     let mut buffers = Vec::new();

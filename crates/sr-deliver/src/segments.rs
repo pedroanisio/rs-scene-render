@@ -246,13 +246,57 @@ impl TimeMap {
         }
     }
 
-    /// The first output time showing composition time `c` in a span played forwards, if any.
+    /// The first output time showing composition time `c`, including reversed or frozen remaps.
     pub fn output_of(&self, c: f64) -> Option<f64> {
+        if !c.is_finite() || !(0.0..=self.project).contains(&c) {
+            return None;
+        }
         self.segments.iter().enumerate().find_map(|(i, seg)| {
-            let (a, s) = self.span(i)?;
-            let u = (c - a) / s;
+            let u = match self.span(i) {
+                Some((a, s)) => (c - a) / s,
+                None => self.remap_time(i, c)?,
+            };
             (u >= -1e-9 && u < seg.duration - 1e-9).then(|| seg.start + u.max(0.0))
         })
+    }
+
+    /// Find crossings in chronological order on a 1 ms grid, splitting at every key and
+    /// sampling even short key intervals. Refine against the actual curve rather than a
+    /// linear approximation, and reject sign changes caused by a jump over the target.
+    fn remap_time(&self, i: usize, c: f64) -> Option<f64> {
+        let duration = self.segments[i].duration;
+        let value = |u| self.composition(i, u) - c;
+        let mut left = 0.0;
+        let mut a = value(left);
+        if a.abs() < 1e-9 {
+            return Some(left);
+        }
+        for end in self.keys(i).iter().copied().filter(|&t| t > 0.0 && t < duration).chain([duration]) {
+            let start = left;
+            let n = ((end - start) * 1000.0).ceil().max(64.0) as usize;
+            for k in 1..=n {
+                let right = start + (end - start) * k as f64 / n as f64;
+                let b = value(right);
+                if b == 0.0 || a.is_sign_positive() != b.is_sign_positive() {
+                    let (mut lo, mut hi) = (left, right);
+                    for _ in 0..50 {
+                        let mid = (lo + hi) * 0.5;
+                        let v = value(mid);
+                        if v == 0.0 || v.is_sign_positive() != a.is_sign_positive() {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    if hi < duration - 1e-9 && value(hi).abs() < 1e-9 {
+                        return Some(hi);
+                    }
+                }
+                left = right;
+                a = b;
+            }
+        }
+        None
     }
 
     /// The segment holding output time `t` (intervals are half-open; the end belongs to the last).
@@ -339,6 +383,44 @@ mod tests {
         let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
         let out = ev.program().scene.outputs.first().cloned().unwrap();
         (ev, out)
+    }
+
+    #[test]
+    fn markers_find_the_first_time_in_remapped_segments() {
+        for (keys, composition, expected) in [
+            (r#"<key time="0" value="0"/><key time="2" value="3"/>"#, 1.5, Some(1.0)),
+            (r#"<key time="0" value="3"/><key time="2" value="0"/>"#, 1.5, Some(1.0)),
+            (r#"<key time="0" value="0" interpolation="quad-in"/><key time="2" value="3"/>"#, 0.75, Some(1.0)),
+            (r#"<key time="0" value="1"/><key time="2" value="1"/>"#, 1.0, Some(0.0)),
+            (r#"<key time="0" value="0"/><key time="1" value="2"/><key time="2" value="0"/>"#, 1.0, Some(0.5)),
+            (
+                r#"<key time="0" value="0" interpolation="hold"/><key time="1" value="2"/><key time="2" value="2"/>"#,
+                1.0,
+                None,
+            ),
+            (
+                r#"<key time="0" value="0" interpolation="hold"/><key time="1" value="2"/><key time="2" value="2"/>"#,
+                2.0,
+                Some(1.0),
+            ),
+            (r#"<key time="0" value="0"/><key time="2" value="3"/>"#, 3.0, None),
+        ] {
+            let (ev, o) = program(&format!(
+                r#"<output path="a.mp4" codec="h264"><segment><timeRemap>{keys}</timeRemap></segment></output>"#
+            ));
+            let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+            let got = tm.output_of(composition);
+            match (got, expected) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-7, "{keys}: {a} != {b}"),
+                (None, None) => {}
+                _ => panic!("{keys}: {got:?} != {expected:?}"),
+            }
+        }
+        let (ev, o) = program(
+            r#"<output path="a.mp4" codec="h264"><segment from="2" to="3"/><segment><timeRemap><key time="0" value="0"/><key time="1" value="2"/></timeRemap></segment><segment from="0" to="2"/></output>"#,
+        );
+        let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
+        assert!((tm.output_of(1.0).unwrap() - 1.5).abs() < 1e-7);
     }
 
     #[test]

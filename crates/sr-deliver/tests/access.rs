@@ -2,6 +2,13 @@
 
 use sr_deliver::access::{FlashDetector, COLS, ROWS};
 
+// As in the segment tests, share one device: concurrent device creation can crash
+// the software Vulkan driver. Each test still owns its renderers and outputs.
+fn gpu() -> Option<sr_gpu::Gpu> {
+    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
+    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
+}
+
 fn frame(v: [f64; 3], cells: Option<usize>) -> Vec<[f64; 3]> {
     (0..COLS * ROWS).map(|k| if cells.map(|n| k < n).unwrap_or(true) { v } else { [0.0; 3] }).collect()
 }
@@ -44,7 +51,9 @@ fn fixtures() -> Option<std::path::PathBuf> {
         eprintln!("skipping: FFmpeg missing");
         return None;
     }
-    let d = std::env::temp_dir().join(format!("sr-access-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("sr-access-{}-{id}", std::process::id()));
     std::fs::create_dir_all(d.join("out")).unwrap();
     Some(d)
 }
@@ -68,15 +77,46 @@ fn flicker() -> String {
 }
 
 fn deliver(d: &sr_model::Document) -> Result<sr_deliver::pipeline::Report, sr_deliver::DeliverError> {
-    let gpu = sr_gpu::Gpu::new().ok();
+    let gpu = gpu();
     let opts = sr_deliver::Options { hardware: sr_media::encode::Hardware::Software, ..Default::default() };
     sr_deliver::deliver(d, &d.scene.outputs[0], gpu.as_ref(), &opts, &mut |_, _| {})
 }
 
 #[test]
+fn segment_flash_checks_use_output_time() {
+    let Some(dir) = fixtures() else { return };
+    if gpu().is_none() {
+        return;
+    }
+    for (name, speed, step, should_fail) in [("fast", 4.0, 0.2, true), ("slow", 0.5, 0.1, false)] {
+        let keys: String = (0..=(2.0 / step) as usize)
+            .map(|k| format!(r#"<key time="{}" value="{}" interpolation="hold"/>"#, k as f64 * step, k % 2))
+            .collect();
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="64" fps="25" duration="2" background="#000000"/>
+          <metadata><accessibility flashCheck="error"/></metadata>
+          <output path="out/{name}.mp4" codec="h264" preset="ultrafast" audio="false"><segment from="0" to="2" speed="{speed}"/></output>
+          <composition><shape id="flash" shape="rect" width="64" height="64" fill="#FFFFFF"><animate property="opacity">{keys}</animate></shape></composition></scene>"##
+        );
+        let path = dir.join(format!("{name}.scene.xml"));
+        std::fs::write(&path, xml).unwrap();
+        let d = sr_model::load_file(path, &Default::default()).unwrap();
+        let result = deliver(&d);
+        if should_fail {
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("flashCheck")),
+                "{name}: {result:?}"
+            );
+        } else {
+            assert!(result.unwrap().accessibility.is_empty(), "slowing 5 Hz to 2.5 Hz must pass");
+        }
+    }
+}
+
+#[test]
 fn delivery_runs_the_checks() {
     let Some(dir) = fixtures() else { return };
-    if sr_gpu::Gpu::new().is_err() {
+    if gpu().is_none() {
         return;
     }
     // flashing fails with flashCheck="error" and is reported with "warn"
@@ -118,7 +158,7 @@ fn flash_check_needs_an_accessibility_element() {
     // as the XSD says: attribute defaults apply to a
     // declared <accessibility>; without one nothing is checked
     let Some(dir) = fixtures() else { return };
-    if sr_gpu::Gpu::new().is_err() {
+    if gpu().is_none() {
         return;
     }
     let r = deliver(&doc(&dir, "", &flicker())).unwrap();
@@ -130,7 +170,7 @@ fn flash_check_needs_an_accessibility_element() {
 #[test]
 fn contrast_is_measured_inside_isolated_groups() {
     let Some(dir) = fixtures() else { return };
-    if sr_gpu::Gpu::new().is_err() {
+    if gpu().is_none() {
         return;
     }
     // text drawn into an offscreen (isolated group) is measured against what the viewer sees:
@@ -158,7 +198,7 @@ fn contrast_is_measured_inside_isolated_groups() {
 #[test]
 fn text_fading_in_is_judged_at_rest() {
     let Some(dir) = fixtures() else { return };
-    if sr_gpu::Gpu::new().is_err() {
+    if gpu().is_none() {
         return;
     }
     // A label fading in passes through every ratio down to 1:1 on its way to rest; the check judges

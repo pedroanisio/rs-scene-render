@@ -376,11 +376,12 @@ impl Video<'_> {
                 };
                 let t1 = Instant::now();
                 let ft = self.segments.as_ref().map(|(_, frames)| frames[k]);
+                let out_t = ft.map_or(t - self.origin, |f| f.output);
                 let frame = self.render_side(&g, t, ft.as_ref())?;
                 unsupported.extend(frame.stats.unsupported.iter().cloned());
                 if let Some(det) = flash.as_mut() {
                     let cells = self.renderer.flash_grid(&frame.texture);
-                    det.push(t, &cells);
+                    det.push(out_t, &cells);
                 }
                 for id in &frame.stats.contrast_unprobed {
                     unprobed.entry(id.clone()).or_default().push((k, opacity_of(&g, id)));
@@ -391,7 +392,6 @@ impl Video<'_> {
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
                 let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
-                let out_t = ft.map_or(t - self.origin, |f| f.output);
                 let over = match self.overlay.as_mut() {
                     Some(o) => {
                         let (tex, problems) = o.draw(&mut self.stage, out_t)?;
@@ -576,9 +576,13 @@ pub fn deliver(
     if takes_audio && scene_audio.is_none() && own_tracks {
         scene_audio = Some(audio::silent(p, fps));
     }
-    // without segments, the output's own tracks play in output time from output/@start
-    let plain = match (&segments, own_tracks) {
-        (None, true) => Some(crate::segment_audio::output_map(p, output)?),
+    // Selection also needs an output programme without segments or output-owned tracks.
+    // Own tracks retain their output/@start origin; a selection alone follows the
+    // effective render range, including command-line overrides.
+    let selects_audio = output.audio_tracks.is_some() || output.audio_roles.is_some() || output.audio_buses.is_some();
+    let plain = match (&segments, own_tracks, selects_audio) {
+        (None, true, _) => Some(crate::segment_audio::output_map(p, output)?),
+        (None, false, true) => Some(crate::segments::TimeMap::span_of(p, start, end).map_err(DeliverError::Invalid)?),
         _ => None,
     };
     let programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
@@ -593,8 +597,9 @@ pub fn deliver(
     let wants_audio = takes_audio && scene_audio.is_some() && (segments.is_none() || programme.is_some());
     let mut audio_file = None;
     if let (true, Some(sa)) = (wants_audio, &scene_audio) {
-        // the output's own programme starts at output/@start, the scene's master at 0
-        let origin = if plain.is_some() { output.start } else { 0.0 };
+        // Plain programmes start at their mapped composition time; the scene and
+        // explicitly segmented programmes start at zero on their respective clocks.
+        let origin = plain.as_ref().map_or(0.0, |tm| tm.composition(0, 0.0));
         let master = programme.as_ref().unwrap_or(&sa.mixed.master);
         let part = audio::slice(master, sa.mix.rate, start - origin, end - origin);
         let weights = sa.mix.layout.loudness_weights();
@@ -708,7 +713,7 @@ pub fn deliver(
             fps,
             reframe: p.reframe,
             segments: segments.as_ref().zip(frame_times),
-            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu)?,
+            overlay: crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu, &eo)?,
             origin: if segments.is_some() { 0.0 } else { output.start },
             join_tex: None,
         };
@@ -817,7 +822,8 @@ pub fn deliver(
                             renderer.audio = audio.clone();
                             renderer.captions_off = map.is_some();
                             let stage = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
-                            let overlay = crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu)?;
+                            let overlay =
+                                crate::overlay::Overlay::new(doc, output, timeline, size, &captions, &gpu, &eo)?;
                             let mut worker = Video {
                                 ev: &ev,
                                 renderer,

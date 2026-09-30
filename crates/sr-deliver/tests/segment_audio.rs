@@ -21,6 +21,15 @@ fn fixtures(name: &str) -> PathBuf {
 
 /// Delivers the document's audio-only output and returns its left channel and the report.
 fn deliver(dir: &Path, output: &str, mix: &str) -> (Vec<f32>, sr_deliver::pipeline::Report) {
+    deliver_with_options(dir, output, mix, &Default::default())
+}
+
+fn deliver_with_options(
+    dir: &Path,
+    output: &str,
+    mix: &str,
+    opts: &sr_deliver::Options,
+) -> (Vec<f32>, sr_deliver::pipeline::Report) {
     let xml = format!(
         r##"<scene version="1.2"><project width="64" height="36" fps="25" duration="4" background="#000000"/>
           {output}
@@ -31,8 +40,7 @@ fn deliver(dir: &Path, output: &str, mix: &str) -> (Vec<f32>, sr_deliver::pipeli
     let path = dir.join("scene.xml");
     std::fs::write(&path, xml).unwrap();
     let d = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
-    let r = sr_deliver::deliver(&d, &d.scene.outputs[0], None, &Default::default(), &mut |_, _| {})
-        .unwrap_or_else(|e| panic!("{e}"));
+    let r = sr_deliver::deliver(&d, &d.scene.outputs[0], None, opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{e}"));
     let a = sr_media::decode_audio(&r.path, 0, RATE).unwrap();
     let ch = a.channels as usize;
     (a.samples.chunks(ch).map(|f| f[0]).collect(), r)
@@ -97,6 +105,41 @@ fn outputs_select_their_sources() {
         let f = frequency(&x, 0.1, 0.9);
         assert!((f - want).abs() < 1.0, "{attr}: {f} Hz");
     }
+}
+
+#[test]
+fn selected_audio_honours_command_line_range_overrides() {
+    let d = fixtures("select-range");
+    let opts = sr_deliver::Options { start: Some(0.0), end: Some(3.0), ..Default::default() };
+    let (x, _) = deliver_with_options(
+        &d,
+        r#"<output path="range.wav" codec="audio-only" start="1" end="2" audioTracks="music"/>"#,
+        r#"<audioTrack id="music" asset="a440"/>"#,
+        &opts,
+    );
+    assert_eq!(x.len(), 3 * RATE as usize);
+    for t in [0.1, 1.1, 2.1] {
+        assert!((frequency(&x, t, t + 0.5) - 440.0).abs() < 1.0);
+    }
+}
+
+#[test]
+fn outputs_select_sources_without_segments() {
+    let d = fixtures("select-plain");
+    let mix = r#"<audioTrack id="music" asset="a440" role="music" bus="fx"/>
+                 <audioTrack id="voice" asset="a1000" role="dialogue"/>
+                 <bus id="fx"/>"#;
+    for (attr, want) in
+        [(r#"audioRoles="dialogue""#, 1000.0), (r#"audioTracks="music""#, 440.0), (r#"audioBuses="fx""#, 440.0)]
+    {
+        let (x, _) =
+            deliver(&d, &format!(r#"<output path="sel.wav" codec="audio-only" start="1" end="2" {attr}/>"#), mix);
+        assert_eq!(x.len(), RATE as usize);
+        let f = frequency(&x, 0.1, 0.9);
+        assert!((f - want).abs() < 1.0, "{attr}: {f} Hz");
+    }
+    let (x, _) = deliver(&d, r#"<output path="silent.wav" codec="audio-only" audioRoles="effects"/>"#, mix);
+    assert!(rms(&x, 0.1, 0.9) < 1e-6, "selecting no sources produces silence");
 }
 
 #[test]

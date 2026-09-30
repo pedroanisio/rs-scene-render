@@ -30,6 +30,29 @@ fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
 }
 
 #[test]
+fn malformed_glb_headers_return_errors() {
+    for length in [0u32, 1, 11, 12, 23, 25, u32::MAX] {
+        let mut bytes = b"glTF\x02\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.resize(24, 0);
+        let path = tmp(&format!("bad-header-{length}.glb"), &bytes);
+        assert!(import::load(&path, None).is_err(), "invalid length {length}");
+    }
+    for len in 0..12 {
+        let path = tmp(&format!("short-header-{len}.glb"), &b"glTF\x02\0\0\0\x0c\0\0\0"[..len]);
+        assert!(import::load(&path, None).is_err(), "truncated header of {len} bytes");
+    }
+}
+
+#[test]
+fn corpus_glb_contains_collision_geometry() {
+    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/corpus/media/robot.glb"));
+    let Asset::Model(model) = import::load(path, None).unwrap() else { panic!("model") };
+    assert!(!model.nodes.is_empty());
+    assert!(model.primitives.iter().any(|p| !p.vertices.is_empty() && p.indices.len() >= 3));
+}
+
+#[test]
 fn primitives_are_closed_and_face_outward() {
     let pi = std::f32::consts::PI;
     let s = prim::sphere(50.0, 64);
