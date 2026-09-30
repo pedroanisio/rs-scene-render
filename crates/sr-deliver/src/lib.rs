@@ -11,6 +11,7 @@ pub mod audio;
 pub mod destinations;
 pub mod overlay;
 pub mod pipeline;
+pub mod segment_audio;
 pub mod segments;
 
 pub use pipeline::{adhoc_output, deliver, Options, Parallel, Report};

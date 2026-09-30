@@ -134,6 +134,151 @@ fn duck(under: &Option<Vec<String>>, amount: f64, threshold: f64, attack: f64, r
     under.as_ref().filter(|u| !u.is_empty()).map(|u| Duck { under: u.clone(), amount, threshold, attack, release })
 }
 
+/// Decoded sources at the mix rate, each decoded once however many tracks play it.
+pub(crate) struct Sources {
+    rate: u32,
+    cache: HashMap<(PathBuf, u64), Arc<Source>>,
+}
+
+impl Sources {
+    pub(crate) fn new(rate: u32) -> Sources {
+        Sources { rate, cache: HashMap::new() }
+    }
+
+    pub(crate) fn load(&mut self, path: PathBuf, stream: u64) -> Result<Arc<Source>, DeliverError> {
+        if let Some(s) = self.cache.get(&(path.clone(), stream)) {
+            return Ok(s.clone());
+        }
+        let a = sr_media::decode_audio(&path, stream as usize, self.rate)?;
+        let s = Arc::new(Source::from_interleaved(
+            &a.samples,
+            a.channels as usize,
+            Layout::for_channels(a.channels as u32, &a.layout),
+        ));
+        self.cache.insert((path, stream), s.clone());
+        Ok(s)
+    }
+}
+
+/// Automation of a node's property: its key, the property and the static value.
+pub(crate) type CurveOf<'a> = dyn Fn(&str, &'static str, f64) -> Curve + 'a;
+
+/// The mix node of `<audioTrack>` `t`, starting at `start` on a timeline of `duration` seconds.
+pub(crate) fn track_node(
+    p: &Program,
+    t: &m::AudioTrack,
+    start: f64,
+    duration: f64,
+    representation: Option<&str>,
+    curve: &CurveOf,
+    sources: &mut Sources,
+) -> Result<Node, DeliverError> {
+    let (asset, doc) = find_asset(p, &t.asset)
+        .ok_or_else(|| DeliverError::Invalid(format!("audio track {}: unknown asset {}", t.id, t.asset)))?;
+    let path = source_path(p, asset, doc, representation).ok_or_else(|| {
+        DeliverError::Invalid(format!("audio track {}: asset {} is not a local audio or video file", t.id, t.asset))
+    })?;
+    let stream = match asset {
+        AssetsChild::Video(v) => v.audio_stream,
+        _ => 0,
+    };
+    let bpm = match asset {
+        AssetsChild::Audio(a) => a.bpm.map(|b| b.get()),
+        _ => None,
+    };
+    let fit = if t.fit_to_duration {
+        Some((
+            bpm.ok_or_else(|| {
+                DeliverError::Invalid(format!("audio track {}: fitToDuration needs @bpm on asset {}", t.id, t.asset))
+            })?,
+            duration,
+        ))
+    } else {
+        None
+    };
+    Ok(Node {
+        id: t.id.clone(),
+        kind: NodeKind::Track {
+            source: sources.load(path, stream)?,
+            placement: Placement::Timeline {
+                start,
+                clip_in: t.clip_in.get(),
+                clip_out: t.clip_out.map(|c| c.get()),
+                loops: t.r#loop as u32,
+                speed: t.speed,
+                reverse: t.reverse,
+                preserve_pitch: t.preserve_pitch,
+                fit,
+            },
+            fade_in: t.fade_in.get(),
+            fade_out: t.fade_out.get(),
+            fade_curve: FadeCurve::parse(t.fade_curve.as_str()),
+        },
+        volume: curve(&t.id, "volume", t.volume.get()),
+        gain: curve(&t.id, "gain", t.gain.get()),
+        pan: curve(&t.id, "pan", t.pan),
+        mute: t.mute,
+        output: t.bus.clone(),
+        duck: duck(
+            &t.duck_under,
+            t.duck_amount.get(),
+            t.duck_threshold.get(),
+            t.duck_attack.get(),
+            t.duck_release.get(),
+        ),
+        effects: t
+            .children
+            .iter()
+            .filter_map(|c| if let m::AudioTrackChild::AudioEffect(e) = c { effect_of(e) } else { None })
+            .collect(),
+    })
+}
+
+/// The mix node of `<bus>` `b`.
+pub(crate) fn bus_node(b: &m::Bus, curve: &CurveOf) -> Node {
+    Node {
+        id: b.id.clone(),
+        kind: NodeKind::Bus,
+        volume: curve(&b.id, "volume", b.volume.get()),
+        gain: curve(&b.id, "gain", b.gain.get()),
+        pan: curve(&b.id, "pan", b.pan),
+        mute: b.mute,
+        output: b.output.clone(),
+        duck: duck(
+            &b.duck_under,
+            b.duck_amount.get(),
+            b.duck_threshold.get(),
+            b.duck_attack.get(),
+            b.duck_release.get(),
+        ),
+        effects: b
+            .children
+            .iter()
+            .filter_map(|c| if let m::BusChild::AudioEffect(e) = c { effect_of(e) } else { None })
+            .collect(),
+    }
+}
+
+/// The master bus of `<master>` `ms`.
+pub(crate) fn master_of(ms: &m::Master, curve: &CurveOf) -> Master {
+    Master {
+        volume: curve(MASTER_KEY, "volume", ms.volume.get()),
+        normalize: match ms.normalize.as_str() {
+            "integrated" => Normalize::Integrated,
+            "dynamic" => Normalize::Dynamic,
+            _ => Normalize::None,
+        },
+        loudness: ms.loudness.get(),
+        true_peak: ms.true_peak.get(),
+        limiter: ms.limiter,
+        effects: ms
+            .children
+            .iter()
+            .filter_map(|c| if let m::MasterChild::AudioEffect(e) = c { effect_of(e) } else { None })
+            .collect(),
+    }
+}
+
 /// Samples of animated properties per control frame.
 struct Automation {
     props: HashMap<String, HashMap<&'static str, Vec<f64>>>,
@@ -223,137 +368,20 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
             }
         }
     }
-    // decoded sources
-    let mut sources: HashMap<(PathBuf, u64), Arc<Source>> = HashMap::new();
-    let mut load = |path: PathBuf, stream: u64| -> Result<Arc<Source>, DeliverError> {
-        if let Some(s) = sources.get(&(path.clone(), stream)) {
-            return Ok(s.clone());
-        }
-        let a = sr_media::decode_audio(&path, stream as usize, rate)?;
-        let s = Arc::new(Source::from_interleaved(
-            &a.samples,
-            a.channels as usize,
-            Layout::for_channels(a.channels as u32, &a.layout),
-        ));
-        sources.insert((path, stream), s.clone());
-        Ok(s)
-    };
+    let mut sources = Sources::new(rate);
+    let curve = |key: &str, prop: &'static str, fallback: f64| auto.curve(key, prop, fallback);
     let mut nodes = Vec::new();
     let mut master = Master::default();
     if let Some(am) = am {
         for c in &am.children {
             match c {
                 m::AudioMixChild::AudioTrack(t) => {
-                    let (asset, doc) = find_asset(p, &t.asset).ok_or_else(|| {
-                        DeliverError::Invalid(format!("audio track {}: unknown asset {}", t.id, t.asset))
-                    })?;
-                    let path = source_path(p, asset, doc, representation).ok_or_else(|| {
-                        DeliverError::Invalid(format!(
-                            "audio track {}: asset {} is not a local audio or video file",
-                            t.id, t.asset
-                        ))
-                    })?;
-                    let stream = match asset {
-                        AssetsChild::Video(v) => v.audio_stream,
-                        _ => 0,
-                    };
-                    let bpm = match asset {
-                        AssetsChild::Audio(a) => a.bpm.map(|b| b.get()),
-                        _ => None,
-                    };
                     let start = t.start.get()
                         + t.start_marker.as_deref().and_then(|mk| sr_eval::eval::marker(p, mk)).unwrap_or(0.0);
-                    let fit = if t.fit_to_duration {
-                        Some((
-                            bpm.ok_or_else(|| {
-                                DeliverError::Invalid(format!(
-                                    "audio track {}: fitToDuration needs @bpm on asset {}",
-                                    t.id, t.asset
-                                ))
-                            })?,
-                            p.duration,
-                        ))
-                    } else {
-                        None
-                    };
-                    nodes.push(Node {
-                        id: t.id.clone(),
-                        kind: NodeKind::Track {
-                            source: load(path, stream)?,
-                            placement: Placement::Timeline {
-                                start,
-                                clip_in: t.clip_in.get(),
-                                clip_out: t.clip_out.map(|c| c.get()),
-                                loops: t.r#loop as u32,
-                                speed: t.speed,
-                                reverse: t.reverse,
-                                preserve_pitch: t.preserve_pitch,
-                                fit,
-                            },
-                            fade_in: t.fade_in.get(),
-                            fade_out: t.fade_out.get(),
-                            fade_curve: FadeCurve::parse(t.fade_curve.as_str()),
-                        },
-                        volume: auto.curve(&t.id, "volume", t.volume.get()),
-                        gain: auto.curve(&t.id, "gain", t.gain.get()),
-                        pan: auto.curve(&t.id, "pan", t.pan),
-                        mute: t.mute,
-                        output: t.bus.clone(),
-                        duck: duck(
-                            &t.duck_under,
-                            t.duck_amount.get(),
-                            t.duck_threshold.get(),
-                            t.duck_attack.get(),
-                            t.duck_release.get(),
-                        ),
-                        effects: t
-                            .children
-                            .iter()
-                            .filter_map(
-                                |c| if let m::AudioTrackChild::AudioEffect(e) = c { effect_of(e) } else { None },
-                            )
-                            .collect(),
-                    });
+                    nodes.push(track_node(p, t, start, p.duration, representation, &curve, &mut sources)?);
                 }
-                m::AudioMixChild::Bus(b) => nodes.push(Node {
-                    id: b.id.clone(),
-                    kind: NodeKind::Bus,
-                    volume: auto.curve(&b.id, "volume", b.volume.get()),
-                    gain: auto.curve(&b.id, "gain", b.gain.get()),
-                    pan: auto.curve(&b.id, "pan", b.pan),
-                    mute: b.mute,
-                    output: b.output.clone(),
-                    duck: duck(
-                        &b.duck_under,
-                        b.duck_amount.get(),
-                        b.duck_threshold.get(),
-                        b.duck_attack.get(),
-                        b.duck_release.get(),
-                    ),
-                    effects: b
-                        .children
-                        .iter()
-                        .filter_map(|c| if let m::BusChild::AudioEffect(e) = c { effect_of(e) } else { None })
-                        .collect(),
-                }),
-                m::AudioMixChild::Master(ms) => {
-                    master = Master {
-                        volume: auto.curve(MASTER_KEY, "volume", ms.volume.get()),
-                        normalize: match ms.normalize.as_str() {
-                            "integrated" => Normalize::Integrated,
-                            "dynamic" => Normalize::Dynamic,
-                            _ => Normalize::None,
-                        },
-                        loudness: ms.loudness.get(),
-                        true_peak: ms.true_peak.get(),
-                        limiter: ms.limiter,
-                        effects: ms
-                            .children
-                            .iter()
-                            .filter_map(|c| if let m::MasterChild::AudioEffect(e) = c { effect_of(e) } else { None })
-                            .collect(),
-                    };
-                }
+                m::AudioMixChild::Bus(b) => nodes.push(bus_node(b, &curve)),
+                m::AudioMixChild::Master(ms) => master = master_of(ms, &curve),
             }
         }
     }
@@ -370,7 +398,7 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
         nodes.push(Node {
             id,
             kind: NodeKind::Track {
-                source: load(path, *stream)?,
+                source: sources.load(path, *stream)?,
                 placement: Placement::Mapped(times),
                 fade_in: 0.0,
                 fade_out: 0.0,
@@ -419,6 +447,29 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
         })
         .unwrap_or(true);
     Ok(Some(SceneAudio { mix, mixed, bits, dither, analysis }))
+}
+
+/// A scene without audio of its own, for an output whose own tracks are all its audio: 48 kHz stereo,
+/// 24-bit with dither, and no sources.
+pub fn silent(p: &Program, fps: f64) -> SceneAudio {
+    let mix = Mix {
+        rate: 48000,
+        layout: Layout::Stereo,
+        duration: p.duration,
+        control_fps: fps,
+        nodes: Vec::new(),
+        master: Master::default(),
+    };
+    let mixed = Mixed {
+        master: vec![Vec::new(); 2],
+        nodes: HashMap::new(),
+        extents: HashMap::new(),
+        master_extent: Extent::EMPTY,
+        loudness_before: f64::NEG_INFINITY,
+        loudness: f64::NEG_INFINITY,
+        true_peak: f64::NEG_INFINITY,
+    };
+    SceneAudio { mix, mixed, bits: 24, dither: true, analysis: Analysis { fps, ..Default::default() } }
 }
 
 /// The master between `start` and `end` seconds.

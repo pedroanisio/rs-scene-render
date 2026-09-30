@@ -543,14 +543,26 @@ pub fn deliver(
     let tmp =
         std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
     std::fs::create_dir_all(&tmp)?;
-    let wants_audio =
-        output.audio && scene_audio.is_some() && (codec.takes_audio() || codec.is_audio_only()) && segments.is_none();
-    if segments.is_some() && output.audio && scene_audio.is_some() {
-        report.unsupported.push("audio of an output with segments is not rendered yet".into());
+    // with segments the programme is the output's own mix in output time (its own tracks may be its
+    // only audio)
+    let takes_audio = output.audio && (codec.takes_audio() || codec.is_audio_only());
+    let own_tracks = output.children.iter().any(|c| matches!(c, m::OutputChild::AudioTrack(_)));
+    if segments.is_some() && takes_audio && scene_audio.is_none() && own_tracks {
+        scene_audio = Some(audio::silent(p, fps));
     }
+    let programme = match (&segments, &scene_audio) {
+        (Some(tm), Some(sa)) if takes_audio => {
+            let t = Instant::now();
+            let a = crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref())?;
+            report.audio_seconds += t.elapsed().as_secs_f64();
+            Some(a.master)
+        }
+        _ => None,
+    };
+    let wants_audio = takes_audio && scene_audio.is_some() && (segments.is_none() || programme.is_some());
     let mut audio_file = None;
     if let (true, Some(sa)) = (wants_audio, &scene_audio) {
-        let part = audio::slice(&sa.mixed.master, sa.mix.rate, start, end);
+        let part = audio::slice(programme.as_ref().unwrap_or(&sa.mixed.master), sa.mix.rate, start, end);
         let weights = sa.mix.layout.loudness_weights();
         // integrated loudness needs at least one 400 ms gating block
         let l = sr_audio::loudness::integrated(&part, sa.mix.rate as f64, &weights);

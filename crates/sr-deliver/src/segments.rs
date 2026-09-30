@@ -20,8 +20,8 @@ use sr_model::model as m;
 enum Map {
     /// a + s·u.
     Span { a: f64, s: f64 },
-    /// A `timeRemap` curve of local time, extended linearly past its end keys.
-    Remap(Box<Channel>),
+    /// A `timeRemap` curve of local time, extended linearly past its end keys, and its key times.
+    Remap(Box<Channel>, Vec<f64>),
 }
 
 /// An animated or fixed coordinate of the reframing focus.
@@ -129,7 +129,9 @@ impl TimeMap {
                 Some(r) => {
                     let ch = channel(&r.keys, r.default_interpolation, p).map_err(|er| format!("{label}: {er}"))?;
                     let end = r.keys.iter().map(|k| k.time).fold(0.0f64, f64::max);
-                    (Map::Remap(Box::new(ch)), end)
+                    let mut keys: Vec<f64> = r.keys.iter().map(|k| k.time).collect();
+                    keys.sort_by(f64::total_cmp);
+                    (Map::Remap(Box::new(ch), keys), end)
                 }
                 None => {
                     let a = match (&e.from, &e.from_marker) {
@@ -194,11 +196,41 @@ impl TimeMap {
 
     /// Composition time of segment `i` at local time `u`, extended past the segment's ends and clamped.
     pub fn composition(&self, i: usize, u: f64) -> f64 {
-        let c = match &self.segments[i].map {
+        self.unclamped(i, u).clamp(0.0, self.project)
+    }
+
+    /// Composition time of segment `i` at local time `u`, extended past the segment's ends but not
+    /// clamped: audio past the project's ends is silence, where the picture holds its end frame.
+    pub fn unclamped(&self, i: usize, u: f64) -> f64 {
+        match &self.segments[i].map {
             Map::Span { a, s } => a + s * u,
-            Map::Remap(ch) => ch.eval(u).as_num().unwrap_or(0.0),
-        };
-        c.clamp(0.0, self.project)
+            Map::Remap(ch, _) => ch.eval(u).as_num().unwrap_or(0.0),
+        }
+    }
+
+    /// The start and speed of segment `i` when it plays a span (`None` for a remap).
+    pub fn span(&self, i: usize) -> Option<(f64, f64)> {
+        match self.segments[i].map {
+            Map::Span { a, s } => Some((a, s)),
+            Map::Remap(..) => None,
+        }
+    }
+
+    /// The key times of segment `i`'s remap, in local time (none for a span).
+    pub fn keys(&self, i: usize) -> &[f64] {
+        match &self.segments[i].map {
+            Map::Remap(_, k) => k,
+            Map::Span { .. } => &[],
+        }
+    }
+
+    /// The first output time showing composition time `c` in a span played forwards, if any.
+    pub fn output_of(&self, c: f64) -> Option<f64> {
+        self.segments.iter().enumerate().find_map(|(i, seg)| {
+            let (a, s) = self.span(i)?;
+            let u = (c - a) / s;
+            (u >= -1e-9 && u < seg.duration - 1e-9).then(|| seg.start + u.max(0.0))
+        })
     }
 
     /// The segment holding output time `t` (intervals are half-open; the end belongs to the last).

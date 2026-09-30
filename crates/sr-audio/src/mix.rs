@@ -57,7 +57,8 @@ pub enum Curve {
 }
 
 impl Curve {
-    fn at(&self, t: f64, fps: f64) -> f64 {
+    /// The value at `t` seconds, for values at `fps` per second.
+    pub fn at(&self, t: f64, fps: f64) -> f64 {
         match self {
             Curve::Const(v) => *v,
             Curve::Frames(v) if v.is_empty() => 0.0,
