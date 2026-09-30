@@ -128,9 +128,8 @@ impl TimeMap {
             let (map, duration) = match remap {
                 Some(r) => {
                     let ch = channel(&r.keys, r.default_interpolation, p).map_err(|er| format!("{label}: {er}"))?;
-                    let end = r.keys.iter().map(|k| k.time).fold(0.0f64, f64::max);
-                    let mut keys: Vec<f64> = r.keys.iter().map(|k| k.time).collect();
-                    keys.sort_by(f64::total_cmp);
+                    let end = ch.span().1;
+                    let keys = ch.key_times().collect();
                     (Map::Remap(Box::new(ch), keys), end)
                 }
                 None => {
@@ -389,6 +388,21 @@ mod tests {
         let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
         let out = ev.program().scene.outputs.first().cloned().unwrap();
         (ev, out)
+    }
+
+    #[test]
+    fn remap_duration_and_boundaries_use_resolved_key_times() {
+        let (ev, output) = program(
+            r#"<output path="a.mp4" codec="h264"><segment><timeRemap>
+              <key time="0" value="0"/><key time="0.5" marker="m1" value="1"/>
+              <key time="1" marker="m1" value="2"/>
+              </timeRemap></segment></output>"#,
+        );
+        let tm = TimeMap::of(ev.program(), &output).unwrap().unwrap();
+        assert_eq!(tm.duration, 2.0);
+        assert_eq!(tm.keys(0), &[0.0, 1.5, 2.0]);
+        assert_eq!(tm.frames(10.0).len(), 20);
+        assert!((tm.at(1.75).composition - 1.5).abs() < 1e-9);
     }
 
     #[test]

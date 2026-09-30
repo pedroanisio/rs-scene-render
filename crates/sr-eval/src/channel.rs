@@ -124,6 +124,11 @@ impl Channel {
         (self.keys[0].t, self.keys[self.keys.len() - 1].t)
     }
 
+    /// Key times after marker offsets and roving-key retiming have been resolved.
+    pub fn key_times(&self) -> impl Iterator<Item = f64> + '_ {
+        self.keys.iter().map(|k| k.t)
+    }
+
     /// A numeric value's input time on the branch nearest `near`. Bracket within
     /// individual key spans so jumps and nonmonotonic curves are handled too.
     /// Unreachable values use the nearest sampled value; source-history callers

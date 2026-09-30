@@ -183,7 +183,9 @@ impl Renderer {
     }
 
     /// Contrast of the pixels that changed between `before` (backdrop) and `after` (with text).
-    fn contrast_of(&self, before: &[[f32; 4]], after: &[[f32; 4]]) -> Option<f64> {
+    /// Both arrays must be corresponding pixels in this renderer's premultiplied working space.
+    /// Delivery uses this after placing an overlay over the output's picture.
+    pub fn contrast_of(&self, before: &[[f32; 4]], after: &[[f32; 4]]) -> Option<f64> {
         // Only pixels the text changed can be glyphs. Find them on the stored values first and take the
         // luminance (two transfer-function pows per channel) of those alone: over a full frame the
         // luminance of every pixel cost ~24 million pows per measured text and dominated encodes.

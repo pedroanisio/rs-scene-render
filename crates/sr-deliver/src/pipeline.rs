@@ -324,7 +324,8 @@ impl Video<'_> {
         let p = self.ev.program();
         let working = self.renderer.working();
         let mut pending: Option<(f64, sr_gpu::output::Pending)> = None;
-        let mut unsupported = std::collections::BTreeSet::new();
+        // A worker reuses its report for several chunks; retain earlier findings.
+        let mut unsupported = report.unsupported.iter().cloned().collect::<std::collections::BTreeSet<_>>();
         let acc = p.scene.metadata.as_ref().and_then(|m| {
             m.children.iter().find_map(|c| match c {
                 m::MetadataChild::Accessibility(a) => Some(a.clone()),
@@ -402,6 +403,13 @@ impl Video<'_> {
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
                 let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
+                if contrast_mode != "off" {
+                    if let Some(o) = self.overlay.as_mut() {
+                        for (id, opacity, ratio) in o.contrast(&mut self.stage, out_t, &picture, placement)? {
+                            keep(&mut lowest, &format!("output layer: {id}"), opacity, ratio, out_t);
+                        }
+                    }
+                }
                 let over = match self.overlay.as_mut() {
                     Some(o) => {
                         let (tex, problems) = o.draw(&mut self.stage, out_t)?;
@@ -461,8 +469,6 @@ impl Video<'_> {
             }
         }
         // accessibility verdicts
-        report.accessibility.clear();
-        report.accessibility_error = None;
         let fail = |mode: &str, msg: String, report: &mut Report| {
             if mode == "error" && report.accessibility_error.is_none() {
                 report.accessibility_error = Some(msg.clone());
@@ -476,11 +482,6 @@ impl Video<'_> {
             if *ratio < min_contrast {
                 fail(&contrast_mode, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
             }
-        }
-        if acc.as_ref().is_some_and(|a| a.require_captions)
-            && p.scene.captions.as_ref().map(|c| c.caption_tracks.is_empty()).unwrap_or(true)
-        {
-            fail("error", "requireCaptions: the document has no caption track".into(), report);
         }
         Ok(())
     }
@@ -579,12 +580,23 @@ pub fn deliver(
     if let Some(parent) = report.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp =
-        std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
-    std::fs::create_dir_all(&tmp)?;
     // captions in output time: with segments the composition's are mapped; the output's own tracks
     let captions = crate::captions::output_captions(p, output, segments.as_ref())?;
     report.warnings.extend(captions.warnings.iter().cloned());
+    // Check once for the delivery, before workers start. Composition tracks and
+    // output-owned tracks both satisfy the document's caption requirement.
+    let requires_captions = p.scene.metadata.as_ref().is_some_and(|md| {
+        md.children.iter().any(|c| matches!(c, m::MetadataChild::Accessibility(a) if a.require_captions))
+    });
+    if requires_captions
+        && captions.tracks.is_empty()
+        && p.scene.captions.as_ref().is_none_or(|c| c.caption_tracks.is_empty())
+    {
+        return Err(DeliverError::Accessibility("requireCaptions: the output has no caption track".into()));
+    }
+    let tmp =
+        std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
+    std::fs::create_dir_all(&tmp)?;
     let mut chapters = None;
     if let Some(tm) = &segments {
         report.warnings.extend(empty_ends(&ev, tm));
@@ -937,6 +949,10 @@ pub fn deliver(
                 report.decode_wait_seconds += part.decode_wait_seconds;
                 report.vector_seconds += part.vector_seconds;
                 unsupported.extend(part.unsupported);
+                report.accessibility.extend(part.accessibility);
+                if report.accessibility_error.is_none() {
+                    report.accessibility_error = part.accessibility_error;
+                }
                 if report.encoder.is_empty() {
                     report.encoder = encoder;
                 }

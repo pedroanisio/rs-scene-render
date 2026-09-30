@@ -323,6 +323,35 @@ fn strict_render_fails_on_shader_fallback() {
 }
 
 #[test]
+fn strict_parallel_encode_retains_findings_from_early_chunks() {
+    let dir = render_fixture("parallel-findings");
+    let scene = dir.join("scene.xml");
+    std::fs::write(
+        &scene,
+        r##"<scene version="1.2">
+      <project width="16" height="16" fps="1" duration="60" background="#000000"/>
+      <output path="clip.mkv" codec="ffv1" audio="false"/>
+      <composition><adjustment id="adj" start="0" end="1" effects="fx"/></composition>
+      <effects><effect id="fx" type="echo"/></effects></scene>"##,
+    )
+    .unwrap();
+    for workers in ["1", "2"] {
+        let o =
+            run(&["encode", scene.to_str().unwrap(), "--parallel", workers, "--hw", "software", "--strict", "--json"]);
+        if no_gpu(&o) {
+            return;
+        }
+        assert_eq!(o.status.code(), Some(1), "workers={workers}: {}", String::from_utf8_lossy(&o.stdout));
+        let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert!(report["unsupported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("echo on an adjustment")));
+    }
+}
+
+#[test]
 fn strict_encode_rejects_unresolved_placeholders_and_reports_them() {
     let dir = render_fixture("strict-template");
     let scene = dir.join("r.scene.xml");

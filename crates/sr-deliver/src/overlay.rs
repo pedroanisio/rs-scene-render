@@ -83,6 +83,75 @@ impl Overlay {
         self.ev.warnings()
     }
 
+    /// Measure each visible text layer (and burned captions) with and without it
+    /// in the delivered picture. A transparent overlay has no backdrop of its own;
+    /// probing it in isolation would measure against black instead of the picture.
+    pub fn contrast(
+        &mut self,
+        stage: &mut OutputStage,
+        t: f64,
+        picture: &Tex,
+        placement: Placement,
+    ) -> Result<Vec<(String, f64, f64)>, DeliverError> {
+        let p = self.ev.program();
+        let g = self.ev.evaluate(t.clamp(0.0, p.duration));
+        let mut targets: Vec<_> = g
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.kind == "layer" && n.text.is_some() && n.draw && n.world_opacity > 0.0)
+            .map(|(i, n)| (Some(i), n.id.to_string(), n.world_opacity))
+            .collect();
+        if p.scene.captions.is_some() {
+            targets.push((None, "captions".into(), 1.0));
+        }
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let working = self.renderer.working();
+        let composite = self.renderer.texture(self.tex.size);
+        let ev = &self.ev;
+        let mut pixels = |renderer: &mut Renderer,
+                          hidden: Option<usize>,
+                          captions_off: bool|
+         -> Result<Vec<[f32; 4]>, DeliverError> {
+            let mut graph = g.clone();
+            if let Some(i) = hidden {
+                graph.nodes[i].draw = false;
+            }
+            let mut sub = |st: f64| {
+                let mut graph = ev.evaluate(st.clamp(0.0, p.duration));
+                if let Some(i) = hidden {
+                    // Match by id: temporal samples may have a different set of nodes.
+                    for n in &mut graph.nodes {
+                        if n.id == g.nodes[i].id {
+                            n.draw = false;
+                        }
+                    }
+                }
+                graph
+            };
+            renderer.captions_off = captions_off;
+            let frame = renderer.render_with(&graph, p, Some(&mut sub));
+            renderer.captions_off = false;
+            if let Some(e) = frame.stats.errors.first() {
+                return Err(DeliverError::Render { time: t, message: format!("output layer: {e}") });
+            }
+            stage.place(&frame.texture, &working, &self.tex, Placement::default());
+            stage.place_with_overlay(picture, &working, &composite, placement, Some(&self.tex));
+            Ok(renderer.read(&composite))
+        };
+        let after = pixels(&mut self.renderer, None, false)?;
+        let mut ratios = Vec::new();
+        for (hidden, id, opacity) in targets {
+            let before = pixels(&mut self.renderer, hidden, hidden.is_none())?;
+            if let Some(ratio) = self.renderer.contrast_of(&before, &after) {
+                ratios.push((id, opacity, ratio));
+            }
+        }
+        Ok(ratios)
+    }
+
     /// Renders the layer at output time `t` and fits it to the output's frame; returns the
     /// output-sized texture and what could not be drawn.
     pub fn draw(&mut self, stage: &mut OutputStage, t: f64) -> Result<(&Tex, Vec<String>), DeliverError> {

@@ -244,3 +244,128 @@ fn text_fading_in_is_judged_at_rest() {
         assert!(r.accessibility.is_empty(), "group {group:?}: {:?}", r.accessibility);
     }
 }
+
+fn caption_requirement(
+    workers: u32,
+    output_captions: bool,
+) -> Result<sr_deliver::pipeline::Report, sr_deliver::DeliverError> {
+    let dir = fixtures().unwrap();
+    let track = if output_captions {
+        r#"<captionTrack id="cc" language="en"><cue start="0" end="1" text="Hello world"/></captionTrack>"#
+    } else {
+        ""
+    };
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="2" duration="1" background="#000000"/>
+      <metadata><accessibility requireCaptions="true" flashCheck="off" contrastCheck="off"/></metadata>
+      <output path="out/captions.mkv" codec="ffv1" audio="false">{track}</output><composition/></scene>"##
+    );
+    let path = dir.join("captions.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(path, &Default::default()).unwrap();
+    let opts = sr_deliver::Options {
+        parallel: sr_deliver::Parallel::Count(workers),
+        hardware: sr_media::encode::Hardware::Software,
+        ..Default::default()
+    };
+    sr_deliver::deliver(&doc, &doc.scene.outputs[0], gpu().as_ref(), &opts, &mut |_, _| {})
+}
+
+#[test]
+fn output_caption_tracks_satisfy_the_caption_requirement() {
+    if gpu().is_none() {
+        return;
+    }
+    for workers in [1, 2] {
+        let report = caption_requirement(workers, true).unwrap();
+        assert!(report.accessibility.is_empty());
+        assert_eq!(report.segments, workers);
+    }
+}
+
+#[test]
+fn parallel_delivery_rejects_missing_required_captions() {
+    if gpu().is_none() {
+        return;
+    }
+    for workers in [1, 2] {
+        let result = caption_requirement(workers, false);
+        assert!(
+            matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("requireCaptions")),
+            "workers={workers}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn overlay_contrast_uses_the_delivered_backdrop() {
+    if gpu().is_none() {
+        return;
+    }
+    // Transparent overlays must use the composition's background, including when
+    // text is inside an isolated group or hidden behind an opaque overlay shape.
+    for (color, background, group, covered, fails) in [
+        ("#303030", "#000000", false, false, true),
+        ("#FFFFFF", "#000000", false, false, false),
+        ("#CCCCCC", "#FFFFFF", true, false, true),
+        ("#000000", "#FFFFFF", true, false, false),
+        ("#303030", "#000000", false, true, false),
+    ] {
+        let dir = fixtures().unwrap();
+        let text = r#"<layer id="low" asset="label" x="4" y="8"/>"#;
+        let body = if group { format!(r#"<group id="g" isolate="true">{text}</group>"#) } else { text.into() };
+        let cover =
+            if covered { r##"<shape id="cover" shape="rect" width="64" height="36" fill="#000000"/>"## } else { "" };
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="{background}"/>
+          <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
+          <output path="out/contrast.mkv" codec="ffv1" audio="false" overlay="tag"/>
+          <assets><text id="label" text="AB" width="56" height="28" size="24" color="{color}" font="DejaVu Sans"/></assets>
+          <symbols><symbol id="tag">{body}{cover}</symbol></symbols><composition/></scene>"##
+        );
+        let path = dir.join("contrast.xml");
+        std::fs::write(&path, xml).unwrap();
+        let doc = sr_model::load_file(path, &Default::default()).unwrap();
+        let result = deliver(&doc);
+        if fails {
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("contrastCheck") && m.contains("low")),
+                "{color} on {background}: {result:?}"
+            );
+        } else {
+            assert!(result.unwrap().accessibility.is_empty());
+        }
+    }
+}
+
+#[test]
+fn output_caption_contrast_is_checked_over_the_picture() {
+    if gpu().is_none() {
+        return;
+    }
+    for (color, fails) in [("#303030", true), ("#FFFFFF", false)] {
+        let dir = fixtures().unwrap();
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="#000000"/>
+          <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
+          <styles><textStyle id="caption-style" size="18" color="{color}"/></styles>
+          <output path="out/caption-contrast.mkv" codec="ffv1" audio="false">
+            <captionTrack id="cc" language="en" mode="burn" style="caption-style" x="32" y="2" width="56">
+              <cue start="0" end="0.2" text="AB"/>
+            </captionTrack>
+          </output><composition/></scene>"##
+        );
+        let path = dir.join("caption-contrast.xml");
+        std::fs::write(&path, xml).unwrap();
+        let doc = sr_model::load_file(path, &Default::default()).unwrap();
+        let result = deliver(&doc);
+        if fails {
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("contrastCheck") && m.contains("captions")),
+                "{result:?}"
+            );
+        } else {
+            assert!(result.unwrap().accessibility.is_empty());
+        }
+    }
+}
