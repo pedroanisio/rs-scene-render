@@ -906,7 +906,12 @@ fn render(
         let warm = frames.len().min(2);
         for &f in &frames[..warm] {
             let mut sub = |st: f64| ev.evaluate(st);
-            r.render_with(&graphs(f), ev.program(), Some(&mut sub));
+            let frame = r.render_with(&graphs(f), ev.program(), Some(&mut sub));
+            if let Some(e) = frame.stats.errors.first() {
+                eprintln!("error: frame {f}: {e}");
+                return Ok(ExitCode::from(1));
+            }
+            unsupported.extend(frame.stats.unsupported.iter().cloned());
             r.gpu().wait();
         }
         let mut times = Vec::new();
@@ -920,6 +925,10 @@ fn render(
             let t1 = std::time::Instant::now();
             let mut sub = |st: f64| ev.evaluate(st);
             last = r.render_with(&g, ev.program(), Some(&mut sub)).stats;
+            if let Some(e) = last.errors.first() {
+                eprintln!("error: frame {f}: {e}");
+                return Ok(ExitCode::from(1));
+            }
             submit_ms.push(t1.elapsed().as_secs_f64() * 1e3);
             if pipelined {
                 if let Some(p) = prev.take() {

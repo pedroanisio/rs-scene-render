@@ -101,5 +101,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --workspace --locked
-      - run: cargo test -p sr-model -p sr-eval --lib --locked
+      - run: cargo check --workspace --all-targets --locked
+      - run: cargo test -p sr-model -p sr-eval -p sr-resolve --lib --locked

@@ -33,6 +33,8 @@ pub mod src {
 
 /// Draw flags.
 pub mod flag {
+    /// Accessibility probe: replace RGB with `color.r`, preserving sampled alpha.
+    pub const CONTRAST_INK: u32 = 16;
     pub const MATTE: u32 = 2;
     /// Antialias the edges of `box_rect`.
     pub const EDGE: u32 = 8;

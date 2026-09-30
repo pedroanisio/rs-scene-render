@@ -5,9 +5,12 @@
 //! the frame's own target get their own draw command, preceded by a copy of
 //! the target (the backdrop). After the frame, the pixels the text changed are
 //! its glyphs: their colour in the frame is the text, and their colour in the
-//! snapshot is the background behind it.
+//! snapshot is the background behind it. Equal colours require a coverage probe:
+//! contrasting inks preserve sampled alpha and establish whether text is visible.
 
 use super::*;
+
+pub(super) const CONTRAST_INK: &str = "__sr_contrast_ink";
 
 /// The integer frame-space rectangle (x, y, w, h) covering a node's box, grown by `pad`, clamped to the frame.
 fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, pad: f64) -> Option<[u32; 4]> {
@@ -21,6 +24,57 @@ fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, pad: f64) -> Option<[u32; 4
 }
 
 impl Renderer {
+    /// A counterfactual frame for accessibility measurement. Only the selected text's
+    /// RGB changes; its sampled alpha, transforms, masks and later occluders remain.
+    /// The private property participates in normal cache hashes.
+    pub fn contrast_ink_graph(g: &sr_eval::FrameGraph, id: &str, ink: f64) -> sr_eval::FrameGraph {
+        let mut g = g.clone();
+        if id == "captions" {
+            g.elements.retain(|e| &*e.key != CONTRAST_INK);
+            g.elements.push(sr_eval::eval::ElementState {
+                key: CONTRAST_INK.into(),
+                element: "contrastProbe",
+                props: sr_eval::eval::Props(vec![(CONTRAST_INK.into(), Value::Num(ink))]),
+            });
+        } else if let Some(n) = g.nodes.iter_mut().find(|n| &*n.id == id) {
+            n.props.0.retain(|(k, _)| &**k != CONTRAST_INK);
+            n.props.0.push((CONTRAST_INK.into(), Value::Num(ink)));
+        }
+        g
+    }
+
+    /// Measure the original colours only where two counterfactual inks establish
+    /// visible text coverage. Returns None for fully occluded, transparent or offscreen text.
+    pub fn contrast_of_coverage(
+        &self,
+        before: &[[f32; 4]],
+        after: &[[f32; 4]],
+        dark: &[[f32; 4]],
+        light: &[[f32; 4]],
+    ) -> Option<f64> {
+        let coverage: Vec<f32> = dark
+            .iter()
+            .zip(light)
+            .map(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs())
+            .collect();
+        let top = coverage.iter().copied().fold(0.0f32, f32::max);
+        if top <= 1e-6 {
+            return None;
+        }
+        let (mut foreground, mut background, mut count) = (0.0, 0.0, 0.0);
+        for ((a, b), coverage) in before.iter().zip(after).zip(coverage) {
+            if coverage >= top * 0.5 {
+                background += self.luminance(*a);
+                foreground += self.luminance(*b);
+                count += 1.0;
+            }
+        }
+        if count == 0.0 {
+            return None;
+        }
+        let (a, b) = (foreground / count, background / count);
+        Some((a.max(b) + 0.05) / (a.min(b) + 0.05))
+    }
     fn is_text_layer(&self, ctx: &Ctx, n: &FrameNode) -> bool {
         n.kind == "layer"
             && n.asset
@@ -226,7 +280,8 @@ impl Renderer {
     /// Contrast of one text layer as the viewer sees it, for text the inline probe cannot reach
     /// (inside isolated groups, masks, mattes or effects): renders the frame with and without the
     /// node and measures the pixels it changes — their colour with the node is the text, without
-    /// it the backdrop. `None` when the node is not in the frame or changes nothing.
+    /// it the backdrop. When colours are identical, contrasting probe inks establish
+    /// coverage. `None` when no text coverage reaches the delivered frame.
     pub fn contrast_with_without(
         &mut self,
         g: &sr_eval::FrameGraph,
@@ -234,20 +289,50 @@ impl Renderer {
         node_id: &str,
         sub: &mut dyn FnMut(f64) -> sr_eval::FrameGraph,
     ) -> Option<f64> {
-        let k = g.nodes.iter().position(|n| &*n.id == node_id)?;
+        let k = g.nodes.iter().position(|n| &*n.id == node_id);
+        let captions = node_id == "captions";
+        if !captions && k.is_none() {
+            return None;
+        }
         let probe = std::mem::replace(&mut self.contrast_probe, false);
         // read each frame back before the next render: frame targets may be pooled
         let with = self.render_with(g, p, Some(&mut *sub)).texture;
         let [w, h] = with.size;
         // read back only around the node (its box in frame space, plus room for glows), not the whole frame
-        let r = node_rect(&g.nodes[k], w, h, 48.0).unwrap_or([0, 0, w, h]);
+        let r = k.and_then(|k| node_rect(&g.nodes[k], w, h, 48.0)).unwrap_or([0, 0, w, h]);
         let after = self.read_rect(&with, r);
         let mut hidden = g.clone();
-        hidden.nodes[k].draw = false;
-        let without = self.render_with(&hidden, p, Some(&mut *sub)).texture;
+        if let Some(k) = k {
+            hidden.nodes[k].draw = false;
+        }
+        let previous_captions_off = self.captions_off;
+        self.captions_off |= captions;
+        let without = {
+            let mut hidden_sub = |t| {
+                let mut graph = sub(t);
+                for n in &mut graph.nodes {
+                    if &*n.id == node_id {
+                        n.draw = false;
+                    }
+                }
+                graph
+            };
+            self.render_with(&hidden, p, Some(&mut hidden_sub)).texture
+        };
         let before = self.read_rect(&without, r);
+        self.captions_off = previous_captions_off;
+        let ratio = self.contrast_of(&before, &after).or_else(|| {
+            let mut inks = Vec::new();
+            for ink in [0.0, 1.0] {
+                let graph = Self::contrast_ink_graph(g, node_id, ink);
+                let mut ink_sub = |t| Self::contrast_ink_graph(&sub(t), node_id, ink);
+                let frame = self.render_with(&graph, p, Some(&mut ink_sub));
+                inks.push(self.read_rect(&frame.texture, r));
+            }
+            self.contrast_of_coverage(&before, &after, &inks[0], &inks[1])
+        });
         self.contrast_probe = probe;
-        self.contrast_of(&before, &after)
+        ratio
     }
 
     /// Display-referred linear sRGB of each cell of a 48 × 27 grid over a frame (flash analysis).

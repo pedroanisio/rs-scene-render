@@ -102,16 +102,44 @@ pub(crate) fn tail(s: &str) -> String {
 
 /// Finds an executable on `PATH`.
 pub(crate) fn which(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let extensions = Some(std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into()));
+    #[cfg(not(windows))]
+    let extensions: Option<std::ffi::OsString> = None;
+    which_in(name, std::env::var_os("PATH").as_deref(), extensions.as_deref())
+}
+
+fn which_in(name: &str, paths: Option<&std::ffi::OsStr>, extensions: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let p = Path::new(name);
-    if p.components().count() > 1 {
-        return p.is_file().then(|| p.to_path_buf());
+    let dirs = if p.components().count() > 1 { vec![PathBuf::new()] } else { std::env::split_paths(paths?).collect() };
+    for dir in dirs {
+        let candidate = dir.join(p);
+        if let Some(extensions) = extensions {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            for ext in extensions.to_string_lossy().split(';').map(str::trim).filter(|e| !e.is_empty()) {
+                let mut name = candidate.as_os_str().to_os_string();
+                name.push(ext);
+                let file = PathBuf::from(name);
+                if file.is_file() {
+                    return Some(file);
+                }
+            }
+        } else {
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                candidate.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            };
+            #[cfg(not(unix))]
+            let executable = candidate.is_file();
+            if executable {
+                return Some(candidate);
+            }
+        }
     }
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|d| d.join(name)).find(|c| {
-            use std::os::unix::fs::PermissionsExt;
-            c.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-        })
-    })
+    None
 }
 
 /// A program from an environment variable, else `PATH`.
@@ -256,6 +284,44 @@ pub(crate) fn base64(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_lookup_honours_windows_pathext() {
+        let dir = std::env::temp_dir().join(format!("sr-provider-which-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("scene-render-provider-test.EXE");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let paths = std::env::join_paths([&dir]).unwrap();
+        let ext = Some(std::ffi::OsStr::new(".COM;.EXE;.CMD"));
+        assert_eq!(which_in("scene-render-provider-test", Some(&paths), ext), Some(exe.clone()));
+        assert_eq!(which_in(exe.to_str().unwrap(), None, ext), Some(exe.clone()));
+        assert_eq!(which_in(dir.join("scene-render-provider-test").to_str().unwrap(), None, ext), Some(exe));
+        let cmd = dir.join("scene-render-provider-test.CMD");
+        std::fs::write(&cmd, b"fixture").unwrap();
+        assert_eq!(
+            which_in("scene-render-provider-test", Some(&paths), Some(std::ffi::OsStr::new(";.CMD; .EXE;"))),
+            Some(cmd)
+        );
+        assert_eq!(which_in("missing", Some(&paths), ext), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_lookup_requires_unix_execute_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sr-provider-permissions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("provider");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let paths = std::env::join_paths([&dir]).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(which_in("provider", Some(&paths), None), None);
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(which_in("provider", Some(&paths), None), Some(exe));
+        assert_eq!(which_in(dir.to_str().unwrap(), None, None), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn prompts_split_like_a_shell() {

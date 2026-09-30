@@ -113,11 +113,15 @@ impl Overlay {
         let ev = &self.ev;
         let mut pixels = |renderer: &mut Renderer,
                           hidden: Option<usize>,
-                          captions_off: bool|
+                          captions_off: bool,
+                          ink: Option<(&str, f64)>|
          -> Result<Vec<[f32; 4]>, DeliverError> {
             let mut graph = g.clone();
             if let Some(i) = hidden {
                 graph.nodes[i].draw = false;
+            }
+            if let Some((id, value)) = ink {
+                graph = Renderer::contrast_ink_graph(&graph, id, value);
             }
             let mut sub = |st: f64| {
                 let mut graph = ev.evaluate(st.clamp(0.0, p.duration));
@@ -128,6 +132,9 @@ impl Overlay {
                             n.draw = false;
                         }
                     }
+                }
+                if let Some((id, value)) = ink {
+                    graph = Renderer::contrast_ink_graph(&graph, id, value);
                 }
                 graph
             };
@@ -141,11 +148,17 @@ impl Overlay {
             stage.place_with_overlay(picture, &working, &composite, placement, Some(&self.tex));
             Ok(renderer.read(&composite))
         };
-        let after = pixels(&mut self.renderer, None, false)?;
+        let after = pixels(&mut self.renderer, None, false, None)?;
         let mut ratios = Vec::new();
         for (hidden, id, opacity) in targets {
-            let before = pixels(&mut self.renderer, hidden, hidden.is_none())?;
-            if let Some(ratio) = self.renderer.contrast_of(&before, &after) {
+            let before = pixels(&mut self.renderer, hidden, hidden.is_none(), None)?;
+            let mut ratio = self.renderer.contrast_of(&before, &after);
+            if ratio.is_none() {
+                let dark = pixels(&mut self.renderer, None, false, Some((&id, 0.0)))?;
+                let light = pixels(&mut self.renderer, None, false, Some((&id, 1.0)))?;
+                ratio = self.renderer.contrast_of_coverage(&before, &after, &dark, &light);
+            }
+            if let Some(ratio) = ratio {
                 ratios.push((id, opacity, ratio));
             }
         }

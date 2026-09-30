@@ -1,3 +1,6 @@
+// This fixture launches a Python script through a Unix shebang and chmod.
+#![cfg(unix)]
+
 use sr_resolve::{resolve, Options, Status};
 use std::os::unix::fs::PermissionsExt;
 

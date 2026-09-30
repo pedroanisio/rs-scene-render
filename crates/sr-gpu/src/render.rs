@@ -1730,6 +1730,10 @@ impl Renderer {
     ) {
         self.flush_vec(plan, cmds);
         let n = &ctx.g.nodes[i];
+        if let Some(Value::Num(ink)) = n.props.get(render_access::CONTRAST_INK) {
+            d.flags |= flag::CONTRAST_INK;
+            d.color[0] = *ink as f32;
+        }
         let three = n.three_d.map(|t| (t, n.anchor));
         // stencil modes act on the whole target: outside the layer the backdrop is cut away
         let stencil = matches!(d.blend, 29 | 30) && three.is_none();
@@ -2324,7 +2328,13 @@ impl Renderer {
             hf(n.source_time.unwrap_or(0.0)),
             ctx.elements,
         ]);
-        let simple = blend == 0 && n.matte.is_none() && !n.is_matte && n.three_d.is_none() && !masked && !n.clip;
+        let simple = blend == 0
+            && n.matte.is_none()
+            && !n.is_matte
+            && n.three_d.is_none()
+            && !masked
+            && !n.clip
+            && n.props.get(render_access::CONTRAST_INK).is_none();
         if simple {
             let mut s = scene.transformed(&Xf(ta.0));
             if op < 1.0 {
@@ -2426,11 +2436,30 @@ impl Renderer {
         if ctx.p.scene.captions.is_none() || self.captions_off {
             return;
         }
+        let ink = ctx.g.elements.iter().find(|e| &*e.key == render_access::CONTRAST_INK).and_then(|e| {
+            match e.props.get(render_access::CONTRAST_INK) {
+                Some(Value::Num(v)) => Some(*v),
+                _ => None,
+            }
+        });
+        if ink.is_some() {
+            self.flush_vec(plan, cmds);
+        }
+        let at_ink = cmds.len();
         let probe = self.contrast_probe.then(|| {
             self.flush_vec(plan, cmds);
             cmds.len()
         });
         let bounds = self.burn_captions_inner(plan, ctx, space, cmds);
+        if let Some(ink) = ink {
+            self.flush_vec(plan, cmds);
+            for cmd in &mut cmds[at_ink..] {
+                let d = &mut plan.draws[cmd.draw as usize];
+                d.flags |= flag::CONTRAST_INK;
+                d.color[0] = ink as f32;
+                cmd.hash = h(&[cmd.hash, ink.to_bits(), 0x1ac]);
+            }
+        }
         if let (Some(at), Some(b)) = (probe, bounds) {
             self.flush_vec(plan, cmds);
             self.attach_probe(plan, space, cmds, at, "captions", b);
@@ -2865,6 +2894,10 @@ impl Renderer {
         for (id, rect, snap) in probes {
             if let Some(ratio) = self.measure_contrast(&snap, probe_bg.as_deref(), &frame, rect) {
                 stats.contrast.push((id, ratio));
+            } else {
+                // Equal colours do not establish that the text is absent. The delivery
+                // fallback measures rendered coverage with contrasting probe inks.
+                stats.contrast_unprobed.push(id);
             }
             self.pool.put(snap);
         }

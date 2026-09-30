@@ -318,7 +318,7 @@ def main(argv):
     parser.add_argument("--bench", action="store_true")
     parser.add_argument("--clips", action="store_true", help="encode complete review scenes as MP4")
     args = parser.parse_args(argv)
-    out, binary, do_bench = args.out, args.bin, args.bench
+    out, do_bench = os.path.abspath(args.out), args.bench
     with open(args.manifest) as f:
         cases = json.load(f)["cases"]
     unknown = set(args.case) - {c["id"] for c in cases}
@@ -328,6 +328,10 @@ def main(argv):
         cases = [c for c in cases if c["id"] in args.case]
     if not cases:
         parser.error("the manifest selects no cases")
+    executable = shutil.which(args.bin)
+    if executable is None:
+        parser.error(f"renderer executable not found: {args.bin}")
+    binary = os.path.abspath(executable)
     for c in cases:
         if c.get("scene"):
             c["scene"] = os.path.abspath(os.path.join(os.path.dirname(args.manifest), c["scene"]))
@@ -345,9 +349,9 @@ def main(argv):
             enc = subprocess.run([binary, "encode", scene, "-o", clip, "--hw", "software", "--parallel", "1", "--strict", "--no-upload"], capture_output=True, text=True)
             with open(os.path.join(out, case["id"], "encode.log"), "w") as f:
                 f.write(enc.stdout + enc.stderr)
-            if enc.returncode:
+            if enc.returncode or not os.path.isfile(clip) or os.path.getsize(clip) == 0:
                 r["outcome"] = "error"
-                r["notes"].append("review clip failed: " + enc.stderr[-2000:])
+                r["notes"].append("review clip failed: " + (enc.stderr[-2000:] if enc.returncode else f"encoder did not produce {clip}"))
             else:
                 r["clip"] = os.path.relpath(clip, out)
             r["review"] = case["review"]

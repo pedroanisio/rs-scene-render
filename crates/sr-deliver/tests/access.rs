@@ -215,6 +215,8 @@ fn contrast_is_measured_inside_isolated_groups() {
     };
     let ok = deliver(&with("#FFFFFF", r#"isolate="true""#)).unwrap();
     assert!(ok.accessibility.is_empty(), "{:?}", ok.accessibility);
+    let same = deliver(&with("#000000", r#"isolate="true""#)).unwrap_err();
+    assert!(matches!(same, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("1.00")), "{same}");
     let low = deliver(&with("#303030", r#"isolate="true""#)).unwrap_err();
     assert!(
         matches!(low, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck") && m.contains(" t ")),
@@ -223,6 +225,42 @@ fn contrast_is_measured_inside_isolated_groups() {
     // a group fading the text is judged at its delivered, faded contrast
     let faded = deliver(&with("#FFFFFF", r#"isolate="true" opacity="0.12""#)).unwrap_err();
     assert!(matches!(faded, sr_deliver::DeliverError::Accessibility(ref m) if m.contains("contrastCheck")), "{faded}");
+}
+
+#[test]
+fn identical_text_and_background_fail_only_when_text_has_visible_coverage() {
+    if gpu().is_none() {
+        return;
+    }
+    for (attrs, mask, cover, text, fails) in [
+        ("", "", "", "AB", true),
+        ("opacity=\"0\"", "", "", "AB", false),
+        ("x=\"1000\"", "", "", "AB", false),
+        ("", r#"<mask type="rect" x="1000" y="0" width="56" height="28"/>"#, "", "AB", false),
+        ("", "", r##"<shape id="cover" shape="rect" width="64" height="36" fill="#000000"/>"##, "AB", false),
+        ("", "", "", " ", false),
+    ] {
+        let dir = fixtures().unwrap();
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="#000000"/>
+          <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
+          <output path="out/same.mkv" codec="ffv1" audio="false"/>
+          <assets><text id="label" text="{text}" width="56" height="28" size="24" color="#000000" font="DejaVu Sans"/></assets>
+          <composition><layer id="same" asset="label" y="4" {attrs}>{mask}</layer>{cover}</composition></scene>"##
+        );
+        let path = dir.join("same.xml");
+        std::fs::write(&path, xml).unwrap();
+        let doc = sr_model::load_file(path, &Default::default()).unwrap();
+        let result = deliver(&doc);
+        if fails {
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("contrastCheck") && m.contains("1.00")),
+                "{result:?}"
+            );
+        } else {
+            assert!(result.unwrap().accessibility.is_empty(), "attrs={attrs}, text={text:?}");
+        }
+    }
 }
 
 #[test]
@@ -305,6 +343,9 @@ fn overlay_contrast_uses_the_delivered_backdrop() {
     // Transparent overlays must use the composition's background, including when
     // text is inside an isolated group or hidden behind an opaque overlay shape.
     for (color, background, group, covered, fails) in [
+        ("#000000", "#000000", false, false, true),
+        ("#FFFFFF", "#FFFFFF", true, false, true),
+        ("#000000", "#000000", true, true, false),
         ("#303030", "#000000", false, false, true),
         ("#FFFFFF", "#000000", false, false, false),
         ("#CCCCCC", "#FFFFFF", true, false, true),
@@ -339,21 +380,28 @@ fn overlay_contrast_uses_the_delivered_backdrop() {
 }
 
 #[test]
-fn output_caption_contrast_is_checked_over_the_picture() {
+fn caption_contrast_is_checked_over_the_picture() {
     if gpu().is_none() {
         return;
     }
-    for (color, fails) in [("#303030", true), ("#FFFFFF", false)] {
+    for (color, composition, fails) in [
+        ("#000000", false, true),
+        ("#303030", false, true),
+        ("#FFFFFF", false, false),
+        ("#000000", true, true),
+        ("#303030", true, true),
+        ("#FFFFFF", true, false),
+    ] {
         let dir = fixtures().unwrap();
+        let track = r#"<captionTrack id="cc" language="en" mode="burn" style="caption-style" x="32" y="2" width="56"><cue start="0" end="0.2" text="AB"/></captionTrack>"#;
+        let (output_captions, captions) =
+            if composition { ("", format!("<captions>{track}</captions>")) } else { (track, String::new()) };
         let xml = format!(
             r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="#000000"/>
           <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
           <styles><textStyle id="caption-style" size="18" color="{color}"/></styles>
-          <output path="out/caption-contrast.mkv" codec="ffv1" audio="false">
-            <captionTrack id="cc" language="en" mode="burn" style="caption-style" x="32" y="2" width="56">
-              <cue start="0" end="0.2" text="AB"/>
-            </captionTrack>
-          </output><composition/></scene>"##
+          <output path="out/caption-contrast.mkv" codec="ffv1" audio="false">{output_captions}</output>
+          <composition/>{captions}</scene>"##
         );
         let path = dir.join("caption-contrast.xml");
         std::fs::write(&path, xml).unwrap();

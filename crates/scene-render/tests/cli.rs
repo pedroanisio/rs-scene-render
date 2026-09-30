@@ -194,6 +194,28 @@ fn run_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 }
 
 #[test]
+fn benchmark_rejects_unreadable_images_even_after_warmup() {
+    let dir = render_fixture("bench-errors");
+    std::fs::write(dir.join("bad.png"), b"not an image").unwrap();
+    let scene = dir.join("bad.xml");
+    std::fs::write(&scene, r#"<scene version="1.2"><project width="32" height="32" fps="1" duration="3"/><assets><image id="im" src="bad.png" width="32" height="32"/></assets><composition><layer id="bad" asset="im" start="2"/></composition></scene>"#).unwrap();
+    for frames in ["0..3", "2..3"] {
+        for pipelined in [false, true] {
+            let mut args = vec!["render", scene.to_str().unwrap(), "--bench", "--frames", frames, "--strict"];
+            if pipelined {
+                args.push("--pipelined");
+            }
+            let out = run(&args);
+            if no_gpu(&out) {
+                return;
+            }
+            assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
+            assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read image"));
+        }
+    }
+}
+
+#[test]
 fn gpus_lists_adapters_and_marks_the_one_chosen() {
     let o = run(&["gpus"]);
     if no_gpu(&o) {

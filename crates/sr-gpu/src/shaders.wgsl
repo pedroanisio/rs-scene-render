@@ -358,6 +358,9 @@ fn shade(v: VOut) -> vec4<f32> {
     case 4u: { c = t_pattern; }
     default: { c = vec4(0.0); }
   }
+  if ((d.flags & 16u) != 0u) {
+    c = vec4(vec3(d.color.r) * c.a, c.a);
+  }
   var cov = mask_coverage(d, v.local, aa) * d.opacity;
   if ((d.flags & 8u) != 0u) {
     // analytic edge coverage against the content rectangle

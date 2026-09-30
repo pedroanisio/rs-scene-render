@@ -17,6 +17,17 @@ fn scene(assets: &str) -> String {
 }
 
 #[test]
+fn image_dimensions_follow_exif_orientation() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sr-media/tests/fixtures/still/rotated.jpg");
+    for (width, height, warns) in [(8, 12, false), (12, 8, true)] {
+        let xml = scene(&format!(r#"<image id="photo" src="{}" width="{width}" height="{height}"/>"#, path.display()));
+        let report = validate_str(&xml, &options());
+        assert!(!report.has_errors(), "{report}");
+        assert_eq!(report.diagnostics.iter().any(|d| d.code == "A07"), warns, "{width}x{height}: {report}");
+    }
+}
+
+#[test]
 fn image_dimension_mismatch_is_a_located_warning_without_a_digest() {
     let xml = scene(r#"<image id="im" src="logo.png" width="1536" height="1024"/>"#);
     let doc = load_str(&xml, &options()).expect("a mismatch does not prevent rendering");

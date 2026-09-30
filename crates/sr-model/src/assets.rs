@@ -226,7 +226,19 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             let size = image::ImageReader::open(p)
                 .and_then(|r| r.with_guessed_format())
                 .ok()
-                .and_then(|r| r.into_dimensions().ok());
+                .and_then(|r| r.into_decoder().ok())
+                .map(|mut decoder| {
+                    use image::metadata::Orientation;
+                    use image::ImageDecoder;
+                    let (w, h) = decoder.dimensions();
+                    match decoder.orientation().unwrap_or(Orientation::NoTransforms) {
+                        Orientation::Rotate90
+                        | Orientation::Rotate270
+                        | Orientation::Rotate90FlipH
+                        | Orientation::Rotate270FlipH => (h, w),
+                        _ => (w, h),
+                    }
+                });
             (p, size)
         })
         .collect();
