@@ -1263,41 +1263,23 @@ impl Renderer {
         // shapes whose ink stays near their box), else the whole target
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
         let mut rect = [0.0, 0.0, fw, fh];
-        let overhang = match n.kind {
-            "layer" => Some(0.0),
-            "shape" => crate::vector::box_overhang(n),
-            _ => None,
-        };
-        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some()) {
-            let effs: Vec<&m::Effect> =
-                effect_ids(&*n.elem).iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
-            let pad: f64 = (effs
-                .iter()
-                .map(|e| reach(e, &Attrs { e: *e as &dyn Element, props: element_props(g, &e.id) }))
-                .sum::<f64>()
-                + over)
-                * Xf(space.xform.then(&n.world).0).max_scale();
-            if pad.is_finite() && n.kind != "object3D" {
-                let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-                for &t in &times {
-                    let sg = sub.at(t);
-                    let Some(&j) = sg.index.get(&n.id) else { continue };
-                    let wt = space.xform.then(&sg.g.nodes[j].world);
-                    for c in corners {
-                        let q = wt.apply(c);
-                        x0 = x0.min(q[0]);
-                        y0 = y0.min(q[1]);
-                        x1 = x1.max(q[0]);
-                        y1 = y1.max(q[1]);
-                    }
+        if matches!(n.kind, "layer" | "shape") && ctx.kids[i].is_empty() {
+            // Size, stroke width, effect reach and scale can all change during the shutter.
+            // Bound each evaluated sample before taking their union; if any sample cannot
+            // be bounded safely, retain the full target for the entire accumulation.
+            let bounds = times.iter().try_fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b: [f64; 4], &t| {
+                let sg = sub.at(t);
+                let Some(&j) = sg.index.get(&n.id) else { return Some(b) };
+                let sample = &sg.g.nodes[j];
+                if sample.kind == "shape" {
+                    crate::vector::box_overhang(sample)?;
                 }
+                let q = drawn_bounds(&ctx.at(&sg), j, space)?;
+                Some([b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[2]), b[3].max(q[3])])
+            });
+            if let Some(b) = bounds {
                 rect = round_rect(
-                    [
-                        (x0 - pad - 1.0).floor().max(0.0),
-                        (y0 - pad - 1.0).floor().max(0.0),
-                        (x1 + pad + 1.0).ceil().min(fw),
-                        (y1 + pad + 1.0).ceil().min(fh),
-                    ],
+                    [b[0].floor().max(0.0), b[1].floor().max(0.0), b[2].ceil().min(fw), b[3].ceil().min(fh)],
                     [0.0, 0.0],
                     [fw, fh],
                 );

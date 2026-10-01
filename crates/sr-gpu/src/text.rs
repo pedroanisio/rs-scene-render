@@ -55,8 +55,8 @@ pub struct Track {
     pub width: sr_model::values::Length,
 }
 
-/// Caption tracks of a program (by program address), each loaded or failed.
-type Tracks = Option<(usize, Arc<Vec<Result<Track, String>>>)>;
+/// Caption tracks of a compiled document, retaining its identity across reloads.
+type Tracks = Option<(Arc<()>, Arc<Vec<Result<Track, String>>>)>;
 /// Chart data from a file: labels and series.
 type ChartData = Result<(Vec<String>, Vec<chart::Series>), String>;
 
@@ -1010,9 +1010,8 @@ fn chart_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, c: &m::ChartAsset) 
 
 /// Loads the caption tracks of a program (once).
 pub fn tracks(tc: &mut TextCache, p: &Program) -> Arc<Vec<Result<Track, String>>> {
-    let pid = p as *const Program as usize;
     if let Some((id, t)) = &tc.tracks {
-        if *id == pid {
+        if Arc::ptr_eq(id, p.identity()) {
             return t.clone();
         }
     }
@@ -1022,7 +1021,7 @@ pub fn tracks(tc: &mut TextCache, p: &Program) -> Arc<Vec<Result<Track, String>>
         out.push(load_track(tr, &base));
     }
     let arc = Arc::new(out);
-    tc.tracks = Some((pid, arc.clone()));
+    tc.tracks = Some((p.identity().clone(), arc.clone()));
     arc
 }
 
@@ -1130,7 +1129,9 @@ pub fn caption_scene(
     let t = g.time;
     let base = p.base_dirs.first().cloned().unwrap_or_default();
     let mut scene = sr_vector::Scene::default();
-    let mut hsh = 0u64;
+    // The renderer also caches the rasterized caption batch. A new document can change
+    // text, placement or styling while retaining the track id, page start and frame time.
+    let mut hsh = Arc::as_ptr(p.identity()) as usize as u64;
     for tr in tracks.iter() {
         let tr = match tr {
             Ok(t) => t,

@@ -1645,13 +1645,21 @@ impl Renderer {
 
     /// Hash of the animated elements outside the composition that node `i`, its subtree and
     /// its mattes use (the paints they fill and stroke with, generator assets, and the paints
-    /// and lights of their effects), and of the camera. A node's cached effect result depends
+    /// and lights of their effects, plus 3D materials and lights), and of the camera. A node's cached result depends
     /// on these and on nothing else outside its own subtree.
     fn deps_hash(ctx: &Ctx, i: usize) -> u64 {
         let mut ids = std::collections::BTreeSet::new();
         let mut stack = vec![i];
         while let Some(k) = stack.pop() {
             let n = &ctx.g.nodes[k];
+            if n.kind == "object3D" {
+                if let Some(AttrValue::Str(id)) = n.elem.get_attr("material") {
+                    ids.insert(Arc::from(id));
+                }
+                // Every document light contributes to the shared 3D pass, including ambient
+                // and environment lights. Plain 2D subtrees do not depend on them.
+                ids.extend(render_three::doc_lights(ctx.p).iter().map(|l| Arc::from(l.id.as_str())));
+            }
             paint_refs(&n.props, &mut ids);
             // static references: the node's attributes and parts (spans, masks), and the asset it draws
             for name in PAINT_ATTRS {
@@ -1785,6 +1793,7 @@ impl Renderer {
     fn content_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
         let n = &ctx.g.nodes[i];
         let mut words = vec![
+            Self::deps_hash(ctx, i),
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
@@ -1876,6 +1885,7 @@ impl Renderer {
     fn matte(&mut self, plan: &mut Plan, ctx: &Ctx, mt: usize, space: &Space) -> Arc<Tex> {
         let hash = h(&[
             Self::subtree_hash(ctx, mt, &space.xform),
+            Self::deps_hash(ctx, mt),
             hf(ctx.g.nodes[mt].world_opacity),
             space.size[0] as u64,
             space.size[1] as u64,

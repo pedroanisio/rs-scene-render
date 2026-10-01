@@ -821,3 +821,70 @@ fn regression_incremental_time_changes_update_captions_without_nodes() {
     assert_eq!(rendered(&later), (1, 1));
     assert!(image::open(output).unwrap().to_rgba8().pixels().all(|p| p.0 == [0, 0, 0, 255]));
 }
+
+#[test]
+fn watch_reloads_edited_caption_text() {
+    use std::io::{BufRead, BufReader};
+    let (dir, scene) = two_halves("watch-caption-reload", "");
+    let xml = r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="1" background="#000000"/>
+      <styles><textStyle id="cs" size="18" color="#FFFFFF"/></styles><composition/>
+      <captions><captionTrack id="cc" language="en" mode="burn" style="cs" x="32" y="2" width="56">
+      <cue start="0" end="1" text="ABC"/></captionTrack></captions></scene>"##;
+    std::fs::write(&scene, xml).unwrap();
+    let output = dir.join("watch.png");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args([
+            "watch",
+            scene.to_str().unwrap(),
+            "--frames",
+            "0..1",
+            "-o",
+            output.to_str().unwrap(),
+            "--interval",
+            "50",
+            "--max-runs",
+            "2",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap().contains("watching") {
+                let _ = tx.send(());
+            }
+        }
+    });
+    if rx.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        let o = child.wait_with_output().unwrap();
+        reader.join().unwrap();
+        if no_gpu(&o) {
+            return;
+        }
+        panic!("watch did not become ready: {o:?}");
+    }
+    let before = image::open(&output).unwrap().to_rgba8();
+    std::fs::write(&scene, xml.replace("ABC", "XYZ")).unwrap();
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed().as_secs() > 60 {
+            let _ = child.kill();
+            panic!("watch did not finish");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let o = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    assert!(o.status.success(), "{o:?}");
+    let fresh = dir.join("fresh.png");
+    let o = run(&["render", scene.to_str().unwrap(), "-o", fresh.to_str().unwrap()]);
+    assert!(o.status.success(), "{o:?}");
+    let expected = image::open(fresh).unwrap().to_rgba8();
+    let actual = image::open(output).unwrap().to_rgba8();
+    assert!(before != expected, "the edited text changes the image");
+    assert!(actual == expected, "watch must render the edited captions like a fresh renderer");
+}

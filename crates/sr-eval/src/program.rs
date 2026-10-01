@@ -443,6 +443,8 @@ pub struct BeatGrid {
 /// Everything evaluation needs, built once.
 #[derive(Debug)]
 pub struct Program {
+    /// Allocation identity retained by downstream caches across moves and document reloads.
+    identity: Arc<()>,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -502,6 +504,14 @@ pub struct Program {
     pub tracks: HashMap<String, Arc<crate::rig::TrackEntry>>,
     /// Skin weights of skeletons with `@weights`, by skeleton id.
     pub skins: HashMap<Arc<str>, Arc<crate::eval::SkinWeights>>,
+}
+
+impl Program {
+    /// Identity of this compiled document. Caches can retain a clone and compare with
+    /// `Arc::ptr_eq`; retaining it prevents reuse of the identity after the program is dropped.
+    pub fn identity(&self) -> &Arc<()> {
+        &self.identity
+    }
 }
 
 // ------------------------------------------------------------------ helpers
@@ -2739,6 +2749,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     };
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
     Ok(Program {
+        identity: Arc::new(()),
         base_dirs,
         safe_area,
         scene: (*scene).clone(),
