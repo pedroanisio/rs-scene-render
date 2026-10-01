@@ -204,7 +204,10 @@ fn v(x: f64, y: f64) -> Vector {
 }
 
 /// The nearest surface point and outward normal (metres, y up) of the first solid containing `q`.
-fn surface<'a>(solids: impl Iterator<Item = (&'a dyn rapier2d_f64::geometry::Shape, &'a Pose)>, q: Vector) -> Option<([f64; 2], [f64; 2])> {
+fn surface<'a>(
+    solids: impl Iterator<Item = (&'a dyn rapier2d_f64::geometry::Shape, &'a Pose)>,
+    q: Vector,
+) -> Option<([f64; 2], [f64; 2])> {
     for (shape, pose) in solids {
         let proj = shape.project_point(pose, q, false);
         if !proj.is_inside {
@@ -562,7 +565,10 @@ impl World {
                     }
                 }
                 // inside a solid: move to the surface along the shortest way out
-                let (q, n) = surface(colliders.iter().filter(|(_, c)| solid(c)).map(|(_, c)| (c.shape(), c.position())), v(p[0], p[1]))?;
+                let (q, n) = surface(
+                    colliders.iter().filter(|(_, c)| solid(c)).map(|(_, c)| (c.shape(), c.position())),
+                    v(p[0], p[1]),
+                )?;
                 Some(([q[0] + n[0] * 1e-4, q[1] + n[1] * 1e-4], n))
             };
             for k in 0..st.softs.len() {

@@ -124,7 +124,9 @@ const RAIN: &str = r#"<particleEmitter id="p" x="200" y="60" emitterShape="line"
 #[test]
 fn particles_bounce_off_rigid_bodies() {
     let ev = evaluator(
-        &format!(r##"<shape id="slab" shape="rect" x="100" y="300" width="200" height="40" fill="#FFFFFF"><rigidBody type="static"/></shape>{RAIN}"##),
+        &format!(
+            r##"<shape id="slab" shape="rect" x="100" y="300" width="200" height="40" fill="#FFFFFF"><rigidBody type="static"/></shape>{RAIN}"##
+        ),
         r#"<physics gravityY="0" bounds="none"/>"#,
     );
     let f = ev.evaluate(2.0);
