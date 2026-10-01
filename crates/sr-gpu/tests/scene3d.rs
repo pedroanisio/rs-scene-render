@@ -145,6 +145,23 @@ fn the_camera_moves_3d_objects_and_2_5d_layers_together() {
 }
 
 #[test]
+fn a_masked_group_follows_the_camera_while_its_3d_content_stands_still() {
+    // a mask isolates the group into a cached layer; nothing in it moves, but the camera dollies in.
+    // Rendered after an earlier frame (as an encode does), the layer kept the first frame's projection.
+    let body = r##"<camera id="cam" x="64" y="64" z="-221.7"><animate property="z"><key time="0" value="-221.7" interpolation="linear"/><key time="2" value="-60"/></animate></camera>
+        <group id="g"><object3D id="p" primitive="plane" width="40" height="40" x="64" y="64" z="200" material="w"/>
+        <layer id="l" asset="red" threeD="true" zDepth="200" x="20" y="20" scaleX="2" scaleY="2"/>
+        <mask type="rect" x="0" y="0" width="128" height="128"/></group>"##;
+    let d = scene("", r##"<material id="w" baseColor="#FFFFFF" unlit="true"/>"##, body, "");
+    let Some(fresh) = render_times(&d, &[1.8]) else { return };
+    let after = render_times(&d, &[0.0, 1.8]).unwrap();
+    assert!(problems(&after).is_empty(), "{:?}", problems(&after));
+    let lit = |r: &Rendered| r.px.iter().filter(|p| p[3] > 0.5).count();
+    assert!(lit(&fresh) > 0, "the plane is in view");
+    assert_eq!(lit(&after), lit(&fresh), "the layer follows the camera after an earlier frame");
+}
+
+#[test]
 fn a_3d_object_and_a_2_5d_layer_at_the_same_depth_coincide() {
     let body = r#"<object3D id="s" primitive="sphere" radius="6" x="96" y="32" z="300"/>
         <layer id="l" asset="red" threeD="true" zDepth="300" x="88" y="88" scaleX="4" scaleY="4"/>"#;

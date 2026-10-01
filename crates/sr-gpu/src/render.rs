@@ -1556,6 +1556,9 @@ impl Renderer {
             generated,
             n.draw as u64,
             n.three_d.map(|t| h(&t.map(hf))).unwrap_or(2),
+            // the camera projects 3D objects and 2.5D layers: a still one looks different when it moves,
+            // and a cached isolated group (mask, clip, matte, effects) holding it must redraw
+            if n.kind == "object3D" || n.three_d.is_some() { ctx.cam } else { 0 },
             n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             props,
