@@ -2453,8 +2453,13 @@ dependencies = [
 name = "sr-fuzz"
 version = "0.1.2"
 dependencies = [
+ "serde_json",
+ "sr-3d",
  "sr-eval",
+ "sr-geo",
  "sr-model",
+ "sr-text",
+ "sr-vector",
 ]
 
 [[package]]
