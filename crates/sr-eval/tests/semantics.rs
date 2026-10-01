@@ -488,11 +488,7 @@ fn repeats_generate_scoped_copies() {
 #[test]
 fn runaway_expansion_is_an_error() {
     let o = EvalOptions::default();
-    let huge = doc("", r#"<repeat id="r" count="1000000000000"><layer id="l" asset="img"/></repeat>"#);
-    assert_eq!(err_codes(&huge, &o), ["E18"]);
-    let copies = doc("", r#"<object3D id="p" primitive="plane" instances="4000000000"/>"#);
-    assert_eq!(err_codes(&copies, &o), ["E18"]);
-    // each count is modest; their product is not
+    // a single huge count is refused at load (P02); the evaluator bounds what counts multiply to
     let nested = doc(
         "",
         r#"<repeat id="a" count="300"><repeat id="b" count="300"><repeat id="c" count="300"><group id="g"/></repeat></repeat></repeat>"#,
