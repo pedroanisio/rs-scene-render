@@ -302,3 +302,49 @@ fn stills_in_four_formats() {
         assert_eq!(v.width, 32, "{name}");
     }
 }
+
+#[test]
+fn a_rejected_stream_reports_ffmpegs_reason_and_leaves_no_file() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let p = dir().join("odd.mp4");
+    let mut s = spec(&p, Codec::H264, InputFormat::Rgba8);
+    // yuv420p needs an even width
+    s.width = 63;
+    let mut e = Encoder::start(&s).unwrap();
+    let f = frame(s.input, 0, 63, 36);
+    let mut err = None;
+    for _ in 0..500 {
+        if let Err(x) = e.write(&f) {
+            err = Some(x.to_string());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let err = err.expect("the encoder stops accepting frames");
+    assert!(err.contains("divisible by 2"), "{err}");
+    drop(e);
+    assert!(!p.exists(), "a truncated file is left at {}", p.display());
+    // an encode abandoned half way leaves nothing either
+    let p = dir().join("abandoned.mkv");
+    let s = spec(&p, Codec::Ffv1, InputFormat::Rgba8);
+    let mut e = Encoder::start(&s).unwrap();
+    for k in 0..3 {
+        e.write(&frame(s.input, k, 64, 36)).unwrap();
+    }
+    drop(e);
+    assert!(!p.exists(), "a truncated file is left at {}", p.display());
+}
+
+#[test]
+fn a_percent_sign_in_the_directory_is_not_a_frame_pattern() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let pattern = dir().join("50%/f_%04d.png");
+    encode(&spec(&pattern, Codec::PngSequence, InputFormat::Rgba8), 2);
+    for k in 0..2 {
+        assert!(dir().join(format!("50%/f_{k:04}.png")).is_file(), "frame {k}");
+    }
+}

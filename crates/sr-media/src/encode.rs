@@ -395,7 +395,7 @@ impl EncodeSpec {
                 self.width, self.height
             )));
         }
-        if self.codec.is_sequence() && !self.path.to_string_lossy().contains('%') {
+        if self.codec.is_sequence() && !self.path.file_name().is_some_and(|n| n.to_string_lossy().contains('%')) {
             return Err(MediaError::Invalid(format!(
                 "sequence output {} needs a printf pattern such as frame_%05d.png",
                 self.path.display()
@@ -878,16 +878,26 @@ impl EncodeSpec {
             a.push("-f".into());
             a.push(c.muxer().into());
         }
-        a.push(self.path.display().to_string());
+        // only a sequence's file name is a frame pattern: a `%` in its directory is escaped
+        match (self.path.parent(), self.path.file_name()) {
+            (Some(dir), Some(name)) if self.codec.is_sequence() => {
+                a.push(Path::new(&dir.to_string_lossy().replace('%', "%%")).join(name).display().to_string())
+            }
+            _ => a.push(self.path.display().to_string()),
+        }
     }
 }
 
-/// A running encoder fed through its standard input.
+/// A running encoder fed through its standard input. Dropped before [`Encoder::finish`] succeeds, it stops
+/// FFmpeg and removes the unfinished file.
 pub struct Encoder {
     child: Child,
     stdin: Option<ChildStdin>,
-    errors: std::thread::JoinHandle<Vec<u8>>,
+    errors: Option<std::thread::JoinHandle<Vec<u8>>>,
     path: PathBuf,
+    /// The one file this run writes (none for a first pass or a sequence).
+    output: Option<PathBuf>,
+    finished: bool,
     /// Encoder name in use.
     pub encoder: String,
     /// Full command line, for diagnostics.
@@ -916,34 +926,66 @@ impl Encoder {
             let _ = err.read_to_end(&mut v);
             v
         });
-        Ok(Encoder { stdin: child.stdin.take(), child, errors, path: spec.path.clone(), encoder, command: args })
+        let first_pass = matches!(spec.pass, Some((1, _)));
+        Ok(Encoder {
+            stdin: child.stdin.take(),
+            child,
+            errors: Some(errors),
+            path: spec.path.clone(),
+            output: (!first_pass && !spec.codec.is_sequence()).then(|| spec.path.clone()),
+            finished: false,
+            encoder,
+            command: args,
+        })
+    }
+
+    fn said(&mut self) -> Vec<u8> {
+        self.errors.take().and_then(|h| h.join().ok()).unwrap_or_default()
     }
 
     /// Writes one frame.
     pub fn write(&mut self, frame: &[u8]) -> Result<(), MediaError> {
-        match self.stdin.as_mut() {
-            Some(s) => s.write_all(frame).map_err(|e| MediaError::Failed {
-                tool: "ffmpeg".into(),
-                path: self.path.display().to_string(),
-                message: format!("encoder stopped accepting frames: {e}"),
-            }),
-            None => Ok(()),
-        }
+        let Some(s) = self.stdin.as_mut() else { return Ok(()) };
+        let Err(e) = s.write_all(frame) else { return Ok(()) };
+        // FFmpeg stopped reading (it rejected the stream, or has no such encoder): it says why as it ends
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+        let said = crate::reason(&self.said());
+        Err(MediaError::Failed {
+            tool: "ffmpeg".into(),
+            path: self.path.display().to_string(),
+            message: if said.is_empty() { format!("encoder stopped accepting frames: {e}") } else { said },
+        })
     }
 
     /// Closes the input and waits for the file to be finished.
     pub fn finish(mut self) -> Result<(), MediaError> {
         drop(self.stdin.take());
         let status = self.child.wait()?;
-        let err = self.errors.join().unwrap_or_default();
+        let err = self.said();
+        self.finished = status.success();
         if !status.success() {
             return Err(MediaError::Failed {
                 tool: "ffmpeg".into(),
                 path: self.path.display().to_string(),
-                message: crate::tail(&err, 4),
+                message: crate::reason(&err),
             });
         }
         Ok(())
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // abandoned or failed: stop FFmpeg before it finalises, and leave no truncated file behind
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(p) = &self.output {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 

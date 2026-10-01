@@ -882,13 +882,15 @@ fn frame_path(pattern: &Path, frame: u64, several: bool) -> Result<PathBuf, Stri
     if s.contains("{frame}") {
         return Ok(PathBuf::from(s.replace("{frame}", &frame.to_string())));
     }
-    if let Some(i) = s.find('%') {
-        let rest = &s[i + 1..];
+    // a printf pattern is in the file name: a `%` in a directory name is just that
+    let name = pattern.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if let Some(i) = name.find('%') {
+        let rest = &name[i + 1..];
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if rest[digits.len()..].starts_with('d') {
             let width: usize = digits.trim_start_matches('0').parse().unwrap_or(0);
             let num = format!("{frame:0width$}");
-            return Ok(PathBuf::from(format!("{}{num}{}", &s[..i], &rest[digits.len() + 1..])));
+            return Ok(pattern.with_file_name(format!("{}{num}{}", &name[..i], &rest[digits.len() + 1..])));
         }
     }
     if several {
@@ -1079,7 +1081,15 @@ fn render(
             changes::Fingerprints::new(&text, file, &doc, &settings)
         });
         let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
-        let mut sidecar = inc.changed_only.then(|| changes::Sidecar::load(&dir));
+        // every render keeps them true: a frame written anew loses the fingerprint recorded for the old one
+        // before it is written, so a run that stops half way leaves none that its files do not match
+        let mut sidecar = changes::Sidecar::load(&dir);
+        let record = |side: &mut changes::Sidecar| {
+            if let Err(e) = side.save() {
+                eprintln!("warning: cannot record frame fingerprints in {}: {e}", dir.display());
+            }
+        };
+        let mut recorded = std::time::Instant::now();
         let mut rendered = 0usize;
         for (f, t) in list {
             let path = match frame_path(&output, f.unwrap_or(0), several) {
@@ -1091,11 +1101,9 @@ fn render(
             };
             let g = ev.evaluate(t);
             let print = prints.as_ref().map(|p| format!("{:016x}", p.frame(&text, &g)));
-            let name = path.display().to_string();
-            if let (Some(p), Some(side)) = (&print, &sidecar) {
-                if path.exists() && side.frames.get(&name) == Some(p) {
-                    continue;
-                }
+            let name = path.strip_prefix(&dir).unwrap_or(&path).display().to_string();
+            if print.is_some() && path.exists() && sidecar.frames.get(&name) == print.as_ref() {
+                continue;
             }
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&g, ev.program(), Some(&mut sub));
@@ -1110,6 +1118,9 @@ fn render(
                 eprintln!("{}", serde_json::json!({ "frame": g.frame, "stats": &frame.stats, "gpu": gpu }));
             }
             let [w, h] = frame.texture.size;
+            if sidecar.frames.remove(&name).is_some() {
+                record(&mut sidecar);
+            }
             let res = if bit_depth == 16 {
                 let working = r.working();
                 let data: Vec<u16> = px
@@ -1131,20 +1142,19 @@ fn render(
             }
             writeln!(out.w, "wrote {} (t = {:.4} s, {} draws)", path.display(), g.time, frame.stats.draws)?;
             rendered += 1;
-            if let (Some(p), Some(side)) = (print, sidecar.as_mut()) {
-                // Unsupported output must be rendered again so --strict cannot lose diagnostics,
-                // including when a prior invocation did not request strict validation.
-                if frame.stats.unsupported.is_empty() {
-                    side.frames.insert(name, p);
-                } else {
-                    side.frames.remove(&name);
+            // Unsupported output must be rendered again so --strict cannot lose diagnostics,
+            // including when a prior invocation did not request strict validation.
+            if let Some(p) = print.filter(|_| frame.stats.unsupported.is_empty()) {
+                sidecar.frames.insert(name, p);
+                // now and then, so a run that is killed keeps most of what it rendered
+                if recorded.elapsed().as_secs() >= 2 {
+                    record(&mut sidecar);
+                    recorded = std::time::Instant::now();
                 }
             }
         }
-        if let (Some(side), Some(prints)) = (&sidecar, &prints) {
-            if let Err(e) = side.save() {
-                eprintln!("warning: cannot record frame fingerprints in {}: {e}", dir.display());
-            }
+        record(&mut sidecar);
+        if let Some(prints) = &prints {
             if let Some(why) = &prints.whole {
                 writeln!(out.w, "note: {why}: an edit to the composition renders every frame")?;
             }
@@ -1231,7 +1241,7 @@ fn watch(
 fn codec_for_path(p: &str) -> &'static str {
     let lower = p.to_ascii_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
-    let seq = lower.contains('%');
+    let seq = Path::new(&lower).file_name().is_some_and(|n| n.to_string_lossy().contains('%'));
     match ext {
         "mov" => "prores",
         "mxf" => "dnxhr",
