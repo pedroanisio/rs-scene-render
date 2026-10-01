@@ -1401,7 +1401,9 @@ impl Renderer {
             plan.stats.cache_hits += 1;
             return t.clone();
         }
-        let target = Arc::new(resources::create(&self.gpu.device, &self.bgl1, [w, hgt], 1, "generator"));
+        // from the pool, where an evicted generator texture goes: an animated generator is a new entry
+        // every frame, and takes the texture of the one that left the cache
+        let target = self.pool.get(&self.gpu.device, &self.bgl1, [w, hgt]);
         let ubuf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gen"),
             size: std::mem::size_of::<Gen>() as u64,

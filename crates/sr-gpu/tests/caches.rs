@@ -145,3 +145,31 @@ fn raster_map_tiles_are_kept_only_while_shown() {
     assert!(n[1] > alone[0], "{n:?}: both zooms' tiles are held when the zoom changes");
     assert_eq!(n[7], alone[0], "{n:?}: the first zoom's tiles are still held");
 }
+
+#[test]
+fn an_evolving_generator_does_not_fill_the_texture_pool() {
+    // Noise that evolves is a new picture every frame. Each one leaves the cache a few frames later and its
+    // texture goes to the pool, where a blur of the same size keeps that size in use: the pool must not then
+    // hold one more texture per frame for the rest of the render.
+    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="6"/>
+      <assets><generator id="a" kind="fractal-noise" width="64" height="64" scale="8" seed="3">
+        <animate property="evolution"><key time="0" value="0"/><key time="6" value="6"/></animate></generator></assets>
+      <composition><layer id="l" asset="a" effects="soft"/></composition>
+      <effects><effect id="soft" type="blur" radius="1"/></effects></scene>"##;
+    let d = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+    let Some(gpu) = gpu() else { return };
+    let ev = sr_eval::Evaluator::new(&d, &sr_eval::EvalOptions::default()).unwrap();
+    let mut r = sr_gpu::Renderer::new(gpu, ev.program());
+    let (mut held, mut shown) = (Vec::new(), Vec::new());
+    for k in 0..60 {
+        let f = r.render(&ev.evaluate(k as f64 * 0.1), ev.program());
+        assert!(f.stats.errors.is_empty() && f.stats.unsupported.is_empty(), "{:?}", f.stats);
+        if k < 2 {
+            shown.push(r.read(&f.texture));
+        }
+        held.push(r.pooled_textures());
+    }
+    assert!(shown[0] != shown[1], "the noise must evolve from frame to frame");
+    let max = *held.iter().max().unwrap();
+    assert!(max <= 16, "pooled textures stay bounded: {held:?}");
+}

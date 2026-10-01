@@ -73,13 +73,14 @@ pub fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32;
     Tex { tex, view, size, bind }
 }
 
-/// Frames a size may go unrequested before its free textures are released.
+/// Frames a size may go unrequested, or a free texture untaken, before it is released.
 const KEEP_FRAMES: u64 = 8;
 
 /// Reuses offscreen textures by size between frames.
 #[derive(Default)]
 pub struct Pool {
-    free: HashMap<[u32; 2], Vec<Arc<Tex>>>,
+    /// Free textures by size, each with the frame it was returned in, oldest first.
+    free: HashMap<[u32; 2], Vec<(Arc<Tex>, u64)>>,
     /// The frame (count of `trim` calls) each size was last requested in.
     wanted: HashMap<[u32; 2], u64>,
     /// `trim` calls so far.
@@ -94,7 +95,7 @@ impl Pool {
     /// A texture of `size`, reused when one is free.
     pub fn get(&mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2]) -> Arc<Tex> {
         self.wanted.insert(size, self.frame);
-        if let Some(t) = self.free.get_mut(&size).and_then(Vec::pop) {
+        if let Some((t, _)) = self.free.get_mut(&size).and_then(Vec::pop) {
             return t;
         }
         self.created += 1;
@@ -105,17 +106,25 @@ impl Pool {
     /// frames. Sizes that follow moving content (motion-blur and effect bounds, rounded to
     /// steps so they repeat) come and go, and would otherwise accumulate over a long render;
     /// keeping them a few frames lets a size that returns find its textures.
+    ///
+    /// Of a size still requested, frees the textures returned that long ago and not taken since.
+    /// More can come in than go out: a cached target that is evicted is returned here whether or not
+    /// it was taken from here, and a size in steady use would otherwise collect those for ever. The
+    /// newest are taken first, so the ones a frame reuses never age.
     pub fn trim(&mut self) {
         let now = self.frame;
         self.wanted.retain(|_, at| now - *at < KEEP_FRAMES);
         let wanted = &self.wanted;
         let mut released = 0;
         self.free.retain(|size, list| {
-            let keep = wanted.contains_key(size);
-            if !keep {
-                released += list.len();
+            let before = list.len();
+            if wanted.contains_key(size) {
+                list.retain(|(_, at)| now - *at < KEEP_FRAMES);
+            } else {
+                list.clear();
             }
-            keep
+            released += before - list.len();
+            !list.is_empty()
         });
         self.released += released;
         self.frame += 1;
@@ -134,7 +143,7 @@ impl Pool {
     /// Returns a texture to the pool.
     pub fn put(&mut self, t: Arc<Tex>) {
         if Arc::strong_count(&t) == 1 {
-            self.free.entry(t.size).or_default().push(t);
+            self.free.entry(t.size).or_default().push((t, self.frame));
         }
     }
 }
