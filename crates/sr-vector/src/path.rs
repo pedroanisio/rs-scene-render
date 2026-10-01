@@ -4,6 +4,9 @@
 
 use crate::geom::{p, Rect, Xf, P};
 
+/// Points [`Poly::subdivide`] produces at most (beyond the polyline's own).
+pub const MAX_SUBDIVIDE: usize = 1 << 20;
+
 /// A path segment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Seg {
@@ -506,9 +509,15 @@ impl Poly {
         if n == 0 {
             return self.clone();
         }
+        let total = self.length();
+        if !total.is_finite() || max.is_nan() {
+            return self.clone();
+        }
+        // a longer step once the whole polyline would pass the cap
+        let max = max.max(1e-6).max(total / MAX_SUBDIVIDE as f64);
         for k in 0..segs {
             let (a, b) = (self.pts[k], self.pts[(k + 1) % n]);
-            let m = ((a.dist(b) / max.max(1e-6)).ceil() as usize).max(1);
+            let m = ((a.dist(b) / max).ceil() as usize).max(1);
             for j in 0..m {
                 out.push(a.lerp(b, j as f64 / m as f64));
             }

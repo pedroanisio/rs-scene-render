@@ -8,6 +8,13 @@ use crate::path::{cubic_point, cubic_tangent, polys_to_path, Contour, Path, Poly
 use crate::scene::MaskOp;
 use crate::stroke::{self, Join};
 
+/// Items a repeater may produce (copies × items); further copies are dropped.
+pub const MAX_REPEATER_ITEMS: usize = 65_536;
+/// Zig-zag ridges per segment.
+pub const MAX_RIDGES: u32 = 1024;
+/// Points of a wiggled subpath.
+pub const MAX_WIGGLE_POINTS: usize = 65_536;
+
 /// One drawable piece of a shape: a path (or, after `merge`, several paths
 /// combined by coverage) with an opacity multiplier.
 #[derive(Debug, Clone, PartialEq)]
@@ -121,7 +128,7 @@ pub fn apply(items: &mut Vec<Item>, m: &Modifier, ctx: &Ctx) {
             end_opacity,
             below,
         } => {
-            let n = copies.max(0.0).floor() as usize;
+            let n = (copies.max(0.0).floor() as usize).min(MAX_REPEATER_ITEMS / items.len().max(1));
             let step = |j: f64| -> Xf {
                 let s = scale.max(1e-6).powf(j);
                 Xf::translate(ctx.center.x + offset_x * j, ctx.center.y + offset_y * j)
@@ -192,7 +199,7 @@ pub fn apply(items: &mut Vec<Item>, m: &Modifier, ctx: &Ctx) {
             });
         }
         Modifier::ZigZag { size, ridges, smooth } => {
-            let r = ridges.max(1) as usize;
+            let r = ridges.clamp(1, MAX_RIDGES) as usize;
             map_paths(items, &mut |path| {
                 map_contours(path, &mut |c| {
                     let n = c.v.len();
@@ -301,7 +308,7 @@ pub fn apply(items: &mut Vec<Item>, m: &Modifier, ctx: &Ctx) {
                 let mut out = Vec::new();
                 for (ci, q) in polys.iter().enumerate() {
                     let len = q.length();
-                    let count = ((len * detail.max(0.0) / 100.0).round() as usize).max(3);
+                    let count = ((len * detail.max(0.0) / 100.0).round() as usize).clamp(3, MAX_WIGGLE_POINTS);
                     let pts = if q.closed {
                         let mut v = q.pts.clone();
                         v.push(v[0]);

@@ -3,6 +3,9 @@
 use crate::geom::P;
 use crate::path::Poly;
 
+/// Dashes one [`dash`] call produces at most; a denser pattern is drawn solid.
+pub const MAX_DASHES: usize = 1 << 20;
+
 /// How trim applies across several subpaths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrimMode {
@@ -23,11 +26,22 @@ fn open_pts(q: &Poly) -> Vec<P> {
 
 /// The piece of an open point list between arc lengths `a` and `b`.
 fn cut(pts: &[P], a: f64, b: f64) -> Vec<P> {
+    cut_from(pts, a, b, &mut (0, 0.0))
+}
+
+/// [`cut`] starting at the segment `at` (its index and the arc length where it begins), left on
+/// the segment holding `b`: successive pieces further along the list each resume where the last ended.
+fn cut_from(pts: &[P], a: f64, b: f64, at: &mut (usize, f64)) -> Vec<P> {
     let mut out = Vec::new();
-    let mut s = 0.0;
-    for w in pts.windows(2) {
+    let (mut k, mut s) = *at;
+    let mut resume = None;
+    while k + 1 < pts.len() {
+        let w = &pts[k..k + 2];
         let l = w[0].dist(w[1]);
         let (s0, s1) = (s, s + l);
+        if resume.is_none() && s1 >= b {
+            resume = Some((k, s0));
+        }
         if s1 >= a && s0 <= b && l > 0.0 {
             let t0 = ((a - s0) / l).clamp(0.0, 1.0);
             let t1 = ((b - s0) / l).clamp(0.0, 1.0);
@@ -41,7 +55,9 @@ fn cut(pts: &[P], a: f64, b: f64) -> Vec<P> {
         if s > b {
             break;
         }
+        k += 1;
     }
+    *at = resume.unwrap_or((k, s));
     out
 }
 
@@ -117,10 +133,16 @@ pub fn dash(ps: &[Poly], pattern: &[f64], offset: f64) -> Vec<Poly> {
     if pat.is_empty() || period <= 1e-9 {
         return ps.to_vec();
     }
+    // more dashes than anything can show: solid
+    let dashes = ps.iter().map(Poly::length).sum::<f64>() / period * (pat.len() / 2) as f64;
+    if dashes.is_nan() || dashes > MAX_DASHES as f64 {
+        return ps.to_vec();
+    }
     let mut out = Vec::new();
     for q in ps {
         let pts = open_pts(q);
         let total = q.length();
+        let mut at = (0, 0.0);
         // phase: position inside the pattern at arc length 0
         let mut phase = offset.rem_euclid(period);
         let mut k = 0;
@@ -132,7 +154,7 @@ pub fn dash(ps: &[Poly], pattern: &[f64], offset: f64) -> Vec<Poly> {
         while s < total {
             let e = s + pat[k];
             if k % 2 == 0 && e > 0.0 {
-                let piece = cut(&pts, s.max(0.0), e.min(total));
+                let piece = cut_from(&pts, s.max(0.0), e.min(total), &mut at);
                 if piece.len() > 1 || (pat[k] == 0.0 && !piece.is_empty()) {
                     out.push(Poly { pts: piece, closed: false });
                 }

@@ -22,6 +22,9 @@ use crate::scene::{Cmd, FillRule, Gradient, GradientKind, MaskOp, MatteMode, Pai
 use crate::shapes;
 use crate::stroke::{self, Cap, Join, Style};
 
+/// Precomp instances evaluated per frame; further ones draw nothing.
+pub const MAX_PRECOMPS: usize = 65_536;
+
 /// A keyframe.
 #[derive(Debug, Clone)]
 struct Key {
@@ -361,6 +364,45 @@ fn rule_of(v: &Value) -> FillRule {
     }
 }
 
+/// Precomps being evaluated (innermost last) and the instances left for this frame.
+struct Walk<'a> {
+    open: Vec<&'a str>,
+    left: usize,
+}
+
+/// Whether a precomp contains itself, directly or through other precomps.
+fn recursive(comps: &HashMap<String, Vec<Layer>>) -> bool {
+    // false while a precomp is on the stack, true once all it reaches is known
+    let mut done: HashMap<&str, bool> = HashMap::new();
+    for start in comps.keys() {
+        if done.contains_key(start.as_str()) {
+            continue;
+        }
+        done.insert(start, false);
+        let mut stack = vec![(start.as_str(), 0usize)];
+        while let Some(&(id, k)) = stack.last() {
+            let Some(l) = comps[id].get(k) else {
+                done.insert(id, true);
+                stack.pop();
+                continue;
+            };
+            stack.last_mut().unwrap().1 += 1;
+            let Some((next, _)) = l.ref_id.as_ref().filter(|_| l.ty == 0).and_then(|r| comps.get_key_value(r)) else {
+                continue;
+            };
+            match done.get(next.as_str()) {
+                Some(false) => return true,
+                Some(true) => {}
+                None => {
+                    done.insert(next, false);
+                    stack.push((next, 0));
+                }
+            }
+        }
+    }
+    false
+}
+
 struct Parser<'a> {
     slots: &'a HashMap<String, Value>,
     skipped: Vec<String>,
@@ -622,6 +664,9 @@ impl Lottie {
         if expr {
             skipped.push("expressions (keyframed values used)".into());
         }
+        if recursive(&comps) {
+            skipped.push("recursive precomps (not drawn inside themselves)".into());
+        }
         skipped.sort();
         skipped.dedup();
         Ok(Lottie {
@@ -654,14 +699,12 @@ impl Lottie {
     /// Evaluates frame `f` into a scene in composition pixels, flattening within `tol`.
     pub fn render(&self, f: f64, tol: f64) -> Scene {
         let mut out = Scene::default();
-        self.comp(&self.layers, f, &Xf::IDENTITY, tol, &mut out, 0);
+        let mut walk = Walk { open: Vec::new(), left: MAX_PRECOMPS };
+        self.comp(&self.layers, f, &Xf::IDENTITY, tol, &mut out, &mut walk);
         out
     }
 
-    fn comp(&self, layers: &[Layer], f: f64, base: &Xf, tol: f64, out: &mut Scene, depth: usize) {
-        if depth > 16 {
-            return;
-        }
+    fn comp<'a>(&'a self, layers: &'a [Layer], f: f64, base: &Xf, tol: f64, out: &mut Scene, walk: &mut Walk<'a>) {
         let by_ind: HashMap<i64, usize> =
             layers.iter().enumerate().filter_map(|(i, l)| l.ind.map(|x| (x, i))).collect();
         let world = |i: usize| -> Xf {
@@ -701,7 +744,7 @@ impl Lottie {
                 let starts_empty = matches!(first, Some(MaskOp::Add) | Some(MaskOp::Lighten)) || (clip_comp && !masked);
                 out.cmds.push(Cmd::Push { mask_init: if starts_empty { 0.0 } else { 1.0 } });
             }
-            self.layer_content(l, f, &x, tol, out, depth);
+            self.layer_content(l, f, &x, tol, out, walk);
             if !isolate {
                 continue;
             }
@@ -736,7 +779,7 @@ impl Lottie {
                         let mx = world(src);
                         let mo = ml.ks.opacity(f);
                         let mut tmp = Scene::default();
-                        self.layer_content(ml, f, &mx, tol, &mut tmp, depth);
+                        self.layer_content(ml, f, &mx, tol, &mut tmp, walk);
                         for c in tmp.cmds {
                             out.cmds.push(match c {
                                 Cmd::Fill { polys, rule, paint, opacity } => {
@@ -753,15 +796,22 @@ impl Lottie {
         }
     }
 
-    fn layer_content(&self, l: &Layer, f: f64, x: &Xf, tol: f64, out: &mut Scene, depth: usize) {
+    fn layer_content<'a>(&'a self, l: &Layer, f: f64, x: &Xf, tol: f64, out: &mut Scene, walk: &mut Walk<'a>) {
         match l.ty {
             0 => {
-                let Some(layers) = l.ref_id.as_ref().and_then(|r| self.comps.get(r)) else { return };
+                let Some((id, layers)) = l.ref_id.as_ref().and_then(|r| self.comps.get_key_value(r)) else { return };
+                // 16 levels, never a precomp inside itself, a bounded number of instances
+                if walk.open.len() >= 16 || walk.left == 0 || walk.open.contains(&id.as_str()) {
+                    return;
+                }
+                walk.left -= 1;
                 let local = match &l.tm {
                     Some(tm) => tm.num(f, 0.0) * self.fps,
                     None => (f - l.st) / l.sr,
                 };
-                self.comp(layers, local, x, tol, out, depth + 1);
+                walk.open.push(id);
+                self.comp(layers, local, x, tol, out, walk);
+                walk.open.pop();
             }
             1 => {
                 let r = shapes::rect(0.0, 0.0, l.size[0], l.size[1], [0.0; 4]).transform(x);
@@ -899,14 +949,13 @@ fn dash_of(ds: &[(char, Prop)], f: f64) -> (Vec<f64>, f64) {
 
 fn gradient(g: &Grad, f: f64) -> Gradient {
     let k = g.k.at(f);
-    let n = g.count;
-    let mut stops: Vec<(f64, [f64; 4])> = (0..n)
-        .filter(|i| k.len() >= 4 * (i + 1))
-        .map(|i| (k[4 * i], [k[4 * i + 1], k[4 * i + 2], k[4 * i + 3], 1.0]))
-        .collect();
+    // the declared count holds no more stops than the data has
+    let n = g.count.min(k.len() / 4);
+    let mut stops: Vec<(f64, [f64; 4])> =
+        (0..n).map(|i| (k[4 * i], [k[4 * i + 1], k[4 * i + 2], k[4 * i + 3], 1.0])).collect();
     // opacity stops follow the colour stops as (offset, alpha) pairs
     let alphas: Vec<(f64, f64)> =
-        k[(4 * n).min(k.len())..].chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect();
+        k[g.count.saturating_mul(4).min(k.len())..].chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect();
     if !alphas.is_empty() {
         for s in &mut stops {
             let a = match alphas.iter().position(|a| a.0 >= s.0) {
