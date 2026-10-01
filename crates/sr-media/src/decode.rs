@@ -110,7 +110,22 @@ pub struct VideoFrame {
 struct Reader {
     child: Child,
     rx: Receiver<Arc<VideoFrame>>,
+    errors: Option<std::thread::JoinHandle<Vec<u8>>>,
+    /// The frame decoding started at.
+    first: i64,
     next: i64,
+}
+
+impl Reader {
+    /// Once the stream has ended: what went wrong, when the decoder failed or complained.
+    fn failure(&mut self) -> Option<String> {
+        let status = self.child.wait().ok();
+        let said = crate::tail(&self.errors.take().and_then(|h| h.join().ok()).unwrap_or_default(), 3);
+        match status {
+            Some(s) if !s.success() && said.is_empty() => Some(format!("ffmpeg ended with {s}")),
+            _ => Some(said).filter(|s| !s.is_empty()),
+        }
+    }
 }
 
 impl Drop for Reader {
@@ -138,14 +153,20 @@ pub struct VideoDecoder {
     reader: Option<Reader>,
     ring: VecDeque<Arc<VideoFrame>>,
     end: Option<i64>,
+    /// Container duration in seconds (0 when unknown).
+    duration: f64,
     /// Decoder restarts (seeks) so far.
     pub seeks: usize,
+    /// Decoding that stopped or complained before the end of the stream (damaged or truncated media): later
+    /// frames hold the last good one. Each is also printed once on standard error.
+    pub warnings: Vec<String>,
 }
 
 impl VideoDecoder {
     /// Opens `path`, indexing frames at `fps` (the stream's own rate when `None`).
     pub fn open(path: &Path, fps: Option<f64>, lookahead: usize) -> Result<VideoDecoder, MediaError> {
         let info = probe(path)?;
+        let duration = info.duration;
         let v = info.video.ok_or_else(|| MediaError::NoStream(path.display().to_string(), "video"))?;
         let fps = fps.filter(|f| *f > 0.0).unwrap_or(if v.fps > 0.0 { v.fps } else { 25.0 });
         Ok(VideoDecoder {
@@ -157,7 +178,9 @@ impl VideoDecoder {
             reader: None,
             ring: VecDeque::new(),
             end: None,
+            duration,
             seeks: 0,
+            warnings: Vec::new(),
         })
     }
 
@@ -175,10 +198,25 @@ impl VideoDecoder {
         cmd.args(["-f", "rawvideo", "-pix_fmt", self.layout.ffmpeg_name(), "pipe:1"]);
         let mut child = cmd
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| MediaError::Spawn { tool: crate::ffmpeg(), source: e })?;
         let mut out = child.stdout.take().expect("piped");
+        let mut err = child.stderr.take().expect("piped");
+        // drained so the decoder never blocks on it; its last lines say why decoding stopped
+        let errors = std::thread::Builder::new()
+            .name("sr-video-errors".into())
+            .spawn(move || {
+                let (mut kept, mut buf) = (Vec::new(), [0u8; 4096]);
+                while let Ok(n @ 1..) = err.read(&mut buf) {
+                    kept.extend_from_slice(&buf[..n]);
+                    if kept.len() > 16384 {
+                        kept.drain(..kept.len() - 8192);
+                    }
+                }
+                kept
+            })
+            .map_err(MediaError::Io)?;
         let (tx, rx) = sync_channel(self.lookahead);
         let layout = self.layout;
         let sizes = layout.planes(w, h);
@@ -202,8 +240,37 @@ impl VideoDecoder {
                 }
             })
             .map_err(MediaError::Io)?;
-        self.reader = Some(Reader { child, rx, next: index });
+        self.reader = Some(Reader { child, rx, errors: Some(errors), first: index, next: index });
         Ok(())
+    }
+
+    /// Whether a decoder started at `index` delivers a frame.
+    fn has_frame(&mut self, index: i64) -> Result<bool, MediaError> {
+        self.ring.clear();
+        self.start(index)?;
+        let got = self.reader.as_ref().expect("started").rx.recv().is_ok();
+        self.reader = None;
+        Ok(got)
+    }
+
+    /// The last frame, after a seek to `past` found none: the end is bracketed with a few seeks (around the
+    /// container's duration, then by halves) and read up to, rather than stepped back to a frame at a time.
+    fn last_frame(&mut self, past: i64) -> Result<Arc<VideoFrame>, MediaError> {
+        let (mut lo, mut hi) = (0, past);
+        let guess = (self.duration * self.fps).ceil() as i64;
+        let mut tries = vec![guess - 12, guess + 4];
+        while hi - lo > 16 {
+            let mid = tries.pop().filter(|m| lo < *m && *m < hi).unwrap_or(lo + (hi - lo) / 2);
+            if self.has_frame(mid)? {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        self.frame(lo)?;
+        let f = self.frame(hi - 1)?;
+        self.end.get_or_insert(hi);
+        Ok(f)
     }
 
     /// Frame `index`, or the last frame when `index` is past the end.
@@ -239,20 +306,27 @@ impl VideoDecoder {
                 }
                 Err(_) => {
                     // end of stream: remember it and hold the last frame
-                    let next = r.next;
+                    let (first, next, why) = (r.first, r.next, r.failure());
                     self.reader = None;
-                    if next == 0 || (self.ring.is_empty() && index == 0) {
+                    if next == first {
+                        if first > 0 {
+                            return self.last_frame(first);
+                        }
                         return Err(MediaError::Failed {
                             tool: "ffmpeg".into(),
                             path: self.path.display().to_string(),
-                            message: "no frames decoded".into(),
+                            message: why.unwrap_or_else(|| "no frames decoded".into()),
                         });
                     }
-                    self.end = Some(next.max(1));
-                    if let Some(f) = self.ring.back() {
-                        return Ok(f.clone());
+                    if let Some(why) = why {
+                        let w = format!("{}: decoding stopped after frame {}: {why}", self.path.display(), next - 1);
+                        if !self.warnings.contains(&w) {
+                            eprintln!("warning: {w}");
+                            self.warnings.push(w);
+                        }
                     }
-                    return self.frame(next - 1);
+                    self.end = Some(next);
+                    return Ok(self.ring.back().expect("frames were read").clone());
                 }
             }
         }
