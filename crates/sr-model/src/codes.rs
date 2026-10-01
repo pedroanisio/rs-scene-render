@@ -32,7 +32,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     (
         "W01",
         "structure",
-        "A numeric attribute holds INF, -INF or NaN; the schema accepts them but the renderer needs finite values.",
+        "A numeric attribute holds INF, -INF, NaN or a number too large for a double (such as 1e400), also inside lengths and number lists; the schema accepts them but the renderer needs finite values.",
     ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
@@ -42,6 +42,9 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("A06", "assets", "A physics cache is declared but absent; the simulation will be recomputed."),
     ("A07", "assets", "An image's declared width and height differ from its local source file. Layout uses the declared dimensions, so a different aspect ratio distorts the image. Set the asset dimensions to the file's size and use the layer's boxWidth, boxHeight and fit for layout. Proxy representations are not compared."),
     ("P01", "rules", "A soft body is too stiff for its mass: stable integration needs more than 4096 substeps per physics@fixedStep."),
+    ("P02", "rules", "A count (repeater copies, star points, zig-zag ridges, burst count or repeat, repeat count, object3D instances) is far above what a renderer can draw."),
+    ("P03", "rules", "A symbol contains an instance of itself, directly or through other symbols."),
+    ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 256 levels."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 

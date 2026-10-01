@@ -474,7 +474,7 @@ impl Sha256 {
 impl ParseValue for Sha256 {
     fn parse_value(s: &str) -> Result<Self, ValueError> {
         let s = s.trim();
-        if s.len() != 64 {
+        if s.len() != 64 || !s.is_ascii() {
             return Err(ValueError::new(format!("{s:?} is not a 64-digit SHA-256")));
         }
         let mut out = [0u8; 32];

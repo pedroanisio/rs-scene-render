@@ -25,7 +25,10 @@ use crate::diag::{element_path, Diagnostic, Loc, Severity};
 use crate::xsd::{root_builtin, Builtin, COMPLEX_TYPES};
 
 /// Frames beyond this count are not checked individually.
-const MAX_SEQUENCE_FRAMES: i64 = 1_000_000;
+const MAX_SEQUENCE_FRAMES: i128 = 1_000_000;
+
+/// Widest frame-number placeholder accepted (`%0Nd` or a run of `#`).
+pub const MAX_FRAME_DIGITS: usize = 64;
 
 /// Names of input-file attributes, derived from the schema: every `xs:anyURI`
 /// attribute except the output-side `path` and `uri`.
@@ -118,7 +121,8 @@ fn hex(d: &[u8; 32]) -> String {
 }
 
 /// Expands an image-sequence pattern (`name_%04d.png`, `name_%d.png` or
-/// `name_####.png`) for one frame number.
+/// `name_####.png`) for one frame number. `None` when the pattern has no
+/// placeholder or one wider than [`MAX_FRAME_DIGITS`].
 pub fn sequence_frame(pattern: &str, frame: i64) -> Option<String> {
     if let Some(start) = pattern.find('%') {
         let rest = &pattern[start + 1..];
@@ -127,12 +131,19 @@ pub fn sequence_frame(pattern: &str, frame: i64) -> Option<String> {
         if !spec.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let width: usize = if spec.is_empty() { 0 } else { spec.trim_start_matches('0').parse().unwrap_or(0) };
+        let digits = spec.trim_start_matches('0');
+        let width: usize = if digits.is_empty() { 0 } else { digits.parse().ok()? };
+        if width > MAX_FRAME_DIGITS {
+            return None;
+        }
         let num = format_frame(frame, width);
         return Some(format!("{}{}{}", &pattern[..start], num, &rest[spec_len + 1..]));
     }
     let start = pattern.find('#')?;
     let width = pattern[start..].bytes().take_while(|b| *b == b'#').count();
+    if width > MAX_FRAME_DIGITS {
+        return None;
+    }
     Some(format!("{}{}{}", &pattern[..start], format_frame(frame, width), &pattern[start + width..]))
 }
 
@@ -349,13 +360,17 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     if sequence_frame(src, first).is_none() {
         out.push(Diagnostic::error(
             "A04",
-            format!("image sequence src {src:?} has no frame placeholder (%0Nd, %d or ####)"),
+            format!(
+                "image sequence src {src:?} has no frame placeholder (%0Nd, %d or ####) of at most \
+                 {MAX_FRAME_DIGITS} digits"
+            ),
             loc,
             path,
         ));
         return;
     }
-    let count = (last - first) / step + 1;
+    let (first_w, step_w) = (first as i128, step as i128);
+    let count = (last as i128 - first_w) / step_w + 1;
     if count > MAX_SEQUENCE_FRAMES {
         out.push(Diagnostic::warning(
             "A04",
@@ -365,7 +380,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
         ));
         return;
     }
-    let frames: Vec<i64> = (0..count).map(|i| first + i * step).collect();
+    let frames: Vec<i64> = (0..count).map(|i| (first_w + i * step_w) as i64).collect();
     let missing: Vec<i64> = frames
         .par_iter()
         .filter(|f| match resolve(&sequence_frame(src, **f).unwrap_or_default(), base_dir) {
@@ -391,7 +406,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     let mut start = 0;
     for &f in &missing {
         match prev {
-            Some(p) if f == p + step => {}
+            Some(p) if p.checked_add(step) == Some(f) => {}
             _ => start = f,
         }
         runs.insert(start, f);
