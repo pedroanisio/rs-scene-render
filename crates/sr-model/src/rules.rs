@@ -1050,7 +1050,7 @@ fn components(next: &[Vec<usize>]) -> Vec<usize> {
 }
 
 /// Deepest bracket nesting accepted in an expression.
-pub const MAX_EXPRESSION_DEPTH: usize = 256;
+pub const MAX_EXPRESSION_DEPTH: usize = 62;
 
 /// Deepest nesting of `()`, `[]` and `{}` in an expression, outside string literals.
 fn expression_depth(s: &str) -> usize {

@@ -344,3 +344,20 @@ fn maps_stop_at_their_frame() {
     }
     assert!(!close(r.at(195, 100), [0.0, 0.0, 0.0, 1.0], 1e-3));
 }
+
+#[test]
+fn a_basemap_asked_for_more_tiles_than_a_frame_can_use_is_an_error() {
+    // the whole world twenty zoom levels finer than the view: 4^20 tiles
+    let doc = map_doc(
+        400,
+        300,
+        &format!(
+            r##"<tiles id="t" src="{}"/>
+                <map id="m" width="400" height="300" projection="web-mercator" centerLon="0" centerLat="0" zoom="1">
+                  <basemap tiles="t" detail="20" attribution="false"/></map>"##,
+            geo_fixture("baixa.pmtiles")
+        ),
+    );
+    let Some(r) = render(&doc) else { return };
+    assert!(r.stats.errors.iter().any(|e| e.contains("tiles")), "{:?}", r.stats.errors);
+}

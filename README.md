@@ -45,7 +45,7 @@ On top of 1.1.3, the vendored files carry the additions SREPs 9 to 11 and 13 (in
 | Stage | Module | Codes | What it enforces |
 |---|---|---|---|
 | Structure | `xsd::structure`, `xsd::simple` | `S01`–`S12`, `W01` | Content models, attribute declarations, lexical forms, enumerations, bounds, patterns, `xs:ID` uniqueness, `xs:IDREF` resolution |
-| Rules | `rules` | `V1`–`V7`, `C1`–`C59`, `R1`–`R41` (with the `R24-*`, `R25-*`, `R30-*` and `R31-*` families) | The 56 Schematron patterns, including the version gates |
+| Rules | `rules` | `V1`–`V7`, `C1`–`C59`, `R1`–`R41` (with the `R24-*`, `R25-*`, `R30-*` and `R31-*` families), `P01`–`P04` | The 56 Schematron patterns, including the version gates, and the limits a renderer needs: soft-body stiffness, counts that multiply into nodes or particles, symbols that contain themselves and expression nesting |
 | Assets | `assets` | `A01`–`A07` | Existence of every input URI, SHA-256 of every `@sha256`/`@cacheSha256` (generated media, transcriptions, physics caches), every frame of every image sequence, declared image dimensions against readable local image headers |
 | Model | `model`, `document` | `M01` | Typed construction and the ID index |
 
@@ -91,7 +91,7 @@ A 10,000-node composition (40,000 elements, 2.1 MiB) parses, validates and loads
 
 Every transcendental function comes from `libm`, so results are bit-identical across platforms.
 
-Evaluation errors use codes `E01`–`E16` (expression compile errors, unknown properties with suggestions, dependency cycles, key parse errors, override and parameter errors, data sources, include failures, recursion, invalid links and paths) and `E17` (a missing or malformed tracking file); `scene-render explain E03` describes each one.
+Evaluation errors use codes `E01`–`E16` (expression compile errors, unknown properties with suggestions, dependency cycles, key parse errors, override and parameter errors, data sources, include failures, recursion, invalid links and paths) `E17` (a missing or malformed tracking file) and `E18` (a composition that expands into more than 2^19 nodes); `scene-render explain E03` describes each one.
 
 **Performance scenario.** `crates/sr-eval/tests/perf.rs` evaluates 5,000 keyframed properties across 1,020 nodes plus 500 expressions into a full FrameGraph and asserts a 2 ms budget per frame on one core (release build); the median is 0.97 ms. `scene-render eval FILE --bench` measures any document.
 
@@ -576,6 +576,7 @@ A document names provider-made media as `<generated>` assets and transcribed cap
 - Generated media come first, so captions can transcribe speech made in the same run. A transcriber hears the track as it plays in the scene's mix (placement, trims, speed, loops, volume and effects), as a mono WAV from composition time 0, so the word times it returns are composition times.
 - `cacheSha256` is rewritten in the document's text; comments, layout and every other attribute stay as they were. Placeholder digests (all zeros) are the usual starting point.
 - `--check` makes and writes nothing and exits 1 when anything is stale, for CI.
+- A `cache` path stays inside the document's folder: an absolute path, a `file:` URI or a path that leaves the folder through `..` is refused before anything is written, so resolving a document cannot write elsewhere. `SR_RESOLVE_ROOT` names a wider folder to allow, for projects that keep scenes and media in sibling folders.
 
 **Providers.**
 - `whisper`, the default transcriber: whisper.cpp's `whisper-cli` (`SR_WHISPER`, else `PATH`). `model` names a ggml model (`base.en`, `small`, `large-v3`) found in `SR_WHISPER_MODELS` or the `models/` folder of the whisper.cpp tree, or is a path. Audio is resampled to 16 kHz, `language` and `prompt` pass through, and the tokens are joined into words timed by dynamic time warping (`--dtw`), which whisper.cpp offers for the standard models.

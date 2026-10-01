@@ -94,8 +94,8 @@ fn deeply_nested_expressions_are_rejected() {
         )
     };
     let nested = |n: usize| format!("{}1{}", "(".repeat(n), ")".repeat(n));
-    assert!(codes(&expr(&nested(200))).is_empty(), "{}", report(&expr(&nested(200))));
-    assert!(has(&expr(&nested(257)), "P04"));
+    assert!(codes(&expr(&nested(60))).is_empty(), "{}", report(&expr(&nested(60))));
+    assert!(has(&expr(&nested(65)), "P04"));
     assert!(has(&expr(&"(".repeat(30_000)), "P04"));
     assert!(has(&expr(&"[".repeat(30_000)), "P04"));
     // brackets in strings do not nest

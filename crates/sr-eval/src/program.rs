@@ -1141,7 +1141,7 @@ impl Builder {
         match a {
             m::AssetsChild::Video(v) => Some(v.duration.get()),
             m::AssetsChild::ImageSequence(s) => {
-                let frames = ((s.last - s.first) as f64 / s.step as f64).floor() + 1.0;
+                let frames = (s.last.saturating_sub(s.first) as f64 / s.step as f64).floor() + 1.0;
                 Some(frames.max(0.0) / s.fps.as_f64())
             }
             _ => None,

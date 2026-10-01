@@ -27,6 +27,9 @@ use sr_vector::{Paint, Poly};
 use super::map::Painter;
 use crate::vector::Attrs;
 
+/// The most tiles one basemap draws in a frame; a view that shows more is an error, not a wait.
+pub(crate) const MAX_TILES: usize = 4096;
+
 fn solid(c: [f64; 4]) -> Option<Paint> {
     Some(Paint::Solid { rgba: [c[0], c[1], c[2], 1.0], srgb: false })
 }
@@ -124,7 +127,7 @@ pub fn draw(
     let zoom = tiles::map_zoom(proj) + detail;
     let z = geo::basemap_zoom(proj, asset.tile_size.unwrap_or(512) as f64, detail, false).min(22);
     let mut loaded: Vec<(Tile, [f64; 3], Arc<TileData>)> = Vec::new();
-    for t in tiles::visible(proj, z) {
+    for t in tiles::visible_within(proj, z, MAX_TILES)? {
         let (src, window) = tiles::source(t, arch.header.max_zoom);
         if let Some(d) = geo::tile(&arch, src.z, src.x, src.y)? {
             loaded.push((src, window, d));
@@ -562,7 +565,7 @@ fn raster(
     let exact = proj.raw() == sr_geo::project::Raw::Mercator && proj.rotate()[1] == 0.0 && proj.rotate()[2] == 0.0;
     let n = if exact { 1 } else { 8 };
     let frame = proj.extent_rect().map(|r| (r.x1 - r.x0).hypot(r.y1 - r.y0)).unwrap_or(1e9);
-    for t in tiles::visible(proj, z) {
+    for t in tiles::visible_within(proj, z, MAX_TILES)? {
         // the finest archive tile that holds this one
         let mut src = tiles::source(t, arch.header.max_zoom);
         let mut data = geo::tile(arch, src.0.z, src.0.x, src.0.y)?;

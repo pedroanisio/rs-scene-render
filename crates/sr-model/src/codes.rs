@@ -44,7 +44,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("P01", "rules", "A soft body is too stiff for its mass: stable integration needs more than 4096 substeps per physics@fixedStep."),
     ("P02", "rules", "A count (repeater copies, star points, zig-zag ridges, burst count or repeat, repeat count, object3D instances) is far above what a renderer can draw."),
     ("P03", "rules", "A symbol contains an instance of itself, directly or through other symbols."),
-    ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 256 levels."),
+    ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 62 levels, the depth the evaluator compiles."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 
