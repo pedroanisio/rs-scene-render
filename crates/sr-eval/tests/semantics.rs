@@ -183,6 +183,25 @@ fn expressions_read_values_other_properties_and_params() {
     assert_ne!(o1, o2, "random changes per frame");
 }
 
+#[test]
+fn delayed_links_over_shared_dependencies_stay_cheap() {
+    // every layer reads the next one twice; a delayed link evaluates the whole chain away from
+    // the frame's own time, where each property must still be computed once, not 2³⁰ times
+    let mut comp =
+        String::from(r#"<layer id="top" asset="img"><link property="x" source="s0.x" delay="0.1"/></layer>"#);
+    for k in 0..30 {
+        comp += &format!(
+            r#"<layer id="s{k}" asset="img"><expression property="x">(prop("s{n}.x") + prop("s{n}.x")) / 2 + 1</expression></layer>"#,
+            n = k + 1
+        );
+    }
+    comp += r#"<layer id="s30" asset="img"><expression property="x">time * 10</expression></layer>"#;
+    let f = eval(&doc("", &comp), 1.0);
+    assert_eq!(node(&f, "s0").props.get("x"), Some(&Value::Len(Length::px(40.0))));
+    let top = node(&f, "top").props.get("x").unwrap().as_num().unwrap();
+    assert!(close(top, 39.0), "the chain 0.1 s ago: {top}");
+}
+
 /// Seeded expression functions: golden values computed from the definition by an
 /// independent reference (project seed 1, fps 10; t = 2.35 is frame 23).
 #[test]
