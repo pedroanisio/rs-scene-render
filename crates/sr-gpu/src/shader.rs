@@ -46,6 +46,7 @@ impl FxEngine {
         }
         let r = crate::fx::check_glsl(&program.glsl)
             .map_err(|e| glsl::user_lines(&e, program.prelude_lines))
+            .and_then(|_| glsl::check_limits(program, &self.device.limits()))
             .map(|_| Arc::new(self.build_pipe(program)));
         self.programs.insert(h, r.clone());
         r

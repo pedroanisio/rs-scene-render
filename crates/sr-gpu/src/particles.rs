@@ -19,7 +19,8 @@ pub struct Inst {
     pub cell: [f32; 4],
 }
 
-/// A particle pass: instances in target pixels, with an optional sprite sheet.
+/// A particle pass: instances in target pixels, with an optional sprite sheet (its asset id
+/// and texture).
 pub struct ParticleJob {
     pub insts: Vec<Inst>,
     pub sprite: Option<(String, wgpu::TextureView)>,
@@ -32,7 +33,9 @@ pub struct ParticleEngine {
     bgl: wgpu::BindGroupLayout,
     smp: wgpu::Sampler,
     white: wgpu::TextureView,
-    binds: HashMap<(String, [u32; 2]), (wgpu::BindGroup, wgpu::Buffer)>,
+    /// Bind groups by sprite texture and target size. The texture, not the asset id: two
+    /// documents' assets may share an id, and one asset decodes differently by colour settings.
+    binds: HashMap<(Option<wgpu::TextureView>, [u32; 2]), (wgpu::BindGroup, wgpu::Buffer)>,
 }
 
 impl ParticleEngine {
@@ -161,7 +164,7 @@ impl ParticleEngine {
         size: [u32; 2],
     ) {
         let d = self.device.clone();
-        let key = (job.sprite.as_ref().map(|s| s.0.clone()).unwrap_or_default(), size);
+        let key = (job.sprite.as_ref().map(|s| s.1.clone()), size);
         if !self.binds.contains_key(&key) {
             let buf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("particle-target"),
