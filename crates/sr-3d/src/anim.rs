@@ -6,13 +6,14 @@ use crate::{Animation, Interp, Model, Path, Trs, Vertex};
 
 fn key_span(times: &[f32], t: f32) -> (usize, usize, f32, f32) {
     let n = times.len();
-    if n == 0 || t <= times[0] {
+    if n == 0 || t.is_nan() || t <= times[0] {
         return (0, 0, 0.0, 0.0);
     }
-    if t >= times[n - 1] {
+    if t >= times[n - 1] || n < 2 {
         return (n - 1, n - 1, 0.0, 0.0);
     }
-    let i = times.partition_point(|&x| x <= t) - 1;
+    // NaN or unsorted times (or a NaN `t`) leave the search anywhere: keep it inside the keys
+    let i = times.partition_point(|&x| x <= t).clamp(1, n - 1) - 1;
     let dt = times[i + 1] - times[i];
     (i, i + 1, if dt > 0.0 { (t - times[i]) / dt } else { 0.0 }, dt)
 }

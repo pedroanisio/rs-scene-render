@@ -6,8 +6,20 @@ fn find_tag(text: &str, name: &str, id: &str) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let open = format!("<{name}");
     let mut from = 0;
-    while let Some(off) = text[from..].find(&open) {
+    while let Some(off) = text[from..].find('<') {
         let start = from + off;
+        let rest = &text[start..];
+        // comments, CDATA sections and processing instructions hold no elements
+        let hidden =
+            [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")].into_iter().find(|(o, _)| rest.starts_with(o));
+        if let Some((o, close)) = hidden {
+            from = start + o.len() + rest[o.len()..].find(close)? + close.len();
+            continue;
+        }
+        if !rest.starts_with(&open) {
+            from = start + 1;
+            continue;
+        }
         from = start + open.len();
         // the name must end here
         match bytes.get(from) {
@@ -123,5 +135,26 @@ mod tests {
         let y = set_attr(x, "generated", "a", "k", "v").unwrap();
         assert_eq!(y, "<generatedX id=\"a\"/><generated prompt=\"say id='a' k='no'\" id=\"a\" k=\"v\"/>");
         assert!(set_attr(t, "generated", "zz", "k", "v").is_err());
+    }
+
+    #[test]
+    fn tags_in_comments_cdata_and_instructions_are_not_elements() {
+        let real = r#"<generated id="a" cacheSha256="00"/>"#;
+        for decoy in [
+            r#"<!-- <generated id="a" cacheSha256="00"/> -->"#,
+            r#"<note><![CDATA[<generated id="a" cacheSha256="00"/>]]></note>"#,
+            r#"<?note <generated id="a" cacheSha256="00"/> ?>"#,
+            r#"<!-- > <generated id="a" cacheSha256="00"/>"#,
+        ] {
+            let t = format!("<scene>{decoy}{real}</scene>");
+            let u = set_attr(&t, "generated", "a", "cacheSha256", "ff");
+            if decoy.ends_with("-->") || !decoy.starts_with("<!--") {
+                assert_eq!(u.unwrap(), format!("<scene>{decoy}{}</scene>", real.replace("00", "ff")), "{decoy}");
+            } else {
+                // an unterminated comment hides the rest of the text
+                assert!(u.is_err(), "{decoy}");
+            }
+        }
+        assert!(set_attr(r#"<!-- <generated id="a"/> -->"#, "generated", "a", "k", "v").is_err());
     }
 }

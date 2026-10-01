@@ -101,22 +101,36 @@ fn outline(t: Tile) -> Geometry {
 
 /// The tiles of zoom `z` whose outline reaches the projection's clip extent (the frame).
 pub fn visible(p: &Projection, z: u8) -> Vec<Tile> {
-    let mut out = Vec::new();
-    let mut stack = vec![Tile { z: 0, x: 0, y: 0 }];
-    while let Some(t) = stack.pop() {
-        if p.project(&outline(t)).polygons.is_empty() {
-            continue;
+    visible_within(p, z, usize::MAX).unwrap_or_default()
+}
+
+/// [`visible`], refusing a view that shows more than `max` tiles. The walk goes one zoom at a time
+/// and stops at the first zoom with more than `max` visible tiles (each has visible tiles below
+/// it), so a refused view costs a few times `max` outlines per zoom, whatever `z` is.
+pub fn visible_within(p: &Projection, z: u8, max: usize) -> Result<Vec<Tile>, String> {
+    let mut level = vec![Tile { z: 0, x: 0, y: 0 }];
+    level.retain(|t| !p.project(&outline(*t)).polygons.is_empty());
+    for zoom in 0..z {
+        let mut below = Vec::new();
+        for t in &level {
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let c = Tile { z: zoom + 1, x: 2 * t.x + dx, y: 2 * t.y + dy };
+                if p.project(&outline(c)).polygons.is_empty() {
+                    continue;
+                }
+                if below.len() >= max {
+                    return Err(format!("the view shows more than {max} tiles at zoom {}", zoom + 1));
+                }
+                below.push(c);
+            }
         }
-        if t.z >= z {
-            out.push(t);
-            continue;
-        }
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            stack.push(Tile { z: t.z + 1, x: 2 * t.x + dx, y: 2 * t.y + dy });
-        }
+        level = below;
     }
-    out.sort();
-    out
+    if level.len() > max {
+        return Err(format!("the view shows more than {max} tiles at zoom {z}"));
+    }
+    level.sort();
+    Ok(level)
 }
 
 /// The tile holding tile `t`'s content at archive zoom `max` (overzooming beyond it), and the
@@ -283,6 +297,25 @@ mod tests {
         let p = m.projection(&View { lon: 10.0, lat: 50.0, zoom: 0.0, rotation: 0.0 });
         let ts = visible(&p, 3);
         assert!(ts.contains(&tile_of(3, 10.0, 50.0)) && !ts.contains(&tile_of(3, -160.0, 0.0)), "{ts:?}");
+    }
+
+    #[test]
+    fn enumeration_stops_at_the_tile_budget() {
+        // the whole world at zoom 10 is a million tiles: refused long before they are listed
+        let (m, _) = Map::new(Kind::WebMercator, None, [512.0, 512.0], &[], 0.0, Some([0.0, 0.0]));
+        let world = m.projection(&View { lon: 0.0, lat: 0.0, zoom: 0.0, rotation: 0.0 });
+        let started = std::time::Instant::now();
+        assert!(visible_within(&world, 10, 2000).is_err());
+        assert!(visible_within(&world, 24, 2000).is_err());
+        assert!(started.elapsed().as_secs() < 20);
+        assert_eq!(visible_within(&world, 1, 4).unwrap(), visible(&world, 1));
+        assert!(visible_within(&world, 1, 3).is_err());
+        // a close view at a deep zoom stays cheap
+        let (m, _) = Map::new(Kind::WebMercator, None, [1024.0, 512.0], &[], 0.0, Some([-9.1375, 38.711]));
+        let p = m.projection(&View { lon: -9.1375, lat: 38.711, zoom: 18.0, rotation: 0.0 });
+        let ts = visible_within(&p, 18, 2000).unwrap();
+        assert!(ts.contains(&tile_of(18, -9.1375, 38.711)) && ts.len() < 40, "{}", ts.len());
+        assert_eq!(ts, visible(&p, 18));
     }
 
     fn tile_of(z: u8, lon: f64, lat: f64) -> Tile {

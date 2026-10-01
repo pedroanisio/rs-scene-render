@@ -287,3 +287,16 @@ fn wav_files_are_valid() {
     assert_eq!(a, wav::pcm_bytes(&vec![vec![0.0; 1000]], 16, true, 1));
     assert!(a.chunks(2).all(|c| i16::from_le_bytes([c[0], c[1]]).abs() <= 1));
 }
+
+#[test]
+fn fitting_an_empty_segment_is_silent() {
+    // clipIn past the end, clipOut before clipIn, and an empty file
+    for (samples, a, b) in [(RATE as usize, 2.0, None), (RATE as usize, 0.5, Some(0.25)), (0, 0.0, None)] {
+        let mut t = track("a", mono(vec![0.5; samples]), 0.0);
+        if let NodeKind::Track { placement: Placement::Timeline { clip_in, clip_out, fit, .. }, .. } = &mut t.kind {
+            (*clip_in, *clip_out, *fit) = (a, b, Some((120.0, 2.0)));
+        }
+        let m = mix(2.0, vec![t]).render().unwrap();
+        assert!(m.master.iter().all(|c| c.iter().all(|v| *v == 0.0)));
+    }
+}

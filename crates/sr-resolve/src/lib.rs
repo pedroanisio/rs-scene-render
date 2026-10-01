@@ -25,6 +25,9 @@
 //!
 //! With `check`, nothing is made or written: the report says which targets are
 //! stale, for CI.
+//!
+//! Caches are written only inside the document's folder (or the folder named by
+//! `SR_RESOLVE_ROOT`), so a document cannot direct a provider's output elsewhere.
 
 pub mod doc;
 pub mod protocol;
@@ -161,10 +164,46 @@ impl Drop for Scratch {
     }
 }
 
+/// A path made absolute with its `.` and `..` steps applied, without reading the file system.
+fn lexical(p: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let abs = std::path::absolute(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    Ok(out)
+}
+
+/// The file a cache attribute names. Caches are written, so they must lie inside `root` (the
+/// project folder): absolute paths and `..` steps that leave it are refused.
+fn local_in(src: &str, base: &Path, root: &Path) -> Result<PathBuf, String> {
+    let p = match sr_model::assets::resolve(src, base) {
+        sr_model::assets::Resolved::Local(p) => p,
+        sr_model::assets::Resolved::Remote(u) => return Err(format!("{u}: a remote cache cannot be written")),
+    };
+    let (file, root) = (lexical(&p)?, lexical(root)?);
+    if file == root || !file.starts_with(&root) {
+        return Err(format!(
+            "the cache is outside the project folder {}; keep caches inside it, or name the folder they may be \
+             written in with SR_RESOLVE_ROOT",
+            root.display()
+        ));
+    }
+    Ok(file)
+}
+
+/// [`local_in`] the document's folder, or `SR_RESOLVE_ROOT` when it is set.
 fn local(src: &str, base: &Path) -> Result<PathBuf, String> {
-    match sr_model::assets::resolve(src, base) {
-        sr_model::assets::Resolved::Local(p) => Ok(p),
-        sr_model::assets::Resolved::Remote(u) => Err(format!("{u}: a remote cache cannot be written")),
+    match std::env::var_os("SR_RESOLVE_ROOT").filter(|r| !r.is_empty()) {
+        Some(root) => local_in(src, base, Path::new(&root)),
+        None => local_in(src, base, base),
     }
 }
 
@@ -594,6 +633,16 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
     };
     let mut terrains: Vec<(&m::MapAsset, u64)> = Vec::new();
     let mut set = std::collections::BTreeSet::new();
+    // the budget holds while the tiles are listed: no view is walked beyond it
+    let max = providers::tiles::max_tiles();
+    let mut add = |proj: &sr_geo::project::Projection, z: u8| -> Result<(), String> {
+        let tiles = sr_geo::tiles::visible_within(proj, z, max).map_err(|_| providers::tiles::over_budget(max))?;
+        set.extend(tiles.iter().map(|t| (t.z, t.x, t.y)));
+        if set.len() > max {
+            return Err(providers::tiles::over_budget(max));
+        }
+        Ok(())
+    };
     for (_, n) in doc.composition_nodes() {
         let m::Node::Object3D(o) = n else { continue };
         let Some(mp) = o.map.as_deref().and_then(map_of) else { continue };
@@ -616,9 +665,7 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
                 if let m::MapAssetChild::Basemap(b) = c {
                     if b.tiles == t.id {
                         let z = sr_eval::geo::basemap_zoom(&proj, size, b.detail, raster).clamp(zmin, zmax);
-                        for tile in sr_geo::tiles::visible(&proj, z) {
-                            set.insert((tile.z, tile.x, tile.y));
-                        }
+                        add(&proj, z)?;
                     }
                 }
             }
@@ -639,9 +686,7 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
             let view = sr_eval::geo::view(&cam, mp, &animated, time);
             let proj = cam.map.projection(&view);
             let z = sr_eval::geo::basemap_zoom(&proj, size, *detail, raster).clamp(zmin, zmax);
-            for tile in sr_geo::tiles::visible(&proj, z) {
-                set.insert((tile.z, tile.x, tile.y));
-            }
+            add(&proj, z)?;
         }
         for (mp, res) in &terrains {
             let cam = sr_eval::geo::camera(p, mp)?;
@@ -651,9 +696,7 @@ fn tile_set(doc: &sr_model::Document, t: &m::TilesAsset) -> Result<std::collecti
             // a DEM pixel per grid cell: 256-pixel tiles at the map zoom less log2(cell), as the renderer
             let cell = (mp.width.max(mp.height) as f64) / *res as f64;
             let zd = (sr_geo::tiles::map_zoom(&proj) + 1.0 - cell.log2()).round().clamp(zmin as f64, zmax as f64) as u8;
-            for tile in sr_geo::tiles::visible(&proj, zd) {
-                set.insert((tile.z, tile.x, tile.y));
-            }
+            add(&proj, zd)?;
         }
     }
     Ok(set)
@@ -688,4 +731,29 @@ fn mix(doc: &sr_model::Document) -> Result<TrackSignals, String> {
         .map_err(|e| format!("mixing the scene's audio: {e}"))?
         .ok_or("the scene has no audio to transcribe")?;
     Ok((a.mix.rate, a.mixed.nodes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caches_stay_inside_the_root() {
+        let base = Path::new("/proj/scenes");
+        let inside = |src: &str, root: &str| local_in(src, base, Path::new(root));
+        // as the platform spells them: a drive is added on Windows
+        let at = |p: &str| lexical(Path::new(p)).unwrap();
+        assert_eq!(inside("gen/vo.wav", "/proj/scenes").unwrap(), at("/proj/scenes/gen/vo.wav"));
+        assert_eq!(inside("./a/../vo%20x.wav", "/proj/scenes").unwrap(), at("/proj/scenes/vo x.wav"));
+        assert_eq!(inside("file:///proj/scenes/vo.wav", "/proj/scenes/").unwrap(), at("/proj/scenes/vo.wav"));
+        for out in
+            ["../media/vo.wav", "/etc/passwd", "file:///etc/passwd", "gen/../../x", "a/../..", ".", "../scenes-2/x"]
+        {
+            assert!(inside(out, "/proj/scenes").is_err_and(|e| e.contains("outside")), "{out}");
+        }
+        // a wider root admits a media folder beside the scenes
+        assert_eq!(inside("../media/vo.wav", "/proj").unwrap(), at("/proj/media/vo.wav"));
+        assert!(inside("../../etc/passwd", "/proj").is_err());
+        assert!(inside("https://example.com/vo.wav", "/proj").is_err_and(|e| e.contains("remote")));
+    }
 }

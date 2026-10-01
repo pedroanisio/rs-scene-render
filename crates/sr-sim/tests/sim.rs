@@ -263,7 +263,7 @@ impl EmitterDriver for Here {
     fn fields(&mut self, _t: f64) -> Vec<Field> {
         Vec::new()
     }
-    fn hit(&mut self, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
         None
     }
 }
@@ -329,4 +329,203 @@ fn particles_emit_move_and_replay_exactly() {
     s.preroll = 2.0;
     let mut e = Emitter::new(s);
     assert_eq!(e.at(1.0, &mut Here).len(), 200);
+}
+
+struct Quiet;
+
+impl EmitterDriver for Quiet {
+    fn origin(&mut self, _t: f64) -> [f64; 6] {
+        [1.0, 0.0, 0.0, 1.0, 400.0, 300.0]
+    }
+    fn rate(&mut self, _t: f64) -> f64 {
+        0.0
+    }
+    fn fields(&mut self, _t: f64) -> Vec<Field> {
+        Vec::new()
+    }
+    fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+        None
+    }
+}
+
+#[test]
+fn a_burst_fires_exactly_once() {
+    // 0.3 is not a multiple of 1/120 in floating point: its step windows must still tile time
+    let mut s = spec();
+    s.bursts = vec![Burst { time: 0.3, count: 10, repeat: 0, interval: 1.0 }];
+    let mut e = Emitter::new(s);
+    assert_eq!(e.at(1.0, &mut Quiet).len(), 10);
+    assert_eq!(e.emitted(), 10);
+    let mut s = spec();
+    s.start = 0.5;
+    s.bursts = vec![Burst { time: 0.7916666666666666, count: 10, repeat: 0, interval: 1.0 }];
+    let mut e = Emitter::new(s);
+    assert_eq!(e.at(1.5, &mut Quiet).len(), 10);
+    // every burst time on or between step boundaries fires once, whatever the start
+    for start in [0.0, 0.1, 0.5, 1.0 / 3.0] {
+        for k in 0..600u32 {
+            let time = start + k as f64 / 240.0;
+            let mut s = spec();
+            s.start = start;
+            s.bursts = vec![Burst { time, count: 1, repeat: 0, interval: 1.0 }];
+            let mut e = Emitter::new(s);
+            e.at(start + 4.0, &mut Quiet);
+            assert_eq!(e.emitted(), 1, "start {start}, burst at {time}");
+        }
+    }
+}
+
+#[test]
+fn huge_bursts_and_rates_stop_at_the_cap() {
+    let mut s = spec();
+    s.max_particles = 100;
+    s.bursts = vec![
+        Burst { time: 0.1, count: 3, repeat: 100_000_000, interval: 0.25 },
+        Burst { time: 0.5, count: 1_000_000_000_000, repeat: 0, interval: 1.0 },
+        Burst { time: 0.6, count: u64::MAX, repeat: u64::MAX, interval: 0.0 },
+    ];
+    let mut e = Emitter::new(s);
+    assert_eq!(e.at(0.45, &mut Quiet).len(), 6, "two repeats so far");
+    assert_eq!(e.emitted(), 6);
+    let p = e.at(0.55, &mut Quiet).clone();
+    assert_eq!(p.len(), 100, "capped");
+    assert_eq!(&p.id[..8], &[0, 1, 2, 3, 4, 5, 6, 7], "ids count on in birth order");
+    assert_eq!(e.emitted(), 6 + 1_000_000_000_000, "dropped particles still count");
+    assert_eq!(e.at(2.0, &mut Quiet).len(), 100);
+    struct Flood;
+    impl EmitterDriver for Flood {
+        fn origin(&mut self, _t: f64) -> [f64; 6] {
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        }
+        fn rate(&mut self, _t: f64) -> f64 {
+            1e18
+        }
+        fn fields(&mut self, _t: f64) -> Vec<Field> {
+            Vec::new()
+        }
+        fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+            None
+        }
+    }
+    let mut s = spec();
+    s.max_particles = 100;
+    let mut e = Emitter::new(s);
+    assert_eq!(e.at(1.0, &mut Flood).len(), 100);
+}
+
+#[test]
+fn points_inside_rigid_bodies_hit_them() {
+    let mut wall = body(400.0, 300.0);
+    wall.kind = BodyKind::Static;
+    let mut w = world(vec![wall], vec![], vec![], Bounds::None);
+    assert!(w.hit([400.0, 260.0]).is_some(), "before the first step too");
+    w.frame_at(0.1, &mut Still(vec![]));
+    let (q, n) = w.hit([400.0, 260.0]).expect("inside the box");
+    assert!((q[0] - 400.0).abs() < 1e-6 && (q[1] - 250.0).abs() < 1e-6, "nearest surface: {q:?}");
+    assert!(n[0].abs() < 1e-9 && (n[1] + 1.0).abs() < 1e-9, "outward normal points up: {n:?}");
+    assert!(w.hit([400.0, 240.0]).is_none(), "outside");
+    let mut sensor = body(400.0, 300.0);
+    sensor.kind = BodyKind::Static;
+    sensor.sensor = true;
+    let w = world(vec![sensor], vec![], vec![], Bounds::None);
+    assert!(w.hit([400.0, 260.0]).is_none(), "sensors do not collide");
+    // a rope dropped on the box rests on its top instead of falling through
+    let rope = SoftSpec {
+        kind: SoftKind::Rope,
+        rows: 2,
+        cols: 5,
+        rest: lattice(370.0, 100.0, 60.0, 4.0, 2, 5),
+        mass: 0.5,
+        stiffness: 300.0,
+        damping: 0.3,
+        pressure: 0.0,
+        pinned: vec![false; 10],
+        self_collision: false,
+    };
+    let mut wall = body(400.0, 300.0);
+    wall.kind = BodyKind::Static;
+    let mut w = world(vec![wall], vec![], vec![rope], Bounds::None);
+    let f = w.frame_at(3.0, &mut Still(vec![]));
+    assert!(f.softs[0].iter().all(|p| p[1] < 256.0 && p[1] > 200.0), "rests on the box: {:?}", f.softs[0]);
+}
+
+#[test]
+fn hits_are_tested_against_the_step_asked_for() {
+    // a box in free fall: 4.9 px down after 0.1 s, 122 px after 0.5 s, 490 px after 1 s
+    let mk = || world(vec![body(400.0, 100.0)], vec![], vec![], Bounds::None);
+    let mut w = mk();
+    let mut d = Still(vec![]);
+    w.frame_at(1.0, &mut d);
+    assert!(w.hit([400.0, 250.0]).is_none(), "it has fallen past");
+    w.prepare_hits(0.5, &mut d);
+    let late = w.hit_at(0.5, [400.0, 250.0]).expect("where it was at 0.5 s");
+    w.prepare_hits(0.1, &mut d);
+    assert!(w.hit_at(0.1, [400.0, 110.0]).is_some() && w.hit_at(0.1, [400.0, 250.0]).is_none());
+    assert!(w.hit_at(0.5, [400.0, 250.0]).is_some(), "earlier steps stay known");
+    // whatever was simulated before, the answer is the same
+    let mut fresh = mk();
+    fresh.prepare_hits(0.5, &mut d);
+    assert_eq!(fresh.hit_at(0.5, [400.0, 250.0]), Some(late));
+    // an emitter catching up in one go collides like one stepped a frame at a time
+    struct Onto<'a>(&'a mut World);
+    impl EmitterDriver for Onto<'_> {
+        fn origin(&mut self, _t: f64) -> [f64; 6] {
+            [1.0, 0.0, 0.0, 1.0, 400.0, 0.0]
+        }
+        fn rate(&mut self, _t: f64) -> f64 {
+            200.0
+        }
+        fn fields(&mut self, _t: f64) -> Vec<Field> {
+            Vec::new()
+        }
+        fn hit(&mut self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+            self.0.prepare_hits(t, &mut Still(vec![]));
+            self.0.hit_at(t, p)
+        }
+    }
+    let rain = || {
+        let mut s = spec();
+        s.direction = 90.0;
+        s.speed = 600.0;
+        s.spread = 20.0;
+        s.collide = true;
+        s
+    };
+    let (mut w1, mut w2) = (mk(), mk());
+    let (mut e1, mut e2) = (Emitter::new(rain()), Emitter::new(rain()));
+    for k in 0..=30 {
+        let t = k as f64 / 30.0;
+        w1.frame_at(t, &mut d);
+        e1.at(t, &mut Onto(&mut w1));
+    }
+    w2.frame_at(1.0, &mut d);
+    let direct = e2.at(1.0, &mut Onto(&mut w2)).clone();
+    assert_eq!(e1.store(), &direct);
+    let bounced = direct.vy.iter().filter(|v| **v < 0.0).count();
+    assert!(bounced > 10, "some drops bounced off the falling box: {bounced}");
+}
+
+#[test]
+fn very_stiff_soft_bodies_stay_finite() {
+    for (stiffness, pressure) in [(1e11, 0.0), (1e300, 0.0), (300.0, 1e30)] {
+        let cloth = SoftSpec {
+            kind: if pressure > 0.0 { SoftKind::Jelly } else { SoftKind::Cloth },
+            rows: 5,
+            cols: 5,
+            rest: lattice(200.0, 100.0, 200.0, 200.0, 5, 5),
+            mass: 0.5,
+            stiffness,
+            damping: 0.2,
+            pressure,
+            pinned: (0..25).map(|k| k < 5).collect(),
+            self_collision: true,
+        };
+        let mut w = world(vec![], vec![], vec![cloth], Bounds::None);
+        let f = w.frame_at(0.25, &mut Still(vec![]));
+        assert!(f.softs[0].iter().all(|p| p[0].is_finite() && p[1].is_finite()), "k = {stiffness}: {:?}", f.softs[0]);
+        if pressure == 0.0 {
+            let low = f.softs[0].iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+            assert!(low < 400.0, "a stiff cloth barely stretches: {low}");
+        }
+    }
 }

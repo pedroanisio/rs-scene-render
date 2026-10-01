@@ -1,4 +1,4 @@
-//! Mutation fuzzing of the document pipeline and the expression compiler.
+//! Mutation fuzzing of the document pipeline, the expression compiler and the asset parsers.
 //!
 //! Two targets take arbitrary text and must never panic:
 //!
@@ -13,6 +13,11 @@
 //! attribute-value replacement with boundary values, nesting bombs and
 //! truncation; expressions also come from a grammar generator. Every panic
 //! is caught and returned with the input that caused it.
+//!
+//! The parsers of the files a document points at (captions, Lottie, SVG,
+//! map and 3D data, …) are fuzzed at the byte level by [`targets`].
+
+pub mod targets;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;

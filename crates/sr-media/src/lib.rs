@@ -75,3 +75,13 @@ pub(crate) fn tail(stderr: &[u8], n: usize) -> String {
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
+
+/// A tool's error output for a message: its first lines name the cause, its last what that led to.
+pub fn reason(stderr: &[u8]) -> String {
+    let s = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() <= 6 {
+        return lines.join("\n");
+    }
+    format!("{}\n…\n{}", lines[..3].join("\n"), lines[lines.len() - 2..].join("\n"))
+}

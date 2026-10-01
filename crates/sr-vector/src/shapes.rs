@@ -6,6 +6,9 @@ use crate::path::{Contour, Path};
 /// Circle-arc handle ratio for a quarter turn.
 pub const KAPPA: f64 = 0.552_284_749_830_793_4;
 
+/// Points of a star or polygon.
+pub const MAX_POINTS: u32 = 10_000;
+
 /// Rectangle with per-corner radii (top-left, top-right, bottom-right, bottom-left), clamped to fit.
 pub fn rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
     let mut r = radii.map(|v| v.max(0.0));
@@ -81,7 +84,7 @@ pub fn polygon(c: P, points: u32, r: f64, roundness: f64, rot_deg: f64) -> Path 
 /// radii `inner` (a star in a non-square box); the roundness handles are
 /// tangent to those ellipses.
 pub fn star_on(c: P, points: u32, outer: P, inner: P, outer_round: f64, inner_round: f64, rot_deg: f64) -> Path {
-    let n = points.max(2) as usize * 2;
+    let n = points.clamp(2, MAX_POINTS) as usize * 2;
     let angle = std::f64::consts::TAU / n as f64;
     // handle length relative to the ellipse's derivative (the vertex spacing over the radius on a circle)
     let k = std::f64::consts::TAU / (n as f64 * 2.0);
@@ -97,7 +100,7 @@ pub fn star_on(c: P, points: u32, outer: P, inner: P, outer_round: f64, inner_ro
 
 /// [`polygon`] with its vertices on the ellipse of radii `r`.
 pub fn polygon_on(c: P, points: u32, r: P, roundness: f64, rot_deg: f64) -> Path {
-    let n = points.max(3) as usize;
+    let n = points.clamp(3, MAX_POINTS) as usize;
     let angle = std::f64::consts::TAU / n as f64;
     let k = std::f64::consts::TAU / (n as f64 * 4.0);
     let mut cn = Contour { closed: true, ..Default::default() };

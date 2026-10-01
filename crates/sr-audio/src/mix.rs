@@ -432,7 +432,8 @@ impl Mix {
                     let bar = (4.0 * 60.0 / bpm * rate).round() as usize;
                     let bars = (seg_len / bar.max(1)).max(1);
                     let unit = (bars * bar).min(seg_len);
-                    let want = ((end - start) * rate).round().max(0.0) as usize;
+                    // an empty segment has nothing to repeat
+                    let want = if unit == 0 { 0 } else { ((end - start) * rate).round().max(0.0) as usize };
                     body = seg.iter().map(|c| (0..want).map(|i| c[i % unit]).collect()).collect();
                     let ramp = ((0.01 * rate) as usize).min(want);
                     for c in body.iter_mut() {

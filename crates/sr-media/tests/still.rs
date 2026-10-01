@@ -26,6 +26,22 @@ fn ffmpeg_available() -> bool {
     std::process::Command::new(sr_media::ffmpeg()).arg("-version").output().is_ok_and(|o| o.status.success())
 }
 
+/// Whether the HEIF fixture `name` decodes here (through libheif, when `libheif`): that takes libheif's
+/// `heif-convert` with its HEVC plugin, or an FFmpeg that reads HEIF items. Without, its checks are skipped
+/// with a notice; `SR_REQUIRE_HEIC=1` (set in CI) runs them regardless, so a missing decoder fails there.
+fn heif_decodable(name: &str, libheif: bool) -> bool {
+    if std::env::var_os("SR_REQUIRE_HEIC").is_some_and(|v| v == "1") {
+        return true;
+    }
+    let why = match still::open(&fixture(name)) {
+        Ok(s) if !libheif || s.decoder == "heif-convert" => return true,
+        Ok(s) => format!("decoded by {}, not libheif", s.decoder),
+        Err(e) => e,
+    };
+    eprintln!("skipping the {name} checks (SR_REQUIRE_HEIC=1 requires them): {why}");
+    false
+}
+
 #[test]
 fn lossless_formats_decode_exactly() {
     let mut names = vec![
@@ -42,8 +58,12 @@ fn lossless_formats_decode_exactly() {
         ("pattern.jxl", false),
     ];
     if ffmpeg_available() {
-        // HEIF-family and formats only FFmpeg reads.
-        names.extend([("pattern.avif", false), ("pattern.psd", false), ("pattern.jp2", false)]);
+        // Formats only FFmpeg reads.
+        names.extend([("pattern.psd", false), ("pattern.jp2", false)]);
+        // FFmpeg alone misreads the identity-matrix AVIF: exact through libheif.
+        if heif_decodable("pattern.avif", true) {
+            names.push(("pattern.avif", false));
+        }
     }
     for (name, alpha) in names {
         let s = still::open(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -123,7 +143,7 @@ fn embedded_colour_descriptions_are_reported() {
         Colour::Unsupported(why) => assert!(why.contains("CMYK"), "{why}"),
         other => panic!("{other:?}"),
     }
-    if ffmpeg_available() {
+    if heif_decodable("p3-icc.heic", false) {
         match still::open(&fixture("p3-icc.heic")).unwrap().colour {
             Colour::Icc(p) => assert_eq!(p.description, "Display P3 (test)"),
             other => panic!("{other:?}"),
@@ -134,7 +154,7 @@ fn embedded_colour_descriptions_are_reported() {
 
 #[test]
 fn heic_pixels_match_libheif() {
-    if !ffmpeg_available() {
+    if !heif_decodable("p3-nclx.heic", false) {
         return;
     }
     let e = expected();

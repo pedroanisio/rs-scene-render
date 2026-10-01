@@ -245,7 +245,13 @@ impl Channel {
             let k = &self.keys[0];
             (k, (1e-3f64).min(self.keys[1].t - k.t).max(1e-9))
         };
-        let near = self.inside(k.t + h);
+        // a jump has no velocity: a hold ends still, a staircase continues along its chord
+        let (a, b) = if at_end { (&self.keys[n - 2], &self.keys[n - 1]) } else { (&self.keys[0], &self.keys[1]) };
+        let near = match a.ease {
+            Ease::Hold => return k.v.clone(),
+            Ease::Steps { .. } if b.t > a.t => a.v.lerp(&b.v, (k.t + h - a.t) / (b.t - a.t)),
+            _ => self.inside(k.t + h),
+        };
         let w = dt / h;
         Value::weighted(&[(&k.v, 1.0 - w), (&near, w)])
     }
@@ -297,7 +303,7 @@ impl Channel {
         if n < 2 {
             return self.eval(t);
         }
-        let m = if count == 0 { n } else { (count + 1).min(n) };
+        let m = if count == 0 { n } else { count.saturating_add(1).min(n) };
         let (lo, hi) = if out { (n - m, n - 1) } else { (0, m - 1) };
         let (t0, tn) = (self.keys[lo].t, self.keys[hi].t);
         let outside = if out { t > tn } else { t < t0 };
@@ -313,7 +319,7 @@ impl Channel {
         let frac = x - cycle;
         let local =
             if kind == LoopKind::PingPong && (cycle as i64).rem_euclid(2) == 1 { tn - frac * d } else { t0 + frac * d };
-        let v = self.inside(local.clamp(t0, tn - 1e-12 * d.max(1.0)));
+        let v = self.inside(local.min(tn - 1e-12 * d.max(1.0)).max(t0));
         if kind == LoopKind::Offset {
             let delta = Value::weighted(&[(&self.keys[hi].v, cycle), (&self.keys[lo].v, -cycle)]);
             v.add(&delta)
@@ -499,6 +505,45 @@ mod tests {
         let o = chan(&k, N, Extrapolation::Hold, Extrapolation::Offset);
         assert!((num(o.eval(3.5)) - (num(o.eval(0.5)) + 30.0)).abs() < 1e-9);
         assert!((num(c.eval_loop(4.5, true, LoopKind::Cycle, 1)) - num(c.eval(2.5))).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loops_over_odd_counts_and_tiny_spans() {
+        let k = keys(r#"<key time="0" value="0"/><key time="1" value="10"/><key time="2" value="30"/>"#);
+        let c = chan(&k, N, Extrapolation::Hold, Extrapolation::Hold);
+        // loopOut("cycle", Infinity) reaches here as usize::MAX: all keys
+        let all = num(c.eval_loop(2.5, true, LoopKind::Cycle, 0));
+        assert_eq!(num(c.eval_loop(2.5, true, LoopKind::Cycle, usize::MAX)), all);
+        assert_eq!(num(c.eval_loop(-0.5, false, LoopKind::Cycle, usize::MAX)), num(c.eval(1.5)));
+        let k = keys(r#"<key time="0" value="0"/><key time="0.0000000000001" value="10"/>"#);
+        let c = chan(&k, N, Extrapolation::Hold, Extrapolation::Hold);
+        for kind in [LoopKind::Cycle, LoopKind::PingPong, LoopKind::Offset, LoopKind::Continue] {
+            assert!(num(c.eval_loop(1.0, true, kind, 0)).is_finite(), "{kind:?}");
+        }
+        let c = chan(&k, N, Extrapolation::Loop, Extrapolation::Loop);
+        assert!(num(c.eval(1.0)).is_finite() && num(c.eval(-1.0)).is_finite());
+    }
+
+    #[test]
+    fn linear_extrapolation_past_a_jump() {
+        // a hold segment ends still; a staircase continues along its chord
+        let k = keys(
+            r#"<key time="0" value="0"/><key time="1" value="10" interpolation="hold"/><key time="2" value="20"/>"#,
+        );
+        let c = chan(&k, N, Extrapolation::Linear, Extrapolation::Linear);
+        assert_eq!(num(c.eval(3.0)), 20.0);
+        assert_eq!(num(c.eval_loop(3.0, true, LoopKind::Continue, 0)), 20.0);
+        let k = keys(
+            r#"<key time="0" value="0"/><key time="1" value="10" interpolation="steps" steps="4"/><key time="2" value="20"/>"#,
+        );
+        let c = chan(&k, N, Extrapolation::Linear, Extrapolation::Linear);
+        assert!((num(c.eval(3.0)) - 30.0).abs() < 1e-9, "{}", num(c.eval(3.0)));
+        let k = keys(
+            r#"<key time="0" value="0" interpolation="hold"/><key time="1" value="10"/><key time="2" value="20"/>"#,
+        );
+        let c = chan(&k, N, Extrapolation::Linear, Extrapolation::Linear);
+        assert_eq!(num(c.eval(-1.0)), 0.0);
+        assert!((num(c.eval(3.0)) - 30.0).abs() < 1e-6, "smooth ends keep their velocity");
     }
 
     #[test]

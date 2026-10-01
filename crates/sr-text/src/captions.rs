@@ -153,11 +153,12 @@ fn parse_vtt(text: &str) -> Result<Vec<Cue>, CaptionError> {
                 if next.is_empty() {
                     break;
                 }
-                let close = next.find('>').unwrap_or(next.len() - 1);
+                // an unclosed tag runs to the end of the cue
+                let close = next.find('>').unwrap_or(next.len());
                 if let Some(ts) = clock(&next[1..close]) {
                     t = ts;
                 }
-                rest = &next[close + 1..];
+                rest = next.get(close + 1..).unwrap_or("");
             }
             for k in 0..words.len() {
                 words[k].end = words.get(k + 1).map(|w| w.start).unwrap_or(e).max(words[k].start);
@@ -215,7 +216,7 @@ fn parse_ass(text: &str) -> Result<Vec<Cue>, CaptionError> {
         };
         while k < rb.len() {
             if rb[k] == b'{' {
-                let close = raw[k..].find('}').map(|c| k + c).unwrap_or(rb.len() - 1);
+                let close = raw[k..].find('}').map(|c| k + c).unwrap_or(rb.len());
                 let tag = &raw[k + 1..close];
                 for part in tag.split('\\').filter(|p| !p.is_empty()) {
                     let lower = part.to_ascii_lowercase();

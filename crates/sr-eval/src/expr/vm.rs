@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use super::parse::{parse, BinOp, Expr, Logic, Stmt, UnOp};
+use super::parse::{parse, BinOp, Expr, Logic, Stmt, UnOp, MAX_DEPTH};
 use crate::rng;
 
 /// A runtime value of the expression language.
@@ -459,6 +459,7 @@ struct Compiler<'r> {
     audio_tracks: Vec<String>,
     audio_dynamic: bool,
     resolver: &'r mut dyn Resolver,
+    depth: usize,
 }
 
 const MAX_REGS: usize = 4096;
@@ -487,7 +488,16 @@ impl<'r> Compiler<'r> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
 
+    fn enter(&mut self) -> Result<(), CompileError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(CompileError { message: "expression is nested too deeply".into(), offset: 0 });
+        }
+        Ok(())
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), CompileError> {
+        self.enter()?;
         match s {
             Stmt::Let(name, e, at) => {
                 let r = self.reg(*at)?;
@@ -556,6 +566,7 @@ impl<'r> Compiler<'r> {
                 self.ops.push(Op::Mov(self.result, r));
             }
         }
+        self.depth -= 1;
         Ok(())
     }
 
@@ -574,6 +585,13 @@ impl<'r> Compiler<'r> {
     }
 
     fn expr(&mut self, e: &Expr) -> Result<Reg, CompileError> {
+        self.enter()?;
+        let r = self.expr_body(e)?;
+        self.depth -= 1;
+        Ok(r)
+    }
+
+    fn expr_body(&mut self, e: &Expr) -> Result<Reg, CompileError> {
         Ok(match e {
             Expr::Num(n) => self.load(V::Num(*n))?,
             Expr::Str(s) => self.load(V::Str(s.clone()))?,
@@ -628,12 +646,23 @@ impl<'r> Compiler<'r> {
                 self.ops.push(Op::Un(*op, d, a));
                 d
             }
-            Expr::Binary(op, a, b) => {
-                let (ra, rb) = (self.expr(a)?, self.expr(b)?);
-                let d = self.reg(0)?;
-                let numeric = is_numeric(a) && is_numeric(b);
-                self.ops.push(if numeric { Op::NumBin(*op, d, ra, rb) } else { Op::Bin(*op, d, ra, rb) });
-                d
+            Expr::Binary(..) => {
+                // a + b + c + … leans left as far as it is long: walk down it instead of recursing
+                let mut chain = Vec::new();
+                let mut left = e;
+                while let Expr::Binary(op, a, b) = left {
+                    chain.push((*op, &**a, &**b));
+                    left = a;
+                }
+                let mut ra = self.expr(left)?;
+                for (op, a, b) in chain.into_iter().rev() {
+                    let rb = self.expr(b)?;
+                    let d = self.reg(0)?;
+                    let numeric = is_numeric(a) && is_numeric(b);
+                    self.ops.push(if numeric { Op::NumBin(op, d, ra, rb) } else { Op::Bin(op, d, ra, rb) });
+                    ra = d;
+                }
+                ra
             }
             Expr::Logical(op, a, b) => {
                 let d = self.reg(0)?;
@@ -855,6 +884,7 @@ pub fn compile(src: &str, resolver: &mut dyn Resolver) -> Result<Code, CompileEr
         audio_tracks: Vec::new(),
         audio_dynamic: false,
         resolver,
+        depth: 0,
     };
     let k = c.konst(V::Undef);
     c.ops.push(Op::Const(0, k));
@@ -972,11 +1002,50 @@ fn interp(a: &V, b: &V, t: f64) -> V {
     }
 }
 
-/// Runs compiled code. `regs` is scratch space reused across calls.
+/// Array and string cells one evaluation may read and build in total.
+pub const MAX_CELLS: usize = 1 << 22;
+/// Deepest nesting of arrays an expression may build or compute with.
+pub const MAX_NESTING: usize = 64;
+
+/// A value grew past what one evaluation may build or read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError(&'static str);
+
+/// Charges the cells of `v` (string bytes and array elements, all the way down) to `left`.
+fn weigh(v: &V, depth: usize, left: &mut usize) -> Result<(), RunError> {
+    let n = match v {
+        V::Str(s) => s.len(),
+        V::Arr(_) if depth >= MAX_NESTING => return Err(RunError("expression value is nested too deeply")),
+        V::Arr(a) => a.len(),
+        _ => return Ok(()),
+    };
+    *left = left.checked_sub(n).ok_or(RunError("expression value is too large"))?;
+    if let V::Arr(a) = v {
+        for x in a.iter() {
+            weigh(x, depth + 1, left)?;
+        }
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// Runs compiled code; `undefined` when it fails. `regs` is scratch space reused across calls.
 pub fn run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> V {
+    try_run(code, host, regs).unwrap_or_default()
+}
+
+/// Runs compiled code. `regs` is scratch space reused across calls.
+pub fn try_run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> Result<V, RunError> {
     regs.clear();
     regs.resize(code.nregs, V::Undef);
     let mut pc = 0usize;
+    // every operation costs at most its operands' cells, so the budget bounds time and memory
+    let mut left = MAX_CELLS;
     loop {
         match &code.ops[pc] {
             Op::Const(d, k) => regs[*d as usize] = code.consts[*k as usize].clone(),
@@ -985,16 +1054,26 @@ pub fn run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> V {
             Op::NumBin(op, d, a, b) => {
                 let r = match (&regs[*a as usize], &regs[*b as usize]) {
                     (V::Num(x), V::Num(y)) => num_bin(*op, *x, *y),
-                    (x, y) => bin(*op, x, y),
+                    (x, y) => {
+                        weigh(x, 0, &mut left)?;
+                        weigh(y, 0, &mut left)?;
+                        bin(*op, x, y)
+                    }
                 };
                 regs[*d as usize] = r;
             }
             Op::Bin(op, d, a, b) => {
-                let r = bin(*op, &regs[*a as usize], &regs[*b as usize]);
+                let (x, y) = (&regs[*a as usize], &regs[*b as usize]);
+                if !matches!((x, y), (V::Num(_), V::Num(_))) {
+                    weigh(x, 0, &mut left)?;
+                    weigh(y, 0, &mut left)?;
+                }
+                let r = bin(*op, x, y);
                 regs[*d as usize] = r;
             }
             Op::Un(op, d, a) => {
                 let v = &regs[*a as usize];
+                weigh(v, 0, &mut left)?;
                 regs[*d as usize] = match op {
                     UnOp::Not => V::Bool(!v.truthy()),
                     UnOp::Neg => map_num(v, |x| -x),
@@ -1027,11 +1106,18 @@ pub fn run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> V {
                 }
             }
             Op::Arr(d, first, n) => {
-                let a: Arc<[V]> = regs[*first as usize..*first as usize + *n as usize].iter().cloned().collect();
+                let items = &regs[*first as usize..*first as usize + *n as usize];
+                for x in items {
+                    weigh(x, 1, &mut left)?;
+                }
+                let a: Arc<[V]> = items.iter().cloned().collect();
                 regs[*d as usize] = V::Arr(a);
             }
             Op::Member(d, o, k) => {
                 let V::Str(name) = &code.consts[*k as usize] else { unreachable!() };
+                if let V::Str(s) = &regs[*o as usize] {
+                    left = left.checked_sub(s.len()).ok_or(RunError("expression value is too large"))?;
+                }
                 let r = match (&regs[*o as usize], &**name) {
                     (V::Arr(a), "length") => V::Num(a.len() as f64),
                     (V::Str(s), "length") => V::Num(s.chars().count() as f64),
@@ -1045,6 +1131,10 @@ pub fn run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> V {
             }
             Op::Index(d, o, i) => {
                 let idx = regs[*i as usize].clone();
+                weigh(&idx, 0, &mut left)?;
+                if let V::Str(s) = &regs[*o as usize] {
+                    left = left.checked_sub(s.len()).ok_or(RunError("expression value is too large"))?;
+                }
                 let r = match (&regs[*o as usize], &idx) {
                     (V::Arr(a), i) => {
                         let n = i.num();
@@ -1070,10 +1160,13 @@ pub fn run(code: &Code, host: &mut dyn Host, regs: &mut Vec<V>) -> V {
             Op::Prop(d, slot) => regs[*d as usize] = host.prop(*slot),
             Op::Call(f, d, first, argc, site) => {
                 let args = &regs[*first as usize..*first as usize + *argc as usize];
+                for x in args {
+                    weigh(x, 0, &mut left)?;
+                }
                 let r = call(*f, args, *site, host);
                 regs[*d as usize] = r;
             }
-            Op::Ret(r) => return std::mem::take(&mut regs[*r as usize]),
+            Op::Ret(r) => return Ok(std::mem::take(&mut regs[*r as usize])),
         }
         pc += 1;
     }
@@ -1367,6 +1460,53 @@ mod tests {
     fn eval(src: &str) -> V {
         let code = compile(src, &mut NoRes).unwrap_or_else(|e| panic!("{src}: {e}"));
         run(&code, &mut H { t: 2.0, value: V::nums(&[10.0, 20.0]) }, &mut Vec::new())
+    }
+
+    fn try_eval(src: &str) -> Result<V, RunError> {
+        let code = compile(src, &mut NoRes).unwrap_or_else(|e| panic!("{src}: {e}"));
+        try_run(&code, &mut H { t: 2.0, value: V::nums(&[10.0, 20.0]) }, &mut Vec::new())
+    }
+
+    #[test]
+    fn cost_is_bounded() {
+        // doubling a string or an array 24 times over is refused, not built
+        let big = format!("let a = 'xx'; {} a.length", "a = a + a;".repeat(24));
+        assert!(try_eval(&big).unwrap_err().to_string().contains("too large"));
+        assert_eq!(eval(&big), V::Undef);
+        let tree = format!("let a = [1]; {} (a + '').length", "a = [a, a];".repeat(26));
+        assert!(try_eval(&tree).unwrap_err().to_string().contains("too large"));
+        let tower = format!("let a = [1]; {} a", "a = [a];".repeat(200));
+        assert!(try_eval(&tower).unwrap_err().to_string().contains("too deeply"));
+        let eq = format!("let a = [1]; let b = [1]; {} a == b", "a = [a, a]; b = [b, b];".repeat(40));
+        assert!(try_eval(&eq).is_err());
+        // ordinary sizes are untouched
+        assert_eq!(eval(&format!("let a = 'xx'; {} a.length", "a = a + a;".repeat(10))), V::Num(2048.0));
+        assert_eq!(eval(&format!("let a = [1]; {} a[0][0][0].length", "a = [a, a];".repeat(8))), V::Num(2.0));
+        assert_eq!(eval("[[1, 2], [3, 4]][1] + [1, 1]"), V::nums(&[4.0, 5.0]));
+    }
+
+    #[test]
+    fn deep_expressions_compile_on_a_small_stack() {
+        use crate::expr::parse::MAX_HEIGHT;
+        // a test thread's stack, whatever RUST_MIN_STACK says
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                let sum = format!("1{}", "+1".repeat(MAX_HEIGHT - 1));
+                assert_eq!(eval(&sum), V::Num(MAX_HEIGHT as f64));
+                let n = MAX_DEPTH - 2;
+                assert_eq!(eval(&format!("{}1{}", "(".repeat(n), ")".repeat(n))), V::Num(1.0));
+                assert_eq!(eval(&format!("{}1{}", "[".repeat(n), "]".repeat(n))).num(), 1.0);
+                assert_eq!(eval(&format!("{}1", "-".repeat(n))), V::Num(1.0));
+                assert_eq!(eval(&format!("{}1{}", "if (1) {".repeat(n / 2), "}".repeat(n / 2))), V::Num(1.0));
+                assert_eq!(eval(&format!("{}1", "0 ? 0 : ".repeat(n))), V::Num(1.0));
+                // what the parser builds without nesting, the compiler refuses to recurse over
+                let e = compile(&format!("time{}", ".x".repeat(MAX_HEIGHT - 1)), &mut NoRes).unwrap_err();
+                assert!(e.message.contains("nested too deeply"), "{e}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

@@ -196,6 +196,64 @@ fn images_and_errors() {
     assert!(odd.status == Status::Error && odd.message.contains("scene-render-provider-no-such-provider"), "{odd:?}");
 }
 
+#[test]
+fn caches_outside_the_project_are_refused() {
+    setup();
+    let outside = std::env::temp_dir().join(format!("sr-resolve-escape-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    let gen = |id: &str, cache: &str| {
+        format!(
+            r#"<generated id="{id}" kind="image" provider="example" model="m" prompt="{id}" width="8" height="8" cache="{cache}" cacheSha256="{ZERO}"/>"#
+        )
+    };
+    let name = outside.file_name().unwrap().to_string_lossy().into_owned();
+    let escapes = [
+        ("up", format!("../{name}/up.png")),
+        ("abs", outside.join("abs.png").display().to_string()),
+        ("uri", format!("file://{}", outside.join("uri.png").display())),
+        ("back", format!("gen/../../{name}/back.png")),
+    ];
+    let mut assets: String = escapes.iter().map(|(id, c)| gen(id, c)).collect();
+    assets += &gen("in", "gen/in.png");
+    assets += &gen("round", "./gen/../round.png");
+    let d = project(
+        "escape",
+        &format!(
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/><assets>{assets}</assets><composition/></scene>"#
+        ),
+    );
+    let doc = d.join("scene.scene.xml");
+    for check in [true, false] {
+        let rows = resolve(&doc, &Options { check, ..opts(&d) }).unwrap();
+        for (id, _) in &escapes {
+            let r = rows.iter().find(|r| r.id == *id).unwrap();
+            assert!(r.status == Status::Error && r.message.contains("outside"), "{r:?}");
+        }
+        assert_eq!(status(&rows, "in"), if check { Status::Stale } else { Status::Made });
+        assert_eq!(status(&rows, "round"), if check { Status::Stale } else { Status::Made });
+    }
+    assert!(!outside.exists(), "nothing is written outside the project");
+    assert!(d.join("gen/in.png").is_file() && d.join("round.png").is_file());
+}
+
+#[test]
+fn a_view_over_the_tile_budget_is_refused_before_its_tiles_are_listed() {
+    // the whole world at zoom 10 is a million tiles
+    let d = project(
+        "tile-budget",
+        &format!(
+            r#"<scene version="1.2"><project width="512" height="512" fps="2" duration="1"/><assets>
+  <tiles id="osm" url="http://127.0.0.1:9/{{z}}/{{x}}/{{y}}.png" minZoom="10" maxZoom="10" cache="gen/osm.pmtiles" cacheSha256="{ZERO}" attribution="Test tiles"/>
+  <map id="m" width="512" height="512" projection="web-mercator" centerLon="0" centerLat="0"><basemap tiles="osm"/></map>
+</assets><composition><layer id="l" asset="m"/></composition></scene>"#
+        ),
+    );
+    let started = std::time::Instant::now();
+    let rows = resolve(&d.join("scene.scene.xml"), &Options { check: true, ..opts(&d) }).unwrap();
+    assert!(rows[0].status == Status::Error && rows[0].message.contains("SR_TILES_MAX"), "{rows:?}");
+    assert!(started.elapsed().as_secs() < 60);
+}
+
 /// How the test server answers: (path, headers, body) → (status, body).
 type Respond = fn(&str, &str, &[u8]) -> (u16, Vec<u8>);
 /// Requests the server saw: (path, headers, body).

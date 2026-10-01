@@ -331,7 +331,7 @@ impl Renderer {
                     let arch = geo::archive(&path)?;
                     let zt = geo::basemap_zoom(&proj, 512.0, b.detail, false).min(22);
                     let (mut bv, mut bi): (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
-                    for t in tiles::visible(&proj, zt) {
+                    for t in tiles::visible_within(&proj, zt, crate::text::MAX_TILES)? {
                         let (src, window) = tiles::source(t, arch.header.max_zoom);
                         let Some(d) = geo::tile(&arch, src.z, src.x, src.y)? else { continue };
                         let TileData::Vector(layers) = &*d else { continue };

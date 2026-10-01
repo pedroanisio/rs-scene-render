@@ -14,7 +14,12 @@
 //! `R1`–`R37`, with per-attribute families `R24-<attr>`, `R25-<attr>`,
 //! `R30-<attr>` and `R31-<attr>`).
 
-use std::collections::HashSet;
+//!
+//! Three further checks keep what later stages build within bounds: `P02` (a
+//! count far beyond what a renderer can draw), `P03` (a symbol that contains
+//! itself) and `P04` (an expression nested too deeply).
+
+use std::collections::{HashMap, HashSet};
 
 use roxmltree::{Document, Node};
 
@@ -924,6 +929,175 @@ pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) {
     }
     out.append(&mut e.out);
     physics_limits(root, out);
+    count_limits(root, out);
+    symbol_cycles(root, out);
+    expression_depths(root, out);
+}
+
+fn attr_loc(n: Node, attr: &str) -> Loc {
+    n.attributes()
+        .find(|a| a.name() == attr && a.namespace().is_none())
+        .map(|a| Loc::at(a.range().start))
+        .unwrap_or_else(|| Loc::of(n))
+}
+
+/// Largest accepted values of the counts that become that many copies, points or particles and
+/// that the schema leaves unbounded: (elements, attribute, maximum).
+pub const COUNT_LIMITS: &[(&[&str], &str, f64)] = &[
+    (&["shapeModifier"], "copies", 10_000.0),
+    (&["shapeModifier"], "ridges", 10_000.0),
+    (&["shape", "vector", "mask"], "points", 10_000.0),
+    (&["burst"], "count", 10_000_000.0),
+    (&["burst"], "repeat", 100_000.0),
+    (&["repeat"], "count", 100_000.0),
+    (&["object3D"], "instances", 100_000.0),
+];
+
+/// P02: a count above its entry in [`COUNT_LIMITS`].
+fn count_limits(root: Node, out: &mut Vec<Diagnostic>) {
+    for n in root.descendants().filter(|n| n.is_element() && n.tag_name().namespace().is_none()) {
+        let name = n.tag_name().name();
+        for (_, attr, max) in COUNT_LIMITS.iter().filter(|(elements, ..)| elements.contains(&name)) {
+            let Some(v) = n.attribute(*attr) else { continue };
+            if v.trim().parse::<f64>().is_ok_and(|x| x > *max) {
+                out.push(Diagnostic::error(
+                    "P02",
+                    format!("@{attr} of <{name}> is {}; at most {max} is supported", v.trim()),
+                    attr_loc(n, attr),
+                    element_path(n),
+                ));
+            }
+        }
+    }
+}
+
+/// P03: an instance inside a symbol that makes the symbol contain itself, directly or through
+/// other symbols.
+fn symbol_cycles(root: Node, out: &mut Vec<Diagnostic>) {
+    let symbols: Vec<Node> = kids(root, "symbols").flat_map(|s| s.children().filter(|c| is(*c, "symbol"))).collect();
+    let index: HashMap<&str, usize> =
+        symbols.iter().enumerate().filter_map(|(i, s)| Some((s.attribute("id")?, i))).collect();
+    // (containing symbol, instanced symbol, instance)
+    let mut uses: Vec<(usize, usize, Node)> = Vec::new();
+    for (i, s) in symbols.iter().enumerate() {
+        for d in s.descendants().filter(|d| is(*d, "instance")) {
+            if let Some(&t) = d.attribute("symbol").and_then(|t| index.get(t)) {
+                uses.push((i, t, d));
+            }
+        }
+    }
+    let mut next: Vec<Vec<usize>> = vec![Vec::new(); symbols.len()];
+    uses.iter().for_each(|(a, b, _)| next[*a].push(*b));
+    let group = components(&next);
+    for (a, b, inst) in uses {
+        if group[a] != group[b] {
+            continue;
+        }
+        let id = |i: usize| symbols[i].attribute("id").unwrap_or("");
+        let message = if a == b {
+            format!("symbol {:?} contains an instance of itself", id(a))
+        } else {
+            format!("symbol {:?} contains itself through its instance of symbol {:?}", id(a), id(b))
+        };
+        out.push(Diagnostic::error("P03", message, Loc::of(inst), element_path(inst)));
+    }
+}
+
+/// The strongly connected component of every node of a graph (Tarjan, without recursion).
+fn components(next: &[Vec<usize>]) -> Vec<usize> {
+    const NONE: usize = usize::MAX;
+    let n = next.len();
+    let (mut order, mut low, mut group) = (vec![NONE; n], vec![0; n], vec![NONE; n]);
+    let (mut stack, mut work): (Vec<usize>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
+    let (mut visited, mut groups) = (0, 0);
+    for start in 0..n {
+        if order[start] != NONE {
+            continue;
+        }
+        work.push((start, 0));
+        while let Some(&(v, edge)) = work.last() {
+            if edge == 0 {
+                order[v] = visited;
+                low[v] = visited;
+                visited += 1;
+                stack.push(v);
+            }
+            if let Some(&w) = next[v].get(edge) {
+                work.last_mut().expect("non-empty").1 += 1;
+                if order[w] == NONE {
+                    work.push((w, 0));
+                } else if group[w] == NONE {
+                    low[v] = low[v].min(order[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == order[v] {
+                while let Some(w) = stack.pop() {
+                    group[w] = groups;
+                    if w == v {
+                        break;
+                    }
+                }
+                groups += 1;
+            }
+        }
+    }
+    group
+}
+
+/// Deepest bracket nesting accepted in an expression.
+pub const MAX_EXPRESSION_DEPTH: usize = 62;
+
+/// Deepest nesting of `()`, `[]` and `{}` in an expression, outside string literals.
+fn expression_depth(s: &str) -> usize {
+    let (mut depth, mut max) = (0usize, 0usize);
+    let mut quote = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quote = Some(c),
+            (None, '(' | '[' | '{') => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            (None, ')' | ']' | '}') => depth = depth.saturating_sub(1),
+            (None, _) => {}
+        }
+    }
+    max
+}
+
+/// P04: an `<expression>` or `@condition` nested deeper than [`MAX_EXPRESSION_DEPTH`].
+fn expression_depths(root: Node, out: &mut Vec<Diagnostic>) {
+    let mut check = |n: Node, what: &str, text: &str, loc: Loc| {
+        let depth = expression_depth(text);
+        if depth > MAX_EXPRESSION_DEPTH {
+            out.push(Diagnostic::error(
+                "P04",
+                format!("{what} nests brackets {depth} deep; at most {MAX_EXPRESSION_DEPTH} levels are supported"),
+                loc,
+                element_path(n),
+            ));
+        }
+    };
+    for n in root.descendants().filter(|n| n.is_element()) {
+        if let Some(c) = n.attribute("condition") {
+            check(n, "@condition", c, attr_loc(n, "condition"));
+        }
+        if is(n, "expression") {
+            let text: String = n.children().filter_map(|c| c.text()).collect();
+            check(n, "the expression", &text, Loc::of(n));
+        }
+    }
 }
 
 /// P01: a soft body whose stable integration needs more than 4096 substeps per

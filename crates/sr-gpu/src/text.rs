@@ -23,6 +23,7 @@ use crate::vector::{is, Attrs};
 
 #[path = "text_basemap.rs"]
 mod basemap;
+pub(crate) use basemap::MAX_TILES;
 
 /// A map asset drawn in `frame` (a map setup and view replacing its own), or in its own frame:
 /// the texture of a 3D map or globe.

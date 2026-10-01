@@ -21,7 +21,7 @@ struct Out {
   bg_offset: vec2<f32>,   // cover placement (output pixels)
   bg_scale: f32,          // cover scale (output pixels per frame pixel)
   overlay: u32,           // 1: composite the output-sized overlay over the placed frame
-  pad2: u32,
+  base: u32,              // first word of the piece being packed (dst[0]); `words` is one past its last
   pad3: u32,
 };
 
@@ -142,7 +142,7 @@ fn yuv_sample(i: u32, bits: u32) -> u32 {
 
 @compute @workgroup_size(64)
 fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let wi = gid.x + gid.y * 65535u * 64u;
+  let wi = o.base + gid.x + gid.y * 65535u * 64u;
   if (wi >= o.words) { return; }
   let w = o.osize.x; let h = o.osize.y;
   let n = w * h;
@@ -185,7 +185,7 @@ fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
       word = bitcast<u32>(v);
     }
   }
-  dst[wi] = word;
+  dst[wi - o.base] = word;
 }
 
 // the placed frame, unconverted: a transition then combines two of them in the output's frame

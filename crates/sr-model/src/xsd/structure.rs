@@ -16,14 +16,14 @@
 //! | S10 | `xs:IDREF` value names no `xs:ID` |
 //! | S11 | element or attribute in a foreign namespace |
 //! | S12 | nesting deeper than the supported limit |
-//! | W01 | non-finite number (`INF`, `-INF`, `NaN`) in a numeric attribute |
+//! | W01 | non-finite number (`INF`, `-INF`, `NaN` or an overflowing literal) in a numeric attribute |
 
 use std::collections::{BTreeSet, HashMap};
 
 use roxmltree::{Document, Node};
 
 use super::simple::{self, collapse};
-use super::{Builtin, ComplexType, Content, IdKind, Particle, COMPLEX_TYPES, ROOT_ELEMENT, ROOT_TYPE};
+use super::{ComplexType, Content, IdKind, Particle, COMPLEX_TYPES, ROOT_ELEMENT, ROOT_TYPE};
 use crate::diag::{element_path, Diagnostic, Loc};
 
 const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
@@ -461,16 +461,13 @@ impl<'a, 'i> Walker<'a, 'i> {
                 ));
                 continue;
             }
-            if super::root_builtin(decl.ty) == Some(Builtin::Double) {
-                let v = value.trim();
-                if matches!(v, "INF" | "-INF" | "NaN") {
-                    self.diags.push(Diagnostic::warning(
-                        "W01",
-                        format!("@{} of <{ename}> is {v}; the renderer requires finite numbers here", decl.name),
-                        loc,
-                        element_path(n),
-                    ));
-                }
+            if let Some(v) = simple::non_finite(decl.ty, value) {
+                self.diags.push(Diagnostic::warning(
+                    "W01",
+                    format!("@{} of <{ename}> is {v}; the renderer requires finite numbers here", decl.name),
+                    loc,
+                    element_path(n),
+                ));
             }
             match decl.id {
                 IdKind::None => {}

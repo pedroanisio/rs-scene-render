@@ -129,7 +129,8 @@ fn decode_ints(data: &[u8], n: usize, wide: bool) -> Result<Vec<i64>, String> {
         }
     };
     let common = rd(data.get(..w).ok_or("ints: truncated")?, w);
-    let codes = data.get(w..w + (n * 2).div_ceil(8)).ok_or("ints: truncated codes")?;
+    // two bits of code an entry: a count the codes cannot hold is malformed
+    let codes = data.get(w..).and_then(|d| d.get(..n.div_ceil(4))).ok_or("ints: truncated codes")?;
     let mut v = w + codes.len();
     let (small, medium) = if wide { (2, 4) } else { (1, 2) };
     let mut prev = 0i64;
@@ -182,6 +183,16 @@ impl Cur<'_> {
     fn i64(&mut self) -> Result<i64, String> {
         Ok(self.u64()? as i64)
     }
+    /// A count read from the file, of entries of at least `size` bytes each stored after the
+    /// cursor (`size` 0: compressed entries, which the decoders bound): an error when the file
+    /// is too short to hold them, so no count is trusted with an allocation.
+    fn counted(&self, n: u64, size: usize) -> Result<usize, String> {
+        let left = (self.d.len() - self.i.min(self.d.len())) as u64;
+        match n.checked_mul(size as u64) {
+            Some(bytes) if bytes <= left && n <= usize::MAX as u64 / 8 => Ok(n as usize),
+            _ => Err("usdc: count larger than the file".into()),
+        }
+    }
     /// A compressed integer table of `n` entries: its compressed size, then the data.
     fn ints(&mut self, n: usize, wide: bool) -> Result<Vec<i64>, String> {
         let size = self.u64()? as usize;
@@ -212,7 +223,8 @@ impl Crate<'_> {
 
     /// Element count of an array at the cursor (u32 before 0.7.0).
     fn count(&self, c: &mut Cur) -> Result<usize, String> {
-        Ok(if self.minor >= 7 { c.u64()? as usize } else { c.u32()? as usize })
+        let n = if self.minor >= 7 { c.u64()? } else { c.u32()? as u64 };
+        c.counted(n, 0)
     }
 
     /// `n` scalars of `size` bytes decoded by `f`.
@@ -222,6 +234,11 @@ impl Crate<'_> {
     }
 
     fn value(&self, rep: u64) -> Result<Val, String> {
+        self.value_in(rep, false)
+    }
+
+    /// A value; `sampled` inside time samples, which do not nest.
+    fn value_in(&self, rep: u64, sampled: bool) -> Result<Val, String> {
         let ty = ((rep >> 48) & 0xff) as u8;
         let payload = rep & ((1 << 48) - 1);
         let array = rep & ARRAY != 0;
@@ -277,7 +294,7 @@ impl Crate<'_> {
                 let mut v = if compressed && comps == 1 {
                     self.compressed_array(&mut c, n, ty, size, dec)?
                 } else {
-                    Self::raw(&mut c, n * comps, size, dec)?
+                    Self::raw(&mut c, n.checked_mul(comps).ok_or("usdc: array too large")?, size, dec)?
                 };
                 if matches!(ty, 16..=18) {
                     quat_fix(&mut v);
@@ -351,7 +368,8 @@ impl Crate<'_> {
             // token and path vectors: u64 count, u32 indices
             40 | 41 => {
                 let mut c = self.at(payload as usize);
-                let n = c.u64()? as usize;
+                let n = c.u64()?;
+                let n = c.counted(n, 4)?;
                 let mut out = Vec::with_capacity(n);
                 for _ in 0..n {
                     let i = c.u32()? as u64;
@@ -375,8 +393,8 @@ impl Crate<'_> {
                     if flags & (1 << bit) == 0 {
                         continue;
                     }
-                    let n = c.u64()? as usize;
-                    for _ in 0..n {
+                    let n = c.u64()?;
+                    for _ in 0..c.counted(n, 4)? {
                         let i = c.u32()? as u64;
                         let s = if ty == 34 { self.path(i) } else { self.token(i) };
                         match keep {
@@ -396,9 +414,11 @@ impl Crate<'_> {
             // double vector: u64 count, doubles
             48 => {
                 let mut c = self.at(payload as usize);
-                let n = c.u64()? as usize;
+                let n = c.u64()?;
+                let n = c.counted(n, 8)?;
                 Val::Array(Self::raw(&mut c, n, 8, &|b: &[u8]| f64::from_le_bytes(b[..8].try_into().unwrap()))?)
             }
+            46 if sampled => return Err("usdc: time samples inside time samples".into()),
             46 => self.time_samples(payload as usize)?,
             _ => Val::Other(ty),
         })
@@ -441,17 +461,18 @@ impl Crate<'_> {
         let mut c = self.at(at);
         let jump = c.i64()?;
         let mut t = self.at(at.checked_add_signed(jump as isize).ok_or("usdc: bad jump")?);
-        let times = match self.value(t.u64()?)? {
+        let times = match self.value_in(t.u64()?, true)? {
             Val::Array(v) | Val::Nums(v) => v,
             _ => Vec::new(),
         };
         let at2 = t.i;
         let jump = t.i64()?;
         let mut v = self.at(at2.checked_add_signed(jump as isize).ok_or("usdc: bad jump")?);
-        let n = v.u64()? as usize;
+        let n = v.u64()?;
+        let n = v.counted(n, 8)?;
         let mut out = Vec::with_capacity(n.min(times.len()));
         for k in 0..n {
-            out.push((times.get(k).copied().unwrap_or(0.0), self.value(v.u64()?)?));
+            out.push((times.get(k).copied().unwrap_or(0.0), self.value_in(v.u64()?, true)?));
         }
         Ok(Val::TimeSamples(out))
     }
@@ -509,6 +530,9 @@ pub fn read(d: &[u8]) -> Result<Vec<Spec>, String> {
     let idx = c.ints(n_enc, false)?;
     let elem = c.ints(n_enc, false)?;
     let jumps = c.ints(n_enc, false)?;
+    if n_paths > n_enc {
+        return Err("usdc: more paths than path entries".into());
+    }
     cr.paths = vec![String::new(); n_paths];
     // depth-first: a jump > 0 (sibling at +jump, child next) or -1 (child only) means the next
     // entry is a child; >= 0 means a sibling follows
@@ -580,4 +604,59 @@ pub fn read(d: &[u8]) -> Result<Vec<Spec>, String> {
         });
     }
     Ok(specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rep(ty: u8, flags: u64, payload: u64) -> u64 {
+        flags | (ty as u64) << 48 | payload
+    }
+
+    fn krate(d: &[u8]) -> Crate<'_> {
+        Crate { d, tokens: Vec::new(), strings: Vec::new(), paths: Vec::new(), minor: 8 }
+    }
+
+    #[test]
+    fn counts_larger_than_the_file_are_errors() {
+        for n in [u64::MAX, 1 << 62, 1 << 40, (usize::MAX / 4 + 2) as u64] {
+            let mut d = vec![0u8; 8];
+            d.extend_from_slice(&n.to_le_bytes());
+            d.extend_from_slice(&[0; 64]);
+            let c = krate(&d);
+            // token vector, path vector, double vector, token list op, vec4d array, compressed int array
+            for r in [rep(41, 0, 8), rep(40, 0, 8), rep(48, 0, 8), rep(27, ARRAY, 8), rep(3, ARRAY | COMPRESSED, 8)] {
+                assert!(c.value(r).is_err(), "count {n:#x}, rep {r:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn integer_tables_check_their_count_against_the_data() {
+        for n in [usize::MAX, usize::MAX / 2 + 1, 1 << 40] {
+            assert!(decode_ints(&[0; 16], n, false).is_err(), "{n:#x}");
+            assert!(decode_ints(&[0; 16], n, true).is_err(), "{n:#x}");
+        }
+        assert_eq!(decode_ints(&[3, 0, 0, 0, 0], 2, false).unwrap(), vec![3, 6]);
+    }
+
+    #[test]
+    fn time_samples_that_point_at_themselves_are_an_error() {
+        // at 8: a jump of +8 to 16, where the times' rep is this same time-samples value
+        let me = rep(46, 0, 8);
+        let mut d = vec![0u8; 8];
+        d.extend_from_slice(&8i64.to_le_bytes());
+        d.extend_from_slice(&me.to_le_bytes());
+        d.extend_from_slice(&[0; 32]);
+        assert!(krate(&d).value(me).is_err());
+        // the values' reps pointing back likewise: times are an empty array, one sample that is this value
+        let mut d = vec![0u8; 8];
+        d.extend_from_slice(&8i64.to_le_bytes()); // 8: jump to 16
+        d.extend_from_slice(&rep(9, ARRAY, 0).to_le_bytes()); // 16: times
+        d.extend_from_slice(&8i64.to_le_bytes()); // 24: jump to 32
+        d.extend_from_slice(&1u64.to_le_bytes()); // 32: one sample
+        d.extend_from_slice(&me.to_le_bytes());
+        assert!(krate(&d).value(me).is_err());
+    }
 }

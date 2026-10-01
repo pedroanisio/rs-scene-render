@@ -152,7 +152,10 @@ pub struct Report {
 
 /// An `<output>` element built from command-line settings.
 pub fn adhoc_output(path: &str, codec: &str) -> Result<m::Output, DeliverError> {
-    let xml = format!(r#"<output path="{}" codec="{}"/>"#, xml_escape(path), xml_escape(codec));
+    // a command-line path is a file path, not a URI: the rules judge its file name (extension, frame
+    // pattern), and a `%` in a directory is no escape
+    let name = Path::new(path).file_name().map_or(path.into(), |n| n.to_string_lossy());
+    let xml = format!(r#"<output path="{}" codec="{}"/>"#, xml_escape(&name), xml_escape(codec));
     let doc = format!(
         r##"<scene version="1.1"><project width="16" height="16" fps="1" duration="1"/>{xml}<composition/></scene>"##
     );
@@ -160,7 +163,7 @@ pub fn adhoc_output(path: &str, codec: &str) -> Result<m::Output, DeliverError> 
         sr_model::LoadError::Invalid(r) => DeliverError::Document(r),
         e => DeliverError::Invalid(e.to_string()),
     })?;
-    Ok(d.scene.outputs[0].clone())
+    Ok(m::Output { path: path.to_string(), ..d.scene.outputs[0].clone() })
 }
 
 fn xml_escape(s: &str) -> String {
@@ -471,11 +474,10 @@ impl Video<'_> {
             Ok(())
         })?;
         report.unsupported = unsupported.into_iter().collect();
-        // Probe every frame at maximum visibility. A middle-frame sample can miss low
-        // contrast at either end, or a transient change in the text's backdrop.
+        // Probe over the whole span of maximum visibility. A middle-frame sample can miss low
+        // contrast at either end, or a change in the text's backdrop.
         for (id, seen) in &unprobed {
-            let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
-            for &(k, opacity) in seen.iter().filter(|s| s.1 >= top - 1e-3) {
+            for (k, opacity) in probe_frames(seen) {
                 let t = times[k];
                 let g = self.ev.evaluate(t);
                 let ev = &self.ev;
@@ -508,21 +510,30 @@ impl Video<'_> {
 struct Feeder {
     tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     handle: Option<std::thread::JoinHandle<Result<String, sr_media::MediaError>>>,
+    /// Set once every frame was sent: an encode whose frames stop short is abandoned, not finished.
+    complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Feeder {
     fn start(spec: &EncodeSpec) -> Result<Feeder, DeliverError> {
+        use std::sync::atomic::Ordering::Relaxed;
         let mut enc = Encoder::start(spec)?;
         let (tx, rx) = sync_channel::<Vec<u8>>(3);
+        let complete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let all_sent = complete.clone();
         let handle = std::thread::Builder::new().name("sr-encode".into()).spawn(move || {
             for f in rx {
                 enc.write(&f)?;
+            }
+            if !all_sent.load(Relaxed) {
+                // the render failed: dropping the encoder stops FFmpeg and removes the partial file
+                return Err(sr_media::MediaError::Invalid("the encode was abandoned".into()));
             }
             let name = enc.encoder.clone();
             enc.finish()?;
             Ok(name)
         })?;
-        Ok(Feeder { tx: Some(tx), handle: Some(handle) })
+        Ok(Feeder { tx: Some(tx), handle: Some(handle), complete })
     }
 
     fn send(&mut self, frame: Vec<u8>) -> Result<f64, DeliverError> {
@@ -535,11 +546,38 @@ impl Feeder {
     }
 
     fn finish(&mut self) -> Result<String, DeliverError> {
+        self.complete.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(self.tx.take());
         match self.handle.take() {
             Some(h) => Ok(h.join().map_err(|_| DeliverError::Invalid("encoder thread panicked".into()))??),
             None => Ok(String::new()),
         }
+    }
+}
+
+impl Drop for Feeder {
+    fn drop(&mut self) {
+        // not finished: wait for the encoder to be stopped, so nothing of it outlives the delivery
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The delivery's temporary directory, removed when the delivery ends, however it ends.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -616,9 +654,12 @@ pub fn deliver(
     {
         return Err(DeliverError::Accessibility("requireCaptions: the output has no caption track".into()));
     }
-    let tmp =
-        std::env::temp_dir().join(format!("scene-render-{}-{}", std::process::id(), started.elapsed().as_nanos()));
-    std::fs::create_dir_all(&tmp)?;
+    let tmp = Scratch(std::env::temp_dir().join(format!(
+        "scene-render-{}-{}",
+        std::process::id(),
+        started.elapsed().as_nanos()
+    )));
+    std::fs::create_dir_all(&tmp.0)?;
     let mut chapters = None;
     if let Some(tm) = &segments {
         report.warnings.extend(empty_ends(&ev, tm));
@@ -848,7 +889,7 @@ pub fn deliver(
                 let passes: &[u8] = if output.two_pass || fit.is_some() { &[1, 2] } else { &[0] };
                 for &pass in passes {
                     let s = EncodeSpec { bitrate, pass: (pass > 0).then(|| (pass, log.clone())), ..spec.clone() };
-                    report.encoder = replay(&inter, &s, format, size)?;
+                    report.encoder = replay(&inter, &s, format, size, n)?;
                     report.passes += 1;
                 }
                 match fit {
@@ -1110,7 +1151,7 @@ pub fn deliver(
             report.files.push(path);
         }
     }
-    let _ = std::fs::remove_dir_all(&tmp);
+    drop(tmp);
     // caption files: the output-time tracks (with segments, the composition's mapped), and without
     // segments the composition's own, cut to the rendered range
     let base_dir = p.base_dirs.first().cloned().unwrap_or_default();
@@ -1230,20 +1271,28 @@ fn base_spec(
 
 /// File name of frame `k` of a printf-patterned sequence path.
 pub fn sequence_name(pattern: &Path, k: u64) -> String {
-    let s = pattern.to_string_lossy();
+    // the pattern is in the file name: a `%` in a directory name is just that
+    let s = pattern.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     if let Some(i) = s.find('%') {
         let rest = &s[i + 1..];
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if rest[digits.len()..].starts_with('d') {
             let width: usize = digits.trim_start_matches('0').parse().unwrap_or(0);
-            return format!("{}{k:0width$}{}", &s[..i], &rest[digits.len() + 1..]);
+            let name = format!("{}{k:0width$}{}", &s[..i], &rest[digits.len() + 1..]);
+            return pattern.with_file_name(name).to_string_lossy().into_owned();
         }
     }
-    s.into_owned()
+    pattern.to_string_lossy().into_owned()
 }
 
 /// Decodes the intermediate and feeds it to an encoder for one pass.
-fn replay(inter: &Path, spec: &EncodeSpec, format: InputFormat, size: [u32; 2]) -> Result<String, DeliverError> {
+fn replay(
+    inter: &Path,
+    spec: &EncodeSpec,
+    format: InputFormat,
+    size: [u32; 2],
+    frames: u64,
+) -> Result<String, DeliverError> {
     use std::io::Read;
     let pix = match format {
         InputFormat::Nv12 => "nv12",
@@ -1257,16 +1306,44 @@ fn replay(inter: &Path, spec: &EncodeSpec, format: InputFormat, size: [u32; 2]) 
         .arg(inter)
         .args(["-f", "rawvideo", "-pix_fmt", pix, "pipe:1"])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| sr_media::MediaError::Spawn { tool: sr_media::ffmpeg(), source: e })?;
     let mut out = dec.stdout.take().expect("piped");
-    let mut enc = Encoder::start(spec)?;
+    let mut err = dec.stderr.take().expect("piped");
+    let said = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err.read_to_end(&mut v);
+        v
+    });
     let mut buf = vec![0u8; format.frame_bytes(size[0], size[1])];
-    while out.read_exact(&mut buf).is_ok() {
-        enc.write(&buf)?;
+    let fed = Encoder::start(spec).map_err(DeliverError::from).and_then(|mut enc| {
+        let mut n = 0u64;
+        while out.read_exact(&mut buf).is_ok() {
+            enc.write(&buf)?;
+            n += 1;
+        }
+        Ok((enc, n))
+    });
+    // the decoder is reaped whatever became of the encoder
+    if fed.is_err() {
+        let _ = dec.kill();
     }
-    let _ = dec.wait();
+    let status = dec.wait()?;
+    let said = sr_media::reason(&said.join().unwrap_or_default());
+    let (enc, n) = fed?;
+    if !status.success() || n != frames {
+        // the encoder is dropped unfinished: a pass fed part of the frames is no output
+        return Err(sr_media::MediaError::Failed {
+            tool: "ffmpeg".into(),
+            path: inter.display().to_string(),
+            message: format!(
+                "the intermediate decoded to {n} of {frames} frames{}{said}",
+                if said.is_empty() { "" } else { ": " }
+            ),
+        }
+        .into());
+    }
     let name = enc.encoder.clone();
     enc.finish()?;
     Ok(name)
@@ -1392,6 +1469,91 @@ fn write_sidecars(
         files.push(path);
     }
     Ok(files)
+}
+
+/// Most with/without renders spent measuring one text's contrast.
+const CONTRAST_PROBES: usize = 32;
+
+/// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at
+/// its most visible, all of them up to [`CONTRAST_PROBES`], else that many spread evenly from the first to
+/// the last, so a title held for minutes does not render every one of its frames twice more.
+fn probe_frames(seen: &[(usize, f64)]) -> Vec<(usize, f64)> {
+    let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
+    let at_top: Vec<(usize, f64)> = seen.iter().filter(|s| s.1 >= top - 1e-3).copied().collect();
+    if at_top.len() <= CONTRAST_PROBES {
+        return at_top;
+    }
+    (0..CONTRAST_PROBES).map(|i| at_top[i * (at_top.len() - 1) / (CONTRAST_PROBES - 1)]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_title_is_probed_a_bounded_number_of_times() {
+        // a title fading in over a second, then held for five minutes at 30 fps
+        let seen: Vec<(usize, f64)> = (0..9030).map(|k| (k, (k as f64 / 30.0).min(1.0))).collect();
+        let frames = probe_frames(&seen);
+        assert!(frames.len() <= CONTRAST_PROBES, "{} probe renders", frames.len());
+        // both ends of the hold, and spread over it
+        assert_eq!((frames[0], frames[frames.len() - 1]), ((30, 1.0), (9029, 1.0)));
+        assert!(frames.windows(2).all(|w| w[1].0 > w[0].0 && w[1].0 - w[0].0 <= 9000 / (CONTRAST_PROBES - 1) + 1));
+        // a short one is probed at every frame
+        assert_eq!(probe_frames(&seen[..40]), seen[30..40].to_vec());
+        assert!(probe_frames(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_the_file_name_of_a_sequence_is_a_pattern() {
+        assert_eq!(sequence_name(Path::new("out/f_%04d.png"), 7), "out/f_0007.png");
+        assert_eq!(sequence_name(Path::new("renders/50%/f_%04d.png"), 7), "renders/50%/f_0007.png");
+        assert_eq!(sequence_name(Path::new("renders/%d/f_%d.png"), 12), "renders/%d/f_12.png");
+        assert_eq!(sequence_name(Path::new("out/plain.png"), 7), "out/plain.png");
+    }
+
+    /// A 5-frame FFV1 intermediate, as the two-pass path writes it.
+    fn intermediate(dir: &Path) -> Option<(EncodeSpec, PathBuf)> {
+        std::process::Command::new(sr_media::ffmpeg()).arg("-version").output().ok()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let adhoc = adhoc_output("x.mkv", "ffv1").ok()?;
+        let doc = sr_model::load_str(
+            r#"<scene version="1.1"><project width="64" height="36" fps="25" duration="1"/><composition/></scene>"#,
+            &sr_model::LoadOptions::without_assets(),
+        )
+        .ok()?;
+        let ev = Evaluator::new(&doc, &EvalOptions::default()).ok()?;
+        let color = OutputColor::new(m::ColorSpace::Srgb, m::Transfer::Auto, false);
+        let opts = Options { hardware: Hardware::Software, ..Default::default() };
+        let out = dir.join("out.mkv");
+        let spec =
+            base_spec(&adhoc, &out, Codec::Ffv1, [64, 36], 25.0, InputFormat::Rgba8, &color, None, ev.program(), &opts);
+        let inter = dir.join("intermediate.mkv");
+        let mut enc =
+            Encoder::start(&EncodeSpec { path: inter.clone(), pixel_format: "bgra".into(), ..spec.clone() }).ok()?;
+        for k in 0..5u8 {
+            enc.write(&vec![k * 40; InputFormat::Rgba8.frame_bytes(64, 36)]).ok()?;
+        }
+        enc.finish().ok()?;
+        Some((spec, inter))
+    }
+
+    #[test]
+    fn a_partial_or_failed_intermediate_decode_fails_the_pass() {
+        let dir = std::env::temp_dir().join(format!("sr-deliver-replay-{}", std::process::id()));
+        let Some((spec, inter)) = intermediate(&dir) else { return };
+        assert!(replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5).is_ok());
+        assert!(spec.path.exists());
+        // cut in the middle of its frames
+        let bytes = std::fs::read(&inter).unwrap();
+        std::fs::write(&inter, &bytes[..bytes.len() * 6 / 10]).unwrap();
+        let cut = replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5);
+        assert!(cut.is_err(), "a truncated intermediate was encoded as if whole");
+        assert!(!spec.path.exists(), "the partial output is left behind");
+        std::fs::write(&inter, b"not a video").unwrap();
+        let e = replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5).unwrap_err().to_string();
+        assert!(e.contains("intermediate.mkv") && e.contains("Invalid data"), "{e}");
+    }
 }
 
 /// Live stage times of the frames rendered so far in this process, readable while an encode runs, so a progress

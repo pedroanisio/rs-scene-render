@@ -257,6 +257,17 @@ pub fn decode_image_bytes(bytes: &[u8], working: &Working, max_dim: u32) -> Resu
     decode_dynamic(img, &Coding::Named(ColorSpace::Srgb, Transfer::Auto), AlphaMode::Auto, working, max_dim)
 }
 
+/// `img` reduced, in its own sample format, to at most `max_dim` a side. Reducing before the
+/// conversion to float keeps a very large image from being held as 16 bytes a pixel.
+pub fn fit(img: image::DynamicImage, max_dim: u32) -> image::DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    if w <= max_dim && h <= max_dim {
+        return img;
+    }
+    let s = max_dim as f64 / w.max(h) as f64;
+    img.thumbnail_exact(((w as f64 * s) as u32).max(1), ((h as f64 * s) as u32).max(1))
+}
+
 fn decode_dynamic(
     img: image::DynamicImage,
     coding: &Coding,
@@ -264,17 +275,7 @@ fn decode_dynamic(
     working: &Working,
     max_dim: u32,
 ) -> Result<Decoded, String> {
-    let mut rgba = img.to_rgba32f();
-    let (w, h) = rgba.dimensions();
-    if w > max_dim || h > max_dim {
-        let s = max_dim as f64 / w.max(h) as f64;
-        rgba = image::imageops::resize(
-            &rgba,
-            ((w as f64 * s) as u32).max(1),
-            ((h as f64 * s) as u32).max(1),
-            image::imageops::FilterType::Triangle,
-        );
-    }
+    let rgba = fit(img, max_dim).to_rgba32f();
     let (w, h) = rgba.dimensions();
     let table = |f: &dyn Fn(f64) -> f64| -> Vec<f64> { (0..65536).map(|i| f(i as f64 / 65535.0)).collect() };
     // Per-channel decoding tables (none when the values are already linear) and the matrix to the working space.

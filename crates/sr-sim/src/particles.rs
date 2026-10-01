@@ -84,8 +84,8 @@ pub trait EmitterDriver {
     /// Particles per second.
     fn rate(&mut self, t: f64) -> f64;
     fn fields(&mut self, t: f64) -> Vec<Field>;
-    /// Surface point and outward normal when `p` lies inside a physics body.
-    fn hit(&mut self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])>;
+    /// Surface point and outward normal when `p` lies inside a physics body at time `t`.
+    fn hit(&mut self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])>;
 }
 
 /// Live particles, structure-of-arrays.
@@ -193,35 +193,51 @@ impl Emitter {
 
     fn step_once(&mut self, drv: &mut dyn EmitterDriver) {
         let dt = self.spec.step;
+        // the step covers [t, hi): `hi` is the next step's `t`, bit for bit, so windows tile time
         let t = self.t0() + self.state.step as f64 * dt;
-        // emission over [t, t + dt)
+        let hi = self.t0() + (self.state.step + 1) as f64 * dt;
+        let max = self.spec.max_particles;
         if self.emitting(t) {
             let rate = drv.rate(t).max(0.0);
             let exact = self.state.carry + rate * dt;
             let n = exact.floor() as u64;
-            self.state.carry = exact - n as f64;
-            for i in 0..n {
+            self.state.carry = if exact.is_finite() { exact - exact.floor() } else { 0.0 };
+            // particles over the cap are counted, not made
+            let room = (max.saturating_sub(self.state.p.len()) as u64).min(n);
+            for i in 0..room {
                 let frac = (i as f64 + 0.5) / n as f64;
-                if self.state.p.len() < self.spec.max_particles {
-                    let k = self.state.emitted;
-                    self.spawn(k, t + frac * dt, (1.0 - frac) * dt, drv);
-                }
-                self.state.emitted += 1;
+                self.spawn(self.state.emitted.saturating_add(i), t + frac * dt, (1.0 - frac) * dt, drv);
             }
+            self.state.emitted = self.state.emitted.saturating_add(n);
         }
-        let bursts = self.spec.bursts.clone();
-        for b in &bursts {
-            for r in 0..=b.repeat {
-                let bt = b.time + r as f64 * b.interval.max(1e-6);
-                if bt >= t && bt < t + dt {
-                    for _ in 0..b.count {
-                        if self.state.p.len() < self.spec.max_particles {
-                            let k = self.state.emitted;
-                            self.spawn(k, bt, t + dt - bt, drv);
-                        }
-                        self.state.emitted += 1;
+        for b in 0..self.spec.bursts.len() {
+            let b = self.spec.bursts[b];
+            let at = |r: u64| b.time + r as f64 * b.interval.max(1e-6);
+            // the first repeat at or after `bound` (times never decrease with the repeat index)
+            let first = |bound: f64| -> u64 {
+                let (mut lo, mut hi) = (0u64, b.repeat.saturating_add(1));
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if at(mid) >= bound {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
                     }
                 }
+                lo
+            };
+            let (r0, r1) = (first(t), first(hi));
+            for r in r0..r1 {
+                let room = (max.saturating_sub(self.state.p.len()) as u64).min(b.count);
+                if room == 0 {
+                    self.state.emitted = self.state.emitted.saturating_add((r1 - r).saturating_mul(b.count));
+                    break;
+                }
+                let bt = at(r);
+                for i in 0..room {
+                    self.spawn(self.state.emitted.saturating_add(i), bt, hi - bt, drv);
+                }
+                self.state.emitted = self.state.emitted.saturating_add(b.count);
             }
         }
         // motion
@@ -272,7 +288,7 @@ impl Emitter {
                     }
                 }
                 if hit.is_none() && s.collide {
-                    hit = drv.hit([p.x[i], p.y[i]]);
+                    hit = drv.hit(hi, [p.x[i], p.y[i]]);
                 }
                 if let Some((q, n)) = hit {
                     p.x[i] = q[0];

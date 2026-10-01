@@ -158,3 +158,18 @@ fn audio_decodes_and_resamples() {
     let crossings = left[..48000].windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
     assert!((crossings as i64 - 2000).abs() <= 2, "{crossings}");
 }
+
+#[test]
+fn a_request_far_past_the_end_finds_the_last_frame_in_few_seeks() {
+    let Some(d) = fixtures() else { return };
+    for (file, index) in [("counter.mp4", 400), ("counter.mkv", 5_000_000)] {
+        let mut dec = VideoDecoder::open(&d.join(file), None, 8).unwrap();
+        let f = dec.frame(index).unwrap();
+        assert_eq!(f.index, 99, "{file}");
+        assert!(dec.seeks <= 32, "{file}: {} seeks for one frame", dec.seeks);
+        // and the end is remembered
+        let before = dec.seeks;
+        assert_eq!(dec.frame(index + 7).unwrap().index, 99);
+        assert_eq!(dec.seeks, before);
+    }
+}
