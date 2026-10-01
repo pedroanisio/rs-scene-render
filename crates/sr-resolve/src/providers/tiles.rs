@@ -25,6 +25,19 @@ pub fn user_agent() -> String {
     format!("scene-render/{} (+https://github.com/pedroanisio/rs-scene-render)", env!("CARGO_PKG_VERSION"))
 }
 
+/// The most tiles one tiles asset may fetch: `SR_TILES_MAX`, default 2000.
+pub fn max_tiles() -> usize {
+    std::env::var("SR_TILES_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+}
+
+/// The refusal of a document whose maps need more than `max` tiles.
+pub fn over_budget(max: usize) -> String {
+    format!(
+        "the maps need more tiles than SR_TILES_MAX ({max}); lower the zoom or the length of the moves, or use a \
+         downloaded PMTiles archive"
+    )
+}
+
 /// GETs `url` into `out`; returns the HTTP status.
 fn get(url: &str, out: &Path) -> Result<u16, String> {
     let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
@@ -96,13 +109,9 @@ impl Provider for Tiles {
                 }
             })
             .collect();
-        let max: usize = std::env::var("SR_TILES_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+        let max = max_tiles();
         if wanted.len() > max {
-            return Err(format!(
-                "the maps need {} tiles, more than SR_TILES_MAX ({max}); lower the zoom or the length of the moves, \
-                 or use a downloaded PMTiles archive",
-                wanted.len()
-            ));
+            return Err(over_budget(max));
         }
         let work = PathBuf::from(&req.workdir);
         let mut tiles = Vec::with_capacity(wanted.len());
