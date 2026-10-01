@@ -3003,6 +3003,23 @@ impl Renderer {
         p: &Program,
         provider: Option<&mut dyn FnMut(f64) -> FrameGraph>,
     ) -> Frame {
+        self.tier = Tier::of(self.quality.unwrap_or(p.scene.project.quality));
+        let dimensions = if self.view_override.is_none() {
+            p.scene.scene360.as_ref().map(|s| [s.width as f64, s.height as f64])
+        } else {
+            None
+        }
+        .unwrap_or(g.size.map(|v| v * self.tier.scale));
+        let size = match crate::output::frame_size(dimensions, &self.gpu.device.limits()) {
+            Ok(size) => size,
+            Err(error) => {
+                self.prefix = None;
+                self.prev_root.clear();
+                self.frame = None;
+                let texture = Arc::new(resources::create(&self.gpu.device, &self.bgl1, [1, 1], 1, "invalid frame"));
+                return Frame { texture, stats: RenderStats { errors: vec![error], ..Default::default() } };
+            }
+        };
         if self.view_override.is_none() && p.scene.scene360.is_some() {
             return self.render_360(g, p, provider);
         }
@@ -3015,7 +3032,6 @@ impl Renderer {
             seconds: Default::default(),
         });
         let scale = self.tier.scale;
-        let size = [(g.size[0] * scale).round().max(1.0) as u32, (g.size[1] * scale).round().max(1.0) as u32];
         let mut plan = Plan::default();
         self.used.clear();
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];

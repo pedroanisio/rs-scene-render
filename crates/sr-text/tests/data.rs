@@ -402,3 +402,23 @@ fn animator_units() {
     let (fx, _) = animate::apply(&lib, &l, &roles, &[a], 0.0);
     assert!((fx[0].xf.0[0] - 3.0).abs() < 1e-9 && (fx[0].xf.0[3] - 2.0).abs() < 1e-9, "{:?}", fx[0].xf);
 }
+
+#[test]
+fn formulas_draw_matrices_accents_and_infix_fractions() {
+    let mut lib = lib();
+    let paint = Paint::Solid { rgba: [1.0; 4], srgb: false };
+    for tex in [
+        r"\begin{pmatrix}a & b \\ c & \frac{d}{e}\end{pmatrix}",
+        r"\hat{x}+\widehat{xyz}+\bar{y}+\vec{v}+\dot{x}+\ddot{y}+\tilde{z}+\overline{AB}+\underline{CD}",
+        r"{a+b \over c+d}",
+        r"\begin{aligned}a &\rightarrow b \\ c &\Rightarrow d\end{aligned}",
+        r"\begin{bmatrix}\begin{matrix}1&0\\0&1\end{matrix}&x\\y&z\end{bmatrix}",
+    ] {
+        let drawing = formula::draw(&mut lib, tex, 32.0, [400.0, 160.0], paint.clone(), 0.25)
+            .unwrap_or_else(|e| panic!("{tex}: {e}"));
+        assert!(coverage(&drawing, [400, 160]) > 100.0, "{tex} has no visible layout");
+    }
+    for tex in [r"\begin{matrix}a&b\end{pmatrix}", r"\begin{matrix}a", r"a \over b \over c"] {
+        assert!(formula::draw(&mut lib, tex, 32.0, [400.0, 160.0], paint.clone(), 0.25).is_err(), "{tex}");
+    }
+}

@@ -179,7 +179,7 @@ pub fn mutate_doc(r: &mut Rng, seeds: &[String], src: &str) -> String {
                 let span = s[a..b].to_string();
                 s.insert_str(a, &span);
             }
-            3 => s.insert_str(a, r.pick(TOKENS)),
+            3 => s.insert_str(a, r.pick::<&str>(TOKENS)),
             4 => {
                 // splice a span of another seed
                 let o = r.pick(seeds);
@@ -299,7 +299,9 @@ pub fn mutate_expr(r: &mut Rng, src: &str) -> String {
     match r.below(4) {
         0 => s.insert_str(
             a,
-            r.pick(&["(", ")", "[", "]", "{", "}", ",", ";", "\"", "'", "`", ".", "=>", "...", "//", "/*", "\\"]),
+            r.pick::<&str>(&[
+                "(", ")", "[", "]", "{", "}", ",", ";", "\"", "'", "`", ".", "=>", "...", "//", "/*", "\\",
+            ]),
         ),
         1 => s.truncate(a),
         2 => {

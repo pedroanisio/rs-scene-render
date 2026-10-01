@@ -571,17 +571,37 @@ impl Renderer {
                         c.copy_from_slice(&l);
                     }
                     p = q;
-                    let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+                    // MaterialX resolves filenames against its document already.
+                    // Joining that directory again duplicates relative prefixes.
+                    let dir = std::path::Path::new(".");
                     if let Some(f) = &mx.base_color_map {
-                        maps[0] = self.map_texture(plan, &dir, &f.display().to_string(), true, id);
+                        maps[0] = self.map_texture(plan, dir, &f.display().to_string(), true, id);
                     }
                     if let Some(f) = &mx.normal_map {
-                        maps[1] = self.map_texture(plan, &dir, &f.display().to_string(), false, id);
+                        maps[1] = self.map_texture(plan, dir, &f.display().to_string(), false, id);
                     }
                     if let Some(f) = &mx.roughness_map {
                         // a roughness image drives the green channel of the metallic-roughness slot
-                        maps[2] = self.map_texture(plan, &dir, &f.display().to_string(), false, id);
+                        maps[2] = self.map_texture(plan, dir, &f.display().to_string(), false, id);
                         p.metallic = 0.0;
+                    }
+                    for (slot, texture) in mx.generated_maps.iter().enumerate() {
+                        if let Some(texture) = texture {
+                            let key = format!("mtlx:{}:{slot}", path.display());
+                            maps[slot] = Some(match self.three_engine().textures.get(&key) {
+                                Some(texture) => texture.clone(),
+                                None => {
+                                    let uploaded = self.three_engine().upload_rgba8(
+                                        texture.width,
+                                        texture.height,
+                                        &texture.rgba,
+                                        texture.srgb,
+                                    );
+                                    self.three_engine().textures.insert(key, uploaded.clone());
+                                    uploaded
+                                }
+                            });
+                        }
                     }
                     for w in &mx.warnings {
                         plan.stats.unsupported.push(format!("{id}: {w}"));
@@ -829,11 +849,20 @@ impl Renderer {
                 let variant = a.str("materialVariant");
                 for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
                     let prim = &model.primitives[item.prim];
-                    let mkey = format!("{key}#{}", item.prim);
+                    let mi = variant
+                        .as_ref()
+                        .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
+                        .or(prim.material);
+                    let imported = if doc_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
+                    let mkey = format!("{key}#{}#material{:?}", item.prim, imported.map(|_| mi));
                     let mesh = match self.three_engine().meshes.get(&mkey) {
                         Some(m) => m.clone(),
                         None => {
-                            let m = self.three_engine().upload_mesh(&prim.vertices, &prim.indices);
+                            let mut vertices = prim.vertices.clone();
+                            if let Some(material) = imported {
+                                material.apply_texture_coordinates(prim, &mut vertices);
+                            }
+                            let m = self.three_engine().upload_mesh(&vertices, &prim.indices);
                             self.three_engine().meshes.insert(mkey, m.clone());
                             m
                         }
@@ -890,7 +919,12 @@ impl Renderer {
                         }
                     };
                     let src = match item.vertices {
-                        Some(vs) => MeshSrc::Deformed(vs, mesh),
+                        Some(mut vs) => {
+                            if let Some(material) = imported {
+                                material.apply_texture_coordinates(prim, &mut vs);
+                            }
+                            MeshSrc::Deformed(vs, mesh)
+                        }
                         None => MeshSrc::Cached(mesh),
                     };
                     draws.push(Draw3 {
@@ -1565,12 +1599,7 @@ impl Renderer {
         let mut scene = scene;
         let limits = self.gpu.device.limits();
         if let Some(opts) = ex.path {
-            if scene.cam.orthographic || scene.clip_fix != Mat4::IDENTITY {
-                plan.stats.unsupported.push(format!(
-                    "{}: path tracing needs a perspective camera over the whole frame; rasterised instead",
-                    n.id
-                ));
-            } else if let Some(m) = crate::pathtrace::limit_note(&scene, &limits) {
+            if let Some(m) = crate::pathtrace::limit_note(&scene, &limits) {
                 plan.stats.unsupported.push(format!("{}: {m}", n.id));
             } else {
                 plan.stats

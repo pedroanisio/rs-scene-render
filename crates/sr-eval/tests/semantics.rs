@@ -10,6 +10,22 @@ const ASSETS: &str = r#"<assets>
 </assets>"#;
 
 #[test]
+fn test_shader_parameter_names_are_owned_by_the_program() {
+    let d = doc_after(
+        "",
+        "",
+        r#"<effects><effect id="fx" type="shader" src="shader.wgsl"><param name="customGain" value="1"/><animate property="customGain"><key time="0" value="1"/><key time="1" value="2"/></animate></effect></effects>"#,
+    );
+    let ev = Evaluator::new(&d, &Default::default()).unwrap();
+    let name =
+        &ev.program().elements.iter().flat_map(|e| &e.attrs).find(|(n, _, _)| n.as_ref() == "customGain").unwrap().0;
+    let weak = std::sync::Arc::downgrade(name);
+    assert!(weak.upgrade().is_some());
+    drop(ev);
+    assert!(weak.upgrade().is_none(), "parameter name outlives its program");
+}
+
+#[test]
 fn reject_matte_cycles_created_by_overrides() {
     let d = doc(
         r#"<parameters><variant id="cycle"><override target="b" property="matte" value="a"/></variant></parameters>"#,

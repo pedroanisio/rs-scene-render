@@ -79,6 +79,33 @@ fn lum(p: [f32; 4]) -> f32 {
 }
 
 #[test]
+fn imported_texture_maps_use_independent_transformed_coordinates() {
+    let Some(mut eng) = engine() else { return };
+    let mut p = prim::plane(70.0, 70.0, 1);
+    for v in &mut p.vertices {
+        v.uv = [0.25, 0.5];
+    }
+    let mut material = sr_3d::ImportedMaterial::default();
+    material.params.unlit = false;
+    material.params.separate_uvs = true;
+    material.params.emissive = [1.0; 3];
+    material.texture_transforms[0].offset = [0.5, 0.0];
+    // Emissive keeps the original UV, while base colour moves to the second texel.
+    let texture = eng.upload_rgba8(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255], false);
+    let mut vertices = p.vertices.clone();
+    material.apply_texture_coordinates(&p, &mut vertices);
+    p.vertices = vertices;
+    let mut dr = draw(&eng, &p, Vec3::new(64.0, 64.0, 0.0), material.params);
+    dr.maps[0] = Some(texture.clone());
+    dr.maps[4] = Some(texture);
+    let mut ambient = sun(Vec3::Z, 1.0, false);
+    ambient.kind = LightKind::Ambient;
+    let pixels = eng.render_now(&scene(vec![dr], vec![ambient]), None);
+    let center = at(&pixels, 64, 64);
+    assert!(center[0] > 0.8 && center[1] > 0.2 && center[2] < 0.1, "base green + emissive red: {center:?}");
+}
+
+#[test]
 fn sphere_faces_outward_and_is_lit_from_the_light() {
     let Some(mut eng) = engine() else { return };
     let sphere = prim::sphere(30.0, 48);
@@ -271,6 +298,15 @@ fn sh_reference(c: &[f32; 48], deg: u32, d: Vec3) -> [f32; 3] {
 
 #[test]
 fn splat_colour_follows_its_spherical_harmonics() {
+    splat_colour_check(false);
+}
+
+#[test]
+fn path_traced_splat_colour_follows_its_spherical_harmonics() {
+    splat_colour_check(true);
+}
+
+fn splat_colour_check(path: bool) {
     // one opaque degree-3 splat, turned so the camera sees it from two directions in its own
     // frame: the centre pixel is the reference SH colour for each direction
     let Some(mut eng) = engine() else { return };
@@ -298,6 +334,9 @@ fn splat_colour_follows_its_spherical_harmonics() {
         let model = Mat4::from_translation(Vec3::new(64.0, 64.0, 0.0)) * Mat4::from_rotation_y(yaw.to_radians());
         let mut sc = sc0;
         sc.splats.push(SplatDraw { gpu: gpu.clone(), model, opacity: 1.0 });
+        if path {
+            sc.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+        }
         let px = eng.render_now(&sc, None);
         let got = at(&px, 64, 64);
         let cam_local = model.inverse().transform_point3(eye);
@@ -316,4 +355,88 @@ fn splat_colour_follows_its_spherical_harmonics() {
     }
     let change = (0..3).map(|k| (seen[0][k] - seen[1][k]).abs()).fold(0.0, f32::max);
     assert!(change > 0.05, "the colour must depend on the view: {seen:?}");
+}
+
+#[test]
+fn path_tracing_samples_texture_maps() {
+    let Some(mut eng) = engine() else { return };
+    let mut plane = prim::plane(70.0, 70.0, 1);
+    for v in &mut plane.vertices {
+        v.uv = [0.75, 0.5];
+    }
+    let mut dr = draw(&eng, &plane, Vec3::new(64.0, 64.0, 0.0), MaterialParams { unlit: true, ..Default::default() });
+    dr.maps[0] = Some(eng.upload_rgba8(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255], true));
+    let mut s = scene(vec![dr], vec![]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let pixels = eng.render_now(&s, None);
+    let p = at(&pixels, 64, 64);
+    assert!(p[1] > 0.9 && p[0] < 0.1 && p[2] < 0.1, "green texel in path-traced material: {p:?}");
+    assert!(!sr_gpu::pathtrace::notes(&s).iter().any(|n| n.contains("texture maps")));
+}
+
+#[test]
+fn path_traced_cutout_textures_do_not_cast_solid_shadows() {
+    let Some(mut eng) = engine() else { return };
+    let plane = prim::plane(100.0, 100.0, 1);
+    let receiver = draw(&eng, &plane, Vec3::new(64.0, 64.0, 0.0), MaterialParams::default());
+    let mut s = scene(vec![receiver], vec![sun(Vec3::Z, 5.0, true)]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let reference = lum(at(&eng.render_now(&s, None), 64, 64));
+    let mut cutout = draw(
+        &eng,
+        &plane,
+        Vec3::new(64.0, 64.0, -20.0),
+        MaterialParams { alpha_mode: sr_3d::AlphaMode::Mask, ..Default::default() },
+    );
+    cutout.maps[0] = Some(eng.upload_rgba8(1, 1, &[255, 255, 255, 0], true));
+    s.draws.push(cutout);
+    let actual = lum(at(&eng.render_now(&s, None), 64, 64));
+    assert!(
+        reference > 0.1 && actual > reference * 0.9,
+        "transparent texel blocked the light: {actual} vs {reference}"
+    );
+}
+
+#[test]
+fn path_tracing_honours_orthographic_cameras_and_ies_profiles() {
+    let Some(mut eng) = engine() else { return };
+    let plane = prim::plane(70.0, 70.0, 1);
+    let dr = draw(&eng, &plane, Vec3::new(64.0, 64.0, 100.0), MaterialParams { unlit: true, ..Default::default() });
+    let mut s = scene(vec![dr], vec![]);
+    s.cam =
+        resolve(&CameraParams { orthographic: true, ortho_height: Some(128.0), ..Default::default() }, 128.0, 128.0);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let pixels = eng.render_now(&s, None);
+    assert!(at(&pixels, 96, 64)[3] > 0.9, "orthographic width must not shrink with depth");
+    let mut light = sun(Vec3::Z, 10.0, false);
+    light.kind = LightKind::Point;
+    light.pos = Vec3::new(64.0, 64.0, -100.0);
+    light.ies = Some(std::sync::Arc::new(vec![0.0; 128 * 32]));
+    s.draws = vec![draw(&eng, &plane, Vec3::new(64.0, 64.0, 0.0), MaterialParams::default())];
+    s.lights = vec![light];
+    s.lens_k1 = 0.1;
+    let pixels = eng.render_now(&s, None);
+    assert!(lum(at(&pixels, 64, 64)) < 0.001, "zero IES profile must emit no light");
+    assert!(sr_gpu::pathtrace::notes(&s).is_empty());
+}
+
+#[test]
+fn path_tracing_composites_gaussian_splats_in_depth_order() {
+    let Some(mut eng) = engine() else { return };
+    let splats = sr_3d::Splats {
+        pos: vec![[64.0, 64.0, 50.0], [64.0, 64.0, 0.0]],
+        scale: vec![[12.0; 3]; 2],
+        rot: vec![[0.0, 0.0, 0.0, 1.0]; 2],
+        color: vec![[0.0, 0.0, 1.0, 0.95], [1.0, 0.0, 0.0, 0.95]],
+        basis: Mat4::IDENTITY,
+        ..Default::default()
+    };
+    let mut s = scene(vec![], vec![]);
+    s.splats.push(SplatDraw { gpu: eng.upload_splats(&splats), model: Mat4::IDENTITY, opacity: 1.0 });
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let pixels = eng.render_now(&s, None);
+    let center = at(&pixels, 64, 64);
+    assert!(center[0] > 0.8 && center[2] < 0.15, "near red splat must cover the far blue splat: {center:?}");
+    assert_eq!(at(&pixels, 1, 1)[3], 0.0);
+    assert!(sr_gpu::pathtrace::notes(&s).is_empty());
 }

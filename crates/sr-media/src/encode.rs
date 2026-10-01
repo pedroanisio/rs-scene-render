@@ -835,6 +835,8 @@ impl EncodeSpec {
                 std::fs::create_dir_all(dir)?;
             }
         }
+        let output = staged_output(&self.path)?;
+        *a.last_mut().expect("output argument") = output.display().to_string();
         let out = Command::new(crate::ffmpeg())
             .args(&a)
             .stdin(Stdio::null())
@@ -853,6 +855,7 @@ impl EncodeSpec {
                 ),
             });
         }
+        publish_output(output, &self.path)?;
         Ok(())
     }
 
@@ -888,6 +891,25 @@ impl EncodeSpec {
     }
 }
 
+fn staged_output(path: &Path) -> std::io::Result<tempfile::TempPath> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".scene-render-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    Ok(builder.tempfile_in(parent)?.into_temp_path())
+}
+
+fn publish_output(output: tempfile::TempPath, path: &Path) -> std::io::Result<()> {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        std::fs::set_permissions(&output, metadata.permissions())?;
+    }
+    output.persist(path).map_err(|e| e.error)
+}
+
 /// A running encoder fed through its standard input. Dropped before [`Encoder::finish`] succeeds, it stops
 /// FFmpeg and removes the unfinished file.
 pub struct Encoder {
@@ -896,7 +918,7 @@ pub struct Encoder {
     errors: Option<std::thread::JoinHandle<Vec<u8>>>,
     path: PathBuf,
     /// The one file this run writes (none for a first pass or a sequence).
-    output: Option<PathBuf>,
+    output: Option<tempfile::TempPath>,
     finished: bool,
     /// Encoder name in use.
     pub encoder: String,
@@ -907,12 +929,21 @@ pub struct Encoder {
 impl Encoder {
     /// Starts FFmpeg for `spec`.
     pub fn start(spec: &EncodeSpec) -> Result<Encoder, MediaError> {
-        let (args, encoder) = spec.args()?;
+        let (mut args, encoder) = spec.args()?;
         if let Some(dir) = spec.path.parent() {
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir)?;
             }
         }
+        let first_pass = matches!(spec.pass, Some((1, _)));
+        let output = if !first_pass && !spec.codec.is_sequence() {
+            let temp = staged_output(&spec.path)?;
+            // args already selected the muxer from the original destination.
+            *args.last_mut().expect("output argument") = temp.display().to_string();
+            Some(temp)
+        } else {
+            None
+        };
         let mut child = Command::new(crate::ffmpeg())
             .args(&args)
             .stdin(if spec.codec.is_audio_only() { Stdio::null() } else { Stdio::piped() })
@@ -926,13 +957,12 @@ impl Encoder {
             let _ = err.read_to_end(&mut v);
             v
         });
-        let first_pass = matches!(spec.pass, Some((1, _)));
         Ok(Encoder {
             stdin: child.stdin.take(),
             child,
             errors: Some(errors),
             path: spec.path.clone(),
-            output: (!first_pass && !spec.codec.is_sequence()).then(|| spec.path.clone()),
+            output,
             finished: false,
             encoder,
             command: args,
@@ -963,7 +993,6 @@ impl Encoder {
         drop(self.stdin.take());
         let status = self.child.wait()?;
         let err = self.said();
-        self.finished = status.success();
         if !status.success() {
             return Err(MediaError::Failed {
                 tool: "ffmpeg".into(),
@@ -971,6 +1000,10 @@ impl Encoder {
                 message: crate::reason(&err),
             });
         }
+        if let Some(output) = self.output.take() {
+            publish_output(output, &self.path)?;
+        }
+        self.finished = true;
         Ok(())
     }
 }
@@ -983,9 +1016,7 @@ impl Drop for Encoder {
         // abandoned or failed: stop FFmpeg before it finalises, and leave no truncated file behind
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(p) = &self.output {
-            let _ = std::fs::remove_file(p);
-        }
+        // TempPath removes only the unfinished file owned by this invocation.
     }
 }
 

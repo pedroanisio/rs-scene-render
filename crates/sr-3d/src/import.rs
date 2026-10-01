@@ -38,6 +38,90 @@ pub fn load(path: &Path, format: Option<&str>) -> Result<Asset, String> {
     }
 }
 
+/// Local files read by an imported asset, excluding embedded data. Missing
+/// dependencies are retained so creating them invalidates an incremental render.
+pub fn dependencies(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    dependencies_as(path, None)
+}
+
+/// Discovers dependencies using the same explicit format override as [`load`].
+pub fn dependencies_as(path: &Path, format: Option<&str>) -> Result<Vec<std::path::PathBuf>, String> {
+    let base = path.parent().unwrap_or(Path::new("."));
+    let mut files = Vec::new();
+    if !path.is_file() {
+        return Ok(files);
+    }
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match format.unwrap_or(&extension) {
+        "gltf" | "glb" => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let g = std::panic::catch_unwind(|| gltf::Gltf::from_slice_without_validation(&bytes))
+                .map_err(|_| "malformed glTF".to_string())?
+                .map_err(|e| e.to_string())?;
+            let mut add = |uri: &str| {
+                if !uri.starts_with("data:") {
+                    files.push(base.join(percent_decode(uri)));
+                }
+            };
+            for b in g.buffers() {
+                if let gltf::buffer::Source::Uri(uri) = b.source() {
+                    add(uri);
+                }
+            }
+            for image in g.images() {
+                if let gltf::image::Source::Uri { uri, .. } = image.source() {
+                    add(uri);
+                }
+            }
+        }
+        "obj" => {
+            // Use the importer's parser and callback so mtllib names follow
+            // exactly the same rules, including material paths with spaces.
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut input = std::io::BufReader::new(file);
+            let found = std::cell::RefCell::new(Vec::new());
+            let _ = tobj::load_obj_buf(&mut input, &tobj::LoadOptions::default(), |mtl| {
+                let mtl = base.join(mtl);
+                found.borrow_mut().push(mtl.clone());
+                let result = tobj::load_mtl(&mtl);
+                if let Ok((materials, _)) = &result {
+                    for mat in materials {
+                        for name in [&mat.diffuse_texture, &mat.normal_texture].into_iter().flatten() {
+                            // OBJ loading resolves texture names relative to the OBJ.
+                            found.borrow_mut().push(base.join(name));
+                        }
+                    }
+                }
+                result
+            });
+            files.extend(found.into_inner());
+        }
+        "mtlx" => {
+            let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let doc = roxmltree::Document::parse(&text).map_err(|e| e.to_string())?;
+            for node in doc.descendants().filter(|n| {
+                n.attribute("type") == Some("filename")
+                    || (n.has_tag_name("input") && n.attribute("name") == Some("file"))
+            }) {
+                if let Some(file) = node.attribute("value") {
+                    let prefix = node
+                        .ancestors()
+                        .filter_map(|n| n.attribute("fileprefix"))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<String>();
+                    files.push(base.join(format!("{prefix}{file}")));
+                }
+            }
+        }
+        _ => {}
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 fn finish_primitive(p: &mut Primitive, had_normals: bool) {
     if !had_normals {
         compute_normals(&mut p.vertices, &p.indices);
@@ -271,9 +355,45 @@ fn gltf_checked(path: &Path) -> Result<Model, String> {
                 p.dispersion = ext_f(s, "dispersion", 0.0);
             }
         }
-        if pbr.base_color_texture().map(|t| t.texture_transform().is_some()).unwrap_or(false) {
-            m.warnings.push("KHR_texture_transform is ignored".into());
+        fn transform(info: gltf::texture::Info) -> crate::TextureTransform {
+            let mut t = crate::TextureTransform { tex_coord: info.tex_coord(), ..Default::default() };
+            if let Some(ext) = info.texture_transform() {
+                t.tex_coord = ext.tex_coord().unwrap_or(t.tex_coord);
+                t.offset = ext.offset();
+                t.scale = ext.scale();
+                t.rotation = ext.rotation();
+            }
+            t
         }
+        fn special_transform(set: u32, ext: Option<&serde_json::Value>) -> crate::TextureTransform {
+            let mut t = crate::TextureTransform { tex_coord: set, ..Default::default() };
+            if let Some(ext) = ext {
+                if let Some(set) = ext["texCoord"].as_u64() {
+                    t.tex_coord = set as u32;
+                }
+                for (name, target) in [("offset", &mut t.offset), ("scale", &mut t.scale)] {
+                    if let Some(v) = ext[name].as_array().filter(|v| v.len() == 2) {
+                        for i in 0..2 {
+                            target[i] = v[i].as_f64().unwrap_or(target[i] as f64) as f32;
+                        }
+                    }
+                }
+                t.rotation = ext["rotation"].as_f64().unwrap_or(0.0) as f32;
+            }
+            t
+        }
+        let texture_transforms = [
+            pbr.base_color_texture().map(transform).unwrap_or_default(),
+            mat.normal_texture()
+                .map(|t| special_transform(t.tex_coord(), t.extension_value("KHR_texture_transform")))
+                .unwrap_or_default(),
+            pbr.metallic_roughness_texture().map(transform).unwrap_or_default(),
+            mat.occlusion_texture()
+                .map(|t| special_transform(t.tex_coord(), t.extension_value("KHR_texture_transform")))
+                .unwrap_or_default(),
+            mat.emissive_texture().map(transform).unwrap_or_default(),
+        ];
+        p.separate_uvs = true;
         let maps = crate::MaterialMaps {
             base_color: pbr.base_color_texture().and_then(|t| tex(t.texture(), true, &mut m)),
             metallic_roughness: pbr.metallic_roughness_texture().and_then(|t| tex(t.texture(), false, &mut m)),
@@ -281,7 +401,12 @@ fn gltf_checked(path: &Path) -> Result<Model, String> {
             occlusion: mat.occlusion_texture().and_then(|t| tex(t.texture(), false, &mut m)),
             emissive: mat.emissive_texture().and_then(|t| tex(t.texture(), true, &mut m)),
         };
-        m.materials.push(ImportedMaterial { name: mat.name().unwrap_or("").to_string(), params: p, maps });
+        m.materials.push(ImportedMaterial {
+            name: mat.name().unwrap_or("").to_string(),
+            params: p,
+            maps,
+            texture_transforms,
+        });
     }
     let variant_names: Vec<String> =
         g.variants().map(|vs| vs.map(|v| v.name().to_string()).collect()).unwrap_or_default();
@@ -311,6 +436,11 @@ fn gltf_checked(path: &Path) -> Result<Model, String> {
                     v.uv = t;
                 }
             }
+            if let Some(colors) = r.read_colors(0) {
+                for (vertex, color) in vs.iter_mut().zip(colors.into_rgba_f32()) {
+                    vertex.color = color;
+                }
+            }
             let indices: Vec<u32> = match r.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => (0..vs.len() as u32).collect(),
@@ -319,6 +449,13 @@ fn gltf_checked(path: &Path) -> Result<Model, String> {
                 return Err(format!("mesh {}: index {i} is past its {} vertices", mesh.index(), vs.len()));
             }
             let mut p = Primitive { vertices: vs, indices, material: prim.material().index(), ..Default::default() };
+            for (semantic, _) in prim.attributes() {
+                if let gltf::Semantic::TexCoords(set) = semantic {
+                    if let Some(uv) = r.read_tex_coords(set) {
+                        p.tex_coords.insert(set, uv.into_f32().collect());
+                    }
+                }
+            }
             if let (Some(j), Some(w)) = (r.read_joints(0), r.read_weights(0)) {
                 p.joints = j.into_u16().collect();
                 p.weights = w.into_f32().collect();
@@ -473,7 +610,7 @@ pub fn obj(path: &Path) -> Result<Model, String> {
                     },
                     ..Default::default()
                 };
-                m.materials.push(ImportedMaterial { name: mt.name, params, maps });
+                m.materials.push(ImportedMaterial { name: mt.name, params, maps, ..Default::default() });
             }
         }
         Err(e) => m.warnings.push(format!("materials: {e}")),
@@ -648,6 +785,7 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
     }
     let mut verts: Vec<Vec<f64>> = Vec::new();
     let mut vnames: Vec<String> = Vec::new();
+    let mut vtypes = Vec::new();
     let mut faces: Vec<Vec<u32>> = Vec::new();
     for el in &elements {
         let is_v = el.name == "vertex";
@@ -656,6 +794,7 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
                 return Err("more than one vertex element".into());
             }
             vnames = el.props.iter().map(|p| p.name.clone()).collect();
+            vtypes = el.props.iter().map(|p| p.ty).collect();
         }
         if el.props.is_empty() {
             continue;
@@ -750,6 +889,7 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
                 _ => [0.0; 2],
             },
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         })
         .collect();
     let mut indices = Vec::new();
@@ -762,8 +902,23 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
         return Err("face index out of range".into());
     }
     let mut m = Model { basis: Y_UP_METRES, ..Default::default() };
-    if col("red").is_some() {
-        m.warnings.push("PLY vertex colours are ignored".into());
+    let colour_value = |row: &[f64], i: usize| {
+        let max = match vtypes[i] {
+            Ty::U8 => 255.0,
+            Ty::I8 => 127.0,
+            Ty::U16 => 65535.0,
+            Ty::I16 => 32767.0,
+            Ty::U32 => u32::MAX as f64,
+            Ty::I32 => i32::MAX as f64,
+            Ty::F32 | Ty::F64 => 1.0,
+        };
+        (row[i] / max).clamp(0.0, 1.0) as f32
+    };
+    if let (Some(red), Some(green), Some(blue)) = (col("red"), col("green"), col("blue")) {
+        for (vertex, row) in vs.iter_mut().zip(&verts) {
+            let rgb = [red, green, blue].map(|i| srgb_to_linear(colour_value(row, i)));
+            vertex.color = [rgb[0], rgb[1], rgb[2], col("alpha").map_or(1.0, |i| colour_value(row, i))];
+        }
     }
     if indices.is_empty() {
         return Err("PLY has no faces and no Gaussian splat properties".into());
@@ -865,7 +1020,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             ..Default::default()
         };
         mat_index.insert(mat.element.typed_id, m.materials.len());
-        m.materials.push(ImportedMaterial { name: mat.element.name.to_string(), params, maps: Default::default() });
+        m.materials.push(ImportedMaterial { name: mat.element.name.to_string(), params, ..Default::default() });
     }
     // every node, parents first (ufbx lists them in depth order), so the hierarchy animates
     let node_of: std::collections::HashMap<u32, usize> =
@@ -942,6 +1097,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
                     normal: nrm.into(),
                     uv: [uv.x as f32, 1.0 - uv.y as f32],
                     tangent: [1.0, 0.0, 0.0, 1.0],
+                    ..Default::default()
                 });
                 if p.morphs.len() < morphs.len() {
                     p.morphs.resize_with(morphs.len(), Default::default);
@@ -1596,7 +1752,7 @@ fn usd_model(root: Prim, up_z: bool, mpu: f32, warnings: Vec<String>) -> Result<
             }
         });
         materials.insert(p.path.clone(), m.materials.len());
-        m.materials.push(ImportedMaterial { name: p.path.clone(), params, maps: Default::default() });
+        m.materials.push(ImportedMaterial { name: p.path.clone(), params, ..Default::default() });
     });
     // meshes with their accumulated transforms
     fn meshes(p: &Prim, parent: Mat4, out: &mut Vec<(Mat4, Prim)>) {

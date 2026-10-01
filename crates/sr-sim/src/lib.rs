@@ -15,7 +15,6 @@
 //! counter-based hash of seeds and indices, so results do not depend on the
 //! order in which frames are requested.
 
-// `is_multiple_of` (Rust 1.87) is newer than the workspace's Rust 1.82.
 #![allow(clippy::manual_is_multiple_of)]
 
 pub mod erosion;

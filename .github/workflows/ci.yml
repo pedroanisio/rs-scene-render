@@ -6,6 +6,12 @@ env:
   SR_GPU_BACKEND: vulkan
   CARGO_BUILD_JOBS: 2
 jobs:
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - run: cargo check --workspace --all-targets --locked
   test:
     runs-on: ubuntu-24.04
     steps:

@@ -54,6 +54,49 @@ fn a_device_has_at_least_the_downlevel_limits() {
 }
 
 #[test]
+fn materialx_files_and_graphs_render_from_relative_document_bases() {
+    let dir = std::path::PathBuf::from(format!("target/materialx-render-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])).save(dir.join("red.png")).unwrap();
+    for (name, graph, source) in [
+        ("direct", "", "im"),
+        (
+            "graph",
+            r#"<multiply name="tint" type="color3"><input name="in1" nodename="im"/><input name="in2" value="0.5"/></multiply>"#,
+            "tint",
+        ),
+    ] {
+        std::fs::write(dir.join(format!("{name}.mtlx")), format!(r#"<materialx><image name="im" type="color3"><input name="file" type="filename" value="red.png"/></image>{graph}<standard_surface name="s"><input name="base_color" nodename="{source}"/></standard_surface></materialx>"#)).unwrap();
+        let xml = format!(
+            r#"<scene version="1.2"><project width="64" height="64" fps="1" duration="1"/><materials><material id="m" materialX="{name}.mtlx"/></materials><composition><object3D id="o" primitive="plane" width="50" height="50" x="32" y="32" material="m"/></composition></scene>"#
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions { base_dir: Some(dir.clone()), verify_assets: true })
+            .unwrap();
+        let Some(frame) = render(&doc) else { return };
+        assert!(frame.stats.errors.is_empty(), "{name}: {:?}", frame.stats.errors);
+        let center = frame.at(32, 32);
+        assert!(center[0] > 0.1 && center[0] > center[1] * 3.0, "{name}: {center:?}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_oversized_or_nonfinite_frames_report_errors_without_panicking() {
+    let Some(gpu) = gpu() else { return };
+    let d = doc(r#"width="16" height="8""#, "", "");
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    for width in [gpu.device.limits().max_texture_dimension_2d as f64 + 1.0, f64::INFINITY, f64::NAN, 0.0] {
+        let mut graph = ev.evaluate(0.0);
+        graph.size = [width, 1.0];
+        let frame = renderer.render(&graph, ev.program());
+        assert!(!frame.stats.errors.is_empty(), "accepted {width}");
+        assert_eq!(frame.texture.size, [1, 1]);
+    }
+    assert!(renderer.render(&ev.evaluate(0.0), ev.program()).stats.errors.is_empty());
+}
+
+#[test]
 fn output_frames_larger_than_a_buffer_are_packed_in_pieces() {
     let d = doc(
         r##"width="16" height="8" background="#00000000""##,

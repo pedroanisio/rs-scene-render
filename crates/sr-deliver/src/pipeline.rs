@@ -760,11 +760,14 @@ pub fn deliver(
             .scene
             .scene360
             .as_ref()
-            .map(|s| [s.width as u32, s.height as u32])
-            .or(p.reframe.map(|r| [r.size[0].round() as u32, r.size[1].round() as u32]))
-            .unwrap_or([p.size[0].round() as u32, p.size[1].round() as u32]);
-        let size =
-            [output.width.map(|w| w as u32).unwrap_or(frame[0]), output.height.map(|h| h as u32).unwrap_or(frame[1])];
+            .map(|s| [s.width as f64, s.height as f64])
+            .or(p.reframe.map(|r| r.size))
+            .unwrap_or(p.size);
+        let size = sr_gpu::output::frame_size(
+            [output.width.map(|w| w as f64).unwrap_or(frame[0]), output.height.map(|h| h as f64).unwrap_or(frame[1])],
+            &gpu.device.limits(),
+        )
+        .map_err(DeliverError::Invalid)?;
         report.size = size;
         let format = input_format(output, codec);
         let exr = codec == Codec::ExrSequence;
@@ -1544,16 +1547,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sr-deliver-replay-{}", std::process::id()));
         let Some((spec, inter)) = intermediate(&dir) else { return };
         assert!(replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5).is_ok());
-        assert!(spec.path.exists());
+        let successful_output = std::fs::read(&spec.path).unwrap();
         // cut in the middle of its frames
         let bytes = std::fs::read(&inter).unwrap();
         std::fs::write(&inter, &bytes[..bytes.len() * 6 / 10]).unwrap();
         let cut = replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5);
         assert!(cut.is_err(), "a truncated intermediate was encoded as if whole");
-        assert!(!spec.path.exists(), "the partial output is left behind");
+        assert_eq!(std::fs::read(&spec.path).unwrap(), successful_output, "a failed pass replaced the previous output");
         std::fs::write(&inter, b"not a video").unwrap();
         let e = replay(&inter, &spec, InputFormat::Rgba8, [64, 36], 5).unwrap_err().to_string();
         assert!(e.contains("intermediate.mkv") && e.contains("Invalid data"), "{e}");
+        assert_eq!(std::fs::read(&spec.path).unwrap(), successful_output);
     }
 }
 

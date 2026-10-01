@@ -14,7 +14,7 @@
 //! y down, z away from the default camera. Imported Y-up assets measured in
 //! metres map into it through [`Y_UP_METRES`] (100 px per metre).
 
-// `as_chunks` (1.88) and `is_multiple_of` (1.87) are newer than the workspace's Rust 1.82.
+// Keep numeric loops explicit; allow equivalent spellings across Clippy versions.
 // lints some clippy versions lack: allowed where known
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 
@@ -26,6 +26,7 @@ pub mod import;
 pub mod light;
 pub mod material;
 pub mod mtlx;
+mod mtlx_graph;
 
 pub mod prim;
 pub mod usdc;
@@ -41,13 +42,30 @@ pub const Y_UP_METRES: Mat4 =
 
 /// A vertex as the GPU reads it.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     /// xyz tangent, w handedness.
     pub tangent: [f32; 4],
+    /// Normal, metallic-roughness, occlusion and emissive UVs, when the material uses separate UVs.
+    pub map_uv: [[f32; 2]; 4],
+    /// Linear vertex colour, multiplied by the material base colour.
+    pub color: [f32; 4],
+}
+
+impl Default for Vertex {
+    fn default() -> Self {
+        Self {
+            pos: [0.0; 3],
+            normal: [0.0; 3],
+            uv: [0.0; 2],
+            tangent: [0.0; 4],
+            map_uv: [[0.0; 2]; 4],
+            color: [1.0; 4],
+        }
+    }
 }
 
 /// Per-vertex morph target offsets.
@@ -64,6 +82,8 @@ pub struct Primitive {
     pub indices: Vec<u32>,
     /// Index into [`Model::materials`].
     pub material: Option<usize>,
+    /// Imported UV sets, including sets selected by a material variant.
+    pub tex_coords: std::collections::BTreeMap<u32, Vec<[f32; 2]>>,
     pub morphs: Vec<MorphTarget>,
     /// Up to four (joint, weight) pairs per vertex.
     pub joints: Vec<[u16; 4]>,
@@ -133,12 +153,78 @@ pub struct MaterialMaps {
     pub emissive: Option<usize>,
 }
 
+/// KHR_texture_transform: scale, then rotate counterclockwise, then translate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureTransform {
+    pub tex_coord: u32,
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+    pub rotation: f32,
+}
+
+impl Default for TextureTransform {
+    fn default() -> Self {
+        Self { tex_coord: 0, offset: [0.0; 2], scale: [1.0; 2], rotation: 0.0 }
+    }
+}
+
+impl TextureTransform {
+    pub fn apply(&self, uv: [f32; 2]) -> [f32; 2] {
+        let (sin, cos) = self.rotation.sin_cos();
+        let [x, y] = [uv[0] * self.scale[0], uv[1] * self.scale[1]];
+        [self.offset[0] + cos * x - sin * y, self.offset[1] + sin * x + cos * y]
+    }
+}
+
 /// An imported material.
 #[derive(Clone, Debug, Default)]
 pub struct ImportedMaterial {
     pub name: String,
     pub params: MaterialParams,
     pub maps: MaterialMaps,
+    /// Base colour, normal, metallic-roughness, occlusion and emissive, respectively.
+    pub texture_transforms: [TextureTransform; 5],
+}
+
+impl ImportedMaterial {
+    /// Bakes the active material's UV selection/transforms into an instance of
+    /// the mesh. The original UV sets stay intact for material variants.
+    pub fn apply_texture_coordinates(&self, primitive: &Primitive, vertices: &mut [Vertex]) {
+        if !self.params.separate_uvs {
+            return;
+        }
+        for (i, vertex) in vertices.iter_mut().enumerate() {
+            let coords = self.texture_transforms.map(|transform| {
+                let uv = primitive
+                    .tex_coords
+                    .get(&transform.tex_coord)
+                    .and_then(|set| set.get(i))
+                    .copied()
+                    .unwrap_or(primitive.vertices[i].uv);
+                transform.apply(uv)
+            });
+            vertex.uv = coords[0];
+            vertex.map_uv.copy_from_slice(&coords[1..]);
+        }
+        if self.maps.normal.is_some() {
+            // The normal map's UV parameterisation defines its tangent frame.
+            for vertex in vertices.iter_mut() {
+                vertex.uv = vertex.map_uv[0];
+            }
+            compute_tangents(vertices, &primitive.indices);
+            for (i, vertex) in vertices.iter_mut().enumerate() {
+                let t = self.texture_transforms[0];
+                vertex.uv = t.apply(
+                    primitive
+                        .tex_coords
+                        .get(&t.tex_coord)
+                        .and_then(|set| set.get(i))
+                        .copied()
+                        .unwrap_or(primitive.vertices[i].uv),
+                );
+            }
+        }
+    }
 }
 
 /// A keyframed property of an animation channel.

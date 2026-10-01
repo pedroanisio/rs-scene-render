@@ -125,18 +125,83 @@ fn cred(profile: Option<&str>, name: &str) -> Option<String> {
     std::env::var(format!("SR_CREDENTIALS_{p}_{name}")).ok().filter(|v| !v.is_empty())
 }
 
-fn curl(args: &[String], uri: &str) -> Result<String, DeliverError> {
-    let tool = std::env::var("SR_CURL").unwrap_or_else(|_| "curl".into());
-    let out = Command::new(&tool)
-        .args(["-sS", "--fail-with-body", "--retry", "2"])
-        .args(args)
-        .output()
-        .map_err(|e| DeliverError::Destination { uri: uri.into(), message: format!("cannot run {tool}: {e}") })?;
-    if !out.status.success() {
-        let msg =
-            format!("{} {}", String::from_utf8_lossy(&out.stderr).trim(), String::from_utf8_lossy(&out.stdout).trim());
-        return Err(DeliverError::Destination { uri: uri.into(), message: msg.trim().to_string() });
+/// SHA-256 and length with a fixed-size read buffer, including webhook manifests.
+fn payload_digest(mut input: impl std::io::Read) -> std::io::Result<(u64, String)> {
+    let mut hash = Sha256::new();
+    let mut bytes = 0;
+    let mut buffer = [0; 65536];
+    loop {
+        let n = match input.read(&mut buffer) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+        bytes += n as u64;
     }
+    Ok((bytes, hex(&hash.finalize())))
+}
+
+fn curl(args: &[String], uri: &str) -> Result<String, DeliverError> {
+    curl_with_tool(&std::env::var("SR_CURL").unwrap_or_else(|_| "curl".into()), args, uri)
+}
+
+fn curl_with_tool(tool: &str, args: &[String], uri: &str) -> Result<String, DeliverError> {
+    use std::io::Write;
+    use std::process::Stdio;
+    // No credential, signed URL or notification body enters argv. Disable the
+    // user's curlrc too: it could enable traces containing those credentials.
+    fn quote(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+    }
+    let mut config = String::from("silent\nshow-error\nfail-with-body\nretry = 2\n");
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let option = match arg.as_str() {
+            "-T" => "upload-file",
+            "-H" => "header",
+            "-u" => "user",
+            "-X" => "request",
+            "--key" => "key",
+            "--data-binary" => "data-binary",
+            "--ftp-create-dirs" => {
+                config.push_str("ftp-create-dirs\n");
+                continue;
+            }
+            _ => {
+                config.push_str(&format!("url = \"{}\"\n", quote(arg)));
+                continue;
+            }
+        };
+        let value = args.next().expect("internal curl option has a value");
+        config.push_str(&format!("{option} = \"{}\"\n", quote(value)));
+    }
+    // A signed query or URI password must not be repeated in an error either.
+    let safe_uri = uri.split(['?', '#']).next().unwrap_or(uri);
+    let safe_uri = match safe_uri.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{}", rest.rsplit_once('@').map_or(rest, |(_, host)| host)),
+        None => safe_uri.to_string(),
+    };
+    let error = |message| DeliverError::Destination { uri: safe_uri.clone(), message };
+    let mut child = Command::new(tool)
+        .args(["--disable", "--config", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| error(format!("cannot run curl: {e}")))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = std::thread::spawn(move || stdin.write_all(config.as_bytes()));
+    let out = child.wait_with_output().map_err(|e| error(format!("curl: {e}")))?;
+    let sent = writer.join().map_err(|_| error("curl request writer failed".into()))?;
+    if !out.status.success() {
+        // Servers and curl diagnostics may echo authentication data. Report the
+        // exit code instead of untrusted response bodies in failure messages.
+        return Err(error(format!("curl upload failed ({})", out.status)));
+    }
+    sent.map_err(|e| error(format!("curl request: {e}")))?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -239,8 +304,7 @@ pub fn upload(d: &m::Destination, files: &[PathBuf], base: &Path) -> Result<Vec<
                         (format!("https://{host}"), host, format!("/{key}"))
                     }
                 };
-                let body = std::fs::read(f)?;
-                let hash = hex(&Sha256::digest(&body));
+                let (_, hash) = payload_digest(std::fs::File::open(f)?)?;
                 let headers =
                     s3_put_headers(&host, &path, &hash, &amz_now(), &region, &key_id, &secret, token.as_deref());
                 let url = format!("{scheme_host}{}", uri_encode(&path, false));
@@ -344,10 +408,10 @@ pub fn notify(
     let entries: Vec<serde_json::Value> = files
         .iter()
         .map(|f| {
-            let bytes = std::fs::read(f).unwrap_or_default();
-            serde_json::json!({ "name": file_name(f), "bytes": bytes.len(), "sha256": hex(&Sha256::digest(&bytes)) })
+            let (bytes, hash) = payload_digest(std::fs::File::open(f)?)?;
+            Ok(serde_json::json!({ "name": file_name(f), "bytes": bytes, "sha256": hash }))
         })
-        .collect();
+        .collect::<std::io::Result<_>>()?;
     let body = serde_json::json!({
         "event": "render.completed",
         "output": output.id,
@@ -398,6 +462,74 @@ pub fn deliver_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_upload_credentials_use_stdin_and_are_redacted() {
+        let dir = std::env::temp_dir().join(format!("sr-curl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("curl.py");
+        std::fs::write(
+            &tool,
+            r#"#!/usr/bin/env python3
+import sys
+config=sys.stdin.read()
+assert sys.argv[1:]==['--disable','--config','-'],sys.argv
+assert 'header = "Authorization: Bearer secret-token"' in config,config
+assert 'url = "https://example.test/upload?sig=secret-sas"' in config,config
+from pathlib import Path
+Path(__file__).with_suffix('.passed').touch()
+print(config)
+sys.exit(1)
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let err = curl_with_tool(
+            tool.to_str().unwrap(),
+            &[
+                "-H".into(),
+                "Authorization: Bearer secret-token".into(),
+                "https://example.test/upload?sig=secret-sas".into(),
+            ],
+            "https://example.test/upload?sig=secret-sas",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("secret-token") && !err.contains("secret-sas"), "{err}");
+        assert!(tool.with_extension("passed").exists(), "curl fixture assertions failed: {err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_payload_digest_streams_short_reads_and_propagates_errors() {
+        struct ShortReads {
+            left: usize,
+        }
+        impl std::io::Read for ShortReads {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                assert!(buf.len() <= 65536, "unbounded read allocation");
+                let n = self.left.min(buf.len()).min(17);
+                buf[..n].fill(b'x');
+                self.left -= n;
+                Ok(n)
+            }
+        }
+        let (bytes, hash) = payload_digest(ShortReads { left: 131073 }).unwrap();
+        assert_eq!(bytes, 131073);
+        assert_eq!(hash, hex(&Sha256::digest(vec![b'x'; 131073])));
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken"))
+            }
+        }
+        assert!(payload_digest(Broken).is_err());
+    }
 
     #[test]
     fn test_file_delivery_aliases_preserve_rendered_bytes() {

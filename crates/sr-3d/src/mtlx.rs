@@ -4,8 +4,8 @@
 //! `.mtlx` document supplies the material: constant inputs map onto
 //! [`MaterialParams`], and inputs connected to `image`/`tiledimage` nodes
 //! (directly, or through a `normalmap` node for normals) become texture maps.
-//! Other node graphs are reported, because no MaterialX shader generator is
-//! linked.
+//! Pattern graphs resolve named outputs, evaluate constants and bake varying
+//! inputs into linear textures. Cycles and unsupported operators are errors.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,8 @@ pub struct MtlxMaterial {
     pub normal_map: Option<PathBuf>,
     pub roughness_map: Option<PathBuf>,
     pub warnings: Vec<String>,
+    /// Baked linear graph outputs in the renderer's six texture slots.
+    pub generated_maps: [Option<crate::Texture>; 6],
 }
 
 fn nums(s: &str) -> Vec<f32> {
@@ -35,9 +37,10 @@ pub fn load(path: &Path) -> Result<MtlxMaterial, String> {
 pub fn parse(text: &str, base: &Path) -> Result<MtlxMaterial, String> {
     let doc = roxmltree::Document::parse(text).map_err(|e| format!("MaterialX: {e}"))?;
     let root = doc.root_element();
-    let prefix = root.attribute("fileprefix").unwrap_or("");
     let all: Vec<roxmltree::Node> = root.descendants().filter(|n| n.is_element()).collect();
-    let by_name = |name: &str| all.iter().find(|n| n.attribute("name") == Some(name)).copied();
+    fn by_name<'a, 'input>(from: roxmltree::Node<'a, 'input>, name: &str) -> Option<roxmltree::Node<'a, 'input>> {
+        from.ancestors().skip(1).find_map(|scope| scope.children().find(|node| node.attribute("name") == Some(name)))
+    }
     let surface = all
         .iter()
         .find(|n| matches!(n.tag_name().name(), "standard_surface" | "open_pbr_surface" | "gltf_pbr"))
@@ -47,36 +50,57 @@ pub fn parse(text: &str, base: &Path) -> Result<MtlxMaterial, String> {
     let mut out = MtlxMaterial::default();
     let mut vals: std::collections::HashMap<String, Vec<f32>> = Default::default();
     let mut maps: std::collections::HashMap<String, PathBuf> = Default::default();
+    let mut graph = crate::mtlx_graph::Compiler::new(root, base);
+    let mut graph_maps = std::collections::HashMap::new();
     for input in surface.children().filter(|c| c.has_tag_name("input")) {
         let Some(name) = input.attribute("name") else { continue };
         if let Some(v) = input.attribute("value") {
             vals.insert(name.to_string(), nums(v));
-        } else if let Some(node) = input.attribute("nodename").and_then(by_name) {
-            // image, tiledimage, or normalmap → image
-            let img = if node.tag_name().name() == "normalmap" {
-                node.children()
-                    .filter(|c| c.has_tag_name("input") && c.attribute("name") == Some("in"))
-                    .find_map(|c| c.attribute("nodename"))
-                    .and_then(by_name)
-            } else {
-                Some(node)
-            };
-            match img.filter(|n| matches!(n.tag_name().name(), "image" | "tiledimage")) {
+        } else if let Some(node) = input.attribute("nodename").and_then(|name| by_name(input, name)) {
+            // Direct image paths remain lazy. Normal-map nodes need graph
+            // evaluation so strength and vector decoding are preserved.
+            let img = Some(node);
+            match img.filter(|n| {
+                n.has_tag_name("image")
+                    && matches!(name, "base_color" | "normal" | "roughness" | "specular_roughness")
+                    && n.attribute("colorspace").is_none()
+                    && n.children().filter(|c| c.has_tag_name("input")).all(|c| c.attribute("name") == Some("file"))
+            }) {
                 Some(img) => {
                     if let Some(file) = img
                         .children()
                         .find(|c| c.has_tag_name("input") && c.attribute("name") == Some("file"))
                         .and_then(|c| c.attribute("value"))
                     {
+                        let prefix = img
+                            .ancestors()
+                            .filter_map(|n| n.attribute("fileprefix"))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<String>();
                         maps.insert(name.to_string(), base.join(format!("{prefix}{file}")));
                     }
                 }
-                None => out
-                    .warnings
-                    .push(format!("MaterialX input {name}: node graph <{}> is not translated", node.tag_name().name())),
+                None => {
+                    let expression = graph.input(input)?;
+                    if expression.varying || name == "normal" {
+                        graph_maps.insert(name.to_string(), expression);
+                    } else {
+                        vals.insert(name.to_string(), expression.eval([0.0; 2]).to_vec());
+                    }
+                }
             }
-        } else if input.attribute("nodegraph").is_some() || input.attribute("output").is_some() {
-            out.warnings.push(format!("MaterialX input {name}: node graphs are not translated"));
+        } else if input.attribute("nodegraph").is_some()
+            || input.attribute("output").is_some()
+            || input.attribute("nodename").is_some()
+        {
+            let expression = graph.input(input)?;
+            if expression.varying || name == "normal" {
+                graph_maps.insert(name.to_string(), expression);
+            } else {
+                vals.insert(name.to_string(), expression.eval([0.0; 2]).to_vec());
+            }
         }
     }
     let f = |n: &str, d: f32| vals.get(n).and_then(|v| v.first().copied()).unwrap_or(d);
@@ -148,6 +172,44 @@ pub fn parse(text: &str, base: &Path) -> Result<MtlxMaterial, String> {
             p.iridescence = f("iridescence", 0.0);
             p.iridescence_ior = f("iridescence_ior", 1.3);
         }
+    }
+    let base_weight = match kind {
+        "standard_surface" => f("base", 1.0),
+        "open_pbr_surface" => f("base_weight", 1.0),
+        _ => 1.0,
+    };
+    let emission_weight = if kind == "standard_surface" { f("emission", 0.0) } else { 1.0 };
+    if maps.contains_key("base_color") {
+        p.base_color[..3].fill(base_weight);
+    }
+    if maps.contains_key("specular_roughness") || maps.contains_key("roughness") {
+        p.roughness = 1.0;
+    }
+    for (name, expression) in graph_maps {
+        let (mut texture, factor) = expression.bake(name == "normal");
+        let slot = match name.as_str() {
+            "base_color" => {
+                p.base_color[..3].copy_from_slice(&scale3([factor[0], factor[1], factor[2]], base_weight));
+                0
+            }
+            "normal" => 1,
+            "specular_roughness" | "roughness" => {
+                p.roughness = factor[0];
+                for pixel in texture.rgba.chunks_exact_mut(4) {
+                    pixel[1] = pixel[0];
+                    pixel[2] = 255;
+                }
+                2
+            }
+            "emission_color" | "emissive" => {
+                p.emissive = scale3([factor[0], factor[1], factor[2]], emission_weight);
+                4
+            }
+            "occlusion" => 3,
+            "displacement" => 5,
+            _ => return Err(format!("varying MaterialX input {name} has no texture slot in the shading model")),
+        };
+        out.generated_maps[slot] = Some(texture);
     }
     if p.base_color[3] < 1.0 {
         p.alpha_mode = crate::AlphaMode::Blend;

@@ -46,6 +46,33 @@ pub struct TexGpu {
     pub key: u64,
     /// Size on the GPU (the source's, reduced to the device's limit).
     pub size: [u32; 2],
+    /// Base-level RGBA8 pixels retained for ray tracing and displacement.
+    pub rgba: Arc<[u8]>,
+    pub srgb: bool,
+}
+
+impl TexGpu {
+    /// Bilinear repeat sampling of the retained base level, in linear colour.
+    pub fn sample(&self, uv: [f32; 2]) -> [f32; 4] {
+        let [w, h] = self.size;
+        let x = uv[0].rem_euclid(1.0) * w as f32 - 0.5;
+        let y = uv[1].rem_euclid(1.0) * h as f32 - 0.5;
+        let fetch = |x: i64, y: i64| {
+            let offset = (y.rem_euclid(h as i64) as usize * w as usize + x.rem_euclid(w as i64) as usize) * 4;
+            std::array::from_fn::<_, 4, _>(|i| {
+                let v = self.rgba[offset + i] as f32 / 255.0;
+                if self.srgb && i < 3 {
+                    sr_3d::material::srgb_to_linear(v)
+                } else {
+                    v
+                }
+            })
+        };
+        let (ix, iy) = (x.floor() as i64, y.floor() as i64);
+        let (a, b, c, d) = (fetch(ix, iy), fetch(ix + 1, iy), fetch(ix, iy + 1), fetch(ix + 1, iy + 1));
+        let (u, v) = (x - x.floor(), y - y.floor());
+        std::array::from_fn(|i| (a[i] * (1.0 - u) + b[i] * u) * (1.0 - v) + (c[i] * (1.0 - u) + d[i] * u) * v)
+    }
 }
 
 /// A prefiltered environment on the GPU.
@@ -64,6 +91,8 @@ pub struct SplatGpu {
     /// Spherical-harmonic coefficients (48 floats a splat), or one dummy entry.
     pub sh: wgpu::Buffer,
     pub sh_degree: u32,
+    pub cpu: Arc<[[f32; 16]]>,
+    pub cpu_sh: Arc<[[f32; 48]]>,
     pub n: u32,
     pub lo: Vec3,
     pub hi: Vec3,
@@ -379,7 +408,7 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
         specular_color: [m.specular_color[0], m.specular_color[1], m.specular_color[2], 1.0],
         irid: [m.iridescence, m.iridescence_ior, m.iridescence_thickness, m.occlusion_strength],
         aniso: [m.anisotropy, m.anisotropy_rotation, m.displacement_scale, bits as f32],
-        uv: [m.uv_scale[0], m.uv_scale[1], 0.0, 0.0],
+        uv: [m.uv_scale[0], m.uv_scale[1], m.separate_uvs as u32 as f32, 0.0],
     }
 }
 
@@ -486,8 +515,7 @@ const F: wgpu::TextureSampleType = wgpu::TextureSampleType::Float { filterable: 
 const D2: wgpu::TextureViewDimension = wgpu::TextureViewDimension::D2;
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRS: [wgpu::VertexAttribute; 4] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+    const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2, 5 => Float32x2, 6 => Float32x2, 7 => Float32x2, 8 => Float32x4];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -926,6 +954,8 @@ impl ThreeEngine {
                     .create_view(&Default::default()),
                 key: 0,
                 size: [1, 1],
+                rgba: Arc::from([255u8; 4]),
+                srgb: false,
             }),
             brdf: texture(d, [1, 1], FORMAT, 1, 1, 1, "brdf").create_view(&Default::default()),
             black_env: texture(d, [1, 1], FORMAT, 1, 1, 1, "black-env").create_view(&Default::default()),
@@ -1049,6 +1079,7 @@ impl ThreeEngine {
         if img.dimensions() != (w, h) {
             img = image::imageops::thumbnail(&img, w, h);
         }
+        let rgba: Arc<[u8]> = img.as_raw().clone().into();
         let mips = 32 - w.max(h).max(1).leading_zeros();
         let format = if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
         let t = texture(&self.device, [w, h], format, mips, 1, 1, "material-map");
@@ -1060,7 +1091,7 @@ impl ThreeEngine {
             self.write_tex(&t, level, [lw, lh], img.as_raw(), 4);
         }
         self.next_key += 1;
-        Arc::new(TexGpu { view: t.create_view(&Default::default()), key: self.next_key, size: [w, h] })
+        Arc::new(TexGpu { view: t.create_view(&Default::default()), key: self.next_key, size: [w, h], rgba, srgb })
     }
 
     /// Uploads a mesh.
@@ -1165,7 +1196,16 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(if has_sh { &s.sh[..n] } else { &dummy[..] }),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        Arc::new(SplatGpu { buf, sh, sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 }, n: n as u32, lo, hi })
+        Arc::new(SplatGpu {
+            buf,
+            sh,
+            sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 },
+            n: n as u32,
+            lo,
+            hi,
+            cpu: data.into(),
+            cpu_sh: if has_sh { s.sh[..n].to_vec().into() } else { Arc::from([]) },
+        })
     }
 
     fn mat_bind(&mut self, maps: &Maps, uniform: &wgpu::Buffer) -> [u64; 6] {

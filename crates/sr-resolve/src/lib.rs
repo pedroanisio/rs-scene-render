@@ -395,10 +395,37 @@ fn audio_format(scene: &m::Scene) -> (u32, u16) {
         .unwrap_or((48000, 24))
 }
 
+struct DocumentLock(std::fs::File);
+impl Drop for DocumentLock {
+    fn drop(&mut self) {
+        // Explicit unlock also releases the lock if a concurrent fork briefly
+        // inherited this descriptor before closing it on exec.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Resolves a document's generated media and transcriptions, rewriting its `cacheSha256`
 /// attributes in place.
 pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
+    // Keep the lock file in place: unlinking it would let another writer lock a
+    // different inode while a waiter still holds the old one.
+    let _lock = if o.check {
+        None
+    } else {
+        let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+        let mut name = canonical.into_os_string();
+        name.push(".resolve.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(name)
+            .map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
+        file.try_lock().map_err(|e| format!("{}: another resolver holds the document lock: {e}", path.display()))?;
+        Some(DocumentLock(file))
+    };
     let mut text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let original = text.clone();
     let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let base = if base.as_os_str().is_empty() { PathBuf::from(".") } else { base };
     let load = |text: &str| {
@@ -629,7 +656,13 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
         }
     }
     if !o.check {
-        let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let current = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if current != original {
+            return Err(format!(
+                "{} changed during resolution; generated caches were kept, but the document was not overwritten",
+                path.display()
+            ));
+        }
         if original != text {
             write_atomic(path, text.as_bytes())?;
         }

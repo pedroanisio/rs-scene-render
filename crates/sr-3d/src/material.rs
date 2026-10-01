@@ -46,6 +46,8 @@ pub struct MaterialParams {
     pub occlusion_strength: f32,
     pub displacement_scale: f32,
     pub uv_scale: [f32; 2],
+    /// Imported geometry carries independently transformed coordinates per map.
+    pub separate_uvs: bool,
 }
 
 impl Default for MaterialParams {
@@ -82,6 +84,7 @@ impl Default for MaterialParams {
             occlusion_strength: 1.0,
             displacement_scale: 0.0,
             uv_scale: [1.0, 1.0],
+            separate_uvs: false,
         }
     }
 }

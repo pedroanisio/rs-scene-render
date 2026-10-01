@@ -68,16 +68,97 @@ impl Provider for External {
     }
 
     fn run(&self, req: &Request) -> Result<Response, String> {
-        let mut child = Command::new(&self.command[0])
-            .args(&self.command[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("cannot run provider {} ({}): {e}", self.name, self.command[0]))?;
+        let timeout = std::env::var("SR_PROVIDER_TIMEOUT")
+            .ok()
+            .map(|s| s.parse::<u64>().map_err(|_| "SR_PROVIDER_TIMEOUT must be positive seconds".to_string()))
+            .transpose()?
+            .unwrap_or(1800);
+        if timeout == 0 {
+            return Err("SR_PROVIDER_TIMEOUT must be positive seconds".into());
+        }
+        self.run_with_timeout(req, std::time::Duration::from_secs(timeout))
+    }
+}
+
+impl External {
+    fn run_with_timeout(&self, req: &Request, timeout: std::time::Duration) -> Result<Response, String> {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Instant;
+        // Drain both pipes while writing stdin. Keep only the response/error tail,
+        // so a noisy provider cannot fill a pipe or grow our memory indefinitely.
+        fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let mut tail = std::collections::VecDeque::new();
+                    let mut buf = [0; 8192];
+                    loop {
+                        let n = pipe.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        let excess = (tail.len() + n).saturating_sub(1024 * 1024);
+                        tail.drain(..excess);
+                        tail.extend(&buf[..n]);
+                    }
+                    Ok(tail.into_iter().collect())
+                })();
+                let _ = tx.send(result);
+            });
+            rx
+        }
+        let mut command = Command::new(&self.command[0]);
+        command.args(&self.command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(|e| format!("cannot run provider {}: {e}", self.name))?;
+        let stdout = drain(child.stdout.take().expect("piped"));
+        let stderr = drain(child.stderr.take().expect("piped"));
+        let mut stdin = child.stdin.take().expect("piped");
         let body = serde_json::to_vec(req).expect("serialisable");
-        child.stdin.take().expect("piped").write_all(&body).map_err(|e| e.to_string())?;
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        let (tx, written) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(stdin.write_all(&body));
+        });
+        let start = Instant::now();
+        let result = (|| {
+            let status = loop {
+                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                    break status;
+                }
+                if start.elapsed() >= timeout {
+                    return Err(format!("provider {} timed out", self.name));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            let remaining = || timeout.saturating_sub(start.elapsed());
+            let stdout = stdout
+                .recv_timeout(remaining())
+                .map_err(|_| "provider stdout timed out".to_string())?
+                .map_err(|e| e.to_string())?;
+            let stderr = stderr
+                .recv_timeout(remaining())
+                .map_err(|_| "provider stderr timed out".to_string())?
+                .map_err(|e| e.to_string())?;
+            written
+                .recv_timeout(remaining())
+                .map_err(|_| "provider stdin timed out".to_string())?
+                .map_err(|e| format!("provider request: {e}"))?;
+            Ok(std::process::Output { status, stdout, stderr })
+        })();
+        if result.is_err() {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let out = result?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let last = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
         let resp: Option<Response> = serde_json::from_str(last).ok();
@@ -284,6 +365,30 @@ pub(crate) fn base64(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_external_provider_timeout_reaps_the_child() {
+        let provider = External {
+            name: "hung".into(),
+            command: vec!["python3".into(), "-c".into(), "import time;time.sleep(60)".into()],
+        };
+        let start = std::time::Instant::now();
+        let result = provider.run_with_timeout(&Request::default(), std::time::Duration::from_millis(100));
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_external_provider_drains_output_while_sending_request() {
+        let provider = External { name: "chatty".into(), command: vec!["python3".into(), "-c".into(),
+            "import sys,json;sys.stderr.write('x'*262144);sys.stderr.flush();sys.stdout.write('y'*262144+'\\n');sys.stdout.flush();json.load(sys.stdin);print('{\"ok\":true}')".into()] };
+        let request = Request { prompt: Some("p".repeat(262144)), ..Default::default() };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(provider.run(&request));
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("provider deadlocked").unwrap().ok);
+    }
 
     #[test]
     fn executable_lookup_honours_windows_pathext() {

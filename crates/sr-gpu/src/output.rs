@@ -14,6 +14,18 @@ use crate::color::{self, Working};
 use crate::resources::Tex;
 use crate::types;
 
+/// Checks a frame's dimensions before conversion or texture allocation.
+pub fn frame_size(size: [f64; 2], limits: &wgpu::Limits) -> Result<[u32; 2], String> {
+    let limit = limits.max_texture_dimension_2d as f64;
+    if size.iter().any(|v| !v.is_finite() || *v <= 0.0 || v.round() > limit) {
+        return Err(format!(
+            "frame dimensions {}x{} must be finite, positive and at most {} per axis",
+            size[0], size[1], limits.max_texture_dimension_2d
+        ));
+    }
+    Ok(size.map(|v| v.round().max(1.0) as u32))
+}
+
 /// The colour of a deliverable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputColor {

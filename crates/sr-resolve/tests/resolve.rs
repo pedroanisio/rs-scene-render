@@ -56,6 +56,32 @@ fn narrated(prompt: &str) -> String {
 }
 
 #[test]
+fn test_resolve_preserves_edits_made_during_generation() {
+    let xml = narrated("hello").replace("provider=\"example\"", "provider=\"editprobe\"");
+    let d = project("concurrent-edit", &xml);
+    let provider = d.join("provider.py");
+    std::fs::write(
+        &provider,
+        r#"import json, sys, pathlib
+r = json.load(sys.stdin)
+p = pathlib.Path(r['baseDir']) / 'scene.scene.xml'
+p.write_text(p.read_text() + '\n<!-- concurrent edit -->\n')
+pathlib.Path(r['output']).write_bytes(b'generated data')
+print(json.dumps({'ok': True}))
+"#,
+    )
+    .unwrap();
+    std::env::set_var("SR_PROVIDER_EDITPROBE", format!("python3 {}", provider.display()));
+    let result = resolve(&d.join("scene.scene.xml"), &Options { only: vec!["vo".into()], ..opts(&d) });
+    std::env::remove_var("SR_PROVIDER_EDITPROBE");
+    assert!(result.as_ref().is_err_and(|e| e.contains("changed")), "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(d.join("scene.scene.xml")).unwrap(),
+        format!("{xml}\n<!-- concurrent edit -->\n")
+    );
+}
+
+#[test]
 fn speech_and_its_captions_resolve_and_pin() {
     setup();
     let d = project("pin", &narrated("hello there world"));

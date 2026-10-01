@@ -348,3 +348,44 @@ fn a_percent_sign_in_the_directory_is_not_a_frame_pattern() {
         assert!(dir().join(format!("50%/f_{k:04}.png")).is_file(), "frame {k}");
     }
 }
+
+#[test]
+fn test_encoder_preserves_existing_output_until_success() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("existing.mp4");
+    let old = b"previous successful deliverable";
+    std::fs::write(&p, old).unwrap();
+    let mut s = spec(&p, Codec::H264, InputFormat::Rgba8);
+    s.width = 63;
+    let mut e = Encoder::start(&s).unwrap();
+    let _ = e.write(&frame(s.input, 0, 63, 36));
+    assert!(e.finish().is_err());
+    assert_eq!(std::fs::read(&p).unwrap(), old);
+    s.width = 64;
+    let mut e = Encoder::start(&s).unwrap();
+    e.write(&frame(s.input, 0, 64, 36)).unwrap();
+    drop(e);
+    assert_eq!(std::fs::read(&p).unwrap(), old);
+    encode(&s, 2);
+    assert_ne!(std::fs::read(&p).unwrap(), old);
+    assert!(probe(&p).unwrap().video.is_some());
+    assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn test_failed_segment_join_preserves_existing_output() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let segment = dir.path().join("segment.mp4");
+    encode(&spec(&segment, Codec::H264, InputFormat::Rgba8), 2);
+    let output = dir.path().join("existing.webm");
+    std::fs::write(&output, b"previous render").unwrap();
+    let s = spec(&output, Codec::H264, InputFormat::Rgba8);
+    assert!(s.join(&[segment], &dir.path().join("segments.txt")).is_err());
+    assert_eq!(std::fs::read(&output).unwrap(), b"previous render");
+}

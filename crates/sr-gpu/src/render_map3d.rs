@@ -305,6 +305,7 @@ impl Renderer {
                     normal: nrm.into(),
                     uv: [u, v],
                     tangent: [t.x, t.y, t.z, 1.0],
+                    ..Default::default()
                 });
             }
         }

@@ -10,7 +10,13 @@ use lyon_tessellation::{BuffersBuilder, FillOptions, FillRule, FillTessellator, 
 use crate::{compute_tangents, Primitive, Vertex};
 
 fn v(p: Vec3, n: Vec3, uv: Vec2) -> Vertex {
-    Vertex { pos: p.into(), normal: n.normalize_or_zero().into(), uv: uv.into(), tangent: [1.0, 0.0, 0.0, 1.0] }
+    Vertex {
+        pos: p.into(),
+        normal: n.normalize_or_zero().into(),
+        uv: uv.into(),
+        tangent: [1.0, 0.0, 0.0, 1.0],
+        ..Default::default()
+    }
 }
 
 /// Flips triangles whose geometric normal disagrees with their vertex normals.

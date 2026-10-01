@@ -47,6 +47,11 @@ struct VIn {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) normal_uv: vec2<f32>,
+    @location(5) mr_uv: vec2<f32>,
+    @location(6) occ_uv: vec2<f32>,
+    @location(7) emissive_uv: vec2<f32>,
+    @location(8) color: vec4<f32>,
 };
 
 struct VOut {
@@ -55,6 +60,11 @@ struct VOut {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) normal_uv: vec2<f32>,
+    @location(5) mr_uv: vec2<f32>,
+    @location(6) occ_uv: vec2<f32>,
+    @location(7) emissive_uv: vec2<f32>,
+    @location(8) color: vec4<f32>,
 };
 
 fn displaced(v: VIn) -> vec3<f32> {
@@ -76,6 +86,11 @@ fn vs_main(v: VIn) -> VOut {
     o.normal = normalize((obj.normal * vec4(v.normal, 0.0)).xyz);
     o.tangent = vec4(normalize((obj.model * vec4(v.tangent.xyz, 0.0)).xyz), v.tangent.w);
     o.uv = v.uv * mat.uv.xy;
+    o.color = v.color;
+    o.normal_uv = select(v.uv, v.normal_uv, mat.uv.z > 0.0) * mat.uv.xy;
+    o.mr_uv = select(v.uv, v.mr_uv, mat.uv.z > 0.0) * mat.uv.xy;
+    o.occ_uv = select(v.uv, v.occ_uv, mat.uv.z > 0.0) * mat.uv.xy;
+    o.emissive_uv = select(v.uv, v.emissive_uv, mat.uv.z > 0.0) * mat.uv.xy;
     return o;
 }
 
@@ -328,14 +343,14 @@ fn sh_irradiance(n: vec3<f32>) -> vec3<f32> {
 fn surface(i: VOut, front: bool) -> Surface {
     var s: Surface;
     let bits = u32(mat.aniso.w);
-    var base = mat.base_color;
+    var base = mat.base_color * i.color;
     if ((bits & 1u) != 0u) { base = base * textureSample(base_map, mat_smp, i.uv); }
     s.albedo = base.rgb;
     s.alpha = base.a * mat.p0.z * obj.params.x;
     var metallic = mat.p0.x;
     var rough = mat.p0.y;
     if ((bits & 4u) != 0u) {
-        let mr = textureSample(mr_map, mat_smp, i.uv);
+        let mr = textureSample(mr_map, mat_smp, i.mr_uv);
         rough = rough * mr.g;
         metallic = metallic * mr.b;
     }
@@ -346,7 +361,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     var t = normalize(i.tangent.xyz - n * dot(n, i.tangent.xyz));
     var b = cross(n, t) * i.tangent.w;
     if ((bits & 2u) != 0u) {
-        var tn = textureSample(normal_map, mat_smp, i.uv).xyz * 2.0 - 1.0;
+        var tn = textureSample(normal_map, mat_smp, i.normal_uv).xyz * 2.0 - 1.0;
         tn = vec3(tn.xy * mat.p1.w, tn.z);
         // glTF normal maps are y-up in texture space; scene space flips y (and z) relative to glTF
         n = normalize(t * tn.x - b * tn.y + n * tn.z);
@@ -361,7 +376,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     s.world = i.world;
     s.v = normalize(fr.eye.xyz - i.world);
     s.occlusion = 1.0;
-    if ((bits & 8u) != 0u) { s.occlusion = 1.0 + mat.irid.w * (textureSample(occ_map, mat_smp, i.uv).r - 1.0); }
+    if ((bits & 8u) != 0u) { s.occlusion = 1.0 + mat.irid.w * (textureSample(occ_map, mat_smp, i.occ_uv).r - 1.0); }
     let ior = mat.p2.w;
     let f0d = pow((ior - 1.0) / (ior + 1.0), 2.0);
     let dielectric = min(vec3(f0d) * mat.specular_color.rgb, vec3(1.0));
@@ -484,7 +499,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         col += transmission(s) * ft * mat.p2.z * (1.0 - s.metallic);
     }
     var em = mat.emissive.rgb * mat.emissive.w;
-    if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * textureSample(emissive_map, mat_smp, i.uv).rgb; }
+    if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * textureSample(emissive_map, mat_smp, i.emissive_uv).rgb; }
     col += em;
     // transmissive surfaces are opaque layers over what they refract
     var a = 1.0;

@@ -3,7 +3,7 @@
 //! with TeX spacing, grouping, `\frac`, `\sqrt[n]{}`, sub- and superscripts,
 //! big operators (`\sum`, `\prod`, `\int`) with limits in display style,
 //! `\left`/`\right` delimiters stretched to their content, `\text`,
-//! `\mathrm`, function names and spaces.
+//! `\mathrm`, function names, matrices, accents, infix fractions and spaces.
 
 use rustybuzz::ttf_parser::GlyphId;
 use sr_vector::geom::Xf;
@@ -25,6 +25,8 @@ enum N {
     Big(char, bool),
     Fn(String, bool),
     Frac(Box<N>, Box<N>),
+    Matrix(Vec<Vec<N>>, String),
+    Accent(String, Box<N>),
     Sqrt(Option<Box<N>>, Box<N>),
     Scripts(Box<N>, Option<Box<N>>, Option<Box<N>>),
     Delim(char, Box<N>, char),
@@ -187,6 +189,54 @@ impl Parser<'_> {
         self.i += 1;
         Ok(t)
     }
+    fn at_command(&self, name: &str) -> bool {
+        let chars: Vec<char> = std::iter::once('\\').chain(name.chars()).collect();
+        self.s[self.i..].starts_with(&chars) && !self.s.get(self.i + chars.len()).is_some_and(char::is_ascii_alphabetic)
+    }
+    fn matrix(&mut self) -> Result<N, String> {
+        let env = self.raw_group()?;
+        let (left, right) = match env.as_str() {
+            "matrix" | "smallmatrix" | "aligned" => (' ', ' '),
+            "pmatrix" => ('(', ')'),
+            "bmatrix" => ('[', ']'),
+            "Bmatrix" => ('{', '}'),
+            "vmatrix" => ('|', '|'),
+            "Vmatrix" => ('‖', '‖'),
+            "cases" => ('{', ' '),
+            _ => return Err(format!("unknown environment {env}")),
+        };
+        let mut rows = Vec::new();
+        let mut row = Vec::new();
+        loop {
+            row.push(self.row(None)?);
+            if self.peek() == Some('&') {
+                self.i += 1;
+                continue;
+            }
+            if self.s[self.i..].starts_with(&['\\', '\\']) {
+                self.i += 2;
+                rows.push(std::mem::take(&mut row));
+                self.skip_ws();
+                if !self.at_command("end") {
+                    continue;
+                }
+            }
+            if !self.at_command("end") {
+                return Err(format!("unclosed {env} environment"));
+            }
+            self.i += 4;
+            let end = self.raw_group()?;
+            if end != env {
+                return Err(format!("expected \\end{{{env}}}, got \\end{{{end}}}"));
+            }
+            if !row.is_empty() {
+                rows.push(row);
+            }
+            break;
+        }
+        let matrix = N::Matrix(rows, env);
+        Ok(if left == ' ' && right == ' ' { matrix } else { N::Delim(left, Box::new(matrix), right) })
+    }
     fn delim(&mut self) -> Result<char, String> {
         self.skip_ws();
         match self.peek() {
@@ -236,6 +286,11 @@ impl Parser<'_> {
                 let name = self.command();
                 match name.as_str() {
                     "frac" | "dfrac" | "tfrac" => N::Frac(Box::new(self.group()?), Box::new(self.group()?)),
+                    "begin" => self.matrix()?,
+                    "hat" | "widehat" | "bar" | "overline" | "underline" | "vec" | "overrightarrow" | "tilde"
+                    | "widetilde" | "dot" | "ddot" | "acute" | "grave" | "breve" | "check" => {
+                        N::Accent(name, Box::new(self.group()?))
+                    }
                     "sqrt" => {
                         self.skip_ws();
                         let idx = if self.peek() == Some('[') {
@@ -278,14 +333,27 @@ impl Parser<'_> {
     }
     fn row(&mut self, until: Option<char>) -> Result<N, String> {
         self.enter()?;
-        let r = self.row_in(until);
+        let r = self.row_in(until, true);
         self.depth -= 1;
         r
     }
-    fn row_in(&mut self, until: Option<char>) -> Result<N, String> {
+    fn row_in(&mut self, until: Option<char>, allow_over: bool) -> Result<N, String> {
         let mut items = Vec::new();
         loop {
             self.skip_ws();
+            if until.is_none()
+                && (self.peek() == Some('&') || self.at_command("end") || self.s[self.i..].starts_with(&['\\', '\\']))
+            {
+                break;
+            }
+            if self.at_command("over") {
+                if !allow_over {
+                    return Err("multiple \\over commands in one group".into());
+                }
+                self.i += 5;
+                let denominator = self.row_in(until, false)?;
+                return Ok(N::Frac(Box::new(N::Row(items)), Box::new(denominator)));
+            }
             match self.peek() {
                 None => {
                     if until.is_some() {
@@ -294,9 +362,7 @@ impl Parser<'_> {
                     break;
                 }
                 Some(c) if Some(c) == until => break,
-                Some('\\') if until.is_none() && self.s[self.i..].starts_with(&['\\', 'r', 'i', 'g', 'h', 't']) => {
-                    break
-                }
+                Some('\\') if until.is_none() && self.at_command("right") => break,
                 Some('^') | Some('_') => {
                     let base = items.pop().unwrap_or(N::Row(vec![]));
                     let (mut sub, mut sup) = match base {
@@ -531,6 +597,98 @@ impl Ctx<'_> {
                 b.asc = b.asc.max(axis + t);
                 b
             }
+            N::Matrix(rows, environment) => {
+                let level = level + u8::from(environment == "smallmatrix");
+                let sz = size * self.script_scale(level);
+                let cells: Vec<Vec<B>> =
+                    rows.iter().map(|row| row.iter().map(|n| self.layout(n, size, level, false)).collect()).collect();
+                let cols = cells.iter().map(Vec::len).max().unwrap_or(0);
+                let widths: Vec<f64> = (0..cols)
+                    .map(|col| cells.iter().filter_map(|row| row.get(col)).map(|b| b.w).fold(0.0, f64::max))
+                    .collect();
+                let heights: Vec<(f64, f64)> = cells
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.iter().map(|b| b.asc).fold(sz * 0.7, f64::max),
+                            row.iter().map(|b| b.desc).fold(sz * 0.2, f64::max),
+                        )
+                    })
+                    .collect();
+                let gap = sz * 0.3;
+                let total: f64 =
+                    heights.iter().map(|(a, d)| a + d).sum::<f64>() + gap * rows.len().saturating_sub(1) as f64;
+                let mut y = -total / 2.0 - axis;
+                let mut out = B {
+                    w: widths.iter().sum::<f64>() + sz * 0.7 * cols.saturating_sub(1) as f64,
+                    ..Default::default()
+                };
+                for (row, (asc, desc)) in cells.into_iter().zip(heights) {
+                    let mut x = 0.0;
+                    for (column, (cell, width)) in row.into_iter().zip(&widths).enumerate() {
+                        let shift = if environment == "cases" {
+                            0.0
+                        } else if environment == "aligned" {
+                            if column % 2 == 0 {
+                                width - cell.w
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            (width - cell.w) / 2.0
+                        };
+                        out.put(cell, x + shift, y + asc);
+                        x += width + sz * 0.7;
+                    }
+                    y += asc + desc + gap;
+                }
+                out
+            }
+            N::Accent(name, body) => {
+                let bb = self.layout(body, size, level, display);
+                let (w, asc, desc) = (bb.w, bb.asc, bb.desc);
+                let mut out = B { w, ..Default::default() };
+                out.put(bb, 0.0, 0.0);
+                let thickness = self.cst(|c| c.overbar_rule_thickness().value, 0.05, sz);
+                let gap = sz * 0.08;
+                if matches!(name.as_str(), "bar" | "overline" | "underline") {
+                    let y = if name == "underline" { desc + gap } else { -asc - gap - thickness };
+                    out.items.push(Item::Rule { x: 0.0, y, w, h: thickness });
+                    out.asc = out.asc.max(-y);
+                    out.desc = out.desc.max(y + thickness);
+                } else {
+                    let ch = match name.as_str() {
+                        "hat" | "widehat" => '^',
+                        "tilde" | "widetilde" => '~',
+                        "vec" | "overrightarrow" => '→',
+                        "dot" => '˙',
+                        "ddot" => '¨',
+                        "acute" => '´',
+                        "grave" => '`',
+                        "breve" => '˘',
+                        "check" => 'ˇ',
+                        _ => unreachable!(),
+                    };
+                    let mut accent = self.glyph(ch, sz, false);
+                    if let Some(bounds) = self.face.glyph_bounding_box(GlyphId(self.gid(ch))) {
+                        accent.desc = -(bounds.y_min as f64) * self.k(sz);
+                    }
+                    if matches!(name.as_str(), "widehat" | "widetilde" | "vec" | "overrightarrow") && accent.w > 0.0 {
+                        let ratio = (w / accent.w).max(1.0);
+                        for item in &mut accent.items {
+                            if let Item::Glyph { k, sy, .. } = item {
+                                *k *= ratio;
+                                *sy /= ratio;
+                            }
+                        }
+                        accent.w *= ratio;
+                    }
+                    let x = (w - accent.w) / 2.0;
+                    let y = -asc - gap - accent.desc;
+                    out.put(accent, x, y);
+                }
+                out
+            }
             N::Sqrt(idx, body) => {
                 let bb = self.layout(body, size, level, display);
                 let t = self.cst(|c| c.radical_rule_thickness().value, 0.05, sz);
@@ -665,7 +823,11 @@ pub fn draw(
     tol: f64,
 ) -> Result<Drawing, String> {
     let chars: Vec<char> = tex.chars().collect();
-    let ast = Parser { s: &chars, i: 0, depth: 0 }.row(None)?;
+    let mut parser = Parser { s: &chars, i: 0, depth: 0 };
+    let ast = parser.row(None)?;
+    if parser.i != chars.len() {
+        return Err("unexpected alignment or closing delimiter".into());
+    }
     let face = lib.math_face().ok_or("no font with an OpenType MATH table is installed")?;
     let b = lib
         .with_face(face, &[], |f| {

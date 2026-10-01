@@ -1351,7 +1351,7 @@ fn encode(
         let mut best_rate = 0.0f64;
         let mut progress = |done: u64, total: u64| {
             if tty {
-                if done % 10 == 0 || done == total {
+                if done.is_multiple_of(10) || done == total {
                     eprint!("\r{}: frame {done}/{total}", o.path);
                     if done == total {
                         eprintln!();

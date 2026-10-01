@@ -75,6 +75,17 @@ fn placement_clip_loop_and_centre_pan() {
 }
 
 #[test]
+fn test_large_loops_are_clipped_before_expansion() {
+    let mut t = track("loop", mono(vec![0.25, 0.5, -0.25, -0.5]), -2.0 / RATE as f64);
+    t.pan = Curve::Const(-1.0);
+    if let NodeKind::Track { placement: Placement::Timeline { loops, .. }, .. } = &mut t.kind {
+        *loops = u32::MAX;
+    }
+    let m = mix(8.0 / RATE as f64, vec![t]).render().unwrap();
+    assert_eq!(m.master[0], [-0.25, -0.5, 0.25, 0.5, -0.25, -0.5, 0.25, 0.5]);
+}
+
+#[test]
 fn fades_follow_their_curves() {
     let src = mono(vec![1.0; RATE as usize * 2]);
     for (curve, mid) in [

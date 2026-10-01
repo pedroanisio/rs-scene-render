@@ -11,9 +11,8 @@
 //! the pass where they cross the composition plane (z = 0). An edge-aware à-trous filter
 //! (Dammertz et al. 2010) guided by first-hit normals and albedo optionally denoises the result.
 //!
-//! Not traced (reported): texture maps (their materials' factors apply), splats, IES profiles,
-//! lens distortion, orthographic cameras and passes inside resized offscreens (these fall back
-//! to the rasteriser).
+//! Gaussian splats share the acceleration structure and composite along rays;
+//! camera rays use the complete projection, including offscreen and lens transforms.
 
 use glam::{Mat4, Vec3};
 
@@ -39,6 +38,10 @@ pub struct PtMat {
     pub emissive: [f32; 4],
     /// specular weight (KHR_materials_specular), unused ×3
     pub extra: [f32; 4],
+    /// Offset, width, height and sRGB flag for each map in the shared pixel buffer.
+    pub maps: [[u32; 4]; 6],
+    /// Alpha cutoff, alpha mode, normal scale, occlusion strength.
+    pub texture_params: [f32; 4],
 }
 
 /// A BVH node: bounds, and either (first triangle, count) for a leaf or (second child, 0) for an
@@ -64,7 +67,7 @@ pub struct PtLight {
     pub color: [f32; 4],
     /// cos outer, cos inner, width, height
     pub spot: [f32; 4],
-    /// radius, casts shadows, unused ×2
+    /// Radius, casts shadows, packed IES pixel offset, IES width.
     pub size: [f32; 4],
     /// right axis (rect lights), unused
     pub right: [f32; 4],
@@ -76,6 +79,10 @@ pub struct PtScene {
     /// World-space positions and normals of every triangle corner (three per triangle).
     pub pos: Vec<[f32; 4]>,
     pub nrm: Vec<[f32; 4]>,
+    pub uv: Vec<[[f32; 2]; 6]>,
+    pub pixels: Vec<u32>,
+    pub colors: Vec<[f32; 4]>,
+    pub splats: std::collections::HashMap<usize, [[f32; 4]; 24]>,
     /// Material of each triangle.
     pub tri_mat: Vec<u32>,
     pub mats: Vec<PtMat>,
@@ -90,21 +97,8 @@ fn srgb_luma(c: [f32; 3]) -> f32 {
 }
 
 /// What the tracer leaves out of `scene`.
-pub fn notes(scene: &Scene3) -> Vec<String> {
-    let mut n = Vec::new();
-    if scene.draws.iter().any(|d| d.maps.iter().any(|t| t.is_some())) {
-        n.push("path tracing: texture maps are not traced; their materials' factors apply".into());
-    }
-    if !scene.splats.is_empty() {
-        n.push("path tracing: Gaussian splats are not traced".into());
-    }
-    if scene.lights.iter().any(|l| l.ies.is_some()) {
-        n.push("path tracing: IES profiles are not traced".into());
-    }
-    if scene.lens_k1 != 0.0 {
-        n.push("path tracing: lens distortion is not traced".into());
-    }
-    n
+pub fn notes(_scene: &Scene3) -> Vec<String> {
+    Vec::new()
 }
 
 /// Whether the tracer's buffers for a `size` frame of `triangles` fit one storage binding of
@@ -112,9 +106,9 @@ pub fn notes(scene: &Scene3) -> Vec<String> {
 pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(), String> {
     let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
     let mib = |b: u64| b.div_ceil(1 << 20);
-    // the guides take 32 bytes a pixel; the corners 96 bytes a triangle (more than its BVH nodes)
+    // Guides take 32 bytes per pixel; each triangle or splat occupies a 384-byte record.
     let guides = (size[0].max(1) as u64 * size[1].max(1) as u64).saturating_mul(32);
-    let corners = triangles.saturating_mul(96);
+    let corners = triangles.saturating_mul(384);
     if guides > cap {
         return Err(format!(
             "path tracing a {}×{} frame needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
@@ -136,7 +130,30 @@ pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(),
 
 /// Why `scene` cannot be path traced on a device with `limits`, if it cannot.
 pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
-    fits(scene.size, scene.draws.iter().map(|d| d.mesh_triangles()).sum(), limits).err()
+    let triangles = scene.draws.iter().map(|d| d.mesh_triangles()).sum::<u64>()
+        + scene.splats.iter().map(|s| s.gpu.n as u64).sum::<u64>();
+    if let Err(note) = fits(scene.size, triangles, limits) {
+        return Some(note);
+    }
+    let mut keys = std::collections::HashSet::new();
+    let texture_bytes = scene
+        .draws
+        .iter()
+        .flat_map(|d| d.maps.iter().flatten())
+        .filter(|t| keys.insert(t.key))
+        .fold(0u64, |n, t| n.saturating_add(t.rgba.len() as u64));
+    let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+    let ies_bytes = scene.lights.iter().filter_map(|l| l.ies.as_ref()).map(|p| p.len() as u64 * 4).sum::<u64>();
+    let bytes =
+        triangles.saturating_mul(384).saturating_add(texture_bytes).saturating_add(ies_bytes).saturating_add(16);
+    if bytes > cap {
+        return Some(format!(
+            "path tracing geometry and textures require {} MiB, device permits {} MiB; rasterised instead",
+            bytes.div_ceil(1 << 20),
+            cap >> 20
+        ));
+    }
+    None
 }
 
 /// Flattens `scene` into triangles, materials and lights, and builds the BVH.
@@ -145,22 +162,30 @@ pub fn build(scene: &Scene3) -> PtScene {
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
     let mut norms: Vec<[Vec3; 3]> = Vec::new();
     let mut tmat: Vec<u32> = Vec::new();
-    let mut textured = false;
+    let mut texcoords = Vec::new();
+    let mut colors: Vec<[[f32; 4]; 3]> = Vec::new();
+    let mut texture_offsets = std::collections::HashMap::new();
     for dr in &scene.draws {
         let m = &dr.material;
-        textured |= dr.maps.iter().any(|t| t.is_some());
+        let maps = std::array::from_fn(|slot| {
+            dr.maps[slot].as_ref().map_or([0; 4], |texture| {
+                let offset = *texture_offsets.entry(texture.key).or_insert_with(|| {
+                    let offset = s.pixels.len() as u32;
+                    s.pixels
+                        .extend(texture.rgba.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().expect("RGBA"))));
+                    offset
+                });
+                [offset, texture.size[0], texture.size[1], texture.srgb as u32]
+            })
+        });
         let unlit = m.unlit;
-        let emissive = if unlit {
-            [m.base_color[0], m.base_color[1], m.base_color[2]]
-        } else {
-            [
-                m.emissive[0] * m.emissive_strength,
-                m.emissive[1] * m.emissive_strength,
-                m.emissive[2] * m.emissive_strength,
-            ]
-        };
+        let emissive = [
+            m.emissive[0] * m.emissive_strength,
+            m.emissive[1] * m.emissive_strength,
+            m.emissive[2] * m.emissive_strength,
+        ];
         let opacity =
-            if m.alpha_mode == sr_3d::AlphaMode::Blend { m.base_color[3] * m.opacity } else { 1.0 } * dr.opacity;
+            if m.alpha_mode != sr_3d::AlphaMode::Opaque { m.base_color[3] * m.opacity } else { 1.0 } * dr.opacity;
         let mi = s.mats.len() as u32;
         s.mats.push(PtMat {
             base: [m.base_color[0], m.base_color[1], m.base_color[2], opacity.clamp(0.0, 1.0)],
@@ -172,31 +197,107 @@ pub fn build(scene: &Scene3) -> PtScene {
             ],
             emissive: [emissive[0], emissive[1], emissive[2], unlit as u32 as f32],
             extra: [m.specular * srgb_luma(m.specular_color).max(0.0), 0.0, 0.0, 0.0],
+            maps,
+            texture_params: [
+                m.alpha_cutoff,
+                match m.alpha_mode {
+                    sr_3d::AlphaMode::Opaque => 0.0,
+                    sr_3d::AlphaMode::Mask => 1.0,
+                    sr_3d::AlphaMode::Blend => 2.0,
+                },
+                m.normal_scale,
+                m.occlusion_strength,
+            ],
         });
         let (verts, idx) = dr.mesh.cpu();
         let nmat = dr.model.inverse().transpose();
         // each copy of an instanced object is its own draw
         let model = dr.model;
         for t in idx.chunks_exact(3) {
-            let p: [Vec3; 3] = std::array::from_fn(|c| model.transform_point3(Vec3::from(verts[t[c] as usize].pos)));
+            let p: [Vec3; 3] = std::array::from_fn(|c| {
+                let vertex = &verts[t[c] as usize];
+                let mut pos = Vec3::from(vertex.pos);
+                if let Some(map) = &dr.maps[5] {
+                    let uv = [vertex.uv[0] * m.uv_scale[0], vertex.uv[1] * m.uv_scale[1]];
+                    pos += Vec3::from(vertex.normal).normalize_or_zero() * map.sample(uv)[0] * m.displacement_scale;
+                }
+                model.transform_point3(pos)
+            });
             let nn: [Vec3; 3] = std::array::from_fn(|c| {
                 nmat.transform_vector3(Vec3::from(verts[t[c] as usize].normal)).normalize_or_zero()
             });
+            let uv: [[[f32; 2]; 6]; 3] = std::array::from_fn(|corner| {
+                let v = &verts[t[corner] as usize];
+                std::array::from_fn(|slot| {
+                    let uv = if m.separate_uvs && (1..5).contains(&slot) { v.map_uv[slot - 1] } else { v.uv };
+                    [uv[0] * m.uv_scale[0], uv[1] * m.uv_scale[1]]
+                })
+            });
+            texcoords.push(uv);
+            colors.push(std::array::from_fn(|i| verts[t[i] as usize].color));
             tris.push(p);
             norms.push(nn);
             tmat.push(mi);
         }
     }
-    let _ = textured;
+
     s.notes = notes(scene);
+    let mut splat_records = std::collections::HashMap::new();
+    for cloud in &scene.splats {
+        let linear = glam::Mat3::from_mat4(cloud.model);
+        let local = glam::Mat3::from_mat4(cloud.model.inverse());
+        for (index, data) in cloud.gpu.cpu.iter().take(cloud.gpu.n as usize).enumerate() {
+            let center = cloud.model.transform_point3(Vec3::new(data[0], data[1], data[2]));
+            let covariance = glam::Mat3::from_cols_array(&[
+                data[4], data[5], data[6], data[5], data[7], data[8], data[6], data[8], data[9],
+            ]);
+            let covariance = linear * covariance * linear.transpose();
+            let inverse = covariance.inverse();
+            if !inverse.is_finite() {
+                continue;
+            }
+            let extent = Vec3::from_array(
+                [covariance.x_axis.x, covariance.y_axis.y, covariance.z_axis.z].map(|v| v.max(0.0).sqrt()),
+            ) * 3.0;
+            let mut record = [[0.0; 4]; 24];
+            record[0] = [center.x, center.y, center.z, f32::from_bits(u32::MAX)];
+            for (row, axis) in inverse.to_cols_array_2d().into_iter().enumerate() {
+                record[row + 1] = [axis[0], axis[1], axis[2], 0.0];
+            }
+            record[4] = [data[12], data[13], data[14], data[3] * cloud.opacity];
+            for (row, axis) in local.to_cols_array_2d().into_iter().enumerate() {
+                record[row + 5] = [axis[0], axis[1], axis[2], 0.0];
+            }
+            if let Some(sh) = cloud.gpu.cpu_sh.get(index) {
+                for (row, values) in sh.chunks_exact(4).enumerate() {
+                    record[row + 8].copy_from_slice(values);
+                }
+                record[20][0] = cloud.gpu.sh_degree as f32;
+            }
+            splat_records.insert(tris.len(), record);
+            tris.push([center - extent, center + extent, center]);
+            norms.push([Vec3::ZERO; 3]);
+            texcoords.push([[[0.0; 2]; 6]; 3]);
+            colors.push([[1.0; 4]; 3]);
+            tmat.push(u32::MAX);
+        }
+    }
+    if s.pixels.is_empty() {
+        s.pixels.push(u32::MAX);
+    }
     // BVH over the triangles, then triangles in leaf order
     let order = bvh(&tris, &mut s.nodes);
-    for &t in &order {
+    for (new_index, &t) in order.iter().enumerate() {
+        if let Some(record) = splat_records.remove(&t) {
+            s.splats.insert(new_index, record);
+        }
         for c in 0..3 {
             let p = tris[t][c];
             let q = norms[t][c];
             s.pos.push([p.x, p.y, p.z, 0.0]);
             s.nrm.push([q.x, q.y, q.z, 0.0]);
+            s.uv.push(texcoords[t][c]);
+            s.colors.push(colors[t][c]);
         }
         s.tri_mat.push(tmat[t]);
     }
@@ -210,12 +311,22 @@ pub fn build(scene: &Scene3) -> PtScene {
             LightKind::Disk => 5.0,
             LightKind::Sphere => 6.0,
         };
+        let ies = l.ies.as_ref().map(|profile| {
+            let offset = s.pixels.len() as u32;
+            s.pixels.extend(profile.iter().map(|v| v.to_bits()));
+            offset
+        });
         s.lights.push(PtLight {
             pos: [l.pos.x, l.pos.y, l.pos.z, kind],
             dir: [l.dir.x, l.dir.y, l.dir.z, l.range],
             color: [l.color.x, l.color.y, l.color.z, l.falloff],
             spot: [l.cos_outer, l.cos_inner, l.size[0], l.size[1]],
-            size: [l.size[2], l.cast_shadow as u32 as f32, 0.0, 0.0],
+            size: [
+                l.size[2],
+                l.cast_shadow as u32 as f32,
+                f32::from_bits(ies.unwrap_or(0)),
+                if ies.is_some() { 128.0 } else { 0.0 },
+            ],
             right: [l.right.x, l.right.y, l.right.z, 0.0],
         });
     }
@@ -230,7 +341,14 @@ pub fn build(scene: &Scene3) -> PtScene {
         });
     }
     if s.mats.is_empty() {
-        s.mats.push(PtMat { base: [0.0; 4], params: [0.0; 4], emissive: [0.0; 4], extra: [0.0; 4] });
+        s.mats.push(PtMat {
+            base: [0.0; 4],
+            params: [0.0; 4],
+            emissive: [0.0; 4],
+            extra: [0.0; 4],
+            maps: [[0; 4]; 6],
+            texture_params: [0.0; 4],
+        });
     }
     if s.pos.is_empty() {
         s.pos.push([0.0; 4]);
@@ -447,6 +565,7 @@ const SLOT: u64 = (std::mem::size_of::<Params>() as u64).div_ceil(256) * 256;
 struct Params {
     cam_to_world: [[f32; 4]; 4],
     view_proj: [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
     env_rot: [[f32; 4]; 4],
     size: [f32; 4],
     cam: [f32; 4],
@@ -602,16 +721,43 @@ pub fn render(
         })
     };
     // interleaved corners, the material index's bits in the first corner's position w
-    let mut verts: Vec<[f32; 4]> = Vec::with_capacity(data.pos.len() * 2);
+    let mut verts: Vec<[f32; 4]> = Vec::with_capacity(data.pos.len() * 8);
     for (c, (p, n)) in data.pos.iter().zip(&data.nrm).enumerate() {
         let w = if c % 3 == 0 { f32::from_bits(data.tri_mat[c / 3]) } else { 0.0 };
         verts.push([p[0], p[1], p[2], w]);
         verts.push(*n);
+        verts.push(data.colors.get(c).copied().unwrap_or([1.0; 4]));
+        let uv = data.uv.get(c).copied().unwrap_or([[0.0; 2]; 6]);
+        for pair in uv.chunks_exact(2) {
+            verts.push([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]);
+        }
+        if c % 3 == 2 {
+            verts.extend([[0.0; 4]; 6]);
+        }
+    }
+    for (&index, record) in &data.splats {
+        verts[index * 24..(index + 1) * 24].copy_from_slice(record);
+    }
+    let offset = (verts.len() * 4) as u32;
+    let mut materials = data.mats.clone();
+    for material in &mut materials {
+        for map in &mut material.maps {
+            map[0] += offset;
+        }
+    }
+    for pixels in data.pixels.chunks(4) {
+        verts.push(std::array::from_fn(|i| f32::from_bits(pixels.get(i).copied().unwrap_or(0))));
     }
     let tverts = storage("pt-verts", bytemuck::cast_slice(&verts));
-    let mats = storage("pt-mats", bytemuck::cast_slice(&data.mats));
+    let mats = storage("pt-mats", bytemuck::cast_slice(&materials));
     let nodes = storage("pt-nodes", bytemuck::cast_slice(&data.nodes));
-    let lights = storage("pt-lights", bytemuck::cast_slice(&data.lights));
+    let mut lights = data.lights.clone();
+    for light in &mut lights {
+        if light.size[3] > 0.0 {
+            light.size[2] = f32::from_bits(light.size[2].to_bits() + offset);
+        }
+    }
+    let lights = storage("pt-lights", bytemuck::cast_slice(&lights));
     let accum = zeroed("pt-accum", pixels * 16);
     let guide = zeroed("pt-guides", pixels * 32);
     let stand_in = zeroed("pt-stand-in", 16);
@@ -624,14 +770,15 @@ pub fn render(
     let base = Params {
         cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
         view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
+        inv_view_proj: (scene.clip_fix * scene.cam.view_proj()).inverse().to_cols_array_2d(),
         // the dome's full orientation, as the rasteriser applies it
         env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
         size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
-        cam: [scene.cam.focal_px, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
+        cam: [scene.lens_k1, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
         env: [
             scene.env.as_ref().map(|e| if e.visible { 2.0 } else { 1.0 }).unwrap_or(0.0),
             scene.env.as_ref().map(|e| e.intensity).unwrap_or(0.0),
-            0.0,
+            scene.cam.orthographic as u32 as f32,
             (ambient.max_element() > 0.0) as u32 as f32,
         ],
         ambient: [ambient.x, ambient.y, ambient.z, data.lights.len() as f32],

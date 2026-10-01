@@ -13,6 +13,7 @@ name = "scene-render"
 path = "src/main.rs"
 
 [dependencies]
+sr-3d = { path = "../sr-3d" }
 sr-model.workspace = true
 sr-eval.workspace = true
 sr-gpu.workspace = true

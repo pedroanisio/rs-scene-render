@@ -236,6 +236,7 @@ pub fn mesh(blobs: &[Blob], finish: &Finish, resolution: u32, t: f64) -> Primiti
                     normal: grad(p).into(),
                     uv: [0.0, 0.0],
                     tangent: [1.0, 0.0, 0.0, 1.0],
+                    ..Default::default()
                 });
             }
         }

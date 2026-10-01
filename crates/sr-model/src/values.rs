@@ -352,7 +352,7 @@ impl Timecode {
         if !self.drop_frame {
             return Ok(base);
         }
-        if nominal % 30 != 0 {
+        if !nominal.is_multiple_of(30) {
             return Err(ValueError::new("drop-frame timecode requires a 29.97 or 59.94 fps family rate"));
         }
         let drop = nominal / 15;

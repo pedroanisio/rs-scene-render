@@ -7,6 +7,7 @@ struct Params {
     cam_to_world: mat4x4<f32>,
     // world → clip of the frame (the composition plane's backdrop lookup)
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     // world → dome directions (the dome's yaw, pitch and roll)
     env_rot: mat4x4<f32>,
     // width, height, first sample of this dispatch, samples in it
@@ -28,6 +29,8 @@ struct Mat {
     params: vec4<f32>,
     emissive: vec4<f32>,
     extra: vec4<f32>,
+    maps: array<vec4<u32>, 6>,
+    texture_params: vec4<f32>,
 };
 
 struct Node {
@@ -47,8 +50,8 @@ struct PLight {
 };
 
 @group(0) @binding(0) var<uniform> pp: Params;
-// two rows per triangle corner: position (w of the first corner: the material index's bits),
-// normal
+// Each primitive occupies 24 rows. Triangles use six rows per corner for position,
+// normal, colour and map coordinates; splats use covariance and harmonic records.
 @group(0) @binding(1) var<storage, read> tverts: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> mats: array<Mat>;
 @group(0) @binding(5) var<storage, read> nodes: array<Node>;
@@ -59,12 +62,70 @@ struct PLight {
 // (xyz) and depth sum (w)
 @group(0) @binding(8) var<storage, read_write> guide: array<vec4<f32>>;
 
-fn tp(k: u32, c: u32) -> vec3<f32> { return tverts[(k * 3u + c) * 2u].xyz; }
-fn tn(k: u32, c: u32) -> vec3<f32> { return tverts[(k * 3u + c) * 2u + 1u].xyz; }
-fn tmat_of(k: u32) -> u32 { return bitcast<u32>(tverts[k * 6u].w); }
+fn tp(k: u32, c: u32) -> vec3<f32> { return tverts[k * 24u + c * 6u].xyz; }
+fn tn(k: u32, c: u32) -> vec3<f32> { return tverts[k * 24u + c * 6u + 1u].xyz; }
+fn tmat_of(k: u32) -> u32 { return bitcast<u32>(tverts[k * 24u].w); }
 @group(0) @binding(10) var env_tex: texture_2d<f32>;
 @group(0) @binding(11) var smp: sampler;
 @group(0) @binding(12) var backdrop: texture_2d<f32>;
+
+fn tuv(k: u32, c: u32, slot: u32) -> vec2<f32> {
+    let row = tverts[k * 24u + c * 6u + 3u + slot / 2u];
+    return select(row.xy, row.zw, slot % 2u == 1u);
+}
+fn texel(info: vec4<u32>, xy: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(info.yz);
+    let q = ((xy % size) + size) % size;
+    let index = info.x + u32(q.y) * info.y + u32(q.x);
+    let c = unpack4x8unorm(bitcast<u32>(tverts[index / 4u][index % 4u]));
+    if (info.w == 0u) { return c; }
+    let rgb = select(pow((c.rgb + 0.055) / 1.055, vec3(2.4)), c.rgb / 12.92, c.rgb <= vec3(0.04045));
+    return vec4(rgb, c.a);
+}
+fn map_sample(info: vec4<u32>, uv: vec2<f32>) -> vec4<f32> {
+    if (info.y == 0u || info.z == 0u) { return vec4(1.0); }
+    let p = fract(uv) * vec2<f32>(info.yz) - 0.5;
+    let q = vec2<i32>(floor(p));
+    let f = fract(p);
+    return mix(mix(texel(info,q),texel(info,q+vec2(1,0)),f.x),mix(texel(info,q+vec2(0,1)),texel(info,q+vec2(1,1)),f.x),f.y);
+}
+
+fn pt_sh_c(i:u32,k:u32)->vec3<f32> {
+    let offset=i*96u+32u+k*3u;
+    return vec3(tverts[offset/4u][offset%4u],tverts[(offset+1u)/4u][(offset+1u)%4u],tverts[(offset+2u)/4u][(offset+2u)%4u]);
+}
+fn pt_sh_color(i: u32, deg: u32, d: vec3<f32>) -> vec3<f32> {
+    let c0 = 0.28209479177387814;
+    var r = c0 * pt_sh_c(i, 0u);
+    if (deg >= 1u) {
+        let c1 = 0.4886025119029199;
+        r += -c1 * d.y * pt_sh_c(i, 1u) + c1 * d.z * pt_sh_c(i, 2u) - c1 * d.x * pt_sh_c(i, 3u);
+    }
+    if (deg >= 2u) {
+        let xx = d.x * d.x; let yy = d.y * d.y; let zz = d.z * d.z;
+        r += 1.0925484305920792 * d.x * d.y * pt_sh_c(i, 4u)
+            - 1.0925484305920792 * d.y * d.z * pt_sh_c(i, 5u)
+            + 0.31539156525252005 * (2.0 * zz - xx - yy) * pt_sh_c(i, 6u)
+            - 1.0925484305920792 * d.x * d.z * pt_sh_c(i, 7u)
+            + 0.5462742152960396 * (xx - yy) * pt_sh_c(i, 8u);
+        if (deg >= 3u) {
+            r += -0.5900435899266435 * d.y * (3.0 * xx - yy) * pt_sh_c(i, 9u)
+                + 2.890611442640554 * d.x * d.y * d.z * pt_sh_c(i, 10u)
+                - 0.4570457994644658 * d.y * (4.0 * zz - xx - yy) * pt_sh_c(i, 11u)
+                + 0.3731763325901154 * d.z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * pt_sh_c(i, 12u)
+                - 0.4570457994644658 * d.x * (4.0 * zz - xx - yy) * pt_sh_c(i, 13u)
+                + 1.445305721320277 * d.z * (xx - yy) * pt_sh_c(i, 14u)
+                - 0.5900435899266435 * d.x * (xx - 3.0 * yy) * pt_sh_c(i, 15u);
+        }
+    }
+    return max(r + 0.5, vec3(0.0));
+}
+
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return select(hi, lo, c <= vec3(0.04045));
+}
 
 var<private> rng: u32;
 
@@ -87,6 +148,18 @@ struct Hit {
 };
 
 fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>) {
+    if (tmat_of(k)==0xffffffffu) {
+        let start=k*24u;
+        let p=o-tverts[start].xyz;
+        let inverse=mat3x3(tverts[start+1u].xyz,tverts[start+2u].xyz,tverts[start+3u].xyz);
+        let t=-dot(d,inverse*p)/max(dot(d,inverse*d),1e-20);
+        if (t<=1e-4 || t>=min(tmax,(*h).t)) {return;}
+        let q=p+d*t;
+        let radius=dot(q,inverse*q);
+        let opacity=min(0.99,tverts[start+4u].w*exp(-0.5*radius));
+        if (radius>9.0 || opacity<1.0/255.0) {return;}
+        (*h).t=t;(*h).u=opacity;(*h).v=0.0;(*h).tri=k;return;
+    }
     let p0 = tp(k, 0u);
     let e1 = tp(k, 1u) - p0;
     let e2 = tp(k, 2u) - p0;
@@ -244,8 +317,39 @@ fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 
 // ---------------------------------------------------------------- lights
 
-/// Radiance arriving from light `li` at `p` along the returned direction (w: distance), for
-/// next-event estimation; area lights are sampled at a random point.
+// Alpha-tested and blended surfaces attenuate shadow rays using the same base map
+// as camera rays. Captured Gaussian splats do not cast shadows.
+fn visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
+    var o = origin;
+    var remaining = distance;
+    var result = 1.0;
+    for (var step = 0u; step < 64u; step++) {
+        let hit = trace(o, direction, remaining);
+        if (hit.tri == 0xffffffffu) { return result; }
+        let k = hit.tri;
+        if (tmat_of(k) != 0xffffffffu) {
+            let m = mats[tmat_of(k)];
+            var opacity = m.base.a;
+            if (m.texture_params.y != 0.0) {
+                let b = vec3(1.0-hit.u-hit.v,hit.u,hit.v);
+                let uv = tuv(k,0u,0u)*b.x+tuv(k,1u,0u)*b.y+tuv(k,2u,0u)*b.z;
+                let vertex_alpha = tverts[k*24u+2u].a*b.x+tverts[k*24u+8u].a*b.y+tverts[k*24u+14u].a*b.z;
+                opacity *= map_sample(m.maps[0],uv).a*vertex_alpha;
+                if (m.texture_params.y == 1.0) { opacity = select(0.0,1.0,opacity >= m.texture_params.x); }
+            }
+            result *= 1.0-clamp(opacity,0.0,1.0);
+            if (result < 1e-5) { return 0.0; }
+        }
+        let advance = hit.t+1e-3;
+        o += direction*advance;
+        remaining -= advance;
+        if (remaining <= 0.0) { return result; }
+    }
+    return 0.0;
+}
+
+// Direction and distance to light `li` at `p` for next-event estimation;
+// area lights are sampled at a random point.
 fn light_sample(li: PLight, p: vec3<f32>) -> vec4<f32> {
     let ty = u32(li.pos.w);
     if (ty == 1u) { return vec4(-li.dir.xyz, 1e30); }
@@ -269,9 +373,24 @@ fn light_sample(li: PLight, p: vec3<f32>) -> vec4<f32> {
     return vec4(to / max(dist, 1e-4), dist);
 }
 
+fn ies_value(li: PLight, l: vec3<f32>) -> f32 {
+    if (li.size.w == 0.0) { return 1.0; }
+    let direction=-l;
+    let theta=acos(clamp(dot(direction,li.dir.xyz),-1.0,1.0))/PI;
+    let up=cross(li.dir.xyz,li.right.xyz);
+    let phi=fract(atan2(dot(direction,up),dot(direction,li.right.xyz))/(2.0*PI)+1.0);
+    let p=vec2(theta*127.0,phi*32.0);
+    let q=vec2<u32>(floor(p));let f=fract(p);
+    let offset=bitcast<u32>(li.size.z);
+    let ix=array<u32,4>(offset+(q.y%32u)*128u+q.x,offset+(q.y%32u)*128u+min(q.x+1u,127u),offset+((q.y+1u)%32u)*128u+q.x,offset+((q.y+1u)%32u)*128u+min(q.x+1u,127u));
+    let a=tverts[ix[0]/4u][ix[0]%4u];let b=tverts[ix[1]/4u][ix[1]%4u];
+    let c=tverts[ix[2]/4u][ix[2]%4u];let d=tverts[ix[3]/4u][ix[3]%4u];
+    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+
 fn light_radiance(li: PLight, l: vec3<f32>, dist: f32) -> vec3<f32> {
     let ty = u32(li.pos.w);
-    var rad = li.color.rgb;
+    var rad = li.color.rgb * ies_value(li,l);
     if (ty == 1u) { return rad; }
     let m = max(dist / 100.0, 0.01);
     var att = 1.0 / pow(m, li.color.w);
@@ -291,18 +410,23 @@ fn light_radiance(li: PLight, l: vec3<f32>, dist: f32) -> vec3<f32> {
 fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     let w = pp.size.x;
     let h = pp.size.y;
-    // camera ray (thin lens when depth of field is on), in camera space: x right, y down, z forward
-    var dir_c = vec3((px.x - w * 0.5) / pp.cam.x, (px.y - h * 0.5) / pp.cam.x, 1.0);
-    var org_c = vec3(0.0);
-    if (pp.cam.y > 0.0) {
-        let r = sqrt(rnd()) * pp.cam.y;
-        let a = 2.0 * PI * rnd();
-        let focus = dir_c * pp.cam.z;
-        org_c = vec3(r * cos(a), r * sin(a), 0.0);
-        dir_c = focus - org_c;
+    // Unprojection supports perspective, orthographic and offscreen clip transforms.
+    var ndc = vec2(px.x/w*2.0-1.0,1.0-px.y/h*2.0);
+    ndc *= 1.0 + pp.cam.x * dot(ndc,ndc);
+    let a = pp.inv_view_proj * vec4(ndc,1.0,1.0);
+    let b = pp.inv_view_proj * vec4(ndc,0.0,1.0);
+    let near = a.xyz/a.w;
+    let far = b.xyz/b.w;
+    var o = (pp.cam_to_world*vec4(0.0,0.0,0.0,1.0)).xyz;
+    if (pp.env.z > 0.5) { o=near; }
+    var d = normalize(far-near);
+    if (pp.cam.y>0.0 && pp.env.z<0.5) {
+        let forward=(pp.cam_to_world*vec4(0.0,0.0,1.0,0.0)).xyz;
+        let focus=o+d*(pp.cam.z/max(dot(d,forward),1e-6));
+        let radius=sqrt(rnd())*pp.cam.y; let angle=2.0*PI*rnd();
+        o+=(pp.cam_to_world*vec4(radius*cos(angle),radius*sin(angle),0.0,0.0)).xyz;
+        d=normalize(focus-o);
     }
-    var o = (pp.cam_to_world * vec4(org_c, 1.0)).xyz;
-    var d = normalize((pp.cam_to_world * vec4(dir_c, 0.0)).xyz);
     var thr = vec3(1.0);
     var col = vec3(0.0);
     var alpha = 0.0;
@@ -337,12 +461,50 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             break;
         }
         let k = hit.tri;
-        let m = mats[tmat_of(k)];
+        if (tmat_of(k)==0xffffffffu) {
+            let start=k*24u;
+            var rgb=tverts[start+4u].rgb;
+            let degree=u32(tverts[start+20u].x);
+            if (degree>0u) {
+                let local=mat3x3(tverts[start+5u].xyz,tverts[start+6u].xyz,tverts[start+7u].xyz);
+                rgb=srgb_decode(min(pt_sh_color(k,degree,normalize(local*d)),vec3(1.0)));
+            }
+            col+=thr*rgb*hit.u;thr*=1.0-hit.u;
+            if (met==0u) {alpha+=(1.0-alpha)*hit.u;}
+            o+=d*(hit.t+1e-3);
+            if (max(thr.x,max(thr.y,thr.z))<1e-5) {break;}
+            continue;
+        }
+        var m = mats[tmat_of(k)];
+        let bary = vec3(1.0 - hit.u - hit.v, hit.u, hit.v);
+        var uv: array<vec2<f32>,6>;
+        for (var slot = 0u; slot < 6u; slot++) { uv[slot] = tuv(k,0u,slot)*bary.x + tuv(k,1u,slot)*bary.y + tuv(k,2u,slot)*bary.z; }
+        let base_texel = map_sample(m.maps[0],uv[0]);
+        let color = tverts[k*24u+2u]*bary.x+tverts[k*24u+8u]*bary.y+tverts[k*24u+14u]*bary.z;
+        m.base = m.base * base_texel * color;
+        let mr = map_sample(m.maps[2],uv[2]);
+        m.params.x *= mr.b; m.params.y *= mr.g;
+        m.emissive = vec4(m.emissive.rgb * map_sample(m.maps[4],uv[4]).rgb, m.emissive.w);
+        if (m.emissive.w > 0.5) { m.emissive = vec4(m.base.rgb, m.emissive.w); }
+        if (m.texture_params.y == 0.0) { m.base.a = mats[tmat_of(k)].base.a; }
+        if (m.texture_params.y == 1.0) { m.base.a = select(0.0,1.0,m.base.a >= m.texture_params.x); }
         let p0 = tp(k, 0u);
         let ng0 = normalize(cross(tp(k, 1u) - p0, tp(k, 2u) - p0));
         let bw = 1.0 - hit.u - hit.v;
         var n = tn(k, 0u) * bw + tn(k, 1u) * hit.u + tn(k, 2u) * hit.v;
         n = select(normalize(n), ng0, dot(n, n) < 1e-8);
+        if (m.maps[1].y != 0u) {
+            let duv1 = tuv(k,1u,1u)-tuv(k,0u,1u); let duv2 = tuv(k,2u,1u)-tuv(k,0u,1u);
+            let det = duv1.x*duv2.y-duv1.y*duv2.x;
+            if (abs(det)>1e-8) {
+                let tangent = ((tp(k,1u)-p0)*duv2.y-(tp(k,2u)-p0)*duv1.y)/det;
+                let t = normalize(tangent-n*dot(n,tangent));
+                let b = cross(n,t)*sign(det);
+                var mapped = map_sample(m.maps[1],uv[1]).xyz*2.0-1.0;
+                mapped = vec3(mapped.xy*m.texture_params.z,mapped.z);
+                n = normalize(t*mapped.x-b*mapped.y+n*mapped.z);
+            }
+        }
         let p = o + d * hit.t;
         // stochastic opacity: pass straight through
         if (m.base.a < 1.0 && rnd() > m.base.a) {
@@ -393,11 +555,9 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             if (nl <= 0.0) { continue; }
             let rad = light_radiance(lt, l, ls.w);
             if (max(rad.r, max(rad.g, rad.b)) <= 0.0) { continue; }
-            if (lt.size.y > 0.5) {
-                let sh = trace(p + ng * 1e-2, l, ls.w - 2e-2);
-                if (sh.tri != 0xffffffffu) { continue; }
-            }
-            var c = thr * bsdf(s, n, v, l) * nl * rad;
+            var visible = 1.0;
+            if (lt.size.y > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }
+            var c = thr * bsdf(s, n, v, l) * nl * rad * visible;
             // clamp rare fireflies from indirect paths
             if (bounce > 0u) { c = min(c, vec3(20.0)); }
             col += c;
@@ -407,7 +567,8 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         let pdf = pdf_of(s, n, v, l);
         let nl = dot(n, l);
         if (pdf <= 1e-8 || nl <= 0.0) { break; }
-        thr *= bsdf(s, n, v, l) * nl / pdf;
+        let occlusion = 1.0 + m.texture_params.w * (map_sample(m.maps[3],uv[3]).r - 1.0);
+        thr *= bsdf(s, n, v, l) * nl / pdf * occlusion;
         bounce += 1u;
         if (bounce > 2u) {
             let q = min(max(thr.r, max(thr.g, thr.b)), 0.95);

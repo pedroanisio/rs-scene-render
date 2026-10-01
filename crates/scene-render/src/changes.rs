@@ -96,6 +96,7 @@ const TIME_EFFECTS: &[&str] = &["posterize-time", "echo", "pixel-motion-blur"];
 pub fn files(path: &Path, doc: &sr_model::Document) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     named(path, doc, &mut files, &mut vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())])?;
+    transitive_assets(&mut files)?;
     files.sort();
     files.dedup();
     Ok(files)
@@ -109,9 +110,30 @@ pub fn effective_files(path: &Path, doc: &sr_model::Document, p: &sr_eval::Progr
         let base = p.base_dirs.get(i).map(PathBuf::as_path).unwrap_or_else(|| doc.base_dir());
         scene_inputs(scene, base, &mut files)?;
     }
+    transitive_assets(&mut files)?;
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+fn transitive_assets(files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut index = 0;
+    while index < files.len() {
+        let path = files[index].clone();
+        index += 1;
+        if !seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+            continue;
+        }
+        files.extend(
+            sr_3d::import::dependencies(&path).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
+            })?,
+        );
+    }
+    files.sort();
+    files.dedup();
+    Ok(())
 }
 
 /// Adds the files `doc` at `path` names to `files`, then those of the documents it includes that are not in
@@ -171,12 +193,26 @@ fn scene_inputs(
         return Err(error);
     }
     let mut includes = Vec::new();
+    let mut imported = Vec::new();
     let mut add = |uri: &str| {
         if let Resolved::Local(path) = resolve(uri, base) {
             files.push(path);
         }
     };
     sr_model::element::walk(scene, &mut |e| {
+        if let Some(mesh) = e.as_any().downcast_ref::<sr_model::model::MeshAsset>() {
+            if let (Some(format), Resolved::Local(path)) = (mesh.format, resolve(&mesh.src, base)) {
+                match sr_3d::import::dependencies_as(&path, Some(&format.to_string())) {
+                    Ok(dependencies) => imported.extend(dependencies),
+                    Err(message) => {
+                        error = Some(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("{}: {message}", path.display()),
+                        ))
+                    }
+                }
+            }
+        }
         if let Some(inc) = e.as_any().downcast_ref::<sr_model::model::Include>() {
             if let Resolved::Local(path) = resolve(&inc.src, base) {
                 includes.push(path);
@@ -204,6 +240,10 @@ fn scene_inputs(
             }
         }
     });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    files.extend(imported);
     Ok(includes)
 }
 
@@ -398,7 +438,7 @@ impl Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
         // Invalidate fingerprints produced without the inputs selected by bindings and overrides.
-        shared = fnv(b"frame-fingerprint-v5", shared);
+        shared = fnv(b"frame-fingerprint-v6", shared);
         shared = fnv(&font_set(&font_dirs()).to_le_bytes(), shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
@@ -452,6 +492,35 @@ impl Fingerprints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_assets_include_external_buffers_and_textures() {
+        let dir = scratch("transitive-assets");
+        std::fs::write(dir.join("mesh.gltf"), r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh%20data.bin","byteLength":4}],"images":[{"uri":"colour.png"},{"uri":"data:image/png;base64,AA=="}]}"#).unwrap();
+        std::fs::write(dir.join("mesh.obj"), "mtllib mesh.mtl\nv 0 0 0\n").unwrap();
+        std::fs::write(dir.join("mesh.mtl"), "newmtl surface\nmap_Kd diffuse.png\nmap_Bump normal.png\n").unwrap();
+        std::fs::write(dir.join("surface.mtlx"), r#"<materialx fileprefix="textures/"><image name="colour"><input name="file" type="filename" value="base.png"/></image><standard_surface name="surface"><input name="base_color" nodename="colour"/></standard_surface></materialx>"#).unwrap();
+        let mut inputs = vec![dir.join("mesh.gltf"), dir.join("mesh.obj"), dir.join("surface.mtlx")];
+        transitive_assets(&mut inputs).unwrap();
+        for file in ["mesh data.bin", "colour.png", "mesh.mtl", "diffuse.png", "normal.png", "textures/base.png"] {
+            assert!(inputs.contains(&dir.join(file)), "{file} missing from {inputs:?}");
+        }
+        assert_eq!(inputs.len(), 9, "embedded data is not a file dependency");
+    }
+
+    #[test]
+    fn explicit_mesh_formats_are_used_for_dependency_discovery() {
+        let dir = scratch("explicit-format");
+        std::fs::write(
+            dir.join("mesh.data"),
+            r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"vertices.bin","byteLength":4}]}"#,
+        )
+        .unwrap();
+        let doc = sr_model::load_str(r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><assets><mesh id="m" src="mesh.data" format="gltf"/></assets><composition/></scene>"#, &sr_model::LoadOptions::without_assets()).unwrap();
+        let mut inputs = Vec::new();
+        scene_inputs(&doc.scene, &dir, &mut inputs).unwrap();
+        assert!(inputs.contains(&dir.join("vertices.bin")), "{inputs:?}");
+    }
 
     #[test]
     fn spans_end_at_the_matching_end_tag() {

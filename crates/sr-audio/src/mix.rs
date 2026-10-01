@@ -423,41 +423,28 @@ impl Mix {
                         seg.iter().map(|c| (0..len).map(|i| hermite(c, i as f64 * speed)).collect()).collect()
                     };
                 }
-                let seg_len = seg[0].len();
-                let start_s = (start * rate).round() as i64;
-                let mut body: Planar = seg
-                    .iter()
-                    .map(|c| {
-                        let mut v = Vec::with_capacity(seg_len * (*loops as usize + 1));
-                        for _ in 0..=*loops {
-                            v.extend_from_slice(c);
-                        }
-                        v
-                    })
-                    .collect();
-                if let Some((bpm, end)) = fit {
-                    // whole bars of the segment, repeated to reach the end, cut at the end
+                let seg_len = seg.first().map_or(0, Vec::len);
+                let start_s = (start * rate).round() as i128;
+                // Keep the logical repeat length for fades, but materialize only
+                // samples that intersect the output timeline.
+                let (unit, len, ramp) = if let Some((bpm, end)) = fit {
                     let bar = (4.0 * 60.0 / bpm * rate).round() as usize;
-                    let bars = (seg_len / bar.max(1)).max(1);
-                    let unit = (bars * bar).min(seg_len);
-                    // an empty segment has nothing to repeat
-                    let want = if unit == 0 { 0 } else { ((end - start) * rate).round().max(0.0) as usize };
-                    body = seg.iter().map(|c| (0..want).map(|i| c[i % unit]).collect()).collect();
-                    let ramp = ((0.01 * rate) as usize).min(want);
-                    for c in body.iter_mut() {
-                        for k in 0..ramp {
-                            c[want - 1 - k] *= k as f32 / ramp as f32;
-                        }
-                    }
+                    let unit = ((seg_len / bar.max(1)).max(1) * bar).min(seg_len);
+                    let len = if unit == 0 { 0 } else { ((end - start) * rate).round().max(0.0) as u128 };
+                    (unit, len, ((0.01 * rate) as u128).min(len))
+                } else {
+                    (seg_len, seg_len as u128 * (*loops as u128 + 1), 0)
+                };
+                if unit == 0 {
+                    return (out, ext);
                 }
-                let len = body[0].len();
-                let (fi, fo) = ((fade_in * rate) as usize, (fade_out * rate) as usize);
-                for (c, ch) in body.iter().enumerate() {
-                    for (i, &v) in ch.iter().enumerate() {
-                        let t = start_s + i as i64;
-                        if t < 0 || t as usize >= total {
-                            continue;
-                        }
+                let end_s = start_s.saturating_add(len.min(i128::MAX as u128) as i128);
+                let lo = start_s.clamp(0, total as i128) as usize;
+                let hi = end_s.clamp(0, total as i128) as usize;
+                let (fi, fo) = ((fade_in * rate) as u128, (fade_out * rate) as u128);
+                for (c, ch) in seg.iter().enumerate() {
+                    for t in lo..hi {
+                        let i = (t as i128 - start_s) as u128;
                         let mut g = 1.0;
                         if i < fi {
                             g *= curve.gain(i as f64 / fi as f64);
@@ -465,11 +452,13 @@ impl Mix {
                         if len - i <= fo {
                             g *= curve.gain((len - i) as f64 / fo as f64);
                         }
-                        out[c][t as usize] = (v as f64 * g) as f32;
+                        if ramp > 0 && len - i <= ramp {
+                            g *= (len - 1 - i) as f64 / ramp as f64;
+                        }
+                        out[c][t] = (ch[(i % unit as u128) as usize] as f64 * g) as f32;
                     }
                 }
-                let clamp = |t: i64| t.clamp(0, total as i64) as usize;
-                ext = Extent { start: clamp(start_s), end: clamp(start_s + len as i64) };
+                ext = Extent { start: lo, end: hi };
             }
             Placement::Mapped(times) => {
                 let fps = self.control_fps;

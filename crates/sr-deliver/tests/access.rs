@@ -18,7 +18,7 @@ fn run(fps: f64, secs: f64, hz: f64, on: [f64; 3], cells: Option<usize>) -> Flas
     let n = (fps * secs) as usize;
     for k in 0..n {
         let t = k as f64 / fps;
-        let lit = ((t * hz * 2.0).floor() as u64) % 2 == 0;
+        let lit = ((t * hz * 2.0).floor() as u64).is_multiple_of(2);
         d.push(t, &frame(if lit { on } else { [0.0; 3] }, cells));
     }
     d
