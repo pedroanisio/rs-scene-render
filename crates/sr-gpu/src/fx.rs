@@ -1227,12 +1227,38 @@ impl Builder<'_> {
         self.run(entry, [op, 0, 0, 0], v, src, aux, None, None, size)
     }
 
-    /// Jump flooding (Rong and Tan): per texel, the offset to the nearest texel inside the input
-    /// (alpha ≥ 0.5) in rg and to the nearest texel outside it in ba, exact enough within `reach`
-    /// texels: one pass per power of two from the first above `reach` down to 1, plus one more at 1.
-    pub fn distance_field(&mut self, src: &Arc<Tex>, reach: f64) -> Arc<Tex> {
+    /// Radii up to this many texels sample rings around each pixel (cheap and gap-free at that
+    /// size); wider ones read distance fields.
+    const RING_RADIUS: f64 = 4.0;
+
+    /// For a morphology radius `r` in texels, the distance fields `fs_morph` reads (flagged in
+    /// `v[0].z`) when rings would be too sparse or too many: of alpha for the max over the disc
+    /// (`dilate`), of its complement for the min (`erode`).
+    fn morph_fields(
+        &mut self,
+        src: &Arc<Tex>,
+        r: f64,
+        dilate: bool,
+        erode: bool,
+        v: &mut [[f32; 4]; 8],
+    ) -> (Aux, Option<Arc<Tex>>) {
+        if r <= Self::RING_RADIUS {
+            return (Aux::None, None);
+        }
+        v[0][2] = 1.0;
+        let max = if dilate { Aux::Tex(self.distance_field(src, r, false)) } else { Aux::None };
+        (max, erode.then(|| self.distance_field(src, r, true)))
+    }
+
+    /// Jump flooding (Rong and Tan): per texel, the offset to the nearest texel of the input with
+    /// any coverage in rg and to the nearest fully covered one in ba (coverage is alpha, or with
+    /// `complement` what alpha leaves), exact enough within `reach` texels: one pass per power of
+    /// two from the first above `reach` down to 1, plus one more at 1.
+    pub fn distance_field(&mut self, src: &Arc<Tex>, reach: f64, complement: bool) -> Arc<Tex> {
         let size = src.size;
-        let mut cur = self.run(Entry::Jfa, [0; 4], [[0.0; 4]; 8], src, Aux::None, None, None, size);
+        let mut seed = [[0.0; 4]; 8];
+        seed[0][1] = f32::from(complement);
+        let mut cur = self.run(Entry::Jfa, [0; 4], seed, src, Aux::None, None, None, size);
         let mut step = (reach.ceil() as u32 + 2).next_power_of_two();
         let mut steps = Vec::new();
         while step >= 1 {
@@ -1963,9 +1989,8 @@ impl Builder<'_> {
                 if kind == "matte-choke" {
                     let choke = amount * px;
                     v[0] = [choke.abs() as f32, (choke > 0.0) as u8 as f32, 0.0, 0.0];
-                    v[0][2] = f32::from(choke.abs() > 4.0);
-                    let aux = Aux::None;
-                    let o = self.simple(Entry::Morph, 0, v, input, aux);
+                    let (aux, aux2) = self.morph_fields(input, choke.abs(), choke <= 0.0, choke > 0.0, &mut v);
+                    let o = self.run(Entry::Morph, [0; 4], v, input, aux, aux2, None, input.size);
                     let soft = a.num("softness", 0.1) * px * 4.0;
                     return Ok(if soft >= 1.0 { self.blur(&o, soft * 0.5) } else { o });
                 }
@@ -1977,9 +2002,9 @@ impl Builder<'_> {
                 };
                 v[0] = [(sz.max(1.0) * px) as f32, 0.0, 0.0, pos];
                 v[1] = v4(c);
-                v[0][2] = f32::from(sz.max(1.0) * px > 4.0);
-                let aux = Aux::None;
-                self.simple(Entry::Morph, if kind == "stroke" { 1 } else { 2 }, v, input, aux)
+                let (aux, aux2) = self.morph_fields(input, sz.max(1.0) * px, pos != 1.0, pos != 0.0, &mut v);
+                let op = if kind == "stroke" { 1 } else { 2 };
+                self.run(Entry::Morph, [op, 0, 0, 0], v, input, aux, aux2, None, input.size)
             }
             "shader" => return self.shader_effect(e, a, input, cx),
             other => return Err(format!("effect type {other} is not drawn")),

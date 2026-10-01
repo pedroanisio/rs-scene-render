@@ -947,9 +947,41 @@ fn fs_conv(in: VOut) -> @location(0) vec4<f32> {
 
 // ------------------------------------------------------------ alpha morphology
 
+// Greatest coverage a wide disc of radius `r` around texel `p` reaches, from one jump-flooded
+// field entry `f` (fs_jfa): coverage is alpha, or with `erode` its complement, weighted by the
+// disc's one-texel soft rim. Each of the entry's two sites decides the result where alpha has
+// hard edges, the site's own texels holding the edge's partial coverage; where alpha ramps, the
+// disc's far point towards the site does.
+fn morph_reach(p: vec2<i32>, f: vec4<f32>, r: f32, erode: bool) -> f32 {
+    let size = vec2<i32>(textureDimensions(src));
+    var best = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = select(f.xy, f.zw, k >= 2);
+        if (abs(o.x) > FAR * 0.5) { continue; }
+        var c = o;
+        if ((k & 1) == 1) {
+            let l = length(o);
+            if (l < 0.5) { continue; }
+            c = round(o / l * r);
+        }
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                let d = vec2<i32>(c) + vec2(dx, dy);
+                let q = p + d;
+                if (any(q < vec2(0)) || any(q >= size)) { continue; }
+                let weight = clamp(r + 1.0 - length(vec2<f32>(d)), 0.0, 1.0);
+                let a = textureLoad(src, q, 0).a;
+                best = max(best, select(a * weight, weight - a, erode));
+            }
+        }
+    }
+    return best;
+}
+
 // Max (dilate) or min (erode) of alpha over a disc. v0: radius px, mode (0 dilate, 1 erode),
 // wide-disc flag; i.x: 0 plain result, 1 stroke ring (v1 colour, v0.w position: 0 outside, 1 inside, 2 centre),
-// 2 outline only.
+// 2 outline only. A wide disc reads the distance fields of alpha (aux, for the max) and of its
+// complement (aux2, for the min); only the ones its result needs are bound.
 @fragment
 fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let d = dims();
@@ -959,29 +991,16 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     var mx = s.a;
     var mn = s.a;
     if (v[0].z > 0.5) {
-        // A binary distance field loses fractional alpha. For wide morphology visit
-        // every texel in the disc, retaining the actual min/max coverage. Stop once
-        // the extrema required by this operation cannot change any further.
         let p = vec2<i32>(in.pos.xy);
         let size = vec2<i32>(textureDimensions(src));
-        let reach = i32(ceil(r));
         let need_max = select(v[0].w != 1.0, v[0].y < 0.5, fx.i.x == 0u);
         let need_min = select(v[0].w != 0.0, v[0].y > 0.5, fx.i.x == 0u);
-        // Outside the texture is transparent, including for erosion.
-        let edge = f32(min(min(p.x + 1, p.y + 1), min(size.x - p.x, size.y - p.y)));
-        mn = min(mn, clamp(edge - r, 0.0, 1.0));
-        let lo = max(-vec2(reach), -p);
-        let hi = min(vec2(reach), size - vec2(1) - p);
-        for (var y = lo.y; y <= hi.y; y++) {
-            if ((!need_max || mx >= 1.0) && (!need_min || mn <= 0.0)) { break; }
-            for (var x = lo.x; x <= hi.x; x++) {
-                let weight = clamp(r + 1.0 - length(vec2<f32>(f32(x), f32(y))), 0.0, 1.0);
-                if (weight <= 0.0) { continue; }
-                let a = textureLoad(src, p + vec2(x, y), 0).a;
-                mx = max(mx, a * weight);
-                mn = min(mn, a + 1.0 - weight);
-                if ((!need_max || mx >= 1.0) && (!need_min || mn <= 0.0)) { break; }
-            }
+        if (need_max) { mx = max(mx, morph_reach(p, textureLoad(aux, p, 0), r, false)); }
+        if (need_min) {
+            // Outside the texture is transparent, including for erosion.
+            let edge = f32(min(min(p.x + 1, p.y + 1), min(size.x - p.x, size.y - p.y)));
+            mn = min(mn, clamp(edge - r, 0.0, 1.0));
+            mn = min(mn, 1.0 - morph_reach(p, textureLoad(aux2, p, 0), r, true));
         }
     } else {
         let rings = clamp(i32(ceil(r / 1.5)), 1, 12);
@@ -1014,10 +1033,12 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
 
 // ------------------------------------------------------------ jump flooding
 
-// i.x 0: seeds from src alpha; 1: one step of v0.x texels over the previous field (src).
-// rg: offset in texels to the nearest texel inside (alpha >= 0.5), ba: to the nearest outside;
-// FAR where none has been found yet.
+// i.x 0: seeds from src alpha, or from its complement (v0.y 1, the field erosion reads);
+// 1: one step of v0.x texels over the previous field (src).
+// rg: offset in texels to the nearest texel with any coverage, ba: to the nearest fully covered
+// one; FAR where none has been found yet.
 const FAR: f32 = 16384.0;
+const COVERED: f32 = 0.002;
 
 @fragment
 fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
@@ -1025,7 +1046,8 @@ fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
     let p = vec2<i32>(in.pos.xy);
     if (fx.i.x == 0u) {
         let a = textureLoad(src, p, 0).a;
-        return select(vec4(FAR, FAR, 0.0, 0.0), vec4(0.0, 0.0, FAR, FAR), a >= 0.5);
+        let c = select(a, 1.0 - a, fx.v[0].y > 0.5);
+        return vec4(select(vec2(FAR), vec2(0.0), c > COVERED), select(vec2(FAR), vec2(0.0), c >= 1.0 - COVERED));
     }
     let step = i32(fx.v[0].x);
     var best = textureLoad(src, p, 0);
