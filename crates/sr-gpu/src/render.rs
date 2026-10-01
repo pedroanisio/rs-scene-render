@@ -275,6 +275,9 @@ pub struct Renderer {
     in_transition: std::collections::HashSet<Arc<str>>,
     /// Drawing a motion-blur sub-frame.
     sampling: bool,
+    /// The node whose motion-blur samples are being drawn: they blend normally, and their
+    /// accumulation blends as the node does.
+    unblended: Option<Arc<str>>,
     /// Pixel rectangle of the next frame-space quad (defaults to the whole target).
     frame_rect: Option<[f64; 4]>,
     /// Reuse effect results across frames (off with `SR_FX_NO_CACHE`, for measuring effect cost).
@@ -820,6 +823,7 @@ impl Renderer {
             bare: Default::default(),
             in_transition: Default::default(),
             sampling: false,
+            unblended: None,
             frame_rect: None,
             fx_cache: std::env::var_os("SR_FX_NO_CACHE").is_none(),
             three: None,
@@ -1873,6 +1877,16 @@ impl Renderer {
         h(&words)
     }
 
+    /// The blend mode node `n` draws with now: normal while it is drawn bare or as a motion-blur
+    /// sample.
+    fn blend_of(&self, n: &FrameNode) -> u32 {
+        if self.bare.contains(&n.id) || self.unblended.as_ref() == Some(&n.id) {
+            0
+        } else {
+            blend_index(&*n.elem)
+        }
+    }
+
     fn isolated(n: &FrameNode, has_kids: bool, count_effects: bool) -> bool {
         if !has_kids {
             return false;
@@ -1998,13 +2012,12 @@ impl Renderer {
         if !n.draw && !force {
             return;
         }
-        let e: &dyn Element = &*n.elem;
         let op = if iso_op > 0.0 { n.world_opacity / iso_op } else { 0.0 };
         if self.special(plan, ctx, i, space, iso_op, cmds, root_hash) {
             return;
         }
         let bare = self.bare.contains(&n.id);
-        let blend = if bare { 0 } else { blend_index(e) };
+        let blend = self.blend_of(n);
         let seed = sr_eval::rng::hash_str(&n.id) as u32;
         let has_kids = !kids[i].is_empty();
         if Self::isolated(n, has_kids, !bare) {

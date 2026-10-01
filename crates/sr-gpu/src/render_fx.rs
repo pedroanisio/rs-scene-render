@@ -38,6 +38,44 @@ pub(super) const TIME_VARYING: &[&str] = &[
     "pixel-motion-blur",
 ];
 
+/// Effect types whose result turns and scales with the node they are on: the same at every
+/// pixel (colour operations), the same in every direction, or directed in the node's own axes.
+const TURNING: &[&str] = &[
+    "blur",
+    "glow",
+    "bloom",
+    "halation",
+    "unsharp-mask",
+    "inner-glow",
+    "stroke",
+    "outline",
+    "matte-choke",
+    "directional-blur",
+    "color-grade",
+    "lift-gamma-gain",
+    "cdl",
+    "lut",
+    "curves",
+    "levels",
+    "white-balance",
+    "exposure",
+    "hue-saturation",
+    "tonemap",
+    "tint",
+    "tritone",
+    "color-overlay",
+    "fill",
+    "grayscale",
+    "sepia",
+    "invert",
+    "posterize",
+    "threshold",
+    "selective-color",
+    "chroma-key",
+    "luma-key",
+    "spill-suppress",
+];
+
 /// Video memory one frame's motion blur may hold (bytes). A frame over it draws the remaining moving nodes
 /// sharp rather than failing to allocate.
 const MOTION_BLUR_BUDGET: u64 = 8 << 30;
@@ -542,13 +580,12 @@ impl Renderer {
         hash: u64,
     ) {
         let n = &ctx.g.nodes[i];
-        let e: &dyn Element = &*n.elem;
         let clip = if n.clip { n.size } else { None };
         let mask_box = n.size.unwrap_or(space.extent());
         let (mask_off, mask_count) = self.masks_of(plan, n, mask_box, clip);
         let d = Draw {
             opacity: op as f32,
-            blend: match (self.bare.contains(&n.id), blend_index(e)) {
+            blend: match (self.bare.contains(&n.id), self.blend_of(n)) {
                 (true, _) => 0,
                 // an adjustment layer replaces the backdrop by its effect within its coverage
                 (false, 0) if n.kind == "adjustment" => BLEND_ADJUST,
@@ -1280,6 +1317,18 @@ impl Renderer {
         if n.kind == "group" && !own_motion {
             return false;
         }
+        if n.kind == "adjustment" {
+            // its effects act on what is below it, which samples drawn apart do not have
+            if own_motion {
+                plan.stats.unsupported.push(format!(
+                    "{}: motion blur is not applied to adjustment layers (it adjusts where it is at the frame time)",
+                    n.id
+                ));
+            }
+            return false;
+        }
+        // stencil modes cut the backdrop away outside the node: the accumulation covers the target
+        let stencil = matches!(self.blend_of(n), 29 | 30);
         // samples cover the box swept across the shutter plus the effects' reach (sized leaf layers, and
         // shapes whose ink stays near their box), else the whole target
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
@@ -1289,7 +1338,7 @@ impl Renderer {
             "shape" => crate::vector::box_overhang(n),
             _ => None,
         };
-        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some()) {
+        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some() && !stencil) {
             let effs: Vec<&m::Effect> =
                 effect_ids(&*n.elem).iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
             let pad: f64 = (effs
@@ -1377,8 +1426,10 @@ impl Renderer {
             let sctx = ctx.at(&sg);
             let mut c = Vec::new();
             self.sampling = true;
+            self.unblended = Some(n.id.clone());
             self.emit(plan, &sctx, j, &inner, iso_op, &mut c, true, 0);
             self.flush_vec(plan, &mut c);
+            self.unblended = None;
             self.sampling = false;
             plan.jobs.push(Job::draws(tex.clone(), true, c, false));
             let mut b = self.builder(plan);
@@ -1422,8 +1473,14 @@ impl Renderer {
     ) {
         let n = &ctx.g.nodes[i];
         let hash = h(&[root_hash, hf(ctx.g.time), sr_eval::rng::hash_str(&n.id), 0x6d62]);
-        // opacity, blend, masks and matte were applied inside each sample
-        let d = Draw { opacity: 1.0, src_kind: src::TEXTURE, uv_rect: [0.0, 0.0, 1.0, 1.0], ..Default::default() };
+        // opacity, masks and matte were applied inside each sample; the samples blend as one
+        let d = Draw {
+            opacity: 1.0,
+            blend: self.blend_of(n),
+            src_kind: src::TEXTURE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
+        };
         self.flush_vec(plan, cmds);
         self.frame_rect = Some(rect);
         let bare_before = self.bare.insert(n.id.clone());
@@ -1479,6 +1536,28 @@ impl Renderer {
         let sg = sub.at(times[times.len() / 2]);
         let j = *sg.index.get(&n.id)?;
         let sctx = ctx.at(&sg);
+        // a drawing that turns or grows takes its effects with it: only those that have no
+        // direction or pattern of their own on screen stay right
+        let lin = |w: &Affine| [w.0[0], w.0[1], w.0[2], w.0[3]];
+        let turned = times.iter().any(|&t| {
+            let s = sub.at(t);
+            s.index.get(&n.id).is_some_and(|&k| {
+                lin(&s.g.nodes[k].world).iter().zip(lin(&sg.g.nodes[j].world)).any(|(a, b)| (a - b).abs() > 1e-9)
+            })
+        });
+        if turned {
+            let mut stack = vec![j];
+            while let Some(k) = stack.pop() {
+                let fixed = effect_ids(&*sg.g.nodes[k].elem)
+                    .iter()
+                    .filter_map(|id| find_effect(ctx.p, id))
+                    .any(|e| e.enabled && !TURNING.contains(&e.r#type.as_str()));
+                if fixed {
+                    return None;
+                }
+                stack.extend(sctx.kids[k].iter().copied());
+            }
+        }
         let b = drawn_bounds(&sctx, j, space)?;
         // within a frame's width or height beyond the target: anything further never shows
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
@@ -1495,8 +1574,10 @@ impl Renderer {
         let tex = self.temp(plan, size);
         let mut c = Vec::new();
         self.sampling = true;
+        self.unblended = Some(n.id.clone());
         self.emit(plan, &sctx, j, &at, iso_op, &mut c, true, 0);
         self.flush_vec(plan, &mut c);
+        self.unblended = None;
         self.sampling = false;
         plan.jobs.push(Job::draws(tex.clone(), true, c, false));
         Some((tex, [b[0], b[1]], space.xform.then(&sg.g.nodes[j].world)))
