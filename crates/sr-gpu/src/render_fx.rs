@@ -38,6 +38,44 @@ pub(super) const TIME_VARYING: &[&str] = &[
     "pixel-motion-blur",
 ];
 
+/// Effect types whose result turns and scales with the node they are on: the same at every
+/// pixel (colour operations), the same in every direction, or directed in the node's own axes.
+const TURNING: &[&str] = &[
+    "blur",
+    "glow",
+    "bloom",
+    "halation",
+    "unsharp-mask",
+    "inner-glow",
+    "stroke",
+    "outline",
+    "matte-choke",
+    "directional-blur",
+    "color-grade",
+    "lift-gamma-gain",
+    "cdl",
+    "lut",
+    "curves",
+    "levels",
+    "white-balance",
+    "exposure",
+    "hue-saturation",
+    "tonemap",
+    "tint",
+    "tritone",
+    "color-overlay",
+    "fill",
+    "grayscale",
+    "sepia",
+    "invert",
+    "posterize",
+    "threshold",
+    "selective-color",
+    "chroma-key",
+    "luma-key",
+    "spill-suppress",
+];
+
 /// Video memory one frame's motion blur may hold (bytes). A frame over it draws the remaining moving nodes
 /// sharp rather than failing to allocate.
 const MOTION_BLUR_BUDGET: u64 = 8 << 30;
@@ -542,13 +580,12 @@ impl Renderer {
         hash: u64,
     ) {
         let n = &ctx.g.nodes[i];
-        let e: &dyn Element = &*n.elem;
         let clip = if n.clip { n.size } else { None };
-        let mask_box = n.size.unwrap_or([space.size[0] as f64, space.size[1] as f64]);
+        let mask_box = n.size.unwrap_or(space.extent());
         let (mask_off, mask_count) = self.masks_of(plan, n, mask_box, clip);
         let d = Draw {
             opacity: op as f32,
-            blend: match (self.bare.contains(&n.id), blend_index(e)) {
+            blend: match (self.bare.contains(&n.id), self.blend_of(n)) {
                 (true, _) => 0,
                 // an adjustment layer replaces the backdrop by its effect within its coverage
                 (false, 0) if n.kind == "adjustment" => BLEND_ADJUST,
@@ -656,8 +693,17 @@ impl Renderer {
         (b[2] > b[0] && b[3] > b[1]).then_some(b)
     }
 
-    /// Point lights referenced by an effect, as uv position, intensity and radius.
-    fn lights_of(&self, ctx: &Ctx, a: &Attrs, to_uv: &dyn Fn([f64; 2]) -> [f64; 2], w: f64) -> Vec<[f32; 4]> {
+    /// Point lights referenced by an effect, as uv position, intensity and radius in target
+    /// heights (the unit the shader measures distances in). `scale` is target pixels per unit of
+    /// the node's space, where the light's position and range are given; `height` the target's.
+    fn lights_of(
+        &self,
+        ctx: &Ctx,
+        a: &Attrs,
+        to_uv: &dyn Fn([f64; 2]) -> [f64; 2],
+        scale: f64,
+        height: f64,
+    ) -> Vec<[f32; 4]> {
         let Some(AttrValue::Tokens(ids)) = a.e.get_attr("lights") else { return Vec::new() };
         let Some(lights) = ctx.p.scene.lights.as_ref() else { return Vec::new() };
         ids.iter()
@@ -668,8 +714,8 @@ impl Renderer {
                 let key = eid(l).unwrap_or_default();
                 let la = Attrs { e: l, props: element_props(ctx.g, &key) };
                 let uv = to_uv([la.num("x", 0.0), la.num("y", 0.0)]);
-                let range = la.opt("range").or(la.opt("distance")).unwrap_or(w * 0.5);
-                [uv[0] as f32, uv[1] as f32, la.num("intensity", 1.0) as f32, (range / w) as f32]
+                let range = la.opt("range").or(la.opt("distance")).map(|r| r * scale / height).unwrap_or(0.5);
+                [uv[0] as f32, uv[1] as f32, la.num("intensity", 1.0) as f32, range as f32]
             })
             .collect()
     }
@@ -699,7 +745,11 @@ impl Renderer {
     ) -> Option<Arc<Tex>> {
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
         if let Some(j) = ctx.g.nodes.iter().position(|n| *n.id == *id) {
-            let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+            let inner = Space {
+                xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+                size,
+                unit: space.unit,
+            };
             let sn = &ctx.g.nodes[j];
             let tex = self.temp(plan, size);
             let mut c = Vec::new();
@@ -857,7 +907,11 @@ impl Renderer {
             return true;
         }
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
-        let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+        let inner = Space {
+            xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+            size,
+            unit: space.unit,
+        };
         // what the result depends on: the node as the chain shows it (its own state and transform
         // into the target, and its subtree), the elements it uses, its effects' parameters now,
         // and the time for effects that change with it (posterize-time counts by its step)
@@ -875,9 +929,12 @@ impl Renderer {
             h(&[
                 Self::node_hash(&src_ctx, sn, &inner.xform.then(&sn.world)),
                 Self::content_hash(&src_ctx, j, &inner.xform),
-                Self::deps_hash(&src_ctx, j),
+                Self::deps_hash(&src_ctx, j, &inner.xform),
             ])
         };
+        // the nodes the effects read are drawn as they are now, whatever time the chain shows
+        let read: Vec<u64> =
+            Self::source_nodes(ctx, n).into_iter().map(|j| Self::subtree_hash(ctx, j, &inner.xform)).collect();
         let time_dep =
             effs.iter().any(|e| TIME_VARYING.contains(&e.r#type.as_str()) && e.r#type.as_str() != "posterize-time");
         let echo_times = if echo.is_some() { h(&shown.iter().map(|&s| hf(s)).collect::<Vec<_>>()) } else { 0 };
@@ -889,6 +946,7 @@ impl Renderer {
             if time_dep { hf(t) } else { 0 },
             echo_times,
             sr_eval::rng::hash_str(&ids.join(" ")),
+            h(&read),
         ]);
         let key = format!("fx:{}:{}x{}", n.id, size[0], size[1]);
         self.used.insert(key.clone());
@@ -1061,7 +1119,7 @@ impl Renderer {
             cx.named = named;
             cx.offset = [rect[0], space.size[1] as f64 - rect[3]];
             cx.frame_size = [space.size[0] as f64, space.size[1] as f64];
-            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, w) } else { Vec::new() };
+            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, cx.px, hgt) } else { Vec::new() };
             let mut b = self.builder(plan);
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
             let (passes, temps, problems) =
@@ -1168,7 +1226,7 @@ impl Renderer {
                 continue;
             }
             let mut cx = self.cx_for(ctx, i, space, [0.0, 0.0, w, hgt], &to_uv, &color, &gradient, &base);
-            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, w) } else { Vec::new() };
+            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, cx.px, hgt) } else { Vec::new() };
             let mut b = self.builder(plan);
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
             passes.append(&mut b.passes);
@@ -1259,6 +1317,18 @@ impl Renderer {
         if n.kind == "group" && !own_motion {
             return false;
         }
+        if n.kind == "adjustment" {
+            // its effects act on what is below it, which samples drawn apart do not have
+            if own_motion {
+                plan.stats.unsupported.push(format!(
+                    "{}: motion blur is not applied to adjustment layers (it adjusts where it is at the frame time)",
+                    n.id
+                ));
+            }
+            return false;
+        }
+        // stencil modes cut the backdrop away outside the node: the accumulation covers the target
+        let stencil = matches!(self.blend_of(n), 29 | 30);
         // samples cover the box swept across the shutter plus the effects' reach (sized leaf layers, and
         // shapes whose ink stays near their box), else the whole target
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
@@ -1268,7 +1338,7 @@ impl Renderer {
             "shape" => crate::vector::box_overhang(n),
             _ => None,
         };
-        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some()) {
+        if let (Some(over), true) = (overhang, ctx.kids[i].is_empty() && n.size.is_some() && !stencil) {
             let effs: Vec<&m::Effect> =
                 effect_ids(&*n.elem).iter().filter_map(|id| find_effect(ctx.p, id)).filter(|e| e.enabled).collect();
             let pad: f64 = (effs
@@ -1314,7 +1384,11 @@ impl Renderer {
         if !Self::blur_budget(plan, 2 * texture) {
             return false;
         }
-        let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+        let inner = Space {
+            xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+            size,
+            unit: space.unit,
+        };
         let acc = self.temp(plan, size);
         if let Some((reference, origin, w_ref)) = self.rigid_reference(plan, ctx, i, space, iso_op, &times) {
             // one drawing, moved to where each sample has the node: render once, accumulate moved copies
@@ -1352,8 +1426,10 @@ impl Renderer {
             let sctx = ctx.at(&sg);
             let mut c = Vec::new();
             self.sampling = true;
+            self.unblended = Some(n.id.clone());
             self.emit(plan, &sctx, j, &inner, iso_op, &mut c, true, 0);
             self.flush_vec(plan, &mut c);
+            self.unblended = None;
             self.sampling = false;
             plan.jobs.push(Job::draws(tex.clone(), true, c, false));
             let mut b = self.builder(plan);
@@ -1397,8 +1473,14 @@ impl Renderer {
     ) {
         let n = &ctx.g.nodes[i];
         let hash = h(&[root_hash, hf(ctx.g.time), sr_eval::rng::hash_str(&n.id), 0x6d62]);
-        // opacity, blend, masks and matte were applied inside each sample
-        let d = Draw { opacity: 1.0, src_kind: src::TEXTURE, uv_rect: [0.0, 0.0, 1.0, 1.0], ..Default::default() };
+        // opacity, masks and matte were applied inside each sample; the samples blend as one
+        let d = Draw {
+            opacity: 1.0,
+            blend: self.blend_of(n),
+            src_kind: src::TEXTURE,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
+        };
         self.flush_vec(plan, cmds);
         self.frame_rect = Some(rect);
         let bare_before = self.bare.insert(n.id.clone());
@@ -1454,6 +1536,28 @@ impl Renderer {
         let sg = sub.at(times[times.len() / 2]);
         let j = *sg.index.get(&n.id)?;
         let sctx = ctx.at(&sg);
+        // a drawing that turns or grows takes its effects with it: only those that have no
+        // direction or pattern of their own on screen stay right
+        let lin = |w: &Affine| [w.0[0], w.0[1], w.0[2], w.0[3]];
+        let turned = times.iter().any(|&t| {
+            let s = sub.at(t);
+            s.index.get(&n.id).is_some_and(|&k| {
+                lin(&s.g.nodes[k].world).iter().zip(lin(&sg.g.nodes[j].world)).any(|(a, b)| (a - b).abs() > 1e-9)
+            })
+        });
+        if turned {
+            let mut stack = vec![j];
+            while let Some(k) = stack.pop() {
+                let fixed = effect_ids(&*sg.g.nodes[k].elem)
+                    .iter()
+                    .filter_map(|id| find_effect(ctx.p, id))
+                    .any(|e| e.enabled && !TURNING.contains(&e.r#type.as_str()));
+                if fixed {
+                    return None;
+                }
+                stack.extend(sctx.kids[k].iter().copied());
+            }
+        }
         let b = drawn_bounds(&sctx, j, space)?;
         // within a frame's width or height beyond the target: anything further never shows
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
@@ -1466,12 +1570,14 @@ impl Renderer {
             return None;
         }
         let size = [(b[2] - b[0]) as u32, (b[3] - b[1]) as u32];
-        let at = Space { xform: Affine::translate(-b[0], -b[1]).then(&space.xform), size };
+        let at = Space { xform: Affine::translate(-b[0], -b[1]).then(&space.xform), size, unit: space.unit };
         let tex = self.temp(plan, size);
         let mut c = Vec::new();
         self.sampling = true;
+        self.unblended = Some(n.id.clone());
         self.emit(plan, &sctx, j, &at, iso_op, &mut c, true, 0);
         self.flush_vec(plan, &mut c);
+        self.unblended = None;
         self.sampling = false;
         plan.jobs.push(Job::draws(tex.clone(), true, c, false));
         Some((tex, [b[0], b[1]], space.xform.then(&sg.g.nodes[j].world)))
