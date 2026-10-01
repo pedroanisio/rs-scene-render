@@ -741,16 +741,18 @@ mod tests {
     fn caches_stay_inside_the_root() {
         let base = Path::new("/proj/scenes");
         let inside = |src: &str, root: &str| local_in(src, base, Path::new(root));
-        assert_eq!(inside("gen/vo.wav", "/proj/scenes").unwrap(), Path::new("/proj/scenes/gen/vo.wav"));
-        assert_eq!(inside("./a/../vo%20x.wav", "/proj/scenes").unwrap(), Path::new("/proj/scenes/vo x.wav"));
-        assert_eq!(inside("file:///proj/scenes/vo.wav", "/proj/scenes/").unwrap(), Path::new("/proj/scenes/vo.wav"));
+        // as the platform spells them: a drive is added on Windows
+        let at = |p: &str| lexical(Path::new(p)).unwrap();
+        assert_eq!(inside("gen/vo.wav", "/proj/scenes").unwrap(), at("/proj/scenes/gen/vo.wav"));
+        assert_eq!(inside("./a/../vo%20x.wav", "/proj/scenes").unwrap(), at("/proj/scenes/vo x.wav"));
+        assert_eq!(inside("file:///proj/scenes/vo.wav", "/proj/scenes/").unwrap(), at("/proj/scenes/vo.wav"));
         for out in
             ["../media/vo.wav", "/etc/passwd", "file:///etc/passwd", "gen/../../x", "a/../..", ".", "../scenes-2/x"]
         {
             assert!(inside(out, "/proj/scenes").is_err_and(|e| e.contains("outside")), "{out}");
         }
         // a wider root admits a media folder beside the scenes
-        assert_eq!(inside("../media/vo.wav", "/proj").unwrap(), Path::new("/proj/media/vo.wav"));
+        assert_eq!(inside("../media/vo.wav", "/proj").unwrap(), at("/proj/media/vo.wav"));
         assert!(inside("../../etc/passwd", "/proj").is_err());
         assert!(inside("https://example.com/vo.wav", "/proj").is_err_and(|e| e.contains("remote")));
     }
