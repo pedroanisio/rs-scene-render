@@ -608,7 +608,9 @@ impl Renderer {
             "sphere" => Ok(sr_3d::prim::sphere(r, segs)),
             "box" => Ok(sr_3d::prim::cuboid(w, hh.unwrap_or(2.0 * r), depth)),
             // a plane is a grid of `segments` × `segments` quads: a displacement map needs its vertices to move
-            "plane" => Ok(sr_3d::prim::plane(w, hh.unwrap_or(2.0 * r), a.num("segments", 32.0).clamp(1.0, 1024.0) as u32)),
+            "plane" => {
+                Ok(sr_3d::prim::plane(w, hh.unwrap_or(2.0 * r), a.num("segments", 32.0).clamp(1.0, 1024.0) as u32))
+            }
             "cylinder" => Ok(sr_3d::prim::cylinder(r, r, hh.unwrap_or(2.0 * r), segs)),
             "cone" => Ok(sr_3d::prim::cylinder(0.0, r, hh.unwrap_or(2.0 * r), segs)),
             // tube radius: half the height, else 0.35 of the ring radius

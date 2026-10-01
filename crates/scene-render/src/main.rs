@@ -1318,7 +1318,10 @@ fn encode(
         // say which adapter renders: a software or GL fallback would otherwise only show up as a very slow encode
         eprintln!("rendering on {} ({:?}, {:?})", g.info.name, g.info.backend, g.info.device_type);
         if g.is_software() {
-            eprintln!("warning: {} is a software or GL adapter; expect encodes far slower than on the GPU", g.info.name);
+            eprintln!(
+                "warning: {} is a software or GL adapter; expect encodes far slower than on the GPU",
+                g.info.name
+            );
         }
     }
     let mut failed = false;

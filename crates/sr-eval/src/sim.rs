@@ -1332,7 +1332,8 @@ impl EDriver<'_, '_> {
     /// The emitter's world transform and rate in the frame graph at `t`, if it is in it.
     fn sample(&mut self, t: f64) -> Option<([f64; 6], f64)> {
         let g = self.graphs.at(t);
-        index_of(&g, &self.id).map(|i| (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)))
+        index_of(&g, &self.id)
+            .map(|i| (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)))
     }
 }
 

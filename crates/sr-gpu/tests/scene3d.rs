@@ -47,8 +47,18 @@ fn a_sphere_with_a_material_under_default_lights() {
 #[test]
 fn a_plane_is_a_grid_of_segments() {
     // a displacement map moves vertices, so a plane that ignored `segments` could never be displaced
-    let dflt = scene("", RED, r#"<object3D id="p" primitive="plane" width="80" height="80" x="64" y="64" material="rmat"/>"#, "");
-    let grid = scene("", RED, r#"<object3D id="p" primitive="plane" width="80" height="80" segments="16" x="64" y="64" material="rmat"/>"#, "");
+    let dflt = scene(
+        "",
+        RED,
+        r#"<object3D id="p" primitive="plane" width="80" height="80" x="64" y="64" material="rmat"/>"#,
+        "",
+    );
+    let grid = scene(
+        "",
+        RED,
+        r#"<object3D id="p" primitive="plane" width="80" height="80" segments="16" x="64" y="64" material="rmat"/>"#,
+        "",
+    );
     let (Some(a), Some(b)) = (render(&dflt), render(&grid)) else { return };
     assert!(problems(&a).is_empty() && problems(&b).is_empty());
     assert_eq!(a.stats.triangles, 2 * 32 * 32, "the schema's default of 32 segments");

@@ -758,7 +758,9 @@ fn motion_blurred_shapes_sample_only_the_box_they_sweep() {
     let paint = r##"fill="#FFFFFF" stroke="#FF0000" strokeWidth="4" strokePosition="outside" motionBlur="on""##;
     let rect = format!(r#"<shape id="r" shape="rect" y="10" width="10" height="8" {paint}>{mv}</shape>"#);
     // the same outline as a path, which samples the whole frame
-    let path = format!(r#"<shape id="r" shape="path" path="M0 0 H10 V8 H0 Z" y="10" width="10" height="8" {paint}>{mv}</shape>"#);
+    let path = format!(
+        r#"<shape id="r" shape="path" path="M0 0 H10 V8 H0 Z" y="10" width="10" height="8" {paint}>{mv}</shape>"#
+    );
     let Some(a) = render_sub(&doc_with(mb, "", &rect, ""), 0.1) else { return };
     let b = render_sub(&doc_with(mb, "", &path, ""), 0.1).unwrap();
     assert!(problems(&a).is_empty() && problems(&b).is_empty(), "{:?} {:?}", problems(&a), problems(&b));
@@ -780,7 +782,8 @@ fn motion_blurred_shapes_sample_only_the_box_they_sweep() {
     let xml = format!(
         r#"<scene version="1.1"><project width="512" height="256" fps="10" duration="4" {mb}/>{ASSETS}<composition>{dots}</composition></scene>"#
     );
-    let big = sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) }).unwrap();
+    let big =
+        sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) }).unwrap();
     let r = render_sub(&big, 0.1).unwrap();
     assert!(problems(&r).is_empty(), "{:?}", problems(&r));
     let texels = r.renderer.pooled_texels();
