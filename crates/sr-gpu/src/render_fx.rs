@@ -544,7 +544,7 @@ impl Renderer {
         let n = &ctx.g.nodes[i];
         let e: &dyn Element = &*n.elem;
         let clip = if n.clip { n.size } else { None };
-        let mask_box = n.size.unwrap_or([space.size[0] as f64, space.size[1] as f64]);
+        let mask_box = n.size.unwrap_or(space.extent());
         let (mask_off, mask_count) = self.masks_of(plan, n, mask_box, clip);
         let d = Draw {
             opacity: op as f32,
@@ -656,8 +656,17 @@ impl Renderer {
         (b[2] > b[0] && b[3] > b[1]).then_some(b)
     }
 
-    /// Point lights referenced by an effect, as uv position, intensity and radius.
-    fn lights_of(&self, ctx: &Ctx, a: &Attrs, to_uv: &dyn Fn([f64; 2]) -> [f64; 2], w: f64) -> Vec<[f32; 4]> {
+    /// Point lights referenced by an effect, as uv position, intensity and radius in target
+    /// heights (the unit the shader measures distances in). `scale` is target pixels per unit of
+    /// the node's space, where the light's position and range are given; `height` the target's.
+    fn lights_of(
+        &self,
+        ctx: &Ctx,
+        a: &Attrs,
+        to_uv: &dyn Fn([f64; 2]) -> [f64; 2],
+        scale: f64,
+        height: f64,
+    ) -> Vec<[f32; 4]> {
         let Some(AttrValue::Tokens(ids)) = a.e.get_attr("lights") else { return Vec::new() };
         let Some(lights) = ctx.p.scene.lights.as_ref() else { return Vec::new() };
         ids.iter()
@@ -668,8 +677,8 @@ impl Renderer {
                 let key = eid(l).unwrap_or_default();
                 let la = Attrs { e: l, props: element_props(ctx.g, &key) };
                 let uv = to_uv([la.num("x", 0.0), la.num("y", 0.0)]);
-                let range = la.opt("range").or(la.opt("distance")).unwrap_or(w * 0.5);
-                [uv[0] as f32, uv[1] as f32, la.num("intensity", 1.0) as f32, (range / w) as f32]
+                let range = la.opt("range").or(la.opt("distance")).map(|r| r * scale / height).unwrap_or(0.5);
+                [uv[0] as f32, uv[1] as f32, la.num("intensity", 1.0) as f32, range as f32]
             })
             .collect()
     }
@@ -699,7 +708,11 @@ impl Renderer {
     ) -> Option<Arc<Tex>> {
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
         if let Some(j) = ctx.g.nodes.iter().position(|n| *n.id == *id) {
-            let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+            let inner = Space {
+                xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+                size,
+                unit: space.unit,
+            };
             let sn = &ctx.g.nodes[j];
             let tex = self.temp(plan, size);
             let mut c = Vec::new();
@@ -857,7 +870,11 @@ impl Renderer {
             return true;
         }
         let size = [(rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32];
-        let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+        let inner = Space {
+            xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+            size,
+            unit: space.unit,
+        };
         // what the result depends on: the node as the chain shows it (its own state and transform
         // into the target, and its subtree), the elements it uses, its effects' parameters now,
         // and the time for effects that change with it (posterize-time counts by its step)
@@ -1065,7 +1082,7 @@ impl Renderer {
             cx.named = named;
             cx.offset = [rect[0], space.size[1] as f64 - rect[3]];
             cx.frame_size = [space.size[0] as f64, space.size[1] as f64];
-            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, w) } else { Vec::new() };
+            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, cx.px, hgt) } else { Vec::new() };
             let mut b = self.builder(plan);
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
             let (passes, temps, problems) =
@@ -1172,7 +1189,7 @@ impl Renderer {
                 continue;
             }
             let mut cx = self.cx_for(ctx, i, space, [0.0, 0.0, w, hgt], &to_uv, &color, &gradient, &base);
-            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, w) } else { Vec::new() };
+            cx.lights = if kind == "lighting" { self.lights_of(ctx, a, &to_uv, cx.px, hgt) } else { Vec::new() };
             let mut b = self.builder(plan);
             let r = b.effect(*e as &dyn Element, a, &cur, &cx);
             passes.append(&mut b.passes);
@@ -1318,7 +1335,11 @@ impl Renderer {
         if !Self::blur_budget(plan, 2 * texture) {
             return false;
         }
-        let inner = Space { xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform), size };
+        let inner = Space {
+            xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
+            size,
+            unit: space.unit,
+        };
         let acc = self.temp(plan, size);
         if let Some((reference, origin, w_ref)) = self.rigid_reference(plan, ctx, i, space, iso_op, &times) {
             // one drawing, moved to where each sample has the node: render once, accumulate moved copies
@@ -1470,7 +1491,7 @@ impl Renderer {
             return None;
         }
         let size = [(b[2] - b[0]) as u32, (b[3] - b[1]) as u32];
-        let at = Space { xform: Affine::translate(-b[0], -b[1]).then(&space.xform), size };
+        let at = Space { xform: Affine::translate(-b[0], -b[1]).then(&space.xform), size, unit: space.unit };
         let tex = self.temp(plan, size);
         let mut c = Vec::new();
         self.sampling = true;

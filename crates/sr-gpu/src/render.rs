@@ -166,6 +166,16 @@ struct Space {
     /// World → target pixels.
     xform: Affine,
     size: [u32; 2],
+    /// Target pixels per document unit where the target stands for the frame: the tier's scale,
+    /// or 1 in a sized node's own offscreen.
+    unit: f64,
+}
+
+impl Space {
+    /// The target's extent in document units: the box of a node that has none of its own.
+    fn extent(&self) -> [f64; 2] {
+        [self.size[0] as f64 / self.unit, self.size[1] as f64 / self.unit]
+    }
 }
 
 #[derive(Default)]
@@ -1681,7 +1691,7 @@ impl Renderer {
     }
 
     /// The nodes that node `n`'s effects read: their `source`, and a shader's `<param>` samplers.
-    pub(super) fn source_nodes(ctx: &Ctx, n: &FrameNode) -> Vec<usize> {
+    fn source_nodes(ctx: &Ctx, n: &FrameNode) -> Vec<usize> {
         let mut out = Vec::new();
         for id in render_fx::effect_ids(&*n.elem) {
             let Some(e) = render_fx::find_effect(ctx.p, &id) else { continue };
@@ -1783,7 +1793,7 @@ impl Renderer {
 
     /// `used_hash` and the camera: what a node's cached effect result depends on outside its
     /// own subtree.
-    pub(super) fn deps_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
+    fn deps_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
         h(&[Self::used_hash(ctx, i, to_space), ctx.cam])
     }
 
@@ -2009,7 +2019,7 @@ impl Renderer {
                 Some([w, hh]) => {
                     let size = [w.ceil() as u32, hh.ceil() as u32];
                     let inv = n.world.inverse().unwrap_or(Affine::IDENTITY);
-                    (Space { xform: inv, size }, [0.0, 0.0, size[0] as f64, size[1] as f64])
+                    (Space { xform: inv, size, unit: 1.0 }, [0.0, 0.0, size[0] as f64, size[1] as f64])
                 }
                 // no box: the offscreen shares the target's space and covers it 1:1
                 None => (*space, [0.0, 0.0, space.size[0] as f64, space.size[1] as f64]),
@@ -2038,7 +2048,7 @@ impl Renderer {
                 }
             };
             let clip = if n.clip { n.size } else { None };
-            let mask_box = n.size.unwrap_or([space.size[0] as f64, space.size[1] as f64]);
+            let mask_box = n.size.unwrap_or(space.extent());
             let (mask_off, mask_count) = self.masks_of(plan, n, mask_box, clip);
             let d = Draw {
                 opacity: op as f32,
@@ -3025,7 +3035,7 @@ impl Renderer {
             }
         }
         // the document's coordinates at the tier's scale
-        let space = Space { xform: Affine::scale(scale, scale), size };
+        let space = Space { xform: Affine::scale(scale, scale), size, unit: scale };
         let mut cmds = Vec::new();
         for r in Self::depth_sorted(g, &roots) {
             let rh = h(&[Self::subtree_hash(&ctx, r, &Affine::IDENTITY), hf(g.nodes[r].world_opacity), cam_hash]);

@@ -189,3 +189,72 @@ fn drafts_still_measure_text_contrast() {
     let (a, b) = (full.stats.contrast[0].1, draft.stats.contrast[0].1);
     assert!((a - b).abs() / a < 0.1, "contrast {a:.2} at full size, {b:.2} in the draft");
 }
+
+#[test]
+fn masks_of_unsized_nodes_resolve_against_the_document_at_every_tier() {
+    // a group, a group with effects and an adjustment, none with a box of its own: their masks'
+    // percentages are of the frame in document units, not of the draft's half-size target
+    let Some(gpu) = gpu() else { return };
+    let picture = r#"<layer id="img" asset="wide" x="0" y="0" scaleX="16" scaleY="24"/>"#;
+    let mask = r#"<mask type="ellipse" x="0" y="0" width="100%" height="100%"/>"#;
+    let fx = r#"<effect id="soft" type="blur" radius="1"/><effect id="inv" type="invert"/>"#;
+    for (name, body) in [
+        ("group", format!(r#"<group id="grp">{mask}{picture}</group>"#)),
+        ("group with effects", format!(r#"<group id="grp" effects="soft">{mask}{picture}</group>"#)),
+        ("adjustment", format!(r#"{picture}<adjustment id="adj" effects="inv">{mask}</adjustment>"#)),
+    ] {
+        let d = scene(r##"background="#101820""##, &body, "", fx);
+        let full = at_quality(&gpu, &d, 0.5, None);
+        let draft = at_quality(&gpu, &d, 0.5, Some(ProjectQuality::Draft));
+        // inside the ellipse near its right and bottom edges
+        for (x, y) in [(110, 48), (64, 86)] {
+            let (a, b) = (full.at(x, y), draft.at(x / 2, y / 2));
+            assert!(close(a, b, 0.05), "{name}: ({x},{y}) is {a:?}, the draft has {b:?}");
+        }
+        let db = psnr(&draft.px, &half(&full));
+        assert!(db >= 28.0, "{name}: {db:.1} dB against the final frame at half size");
+    }
+}
+
+#[test]
+fn point_lights_fall_off_over_their_range_in_document_units() {
+    // a light of range 12 at (64, 48) over a grey bar, wide or tall: lit within 12 px of it in
+    // every direction, at every tier, whatever the shape of the effect's target
+    let Some(gpu) = gpu() else { return };
+    for (bar, light, unlit, far) in [
+        (
+            r#"x="4" y="24" width="120" height="48""#,
+            r#"x="60" y="24""#,
+            (112, 48),
+            [(79, 48), (49, 48), (64, 63), (64, 33)],
+        ),
+        (
+            r#"x="40" y="4" width="48" height="88""#,
+            r#"x="24" y="44""#,
+            (64, 84),
+            [(79, 48), (49, 48), (64, 63), (64, 33)],
+        ),
+    ] {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="128" height="96" fps="10" duration="2" background="#000000"/>
+            <composition><shape id="bar" shape="rect" {bar} fill="#808080" effects="lit"/></composition>
+            <lights><light id="pl" type="point" {light} range="12" intensity="2"/></lights>
+            <effects><effect id="lit" type="lighting" lights="pl" intensity="1"/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        for quality in [None, Some(ProjectQuality::Draft)] {
+            let s = at_quality(&gpu, &d, 0.0, quality);
+            assert!(s.stats.unsupported.is_empty(), "{:?}", s.stats.unsupported);
+            let k = 128 / s.size[0];
+            let lum = |(x, y): (u32, u32)| s.at(x / k, y / k)[1];
+            let base = lum(unlit);
+            let (right, below) = (lum((70, 48)), lum((64, 54)));
+            assert!(right > base * 1.2, "{bar} {quality:?}: 6 px right of the light {right}, unlit {base}");
+            assert!((right - below).abs() < 0.1 * right, "{bar} {quality:?}: right {right}, below {below}");
+            for p in far {
+                let v = lum(p);
+                assert!((v - base).abs() < 0.02 * base, "{bar} {quality:?}: 15 px away at {p:?} {v}, unlit {base}");
+            }
+        }
+    }
+}
