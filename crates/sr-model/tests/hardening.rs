@@ -156,7 +156,30 @@ fn counts_that_allocate_are_bounded() {
 
 #[test]
 fn new_codes_are_catalogued() {
-    for c in ["P02", "P03", "P04"] {
+    for c in ["P02", "P03", "P04", "P05"] {
         assert!(sr_model::codes::lookup(c).is_some(), "{c}");
+    }
+}
+
+#[test]
+fn matte_cycles_include_container_dependencies() {
+    for body in [
+        r#"<group id="a" matte="b"/><group id="b" matte="a"/>"#,
+        r#"<group id="a"><group id="b" matte="a"/></group>"#,
+        r#"<group id="a"><group id="b" matte="c"/></group><group id="c" matte="a"/>"#,
+    ] {
+        let xml = scene("", body);
+        assert!(has(&xml, "P05"), "cycle was accepted: {body}\n{}", report(&xml));
+    }
+}
+
+#[test]
+fn shared_and_descendant_mattes_are_acyclic() {
+    for body in [
+        r#"<group id="a" matte="m"/><group id="b" matte="m"/><group id="m"/>"#,
+        r#"<group id="a" matte="b"><group id="b"/></group>"#,
+    ] {
+        let r = report(&scene("", body));
+        assert!(!r.has_errors(), "{r}");
     }
 }

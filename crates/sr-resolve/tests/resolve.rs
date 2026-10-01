@@ -160,9 +160,11 @@ fn the_store_restores_results_without_the_provider() {
     let d = project("store", &narrated("stored words"));
     let doc = d.join("scene.scene.xml");
     resolve(&doc, &opts(&d)).unwrap();
+    let transcript = std::fs::read(d.join("gen/subs.json")).unwrap();
     std::fs::remove_dir_all(d.join("gen")).unwrap();
     let rows = resolve(&doc, &opts(&d)).unwrap();
     assert!(rows.iter().all(|r| r.status == Status::Restored), "{rows:?}");
+    assert_eq!(std::fs::read(d.join("gen/subs.json")).unwrap(), transcript);
     assert_eq!(calls(&d), 2);
     // --force makes them again
     let rows = resolve(&doc, &Options { force: true, ..opts(&d) }).unwrap();
@@ -194,6 +196,135 @@ fn images_and_errors() {
     assert!(cloudy.status == Status::Error && cloudy.message.contains("--allow-cloud"), "{cloudy:?}");
     let odd = rows.iter().find(|r| r.id == "odd").unwrap();
     assert!(odd.status == Status::Error && odd.message.contains("scene-render-provider-no-such-provider"), "{odd:?}");
+}
+
+#[test]
+fn test_store_invalid_entries_regenerate_without_pinning_corruption() {
+    setup();
+    for damage in ["bytes", "missing-sidecar", "malformed-sidecar", "wrong-key"] {
+        let d = project(
+            &format!("store-integrity-{damage}"),
+            &format!(
+                r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+          <assets><generated id="g" kind="image" provider="example" model="m" prompt="same image" width="8" height="8" cache="image.png" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+            ),
+        );
+        let doc = d.join("scene.scene.xml");
+        assert_eq!(status(&resolve(&doc, &opts(&d)).unwrap(), "g"), Status::Made);
+        let original = std::fs::read(d.join("image.png")).unwrap();
+        let pinned = std::fs::read_to_string(&doc).unwrap();
+        let side: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.join("image.png.resolve.json")).unwrap()).unwrap();
+        let stored = d.join("store").join(format!("{}.png", side["key"].as_str().unwrap()));
+        let metadata = stored.with_file_name(format!("{}.resolve.json", stored.file_name().unwrap().to_string_lossy()));
+        match damage {
+            "bytes" => std::fs::write(&stored, b"corrupted cache").unwrap(),
+            "missing-sidecar" => std::fs::remove_file(&metadata).unwrap(),
+            "malformed-sidecar" => std::fs::write(&metadata, b"{").unwrap(),
+            "wrong-key" => {
+                let mut side = side;
+                side["key"] = "wrong".into();
+                std::fs::write(&metadata, serde_json::to_vec(&side).unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        std::fs::remove_file(d.join("image.png")).unwrap();
+        let rows = resolve(&doc, &opts(&d)).unwrap();
+        assert_eq!(status(&rows, "g"), Status::Made, "{damage}: {rows:?}");
+        assert_eq!(std::fs::read(d.join("image.png")).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), pinned, "{damage}: changed pinned content");
+        assert_eq!(calls(&d), 2);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[test]
+fn the_store_keeps_output_formats_distinct() {
+    setup();
+    let d = project("store-formats", "");
+    let doc = d.join("scene.scene.xml");
+    for (ext, format) in [("png", image::ImageFormat::Png), ("jpg", image::ImageFormat::Jpeg)] {
+        std::fs::write(&doc, format!(r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+          <assets><generated id="g" kind="image" provider="example" model="m" prompt="same image" width="16" height="16" cache="image.{ext}" cacheSha256="{ZERO}"/></assets><composition/></scene>"#)).unwrap();
+        let rows = resolve(&doc, &opts(&d)).unwrap();
+        assert_eq!(status(&rows, "g"), Status::Made, "{ext}: {rows:?}");
+        let cache = d.join(format!("image.{ext}"));
+        let bytes = std::fs::read(&cache).unwrap();
+        assert_eq!(image::guess_format(&bytes).unwrap(), format);
+        std::fs::remove_file(&cache).unwrap();
+        let restored = resolve(&doc, &opts(&d)).unwrap();
+        assert_eq!(status(&restored, "g"), Status::Restored);
+        assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+    }
+    assert_eq!(calls(&d), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_symlinks_cannot_escape_the_project() {
+    use std::os::unix::fs::symlink;
+    setup();
+    let d = project("symlink-cache", "");
+    let outside = project("symlink-outside", "");
+    let victim = outside.join("victim.png");
+    std::fs::write(&victim, b"untouched").unwrap();
+    symlink(&outside, d.join("linked")).unwrap();
+    symlink(&victim, d.join("leaf.png")).unwrap();
+    symlink(outside.join("absent.png"), d.join("dangling.png")).unwrap();
+    let assets: String = [("parent", "linked/victim.png"), ("leaf", "leaf.png"), ("dangling", "dangling.png")]
+        .iter().map(|(id, cache)| format!(r#"<generated id="{id}" kind="image" provider="example" model="m" prompt="test" width="8" height="8" cache="{cache}" cacheSha256="{ZERO}"/>"#)).collect();
+    let doc = d.join("scene.scene.xml");
+    std::fs::write(&doc, format!(r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/><assets>{assets}</assets><composition/></scene>"#)).unwrap();
+    let rows = resolve(&doc, &opts(&d)).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"untouched", "resolve overwrote an outside file");
+    assert!(!outside.join("absent.png").exists());
+    assert!(rows.iter().all(|r| r.status == Status::Error), "{rows:?}");
+    assert_eq!(calls(&d), 0, "reject escaped paths before starting a provider");
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_symlinks_cannot_redirect_resolver_writes() {
+    use std::os::unix::fs::symlink;
+    setup();
+    let d = project(
+        "symlink-temporary",
+        &format!(
+            r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+      <assets><generated id="g" kind="image" provider="example" model="m" prompt="test" width="8" height="8" cache="image.png" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+        ),
+    );
+    let outside = project("symlink-temporary-outside", "");
+    for name in ["image.png.resolve.json.part", "scene.scene.xml.part"] {
+        std::fs::write(outside.join(name), b"untouched").unwrap();
+        symlink(outside.join(name), d.join(name)).unwrap();
+    }
+    let rows = resolve(&d.join("scene.scene.xml"), &opts(&d)).unwrap();
+    assert_eq!(status(&rows, "g"), Status::Made, "{rows:?}");
+    for name in ["image.png.resolve.json.part", "scene.scene.xml.part"] {
+        assert_eq!(std::fs::read(outside.join(name)).unwrap(), b"untouched", "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn caches_support_project_and_internal_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+    setup();
+    let d = project(
+        "symlink-safe",
+        &format!(
+            r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+      <assets><generated id="g" kind="image" provider="example" model="m" prompt="test" width="8" height="8" cache="linked/new/image.png" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+        ),
+    );
+    std::fs::create_dir(d.join("real")).unwrap();
+    symlink(d.join("real"), d.join("linked")).unwrap();
+    let alias = project("symlink-safe-alias", "");
+    symlink(&d, alias.join("project")).unwrap();
+    let rows = resolve(&alias.join("project/scene.scene.xml"), &opts(&d)).unwrap();
+    assert_eq!(status(&rows, "g"), Status::Made, "{rows:?}");
+    assert!(d.join("real/new/image.png").is_file());
 }
 
 #[test]

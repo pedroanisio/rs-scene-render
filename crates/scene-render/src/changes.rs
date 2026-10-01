@@ -93,26 +93,90 @@ const TIME_EFFECTS: &[&str] = &["posterize-time", "echo", "pixel-motion-blur"];
 
 /// Local input files named by the document and by the documents it includes, including every declared
 /// sequence frame.
-pub fn files(path: &Path, doc: &sr_model::Document) -> Vec<PathBuf> {
+pub fn files(path: &Path, doc: &sr_model::Document) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    named(path, doc, &mut files, &mut vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())]);
+    named(path, doc, &mut files, &mut vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())])?;
     files.sort();
     files.dedup();
-    files
+    Ok(files)
+}
+
+/// Inputs before and after parameter bindings, variants, data rows and includes are resolved.
+/// Keep the authored inputs too: changing a data file or included document can select new assets.
+pub fn effective_files(path: &Path, doc: &sr_model::Document, p: &sr_eval::Program) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = files(path, doc)?;
+    for (i, scene) in std::iter::once(&p.scene).chain(p.includes.iter().map(|(_, scene)| scene)).enumerate() {
+        let base = p.base_dirs.get(i).map(PathBuf::as_path).unwrap_or_else(|| doc.base_dir());
+        scene_inputs(scene, base, &mut files)?;
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 /// Adds the files `doc` at `path` names to `files`, then those of the documents it includes that are not in
 /// `seen` yet: they are loaded when the scene is evaluated, so the main document does not name their files.
-fn named(path: &Path, doc: &sr_model::Document, files: &mut Vec<PathBuf>, seen: &mut Vec<PathBuf>) {
-    use sr_model::assets::{input_uri_attributes, resolve, sequence_frame, Resolved};
+fn named(
+    path: &Path,
+    doc: &sr_model::Document,
+    files: &mut Vec<PathBuf>,
+    seen: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
     let base = path.parent().unwrap_or(Path::new("."));
+    for inc in scene_inputs(&doc.scene, base, files)? {
+        // one file has many spellings (`parts/../main.xml`): documents that include each other must end
+        let real = inc.canonicalize().unwrap_or_else(|_| inc.clone());
+        if seen.contains(&real) {
+            continue;
+        }
+        seen.push(real);
+        if let Ok(doc) = sr_model::load_file(&inc, &sr_model::LoadOptions::without_assets()) {
+            named(&inc, &doc, files, seen)?;
+        }
+    }
+    Ok(())
+}
+
+fn scene_inputs(
+    scene: &sr_model::model::Scene,
+    base: &Path,
+    files: &mut Vec<PathBuf>,
+) -> std::io::Result<Vec<PathBuf>> {
+    use sr_model::assets::{input_uri_attributes, resolve, sequence_frame, Resolved};
+    // The validator skips huge sequences with a warning. Dependency collection cannot
+    // silently skip them: edits to an omitted frame would leave incremental output stale.
+    // Bound the total work before expanding this scene, including included/bound inputs.
+    const MAX_SEQUENCE_INPUTS: i128 = 1_000_000;
+    let mut count = files.len() as i128;
+    let mut error = None;
+    sr_model::element::walk(scene, &mut |e| {
+        if error.is_some() {
+            return;
+        }
+        if let Some(seq) = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>() {
+            let frames = if seq.last >= seq.first {
+                (seq.last as i128 - seq.first as i128) / seq.step.max(1) as i128 + 1
+            } else {
+                0
+            };
+            count += frames;
+            if count > MAX_SEQUENCE_INPUTS {
+                error = Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!(
+                    "image sequence {:?} ({frames} frames) exceeds the dependency limit of {MAX_SEQUENCE_INPUTS} inputs; narrow its first/last range or increase its step", seq.id
+                )));
+            }
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
     let mut includes = Vec::new();
     let mut add = |uri: &str| {
         if let Resolved::Local(path) = resolve(uri, base) {
             files.push(path);
         }
     };
-    sr_model::element::walk(&doc.scene, &mut |e| {
+    sr_model::element::walk(scene, &mut |e| {
         if let Some(inc) = e.as_any().downcast_ref::<sr_model::model::Include>() {
             if let Resolved::Local(path) = resolve(&inc.src, base) {
                 includes.push(path);
@@ -140,18 +204,7 @@ fn named(path: &Path, doc: &sr_model::Document, files: &mut Vec<PathBuf>, seen: 
             }
         }
     });
-    for inc in includes {
-        files.push(inc.clone());
-        // one file has many spellings (`parts/../main.xml`): documents that include each other must end
-        let real = inc.canonicalize().unwrap_or_else(|_| inc.clone());
-        if seen.contains(&real) {
-            continue;
-        }
-        seen.push(real);
-        if let Ok(doc) = sr_model::load_file(&inc, &sr_model::LoadOptions::without_assets()) {
-            named(&inc, &doc, files, seen);
-        }
-    }
+    Ok(includes)
 }
 
 /// A file's size, modification time and, on Unix, status-change time (seconds, nanoseconds): a file put
@@ -260,15 +313,15 @@ impl Drop for Lock {
 
 /// Hash of what a renderer is built from (the project, colour management, styles and media dependencies): while it
 /// stays the same, a renderer made for an earlier version of the document can render this one.
-pub fn setup_key(text: &str, path: &Path, doc: &sr_model::Document) -> u64 {
+pub fn setup_key(text: &str, inputs: &[PathBuf]) -> u64 {
     let mut h = SEED;
     for tag in ["<project", "<colorManagement", "<styles"] {
         if let Some(at) = text.find(tag) {
             h = fnv(element_span(text, at).unwrap_or("").as_bytes(), h);
         }
     }
-    for f in files(path, doc) {
-        h = fnv(format!("{}:{:?}", f.display(), stamp(&f)).as_bytes(), h);
+    for f in inputs {
+        h = fnv(format!("{}:{:?}", f.display(), stamp(f)).as_bytes(), h);
     }
     h
 }
@@ -339,21 +392,21 @@ pub struct Fingerprints {
 }
 
 impl Fingerprints {
-    /// Fingerprints for `doc`, whose source is `text` at `path`, rendered with `settings`
+    /// Fingerprints for `doc`, whose source is `text`, with resolved `inputs` and render `settings`
     /// (quality, bit depth, variant and anything else that changes pixels).
-    pub fn new(text: &str, path: &Path, doc: &sr_model::Document, settings: &str) -> Fingerprints {
+    pub fn new(text: &str, doc: &sr_model::Document, inputs: &[PathBuf], settings: &str) -> Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
-        // Invalidate fingerprints produced without included documents' files or file contents.
-        shared = fnv(b"frame-fingerprint-v4", shared);
+        // Invalidate fingerprints produced without the inputs selected by bindings and overrides.
+        shared = fnv(b"frame-fingerprint-v5", shared);
         shared = fnv(&font_set(&font_dirs()).to_le_bytes(), shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
         shared = fnv(&text.as_bytes()[..a], shared);
         shared = fnv(&text.as_bytes()[b..], shared);
         // files the document and those it includes name
-        for f in files(path, doc) {
-            shared = fnv(format!("{}:{}", f.display(), file_print(&f)).as_bytes(), shared);
+        for f in inputs {
+            shared = fnv(format!("{}:{}", f.display(), file_print(f)).as_bytes(), shared);
         }
         let whole = if doc.scene.project.motion_blur {
             Some("the scene uses motion blur, so frames show other times".to_string())
@@ -456,10 +509,49 @@ mod tests {
         );
         let main = dir.join("main.xml");
         let doc = load(&main, &scene(r#"<composition><include id="c" src="parts/child.xml"/></composition>"#));
-        let found = files(&main, &doc);
+        let found = files(&main, &doc).unwrap();
         for f in ["parts/child.xml", "parts/logo.png", "parts/deep/leaf.xml", "parts/deep/leaf.png"] {
             assert!(found.contains(&dir.join(f)), "{f} is missing from {found:?}");
         }
+    }
+
+    #[test]
+    fn sequence_dependencies_use_the_step_without_integer_overflow() {
+        let dir = scratch("sequence-step");
+        let main = dir.join("main.xml");
+        let doc = load(
+            &main,
+            r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/>
+          <assets><imageSequence id="s" src="f_%d.png" first="-9223372036854775808" last="9223372036854775807" step="9223372036854775807" fps="1" width="8" height="8"/></assets><composition/></scene>"#,
+        );
+        let found = files(&main, &doc).unwrap();
+        assert_eq!(found.len(), 3);
+        for frame in [i64::MIN, -1, i64::MAX - 1] {
+            assert!(found.contains(&dir.join(format!("f_{frame}.png"))));
+        }
+    }
+
+    #[test]
+    fn bound_and_included_sequences_share_the_dependency_limit() {
+        let dir = scratch("sequence-limit");
+        let main = dir.join("main.xml");
+        let doc = load(
+            &main,
+            r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/>
+          <parameters><param id="end" type="string" default="9223372036854775807"/><bind param="end" target="s" property="last"/></parameters>
+          <assets><imageSequence id="s" src="f_%d.png" first="0" last="0" fps="1" width="8" height="8"/></assets><composition/></scene>"#,
+        );
+        assert_eq!(files(&main, &doc).unwrap().len(), 1);
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        assert!(effective_files(&main, &doc, ev.program()).unwrap_err().to_string().contains("limit"));
+        let child = dir.join("child.xml");
+        load(&child, &std::fs::read_to_string(&main).unwrap().replace("last=\"0\"", "last=\"9223372036854775807\""));
+        let doc = load(
+            &main,
+            r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/>
+          <composition><include id="child" src="child.xml"/></composition></scene>"#,
+        );
+        assert!(files(&main, &doc).unwrap_err().to_string().contains("limit"));
     }
 
     #[test]
@@ -471,15 +563,16 @@ mod tests {
         let doc = load(&main, xml);
         std::fs::write(&logo, b"aaaa").unwrap();
         let time = std::fs::metadata(&logo).unwrap().modified().unwrap();
-        let before = (Fingerprints::new(xml, &main, &doc, "").shared, setup_key(xml, &main, &doc));
+        let inputs = files(&main, &doc).unwrap();
+        let before = (Fingerprints::new(xml, &doc, &inputs, "").shared, setup_key(xml, &inputs));
         // as `cp -p` of another file of the same size does
         std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(&logo, b"bbbb").unwrap();
         std::fs::File::options().write(true).open(&logo).unwrap().set_modified(time).unwrap();
         assert_eq!(std::fs::metadata(&logo).unwrap().modified().unwrap(), time);
-        assert_ne!(Fingerprints::new(xml, &main, &doc, "").shared, before.0);
+        assert_ne!(Fingerprints::new(xml, &doc, &inputs, "").shared, before.0);
         if cfg!(unix) {
-            assert_ne!(setup_key(xml, &main, &doc), before.1, "a kept renderer would show the old image");
+            assert_ne!(setup_key(xml, &inputs), before.1, "a kept renderer would show the old image");
         }
     }
 

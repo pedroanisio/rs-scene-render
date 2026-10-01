@@ -152,6 +152,33 @@ fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Skip path aliases and stage other copies before replacing their destination.
+/// Staging also protects the source when distinct paths are hard links to one file.
+fn copy_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let source_path = source.canonicalize()?;
+    match destination.canonicalize() {
+        Ok(path) if path == source_path => return Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut input = std::fs::File::open(source)?;
+    let mut temporary = destination.as_os_str().to_owned();
+    temporary.push(format!(".part-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let temporary = PathBuf::from(temporary);
+    let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    let result =
+        std::io::copy(&mut input, &mut output).and_then(|_| output.set_permissions(input.metadata()?.permissions()));
+    drop(output);
+    drop(input);
+    let result = result.and_then(|_| std::fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 /// Uploads `files` to one destination; returns their remote locations.
 pub fn upload(d: &m::Destination, files: &[PathBuf], base: &Path) -> Result<Vec<String>, DeliverError> {
     let uri = d.uri.as_str();
@@ -163,9 +190,7 @@ pub fn upload(d: &m::Destination, files: &[PathBuf], base: &Path) -> Result<Vec<
             std::fs::create_dir_all(&dir)?;
             for f in files {
                 let to = dir.join(file_name(f));
-                if to != *f {
-                    std::fs::copy(f, &to)?;
-                }
+                copy_file(f, &to)?;
                 out.push(to.display().to_string());
             }
         }
@@ -373,6 +398,57 @@ pub fn deliver_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_file_delivery_aliases_preserve_rendered_bytes() {
+        let dir = (0..)
+            .find_map(|attempt| {
+                let dir = std::env::temp_dir().join(format!("sr-delivery-aliases-{}-{attempt}", std::process::id()));
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => Some(dir),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("{e}"),
+                }
+            })
+            .unwrap();
+        let source = dir.join("movie.mp4");
+        let bytes = b"completed render";
+        let mut destinations = vec![dir.clone(), dir.join("..").join(dir.file_name().unwrap())];
+        let hard = dir.join("hard");
+        std::fs::create_dir_all(&hard).unwrap();
+        std::fs::write(&source, bytes).unwrap();
+        std::fs::hard_link(&source, hard.join("movie.mp4")).unwrap();
+        destinations.push(hard);
+        #[cfg(unix)]
+        {
+            let linked = dir.join("linked");
+            std::os::unix::fs::symlink(&dir, &linked).unwrap();
+            destinations.push(linked);
+        }
+        for to in destinations {
+            let d = m::Destination {
+                loc: Default::default(),
+                kind: m::DestinationKind::File,
+                uri: to.display().to_string(),
+                credentials: None,
+            };
+            upload(&d, std::slice::from_ref(&source), &dir).unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), bytes, "delivery to {} erased its input", to.display());
+            assert_eq!(std::fs::read(to.join("movie.mp4")).unwrap(), bytes);
+        }
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("movie.mp4"), b"old render").unwrap();
+        let d = m::Destination {
+            loc: Default::default(),
+            kind: m::DestinationKind::File,
+            uri: other.display().to_string(),
+            credentials: None,
+        };
+        upload(&d, std::slice::from_ref(&source), &dir).unwrap();
+        assert_eq!(std::fs::read(other.join("movie.mp4")).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn hmac_and_sigv4_match_published_vectors() {

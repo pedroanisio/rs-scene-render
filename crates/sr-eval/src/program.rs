@@ -2287,6 +2287,19 @@ impl Builder {
                 self.nodes[n].matte = self.resolve(&scope, &mt);
             }
         }
+        // Overrides and symbol expansion can introduce matte cycles absent from the source XML.
+        let children: Vec<Vec<usize>> =
+            self.nodes.iter().map(|n| n.children.iter().map(|&c| c as usize).collect()).collect();
+        let mattes: Vec<_> = self.nodes.iter().map(|n| n.matte.map(|m| m as usize)).collect();
+        for i in sr_model::rules::cyclic_mattes(&children, &mattes) {
+            let n = &self.nodes[i];
+            self.diags.push(err(
+                "P05",
+                format!("{:?}: matte dependencies form a cycle through mattes or contained children", n.id),
+                n.elem.loc(),
+                &*n.id,
+            ));
+        }
         // Transform dependencies include the container when @parent is absent.
         for start in 0..self.nodes.len() {
             let mut seen = HashSet::new();

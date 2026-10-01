@@ -23,6 +23,34 @@ fn valid_document_exits_zero() {
 }
 
 #[test]
+fn huge_sequences_are_rejected_before_dependency_expansion() {
+    let (dir, scene) = two_halves("huge-sequence-dependencies", "");
+    std::fs::write(&scene, r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+      <assets><imageSequence id="seq" src="f_%d.png" first="0" last="9223372036854775807" fps="1" width="16" height="16"/></assets><composition/></scene>"#).unwrap();
+    for command in ["watch", "render"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+            .args([command, scene.to_str().unwrap(), "-o", dir.join("out.png").to_str().unwrap()])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() && start.elapsed().as_secs() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("{command} did not bound image-sequence dependency expansion");
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("image sequence") && error.contains("limit"), "{command}: {output:?}");
+    }
+}
+
+#[test]
 fn invalid_document_exits_one_with_a_located_diagnostic() {
     let o = run(&["validate", &path("invalid/c21.scene.xml")]);
     assert_eq!(o.status.code(), Some(1));
@@ -676,15 +704,31 @@ fn regression_incremental_strict_repeats_shader_diagnostics() {
 
 #[test]
 fn regression_watch_reloads_changed_image_bytes() {
+    watch_reloads_image_bytes("watch-image-regression", "", "source.png");
+}
+
+#[test]
+fn watch_reloads_bound_image_bytes() {
+    watch_reloads_image_bytes(
+        "watch-bound-image",
+        r#"<parameters><param id="picture" type="string" default="source.png"/><bind param="picture" target="img" property="src"/></parameters>"#,
+        "original.png",
+    );
+}
+
+fn watch_reloads_image_bytes(name: &str, parameters: &str, authored_src: &str) {
     use std::io::{BufRead, BufReader};
-    let (dir, scene) = two_halves("watch-image-regression", "");
+    let (dir, scene) = two_halves(name, "");
     let source = dir.join("source.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba(GREEN)).save(dir.join("original.png")).unwrap();
     image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255])).save(&source).unwrap();
     std::fs::write(
         &scene,
-        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
-      <assets><image id="img" src="source.png" width="16" height="16"/></assets>
-      <composition><layer id="l" asset="img"/></composition></scene>"#,
+        format!(
+            r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>{parameters}
+      <assets><image id="img" src="{authored_src}" width="16" height="16"/></assets>
+      <composition><layer id="l" asset="img"/></composition></scene>"#
+        ),
     )
     .unwrap();
     let output = dir.join("watch.png");
@@ -723,6 +767,7 @@ fn regression_watch_reloads_changed_image_bytes() {
         }
         panic!("watch did not become ready: {o:?}");
     }
+    assert_eq!(centre(output.clone()), RED);
     image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&source).unwrap();
     let start = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
@@ -1052,4 +1097,58 @@ fn watch_reloads_edited_caption_text() {
     let actual = image::open(output).unwrap().to_rgba8();
     assert!(before != expected, "the edited text changes the image");
     assert!(actual == expected, "watch must render the edited captions like a fresh renderer");
+}
+
+#[test]
+fn bound_assets_invalidate_changed_frames() {
+    let (dir, scene) = two_halves("bound-assets", "");
+    let image =
+        |name: &str, color| image::RgbaImage::from_pixel(16, 16, image::Rgba(color)).save(dir.join(name)).unwrap();
+    image("base.png", GREEN);
+    image("actual.png", RED);
+    let xml = r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+      <parameters><param id="picture" type="string" default="base.png"/><bind param="picture" target="img" property="src"/></parameters>
+      <assets><image id="img" src="base.png" width="16" height="16"/></assets><composition><layer id="l" asset="img"/></composition></scene>"#;
+    std::fs::write(&scene, xml).unwrap();
+    let output = dir.join("bound.png");
+    let args = [
+        "render",
+        scene.to_str().unwrap(),
+        "--param",
+        "picture=actual.png",
+        "--changed-only",
+        "-o",
+        output.to_str().unwrap(),
+    ];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert_eq!(rendered(&first), (1, 1));
+    assert_eq!(centre(output.clone()), RED);
+    assert_eq!(rendered(&run(&args)), (0, 1));
+    image("actual.png", BLUE);
+    assert_eq!(rendered(&run(&args)), (1, 1), "the resolved input changed");
+    assert_eq!(centre(output), BLUE);
+}
+
+#[test]
+fn plain_exports_keep_the_final_partial_frame() {
+    let (dir, scene) = two_halves("partial-frame-export", "");
+    for (name, segment) in [("plain", ""), ("segmented", r#"<segment from="0" to="0.21"/>"#)] {
+        let xml = format!(
+            r##"<scene version="1.2"><project width="16" height="16" fps="30" duration="0.21"/>
+          <output path="{name}_%03d.png" codec="png-sequence" fps="10">{segment}</output>
+          <composition><shape id="s" shape="rect" width="16" height="16" fill="#FF0000"><animate property="fill"><key time="0" value="#FF0000" interpolation="hold"/><key time="0.2" value="#0000FF"/></animate></shape></composition></scene>"##
+        );
+        std::fs::write(&scene, xml).unwrap();
+        let o = run(&["encode", scene.to_str().unwrap()]);
+        if no_gpu(&o) {
+            return;
+        }
+        assert!(o.status.success(), "{o:?}");
+        assert!(dir.join(format!("{name}_002.png")).is_file(), "{name}: dropped the frame starting at 0.2 seconds");
+        assert!(!dir.join(format!("{name}_003.png")).exists());
+        assert_eq!(centre(dir.join(format!("{name}_002.png"))), BLUE);
+    }
 }

@@ -65,6 +65,28 @@ pub(super) struct CamExtras {
     pub path: Option<crate::pathtrace::PathOpts>,
 }
 
+impl CamExtras {
+    /// Hash resolved values, including depth of field's animated focus target.
+    pub(super) fn hash(&self) -> u64 {
+        h(&[
+            self.exposure.to_bits() as u64,
+            self.lens_k1.to_bits() as u64,
+            self.ssr as u64,
+            self.dof.map_or(0, |d| {
+                h(&[
+                    1,
+                    d.coc_scale.to_bits() as u64,
+                    d.focus.to_bits() as u64,
+                    d.max_coc.to_bits() as u64,
+                    d.blades as u64,
+                ])
+            }),
+            self.ao.map_or(0, |a| h(&[1, a[0].to_bits() as u64, a[1].to_bits() as u64])),
+            self.path.map_or(0, |p| h(&[1, p.samples as u64, p.bounces as u64, p.denoise as u64])),
+        ])
+    }
+}
+
 /// The blobs of a clay object at this frame: static attributes, overridden by the animated
 /// values of each `<blob>` (part `{id}/blob[k]`).
 fn clay_blobs(n: &sr_eval::FrameNode) -> Vec<sr_3d::clay::Blob> {
@@ -165,6 +187,27 @@ pub(super) fn doc_lights(p: &Program) -> &[m::Light] {
 }
 
 impl Renderer {
+    /// A light's resolved transform dependencies, including targets outside the cached subtree.
+    /// Resolve them with the drawing path so chained parents, cameras and simulated 3D poses
+    /// contribute their actual world transforms rather than only their authored attributes.
+    pub(super) fn light_transform_hash(ctx: &Ctx, id: &str) -> Option<u64> {
+        let lights = doc_lights(ctx.p);
+        let light = lights.iter().find(|l| l.id == id)?;
+        let a = Attrs { e: light, props: element_props(ctx.g, id) };
+        let world = Self::pose_world(ctx.g, lights, light, &a, 0);
+        let mut words: Vec<u64> = world.to_cols_array().iter().map(|v| v.to_bits() as u64).collect();
+        for c in sr_model::element::children(light) {
+            if c.element_name() != "transformConstraint" {
+                continue;
+            }
+            let ca = Attrs { e: c, props: None };
+            if let Some(target) = ca.str("target").and_then(|t| Self::target_point(ctx.g, lights, &t)) {
+                words.extend(target.to_array().map(|v| v.to_bits() as u64));
+            }
+        }
+        Some(h(&words))
+    }
+
     pub(super) fn three_engine(&mut self) -> &mut ThreeEngine {
         let g = &self.gpu;
         self.three.get_or_insert_with(|| {

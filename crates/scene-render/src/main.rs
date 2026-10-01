@@ -948,7 +948,8 @@ fn render(
     }
     let eval_warnings = ev.warnings().len();
     // a renderer kept from an earlier render of this document (watch), while it still fits
-    let setup = changes::setup_key(&text, file, &doc);
+    let inputs = changes::effective_files(file, &doc, ev.program())?;
+    let setup = changes::setup_key(&text, &inputs);
     let mut keep = inc.keep;
     let kept = keep.as_mut().and_then(|k| k.take()).filter(|(key, _)| *key == setup).map(|(_, r)| r);
     let mut r = match kept {
@@ -1078,7 +1079,7 @@ fn render(
         let prints = inc.changed_only.then(|| {
             let effective = quality.unwrap_or(doc.scene.project.quality).as_str();
             let settings = format!("{effective} {bit_depth} {:?}", opts);
-            changes::Fingerprints::new(&text, file, &doc, &settings)
+            changes::Fingerprints::new(&text, &doc, &inputs, &settings)
         });
         let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
         // every render keeps them true: a frame written anew loses the fingerprint recorded for the old one
@@ -1182,12 +1183,15 @@ struct Incremental<'a> {
 }
 
 /// The document and the files it names, with their sizes and modification times.
-fn watched_stamps(file: &Path) -> Vec<(PathBuf, Option<changes::Stamp>)> {
+fn watched_stamps(file: &Path) -> std::io::Result<Vec<(PathBuf, Option<changes::Stamp>)>> {
     let mut files = vec![file.to_path_buf()];
     if let Ok(doc) = sr_model::load_file(file, &LoadOptions::without_assets()) {
-        files.extend(changes::files(file, &doc));
+        files.extend(match sr_eval::Evaluator::new(&doc, &Default::default()) {
+            Ok(ev) => changes::effective_files(file, &doc, ev.program()),
+            Err(_) => changes::files(file, &doc),
+        }?);
     }
-    files.into_iter().map(|f| (f.clone(), changes::stamp(&f))).collect()
+    Ok(files.into_iter().map(|f| (f.clone(), changes::stamp(&f))).collect())
 }
 
 fn watch(
@@ -1203,7 +1207,7 @@ fn watch(
     let mut runs = 0u32;
     loop {
         // taken before rendering, so an edit made while it renders starts another render
-        let before = watched_stamps(file);
+        let before = watched_stamps(file)?;
         let list: Vec<u64> = match frames {
             Some((a, b)) => (a..b).collect(),
             None => {
@@ -1232,7 +1236,9 @@ fn watch(
         }
         writeln!(out.w, "watching {} for changes (Ctrl-C stops)", file.display())?;
         out.w.flush()?;
-        while watched_stamps(file) == before {
+        // Resolve bindings once per render, then poll those files. A changed source or data
+        // file starts another iteration, which discovers any newly selected dependencies.
+        while before.iter().all(|(f, stamp)| changes::stamp(f) == *stamp) {
             std::thread::sleep(std::time::Duration::from_millis(interval.max(20)));
         }
     }
@@ -1584,5 +1590,20 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    #[test]
+    fn watches_bound_asset_files() {
+        let dir = std::env::temp_dir().join(format!("sr-watch-bound-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.xml");
+        std::fs::write(&file, r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/>
+          <parameters><param id="picture" type="string" default="actual.png"/><bind param="picture" target="img" property="src"/></parameters>
+          <assets><image id="img" src="base.png" width="16" height="16"/></assets><composition><layer id="l" asset="img"/></composition></scene>"#).unwrap();
+        let watched = super::watched_stamps(&file).unwrap();
+        assert!(watched.iter().any(|(f, _)| f == &dir.join("actual.png")), "bound file missing: {watched:?}");
     }
 }

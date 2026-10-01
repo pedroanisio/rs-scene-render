@@ -604,7 +604,8 @@ pub fn deliver(
     };
     let ev0 = Evaluator::new(doc, &eo).map_err(DeliverError::Document)?;
     let p0 = ev0.program();
-    let fps = output.fps.map(|f| f.as_f64()).unwrap_or(p0.fps.as_f64());
+    let frame_rate = output.fps.unwrap_or(p0.fps);
+    let fps = frame_rate.as_f64();
     // with segments, the output has its own timeline: start and end (from the command line) are output times
     let segments = crate::segments::TimeMap::of(p0, output).map_err(DeliverError::Invalid)?;
     let timeline = segments.as_ref().map(|tm| tm.duration).unwrap_or(p0.duration);
@@ -798,8 +799,8 @@ pub fn deliver(
         let times: Vec<f64> = match &frame_times {
             Some(f) => f.iter().map(|f| f.composition).collect(),
             None => {
-                let n = ((end - start) * fps).round().max(1.0) as u64;
-                (0..n).map(|k| start + k as f64 / fps).collect()
+                let n = frame_rate.frame_count(end - start).max(1);
+                (0..n).map(|k| start + frame_rate.frame_time(k)).collect()
             }
         };
         let n = times.len() as u64;

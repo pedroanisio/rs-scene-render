@@ -196,6 +196,47 @@ fn time_stretch_keeps_pitch_and_varispeed_does_not() {
 }
 
 #[test]
+fn test_short_stretch_preserves_duration_channels_and_pitch() {
+    for n in [0, 1, 2, 3, 4, 5, 7, 16, 480, 1023, 1024, 2048] {
+        let src = vec![vec![0.25; n], vec![-0.25; n]];
+        for factor in [0.0, 0.25, 0.5, 1.0, 1.5, 2.0] {
+            let out = sr_audio::mix::time_stretch(&src, factor);
+            assert_eq!(out.len(), 2);
+            assert_eq!(out[0].len(), (n as f64 * factor) as usize, "{n} samples, factor {factor}");
+            assert_eq!(out[1].len(), out[0].len());
+            assert!(out.iter().flatten().all(|x| x.is_finite()));
+            assert!(out[0].iter().zip(&out[1]).all(|(l, r)| (l + r).abs() < 1e-6));
+            if factor == 1.0 {
+                assert_eq!(out, src);
+            }
+            if !out[0].is_empty() {
+                assert!(out[0].iter().any(|v| v.abs() > 0.01));
+            }
+        }
+    }
+    let src = vec![sine(1500.0, 0.5, 0.01)];
+    for factor in [0.5, 2.0] {
+        let out = sr_audio::mix::time_stretch(&src, factor);
+        let body = &out[0];
+        let crossings = body.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count() as f64;
+        let hz = crossings * RATE as f64 / body.len() as f64 / 2.0;
+        assert!((hz - 1500.0).abs() < 200.0, "factor {factor}: {hz} Hz");
+    }
+}
+
+#[test]
+fn test_short_track_speed_controls_playback_extent() {
+    for speed in [0.5, 2.0] {
+        let mut t = track("short", mono(vec![0.25; 480]), 0.0);
+        if let NodeKind::Track { placement: Placement::Timeline { speed: s, .. }, .. } = &mut t.kind {
+            *s = speed;
+        }
+        let out = mix(0.03, vec![t]).render().unwrap();
+        assert_eq!(out.extents["short"].end, (480.0 / speed) as usize);
+    }
+}
+
+#[test]
 fn mapped_video_audio_follows_source_time() {
     // a layer that starts at 1 s and plays its source at 0.5×
     let src = mono((0..RATE as usize * 2).map(|i| i as f32 / (RATE * 2) as f32).collect());

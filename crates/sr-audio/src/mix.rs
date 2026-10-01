@@ -300,35 +300,43 @@ pub struct Mixed {
 
 /// WSOLA time-stretch: output length = input length × `factor`, pitch kept.
 pub fn time_stretch(src: &Planar, factor: f64) -> Planar {
-    const N: usize = 1024;
-    const HS: usize = N / 2;
     const TOL: i64 = 256;
     let n = src.first().map(Vec::len).unwrap_or(0);
-    if n < N || (factor - 1.0).abs() < 1e-9 {
+    if n == 0 || (factor - 1.0).abs() < 1e-9 {
         return src.clone();
     }
     let out_len = (n as f64 * factor) as usize;
-    let win = crate::dsp::hann(N);
+    // Fewer than four input samples cannot form overlapping analysis windows;
+    // a single output sample cannot carry a window either. Keep the original
+    // sample rate and repeat tiny inputs to honor the requested length.
+    if n < 4 || out_len < 2 {
+        return src.iter().map(|c| (0..out_len).map(|i| c[i % n]).collect()).collect();
+    }
+    // A short clip still needs room to search for a matching overlap. Keep the
+    // existing window for longer clips; use half the clip below that threshold.
+    let window = if n < 1024 { n / 2 } else { 1024 };
+    let hop = window / 2;
+    let win = crate::dsp::hann(window);
     let mono: Vec<f32> = (0..n).map(|i| src.iter().map(|c| c[i]).sum::<f32>()).collect();
-    let mut out = vec![vec![0f64; out_len + N]; src.len()];
-    let mut norm = vec![0f64; out_len + N];
-    let ha = HS as f64 / factor;
+    let mut out = vec![vec![0f64; out_len + window]; src.len()];
+    let mut norm = vec![0f64; out_len + window];
+    let ha = hop as f64 / factor;
     let mut prev: i64 = 0;
     let mut k = 0usize;
-    while k * HS < out_len {
+    while k * hop < out_len {
         let nominal = (k as f64 * ha) as i64;
         let pos = if k == 0 {
             0
         } else {
             // best match to the natural continuation of the previous segment
-            let target = prev + HS as i64;
+            let target = prev + hop as i64;
             let mut best = (f64::MIN, nominal);
             let mut d = -TOL;
             while d <= TOL {
                 let c = nominal + d;
-                if c >= 0 && c as usize + N <= n && target >= 0 && target as usize + N <= n {
+                if c >= 0 && c as usize + window <= n && target >= 0 && target as usize + window <= n {
                     let mut s = 0.0;
-                    for j in (0..N).step_by(4) {
+                    for j in (0..window).step_by(4) {
                         s += mono[c as usize + j] as f64 * mono[target as usize + j] as f64;
                     }
                     if s > best.0 {
@@ -339,14 +347,14 @@ pub fn time_stretch(src: &Planar, factor: f64) -> Planar {
             }
             best.1
         };
-        let pos = pos.clamp(0, (n - N) as i64);
+        let pos = pos.clamp(0, (n - window) as i64);
         for (ch, o) in src.iter().zip(out.iter_mut()) {
-            for j in 0..N {
-                o[k * HS + j] += ch[pos as usize + j] as f64 * win[j];
+            for j in 0..window {
+                o[k * hop + j] += ch[pos as usize + j] as f64 * win[j];
             }
         }
-        for j in 0..N {
-            norm[k * HS + j] += win[j];
+        for j in 0..window {
+            norm[k * hop + j] += win[j];
         }
         prev = pos;
         k += 1;

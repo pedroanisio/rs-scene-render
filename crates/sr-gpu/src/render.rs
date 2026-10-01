@@ -1692,6 +1692,9 @@ impl Renderer {
             .filter(|(k, _)| &***k == id || (k.starts_with(id) && k[id.len()..].starts_with('/')))
             .map(|(k, v)| h(&[sr_eval::rng::hash_str(k), *v]))
             .collect();
+        if let Some(transform) = Self::light_transform_hash(ctx, id) {
+            words.push(transform);
+        }
         if Self::asset_element(ctx.p, id)
             .and_then(|a| a.as_any().downcast_ref::<m::GeneratorAsset>())
             .is_some_and(|a| a.kind == m::GeneratorAssetKind::FilmGrain)
@@ -3028,6 +3031,19 @@ impl Renderer {
             _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "frame")),
         };
         self.frame = Some(frame.clone());
+        // FrameGraph is public: callers may supply links that did not pass compilation.
+        // Reject cycles before any recursive matte hashing or drawing, and clear old pixels.
+        let mattes: Vec<_> = g.nodes.iter().map(|n| n.matte.map(|m| m as usize)).collect();
+        let cycles = sr_model::rules::cyclic_mattes(&kids, &mattes);
+        if !cycles.is_empty() {
+            plan.stats.errors.extend(cycles.iter().map(|&i| {
+                format!("{}: matte dependencies form a cycle through mattes or contained children", g.nodes[i].id)
+            }));
+            self.prefix = None;
+            self.prev_root.clear();
+            plan.jobs.push(Job::draws(frame.clone(), true, Vec::new(), true));
+            return Frame { texture: frame, stats: self.execute(plan, 0, None, &[]) };
+        }
         let mut timed = std::collections::HashSet::new();
         let mut generated = std::collections::HashSet::new();
         for key in p.assets.keys() {
@@ -3041,10 +3057,10 @@ impl Renderer {
                 }
             }
         }
-        // the camera (with any 360 face override) changes every projected draw
+        // The camera view and post-processing affect every projected draw, including cached groups.
         let cam_hash = {
-            let (cv, _, _) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
-            h(&cv.view_proj().to_cols_array().map(|v| v.to_bits() as u64))
+            let (cv, extras, _) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
+            h(&[h(&cv.view_proj().to_cols_array().map(|v| v.to_bits() as u64)), extras.hash()])
         };
         let elements = h(&[elements_hash(&g.elements), cam_hash]);
         let el = element_hashes(&g.elements);

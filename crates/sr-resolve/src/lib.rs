@@ -113,11 +113,30 @@ fn read_sidecar(cache: &Path) -> Option<Sidecar> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    replace_atomic(path, |f| f.write_all(bytes)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Never follow an existing temporary-file or destination symlink while writing.
+fn replace_atomic(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".part");
+    tmp.push(format!(".part-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = write(&mut f);
+    drop(f);
+    let result = result.and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn copy_atomic(src: &Path, path: &Path) -> std::io::Result<()> {
+    let mut input = std::fs::File::open(src)?;
+    replace_atomic(path, |f| std::io::copy(&mut input, f).map(|_| ()))
 }
 
 /// The result store.
@@ -181,6 +200,20 @@ fn lexical(p: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Resolve existing ancestors, including symlinks, while allowing new cache directories.
+/// A dangling symlink is an error rather than a missing directory we may create through.
+fn physical(p: &Path) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => p.canonicalize().map_err(|e| format!("{}: {e}", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = p.parent().ok_or_else(|| format!("{}: {e}", p.display()))?;
+            let name = p.file_name().ok_or_else(|| format!("{}: {e}", p.display()))?;
+            Ok(physical(parent)?.join(name))
+        }
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
+}
+
 /// The file a cache attribute names. Caches are written, so they must lie inside `root` (the
 /// project folder): absolute paths and `..` steps that leave it are refused.
 fn local_in(src: &str, base: &Path, root: &Path) -> Result<PathBuf, String> {
@@ -195,6 +228,10 @@ fn local_in(src: &str, base: &Path, root: &Path) -> Result<PathBuf, String> {
              written in with SR_RESOLVE_ROOT",
             root.display()
         ));
+    }
+    let (file, real_root) = (physical(&file)?, physical(&root)?);
+    if file == real_root || !file.starts_with(&real_root) {
+        return Err(format!("the cache resolves outside the project folder {}", root.display()));
     }
     Ok(file)
 }
@@ -237,7 +274,10 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         message: String::new(),
         notes: Vec::new(),
     };
-    let key = t.req.key();
+    // The extension selects the provider's output format and must participate in both
+    // the request key and store path, before any cache or sidecar is consulted.
+    let req = Request { output: t.cache.display().to_string(), ..t.req.clone() };
+    let key = req.key();
     let pinned_ok = |sha: &str| t.pinned.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(sha));
     // 1. cache and sidecar agree with the request
     if !o.force {
@@ -280,15 +320,18 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
     }
     // 2. the store
     let version;
-    let stored = store.as_ref().map(|s| store_entry(s, &t.req, &key)).filter(|p| !o.force && p.is_file());
-    if let Some(src) = stored {
-        if let Err(e) = std::fs::copy(&src, &t.cache) {
+    let stored = store.as_ref().filter(|_| !o.force).map(|s| store_entry(s, &req, &key)).and_then(|path| {
+        // A shared result has the same integrity requirements as a project cache.
+        // Missing, stale or damaged entries are misses, never new content to pin.
+        read_sidecar(&path)
+            .filter(|side| side.key == key && file_sha256(&path).ok().as_deref() == Some(side.sha256.as_str()))
+            .map(|side| (path, side))
+    });
+    if let Some((src, side)) = stored {
+        if let Err(e) = copy_atomic(&src, &t.cache) {
             return fail(r, format!("{}: {e}", t.cache.display()));
         }
-        version = std::fs::read(src.with_extension("json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Sidecar>(&b).ok())
-            .and_then(|s| s.version);
+        version = side.version;
         r.status = Status::Restored;
     } else {
         // 3. the provider
@@ -307,15 +350,16 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         }
         let ext = t.cache.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "bin".into());
         let out = work.join(format!("result.{ext}"));
-        let req = Request { output: out.display().to_string(), workdir: work.display().to_string(), ..t.req.clone() };
-        let resp: Response = match provider.run(&req) {
+        let provider_req =
+            Request { output: out.display().to_string(), workdir: work.display().to_string(), ..req.clone() };
+        let resp: Response = match provider.run(&provider_req) {
             Ok(r) => r,
             Err(e) => return fail(r, format!("{}: {e}", t.req.provider)),
         };
         if !out.is_file() {
             return fail(r, format!("{} reported success but wrote nothing", t.req.provider));
         }
-        if let Err(e) = std::fs::copy(&out, &t.cache) {
+        if let Err(e) = copy_atomic(&out, &t.cache) {
             return fail(r, format!("{}: {e}", t.cache.display()));
         }
         version = resp.version;
@@ -326,16 +370,16 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         Ok(s) => s,
         Err(e) => return fail(r, format!("{}: {e}", t.cache.display())),
     };
-    let side = Sidecar { key, sha256: sha.clone(), provider: t.req.provider.clone(), version, request: t.req.clone() };
+    let side = Sidecar { key, sha256: sha.clone(), provider: t.req.provider.clone(), version, request: req.clone() };
     let side_json = serde_json::to_vec_pretty(&side).expect("json");
     if let Err(e) = write_atomic(&sidecar_path(&t.cache), &side_json) {
         return fail(r, e);
     }
     if let (Some(s), Status::Made) = (&store, r.status) {
-        let entry = store_entry(s, &t.req, &side.key);
+        let entry = store_entry(s, &req, &side.key);
         let _ = std::fs::create_dir_all(s)
-            .and_then(|_| std::fs::copy(&t.cache, &entry))
-            .and_then(|_| std::fs::write(entry.with_extension("json"), &side_json));
+            .and_then(|_| copy_atomic(&t.cache, &entry))
+            .and_then(|_| replace_atomic(&sidecar_path(&entry), |f| std::io::Write::write_all(f, &side_json)));
     }
     r.sha256 = Some(sha.clone());
     let pin = (!pinned_ok(&sha)).then_some(sha);

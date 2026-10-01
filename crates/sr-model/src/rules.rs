@@ -15,9 +15,9 @@
 //! `R30-<attr>` and `R31-<attr>`).
 
 //!
-//! Three further checks keep what later stages build within bounds: `P02` (a
+//! Further checks keep what later stages build within bounds: `P02` (a
 //! count far beyond what a renderer can draw), `P03` (a symbol that contains
-//! itself) and `P04` (an expression nested too deeply).
+//! itself), `P04` (an expression nested too deeply) and `P05` (cyclic matte dependencies).
 
 use std::collections::{HashMap, HashSet};
 
@@ -931,7 +931,48 @@ pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) {
     physics_limits(root, out);
     count_limits(root, out);
     symbol_cycles(root, out);
+    matte_cycles(root, out);
     expression_depths(root, out);
+}
+
+/// Nodes whose matte edges participate in a cycle through mattes or contained children.
+/// Shared mattes and a container using its own descendant as a matte are valid DAGs.
+pub fn cyclic_mattes(children: &[Vec<usize>], mattes: &[Option<usize>]) -> Vec<usize> {
+    if mattes.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let mut next = children.to_vec();
+    for (edges, matte) in next.iter_mut().zip(mattes) {
+        edges.extend(matte);
+    }
+    let group = components(&next);
+    mattes.iter().enumerate().filter_map(|(i, m)| m.filter(|&m| group[i] == group[m]).map(|_| i)).collect()
+}
+
+fn matte_cycles(root: Node, out: &mut Vec<Diagnostic>) {
+    let nodes: Vec<_> = root.descendants().filter(|n| n.is_element()).collect();
+    let indices: HashMap<_, _> = nodes.iter().enumerate().map(|(i, n)| (n.id(), i)).collect();
+    let ids: HashMap<_, _> =
+        nodes.iter().enumerate().filter_map(|(i, n)| n.attribute("id").map(|id| (id, i))).collect();
+    let children: Vec<Vec<usize>> =
+        nodes.iter().map(|n| n.children().filter_map(|c| indices.get(&c.id()).copied()).collect()).collect();
+    let mattes: Vec<_> = nodes
+        .iter()
+        .map(|n| n.attribute("matte").filter(|_| !is(*n, "transition")).and_then(|m| ids.get(m).copied()))
+        .collect();
+    for i in cyclic_mattes(&children, &mattes) {
+        let n = nodes[i];
+        // Direct self references already have the Schematron R9 diagnostic.
+        if mattes[i] == Some(i) {
+            continue;
+        }
+        out.push(Diagnostic::error(
+            "P05",
+            "matte dependencies form a cycle through mattes or contained children",
+            attr_loc(n, "matte"),
+            element_path(n),
+        ));
+    }
 }
 
 fn attr_loc(n: Node, attr: &str) -> Loc {

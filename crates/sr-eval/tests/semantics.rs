@@ -9,6 +9,18 @@ const ASSETS: &str = r#"<assets>
   <text id="txt" text="Hello {{name}} #{{index}}: {{item.city}}" width="100" height="20" size="10"/>
 </assets>"#;
 
+#[test]
+fn reject_matte_cycles_created_by_overrides() {
+    let d = doc(
+        r#"<parameters><variant id="cycle"><override target="b" property="matte" value="a"/></variant></parameters>"#,
+        r#"<group id="a" matte="b"/><group id="b"/>"#,
+    );
+    let opts = EvalOptions { variant: Some("cycle".into()), ..Default::default() };
+    let result = Evaluator::new(&d, &opts);
+    assert!(result.is_err(), "expanded matte cycle was accepted");
+    assert!(result.err().unwrap().diagnostics.iter().any(|d| d.code == "P05"));
+}
+
 fn doc(sections: &str, comp: &str) -> sr_model::Document {
     let xml = format!(
         r#"<scene version="1.1"><project width="1000" height="500" fps="10" duration="10" seed="1"/>{sections}{ASSETS}<composition>{comp}</composition></scene>"#

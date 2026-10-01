@@ -4,6 +4,77 @@ mod common;
 use common::*;
 
 #[test]
+fn isolated_groups_follow_camera_exposure() {
+    let Some(gpu) = gpu() else { return };
+    let d = doc(
+        "",
+        "",
+        r#"<camera id="cam" x="32" y="16" z="-80"><animate property="exposure"><key time="0" value="-2"/><key time="1" value="2"/></animate></camera>
+      <group id="g" isolate="true"><object3D id="ball" primitive="sphere" x="32" y="16" radius="12"/></group>"#,
+    );
+    let frames = render_sub_frames(&d, &[0.0, 1.0]).unwrap();
+    let fresh = render_times_on(gpu, &d, &[1.0]).unwrap();
+    assert!(frames[1].stats.errors.is_empty() && fresh.stats.errors.is_empty());
+    assert!(frames[0].px != fresh.px, "exposure must change the image");
+    assert!(frames[1].px == fresh.px, "isolated group retained the old camera exposure");
+}
+
+#[test]
+fn cyclic_frame_mattes_report_an_error_without_aborting() {
+    const CHILD: &str = "SR_TEST_CYCLIC_FRAME_MATTES";
+    if std::env::var_os(CHILD).is_none() {
+        // A regression would abort the renderer process, so keep it outside the test runner.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cyclic_frame_mattes_report_an_error_without_aborting", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let Some(gpu) = gpu() else { return };
+    let d = doc(
+        "",
+        "",
+        r##"<shape id="a" shape="rect" width="16" height="16" fill="#FFFFFF"/><shape id="b" shape="rect" width="16" height="16" fill="#FFFFFF"/>"##,
+    );
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let mut renderer = sr_gpu::Renderer::new(gpu, ev.program());
+    let valid = ev.evaluate(0.0);
+    let good = renderer.render(&valid, ev.program());
+    let expected = renderer.read(&good.texture);
+    renderer.render(&valid, ev.program());
+    let mut g = ev.evaluate(0.0);
+    g.nodes[0].matte = Some(1);
+    g.nodes[1].matte = Some(0);
+    let frame = renderer.render(&g, ev.program());
+    assert!(frame.stats.errors.iter().any(|e| e.contains("matte") && e.contains("cycle")));
+    assert!(renderer.read(&frame.texture).iter().all(|p| *p == [0.0; 4]), "bad frames must clear old pixels");
+    let recovered = renderer.render(&valid, ev.program());
+    assert!(recovered.stats.errors.is_empty());
+    assert!(renderer.read(&recovered.texture) == expected, "the renderer must recover on a valid frame");
+}
+
+#[test]
+fn isolated_groups_follow_light_constraint_targets() {
+    let Some(gpu) = gpu() else { return };
+    for constraint in ["parent", "copy-position"] {
+        let xml = format!(
+            r#"<scene version="1.2"><project width="64" height="32" fps="10" duration="2"/>
+          <composition><group id="rig" x="32" y="16"><animate property="x"><key time="0" value="32"/><key time="1" value="232"/></animate></group>
+          <group id="g" isolate="true"><object3D id="s" primitive="sphere" radius="12" x="32" y="16"/></group></composition>
+          <lights><light id="a" type="point" z="40" intensity="2"><transformConstraint type="{constraint}" target="rig"/></light></lights></scene>"#
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let frames = render_sub_frames(&d, &[0.0, 1.0]).unwrap();
+        let fresh = render_times_on(gpu.clone(), &d, &[1.0]).unwrap();
+        assert!(frames[1].stats.errors.is_empty() && fresh.stats.errors.is_empty());
+        assert!(frames[0].px != fresh.px, "{constraint}: control must visibly move the light");
+        assert!(frames[1].px == fresh.px, "{constraint}: isolated group retained stale lighting");
+    }
+}
+
+#[test]
 fn matte_cache_follows_animated_paints() {
     let d = doc(
         "",

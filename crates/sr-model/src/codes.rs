@@ -45,6 +45,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("P02", "rules", "A count (repeater copies, star points, zig-zag ridges, burst count or repeat, repeat count, object3D instances) is far above what a renderer can draw."),
     ("P03", "rules", "A symbol contains an instance of itself, directly or through other symbols."),
     ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 62 levels, the depth the evaluator compiles."),
+    ("P05", "rules", "Matte dependencies form a cycle through mattes or contained children, including after composition expansion."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 
