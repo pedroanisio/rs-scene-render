@@ -1212,6 +1212,12 @@ impl Renderer {
                     return None;
                 }
             };
+            // a clip that stopped decoding holds its last good frame: say so on the frames it stands in for
+            if frame.index != k {
+                if let Some(w) = dec.warnings.last() {
+                    plan.stats.errors.push(format!("{}: {w}", n.id));
+                }
+            }
             let info = dec.info.clone();
             let quarter = match rotation {
                 m::VideoAssetRotation::V0 => (info.rotation / 90) as u32,
