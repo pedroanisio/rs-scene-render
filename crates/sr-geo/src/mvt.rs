@@ -84,14 +84,16 @@ impl<'a> Reader<'a> {
         Ok((k >> 3, (k & 7) as u8))
     }
     fn bytes(&mut self) -> Result<&'a [u8], String> {
-        let n = self.varint()? as usize;
-        let s = self.b.get(self.i..self.i + n).ok_or("truncated protobuf field")?;
-        self.i += n;
+        let n = usize::try_from(self.varint()?).map_err(|_| "truncated protobuf field")?;
+        let end = self.i.checked_add(n).ok_or("truncated protobuf field")?;
+        let s = self.b.get(self.i..end).ok_or("truncated protobuf field")?;
+        self.i = end;
         Ok(s)
     }
     fn fixed(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let s = self.b.get(self.i..self.i + n).ok_or("truncated protobuf field")?;
-        self.i += n;
+        let end = self.i.checked_add(n).ok_or("truncated protobuf field")?;
+        let s = self.b.get(self.i..end).ok_or("truncated protobuf field")?;
+        self.i = end;
         Ok(s)
     }
     fn skip(&mut self, wire: u8) -> Result<(), String> {
@@ -153,8 +155,8 @@ fn geometry(cmds: &[u64]) -> Result<Vec<Vec<[f64; 2]>>, String> {
                     let (dx, dy) =
                         (*cmds.get(i).ok_or("truncated geometry")?, *cmds.get(i + 1).ok_or("truncated geometry")?);
                     i += 2;
-                    x += zigzag(dx);
-                    y += zigzag(dy);
+                    x = x.checked_add(zigzag(dx)).ok_or("geometry coordinate overflows")?;
+                    y = y.checked_add(zigzag(dy)).ok_or("geometry coordinate overflows")?;
                     let p = [x as f64, y as f64];
                     if id == 1 {
                         parts.push(vec![p]);
@@ -226,4 +228,39 @@ pub fn decode(b: &[u8]) -> Result<Vec<Layer>, String> {
         layers.push(Layer { name, extent, features });
     }
     Ok(layers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    #[test]
+    fn a_field_longer_than_the_address_space_is_truncated() {
+        for len in [u64::MAX, u64::MAX - 1, 1 << 40] {
+            let mut b = vec![0x1a];
+            varint(&mut b, len);
+            b.extend([0; 16]);
+            assert!(decode(&b).is_err(), "{len}");
+        }
+        let mut b = vec![0x1a, 3, 0x0d];
+        b.extend([1, 2]);
+        assert!(decode(&b).is_err());
+    }
+
+    #[test]
+    fn coordinates_that_overflow_are_errors() {
+        let far = u64::MAX - 1; // zigzag of i64::MAX
+        assert!(geometry(&[(2 << 3) | 1, far, 0, far, 0]).is_err());
+        assert!(geometry(&[(2 << 3) | 1, 0, far, 0, far]).is_err());
+        assert!(geometry(&[(1 << 3) | 1, u64::MAX, u64::MAX, (1 << 3) | 2, u64::MAX, u64::MAX]).is_err());
+        assert_eq!(geometry(&[(1 << 3) | 1, 4, 6, (1 << 3) | 2, 2, 1]).unwrap(), [[[2.0, 3.0], [3.0, 2.0]]]);
+    }
 }
