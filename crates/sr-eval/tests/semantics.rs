@@ -457,12 +457,12 @@ fn instances_scope_ids_apply_overrides_and_run_on_their_own_clock() {
     assert_eq!(node(&f, "b/bg").props.get("opacity"), Some(&Value::Num(0.5)));
     assert!(!has(&eval(&d, 3.5), "a/bg"), "a ends with its 2 s symbol");
     assert!(has(&eval(&d, 7.0), "b/bg"), "b plays twice at half speed: 8 s");
-    let rec = doc_after(
-        r#"<symbols><symbol id="s"><instance id="i" symbol="s"/></symbol></symbols>"#,
-        r#"<instance id="top" symbol="s"/>"#,
-        "",
+    // a symbol inside itself is rejected when the document loads (sr-model P03)
+    let rec = sr_model::load_str(
+        r#"<scene version="1.1"><project width="1000" height="500" fps="10" duration="10"/><symbols><symbol id="s"><instance id="i" symbol="s"/></symbol></symbols><composition><instance id="top" symbol="s"/></composition></scene>"#,
+        &sr_model::LoadOptions::without_assets(),
     );
-    assert_eq!(err_codes(&rec, &EvalOptions::default()), ["E13"]);
+    assert!(rec.is_err_and(|e| e.to_string().contains("P03")));
     let miss = doc_after(
         r#"<symbols><symbol id="s"><layer id="x" asset="img"/></symbol></symbols>"#,
         r#"<instance id="top" symbol="s"><override target="y" property="x" value="1"/></instance>"#,

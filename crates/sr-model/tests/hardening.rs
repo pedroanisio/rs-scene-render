@@ -1,4 +1,4 @@
-//! Crafted documents: values that used to panic, overflow or pass unnoticed.
+//! Crafted documents: hostile values are diagnosed, without a panic or an unbounded allocation.
 
 use sr_model::assets::sequence_frame;
 use sr_model::parse::ParseValue;
