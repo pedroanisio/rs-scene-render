@@ -168,3 +168,39 @@ fn gltf_import_drops_nan_keys_and_sorts_the_rest() {
     assert_eq!(m.animations[0].channels[0].times, vec![0.0, 1.0]);
     assert!(m.warnings.is_empty(), "{:?}", m.warnings);
 }
+
+/// A one-triangle glTF: `count` positions declared over three stored ones, and the given indices.
+fn gltf_triangle(count: usize, indices: [u16; 3]) -> String {
+    let mut buf = Vec::new();
+    for p in [[0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+        for v in p {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for i in indices {
+        buf.extend_from_slice(&i.to_le_bytes());
+    }
+    format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+ "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],
+ "buffers":[{{"byteLength":{},"uri":"data:application/octet-stream;base64,{}"}}],
+ "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":6}}],
+ "accessors":[{{"bufferView":0,"componentType":5126,"count":{count},"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+   {{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}}]}}"#,
+        buf.len(),
+        b64(&buf)
+    )
+}
+
+#[test]
+fn gltf_accessors_reaching_past_their_data_are_an_error() {
+    assert!(import::gltf(&tmp("ok.gltf", gltf_triangle(3, [0, 1, 2]).as_bytes())).is_ok());
+    let e = import::gltf(&tmp("long.gltf", gltf_triangle(4000, [0, 1, 2]).as_bytes())).unwrap_err();
+    assert!(e.contains("accessor 0"), "{e}");
+}
+
+#[test]
+fn gltf_indices_past_the_vertices_are_an_error() {
+    let e = import::gltf(&tmp("far.gltf", gltf_triangle(3, [0, 1, 9]).as_bytes())).unwrap_err();
+    assert!(e.contains("index"), "{e}");
+}

@@ -129,6 +129,35 @@ fn ext_v3(m: &serde_json::Map<String, serde_json::Value>, name: &str, d: [f32; 3
 
 /// Loads glTF 2.0 (`.gltf` with external or embedded buffers, or `.glb`).
 pub fn gltf(path: &Path) -> Result<Model, String> {
+    // the gltf crate indexes and unwraps on documents its validation lets through
+    std::panic::catch_unwind(|| gltf_checked(path)).unwrap_or_else(|_| Err("malformed glTF".into()))
+}
+
+/// Every accessor's bytes, sparse parts included, lie inside its view and the view inside its buffer.
+fn check_accessors(g: &gltf::Gltf, buffers: &[Vec<u8>]) -> Result<(), String> {
+    let within = |view: &gltf::buffer::View, offset: usize, count: usize, size: usize| -> bool {
+        let stride = view.stride().unwrap_or(size);
+        let need = count.checked_sub(1).and_then(|n| n.checked_mul(stride)).and_then(|n| n.checked_add(size));
+        let need = if count == 0 { Some(0) } else { need }.and_then(|n| n.checked_add(offset));
+        let end = view.offset().checked_add(view.length());
+        let held = buffers.get(view.buffer().index()).map_or(0, |b| b.len());
+        matches!((need, end), (Some(n), Some(e)) if n <= view.length() && e <= held)
+    };
+    for a in g.accessors() {
+        let ok = a.view().is_none_or(|v| within(&v, a.offset(), a.count(), a.size()))
+            && a.sparse().is_none_or(|s| {
+                let n = s.count();
+                within(&s.indices().view(), s.indices().offset(), n, s.indices().index_type().size())
+                    && within(&s.values().view(), s.values().offset(), n, a.size())
+            });
+        if !ok {
+            return Err(format!("accessor {} reaches past its buffer", a.index()));
+        }
+    }
+    Ok(())
+}
+
+fn gltf_checked(path: &Path) -> Result<Model, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     if data.starts_with(b"glTF") {
         let header = data.get(..12).ok_or("truncated GLB header")?;
@@ -148,6 +177,7 @@ pub fn gltf(path: &Path) -> Result<Model, String> {
             gltf::buffer::Source::Uri(uri) => load_uri(uri, base)?,
         });
     }
+    check_accessors(&g, &buffers)?;
     let mut m = Model { basis: Y_UP_METRES, ..Default::default() };
     // images decode lazily per (image, colour/data) pair
     let mut images: std::collections::HashMap<(usize, bool), usize> = Default::default();
@@ -285,6 +315,9 @@ pub fn gltf(path: &Path) -> Result<Model, String> {
                 Some(i) => i.into_u32().collect(),
                 None => (0..vs.len() as u32).collect(),
             };
+            if let Some(i) = indices.iter().find(|&&i| i as usize >= vs.len()) {
+                return Err(format!("mesh {}: index {i} is past its {} vertices", mesh.index(), vs.len()));
+            }
             let mut p = Primitive { vertices: vs, indices, material: prim.material().index(), ..Default::default() };
             if let (Some(j), Some(w)) = (r.read_joints(0), r.read_weights(0)) {
                 p.joints = j.into_u16().collect();

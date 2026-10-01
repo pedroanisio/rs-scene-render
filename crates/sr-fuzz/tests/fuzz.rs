@@ -87,7 +87,6 @@ fn text_smoke() {
 }
 
 #[test]
-#[ignore = "enabled after merge with sr-geo fixes"]
 fn pmtiles_smoke() {
     smoke("pmtiles", 300);
 }
@@ -103,7 +102,6 @@ fn geodata_smoke() {
 }
 
 #[test]
-#[ignore = "enabled after merge with sr-3d fixes"]
 fn ply_smoke() {
     smoke("ply", 600);
 }
@@ -114,7 +112,6 @@ fn usd_smoke() {
 }
 
 #[test]
-#[ignore = "enabled after merge with sr-3d fixes"]
 fn gltf_smoke() {
     smoke("gltf", 300);
 }
