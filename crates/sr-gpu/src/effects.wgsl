@@ -947,61 +947,116 @@ fn fs_conv(in: VOut) -> @location(0) vec4<f32> {
 
 // ------------------------------------------------------------ alpha morphology
 
-// Greatest coverage a wide disc of radius `r` around texel `p` reaches, from one jump-flooded
-// field entry `f` (fs_jfa): coverage is alpha, or with `erode` its complement, weighted by the
-// disc's one-texel soft rim. Each of the entry's two sites decides the result where alpha has
-// hard edges, the site's own texels holding the edge's partial coverage; where alpha ramps, the
-// disc's far point towards the site does.
-fn morph_reach(p: vec2<i32>, f: vec4<f32>, r: f32, erode: bool) -> f32 {
+// Wide discs. A field holds, per texel, the offsets (texels) to the texel that decides the max
+// of alpha over a disc around it (rg) and to the one that decides the min (ba). A disc of radius
+// 2ρ is the union of the discs of radius ρ centred on the circle of radius ρ and at its centre,
+// so the texels deciding it are among those the field names at points of that circle: each is
+// weighed again with its own alpha and its distance, which keeps every level of alpha and the
+// disc's one-texel soft rim exact. Beyond the texture alpha is transparent.
+struct Morph {
+    // the max and the offset to its texel, the min and the offset to its texel
+    mx: f32,
+    at_mx: vec2<i32>,
+    mn: f32,
+    at_mn: vec2<i32>,
+}
+
+fn morph_alpha(q: vec2<i32>) -> f32 {
     let size = vec2<i32>(textureDimensions(src));
-    var best = 0.0;
-    for (var k = 0; k < 4; k++) {
-        let o = select(f.xy, f.zw, k >= 2);
-        if (abs(o.x) > FAR * 0.5) { continue; }
-        var c = o;
-        if ((k & 1) == 1) {
-            let l = length(o);
-            if (l < 0.5) { continue; }
-            c = round(o / l * r);
-        }
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dx = -1; dx <= 1; dx++) {
-                let d = vec2<i32>(c) + vec2(dx, dy);
-                let q = p + d;
-                if (any(q < vec2(0)) || any(q >= size)) { continue; }
-                let weight = clamp(r + 1.0 - length(vec2<f32>(d)), 0.0, 1.0);
-                let a = textureLoad(src, q, 0).a;
-                best = max(best, select(a * weight, weight - a, erode));
-            }
+    if (any(q < vec2(0)) || any(q >= size)) { return 0.0; }
+    return textureLoad(src, q, 0).a;
+}
+
+// Weighs the texel at offset `o` from `p` for a disc of radius `r`; the nearer one wins a tie.
+fn morph_weigh(m: ptr<function, Morph>, p: vec2<i32>, o: vec2<i32>, r: f32, need: vec2<f32>, low: bool) {
+    let len = length(vec2<f32>(o));
+    let weight = clamp(r + 1.0 - len, 0.0, 1.0);
+    if (weight <= 0.0 || select(need.x, need.y, low) < 0.5) { return; }
+    let a = morph_alpha(p + o);
+    if (!low) {
+        let val = a * weight;
+        if (val > (*m).mx || (val == (*m).mx && len < length(vec2<f32>((*m).at_mx)))) {
+            (*m).mx = val;
+            (*m).at_mx = o;
         }
     }
-    return best;
+    if (low) {
+        let val = a + 1.0 - weight;
+        if (val < (*m).mn || (val == (*m).mn && len < length(vec2<f32>((*m).at_mn)))) {
+            (*m).mn = val;
+            (*m).at_mn = o;
+        }
+    }
+}
+
+// The max and min of alpha over the disc of radius `r` around `p`: v2 = radius of the field in
+// aux, points on the circle, phase of the first; v3.xy = whether the max and the min are needed.
+fn morph_wide(p: vec2<i32>, r: f32) -> Morph {
+    let rho = fx.v[2].x;
+    let n = i32(fx.v[2].y);
+    let need = fx.v[3].xy;
+    let size = vec2<i32>(textureDimensions(aux));
+    let own = morph_alpha(p);
+    var m = Morph(own, vec2(0), own, vec2(0));
+    for (var k = 0; k <= n; k++) {
+        var c = vec2(0);
+        if (k < n) {
+            let a = (f32(k) + fx.v[2].z) / f32(n) * 2.0 * PI;
+            // not nearer than the circle: the texel that decides here is then no further from
+            // the point than the field's radius, as it is from `p` by the disc's
+            let e = vec2(cos(a), sin(a)) * rho;
+            c = vec2<i32>(sign(e) * ceil(abs(e) - 1e-3));
+        }
+        let t = p + c;
+        // beyond the field a texel stands for itself
+        var f = vec4(0.0);
+        if (all(t >= vec2(0)) && all(t < size)) { f = textureLoad(aux, t, 0); }
+        // with the texel before and after each along the way to it: across an anti-aliased edge
+        // the disc around `p` can prefer the neighbour of the texel the smaller disc preferred
+        for (var j = 0; j < 2; j++) {
+            let o = c + vec2<i32>(select(f.xy, f.zw, j == 1));
+            let step = vec2<i32>(round(vec2<f32>(o) / max(length(vec2<f32>(o)), 1.0)));
+            morph_weigh(&m, p, o, r, need, j == 1);
+            morph_weigh(&m, p, o - step, r, need, j == 1);
+            morph_weigh(&m, p, o + step, r, need, j == 1);
+        }
+    }
+    return m;
 }
 
 // Max (dilate) or min (erode) of alpha over a disc. v0: radius px, mode (0 dilate, 1 erode),
 // wide-disc flag; i.x: 0 plain result, 1 stroke ring (v1 colour, v0.w position: 0 outside, 1 inside, 2 centre),
-// 2 outline only. A wide disc reads the distance fields of alpha (aux, for the max) and of its
-// complement (aux2, for the min); only the ones its result needs are bound.
+// 2 outline only, 3 the field of a small disc (v2.x its radius px: every texel of it is weighed),
+// 4 the field of the disc of radius v2.w, from the one in aux. A wide disc reads the field in aux.
 @fragment
 fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let d = dims();
     let v = fx.v;
+    let p = vec2<i32>(in.pos.xy);
+    if (fx.i.x == 3u) {
+        let own = morph_alpha(p);
+        var m = Morph(own, vec2(0), own, vec2(0));
+        let reach = i32(ceil(v[2].x));
+        for (var y = -reach; y <= reach; y++) {
+            for (var x = -reach; x <= reach; x++) {
+                morph_weigh(&m, p, vec2(x, y), v[2].x, v[3].xy, false);
+                morph_weigh(&m, p, vec2(x, y), v[2].x, v[3].xy, true);
+            }
+        }
+        return vec4(vec2<f32>(m.at_mx), vec2<f32>(m.at_mn));
+    }
+    if (fx.i.x == 4u) {
+        let m = morph_wide(p, v[2].w);
+        return vec4(vec2<f32>(m.at_mx), vec2<f32>(m.at_mn));
+    }
     let s = S(in.uv);
     let r = max(v[0].x, 0.0);
     var mx = s.a;
     var mn = s.a;
     if (v[0].z > 0.5) {
-        let p = vec2<i32>(in.pos.xy);
-        let size = vec2<i32>(textureDimensions(src));
-        let need_max = select(v[0].w != 1.0, v[0].y < 0.5, fx.i.x == 0u);
-        let need_min = select(v[0].w != 0.0, v[0].y > 0.5, fx.i.x == 0u);
-        if (need_max) { mx = max(mx, morph_reach(p, textureLoad(aux, p, 0), r, false)); }
-        if (need_min) {
-            // Outside the texture is transparent, including for erosion.
-            let edge = f32(min(min(p.x + 1, p.y + 1), min(size.x - p.x, size.y - p.y)));
-            mn = min(mn, clamp(edge - r, 0.0, 1.0));
-            mn = min(mn, 1.0 - morph_reach(p, textureLoad(aux2, p, 0), r, true));
-        }
+        let m = morph_wide(p, r);
+        mx = max(mx, m.mx);
+        mn = min(mn, m.mn);
     } else {
         let rings = clamp(i32(ceil(r / 1.5)), 1, 12);
         for (var ring = 1; ring <= rings; ring++) {
@@ -1033,12 +1088,10 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
 
 // ------------------------------------------------------------ jump flooding
 
-// i.x 0: seeds from src alpha, or from its complement (v0.y 1, the field erosion reads);
-// 1: one step of v0.x texels over the previous field (src).
-// rg: offset in texels to the nearest texel with any coverage, ba: to the nearest fully covered
-// one; FAR where none has been found yet.
+// i.x 0: seeds from src alpha; 1: one step of v0.x texels over the previous field (src).
+// rg: offset in texels to the nearest texel inside (alpha >= 0.5), ba: to the nearest outside;
+// FAR where none has been found yet.
 const FAR: f32 = 16384.0;
-const COVERED: f32 = 0.002;
 
 @fragment
 fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
@@ -1046,8 +1099,7 @@ fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
     let p = vec2<i32>(in.pos.xy);
     if (fx.i.x == 0u) {
         let a = textureLoad(src, p, 0).a;
-        let c = select(a, 1.0 - a, fx.v[0].y > 0.5);
-        return vec4(select(vec2(FAR), vec2(0.0), c > COVERED), select(vec2(FAR), vec2(0.0), c >= 1.0 - COVERED));
+        return select(vec4(FAR, FAR, 0.0, 0.0), vec4(0.0, 0.0, FAR, FAR), a >= 0.5);
     }
     let step = i32(fx.v[0].x);
     var best = textureLoad(src, p, 0);
