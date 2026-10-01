@@ -64,17 +64,29 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        let hex = |k: usize| b.get(k).and_then(|c| (*c as char).to_digit(16));
+        if let (b'%', Some(h), Some(l)) = (b[i], hex(i + 1), hex(i + 2)) {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Keys with a finite time, in time order, each with its `values.len() / times.len()` values;
+/// `None` when the keys are already so.
+fn ordered_keys(times: &[f32], values: &[f32]) -> Option<(Vec<f32>, Vec<f32>)> {
+    if times.iter().all(|t| t.is_finite()) && times.windows(2).all(|w| w[0] <= w[1]) {
+        return None;
+    }
+    let stride = values.len() / times.len().max(1);
+    let mut order: Vec<usize> = (0..times.len()).filter(|&k| times[k].is_finite()).collect();
+    order.sort_by(|a, b| times[*a].total_cmp(&times[*b]));
+    let vals = order.iter().flat_map(|&k| values[k * stride..(k + 1) * stride].iter().copied()).collect();
+    Some((order.iter().map(|&k| times[k]).collect(), vals))
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
@@ -351,8 +363,8 @@ pub fn gltf(path: &Path) -> Result<Model, String> {
         for ch in anim.channels() {
             let r = ch.reader(|b| buffers.get(b.index()).map(|v| v.as_slice()));
             let Some(times) = r.read_inputs() else { continue };
-            let times: Vec<f32> = times.collect();
-            let (path, values): (AnimPath, Vec<f32>) = match r.read_outputs() {
+            let mut times: Vec<f32> = times.collect();
+            let (path, mut values): (AnimPath, Vec<f32>) = match r.read_outputs() {
                 Some(gltf::animation::util::ReadOutputs::Translations(it)) => {
                     (AnimPath::Translation, it.flatten().collect())
                 }
@@ -370,6 +382,13 @@ pub fn gltf(path: &Path) -> Result<Model, String> {
                 gltf::animation::Interpolation::Linear => Interp::Linear,
                 gltf::animation::Interpolation::CubicSpline => Interp::CubicSpline,
             };
+            if let Some((t, v)) = ordered_keys(&times, &values) {
+                let msg = format!("animation {}: key times that are not numbers or not in order were repaired", a.name);
+                if !m.warnings.contains(&msg) {
+                    m.warnings.push(msg);
+                }
+                (times, values) = (t, v);
+            }
             a.duration = a.duration.max(times.last().copied().unwrap_or(0.0));
             a.channels.push(Channel { node: ch.target().node().index(), path, interp, times, values });
         }
@@ -600,7 +619,13 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
     for el in &elements {
         let is_v = el.name == "vertex";
         if is_v {
+            if !vnames.is_empty() {
+                return Err("more than one vertex element".into());
+            }
             vnames = el.props.iter().map(|p| p.name.clone()).collect();
+        }
+        if el.props.is_empty() {
+            continue;
         }
         for _ in 0..el.count {
             let mut row = Vec::with_capacity(el.props.len());
@@ -608,6 +633,10 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
                 match p.list {
                     Some(ct) => {
                         let n = rd.read(ct)? as usize;
+                        // an entry takes at least a byte: a count beyond the data left is malformed
+                        if n > data.len() - rd.pos.min(data.len()) {
+                            return Err("list longer than the data".into());
+                        }
                         let mut list = Vec::with_capacity(n);
                         for _ in 0..n {
                             list.push(rd.read(p.ty)? as u32);
@@ -631,10 +660,14 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
         col("y").ok_or("vertices without y")?,
         col("z").ok_or("vertices without z")?,
     );
-    if let (Some(dc0), Some(s0)) = (col("f_dc_0"), col("scale_0")) {
+    if col("f_dc_0").is_some() && col("scale_0").is_some() {
         const C0: f64 = 0.282_094_791_773_878_14;
         let op = col("opacity");
-        let r0 = col("rot_0").ok_or("splats without rot_0")?;
+        // every column by its own name: a header may list them in any order, or leave some out
+        let cols = |stem: &str, n: usize| -> Result<Vec<usize>, String> {
+            (0..n).map(|k| col(&format!("{stem}_{k}")).ok_or_else(|| format!("splats without {stem}_{k}"))).collect()
+        };
+        let (dc, sc, rot) = (cols("f_dc", 3)?, cols("scale", 3)?, cols("rot", 4)?);
         let mut s = Splats { basis: Mat4::from_scale(Vec3::splat(100.0)), ..Default::default() };
         // higher-order SH: f_rest_* holds (degree + 1)² − 1 coefficients per channel, channel-major
         let rest = (0..).take_while(|k| col(&format!("f_rest_{k}")).is_some()).count();
@@ -645,36 +678,40 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
             15 => 3,
             _ => 0,
         };
-        let rest0 = col("f_rest_0");
+        let rest = cols("f_rest", if degree > 0 { per * 3 } else { 0 })?;
         s.sh_degree = degree;
         for v in &verts {
             if degree > 0 {
                 let mut c = [0.0f32; 48];
                 for ch in 0..3 {
-                    c[ch] = v[dc0 + ch] as f32;
+                    c[ch] = v[dc[ch]] as f32;
                     for j in 0..per {
-                        c[(j + 1) * 3 + ch] = v[rest0.unwrap_or(0) + ch * per + j] as f32;
+                        c[(j + 1) * 3 + ch] = v[rest[ch * per + j]] as f32;
                     }
                 }
                 s.sh.push(c);
             }
             s.pos.push([v[x] as f32, v[y] as f32, v[z] as f32]);
-            s.scale.push([0, 1, 2].map(|k| v[s0 + k].exp() as f32));
-            let q = Quat::from_xyzw(v[r0 + 1] as f32, v[r0 + 2] as f32, v[r0 + 3] as f32, v[r0] as f32).normalize();
+            s.scale.push([0, 1, 2].map(|k| v[sc[k]].exp() as f32));
+            let q = Quat::from_xyzw(v[rot[1]] as f32, v[rot[2]] as f32, v[rot[3]] as f32, v[rot[0]] as f32).normalize();
             s.rot.push(q.to_array());
-            let c = [0, 1, 2].map(|k| srgb_to_linear((0.5 + C0 * v[dc0 + k]).clamp(0.0, 1.0) as f32));
+            let c = [0, 1, 2].map(|k| srgb_to_linear((0.5 + C0 * v[dc[k]]).clamp(0.0, 1.0) as f32));
             let a = op.map(|o| 1.0 / (1.0 + (-v[o]).exp())).unwrap_or(1.0) as f32;
             s.color.push([c[0], c[1], c[2], a]);
         }
         return Ok(Asset::Splats(s));
     }
-    let (nx, u, vv) =
-        (col("nx"), col("u").or(col("s")).or(col("texture_u")), col("v").or(col("t")).or(col("texture_v")));
+    let (u, vv) = (col("u").or(col("s")).or(col("texture_u")), col("v").or(col("t")).or(col("texture_v")));
+    let normal = match (col("nx"), col("ny"), col("nz")) {
+        (Some(a), Some(b), Some(c)) => Some([a, b, c]),
+        (None, ..) => None,
+        _ => return Err("vertices with nx but without ny and nz".into()),
+    };
     let mut vs: Vec<Vertex> = verts
         .iter()
         .map(|r| Vertex {
             pos: [r[x] as f32, r[y] as f32, r[z] as f32],
-            normal: nx.map(|i| [r[i] as f32, r[i + 1] as f32, r[i + 2] as f32]).unwrap_or_default(),
+            normal: normal.map(|n| n.map(|i| r[i] as f32)).unwrap_or_default(),
             uv: match (u, vv) {
                 (Some(a), Some(b)) => [r[a] as f32, 1.0 - r[b] as f32],
                 _ => [0.0; 2],
@@ -698,7 +735,7 @@ pub fn ply(data: &[u8]) -> Result<Asset, String> {
     if indices.is_empty() {
         return Err("PLY has no faces and no Gaussian splat properties".into());
     }
-    let had = nx.is_some();
+    let had = normal.is_some();
     if !had {
         compute_normals(&mut vs, &indices);
     }
