@@ -759,6 +759,12 @@ impl Renderer {
                         g
                     }
                 };
+                if let Some(m) = crate::three::splat_note(s.len() as u64, gpu.n as u64) {
+                    let m = format!("{}: {m}", n.id);
+                    if !plan.stats.unsupported.contains(&m) {
+                        plan.stats.unsupported.push(m);
+                    }
+                }
                 splats.push(SplatDraw { gpu, model: world * s.basis, opacity });
             }
             Ok(Asset::Model(model)) => {
@@ -1204,9 +1210,12 @@ impl Renderer {
             }
         }
         let d = self.gpu.device.clone();
+        // the faces come back at the quality tier's size (half a side at draft)
+        let scale = Tier::of(self.quality.unwrap_or(p.scene.project.quality)).scale;
+        let fside = (side as f64 * scale).round().max(1.0) as u32;
         let faces = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("360-faces"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 6 * eyes.len() as u32 },
+            size: wgpu::Extent3d { width: fside, height: fside, depth_or_array_layers: 6 * eyes.len() as u32 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1245,7 +1254,11 @@ impl Renderer {
                         origin: wgpu::Origin3d { x: 0, y: 0, z: (e * 6 + k) as u32 },
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width: fside.min(f.texture.size[0]),
+                        height: fside.min(f.texture.size[1]),
+                        depth_or_array_layers: 1,
+                    },
                 );
                 self.gpu.queue.submit([enc.finish()]);
                 let fs = f.stats;
@@ -1432,13 +1445,9 @@ impl Renderer {
         let g = ctx.g;
         let n = &g.nodes[i];
         let members = Self::three_members(g, i);
-        if self.gpu.info.backend == wgpu::Backend::Gl {
-            // the 3D pass resolves multisampled depth, which OpenGL shaders cannot read
+        if let Some(why) = crate::gpu::three_d_warning(&self.gpu.info) {
             if members.first() == Some(&i) {
-                plan.stats.unsupported.push(format!(
-                    "{}: 3D objects are not drawn on the OpenGL backend; SR_GPU_ADAPTER picks a Vulkan, Metal or DirectX 12 adapter (see scene-render gpus)",
-                    n.id
-                ));
+                plan.stats.unsupported.push(format!("{}: {why}", n.id));
             }
             return;
         }
@@ -1511,18 +1520,26 @@ impl Renderer {
             path: None,
         };
         let mut scene = scene;
+        let limits = self.gpu.device.limits();
         if let Some(opts) = ex.path {
             if scene.cam.orthographic || scene.clip_fix != Mat4::IDENTITY {
                 plan.stats.unsupported.push(format!(
                     "{}: path tracing needs a perspective camera over the whole frame; rasterised instead",
                     n.id
                 ));
+            } else if let Some(m) = crate::pathtrace::limit_note(&scene, &limits) {
+                plan.stats.unsupported.push(format!("{}: {m}", n.id));
             } else {
                 plan.stats
                     .unsupported
                     .extend(crate::pathtrace::notes(&scene).into_iter().map(|m| format!("{}: {m}", n.id)));
                 scene.path = Some(opts);
             }
+        }
+        if scene.path.is_none() {
+            let lost =
+                crate::three::shadow_note(&scene.lights, !scene.cam.orthographic, limits.max_texture_array_layers);
+            plan.stats.unsupported.extend(lost.map(|m| format!("{}: {m}", n.id)));
         }
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);

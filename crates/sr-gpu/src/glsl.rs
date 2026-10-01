@@ -362,9 +362,10 @@ fn layout(decls: &[Decl]) -> Result<(Vec<Uniform>, u32, String), String> {
             return Err(format!("uniform {} {}: bool vectors and arrays are not supported", d.ty, d.name));
         }
         // std140: vec2 aligns to 8, vec3/vec4 to 16; arrays and matrix columns to 16
+        let too_large = || format!("uniform {} {}: the uniforms are too large", d.ty, d.name);
         let (align, size, stride) = if d.array > 0 || cols > 1 {
-            let n = d.array.max(1) * cols;
-            (16, 16 * n, 16)
+            let n = d.array.max(1).checked_mul(cols).and_then(|n| n.checked_mul(16)).ok_or_else(too_large)?;
+            (16, n, 16)
         } else {
             let a = match rows {
                 1 => 4,
@@ -373,7 +374,7 @@ fn layout(decls: &[Decl]) -> Result<(Vec<Uniform>, u32, String), String> {
             };
             (a, 4 * rows, 16)
         };
-        off = off.div_ceil(align) * align;
+        off = off.checked_next_multiple_of(align).ok_or_else(too_large)?;
         let member = if base == Base::Bool { format!("{}_srb", d.name) } else { d.name.clone() };
         let ty = if base == Base::Bool { "int".to_string() } else { d.ty.clone() };
         let arr = if d.array > 0 { format!("[{}]", d.array) } else { String::new() };
@@ -382,7 +383,7 @@ fn layout(decls: &[Decl]) -> Result<(Vec<Uniform>, u32, String), String> {
             macros.push_str(&format!("#define {} ({}_srb != 0)\n", d.name, d.name));
         }
         uniforms.push(Uniform { name: d.name.clone(), base, rows, cols, array: d.array, offset: off, stride });
-        off += size;
+        off = off.checked_add(size).filter(|o| *o <= u32::MAX - 16).ok_or_else(too_large)?;
     }
     if uniforms.is_empty() {
         members.push_str("    float sr_unused;\n");
@@ -391,6 +392,25 @@ fn layout(decls: &[Decl]) -> Result<(Vec<Uniform>, u32, String), String> {
     let size = off.div_ceil(16).max(1) * 16;
     let block = format!("layout(std140, set = 0, binding = 0) uniform SrUniforms {{\n{members}}};\n{macros}");
     Ok((uniforms, size, block))
+}
+
+/// Whether a device with `limits` can bind the program's uniform block and textures; the
+/// error reads like a compile error, and the shader falls back the same way.
+pub fn check_limits(p: &Program, limits: &wgpu::Limits) -> Result<(), String> {
+    if p.block_size as u64 > limits.max_uniform_buffer_binding_size {
+        return Err(format!(
+            "the uniforms take {} bytes and this device binds at most {}",
+            p.block_size, limits.max_uniform_buffer_binding_size
+        ));
+    }
+    if p.samplers.len() as u64 > limits.max_sampled_textures_per_shader_stage as u64 {
+        return Err(format!(
+            "the shader reads {} textures and this device binds at most {}",
+            p.samplers.len(),
+            limits.max_sampled_textures_per_shader_stage
+        ));
+    }
+    Ok(())
 }
 
 fn samplers_block(names: &[String]) -> String {
@@ -732,12 +752,11 @@ fn percent_decode(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        let hex = |k: usize| b.get(k).and_then(|c| (*c as char).to_digit(16));
+        if let (b'%', Some(h), Some(l)) = (b[i], hex(i + 1), hex(i + 2)) {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;

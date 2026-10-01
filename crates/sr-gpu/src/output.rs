@@ -79,7 +79,9 @@ struct Params {
     bg_offset: [f32; 2],
     bg_scale: f32,
     overlay: u32,
-    pad: [u32; 2],
+    /// First word of the piece being packed; `words` is one past its last.
+    base: u32,
+    pad: u32,
 }
 
 /// How a frame is placed in an output of another shape.
@@ -110,14 +112,15 @@ impl Placement {
     }
 }
 
-/// A conversion in flight: its staging buffer (out of the ring until [`OutputStage::wait`]
-/// returns it), the submission that fills it, and the flag its map callback sets.
+/// A conversion in flight: its staging buffers (out of the ring until [`OutputStage::wait`]
+/// returns them; one unless the frame is larger than a buffer), the last submission that fills
+/// them, and the count their map callbacks raise.
 pub struct Pending {
     slot: usize,
-    buffer: wgpu::Buffer,
+    buffers: Vec<wgpu::Buffer>,
     bytes: usize,
     submitted: wgpu::SubmissionIndex,
-    ready: Arc<std::sync::atomic::AtomicBool>,
+    ready: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Staging buffers in the ring: one mapping, one converting, one spare.
@@ -144,8 +147,11 @@ pub struct OutputStage {
     none_view: wgpu::TextureView,
     /// Packed output, grown when a larger frame needs it.
     packed: Option<wgpu::Buffer>,
-    /// Staging buffers by slot; a slot is empty while its buffer is out in a [`Pending`].
-    ring: [Option<wgpu::Buffer>; RING],
+    /// The most bytes one packed or staging buffer holds: the device's storage binding and
+    /// buffer limits. A larger frame is packed and read back in pieces of this size.
+    piece: u64,
+    /// Staging buffers by slot; a slot is empty while its buffers are out in a [`Pending`].
+    ring: [Option<Vec<wgpu::Buffer>>; RING],
     /// The slot the next submission takes.
     head: usize,
     frame_index: u32,
@@ -155,6 +161,7 @@ impl OutputStage {
     /// Builds the pipeline.
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> OutputStage {
         let d = &*device;
+        let limits = d.limits();
         let src = format!("{}\n{}", include_str!("transfer.wgsl"), include_str!("output.wgsl"));
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("output"),
@@ -365,6 +372,7 @@ impl OutputStage {
             blur_tex: None,
             none_view,
             packed: None,
+            piece: limits.max_storage_buffer_binding_size.min(limits.max_buffer_size),
             ring: [None, None, None],
             head: 0,
             frame_index: 0,
@@ -375,6 +383,13 @@ impl OutputStage {
     /// frame's dither, so a frame converts the same whichever frame a render started from.
     pub fn seek(&mut self, frame: u32) {
         self.frame_index = frame;
+    }
+
+    /// Lowers the size of the buffers frames are packed and read back in (never above the
+    /// device's limits); frames larger than `bytes` go through in pieces.
+    pub fn limit_buffers(&mut self, bytes: u64) {
+        self.piece = self.piece.min(bytes);
+        self.packed = None;
     }
 
     /// Starts converting `frame` to `size` in `format`; returns a pending readback.
@@ -406,7 +421,10 @@ impl OutputStage {
     ) -> Pending {
         let d = self.device.clone();
         let bytes = format.frame_bytes(size[0], size[1]);
-        let words = bytes.div_ceil(4) as u32;
+        let words = (bytes.div_ceil(4) as u32).max(1);
+        // (first word, words) of each piece: one, unless the frame is larger than a buffer
+        let per = (self.piece / 4).clamp(1, u32::MAX as u64) as u32;
+        let pieces: Vec<(u32, u32)> = (0..words.div_ceil(per)).map(|k| (k * per, per.min(words - k * per))).collect();
         let mut p = Self::params(frame, working, out, size, placement);
         p.format = match format {
             InputFormat::Nv12 => 0,
@@ -416,7 +434,6 @@ impl OutputStage {
             InputFormat::Gbrapf32 => 4,
         };
         p.keep_alpha = keep_alpha as u32;
-        p.words = words;
         p.seed = self.frame_index;
         if let Some(o) = overlay {
             assert_eq!(o.size, size, "the overlay is output-sized");
@@ -424,14 +441,11 @@ impl OutputStage {
         }
         let mode = p.mode;
         self.frame_index = self.frame_index.wrapping_add(1);
-        // The queue orders this write after every earlier submission, so the previous
-        // frame's pack pass reads its own parameters before these land.
-        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         let mut enc = d.create_command_encoder(&Default::default());
         if mode == 1 {
             self.blur(&mut enc, frame);
         }
-        let size_bytes = (words as u64) * 4;
+        let size_bytes = (pieces[0].1 as u64) * 4;
         // The shader stops at `words`, so a packed buffer left over from a larger frame is fine.
         if self.packed.as_ref().is_none_or(|b| b.size() < size_bytes) {
             self.packed = Some(d.create_buffer(&wgpu::BufferDescriptor {
@@ -442,19 +456,27 @@ impl OutputStage {
             }));
         }
         let storage = self.packed.as_ref().expect("packed buffer");
-        // Round-robin through the ring. A slot is only empty while its buffer is out in a
+        // Round-robin through the ring. A slot is only empty while its buffers are out in a
         // `Pending` (still mapping, or dropped unwaited), so a buffer is never handed out
-        // twice; an empty or wrongly sized slot gets a fresh buffer.
+        // twice; an empty or wrongly sized slot gets fresh buffers.
         let slot = self.head;
         self.head = (self.head + 1) % RING;
+        let fits = |b: &Vec<wgpu::Buffer>| {
+            b.len() == pieces.len() && b.iter().zip(&pieces).all(|(b, (_, n))| b.size() == *n as u64 * 4)
+        };
         let staging = match self.ring[slot].take() {
-            Some(b) if b.size() == size_bytes => b,
-            _ => d.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("staging"),
-                size: size_bytes,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
+            Some(b) if fits(&b) => b,
+            _ => pieces
+                .iter()
+                .map(|(_, n)| {
+                    d.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("staging"),
+                        size: *n as u64 * 4,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    })
+                })
+                .collect(),
         };
         let blurred = match (&self.blur_tex, mode) {
             (Some((_, v)), 1) => &v[0],
@@ -475,20 +497,32 @@ impl OutputStage {
                 },
             ],
         });
-        {
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.pipe);
-            pass.set_bind_group(0, &bg, &[]);
-            let groups = words.div_ceil(64);
-            let (x, y) = if groups > 65535 { (65535, groups.div_ceil(65535)) } else { (groups, 1) };
-            pass.dispatch_workgroups(x, y, 1);
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut enc = Some(enc);
+        let mut submitted = None;
+        for ((base, n), staging) in pieces.iter().zip(&staging) {
+            p.base = *base;
+            p.words = base + n;
+            // The queue orders this write after every earlier submission, so the previous
+            // piece's (or frame's) pack pass reads its own parameters before these land.
+            self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+            let mut enc = enc.take().unwrap_or_else(|| d.create_command_encoder(&Default::default()));
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.pipe);
+                pass.set_bind_group(0, &bg, &[]);
+                let groups = n.div_ceil(64);
+                let (x, y) = if groups > 65535 { (65535, groups.div_ceil(65535)) } else { (groups, 1) };
+                pass.dispatch_workgroups(x, y, 1);
+            }
+            enc.copy_buffer_to_buffer(storage, 0, staging, 0, *n as u64 * 4);
+            submitted = Some(self.queue.submit([enc.finish()]));
+            let r = ready.clone();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |_| {
+                r.fetch_add(1, std::sync::atomic::Ordering::Release);
+            });
         }
-        enc.copy_buffer_to_buffer(storage, 0, &staging, 0, size_bytes);
-        let submitted = self.queue.submit([enc.finish()]);
-        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let r = ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |_| r.store(true, std::sync::atomic::Ordering::Release));
-        Pending { slot, buffer: staging, bytes, submitted, ready }
+        Pending { slot, buffers: staging, bytes, submitted: submitted.expect("a frame has a piece"), ready }
     }
 
     /// Conversion parameters for `frame` placed in `size`; the caller sets the packing fields.
@@ -518,11 +552,12 @@ impl OutputStage {
             kb: out.matrix.1,
             words: 0,
             seed: 0,
+            base: 0,
             mode,
             bg_offset,
             bg_scale,
             overlay: 0,
-            pad: [0; 2],
+            pad: 0,
         }
     }
 
@@ -630,17 +665,19 @@ impl OutputStage {
     /// next frame's render and pack) keeps running on the GPU meanwhile.
     pub fn wait(&mut self, p: Pending) -> Vec<u8> {
         use std::sync::atomic::Ordering;
-        let Pending { slot, buffer, bytes, submitted, ready } = p;
+        let Pending { slot, buffers, bytes, submitted, ready } = p;
         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: None });
-        while !ready.load(Ordering::Acquire) {
+        while ready.load(Ordering::Acquire) < buffers.len() {
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         }
-        let out = {
-            let view = buffer.slice(..).get_mapped_range().expect("mapped");
-            view[..bytes].to_vec()
-        };
-        buffer.unmap();
-        self.ring[slot] = Some(buffer);
+        let mut out = Vec::with_capacity(bytes);
+        for b in &buffers {
+            let view = b.slice(..).get_mapped_range().expect("mapped");
+            out.extend_from_slice(&view[..view.len().min(bytes - out.len())]);
+            drop(view);
+            b.unmap();
+        }
+        self.ring[slot] = Some(buffers);
         out
     }
 }

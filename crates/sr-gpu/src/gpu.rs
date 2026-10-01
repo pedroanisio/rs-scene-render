@@ -112,6 +112,49 @@ pub fn software_warning(info: &wgpu::AdapterInfo) -> Option<String> {
     })
 }
 
+/// Why 3D objects are left out on this adapter and how to get them drawn; `None` where they draw.
+pub fn three_d_warning(info: &wgpu::AdapterInfo) -> Option<String> {
+    // the 3D pass resolves multisampled depth, which OpenGL shaders cannot read
+    (info.backend == wgpu::Backend::Gl).then(|| {
+        format!(
+            "3D objects are not drawn: the adapter in use ({}) is an OpenGL one, which cannot run the 3D pass.              Set SR_GPU_BACKEND=vulkan to render them (on WSL2 that is Mesa lavapipe, a software renderer:              complete but slow), or name a Vulkan, Metal or DirectX 12 adapter with SR_GPU_ADAPTER;              `scene-render gpus` lists the adapters found",
+            info.name
+        )
+    })
+}
+
+/// Index among `found` of the adapter `want` describes: the same name, backend, vendor, device,
+/// type and bus address, not merely a name that contains it ("RTX 3080" is not "RTX 3080 Ti").
+pub fn same_adapter(found: &[wgpu::AdapterInfo], want: &wgpu::AdapterInfo) -> Option<usize> {
+    found.iter().position(|a| {
+        a.name == want.name
+            && a.backend == want.backend
+            && a.vendor == want.vendor
+            && a.device == want.device
+            && a.device_type == want.device_type
+            && a.device_pci_bus_id == want.device_pci_bus_id
+    })
+}
+
+/// The limits a device is created with: the downlevel set every backend meets, at the
+/// adapter's texture sizes, with the adapter's own buffer, binding and layer limits where
+/// those are larger, so large frames, splat sets and shadow arrays fit where the hardware has room.
+pub fn device_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
+    let base = wgpu::Limits { max_storage_buffers_per_shader_stage: 8, ..wgpu::Limits::downlevel_defaults() }
+        .using_resolution(adapter.clone());
+    wgpu::Limits {
+        max_buffer_size: base.max_buffer_size.max(adapter.max_buffer_size),
+        max_storage_buffer_binding_size: base
+            .max_storage_buffer_binding_size
+            .max(adapter.max_storage_buffer_binding_size),
+        max_uniform_buffer_binding_size: base
+            .max_uniform_buffer_binding_size
+            .max(adapter.max_uniform_buffer_binding_size),
+        max_texture_array_layers: base.max_texture_array_layers.max(adapter.max_texture_array_layers),
+        ..base
+    }
+}
+
 /// A one-line description: name, backend and device type.
 pub fn describe(info: &wgpu::AdapterInfo) -> String {
     format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type)
@@ -231,10 +274,12 @@ impl Gpu {
             GpuError::NoAdapter(_) => GpuError::NoAdapter(format!("none on {:?}", opts.backends)),
             e => e,
         })?;
-        let adapter = found.swap_remove(i);
+        Gpu::open(found.swap_remove(i))
+    }
+
+    fn open(adapter: wgpu::Adapter) -> Result<Gpu, GpuError> {
         let info = adapter.get_info();
-        let limits = wgpu::Limits { max_storage_buffers_per_shader_stage: 8, ..wgpu::Limits::downlevel_defaults() }
-            .using_resolution(adapter.limits());
+        let limits = device_limits(&adapter.limits());
         // timestamp queries, where the adapter has them, so renders can report GPU time
         let features =
             adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
@@ -263,8 +308,13 @@ impl Gpu {
 
     /// A new device on the same adapter, for work that needs a device of its own.
     pub fn open_like(&self) -> Result<Gpu, GpuError> {
-        let backends = wgpu::Backends::from(self.info.backend);
-        Gpu::with_options(&GpuOptions { backends, adapter: Some(self.info.name.clone()) })
+        let mut found = enumerate(wgpu::Backends::from(self.info.backend));
+        let infos = found.iter().map(|a| a.get_info()).collect::<Vec<_>>();
+        let i = same_adapter(&infos, &self.info).ok_or_else(|| GpuError::NoMatch {
+            wanted: describe(&self.info),
+            available: infos.iter().map(describe).collect(),
+        })?;
+        Gpu::open(found.swap_remove(i))
     }
 
     /// True when this device rasterises on the CPU.

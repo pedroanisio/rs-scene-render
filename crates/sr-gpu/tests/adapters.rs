@@ -129,3 +129,32 @@ fn nothing_changes_outside_wsl2_without_the_driver_or_when_opted_out() {
     assert_eq!(wsl_environment(&WslProbe { d3d12_driver: false, ..wsl() }), pairs(&[]));
     assert_eq!(wsl_environment(&WslProbe { opt_out: true, ..wsl() }), pairs(&[]));
 }
+
+#[test]
+fn a_device_reopens_on_exactly_its_own_adapter() {
+    use sr_gpu::gpu::same_adapter;
+    let gpu = |name: &str, device: u32, b: Backend| AdapterInfo { device, ..info(name, DeviceType::DiscreteGpu, b) };
+    let found = [
+        gpu("NVIDIA GeForce RTX 3080 Ti", 0x2208, Backend::Vulkan),
+        gpu("NVIDIA GeForce RTX 3080", 0x2206, Backend::Dx12),
+        gpu("NVIDIA GeForce RTX 3080", 0x2206, Backend::Vulkan),
+        gpu("NVIDIA GeForce RTX 3080", 0x2216, Backend::Vulkan),
+    ];
+    for (k, a) in found.iter().enumerate() {
+        assert_eq!(same_adapter(&found, a), Some(k), "{}", a.name);
+    }
+    assert_eq!(same_adapter(&found, &gpu("NVIDIA GeForce RTX 308", 0x2206, Backend::Vulkan)), None);
+    assert_eq!(same_adapter(&found, &gpu("nvidia geforce rtx 3080", 0x2206, Backend::Vulkan)), None);
+}
+
+#[test]
+fn an_adapter_that_cannot_draw_3d_says_how_to_get_one_that_can() {
+    use sr_gpu::gpu::three_d_warning;
+    let gl = info("D3D12 (NVIDIA GeForce RTX 4050 Laptop GPU)", DeviceType::Other, Backend::Gl);
+    let w = three_d_warning(&gl).expect("OpenGL adapters do not draw 3D");
+    assert!(w.contains("SR_GPU_BACKEND=vulkan"), "{w}");
+    assert!(w.contains("D3D12 (NVIDIA GeForce RTX 4050 Laptop GPU)") && w.contains("not drawn"), "{w}");
+    assert!(w.contains("scene-render gpus"), "{w}");
+    assert!(three_d_warning(&lavapipe()).is_none());
+    assert!(three_d_warning(&info("RTX 4050", DeviceType::DiscreteGpu, Backend::Dx12)).is_none());
+}

@@ -44,6 +44,8 @@ pub struct MeshGpu {
 pub struct TexGpu {
     pub view: wgpu::TextureView,
     pub key: u64,
+    /// Size on the GPU (the source's, reduced to the device's limit).
+    pub size: [u32; 2],
 }
 
 /// A prefiltered environment on the GPU.
@@ -109,6 +111,59 @@ impl Draw3 {
     pub fn mesh_triangles(&self) -> u64 {
         self.mesh.mesh().count as u64 / 3
     }
+}
+
+/// Splats one storage binding of the device holds: 64 bytes each, 192 with spherical harmonics.
+pub fn splat_capacity(limits: &wgpu::Limits, sh: bool) -> u64 {
+    limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / if sh { 192 } else { 64 }
+}
+
+/// The note for a splat set of `total` of which the device holds `kept`.
+pub fn splat_note(total: u64, kept: u64) -> Option<String> {
+    (kept < total).then(|| {
+        format!("{} of {total} Gaussian splats are not drawn: this device holds {kept} in one buffer", total - kept)
+    })
+}
+
+/// A `w`×`h` image's size reduced, in proportion, to at most `cap` a side.
+pub fn fit_texture(w: u32, h: u32, cap: u32) -> [u32; 2] {
+    let m = w.max(h);
+    if m <= cap {
+        return [w, h];
+    }
+    [w, h].map(|v| ((v as u64 * cap as u64 / m as u64) as u32).max(1))
+}
+
+/// Which lights get shadow views: a view is a layer of one depth array, so once the device's
+/// `max_layers` are taken the remaining lights light without shadows. A point light takes six
+/// views, a directional one four cascades (one view under an orthographic camera), a spot one.
+pub fn shadow_casters(lights: &[Light3], cascades: bool, max_layers: u32) -> Vec<bool> {
+    let mut used = 0u32;
+    lights
+        .iter()
+        .map(|l| {
+            let views = match l.kind {
+                _ if !l.cast_shadow => return false,
+                LightKind::Ambient => return false,
+                LightKind::Directional if cascades => 4,
+                LightKind::Directional | LightKind::Spot => 1,
+                _ => 6,
+            };
+            let fits = used + views <= max_layers;
+            if fits {
+                used += views;
+            }
+            fits
+        })
+        .collect()
+}
+
+/// The note for shadow-casting lights that [`shadow_casters`] leaves without shadows.
+pub fn shadow_note(lights: &[Light3], cascades: bool, max_layers: u32) -> Option<String> {
+    let cast = shadow_casters(lights, cascades, max_layers);
+    let lost = lights.iter().zip(&cast).filter(|(l, c)| l.cast_shadow && l.kind != LightKind::Ambient && !**c).count();
+    (lost > 0)
+        .then(|| format!("{lost} light(s) cast no shadows: their shadow views exceed the {max_layers} this device has"))
 }
 
 /// Light kinds, as the shader numbers them.
@@ -870,6 +925,7 @@ impl ThreeEngine {
                 view: texture(d, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1, 1, 1, "white")
                     .create_view(&Default::default()),
                 key: 0,
+                size: [1, 1],
             }),
             brdf: texture(d, [1, 1], FORMAT, 1, 1, 1, "brdf").create_view(&Default::default()),
             black_env: texture(d, [1, 1], FORMAT, 1, 1, 1, "black-env").create_view(&Default::default()),
@@ -984,12 +1040,18 @@ impl ThreeEngine {
         })
     }
 
-    /// Uploads an RGBA8 image with a CPU-built mip chain.
+    /// Uploads an RGBA8 image with a CPU-built mip chain, reduced to the device's texture
+    /// limit (8192 at most, as 2D images are) when it is larger.
     pub fn upload_rgba8(&mut self, w: u32, h: u32, rgba: &[u8], srgb: bool) -> Arc<TexGpu> {
+        let cap = self.device.limits().max_texture_dimension_2d.min(8192);
+        let mut img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).unwrap_or_else(|| image::RgbaImage::new(w, h));
+        let [w, h] = fit_texture(w.max(1), h.max(1), cap);
+        if img.dimensions() != (w, h) {
+            img = image::imageops::thumbnail(&img, w, h);
+        }
         let mips = 32 - w.max(h).max(1).leading_zeros();
         let format = if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
         let t = texture(&self.device, [w, h], format, mips, 1, 1, "material-map");
-        let mut img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).unwrap_or_else(|| image::RgbaImage::new(w, h));
         for level in 0..mips {
             let (lw, lh) = ((w >> level).max(1), (h >> level).max(1));
             if level > 0 {
@@ -998,7 +1060,7 @@ impl ThreeEngine {
             self.write_tex(&t, level, [lw, lh], img.as_raw(), 4);
         }
         self.next_key += 1;
-        Arc::new(TexGpu { view: t.create_view(&Default::default()), key: self.next_key })
+        Arc::new(TexGpu { view: t.create_view(&Default::default()), key: self.next_key, size: [w, h] })
     }
 
     /// Uploads a mesh.
@@ -1062,11 +1124,19 @@ impl ThreeEngine {
         })
     }
 
-    /// Uploads splats: position and opacity, the covariance R S Sᵀ Rᵀ, colour.
+    /// Uploads splats: position and opacity, the covariance R S Sᵀ Rᵀ, colour. A set larger
+    /// than one storage binding of the device is cut to what fits ([`splat_note`] reports it).
     pub fn upload_splats(&self, s: &sr_3d::Splats) -> Arc<SplatGpu> {
-        let mut data: Vec<[f32; 16]> = Vec::with_capacity(s.len());
+        let sh = s.sh_degree > 0 && s.sh.len() == s.len();
+        self.upload_splats_within(s, splat_capacity(&self.device.limits(), sh).min(u32::MAX as u64) as usize)
+    }
+
+    /// [`upload_splats`](Self::upload_splats) of the first `cap` splats.
+    pub fn upload_splats_within(&self, s: &sr_3d::Splats, cap: usize) -> Arc<SplatGpu> {
+        let n = s.len().min(cap);
+        let mut data: Vec<[f32; 16]> = Vec::with_capacity(n);
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for i in 0..s.len() {
+        for i in 0..n {
             let p = Vec3::from(s.pos[i]);
             lo = lo.min(p);
             hi = hi.max(p);
@@ -1088,21 +1158,14 @@ impl ThreeEngine {
             contents: bytemuck::cast_slice(&data),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let has_sh = s.sh_degree > 0 && s.sh.len() == s.len() && !s.is_empty();
+        let has_sh = s.sh_degree > 0 && s.sh.len() == s.len() && n > 0;
         let dummy = [[0.0f32; 48]];
         let sh = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("splat-sh"),
-            contents: bytemuck::cast_slice(if has_sh { &s.sh[..] } else { &dummy[..] }),
+            contents: bytemuck::cast_slice(if has_sh { &s.sh[..n] } else { &dummy[..] }),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        Arc::new(SplatGpu {
-            buf,
-            sh,
-            sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 },
-            n: s.len() as u32,
-            lo,
-            hi,
-        })
+        Arc::new(SplatGpu { buf, sh, sh_degree: if has_sh { s.sh_degree.min(3) } else { 0 }, n: n as u32, lo, hi })
     }
 
     fn mat_bind(&mut self, maps: &Maps, uniform: &wgpu::Buffer) -> [u64; 6] {
@@ -1250,7 +1313,9 @@ impl ThreeEngine {
         backdrop: Option<&wgpu::TextureView>,
         out: &wgpu::TextureView,
     ) {
-        if let Some(opts) = scene.path {
+        let limits = self.device.limits();
+        // a scene too large for the tracer's buffers is rasterised (the caller reports `limit_note`)
+        if let Some(opts) = scene.path.filter(|_| crate::pathtrace::limit_note(scene, &limits).is_none()) {
             let data = crate::pathtrace::build(scene);
             if self.pt.is_none() {
                 self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
@@ -1345,6 +1410,7 @@ impl ThreeEngine {
                 })
                 .collect()
         });
+        let casters = shadow_casters(&scene.lights, cascades.is_some(), limits.max_texture_array_layers);
         let mut shadow_mats: Vec<Mat4> = Vec::new();
         let mut map_size = 16u32;
         let mut lights_u: Vec<LightU> = Vec::with_capacity(scene.lights.len());
@@ -1353,7 +1419,7 @@ impl ThreeEngine {
             let mut views = 1.0;
             // cascade split depths of a directional light (view z where cascades 0–2 end)
             let mut splits = [0.0f32; 3];
-            if l.cast_shadow && l.kind != LightKind::Ambient {
+            if casters[li] {
                 first = shadow_mats.len() as f32;
                 map_size = map_size.max(l.map_size.clamp(16, 8192));
                 match l.kind {
