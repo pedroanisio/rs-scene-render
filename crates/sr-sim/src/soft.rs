@@ -34,6 +34,9 @@ pub struct SoftSpec {
     pub self_collision: bool,
 }
 
+/// Most substeps a fixed step is split into; stiffer springs are softened to stay stable.
+pub const MAX_SUBSTEPS: u64 = 4096;
+
 /// Substeps one fixed step needs for stable integration.
 pub fn substeps(spec_mass: f64, stiffness: f64, nodes: usize, step: f64) -> u64 {
     let m = (spec_mass / nodes.max(1) as f64).max(1e-9);
@@ -136,8 +139,11 @@ impl SoftState {
     ) {
         let n = self.pos.len();
         let m = (spec.mass / n.max(1) as f64).max(1e-9);
-        let subs = substeps(spec.mass, spec.stiffness, n, dt).min(4096);
+        let need = substeps(spec.mass, spec.stiffness, n, dt);
+        let subs = need.min(MAX_SUBSTEPS);
         let h = dt / subs as f64;
+        // past the cap, the stiffest spring the substep still integrates stably
+        let stiffness = if need > subs { m / (8.0 * h * h) } else { spec.stiffness };
         // each spring's damping coefficient is damping · 2√(k m) for its own k
         let c_crit = 2.0 * m.sqrt() * spec.damping;
         let pinned = |k: usize| -> bool {
@@ -160,7 +166,7 @@ impl SoftState {
                 let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
                 let u = [d[0] / len, d[1] / len];
                 let rv = (self.vel[b][0] - self.vel[a][0]) * u[0] + (self.vel[b][1] - self.vel[a][1]) * u[1];
-                let k = spec.stiffness * kf;
+                let k = stiffness * kf;
                 let mag = k * (len - rest) + c_crit * k.sqrt() * rv;
                 force[a][0] += u[0] * mag;
                 force[a][1] += u[1] * mag;
@@ -190,7 +196,7 @@ impl SoftState {
                         let d = [self.pos[j][0] - self.pos[i][0], self.pos[j][1] - self.pos[i][1]];
                         let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
                         if len < r && len > 1e-12 {
-                            let push = spec.stiffness * (r - len) / len;
+                            let push = stiffness * (r - len) / len;
                             force[i][0] -= d[0] * push;
                             force[i][1] -= d[1] * push;
                             force[j][0] += d[0] * push;
@@ -207,6 +213,10 @@ impl SoftState {
                 self.vel[k][0] += force[k][0] / m * h;
                 self.vel[k][1] += force[k][1] / m * h;
                 let mut p = [self.pos[k][0] + self.vel[k][0] * h, self.pos[k][1] + self.vel[k][1] * h];
+                if !(p[0].is_finite() && p[1].is_finite()) {
+                    self.vel[k] = [0.0, 0.0];
+                    continue;
+                }
                 if let Some((q, nrm)) = collide(p) {
                     p = q;
                     let vn = self.vel[k][0] * nrm[0] + self.vel[k][1] * nrm[1];

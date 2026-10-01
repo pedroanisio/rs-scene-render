@@ -193,6 +193,24 @@ fn v(x: f64, y: f64) -> Vector {
     Vector::new(x, y)
 }
 
+/// The nearest surface point and outward normal (metres, y up) of the first enabled,
+/// non-sensor collider containing `q`.
+fn surface(colliders: &ColliderSet, q: Vector) -> Option<([f64; 2], [f64; 2])> {
+    for (_, c) in colliders.iter() {
+        if c.is_sensor() || !c.is_enabled() {
+            continue;
+        }
+        let proj = c.shape().project_point(c.position(), q, false);
+        if !proj.is_inside {
+            continue;
+        }
+        let d = [proj.point.x - q.x, proj.point.y - q.y];
+        let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
+        return Some(([proj.point.x, proj.point.y], [d[0] / l, d[1] / l]));
+    }
+    None
+}
+
 impl World {
     /// Metres (y up) of a pixel point.
     pub fn to_m(&self, p: [f64; 2]) -> [f64; 2] {
@@ -515,12 +533,7 @@ impl World {
         if !st.softs.is_empty() {
             let g = self.spec.gravity;
             let bounds = self.spec.bounds;
-            let qp = st.broad.as_query_pipeline(
-                st.narrow.query_dispatcher(),
-                &st.bodies,
-                &st.colliders,
-                QueryFilter::default().exclude_sensors(),
-            );
+            let colliders = &st.colliders;
             let collide = |p: [f64; 2]| -> Option<([f64; 2], [f64; 2])> {
                 // bounds first (metres, y up; the frame spans y ∈ [−h, 0])
                 match bounds {
@@ -540,15 +553,9 @@ impl World {
                         return Some(([p[0], 0.0], [0.0, -1.0]));
                     }
                 }
-                let (_, proj) = qp.project_point(v(p[0], p[1]), 0.0, true)?;
-                if !proj.is_inside {
-                    return None;
-                }
                 // inside a solid: move to the surface along the shortest way out
-                let (_, surf) = qp.project_point(v(p[0], p[1]), f64::MAX, false)?;
-                let d = [surf.point.x - p[0], surf.point.y - p[1]];
-                let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
-                Some(([surf.point.x + d[0] / l * 1e-4, surf.point.y + d[1] / l * 1e-4], [d[0] / l, d[1] / l]))
+                let (q, n) = surface(colliders, v(p[0], p[1]))?;
+                Some(([q[0] + n[0] * 1e-4, q[1] + n[1] * 1e-4], n))
             };
             for k in 0..st.softs.len() {
                 let spec = {
@@ -619,22 +626,8 @@ impl World {
     /// outward normal and the nearest surface point (pixels) when it does.
     pub fn hit(&self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
-        let st = &self.state;
-        let qp = st.broad.as_query_pipeline(
-            st.narrow.query_dispatcher(),
-            &st.bodies,
-            &st.colliders,
-            QueryFilter::default().exclude_sensors(),
-        );
-        let q = v(p[0] / ppm, -p[1] / ppm);
-        let (_, proj) = qp.project_point(q, 0.0, true)?;
-        if !proj.is_inside {
-            return None;
-        }
-        let (_, surf) = qp.project_point(q, f64::MAX, false)?;
-        let d = [surf.point.x - q.x, surf.point.y - q.y];
-        let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
-        Some(([surf.point.x * ppm, -surf.point.y * ppm], [d[0] / l, -d[1] / l]))
+        let (q, n) = surface(&self.state.colliders, v(p[0] / ppm, -p[1] / ppm))?;
+        Some(([q[0] * ppm, -q[1] * ppm], [n[0], -n[1]]))
     }
 
     /// Steps simulated so far and checkpoints held (tests, statistics).
