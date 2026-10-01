@@ -1,6 +1,8 @@
 [workspace]
 members = ["crates/sr-model", "crates/sr-eval", "crates/sr-gpu", "crates/sr-media", "crates/sr-audio", "crates/sr-deliver", "crates/sr-vector", "crates/sr-text", "crates/sr-3d", "crates/sr-sim", "crates/sr-geo", "crates/sr-resolve", "crates/sr-fuzz", "crates/scene-render"]
 resolver = "2"
+# vendored crates are dependencies, not members (see vendor/README.md)
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.2"
@@ -50,3 +52,8 @@ incremental = false
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
+
+# gpu-allocator with one change, for wgpu's Vulkan backend: upload memory in ordinary host memory instead
+# of the device's mapped-memory window (see vendor/README.md).
+[patch.crates-io]
+gpu-allocator = { path = "vendor/gpu-allocator" }
