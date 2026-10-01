@@ -16,7 +16,9 @@
 //! any window one third of the frame wide and tall, the 10° visual field at
 //! the reference 1024 × 768 viewing geometry.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+
+use sr_gpu::ContrastTarget;
 
 pub const COLS: usize = 48;
 pub const ROWS: usize = 27;
@@ -151,5 +153,94 @@ impl FlashDetector {
             self.red_frames,
             self.first.unwrap_or(0.0)
         ))
+    }
+}
+
+/// What the checks take from each rendered frame. Both checks compare frames over the whole output (a
+/// flash counts transitions within a second, a text is judged at the frames where it is most visible),
+/// so everything observed reaches one [`Judge`], in frame order.
+pub(crate) trait Observe {
+    /// The flash grid of the frame at output time `t`.
+    fn flash(&mut self, t: f64, cells: Vec<[f64; 3]>);
+    /// The contrast `ratio` of a text at accumulated opacity `opacity`, measured at time `t`.
+    fn contrast(&mut self, id: &ContrastTarget, opacity: f64, ratio: f64, t: f64);
+    /// A text the inline probe cannot measure, seen at `opacity` in frame `frame` of the frames observed.
+    fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64);
+}
+
+/// The state of the checks over an output.
+pub(crate) struct Judge {
+    /// The flash analysis, when the flash check is on.
+    pub flash: Option<FlashDetector>,
+    /// Each text is judged at its most visible: the lowest ratio among the frames where its accumulated
+    /// opacity is at its maximum over the encode. A label fading in passes through every ratio down to
+    /// 1:1 on its way to rest, which is not what a reader faces; text held dim is judged dim.
+    /// (opacity, ratio, time) for each independent text target.
+    pub lowest: BTreeMap<ContrastTarget, (f64, f64, f64)>,
+    /// Text requiring final-frame measurement: (frame index, opacity) where each appears.
+    pub unprobed: BTreeMap<ContrastTarget, Vec<(usize, f64)>>,
+}
+
+impl Judge {
+    pub fn new(flash: bool) -> Judge {
+        Judge { flash: flash.then(FlashDetector::default), lowest: BTreeMap::new(), unprobed: BTreeMap::new() }
+    }
+
+    /// Takes what a stretch of frames showed; `first` is the index of its first frame in the output.
+    /// Stretches must arrive in frame order.
+    pub fn replay(&mut self, seen: Seen, first: usize) {
+        for (t, cells) in seen.flash {
+            self.flash(t, cells);
+        }
+        for (id, opacity, ratio, t) in &seen.contrast {
+            self.contrast(id, *opacity, *ratio, *t);
+        }
+        for (id, frame, opacity) in &seen.unprobed {
+            self.unprobed(id, first + frame, *opacity);
+        }
+    }
+}
+
+impl Observe for Judge {
+    fn flash(&mut self, t: f64, cells: Vec<[f64; 3]>) {
+        if let Some(d) = self.flash.as_mut() {
+            d.push(t, &cells);
+        }
+    }
+
+    fn contrast(&mut self, id: &ContrastTarget, opacity: f64, ratio: f64, t: f64) {
+        let e = self.lowest.entry(id.clone()).or_insert((f64::MIN, f64::MAX, t));
+        if opacity > e.0 + 1e-3 {
+            *e = (opacity, ratio, t);
+        } else if (opacity - e.0).abs() <= 1e-3 && ratio < e.1 {
+            *e = (e.0, ratio, t);
+        }
+    }
+
+    fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64) {
+        self.unprobed.entry(id.clone()).or_default().push((frame, opacity));
+    }
+}
+
+/// What a stretch of frames showed, kept until the frames before it have been judged: time segments
+/// rendered at once finish in any order.
+#[derive(Default)]
+pub(crate) struct Seen {
+    flash: Vec<(f64, Vec<[f64; 3]>)>,
+    contrast: Vec<(ContrastTarget, f64, f64, f64)>,
+    unprobed: Vec<(ContrastTarget, usize, f64)>,
+}
+
+impl Observe for Seen {
+    fn flash(&mut self, t: f64, cells: Vec<[f64; 3]>) {
+        self.flash.push((t, cells));
+    }
+
+    fn contrast(&mut self, id: &ContrastTarget, opacity: f64, ratio: f64, t: f64) {
+        self.contrast.push((id.clone(), opacity, ratio, t));
+    }
+
+    fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64) {
+        self.unprobed.push((id.clone(), frame, opacity));
     }
 }

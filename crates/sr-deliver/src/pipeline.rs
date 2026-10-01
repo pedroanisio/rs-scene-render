@@ -17,6 +17,7 @@ use sr_gpu::{Gpu, Renderer};
 use sr_media::encode::{Codec, ColorTags, Container, EncodeSpec, Encoder, Hardware, Hdr, InputFormat, StillFormat};
 use sr_model::model as m;
 
+use crate::access::{Judge, Observe, Seen};
 use crate::audio::{self, SceneAudio};
 use crate::DeliverError;
 
@@ -324,11 +325,14 @@ impl Video<'_> {
 }
 
 impl Video<'_> {
-    /// Renders `times` and hands each converted frame to `sink`; returns stage timings.
+    /// Renders `times` and hands each converted frame to `sink` and what the accessibility checks
+    /// take from it to `seen`; adds stage timings to `report`. The checks' verdicts come from
+    /// [`Video::judge`], once every frame of the output has been observed.
     fn run(
         &mut self,
         times: &[f64],
         report: &mut Report,
+        seen: &mut dyn Observe,
         mut sink: impl FnMut(Vec<u8>) -> Result<f64, DeliverError>,
     ) -> Result<(), DeliverError> {
         let p = self.ev.program();
@@ -336,45 +340,14 @@ impl Video<'_> {
         let mut pending: Option<(f64, sr_gpu::output::Pending)> = None;
         // A worker reuses its report for several chunks; retain earlier findings.
         let mut unsupported = report.unsupported.iter().cloned().collect::<std::collections::BTreeSet<_>>();
-        let acc = p.scene.metadata.as_ref().and_then(|m| {
-            m.children.iter().find_map(|c| match c {
-                m::MetadataChild::Accessibility(a) => Some(a.clone()),
-                _ => None,
-            })
-        });
-        // Without an <accessibility> element nothing is checked: the XSD defaults (flashCheck
-        // "warn", contrastCheck "off") apply to the element's attributes, and the checks
-        // are skipped when it is absent. Declare <accessibility/> to opt in.
-        let flash_mode = acc.as_ref().map(|a| a.flash_check.to_string()).unwrap_or_else(|| "off".into());
-        let contrast_mode = acc.as_ref().map(|a| a.contrast_check.to_string()).unwrap_or_else(|| "off".into());
-        let min_contrast = acc.as_ref().map(|a| a.min_contrast.get()).unwrap_or(4.5);
-        let mut flash = (flash_mode != "off").then(crate::access::FlashDetector::default);
-        let flash_picture = flash.as_ref().map(|_| self.renderer.texture(self.size));
-        self.renderer.contrast_probe = contrast_mode != "off";
-        // Each text is judged at its most visible: the lowest ratio among the frames where its accumulated
-        // opacity is at its maximum over the encode. A label fading in passes through every ratio down to
-        // 1:1 on its way to rest, which is not what a reader faces; text held dim is judged dim.
-        // (opacity, ratio, time) for each independent text target.
-        let mut lowest: std::collections::BTreeMap<sr_gpu::ContrastTarget, (f64, f64, f64)> = Default::default();
-        // Text requiring final-frame measurement: (frame index, opacity) where each appears.
-        let mut unprobed: std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>> = Default::default();
+        let checks = Checks::of(p);
+        let flash_picture = checks.flash_on().then(|| self.renderer.texture(self.size));
+        self.renderer.contrast_probe = checks.contrast_on();
         let opacity_of = |g: &sr_eval::FrameGraph, id: &sr_gpu::ContrastTarget| match id {
             sr_gpu::ContrastTarget::Node(id) => {
                 g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0)
             }
             sr_gpu::ContrastTarget::Captions => 1.0,
-        };
-        let keep = |lowest: &mut std::collections::BTreeMap<sr_gpu::ContrastTarget, (f64, f64, f64)>,
-                    id: &sr_gpu::ContrastTarget,
-                    op: f64,
-                    ratio: f64,
-                    t: f64| {
-            let e = lowest.entry(id.clone()).or_insert((f64::MIN, f64::MAX, t));
-            if op > e.0 + 1e-3 {
-                *e = (op, ratio, t);
-            } else if (op - e.0).abs() <= 1e-3 && ratio < e.1 {
-                *e = (e.0, ratio, t);
-            }
         };
         let ev = self.ev;
         // Without a simulation, evaluation is a pure function of time, so a helper thread
@@ -409,24 +382,19 @@ impl Video<'_> {
                 let frame = self.render_side(&g, t, ft.as_ref())?;
                 unsupported.extend(frame.stats.unsupported.iter().cloned());
                 for id in &frame.stats.contrast_unprobed {
-                    unprobed.entry(id.clone()).or_default().push((k, opacity_of(&g, id)));
+                    seen.unprobed(id, k, opacity_of(&g, id));
                 }
                 for (id, ratio) in &frame.stats.contrast {
-                    keep(&mut lowest, id, opacity_of(&g, id), *ratio, t);
+                    seen.contrast(id, opacity_of(&g, id), *ratio, t);
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
                 let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
-                if contrast_mode != "off" {
+                if checks.contrast_on() {
                     if let Some(o) = self.overlay.as_mut() {
                         for (id, opacity, ratio) in o.contrast(&mut self.stage, out_t, &picture, placement)? {
-                            keep(
-                                &mut lowest,
-                                &sr_gpu::ContrastTarget::Node(format!("output layer: {id}")),
-                                opacity,
-                                ratio,
-                                out_t,
-                            );
+                            let id = sr_gpu::ContrastTarget::Node(format!("output layer: {id}"));
+                            seen.contrast(&id, opacity, ratio, out_t);
                         }
                     }
                 }
@@ -438,10 +406,9 @@ impl Video<'_> {
                     }
                     None => None,
                 };
-                if let Some((det, tex)) = flash.as_mut().zip(flash_picture.as_ref()) {
+                if let Some(tex) = flash_picture.as_ref() {
                     self.stage.place_with_overlay(&picture, &working, tex, placement, over);
-                    let cells = self.renderer.flash_grid(tex);
-                    det.push(out_t, &cells);
+                    seen.flash(out_t, self.renderer.flash_grid(tex));
                 }
                 let next = self.stage.submit_placed(
                     &picture,
@@ -474,16 +441,25 @@ impl Video<'_> {
             Ok(())
         })?;
         report.unsupported = unsupported.into_iter().collect();
+        Ok(())
+    }
+
+    /// Completes the accessibility checks over an output and records their findings in `report`.
+    /// `judge` has observed every frame of `times`, in order; text the inline probe could not reach is
+    /// measured here, then the verdicts are given.
+    fn judge(&mut self, mut judge: Judge, times: &[f64], report: &mut Report) {
+        let p = self.ev.program();
+        let checks = Checks::of(p);
         // Probe over the whole span of maximum visibility. A middle-frame sample can miss low
         // contrast at either end, or a change in the text's backdrop.
-        for (id, seen) in &unprobed {
-            for (k, opacity) in probe_frames(seen) {
+        for (id, seen) in std::mem::take(&mut judge.unprobed) {
+            for (k, opacity) in probe_frames(&seen) {
                 let t = times[k];
                 let g = self.ev.evaluate(t);
                 let ev = &self.ev;
                 let mut sub = |st: f64| ev.evaluate(st);
-                if let Some(ratio) = self.renderer.contrast_with_without(&g, p, id, &mut sub) {
-                    keep(&mut lowest, id, opacity, ratio, t);
+                if let Some(ratio) = self.renderer.contrast_with_without(&g, p, &id, &mut sub) {
+                    judge.contrast(&id, opacity, ratio, t);
                 }
             }
         }
@@ -494,15 +470,73 @@ impl Video<'_> {
             }
             report.accessibility.push(msg);
         };
-        if let Some(msg) = flash.as_ref().and_then(|d| d.verdict()) {
-            fail(&flash_mode, msg, report);
+        if let Some(msg) = judge.flash.as_ref().and_then(|d| d.verdict()) {
+            fail(&checks.flash, msg, report);
         }
-        for (id, (_, ratio, at)) in &lowest {
+        let min_contrast = checks.min_contrast;
+        for (id, (_, ratio, at)) in &judge.lowest {
             if *ratio < min_contrast {
-                fail(&contrast_mode, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
+                fail(&checks.contrast, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
             }
         }
-        Ok(())
+    }
+}
+
+/// The accessibility checks' judge behind time segments rendered at once: chunks of frames finish in any
+/// order and are judged in frame order, each as soon as the chunks before it have been.
+struct InOrder {
+    judge: Judge,
+    /// The chunk the judge takes next.
+    next: usize,
+    /// Chunks that finished before an earlier one did.
+    waiting: std::collections::BTreeMap<usize, Seen>,
+}
+
+impl InOrder {
+    /// Takes what chunk `i` showed; `bounds[i]` is the index of the chunk's first frame in the output.
+    fn take(&mut self, i: usize, seen: Seen, bounds: &[usize]) {
+        self.waiting.insert(i, seen);
+        while let Some(seen) = self.waiting.remove(&self.next) {
+            self.judge.replay(seen, bounds[self.next]);
+            self.next += 1;
+        }
+    }
+}
+
+/// The accessibility checks a document asks for on its rendered frames.
+struct Checks {
+    /// `flashCheck`: `off`, `warn` or `error`.
+    flash: String,
+    /// `contrastCheck`: `off`, `warn` or `error`.
+    contrast: String,
+    /// `minContrast`.
+    min_contrast: f64,
+}
+
+impl Checks {
+    fn of(p: &sr_eval::Program) -> Checks {
+        let acc = p.scene.metadata.as_ref().and_then(|m| {
+            m.children.iter().find_map(|c| match c {
+                m::MetadataChild::Accessibility(a) => Some(a),
+                _ => None,
+            })
+        });
+        // Without an <accessibility> element nothing is checked: the XSD defaults (flashCheck
+        // "warn", contrastCheck "off") apply to the element's attributes, and the checks
+        // are skipped when it is absent. Declare <accessibility/> to opt in.
+        Checks {
+            flash: acc.map(|a| a.flash_check.to_string()).unwrap_or_else(|| "off".into()),
+            contrast: acc.map(|a| a.contrast_check.to_string()).unwrap_or_else(|| "off".into()),
+            min_contrast: acc.map(|a| a.min_contrast.get()).unwrap_or(4.5),
+        }
+    }
+
+    fn flash_on(&self) -> bool {
+        self.flash != "off"
+    }
+
+    fn contrast_on(&self) -> bool {
+        self.contrast != "off"
     }
 }
 
@@ -843,6 +877,7 @@ pub fn deliver(
         spec.start_number = (start * fps).round() as u64;
         spec.chapters = chapters.clone();
         let fit = output.max_file_size;
+        let checks = Checks::of(p);
         let t_video = Instant::now();
         report.segments = 1;
         // llvmpipe already spreads one device over every core, so automatic parallelism would only add
@@ -877,12 +912,14 @@ pub fn deliver(
             };
             let mut feeder = Feeder::start(&ispec)?;
             let mut done = 0;
+            let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
-            video.run(&times, &mut report, |b| {
+            video.run(&times, &mut report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
                 feeder.send(b)
             })?;
+            video.judge(judge, &times, &mut report);
             feeder.finish()?;
             report.frames = n;
             let duration = end - start;
@@ -940,6 +977,13 @@ pub fn deliver(
             // worker has joined. Concurrent device creation crashed the Vulkan loader;
             // independent devices avoid allocation contention between renderers.
             let worker_gpus: Vec<_> = (0..workers).map(|_| gpu.open_like()).collect::<Result<_, _>>()?;
+            // the accessibility checks follow frames across chunks, and chunks finish in any order: one
+            // judge takes what each chunk showed once the chunks before it are in
+            let judged = std::sync::Mutex::new(InOrder {
+                judge: Judge::new(checks.flash_on()),
+                next: 0,
+                waiting: std::collections::BTreeMap::new(),
+            });
             let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = worker_gpus
                     .iter()
@@ -990,10 +1034,12 @@ pub fn deliver(
                                     worker.segments = map
                                         .zip(all_frames.as_ref())
                                         .map(|(tm, f)| (tm, f[bounds[i]..bounds[i + 1]].to_vec()));
-                                    worker.run(&times[bounds[i]..bounds[i + 1]], &mut part, |b| {
+                                    let mut seen = Seen::default();
+                                    worker.run(&times[bounds[i]..bounds[i + 1]], &mut part, &mut seen, |b| {
                                         done.fetch_add(1, Relaxed);
                                         feeder.send(b)
                                     })?;
+                                    judged.lock().unwrap_or_else(|e| e.into_inner()).take(i, seen, &bounds);
                                     feeder.finish()
                                 })();
                                 match chunk {
@@ -1028,15 +1074,15 @@ pub fn deliver(
                 report.decode_wait_seconds += part.decode_wait_seconds;
                 report.vector_seconds += part.vector_seconds;
                 unsupported.extend(part.unsupported);
-                report.accessibility.extend(part.accessibility);
-                if report.accessibility_error.is_none() {
-                    report.accessibility_error = part.accessibility_error;
-                }
                 if report.encoder.is_empty() {
                     report.encoder = encoder;
                 }
             }
             report.unsupported = unsupported.into_iter().collect();
+            // every chunk was rendered, so every chunk has been judged; text the workers could not
+            // measure in place is measured by this thread's renderer
+            let judge = judged.into_inner().unwrap_or_else(|e| e.into_inner()).judge;
+            video.judge(judge, &times, &mut report);
             progress(n, n);
             spec.join(&parts, &tmp.join("segments.txt"))?;
             report.frames = n;
@@ -1045,12 +1091,14 @@ pub fn deliver(
         } else {
             let mut feeder = Feeder::start(&spec)?;
             let mut done = 0;
+            let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
-            video.run(&times, &mut report, |b| {
+            video.run(&times, &mut report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
                 feeder.send(b)
             })?;
+            video.judge(judge, &times, &mut report);
             report.encoder = feeder.finish()?;
             report.frames = n;
             report.passes = 1;
@@ -1186,23 +1234,14 @@ pub fn deliver(
 }
 
 /// Segments to render `output` in at once: 1 unless it is a single-pass video file whose frames
-/// render the same from a cold start (no simulation, no accessibility analysis across frames).
+/// render the same from a cold start (no simulation). The accessibility checks compare frames across
+/// segments and do not limit the count: the segments' observations are judged together, in frame order.
 fn segment_count(output: &m::Output, codec: Codec, opts: &Options, ev: &Evaluator, duration: f64) -> usize {
-    let p = ev.program();
-    let accessibility = p.scene.metadata.as_ref().is_some_and(|m| {
-        m.children.iter().any(|c| match c {
-            m::MetadataChild::Accessibility(a) => {
-                a.flash_check.to_string() != "off" || a.contrast_check.to_string() != "off"
-            }
-            _ => false,
-        })
-    });
     if output.two_pass
         || output.max_file_size.is_some()
         || codec.is_sequence()
         || codec.is_audio_only()
         || matches!(codec, Codec::Gif | Codec::Apng | Codec::Webp)
-        || accessibility
         || ev.has_simulation()
     {
         return 1;

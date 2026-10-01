@@ -521,3 +521,110 @@ fn regression_contrast_checks_all_times_even_with_a_later_layer() {
         }
     }
 }
+
+/// Delivers a whole document as `workers` time segments at once.
+fn deliver_in(
+    dir: &std::path::Path,
+    name: &str,
+    xml: &str,
+    workers: u32,
+) -> Result<sr_deliver::pipeline::Report, sr_deliver::DeliverError> {
+    let path = dir.join(name);
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(path, &Default::default()).unwrap();
+    let opts = sr_deliver::Options {
+        parallel: sr_deliver::Parallel::Count(workers),
+        hardware: sr_media::encode::Hardware::Software,
+        ..Default::default()
+    };
+    sr_deliver::deliver(&doc, &doc.scene.outputs[0], gpu().as_ref(), &opts, &mut |_, _| {})
+}
+
+#[test]
+fn parallel_delivery_counts_flashes_across_its_segments() {
+    let Some(dir) = fixtures() else { return };
+    if gpu().is_none() {
+        return;
+    }
+    // 60 frames in two segments of 30. The frame turns white and black ten times around the join, four
+    // times before it and six after: neither side alone reaches the eight transitions in a second that
+    // make a flash, so the check must follow the frames across the join.
+    let keys: String = (26..=35)
+        .map(|k| format!(r#"<key time="{}" value="{}" interpolation="hold"/>"#, (k as f64 - 0.5) / 30.0, k % 2))
+        .collect();
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="30" duration="2" background="#000000"/>
+      <metadata><accessibility flashCheck="warn" contrastCheck="off"/></metadata>
+      <output path="out/join-flash.mkv" codec="ffv1" audio="false"/>
+      <composition><shape id="flash" shape="rect" width="64" height="36" fill="#FFFFFF"><animate property="opacity">
+      <key time="0" value="0" interpolation="hold"/>{keys}</animate></shape></composition></scene>"##
+    );
+    let mut findings = Vec::new();
+    for workers in [1, 2] {
+        let r = deliver_in(&dir, "join-flash.xml", &xml, workers).unwrap();
+        assert_eq!(r.segments, workers, "the flash check must not force a serial render");
+        assert!(r.accessibility.iter().any(|m| m.contains("flashCheck")), "workers={workers}: {:?}", r.accessibility);
+        findings.push(r.accessibility);
+    }
+    assert_eq!(findings[0], findings[1], "the parallel render reports other flashes than the serial one");
+}
+
+#[test]
+fn parallel_delivery_judges_text_at_its_most_visible_over_the_whole_output() {
+    let Some(dir) = fixtures() else { return };
+    if gpu().is_none() {
+        return;
+    }
+    // White text on black fades in across the join of two segments: in the first it only reaches a
+    // ninth of its opacity, which alone would fail, and it rests in the second. Outside a group the
+    // inline probe measures it; inside an isolated one, the renders with and without it.
+    for group in ["", r#"isolate="true""#] {
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="30" duration="2" background="#000000"/>
+          <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
+          <output path="out/join-fade.mkv" codec="ffv1" audio="false"/>
+          <assets><text id="label" text="AB" width="56" height="28" size="24" color="#FFFFFF" font="DejaVu Sans"/></assets>
+          <composition><group id="g" {group}><layer id="t" asset="label" x="4" y="4"><animate property="opacity">
+          <key time="0" value="0"/><key time="0.9" value="0"/><key time="1.5" value="1"/></animate></layer></group></composition></scene>"##
+        );
+        for workers in [1, 2] {
+            let r = deliver_in(&dir, "join-fade.xml", &xml, workers)
+                .unwrap_or_else(|e| panic!("group {group:?}, workers={workers}: {e}"));
+            assert_eq!(r.segments, workers, "the contrast check must not force a serial render");
+            assert!(r.accessibility.is_empty(), "group {group:?}, workers={workers}: {:?}", r.accessibility);
+        }
+    }
+}
+
+#[test]
+fn parallel_delivery_reports_the_contrast_findings_of_serial_delivery() {
+    let Some(dir) = fixtures() else { return };
+    if gpu().is_none() {
+        return;
+    }
+    // Dark grey text over a backdrop that turns from black to dark grey in the second segment: the
+    // lowest ratio, and the time it is reported at, lie after the join.
+    for group in ["", r#"isolate="true""#] {
+        let xml = format!(
+            r##"<scene version="1.2"><project width="64" height="36" fps="30" duration="2" background="#000000"/>
+          <metadata><accessibility contrastCheck="warn" flashCheck="warn"/></metadata>
+          <output path="out/join-contrast.mkv" codec="ffv1" audio="false"/>
+          <assets><text id="label" text="AB" width="56" height="28" size="24" color="#606060" font="DejaVu Sans"/></assets>
+          <composition><shape id="backdrop" shape="rect" width="64" height="36" fill="#000000"><animate property="fill">
+          <key time="0" value="#000000" interpolation="hold"/><key time="1.4" value="#303030"/></animate></shape>
+          <group id="g" {group}><layer id="t" asset="label" x="4" y="4"/></group></composition></scene>"##
+        );
+        let mut findings = Vec::new();
+        for workers in [1, 2] {
+            let r = deliver_in(&dir, "join-contrast.xml", &xml, workers).unwrap();
+            assert_eq!(r.segments, workers);
+            assert!(
+                r.accessibility.iter().any(|m| m.contains("contrastCheck") && m.contains(" t ")),
+                "group {group:?}, workers={workers}: {:?}",
+                r.accessibility
+            );
+            findings.push(r.accessibility);
+        }
+        assert_eq!(findings[0], findings[1], "group {group:?}: the parallel render reports other findings");
+    }
+}
