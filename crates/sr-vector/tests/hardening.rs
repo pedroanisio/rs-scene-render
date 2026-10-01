@@ -289,3 +289,11 @@ fn zip_inflated_sizes_are_capped() {
     assert!(zip::entries_within(&stored, &roomy).unwrap_err().contains("total"));
     assert!(zip::entries_within(&stored, &lim).unwrap_err().contains("a.json"));
 }
+
+#[test]
+fn lottie_easing_handle_without_an_axis() {
+    // found by the dotlottie fuzz target: an `i`/`o` handle with no `x` or `y`
+    let doc = br##"{"fr":30,"ip":0,"op":60,"w":100,"h":100,"layers":[{"ty":1,"ip":0,"op":60,"sw":5,"sh":5,"sc":"#102030",
+    "ks":{"p":{"a":1,"k":[{"t":0,"s":[0,0],"o":{"x":0.3},"i":{"h":0.7,"y":1}},{"t":30,"s":[60,0],"o":{},"i":{}}]}}}]}"##;
+    assert_eq!(Lottie::parse(doc, None, &[]).unwrap().render(15.0, 0.1).cmds.len(), 1);
+}

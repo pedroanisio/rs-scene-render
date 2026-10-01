@@ -51,3 +51,11 @@ fn formula_nesting_is_limited() {
         assert!(formula(tex).unwrap_err().contains("MATH"), "{tex}");
     }
 }
+
+#[test]
+fn formula_unclosed_text_group_inside_left() {
+    // found by the formula fuzz target: the cursor ran past the end, then `\\left` looked for its `\\right`
+    for tex in ["\\left\\{ \\text{r", "\\left( \\mathrm{", "\\text{", "\\left(\\text{a}"] {
+        assert!(!formula(tex).unwrap_err().contains("MATH"), "{tex}");
+    }
+}

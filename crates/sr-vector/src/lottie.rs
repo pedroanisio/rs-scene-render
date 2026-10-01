@@ -52,7 +52,7 @@ fn ease_xy(v: &Value, fallback: [f64; 2]) -> ([f64; 2], [f64; 2]) {
         x.as_f64().or_else(|| x.as_array().and_then(|a| a.first()).and_then(Value::as_f64)).unwrap_or(0.0)
     };
     match v {
-        Value::Object(m) => ([comp(&m["x"]), comp(&m["y"])], fallback),
+        Value::Object(_) => ([comp(&v["x"]), comp(&v["y"])], fallback),
         _ => (fallback, fallback),
     }
 }

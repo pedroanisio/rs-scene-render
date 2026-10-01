@@ -180,6 +180,9 @@ impl Parser<'_> {
             }
             self.i += 1;
         }
+        if self.peek().is_none() {
+            return Err("unclosed group".into());
+        }
         let t: String = self.s[start..self.i].iter().collect();
         self.i += 1;
         Ok(t)
