@@ -145,6 +145,33 @@ fn check_normalized(ty: usize, v: &str) -> Result<(), String> {
     }
 }
 
+/// String types whose patterns hold numbers: lengths with a unit and coordinate pairs.
+const NUMERIC_PATTERN_TYPES: &[&str] = &["relativeLength", "positiveRelativeLength", "pointType", "geoPointsType"];
+
+/// The first number of a valid `raw` value of type `ty` that is not finite: `INF`, `-INF`, `NaN`,
+/// or a literal too large for a double. Looks into union members, list items and the string types
+/// that hold numbers.
+pub fn non_finite(ty: usize, raw: &str) -> Option<String> {
+    let v = collapse(raw);
+    non_finite_normalized(ty, &v).map(|t| t.chars().take(40).collect())
+}
+
+fn non_finite_normalized(ty: usize, v: &str) -> Option<&str> {
+    let t = &SIMPLE_TYPES[ty];
+    match t.kind {
+        SimpleKind::Builtin(Builtin::Double) => parse_xsd_double(v).is_some_and(|x| !x.is_finite()).then_some(v),
+        SimpleKind::Builtin(_) => None,
+        SimpleKind::Restriction(_) if NUMERIC_PATTERN_TYPES.contains(&t.name) => v
+            .split(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E')))
+            .find(|n| n.parse::<f64>().is_ok_and(|x| !x.is_finite())),
+        SimpleKind::Restriction(r) => non_finite_normalized(r.base, v),
+        SimpleKind::Union(members) => {
+            members.iter().find(|&&m| check_normalized(m, v).is_ok()).and_then(|&m| non_finite_normalized(m, v))
+        }
+        SimpleKind::List(item) => v.split(' ').find_map(|tok| non_finite_normalized(item, tok)),
+    }
+}
+
 fn check_builtin(b: Builtin, v: &str) -> Result<(), String> {
     match b {
         Builtin::String => Ok(()),

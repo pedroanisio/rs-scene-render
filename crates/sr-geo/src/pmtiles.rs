@@ -248,11 +248,16 @@ fn write_varint(out: &mut Vec<u8>, mut v: u64) {
 /// Decodes a (decompressed) directory.
 pub fn parse_directory(b: &[u8]) -> Result<Vec<Entry>, String> {
     let mut i = 0;
-    let n = read_varint(b, &mut i)? as usize;
+    let n = read_varint(b, &mut i)?;
+    // an entry takes at least a byte in each of the four columns
+    if n > (b.len() / 4) as u64 {
+        return Err(format!("a directory of {} bytes cannot hold {n} entries", b.len()));
+    }
+    let n = n as usize;
     let mut entries = vec![Entry { tile_id: 0, offset: 0, length: 0, run_length: 0 }; n];
     let mut last = 0u64;
     for e in entries.iter_mut() {
-        last += read_varint(b, &mut i)?;
+        last = last.checked_add(read_varint(b, &mut i)?).ok_or("directory tile ids overflow")?;
         e.tile_id = last;
     }
     for e in entries.iter_mut() {
@@ -263,7 +268,13 @@ pub fn parse_directory(b: &[u8]) -> Result<Vec<Entry>, String> {
     }
     for k in 0..n {
         let v = read_varint(b, &mut i)?;
-        entries[k].offset = if v == 0 && k > 0 { entries[k - 1].offset + entries[k - 1].length as u64 } else { v - 1 };
+        entries[k].offset = match (v, k) {
+            (0, 0) => return Err("the first directory entry has no offset".into()),
+            (0, _) => {
+                entries[k - 1].offset.checked_add(entries[k - 1].length as u64).ok_or("directory offsets overflow")?
+            }
+            _ => v - 1,
+        };
     }
     Ok(entries)
 }
@@ -290,8 +301,15 @@ pub fn serialize_directory(entries: &[Entry]) -> Vec<u8> {
     out
 }
 
-/// Decompresses by a PMTiles compression code.
+/// Most bytes a directory, the metadata or a tile may decompress to.
+pub const MAX_DECOMPRESSED: u64 = 256 << 20;
+
+/// Decompresses by a PMTiles compression code, to at most [`MAX_DECOMPRESSED`] bytes.
 pub fn decompress(code: u8, b: Vec<u8>) -> Result<Vec<u8>, String> {
+    decompress_within(code, b, MAX_DECOMPRESSED)
+}
+
+fn decompress_within(code: u8, b: Vec<u8>, max: u64) -> Result<Vec<u8>, String> {
     match code {
         0 | 1 => Ok(b),
         2 => {
@@ -300,7 +318,11 @@ pub fn decompress(code: u8, b: Vec<u8>) -> Result<Vec<u8>, String> {
                 return Ok(b);
             }
             let mut out = Vec::new();
-            flate2::read::MultiGzDecoder::new(&b[..]).read_to_end(&mut out).map_err(|e| format!("gzip: {e}"))?;
+            let mut gz = flate2::read::MultiGzDecoder::new(&b[..]).take(max.saturating_add(1));
+            gz.read_to_end(&mut out).map_err(|e| format!("gzip: {e}"))?;
+            if out.len() as u64 > max {
+                return Err(format!("gzip: more than {max} bytes when decompressed"));
+            }
             Ok(out)
         }
         3 => Err("brotli-compressed PMTiles are not supported".into()),
@@ -309,11 +331,24 @@ pub fn decompress(code: u8, b: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Reads `len` bytes at `off` of a file of `size` bytes.
+fn read_at(f: &mut File, size: u64, off: u64, len: u64) -> Result<Vec<u8>, String> {
+    match off.checked_add(len) {
+        Some(end) if end <= size => {}
+        _ => return Err(format!("{len} bytes at offset {off} are beyond the end of the archive ({size} bytes)")),
+    }
+    let mut b = vec![0u8; len as usize];
+    f.seek(SeekFrom::Start(off)).and_then(|_| f.read_exact(&mut b)).map_err(|e| e.to_string())?;
+    Ok(b)
+}
+
 /// An open archive.
 pub struct Archive {
     pub header: Header,
     pub metadata: serde_json::Value,
     file: Mutex<File>,
+    /// File size: no directory, metadata or tile lies beyond it.
+    size: u64,
     root: Vec<Entry>,
     leaves: Mutex<HashMap<u64, std::sync::Arc<Vec<Entry>>>>,
 }
@@ -325,12 +360,9 @@ impl Archive {
         let mut head = vec![0u8; HEADER_LEN];
         f.read_exact(&mut head).map_err(|e| format!("{}: {e}", path.display()))?;
         let header = Header::parse(&head).map_err(|e| format!("{}: {e}", path.display()))?;
+        let size = f.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
         let read = |f: &mut File, off: u64, len: u64| -> Result<Vec<u8>, String> {
-            let mut b = vec![0u8; len as usize];
-            f.seek(SeekFrom::Start(off))
-                .and_then(|_| f.read_exact(&mut b))
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(b)
+            read_at(f, size, off, len).map_err(|e| format!("{}: {e}", path.display()))
         };
         let root = parse_directory(&decompress(
             header.internal_compression,
@@ -343,21 +375,19 @@ impl Archive {
         } else {
             serde_json::Value::Null
         };
-        Ok(Archive { header, metadata, file: Mutex::new(f), root, leaves: Mutex::new(HashMap::new()) })
+        Ok(Archive { header, metadata, file: Mutex::new(f), size, root, leaves: Mutex::new(HashMap::new()) })
     }
 
     fn read(&self, off: u64, len: u64) -> Result<Vec<u8>, String> {
         let mut f = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        let mut b = vec![0u8; len as usize];
-        f.seek(SeekFrom::Start(off)).and_then(|_| f.read_exact(&mut b)).map_err(|e| e.to_string())?;
-        Ok(b)
+        read_at(&mut f, self.size, off, len)
     }
 
     fn find(entries: &[Entry], id: u64) -> Option<Entry> {
         // the last entry whose id is not after `id`
         let k = entries.partition_point(|e| e.tile_id <= id);
         let e = *entries.get(k.checked_sub(1)?)?;
-        if e.run_length == 0 || id < e.tile_id + e.run_length as u64 {
+        if e.run_length == 0 || id - e.tile_id < e.run_length as u64 {
             Some(e)
         } else {
             None
@@ -371,10 +401,11 @@ impl Archive {
         for _ in 0..4 {
             let Some(e) = Self::find(&dir, id) else { return Ok(None) };
             if e.run_length > 0 {
-                let b = self.read(self.header.data_offset + e.offset, e.length as u64)?;
+                let off = self.header.data_offset.checked_add(e.offset).ok_or("tile offset overflows")?;
+                let b = self.read(off, e.length as u64)?;
                 return decompress(self.header.tile_compression, b).map(Some);
             }
-            let off = self.header.leaf_offset + e.offset;
+            let off = self.header.leaf_offset.checked_add(e.offset).ok_or("leaf directory offset overflows")?;
             let cached = self.leaves.lock().unwrap_or_else(|p| p.into_inner()).get(&off).cloned();
             dir = match cached {
                 Some(d) => d,
@@ -516,5 +547,71 @@ mod tests {
         }
         assert_eq!(a.tile(6, 0, 0).unwrap(), None);
         std::fs::remove_file(dir).ok();
+    }
+
+    fn temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("pmtiles-{name}-{}.pmtiles", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_header_cannot_claim_more_than_the_file_holds() {
+        let mut h = write(&[], TileType::Png, 1, &serde_json::Value::Null);
+        h.truncate(HEADER_LEN);
+        for (field, value) in [(16, 1u64 << 42), (8, u64::MAX), (32, 1u64 << 42)] {
+            let mut b = h.clone();
+            b[field..field + 8].copy_from_slice(&value.to_le_bytes());
+            let p = temp(&format!("claim-{field}"), &b);
+            let r = Archive::open(&p).map(|_| ());
+            std::fs::remove_file(&p).ok();
+            assert!(r.is_err_and(|e| e.contains("beyond the end")), "field {field}");
+        }
+    }
+
+    #[test]
+    fn crafted_directories_are_errors() {
+        let mut d = Vec::new();
+        // more entries than the directory has bytes for
+        write_varint(&mut d, u64::MAX);
+        assert!(parse_directory(&d).is_err());
+        d.clear();
+        write_varint(&mut d, 1 << 40);
+        d.extend([0; 64]);
+        assert!(parse_directory(&d).is_err());
+        // the first entry has no predecessor to follow
+        let d: Vec<u8> = vec![1, 5, 1, 9, 0];
+        assert!(parse_directory(&d).is_err());
+        // tile ids and offsets that overflow
+        let mut d = vec![2];
+        write_varint(&mut d, u64::MAX);
+        d.extend([1, 1, 1, 1, 1, 1, 1]);
+        assert!(parse_directory(&d).is_err());
+        let mut d = vec![2, 1, 1, 1, 1];
+        write_varint(&mut d, u32::MAX as u64);
+        write_varint(&mut d, 1);
+        write_varint(&mut d, u64::MAX);
+        d.push(0);
+        assert!(parse_directory(&d).is_err());
+        // a run that would end beyond the last tile id is not found, not an overflow
+        let e = Entry { tile_id: u64::MAX - 1, offset: 0, length: 1, run_length: 9 };
+        assert_eq!(Archive::find(&[e], u64::MAX), Some(e));
+        let ok = [
+            Entry { tile_id: 3, offset: 0, length: 7, run_length: 1 },
+            Entry { tile_id: 9, offset: 7, length: 2, run_length: 2 },
+        ];
+        assert_eq!(parse_directory(&serialize_directory(&ok)).unwrap(), ok);
+    }
+
+    #[test]
+    fn decompression_is_capped() {
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let bomb = gz.finish().unwrap();
+        assert!(bomb.len() < 8192);
+        assert_eq!(decompress(2, bomb.clone()).unwrap().len(), 1 << 20);
+        assert_eq!(decompress_within(2, bomb.clone(), 1 << 20).unwrap().len(), 1 << 20);
+        assert!(decompress_within(2, bomb, (1 << 20) - 1).is_err_and(|e| e.contains("more than")));
     }
 }
