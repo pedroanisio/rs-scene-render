@@ -821,3 +821,168 @@ fn regression_incremental_time_changes_update_captions_without_nodes() {
     assert_eq!(rendered(&later), (1, 1));
     assert!(image::open(output).unwrap().to_rgba8().pixels().all(|p| p.0 == [0, 0, 0, 255]));
 }
+
+const RED: [u8; 4] = [255, 0, 0, 255];
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+/// A document that includes `parts/child.scene.xml`, which shows `parts/logo.png` (red).
+fn including(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let (dir, scene) = two_halves(name, "");
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    let logo = dir.join("parts/logo.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba(RED)).save(&logo).unwrap();
+    std::fs::write(
+        dir.join("parts/child.scene.xml"),
+        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
+      <assets><image id="logo" src="logo.png" width="16" height="16"/></assets>
+      <composition><layer id="l" asset="logo"/></composition></scene>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &scene,
+        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
+      <composition><include id="inc" src="parts/child.scene.xml"/></composition></scene>"#,
+    )
+    .unwrap();
+    (dir, scene, logo)
+}
+
+fn centre(path: PathBuf) -> [u8; 4] {
+    image::open(path).unwrap().to_rgba8().get_pixel(8, 8).0
+}
+
+#[test]
+fn an_included_documents_asset_invalidates_incremental_frames() {
+    let (dir, scene, logo) = including("include-asset");
+    let out = dir.join("f_%03d.png");
+    let args = ["render", scene.to_str().unwrap(), "--frames", "0..2", "-o", out.to_str().unwrap(), "--changed-only"];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(centre(dir.join("f_001.png")), RED);
+    assert_eq!(rendered(&run(&args)), (0, 2));
+    image::RgbaImage::from_pixel(16, 16, image::Rgba(BLUE)).save(&logo).unwrap();
+    assert_eq!(rendered(&run(&args)), (2, 2));
+    assert_eq!(centre(dir.join("f_001.png")), BLUE);
+}
+
+#[test]
+fn watch_notices_an_included_documents_asset() {
+    use std::io::{BufRead, BufReader};
+    let (dir, scene, logo) = including("include-watch");
+    let output = dir.join("watch.png");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args(["watch", scene.to_str().unwrap(), "--frames", "0..1", "-o", output.to_str().unwrap()])
+        .args(["--interval", "50", "--max-runs", "2"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap().contains("watching") {
+                let _ = tx.send(());
+            }
+        }
+    });
+    if rx.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        let o = child.wait_with_output().unwrap();
+        reader.join().unwrap();
+        if no_gpu(&o) {
+            return;
+        }
+        panic!("watch did not become ready: {o:?}");
+    }
+    assert_eq!(centre(output.clone()), RED);
+    image::RgbaImage::from_pixel(16, 16, image::Rgba(BLUE)).save(&logo).unwrap();
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed().as_secs() > 20 {
+            let _ = child.kill();
+            panic!("watch did not notice the included document's image");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let o = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    assert!(o.status.success(), "{o:?}");
+    // the renderer kept from the first run does not hold on to the old image
+    assert_eq!(centre(output), BLUE);
+}
+
+#[test]
+fn every_render_keeps_the_recorded_fingerprints_true() {
+    let (dir, scene) = two_halves("sidecar-sync", "");
+    std::fs::write(dir.join("bad.png"), b"not an image").unwrap();
+    let doc = |fill: &str, bad: bool| {
+        let (asset, layer) = if bad {
+            (
+                r#"<assets><image id="im" src="bad.png" width="16" height="16"/></assets>"#,
+                r#"<layer id="bad" asset="im" start="0.2"/>"#,
+            )
+        } else {
+            ("", "")
+        };
+        let xml = format!(
+            r##"<scene version="1.2"><project width="16" height="16" fps="10" duration="0.3"/>{asset}
+      <composition><shape id="s" shape="rect" width="16" height="16" fill="{fill}"/>{layer}</composition></scene>"##
+        );
+        std::fs::write(&scene, xml).unwrap();
+    };
+    let out = dir.join("f_%03d.png");
+    let plain = ["render", scene.to_str().unwrap(), "--frames", "0..3", "-o", out.to_str().unwrap()];
+    let changed = [plain.as_slice(), &["--changed-only"]].concat();
+    let frame = |k: u32| centre(dir.join(format!("f_{k:03}.png")));
+    doc("#FF0000", false);
+    let first = run(&changed);
+    if no_gpu(&first) {
+        return;
+    }
+    assert_eq!(rendered(&first), (3, 3));
+    // a render without the flag writes the same files
+    doc("#00FF00", false);
+    assert!(run(&plain).status.success());
+    assert_eq!(frame(0), GREEN);
+    doc("#FF0000", false);
+    assert_eq!(rendered(&run(&changed)), (3, 3), "the files are not what the fingerprints say");
+    assert_eq!(frame(0), RED);
+    // a run that stops at a frame it cannot render has written the ones before it
+    doc("#00FF00", true);
+    let stopped = run(&changed);
+    assert_eq!(stopped.status.code(), Some(1), "{stopped:?}");
+    assert_eq!((frame(0), frame(1), frame(2)), (GREEN, GREEN, RED));
+    doc("#FF0000", false);
+    assert_eq!(rendered(&run(&changed)), (2, 3));
+    assert_eq!((frame(0), frame(1), frame(2)), (RED, RED, RED));
+}
+
+#[test]
+fn a_percent_sign_in_a_directory_is_not_a_frame_pattern() {
+    let (dir, scene) = two_halves("percent-dir", "");
+    let scene = scene.to_str().unwrap();
+    std::fs::create_dir_all(dir.join("50%")).unwrap();
+    let frames = dir.join("50%/f_%03d.png");
+    let o = run(&["render", scene, "--frames", "0..2", "-o", frames.to_str().unwrap()]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(dir.join("50%/f_000.png").is_file() && dir.join("50%/f_001.png").is_file());
+    let one = dir.join("50%/still.png");
+    assert_eq!(run(&["render", scene, "-o", one.to_str().unwrap()]).status.code(), Some(0));
+    assert!(one.is_file());
+    let o = run(&["render", scene, "--frames", "0..2", "-o", one.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("names one file"), "{o:?}");
+    // encode takes the sequence codec from the file name, and writes the frames
+    let encoded = dir.join("75%/e_%03d.png");
+    let o = run(&["encode", scene, "-o", encoded.to_str().unwrap(), "--end", "0.2"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("(2 file(s), png)"), "{o:?}");
+    assert!(dir.join("75%/e_000.png").is_file() && dir.join("75%/e_001.png").is_file());
+}

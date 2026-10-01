@@ -91,17 +91,33 @@ const SEED: u64 = 0xcbf2_9ce4_8422_2325;
 /// Effects that make a frame show the scene at other times.
 const TIME_EFFECTS: &[&str] = &["posterize-time", "echo", "pixel-motion-blur"];
 
-/// Local input files named by the document, including every declared sequence frame.
+/// Local input files named by the document and by the documents it includes, including every declared
+/// sequence frame.
 pub fn files(path: &Path, doc: &sr_model::Document) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    named(path, doc, &mut files, &mut vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())]);
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Adds the files `doc` at `path` names to `files`, then those of the documents it includes that are not in
+/// `seen` yet: they are loaded when the scene is evaluated, so the main document does not name their files.
+fn named(path: &Path, doc: &sr_model::Document, files: &mut Vec<PathBuf>, seen: &mut Vec<PathBuf>) {
     use sr_model::assets::{input_uri_attributes, resolve, sequence_frame, Resolved};
     let base = path.parent().unwrap_or(Path::new("."));
-    let mut files = Vec::new();
+    let mut includes = Vec::new();
     let mut add = |uri: &str| {
         if let Resolved::Local(path) = resolve(uri, base) {
             files.push(path);
         }
     };
     sr_model::element::walk(&doc.scene, &mut |e| {
+        if let Some(inc) = e.as_any().downcast_ref::<sr_model::model::Include>() {
+            if let Resolved::Local(path) = resolve(&inc.src, base) {
+                includes.push(path);
+            }
+        }
         let sequence = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>();
         if let Some(seq) = sequence {
             // i128 also handles a step or a final increment beyond the i64 frame range.
@@ -124,17 +140,122 @@ pub fn files(path: &Path, doc: &sr_model::Document) -> Vec<PathBuf> {
             }
         }
     });
-    files.sort();
-    files.dedup();
-    files
+    for inc in includes {
+        files.push(inc.clone());
+        // one file has many spellings (`parts/../main.xml`): documents that include each other must end
+        let real = inc.canonicalize().unwrap_or_else(|_| inc.clone());
+        if seen.contains(&real) {
+            continue;
+        }
+        seen.push(real);
+        if let Ok(doc) = sr_model::load_file(&inc, &sr_model::LoadOptions::without_assets()) {
+            named(&inc, &doc, files, seen);
+        }
+    }
 }
 
-/// A file's size and modification time.
-pub type Stamp = (u64, Option<std::time::SystemTime>);
+/// A file's size, modification time and, on Unix, status-change time (seconds, nanoseconds): a file put
+/// back with its old modification time (`cp -p`) still differs in the last.
+pub type Stamp = (u64, Option<std::time::SystemTime>, (i64, i64));
 
-/// A file's size and modification time, when it exists.
+/// A file's stamp, when it exists.
 pub fn stamp(f: &Path) -> Option<Stamp> {
-    std::fs::metadata(f).ok().map(|m| (m.len(), m.modified().ok()))
+    let m = std::fs::metadata(f).ok()?;
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        (m.ctime(), m.ctime_nsec())
+    };
+    #[cfg(not(unix))]
+    let changed = (0, 0);
+    Some((m.len(), m.modified().ok(), changed))
+}
+
+/// What a frame fingerprint keeps of a file: the hash of its content while it is small (a file replaced by
+/// one of the same size and time is seen, a file merely touched is not), else its stamp.
+fn file_print(f: &Path) -> String {
+    const SMALL: u64 = 1 << 20;
+    match std::fs::metadata(f) {
+        Ok(m) if m.is_file() && m.len() <= SMALL => match std::fs::read(f) {
+            Ok(b) => format!("{}:{:016x}", b.len(), fnv(&b, SEED)),
+            Err(e) => e.to_string(),
+        },
+        _ => format!("{:?}", stamp(f)),
+    }
+}
+
+/// Directories system fonts are installed in.
+fn font_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        ["/Library/Fonts", "/System/Library/Fonts", "/Network/Library/Fonts"].map(PathBuf::from).to_vec()
+    } else if cfg!(windows) {
+        std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).into_iter().collect()
+    } else {
+        ["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from).to_vec()
+    };
+    if let Some(home) = home {
+        let own: &[&str] = if cfg!(target_os = "macos") {
+            &["Library/Fonts"]
+        } else if cfg!(windows) {
+            &["AppData/Local/Microsoft/Windows/Fonts"]
+        } else {
+            &[".fonts", ".local/share/fonts"]
+        };
+        dirs.extend(own.iter().map(|d| home.join(d)));
+    }
+    dirs
+}
+
+/// Hash of the font files under `dirs` (path, size, modification time): text set in a system font changes
+/// when the fonts installed do.
+fn font_set(dirs: &[PathBuf]) -> u64 {
+    fn walk(dir: &Path, depth: u32, found: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = e.path();
+            match e.metadata() {
+                Ok(m) if m.is_dir() && depth < 8 => walk(&path, depth + 1, found),
+                Ok(m) if m.is_file() => found.push(format!("{}:{}:{:?}", path.display(), m.len(), m.modified().ok())),
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for d in dirs {
+        walk(d, 0, &mut found);
+    }
+    found.sort();
+    found.iter().fold(SEED, |h, f| fnv(f.as_bytes(), h))
+}
+
+/// The lock on a sidecar while it is rewritten; removed when dropped.
+struct Lock(PathBuf);
+
+impl Lock {
+    /// Waits for the lock beside `sidecar`; one left by a run that died is taken over after a few seconds.
+    fn take(sidecar: &Path) -> std::io::Result<Lock> {
+        let path = sidecar.with_extension("lock");
+        let started = std::time::Instant::now();
+        loop {
+            match std::fs::File::options().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Lock(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && started.elapsed().as_secs() < 15 => {
+                    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+                    if age.is_some_and(|a| a.as_secs() >= 5) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Hash of what a renderer is built from (the project, colour management, styles and media dependencies): while it
@@ -156,23 +277,56 @@ pub fn setup_key(text: &str, path: &Path, doc: &sr_model::Document) -> u64 {
 pub struct Sidecar {
     path: PathBuf,
     pub frames: BTreeMap<String, String>,
+    /// The frames as last read from or written to the file: what differs from them is this run's to save.
+    saved: BTreeMap<String, String>,
 }
 
 impl Sidecar {
     /// The sidecar of outputs written into `dir`.
     pub fn load(dir: &Path) -> Sidecar {
         let path = dir.join(".scene-render-frames.json");
-        let frames = std::fs::read(&path)
+        let frames = Sidecar::read(&path);
+        Sidecar { path, saved: frames.clone(), frames }
+    }
+
+    fn read(path: &Path) -> BTreeMap<String, String> {
+        std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| serde_json::from_value(v["frames"].clone()).ok())
-            .unwrap_or_default();
-        Sidecar { path, frames }
+            .unwrap_or_default()
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
-        let doc = serde_json::json!({ "version": 1, "frames": self.frames });
-        std::fs::write(&self.path, serde_json::to_string_pretty(&doc).expect("serialisable"))
+    /// Writes this run's changes into the file as it is now (another run, rendering other frames into the
+    /// directory, may have written it since), whole or not at all.
+    pub fn save(&mut self) -> std::io::Result<()> {
+        if self.frames == self.saved {
+            return Ok(());
+        }
+        let _lock = Lock::take(&self.path)?;
+        let mut frames = Sidecar::read(&self.path);
+        frames.retain(|k, _| self.frames.contains_key(k) || !self.saved.contains_key(k));
+        for (k, v) in &self.frames {
+            if self.saved.get(k) != Some(v) {
+                frames.insert(k.clone(), v.clone());
+            }
+        }
+        let doc = serde_json::json!({ "version": 1, "frames": frames });
+        let tmp = self.path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_string_pretty(&doc).expect("serialisable"))
+            .and_then(|()| std::fs::rename(&tmp, &self.path))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+        self.saved = frames.clone();
+        self.frames = frames;
+        Ok(())
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        let _ = self.save();
     }
 }
 
@@ -190,15 +344,16 @@ impl Fingerprints {
     pub fn new(text: &str, path: &Path, doc: &sr_model::Document, settings: &str) -> Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
-        // Invalidate fingerprints produced without frame time or complete file dependencies.
-        shared = fnv(b"frame-fingerprint-v3", shared);
+        // Invalidate fingerprints produced without included documents' files or file contents.
+        shared = fnv(b"frame-fingerprint-v4", shared);
+        shared = fnv(&font_set(&font_dirs()).to_le_bytes(), shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
         shared = fnv(&text.as_bytes()[..a], shared);
         shared = fnv(&text.as_bytes()[b..], shared);
-        // files the document names: size and modification time
+        // files the document and those it includes name
         for f in files(path, doc) {
-            shared = fnv(format!("{}:{:?}", f.display(), stamp(&f)).as_bytes(), shared);
+            shared = fnv(format!("{}:{}", f.display(), file_print(&f)).as_bytes(), shared);
         }
         let whole = if doc.scene.project.motion_blur {
             Some("the scene uses motion blur, so frames show other times".to_string())
@@ -266,5 +421,101 @@ mod tests {
         let n = g.nodes.iter().find(|n| &*n.id == "s").unwrap();
         let span = element_span(xml, n.elem.loc().offset as usize).unwrap();
         assert!(span.starts_with("<shape id=\"s\"") && span.ends_with("</shape>"), "{span}");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sr-changes-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn load(path: &Path, xml: &str) -> sr_model::Document {
+        std::fs::write(path, xml).unwrap();
+        sr_model::load_file(path, &sr_model::LoadOptions::without_assets()).unwrap()
+    }
+
+    #[test]
+    fn files_of_included_documents_are_dependencies() {
+        let dir = scratch("includes");
+        std::fs::create_dir_all(dir.join("parts/deep")).unwrap();
+        let scene = |body: &str| {
+            format!(r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/>{body}</scene>"#)
+        };
+        load(
+            &dir.join("parts/deep/leaf.xml"),
+            &scene(r#"<assets><image id="i" src="leaf.png" width="8" height="8"/></assets><composition/>"#),
+        );
+        // includes its parent as well: a cycle must end
+        load(
+            &dir.join("parts/child.xml"),
+            &scene(
+                r#"<assets><image id="i" src="logo.png" width="8" height="8"/></assets>
+            <composition><include id="a" src="deep/leaf.xml"/><include id="b" src="../main.xml"/></composition>"#,
+            ),
+        );
+        let main = dir.join("main.xml");
+        let doc = load(&main, &scene(r#"<composition><include id="c" src="parts/child.xml"/></composition>"#));
+        let found = files(&main, &doc);
+        for f in ["parts/child.xml", "parts/logo.png", "parts/deep/leaf.xml", "parts/deep/leaf.png"] {
+            assert!(found.contains(&dir.join(f)), "{f} is missing from {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_same_size_file_put_back_with_its_old_time_is_a_change() {
+        let dir = scratch("stamp");
+        let (main, logo) = (dir.join("main.xml"), dir.join("logo.png"));
+        let xml = r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/>
+          <assets><image id="i" src="logo.png" width="8" height="8"/></assets><composition/></scene>"#;
+        let doc = load(&main, xml);
+        std::fs::write(&logo, b"aaaa").unwrap();
+        let time = std::fs::metadata(&logo).unwrap().modified().unwrap();
+        let before = (Fingerprints::new(xml, &main, &doc, "").shared, setup_key(xml, &main, &doc));
+        // as `cp -p` of another file of the same size does
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&logo, b"bbbb").unwrap();
+        std::fs::File::options().write(true).open(&logo).unwrap().set_modified(time).unwrap();
+        assert_eq!(std::fs::metadata(&logo).unwrap().modified().unwrap(), time);
+        assert_ne!(Fingerprints::new(xml, &main, &doc, "").shared, before.0);
+        if cfg!(unix) {
+            assert_ne!(setup_key(xml, &main, &doc), before.1, "a kept renderer would show the old image");
+        }
+    }
+
+    #[test]
+    fn the_font_set_changes_with_the_fonts_installed() {
+        let dir = scratch("fonts");
+        std::fs::create_dir_all(dir.join("truetype/a")).unwrap();
+        std::fs::write(dir.join("truetype/a/A.ttf"), b"one").unwrap();
+        let dirs = [dir.clone(), dir.join("absent")];
+        let before = font_set(&dirs);
+        assert_eq!(font_set(&dirs), before);
+        std::fs::write(dir.join("truetype/B.ttf"), b"two").unwrap();
+        let added = font_set(&dirs);
+        assert_ne!(added, before);
+        std::fs::write(dir.join("truetype/a/A.ttf"), b"another").unwrap();
+        assert_ne!(font_set(&dirs), added);
+    }
+
+    #[test]
+    fn sidecars_of_two_shards_keep_each_others_frames() {
+        let dir = scratch("shards");
+        let (mut a, mut b) = (Sidecar::load(&dir), Sidecar::load(&dir));
+        a.frames.insert("f_000.png".into(), "a0".into());
+        b.frames.insert("f_050.png".into(), "b0".into());
+        a.save().unwrap();
+        b.save().unwrap();
+        a.frames.insert("f_001.png".into(), "a1".into());
+        a.frames.remove("f_000.png");
+        a.save().unwrap();
+        b.frames.insert("f_051.png".into(), "b1".into());
+        drop(a);
+        drop(b);
+        let kept: Vec<String> = Sidecar::load(&dir).frames.keys().cloned().collect();
+        assert_eq!(kept, ["f_001.png", "f_050.png", "f_051.png"]);
+        // written whole or not at all: nothing but the sidecar is left
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, [".scene-render-frames.json"]);
     }
 }
