@@ -734,6 +734,10 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
             return Err(format!("SHA-256 {got} does not match cacheSha256 {want}"));
         }
     }
+    parse_cache(&data)
+}
+
+fn parse_cache(data: &[u8]) -> Result<Cached, String> {
     let v2 = data.len() >= 8 && &data[..8] == CACHE_MAGIC;
     if data.len() < 40 || !(v2 || &data[..8] == CACHE_MAGIC_V1) {
         return Err("not a scene-render physics cache".into());
@@ -744,13 +748,14 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
         (f64_at(8), f64_at(16), u64_at(24) as usize, u64_at(32) as usize, 0usize);
     let _ = nframes;
     let mut o = 40;
+    // the soft bodies' point counts, then the 3D body count (version 2) and the frame count
+    if nsoft > (data.len() - o) / 8 || data.len() - o - nsoft * 8 < if v2 { 16 } else { 8 } {
+        return Err("truncated".into());
+    }
     let mut soft_points = Vec::new();
     for _ in 0..nsoft {
         soft_points.push(u64_at(o) as usize);
         o += 8;
-    }
-    if data.len() < o + 16 {
-        return Err("truncated".into());
     }
     let bodies3 = if v2 {
         o += 8;
@@ -760,8 +765,18 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
     };
     let frames_n = u64_at(o) as usize;
     o += 8;
-    let per = bodies * 3 + soft_points.iter().sum::<usize>() * 2 + bodies3 * 7;
-    if data.len() < o + frames_n * per * 8 {
+    if frames_n == 0 {
+        return Err("no frames".into());
+    }
+    let per = soft_points
+        .iter()
+        .try_fold(0usize, |a, n| a.checked_add(*n))
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|n| n.checked_add(bodies.checked_mul(3)?))
+        .and_then(|n| n.checked_add(bodies3.checked_mul(7)?));
+    let bytes = per.and_then(|per| per.checked_mul(frames_n)).and_then(|n| n.checked_mul(8));
+    let (Some(per), Some(bytes)) = (per, bytes) else { return Err("truncated".into()) };
+    if data.len() - o < bytes {
         return Err("truncated".into());
     }
     let frames = (0..frames_n).map(|k| (0..per).map(|i| f64_at(o + (k * per + i) * 8)).collect()).collect();
@@ -1059,6 +1074,16 @@ fn curve_of(e: &dyn Element, name: &str) -> crate::curve::Ease {
     crate::curve::resolve(c, &crate::curve::KeyParams::default())
 }
 
+/// The key of asset `id` named from the document with namespace `ns`: that document's own asset,
+/// else the main document's, else the first by key that any include holds under that id.
+fn asset_key(assets: &HashMap<Arc<str>, (u16, String)>, ns: &str, id: &str) -> Arc<str> {
+    let own = if ns.is_empty() { id.to_string() } else { format!("{ns}/{id}") };
+    if let Some((k, _)) = assets.get_key_value(own.as_str()).or_else(|| assets.get_key_value(id)) {
+        return k.clone();
+    }
+    assets.keys().filter(|k| k.rsplit('/').next() == Some(id)).min().cloned().unwrap_or_else(|| id.into())
+}
+
 fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<String>) -> EmitterRt {
     let e: &dyn Element = &*n.elem;
     let a = Attr { e, preset: text(e, "preset").map(|s| preset(&s)).unwrap_or(&[]) };
@@ -1067,6 +1092,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
     let replay_source = !linear_emitter_clock(p, node as u32);
     let start = p.nodes[node].start;
     let end = p.nodes[node].end;
+    let ns = p.nodes[node].doc.checked_sub(1).and_then(|d| p.includes.get(d as usize)).map(|d| &*d.0).unwrap_or("");
     let shape = match text(e, "emitterShape").as_deref() {
         Some("point") => EmitShape::Point,
         Some("ellipse") => EmitShape::Ellipse { w: num(e, "emitterWidth", 0.0), h: num(e, "emitterHeight", 0.0) },
@@ -1075,9 +1101,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
             EmitShape::Points(text(e, "emitterPath").map(|d| along(&path_points(&d, 0.5), 1024)).unwrap_or_default())
         }
         Some("asset-alpha") => {
-            let key = text(e, "emitterAsset").map(|id| {
-                p.assets.keys().find(|k| k.rsplit('/').next() == Some(id.as_str())).map(|k| k.to_string()).unwrap_or(id)
-            });
+            let key = text(e, "emitterAsset").map(|id| asset_key(&p.assets, ns, &id));
             match key.map(|k| alpha_points(p, &k, 4096)) {
                 Some(Ok((pts, _))) => EmitShape::Points(pts),
                 Some(Err(err)) => {
@@ -1144,15 +1168,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
         Some("streak") => ParticleShape::Streak,
         _ => ParticleShape::Disc,
     };
-    let sprite = text(e, "sprite").map(|id| {
-        let key: Arc<str> = p
-            .assets
-            .keys()
-            .find(|k| k.rsplit('/').next() == Some(id.as_str()))
-            .cloned()
-            .unwrap_or_else(|| id.as_str().into());
-        key
-    });
+    let sprite = text(e, "sprite").map(|id| asset_key(&p.assets, ns, &id));
     if pshape == ParticleShape::Sprite && sprite.is_none() {
         problems.push(format!("{}: shape=\"sprite\" without @sprite", n.id));
     }
@@ -1252,6 +1268,8 @@ struct EDriver<'a, 'b> {
     at: f64,
     /// Seconds between samples of an animated emitter's transform and rate (one frame).
     grid: f64,
+    /// The step time collisions were last asked at, and its composition time.
+    hits: Option<(u64, f64)>,
 }
 
 impl EDriver<'_, '_> {
@@ -1352,8 +1370,22 @@ impl EmitterDriver for EDriver<'_, '_> {
             None => self.fields.at(t, g.as_deref()),
         }
     }
-    fn hit(&mut self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
-        self.physics.as_deref().and_then(|ph| ph.world.as_ref()).and_then(|w| w.hit(p))
+    fn hit(&mut self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+        // against the bodies of the step's own time, wherever the world was left by the frames before
+        let ph = self.physics.as_deref_mut()?;
+        let w = ph.world.as_mut()?;
+        let at = match self.hits {
+            Some((k, at)) if k == t.to_bits() => at,
+            _ => {
+                let at = source_sample(self.p, self.node, t, self.at).0;
+                let statics = if self.fields.animated { Vec::new() } else { self.fields.at(ph.start, None) };
+                let mut drv = PDriver { graphs: &mut *self.graphs, bodies: &ph.bodies, fields: self.fields, statics };
+                w.prepare_hits(at, &mut drv);
+                self.hits = Some((t.to_bits(), at));
+                at
+            }
+        };
+        w.hit_at(at, p)
     }
 }
 
@@ -1472,6 +1504,7 @@ impl Runtime {
                 node: rt.node,
                 at: t,
                 grid: 1.0 / p.scene.project.fps.as_f64().max(1.0),
+                hits: None,
                 invariant: &mut rt.invariant,
             };
             let time = g.nodes[i].timeline_time;
@@ -1653,6 +1686,56 @@ mod tests {
 
     fn index(p: &Program, id: &str) -> u32 {
         p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32
+    }
+
+    #[test]
+    fn malformed_physics_caches_are_errors() {
+        let cache = |bodies: u64, softs: &[u64], bodies3: u64, frames: u64, numbers: usize| {
+            let mut d = CACHE_MAGIC.to_vec();
+            d.extend(0.01f64.to_le_bytes());
+            d.extend(0.0f64.to_le_bytes());
+            d.extend(bodies.to_le_bytes());
+            d.extend((softs.len() as u64).to_le_bytes());
+            for s in softs {
+                d.extend(s.to_le_bytes());
+            }
+            d.extend(bodies3.to_le_bytes());
+            d.extend(frames.to_le_bytes());
+            d.extend(std::iter::repeat_n(1.5f64.to_le_bytes(), numbers).flatten());
+            d
+        };
+        let ok = parse_cache(&cache(1, &[2], 1, 2, 28)).unwrap();
+        assert_eq!((ok.frames.len(), ok.frames[0].len()), (2, 14));
+        assert_eq!(ok.frame(5.0).softs[0], vec![[1.5, 1.5]; 2]);
+        assert!(parse_cache(&cache(1, &[2], 1, 2, 27)).is_err(), "a short last frame");
+        assert!(parse_cache(&cache(1, &[], 0, 0, 0)).is_err(), "no frames");
+        assert!(parse_cache(&cache(u64::MAX / 2, &[], 0, 16, 0)).is_err(), "sizes that overflow");
+        assert!(parse_cache(&cache(1, &[u64::MAX / 2, u64::MAX / 2, 4], 0, 1, 3)).is_err());
+        assert!(parse_cache(&cache(1, &[], u64::MAX / 3, u64::MAX / 3, 3)).is_err());
+        // more soft bodies declared than the file holds
+        let mut d = cache(0, &[], 0, 1, 0);
+        d[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_cache(&d).is_err());
+        d[32..40].copy_from_slice(&3u64.to_le_bytes());
+        assert!(parse_cache(&d).is_err());
+        assert!(parse_cache(&d[..40]).is_err() && parse_cache(b"SRPHYS02").is_err());
+    }
+
+    #[test]
+    fn an_asset_id_resolves_in_its_own_document_first() {
+        let assets: HashMap<Arc<str>, (u16, String)> =
+            ["img", "b/img", "a/img", "a/only"].iter().map(|k| (Arc::from(*k), (0, String::new()))).collect();
+        for _ in 0..32 {
+            assert_eq!(&*asset_key(&assets, "", "img"), "img");
+            assert_eq!(&*asset_key(&assets, "a", "img"), "a/img");
+            assert_eq!(&*asset_key(&assets, "b", "img"), "b/img");
+            assert_eq!(&*asset_key(&assets, "c", "img"), "img", "then in the main document");
+            assert_eq!(&*asset_key(&assets, "", "only"), "a/only");
+            assert_eq!(&*asset_key(&assets, "", "none"), "none");
+        }
+        let assets: HashMap<Arc<str>, (u16, String)> =
+            ["b/x/img", "a/img", "c/img"].iter().map(|k| (Arc::from(*k), (0, String::new()))).collect();
+        assert_eq!(&*asset_key(&assets, "", "img"), "a/img", "else the first in order, whatever the map's");
     }
 
     #[test]

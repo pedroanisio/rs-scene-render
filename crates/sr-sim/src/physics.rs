@@ -187,20 +187,26 @@ pub struct World {
     state: State,
     checkpoints: BTreeMap<u64, State>,
     steps_per_checkpoint: u64,
+    /// Solid colliders of recent steps, once `prepare_hits` has asked for any.
+    solids: BTreeMap<u64, Solids>,
+    keep_solids: bool,
+}
+
+/// Shape and pose of the enabled, non-sensor colliders of one step.
+type Solids = Vec<(SharedShape, Pose)>;
+
+fn solid(c: &Collider) -> bool {
+    !c.is_sensor() && c.is_enabled()
 }
 
 fn v(x: f64, y: f64) -> Vector {
     Vector::new(x, y)
 }
 
-/// The nearest surface point and outward normal (metres, y up) of the first enabled,
-/// non-sensor collider containing `q`.
-fn surface(colliders: &ColliderSet, q: Vector) -> Option<([f64; 2], [f64; 2])> {
-    for (_, c) in colliders.iter() {
-        if c.is_sensor() || !c.is_enabled() {
-            continue;
-        }
-        let proj = c.shape().project_point(c.position(), q, false);
+/// The nearest surface point and outward normal (metres, y up) of the first solid containing `q`.
+fn surface<'a>(solids: impl Iterator<Item = (&'a dyn rapier2d_f64::geometry::Shape, &'a Pose)>, q: Vector) -> Option<([f64; 2], [f64; 2])> {
+    for (shape, pose) in solids {
+        let proj = shape.project_point(pose, q, false);
         if !proj.is_inside {
             continue;
         }
@@ -450,6 +456,8 @@ impl World {
             state: st,
             checkpoints: BTreeMap::new(),
             steps_per_checkpoint,
+            solids: BTreeMap::new(),
+            keep_solids: false,
         };
         w.checkpoints.insert(0, w.state.clone());
         w
@@ -554,7 +562,7 @@ impl World {
                     }
                 }
                 // inside a solid: move to the surface along the shortest way out
-                let (q, n) = surface(colliders, v(p[0], p[1]))?;
+                let (q, n) = surface(colliders.iter().filter(|(_, c)| solid(c)).map(|(_, c)| (c.shape(), c.position())), v(p[0], p[1]))?;
                 Some(([q[0] + n[0] * 1e-4, q[1] + n[1] * 1e-4], n))
             };
             for k in 0..st.softs.len() {
@@ -574,6 +582,23 @@ impl World {
         if st.step % self.steps_per_checkpoint == 0 && !self.checkpoints.contains_key(&st.step) {
             self.checkpoints.insert(st.step, st.clone());
         }
+        self.remember();
+    }
+
+    /// Keeps the current step's solids for `hit_at`, dropping the step furthest back when full.
+    fn remember(&mut self) {
+        let st = &self.state;
+        if !self.keep_solids || self.solids.contains_key(&st.step) {
+            return;
+        }
+        let now = st.colliders.iter().filter(|(_, c)| solid(c)).map(|(_, c)| (c.shared_shape().clone(), *c.position()));
+        self.solids.insert(st.step, now.collect());
+        if self.solids.len() > ((1 << 18) / st.colliders.len().max(1)).clamp(8, 1024) {
+            match self.solids.first_key_value() {
+                Some((k, _)) if *k != st.step => self.solids.pop_first(),
+                _ => self.solids.pop_last(),
+            };
+        }
     }
 
     /// Steps before `t` (none before the start).
@@ -587,7 +612,11 @@ impl World {
 
     /// The simulated state at `t`, replaying from the nearest checkpoint at or before it.
     pub fn frame_at(&mut self, t: f64, driver: &mut dyn Driver) -> Frame {
-        let target = self.step_index(t);
+        self.seek(self.step_index(t), driver);
+        self.snapshot()
+    }
+
+    fn seek(&mut self, target: u64, driver: &mut dyn Driver) {
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
                 if cp.step > self.state.step || self.state.step > target {
@@ -598,7 +627,6 @@ impl World {
         while self.state.step < target {
             self.step_once(driver);
         }
-        self.snapshot()
     }
 
     fn snapshot(&self) -> Frame {
@@ -625,9 +653,37 @@ impl World {
     /// Whether a pixel point lies inside a (non-sensor) collider at the current state, with the
     /// outward normal and the nearest surface point (pixels) when it does.
     pub fn hit(&self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+        let solids = self.state.colliders.iter().filter(|(_, c)| solid(c)).map(|(_, c)| (c.shape(), c.position()));
+        self.hit_in(solids, p)
+    }
+
+    fn hit_in<'a>(
+        &self,
+        solids: impl Iterator<Item = (&'a dyn rapier2d_f64::geometry::Shape, &'a Pose)>,
+        p: [f64; 2],
+    ) -> Option<([f64; 2], [f64; 2])> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
-        let (q, n) = surface(&self.state.colliders, v(p[0] / ppm, -p[1] / ppm))?;
+        let (q, n) = surface(solids, v(p[0] / ppm, -p[1] / ppm))?;
         Some(([q[0] * ppm, -q[1] * ppm], [n[0], -n[1]]))
+    }
+
+    /// Makes the colliders of the step at `t` known to `hit_at`, simulating to it if they are not:
+    /// the steps of a world that only moves forward stay known for a while, so emitters catching up
+    /// behind it do not move it.
+    pub fn prepare_hits(&mut self, t: f64, driver: &mut dyn Driver) {
+        let k = self.step_index(t);
+        if !self.solids.contains_key(&k) {
+            self.keep_solids = true;
+            self.seek(k, driver);
+            self.remember();
+        }
+    }
+
+    /// `hit` against the colliders of the step at `t`, whatever the world's current state
+    /// (nothing unless `prepare_hits(t)` came first).
+    pub fn hit_at(&self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+        let solids = self.solids.get(&self.step_index(t))?;
+        self.hit_in(solids.iter().map(|(s, m)| (&**s as &dyn rapier2d_f64::geometry::Shape, m)), p)
     }
 
     /// Steps simulated so far and checkpoints held (tests, statistics).

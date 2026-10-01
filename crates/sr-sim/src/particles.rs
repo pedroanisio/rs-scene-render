@@ -84,8 +84,8 @@ pub trait EmitterDriver {
     /// Particles per second.
     fn rate(&mut self, t: f64) -> f64;
     fn fields(&mut self, t: f64) -> Vec<Field>;
-    /// Surface point and outward normal when `p` lies inside a physics body.
-    fn hit(&mut self, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])>;
+    /// Surface point and outward normal when `p` lies inside a physics body at time `t`.
+    fn hit(&mut self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])>;
 }
 
 /// Live particles, structure-of-arrays.
@@ -288,7 +288,7 @@ impl Emitter {
                     }
                 }
                 if hit.is_none() && s.collide {
-                    hit = drv.hit([p.x[i], p.y[i]]);
+                    hit = drv.hit(hi, [p.x[i], p.y[i]]);
                 }
                 if let Some((q, n)) = hit {
                     p.x[i] = q[0];

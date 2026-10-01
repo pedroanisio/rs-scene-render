@@ -263,7 +263,7 @@ impl EmitterDriver for Here {
     fn fields(&mut self, _t: f64) -> Vec<Field> {
         Vec::new()
     }
-    fn hit(&mut self, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
         None
     }
 }
@@ -343,7 +343,7 @@ impl EmitterDriver for Quiet {
     fn fields(&mut self, _t: f64) -> Vec<Field> {
         Vec::new()
     }
-    fn hit(&mut self, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
         None
     }
 }
@@ -403,7 +403,7 @@ fn huge_bursts_and_rates_stop_at_the_cap() {
         fn fields(&mut self, _t: f64) -> Vec<Field> {
             Vec::new()
         }
-        fn hit(&mut self, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+        fn hit(&mut self, _t: f64, _p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
             None
         }
     }
@@ -447,6 +447,62 @@ fn points_inside_rigid_bodies_hit_them() {
     let mut w = world(vec![wall], vec![], vec![rope], Bounds::None);
     let f = w.frame_at(3.0, &mut Still(vec![]));
     assert!(f.softs[0].iter().all(|p| p[1] < 256.0 && p[1] > 200.0), "rests on the box: {:?}", f.softs[0]);
+}
+
+#[test]
+fn hits_are_tested_against_the_step_asked_for() {
+    // a box in free fall: 4.9 px down after 0.1 s, 122 px after 0.5 s, 490 px after 1 s
+    let mk = || world(vec![body(400.0, 100.0)], vec![], vec![], Bounds::None);
+    let mut w = mk();
+    let mut d = Still(vec![]);
+    w.frame_at(1.0, &mut d);
+    assert!(w.hit([400.0, 250.0]).is_none(), "it has fallen past");
+    w.prepare_hits(0.5, &mut d);
+    let late = w.hit_at(0.5, [400.0, 250.0]).expect("where it was at 0.5 s");
+    w.prepare_hits(0.1, &mut d);
+    assert!(w.hit_at(0.1, [400.0, 110.0]).is_some() && w.hit_at(0.1, [400.0, 250.0]).is_none());
+    assert!(w.hit_at(0.5, [400.0, 250.0]).is_some(), "earlier steps stay known");
+    // whatever was simulated before, the answer is the same
+    let mut fresh = mk();
+    fresh.prepare_hits(0.5, &mut d);
+    assert_eq!(fresh.hit_at(0.5, [400.0, 250.0]), Some(late));
+    // an emitter catching up in one go collides like one stepped a frame at a time
+    struct Onto<'a>(&'a mut World);
+    impl EmitterDriver for Onto<'_> {
+        fn origin(&mut self, _t: f64) -> [f64; 6] {
+            [1.0, 0.0, 0.0, 1.0, 400.0, 0.0]
+        }
+        fn rate(&mut self, _t: f64) -> f64 {
+            200.0
+        }
+        fn fields(&mut self, _t: f64) -> Vec<Field> {
+            Vec::new()
+        }
+        fn hit(&mut self, t: f64, p: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+            self.0.prepare_hits(t, &mut Still(vec![]));
+            self.0.hit_at(t, p)
+        }
+    }
+    let rain = || {
+        let mut s = spec();
+        s.direction = 90.0;
+        s.speed = 600.0;
+        s.spread = 20.0;
+        s.collide = true;
+        s
+    };
+    let (mut w1, mut w2) = (mk(), mk());
+    let (mut e1, mut e2) = (Emitter::new(rain()), Emitter::new(rain()));
+    for k in 0..=30 {
+        let t = k as f64 / 30.0;
+        w1.frame_at(t, &mut d);
+        e1.at(t, &mut Onto(&mut w1));
+    }
+    w2.frame_at(1.0, &mut d);
+    let direct = e2.at(1.0, &mut Onto(&mut w2)).clone();
+    assert_eq!(e1.store(), &direct);
+    let bounced = direct.vy.iter().filter(|v| **v < 0.0).count();
+    assert!(bounced > 10, "some drops bounced off the falling box: {bounced}");
 }
 
 #[test]
