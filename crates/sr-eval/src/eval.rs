@@ -299,7 +299,12 @@ struct Frame<'p> {
     adjust: Vec<Option<Affine>>,
     /// Whether each node and its ancestors are inside their windows (conditions not yet applied).
     alive: Vec<bool>,
+    memo: Memo,
 }
+
+/// Values of linked and computed slots away from the frame's own time, by slot, time and depth:
+/// what delayed and smoothed links reach, each computed once a frame however many readers it has.
+type Memo = std::cell::RefCell<std::collections::HashMap<(u32, u64, u32), Value>>;
 
 /// A node's local transform and the quantities layout needs.
 struct Local {
@@ -407,7 +412,15 @@ impl Program {
         }
     }
 
-    fn link_value(&self, slot: u32, l: u32, comp_t: f64, frame: Option<&Frame>, depth: u32) -> Option<Value> {
+    fn link_value(
+        &self,
+        slot: u32,
+        l: u32,
+        comp_t: f64,
+        frame: Option<&Frame>,
+        depth: u32,
+        memo: &Memo,
+    ) -> Option<Value> {
         let link = &self.links[l as usize];
         let kind = self.slots[slot as usize].kind;
         let template = &self.slots[slot as usize].base;
@@ -424,7 +437,7 @@ impl Program {
                 }),
                 LinkSource::Prop(p) => match frame {
                     Some(f) if ct == f.t => f.values[*p as usize].to_v(),
-                    _ => self.value_at(*p, ct, depth + 1).to_v(),
+                    _ => self.value_at(*p, ct, depth + 1, memo).to_v(),
                 },
             }
         };
@@ -464,28 +477,34 @@ impl Program {
 
     /// Full value of a slot (keys, link, expression) at composition time
     /// `comp_t`, computed without the frame cache (link delays, smoothing).
-    fn value_at(&self, slot: u32, comp_t: f64, depth: u32) -> Value {
+    fn value_at(&self, slot: u32, comp_t: f64, depth: u32, memo: &Memo) -> Value {
         let s = &self.slots[slot as usize];
         let t = self.slot_time(slot, comp_t, None);
         let mut v = self.channels_at(slot, t);
-        if depth > 32 {
-            return v;
+        if depth > 32 || (s.link.is_none() && s.expr.is_none()) {
+            return if depth > 32 { v } else { s.kind.clamp(v) };
+        }
+        let key = (slot, comp_t.to_bits(), depth);
+        if let Some(known) = memo.borrow().get(&key) {
+            return known.clone();
         }
         if let Some(l) = s.link {
-            if let Some(lv) = self.link_value(slot, l, comp_t, None, depth) {
+            if let Some(lv) = self.link_value(slot, l, comp_t, None, depth, memo) {
                 v = lv;
             }
         }
         if let Some(x) = s.expr {
             let mut regs = Vec::new();
             let mut h =
-                ExprHost { p: self, frame: None, comp_t, t, slot: Some(slot), expr: x, value: v.clone(), depth };
+                ExprHost { p: self, frame: None, comp_t, t, slot: Some(slot), expr: x, value: v.clone(), depth, memo };
             let r = vm::run(&self.exprs[x as usize].code, &mut h, &mut regs);
             if let Some(nv) = s.kind.from_v(&r, &v) {
                 v = nv;
             }
         }
-        s.kind.clamp(v)
+        let v = s.kind.clamp(v);
+        memo.borrow_mut().insert(key, v.clone());
+        v
     }
 }
 
@@ -499,6 +518,7 @@ struct ExprHost<'a, 'f> {
     expr: u32,
     value: Value,
     depth: u32,
+    memo: &'f Memo,
 }
 
 impl Host for ExprHost<'_, '_> {
@@ -521,7 +541,7 @@ impl Host for ExprHost<'_, '_> {
     fn prop(&mut self, slot: u32) -> V {
         match self.frame {
             Some(f) if self.comp_t == f.t => f.values[slot as usize].to_v(),
-            _ => self.p.value_at(slot, self.comp_t, self.depth + 1).to_v(),
+            _ => self.p.value_at(slot, self.comp_t, self.depth + 1, self.memo).to_v(),
         }
     }
 
@@ -578,10 +598,10 @@ impl Host for ExprHost<'_, '_> {
         let mp = crate::geo::map_asset(self.p, map)?;
         let cam = crate::geo::camera(self.p, mp).ok()?;
         let target = self.p.elements.iter().find(|e| *e.key == *map);
-        let (p, comp_t, depth) = (self.p, self.comp_t, self.depth);
+        let (p, comp_t, depth, memo) = (self.p, self.comp_t, self.depth, self.memo);
         let animated = |name: &str| {
             let slot = target?.slots.iter().copied().find(|&s| &*p.slots[s as usize].prop == name)?;
-            p.value_at(slot, comp_t, depth + 1).as_num()
+            p.value_at(slot, comp_t, depth + 1, memo).as_num()
         };
         let v = crate::geo::view(&cam, mp, &animated, comp_t);
         Some(crate::geo::locate(&cam, &v, lon, lat))
@@ -667,7 +687,7 @@ impl<'p> Frame<'p> {
             let t = p.slot_time(s, self.t, Some(&self.tl));
             let mut v = p.channels_at(s, t);
             if let Some(l) = slot.link {
-                if let Some(lv) = p.link_value(s, l, self.t, Some(self), 0) {
+                if let Some(lv) = p.link_value(s, l, self.t, Some(self), 0, &self.memo) {
                     v = lv;
                 }
             }
@@ -683,6 +703,7 @@ impl<'p> Frame<'p> {
                         expr: x,
                         value: v.clone(),
                         depth: 0,
+                        memo: &self.memo,
                     };
                     vm::run(&p.exprs[x as usize].code, &mut h, &mut regs)
                 };
@@ -709,6 +730,7 @@ impl<'p> Frame<'p> {
                 expr: x,
                 value: Value::Bool(true),
                 depth: 0,
+                memo: &self.memo,
             };
             vm::run(&p.exprs[x as usize].code, &mut h, &mut regs)
         };
@@ -937,6 +959,7 @@ pub(crate) fn evaluate_with_clocks(p: &Program, t: f64, clocks: &[(u32, f64)]) -
         regs: Vec::new(),
         adjust: vec![None; n],
         alive: vec![false; n],
+        memo: Memo::default(),
     };
     f.timelines(clocks);
     f.slots();

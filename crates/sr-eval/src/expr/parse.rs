@@ -6,8 +6,10 @@
 //! assignment to declared variables; `if`/`else`; blocks; `return`; unary
 //! `! - +`; binary `** * / % + - < <= > >= == != === !== && || ??`; the
 //! conditional operator; calls, member access and indexing. Loops, function
-//! definitions, objects literals and `new` are rejected, which bounds the
-//! cost of every expression by its length.
+//! definitions, objects literals and `new` are rejected, so an expression
+//! runs each of its operations at most once; nesting is limited here
+//! ([`MAX_DEPTH`], [`MAX_HEIGHT`]) and the size of the values it builds in
+//! the VM.
 
 use std::fmt;
 use std::sync::Arc;
@@ -223,10 +225,19 @@ pub enum Stmt {
     Expr(Expr),
 }
 
+/// Deepest nesting of statements, parentheses, brackets, unary and conditional operators: what
+/// the parser and the compiler recurse over (a debug build spends about 12 KiB of stack a level).
+pub const MAX_DEPTH: usize = 64;
+/// Tallest expression tree: a chain of `n` binary operators, which nests nothing, is `n + 1` tall.
+pub const MAX_HEIGHT: usize = 1000;
+
 struct Parser<'s> {
     lex: Lexer<'s>,
     tok: Tok,
     at: usize,
+    depth: usize,
+    /// Height of the expression tree parsed last.
+    height: usize,
 }
 
 impl<'s> Parser<'s> {
@@ -274,7 +285,35 @@ impl<'s> Parser<'s> {
         Ok(())
     }
 
+    fn too_deep(&self) -> SyntaxError {
+        self.err("expression is nested too deeply")
+    }
+
+    fn enter(&mut self) -> Result<(), SyntaxError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        Ok(())
+    }
+
+    /// Records the height of a node built over subtrees of height `below`.
+    fn grow(&mut self, below: usize) -> Result<usize, SyntaxError> {
+        self.height = below + 1;
+        if self.height > MAX_HEIGHT {
+            return Err(self.too_deep());
+        }
+        Ok(self.height)
+    }
+
     fn statement(&mut self) -> Result<Stmt, SyntaxError> {
+        self.enter()?;
+        let s = self.statement_body()?;
+        self.depth -= 1;
+        Ok(s)
+    }
+
+    fn statement_body(&mut self) -> Result<Stmt, SyntaxError> {
         if let Tok::Ident(kw) = &self.tok {
             match kw.as_str() {
                 "let" | "const" | "var" => {
@@ -381,13 +420,17 @@ impl<'s> Parser<'s> {
     }
 
     fn expr(&mut self, min_bp: u8) -> Result<Expr, SyntaxError> {
+        self.enter()?;
         let mut lhs = self.unary()?;
+        let mut h = self.height;
         loop {
             if self.is("?") && min_bp <= 2 {
                 self.bump()?;
                 let a = self.expr(0)?;
+                h = h.max(self.height);
                 self.expect(":")?;
                 let b = self.expr(2)?;
+                h = self.grow(h.max(self.height))?;
                 lhs = Expr::Cond(Box::new(lhs), Box::new(a), Box::new(b));
                 continue;
             }
@@ -397,6 +440,7 @@ impl<'s> Parser<'s> {
             }
             self.bump()?;
             let rhs = self.expr(r)?;
+            h = self.grow(h.max(self.height))?;
             lhs = match op {
                 "&&" => Expr::Logical(Logic::And, Box::new(lhs), Box::new(rhs)),
                 "||" => Expr::Logical(Logic::Or, Box::new(lhs), Box::new(rhs)),
@@ -422,6 +466,8 @@ impl<'s> Parser<'s> {
                 }
             };
         }
+        self.height = h;
+        self.depth -= 1;
         Ok(lhs)
     }
 
@@ -434,7 +480,10 @@ impl<'s> Parser<'s> {
         };
         if let Some(op) = op {
             self.bump()?;
+            self.enter()?;
             let e = self.unary()?;
+            self.depth -= 1;
+            self.grow(self.height)?;
             if self.is("**") {
                 return Err(self.err("wrap the unary expression in parentheses before '**'"));
             }
@@ -445,6 +494,7 @@ impl<'s> Parser<'s> {
 
     fn postfix(&mut self) -> Result<Expr, SyntaxError> {
         let mut e = self.primary()?;
+        let mut h = self.height;
         loop {
             if self.is("(") {
                 let at = self.at;
@@ -452,6 +502,7 @@ impl<'s> Parser<'s> {
                 let mut args = Vec::new();
                 while !self.is(")") {
                     args.push(self.expr(0)?);
+                    h = h.max(self.height);
                     if !self.is(")") {
                         self.expect(",")?;
                     }
@@ -466,17 +517,21 @@ impl<'s> Parser<'s> {
             } else if self.is("[") {
                 self.bump()?;
                 let i = self.expr(0)?;
+                h = h.max(self.height);
                 self.expect("]")?;
                 e = Expr::Index(Box::new(e), Box::new(i));
             } else {
                 break;
             }
+            h = self.grow(h)?;
         }
+        self.height = h;
         Ok(e)
     }
 
     fn primary(&mut self) -> Result<Expr, SyntaxError> {
         let at = self.at;
+        self.height = 1;
         match self.bump()? {
             Tok::Num(n) => Ok(Expr::Num(n)),
             Tok::Str(s) => Ok(Expr::Str(s)),
@@ -498,13 +553,16 @@ impl<'s> Parser<'s> {
             }
             Tok::Punct("[") => {
                 let mut items = Vec::new();
+                let mut h = 0;
                 while !self.is("]") {
                     items.push(self.expr(0)?);
+                    h = h.max(self.height);
                     if !self.is("]") {
                         self.expect(",")?;
                     }
                 }
                 self.bump()?;
+                self.grow(h)?;
                 Ok(Expr::Array(items))
             }
             Tok::Punct("{") => Err(SyntaxError { message: "object literals are not supported".into(), offset: at }),
@@ -546,7 +604,7 @@ fn check_name(name: &str, at: usize) -> Result<(), SyntaxError> {
 /// Parses a program: statements whose result is the value of `return` or of
 /// the last expression statement executed.
 pub fn parse(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    let mut p = Parser { lex: Lexer { src, pos: 0 }, tok: Tok::Eof, at: 0 };
+    let mut p = Parser { lex: Lexer { src, pos: 0 }, tok: Tok::Eof, at: 0, depth: 0, height: 0 };
     p.bump()?;
     let mut out = Vec::new();
     while p.tok != Tok::Eof {
@@ -574,6 +632,33 @@ mod tests {
         assert!(parse("a ? b : c ? d : e").is_ok());
         assert!(parse("// comment\n1 /* block */ + 2").is_ok());
         assert!(parse("0x1F + .5 + 1e-3").is_ok());
+    }
+
+    #[test]
+    fn nesting_is_bounded() {
+        let wrap = |open: &str, n: usize, close: &str| format!("{}1{}", open.repeat(n), close.repeat(n));
+        for src in [
+            wrap("- ", 30000, ""),
+            wrap("!", 60000, ""),
+            wrap("[", 16000, ""),
+            wrap("(", 30000, ")"),
+            wrap("{", 30000, "}"),
+            wrap("if(1)", 12000, ""),
+            wrap("1?1:", 15000, ""),
+            wrap("2**", 20000, ""),
+            format!("1{}", "+1".repeat(30000)),
+            format!("a{}", "[0]".repeat(20000)),
+            wrap("f(", 30000, ")"),
+            format!("f{}", "()".repeat(30000)),
+            format!("a{}", ".b".repeat(30000)),
+        ] {
+            let e = parse(&src).unwrap_err();
+            assert!(e.message.contains("nested too deeply"), "{}…: {}", &src[..12], e.message);
+        }
+        assert!(parse(&wrap("(", MAX_DEPTH - 2, ")")).is_ok());
+        assert!(parse(&wrap("(", MAX_DEPTH - 1, ")")).is_err());
+        assert!(parse(&format!("1{}", "+1".repeat(MAX_HEIGHT - 1))).is_ok());
+        assert!(parse(&format!("1{}", "+1".repeat(MAX_HEIGHT))).is_err());
     }
 
     #[test]

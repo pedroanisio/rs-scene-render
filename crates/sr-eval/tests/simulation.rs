@@ -118,3 +118,53 @@ fn bursts_happen_at_their_composition_time_like_animation_keys() {
     assert_eq!(count(1.4), 5);
     assert_eq!(count(1.6), 12);
 }
+
+const RAIN: &str = r#"<particleEmitter id="p" x="200" y="60" emitterShape="line" emitterWidth="300" seed="1" rate="120" speed="300" direction="90" spread="10" lifetime="3" collide="true"/>"#;
+
+#[test]
+fn particles_bounce_off_rigid_bodies() {
+    let ev = evaluator(
+        &format!(
+            r##"<shape id="slab" shape="rect" x="100" y="300" width="200" height="40" fill="#FFFFFF"><rigidBody type="static"/></shape>{RAIN}"##
+        ),
+        r#"<physics gravityY="0" bounds="none"/>"#,
+    );
+    let f = ev.evaluate(2.0);
+    assert!(f.problems.is_empty(), "{:?}", f.problems);
+    let slab = node(&f, "slab");
+    let (a, b) = (slab.world.apply([0.0, 0.0]), slab.world.apply([200.0, 40.0]));
+    assert_eq!((a, b), ([100.0, 300.0], [300.0, 340.0]));
+    let parts = node(&f, "p").particles.as_ref().unwrap();
+    let inside = |q: &[f32; 2]| q[0] > 101.0 && q[0] < 299.0 && q[1] > 301.0 && q[1] < 339.0;
+    assert_eq!(parts.pos.iter().filter(|q| inside(q)).count(), 0, "nothing passes through the slab");
+    let rising = parts.pos.iter().zip(&parts.vel).filter(|(q, v)| v[1] < 0.0 && q[1] < 300.0).count();
+    assert!(rising > 20, "drops bounce back up off it: {rising}");
+    assert!(parts.pos.iter().any(|q| q[1] > 345.0 && (q[0] < 95.0 || q[0] > 305.0)), "and fall past its sides");
+}
+
+#[test]
+fn particle_collisions_do_not_depend_on_the_frames_rendered_before() {
+    // a body crossing under the rain: every catch-up step meets it where it was at that step
+    let scene = format!(
+        r##"<shape id="cart" shape="rect" x="20" y="300" width="120" height="40" fill="#FFFFFF"><rigidBody velocityX="150" linearDamping="0"/></shape>{RAIN}"##
+    );
+    let physics = r#"<physics gravityY="0" bounds="none"/>"#;
+    let parts = |f: &sr_eval::FrameGraph| {
+        let p = node(f, "p").particles.as_ref().unwrap();
+        (p.pos.clone(), p.vel.clone())
+    };
+    let in_order = evaluator(&scene, physics);
+    let mut last = None;
+    for k in 0..=45 {
+        last = Some(parts(&in_order.evaluate(k as f64 / 30.0)));
+    }
+    let direct = parts(&evaluator(&scene, physics).evaluate(1.5));
+    assert!(direct.1.iter().filter(|v| v[1] < 0.0).count() > 20, "drops bounce off the cart");
+    assert!(last.unwrap() == direct, "frames 0..45 in order and frame 45 alone differ");
+    // and going back gives what was there
+    let early = parts(&evaluator(&scene, physics).evaluate(0.5));
+    assert!(parts(&in_order.evaluate(0.5)) == early, "going back differs");
+    let skipping = evaluator(&scene, physics);
+    skipping.evaluate(1.0);
+    assert!(parts(&skipping.evaluate(0.5)) == early && parts(&skipping.evaluate(1.5)) == direct, "skipping differs");
+}

@@ -536,6 +536,9 @@ fn attr_len(e: &dyn Element, n: &str) -> Option<Length> {
     }
 }
 
+/// Most nodes a composition may expand into (repeat copies, instances and their contents).
+pub const MAX_NODES: usize = 1 << 19;
+
 fn err(code: &str, msg: impl Into<String>, loc: Loc, path: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, msg, loc, path)
 }
@@ -1145,6 +1148,18 @@ impl Builder {
         }
     }
 
+    /// Whether `more` nodes still fit; reports E18 (once) when they do not.
+    fn room(&mut self, more: u64, loc: Loc, path: &str) -> bool {
+        if more <= (MAX_NODES.saturating_sub(self.nodes.len())) as u64 {
+            return true;
+        }
+        if !self.diags.iter().any(|d| d.code == "E18") {
+            let msg = format!("{path:?} expands the composition past {MAX_NODES} nodes");
+            self.diags.push(err("E18", msg, loc, path));
+        }
+        false
+    }
+
     fn instantiate(&mut self, list: &[Node], parent: Option<u32>, ctx: &Ctx) -> Vec<u32> {
         let mut out = Vec::new();
         let mut tcount = 0;
@@ -1161,6 +1176,9 @@ impl Builder {
             // object3D/@instances: one node per copy, each evaluated with its own index and count
             // copy 0 keeps the id, copy k is `id[k]`.
             let copies = if name == "object3D" { attr_num(n, "instances").unwrap_or(1.0).max(1.0) as u32 } else { 1 };
+            if !self.room(copies as u64, Loc::default(), &id) {
+                break;
+            }
             if copies > 1 {
                 let mut one = n.clone();
                 let _ = one.set_attr("instances", "1");
@@ -1437,13 +1455,14 @@ impl Builder {
             }
         }
         let start = self.nodes[idx as usize].start;
+        // a negative speed plays backwards
         let clock = MediaClock {
             start,
-            rate,
+            rate: rate.abs(),
             clip_in: l.clip_in,
             len,
             loops: l.r#loop,
-            reverse: l.reverse,
+            reverse: l.reverse != (rate < 0.0),
             freeze_at: l.freeze_at,
             remap,
         };
@@ -1494,7 +1513,13 @@ impl Builder {
 
     fn repeat(&mut self, idx: u32, r: &m::Repeat, n: &Node, ctx: &Ctx) {
         let items: Vec<V> = match (&r.count, &r.over) {
-            (Some(c), _) => (0..*c).map(|k| V::Num((r.from + k * r.step) as f64)).collect(),
+            (Some(c), _) if !self.room(*c, r.loc, r.id.as_str()) => Vec::new(),
+            (Some(c), _) => {
+                let at = |k: u64| k.checked_mul(r.step).and_then(|x| x.checked_add(r.from));
+                (0..*c)
+                    .map(|k| V::Num(at(k).map(|v| v as f64).unwrap_or(r.from as f64 + k as f64 * r.step as f64)))
+                    .collect()
+            }
             (None, Some(over)) => match self.params.get(over) {
                 Some(V::Arr(a)) => a.iter().skip(r.from as usize).step_by(r.step.max(1) as usize).cloned().collect(),
                 _ => {
@@ -1514,6 +1539,9 @@ impl Builder {
         let mut copies = Vec::new();
         let rid = self.nodes[idx as usize].id.clone();
         let var: Arc<str> = r.var.as_str().into();
+        if !self.room(items.len() as u64, r.loc, r.id.as_str()) {
+            return;
+        }
         for (k, item) in items.into_iter().enumerate() {
             let k = k as u32;
             let cid: Arc<str> = format!("{rid}[{k}]").into();
@@ -1606,7 +1634,8 @@ impl Builder {
     ) {
         let start = self.nodes[idx as usize].start;
         let len = (len - clip_in).max(0.0);
-        let clock = MediaClock { start, rate: speed, clip_in, len: Some(len), loops, reverse, freeze_at: None, remap };
+        let (rate, reverse) = (speed.abs(), reverse != (speed < 0.0));
+        let clock = MediaClock { start, rate, clip_in, len: Some(len), loops, reverse, freeze_at: None, remap };
         let node = &mut self.nodes[idx as usize];
         if node.end.is_none() && clock.remap.is_none() && speed != 0.0 {
             node.end = Some(start + len * (loops + 1) as f64 / speed.abs());
@@ -1830,23 +1859,37 @@ impl Builder {
         }
     }
 
-    /// Moves a node in time, keeping its media clock aligned.
+    /// Moves a node in time, keeping its media clock aligned, and with it what shares its timeline:
+    /// the contents of a group move with it, those of an instance run on its own clock.
     fn shift(&mut self, k: u32, delta: f64) {
         if delta == 0.0 {
             return;
         }
-        let n = &mut self.nodes[k as usize];
-        n.start += delta;
-        if let Some(e) = &mut n.end {
-            *e += delta;
-        }
-        if let Some(mc) = &mut n.media {
-            mc.start += delta;
-        }
-        match &mut n.clock {
-            Clock::Media(mc) => mc.start += delta,
-            Clock::Affine { origin, .. } => *origin += delta,
-            Clock::Same => {}
+        let mut todo = vec![k];
+        while let Some(k) = todo.pop() {
+            let n = &mut self.nodes[k as usize];
+            n.start += delta;
+            if let Some(e) = &mut n.end {
+                *e += delta;
+            }
+            if let Some(mc) = &mut n.media {
+                mc.start += delta;
+            }
+            match &mut n.clock {
+                Clock::Media(mc) => {
+                    mc.start += delta;
+                    continue;
+                }
+                Clock::Affine { origin, .. } => *origin += delta,
+                Clock::Same => {}
+            }
+            // contents placed by a marker stay on it, as a sequence's own children do
+            let nodes = &self.nodes;
+            let moving = nodes[k as usize].children.iter().copied();
+            todo.extend(moving.filter(|c| attr_str(&*nodes[*c as usize].elem, "startMarker").is_none()));
+            for t in self.transitions.iter_mut().filter(|t| t.container == Some(k)) {
+                t.window = (t.window.0 + delta, t.window.1 + delta);
+            }
         }
     }
 

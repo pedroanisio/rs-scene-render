@@ -183,6 +183,25 @@ fn expressions_read_values_other_properties_and_params() {
     assert_ne!(o1, o2, "random changes per frame");
 }
 
+#[test]
+fn delayed_links_over_shared_dependencies_stay_cheap() {
+    // every layer reads the next one twice; a delayed link evaluates the whole chain away from
+    // the frame's own time, where each property must still be computed once, not 2³⁰ times
+    let mut comp =
+        String::from(r#"<layer id="top" asset="img"><link property="x" source="s0.x" delay="0.1"/></layer>"#);
+    for k in 0..30 {
+        comp += &format!(
+            r#"<layer id="s{k}" asset="img"><expression property="x">(prop("s{n}.x") + prop("s{n}.x")) / 2 + 1</expression></layer>"#,
+            n = k + 1
+        );
+    }
+    comp += r#"<layer id="s30" asset="img"><expression property="x">time * 10</expression></layer>"#;
+    let f = eval(&doc("", &comp), 1.0);
+    assert_eq!(node(&f, "s0").props.get("x"), Some(&Value::Len(Length::px(40.0))));
+    let top = node(&f, "top").props.get("x").unwrap().as_num().unwrap();
+    assert!(close(top, 39.0), "the chain 0.1 s ago: {top}");
+}
+
 /// Seeded expression functions: golden values computed from the definition by an
 /// independent reference (project seed 1, fps 10; t = 2.35 is frame 23).
 #[test]
@@ -263,6 +282,39 @@ fn links_scale_offset_clamp_delay_and_markers() {
 // ------------------------------------------------------------------ timing
 
 #[test]
+fn sequences_move_groups_with_their_contents() {
+    let d = doc_after(
+        r#"<symbols><symbol id="two"><layer id="f" asset="img" start="1" end="2"/></symbol></symbols>"#,
+        r#"<sequence id="s" start="1">
+        <group id="g1" end="2"><layer id="a" asset="img" start="0" end="2"/></group>
+        <group id="g2" end="2"><layer id="b" asset="img" start="0.5" end="2"/>
+          <sequence id="in" transition="crossfade" transitionDuration="0.5"><layer id="c" asset="img" end="1"/><layer id="d" asset="img" end="1"/></sequence></group>
+        <group id="g3" end="2" timeScale="2"><layer id="e" asset="img" start="1" end="3"/></group>
+        <instance id="i" symbol="two" end="2"/>
+    </sequence>"#,
+        "",
+    );
+    let ev = ev(&d, &EvalOptions::default());
+    let p = ev.program();
+    let span = |id: &str| {
+        let n = p.nodes.iter().find(|n| &*n.id == id).unwrap();
+        (n.start, n.end)
+    };
+    assert_eq!(span("g2"), (3.0, Some(5.0)));
+    assert_eq!(span("b"), (3.5, Some(5.0)));
+    assert_eq!((span("c"), span("d")), ((3.0, Some(4.0)), (4.0, Some(5.0))), "a sequence inside moves too");
+    assert_eq!(p.transitions.iter().map(|t| t.window).collect::<Vec<_>>(), vec![(3.75, 4.25)]);
+    let f = ev.evaluate(4.5);
+    assert!(has(&f, "g2") && has(&f, "b") && has(&f, "d") && !has(&f, "c") && !has(&f, "a"));
+    // a retimed group's children keep their place on its clock: e was drawn over [0.5, 1.5) of g3
+    assert_eq!(span("g3"), (5.0, Some(7.0)));
+    assert!(!has(&ev.evaluate(5.25), "e") && has(&ev.evaluate(5.75), "e") && !has(&ev.evaluate(6.75), "e"));
+    // an instance runs its symbol on its own clock, which starts with it
+    assert_eq!((span("i"), span("i/f")), ((7.0, Some(9.0)), (1.0, Some(2.0))));
+    assert!(!has(&ev.evaluate(7.5), "i/f") && has(&ev.evaluate(8.5), "i/f"));
+}
+
+#[test]
 fn sequences_place_children_end_to_end() {
     let d = doc(
         "",
@@ -306,6 +358,25 @@ fn layer_source_time_speed_reverse_loop_freeze_and_remap() {
     assert_eq!(node(&eval(&d, 1.0), "remap").source_time, Some(2.0));
     assert!(!has(&eval(&d, 1.9), "speed") || node(&eval(&d, 1.9), "speed").source_time.is_some());
     assert!(!has(&eval(&d, 2.8), "speed"), "3.5 s of source at 2× ends at t = 2.75");
+}
+
+#[test]
+fn a_negative_speed_plays_backwards() {
+    let d = doc_after(
+        r#"<symbols><symbol id="two" duration="2"><layer id="f" asset="img" start="1.5" end="2"/></symbol></symbols>"#,
+        r#"<layer id="back" asset="vid" speed="-1"/>
+           <layer id="fast" asset="vid" speed="-2" clipIn="1"/>
+           <layer id="twice" asset="vid" speed="-1" reverse="true"/>
+           <instance id="i" symbol="two" speed="-1"/>"#,
+        "",
+    );
+    let f = eval(&d, 1.0);
+    assert_eq!(node(&f, "back").source_time, Some(3.0), "4 s clip: 4 − 1");
+    assert_eq!(node(&f, "fast").source_time, Some(2.0), "3 s after clipIn at twice the speed: 1 + 3 − 2");
+    assert_eq!(node(&f, "twice").source_time, Some(1.0), "reversed twice is forwards");
+    assert!(!has(&eval(&d, 1.6), "fast") && has(&eval(&d, 1.4), "fast"), "and it ends when the clip runs out");
+    // the symbol's last half second comes first
+    assert!(has(&eval(&d, 0.25), "i/f") && !has(&eval(&d, 0.75), "i/f"));
 }
 
 #[test]
@@ -412,6 +483,28 @@ fn repeats_generate_scoped_copies() {
     assert_eq!(node(&f, "r[1]/l").props.get("rotation"), Some(&Value::Num(10.0)));
     assert_eq!(node(&f, "c[1]/t").text.as_deref(), Some("Hello {{name}} #1: Oslo"));
     assert_eq!(node(&f, "c[1]/t").repeat, Some([1, 2]));
+}
+
+#[test]
+fn runaway_expansion_is_an_error() {
+    let o = EvalOptions::default();
+    let huge = doc("", r#"<repeat id="r" count="1000000000000"><layer id="l" asset="img"/></repeat>"#);
+    assert_eq!(err_codes(&huge, &o), ["E18"]);
+    let copies = doc("", r#"<object3D id="p" primitive="plane" instances="4000000000"/>"#);
+    assert_eq!(err_codes(&copies, &o), ["E18"]);
+    // each count is modest; their product is not
+    let nested = doc(
+        "",
+        r#"<repeat id="a" count="300"><repeat id="b" count="300"><repeat id="c" count="300"><group id="g"/></repeat></repeat></repeat>"#,
+    );
+    assert_eq!(err_codes(&nested, &o), ["E18"]);
+    // from + index · step past the integers is a large number, not a panic
+    let wide = doc(
+        "",
+        r#"<repeat id="r" count="3" from="18446744073709551615" step="18446744073709551615"><layer id="l" asset="img"/></repeat>"#,
+    );
+    let e = ev(&wide, &o);
+    assert_eq!(node(&e.evaluate(0.0), "r[2]/l").repeat, Some([2, 3]));
 }
 
 #[test]
