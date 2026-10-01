@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Mutation fuzzing of the scene-render parser, validator, evaluator and expression compiler"
+description = "Mutation fuzzing of the scene-render parser, validator, evaluator, expression compiler and asset parsers"
 
 [dependencies]
 sr-model.workspace = true
 sr-eval.workspace = true
+sr-vector.workspace = true
+sr-text.workspace = true
+sr-geo.workspace = true
+sr-3d = { path = "../sr-3d" }
+serde_json.workspace = true
