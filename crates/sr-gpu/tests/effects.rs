@@ -776,10 +776,15 @@ fn motion_blurred_shapes_sample_only_the_box_they_sweep() {
                 k % 28, k * 2, k * 2 + 200)
         })
         .collect();
-    let r = render_sub(&doc_with(mb, "", &dots, ""), 0.1).unwrap();
+    // a frame large enough that a dot's target (rounded up to 32 px steps) is far smaller than the frame
+    let xml = format!(
+        r#"<scene version="1.1"><project width="512" height="256" fps="10" duration="4" {mb}/>{ASSETS}<composition>{dots}</composition></scene>"#
+    );
+    let big = sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) }).unwrap();
+    let r = render_sub(&big, 0.1).unwrap();
     assert!(problems(&r).is_empty(), "{:?}", problems(&r));
     let texels = r.renderer.pooled_texels();
-    assert!(texels < 30 * 64 * 32 / 4, "blur textures follow the dots, not the frame: {texels} texels");
+    assert!(texels < 30 * 512 * 256 / 8, "blur textures follow the dots, not the frame: {texels} texels");
 }
 
 #[test]
