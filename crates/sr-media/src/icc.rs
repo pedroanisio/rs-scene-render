@@ -206,7 +206,7 @@ fn describe(t: &[u8]) -> String {
             let (len, off) = (len as usize, off as usize);
             t.get(off..off + len)
                 .map(|s| {
-                    let u: Vec<u16> = s.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                    let u: Vec<u16> = s.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                     String::from_utf16_lossy(&u)
                 })
                 .unwrap_or_default()

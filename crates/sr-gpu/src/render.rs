@@ -3832,7 +3832,7 @@ impl Renderer {
         let mut out = Vec::with_capacity((w * hh) as usize);
         for y in 0..hh {
             let line = &data[(y * row) as usize..(y * row + w * 8) as usize];
-            for px in line.chunks_exact(8) {
+            for px in line.as_chunks::<8>().0 {
                 let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
                 out.push([c(0), c(2), c(4), c(6)]);
             }

@@ -122,7 +122,7 @@ pub fn compare(a: &[[f64; 4]], b: &[[f64; 4]]) -> Comparison {
 
 /// 8-bit RGBA bytes → normalised values.
 pub fn from_rgba8(px: &[u8]) -> Vec<[f64; 4]> {
-    px.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]].map(|v| v as f64 / 255.0)).collect()
+    px.as_chunks::<4>().0.iter().map(|c| c.map(|v| v as f64 / 255.0)).collect()
 }
 
 #[cfg(test)]

@@ -115,7 +115,7 @@ fn trim_leading_silence(path: &Path) -> Result<f64, String> {
     let b = std::fs::read(path).map_err(|e| e.to_string())?;
     let data = b.windows(4).position(|w| w == b"data").ok_or("whisper input: no data chunk")?;
     let pcm = &b[data + 8..];
-    let first = pcm.chunks_exact(2).position(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() > 104);
+    let first = pcm.as_chunks::<2>().0.iter().position(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() > 104);
     let cut = first.map(|i| i.saturating_sub(3200)).unwrap_or(0);
     if cut < 1600 {
         return Ok(0.0);

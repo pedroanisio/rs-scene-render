@@ -80,7 +80,7 @@ fn overlay_uses_output_representation_and_cli_override_in_every_worker() {
                 .unwrap();
             assert!(decoded.status.success());
             assert_eq!(decoded.stdout.len(), 2 * 64 * 36 * 3);
-            for frame in decoded.stdout.chunks_exact(64 * 36 * 3) {
+            for frame in decoded.stdout.as_chunks::<{ 64 * 36 * 3 }>().0 {
                 let want = if cli { [0, 255, 0] } else { [0, 0, 255] };
                 for x in [2, 34] {
                     assert!(

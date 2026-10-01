@@ -181,7 +181,8 @@ fn pam(b: &[u8]) -> Option<DynamicImage> {
     match field("MAXVAL ")? {
         255 => image::RgbaImage::from_raw(w, h, b.get(end..end + n)?.to_vec()).map(DynamicImage::ImageRgba8),
         65535 => {
-            let px = b.get(end..end + 2 * n)?.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            let px =
+                b.get(end..end + 2 * n)?.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
             image::ImageBuffer::from_raw(w, h, px).map(DynamicImage::ImageRgba16)
         }
         _ => None,

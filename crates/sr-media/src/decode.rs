@@ -370,6 +370,6 @@ pub fn decode_audio(path: &Path, stream: usize, rate: u32) -> Result<AudioData, 
             message: crate::tail(&out.stderr, 3),
         });
     }
-    let samples = out.stdout.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let samples = out.stdout.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     Ok(AudioData { sample_rate: rate, channels: a.channels.max(1), layout: a.layout, samples })
 }

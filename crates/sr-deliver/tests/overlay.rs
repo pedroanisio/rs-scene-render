@@ -34,7 +34,7 @@ fn overlays_use_caller_parameters_and_data_rows() {
                 .unwrap();
             assert!(decoded.status.success());
             assert_eq!(decoded.stdout.len(), 2 * 64 * 36 * 3);
-            for frame in decoded.stdout.chunks_exact(64 * 36 * 3) {
+            for frame in decoded.stdout.as_chunks::<{ 64 * 36 * 3 }>().0 {
                 let x = if cli { 26 } else { 42 };
                 assert!(frame[(2 * 64 + x) * 3] > 250, "overlay uses the selected input");
                 assert!(frame[(2 * 64 + 2) * 3] < 3, "overlay is not drawn at the default position");

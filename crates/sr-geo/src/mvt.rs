@@ -218,7 +218,7 @@ pub fn decode(b: &[u8]) -> Result<Vec<Layer>, String> {
                 }
             }
             let mut properties = Map::new();
-            for kv in tags.chunks_exact(2) {
+            for kv in tags.as_chunks::<2>().0 {
                 if let (Some(k), Some(v)) = (keys.get(kv[0] as usize), values.get(kv[1] as usize)) {
                     properties.insert(k.clone(), v.clone());
                 }

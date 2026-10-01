@@ -2281,7 +2281,7 @@ impl ThreeEngine {
         let data = buf.slice(..).get_mapped_range().expect("mapped");
         let mut out = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
-            for px in data[(y * row) as usize..(y * row + w * 8) as usize].chunks_exact(8) {
+            for px in data[(y * row) as usize..(y * row + w * 8) as usize].as_chunks::<8>().0 {
                 let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
                 out.push([c(0), c(2), c(4), c(6)]);
             }

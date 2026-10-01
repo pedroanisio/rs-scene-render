@@ -172,8 +172,7 @@ pub fn build(scene: &Scene3) -> PtScene {
             dr.maps[slot].as_ref().map_or([0; 4], |texture| {
                 let offset = *texture_offsets.entry(texture.key).or_insert_with(|| {
                     let offset = s.pixels.len() as u32;
-                    s.pixels
-                        .extend(texture.rgba.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().expect("RGBA"))));
+                    s.pixels.extend(texture.rgba.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p)));
                     offset
                 });
                 [
@@ -227,7 +226,7 @@ pub fn build(scene: &Scene3) -> PtScene {
         let nmat = dr.model.inverse().transpose();
         // each copy of an instanced object is its own draw
         let model = dr.model;
-        for t in idx.chunks_exact(3) {
+        for t in idx.as_chunks::<3>().0 {
             let p: [Vec3; 3] = std::array::from_fn(|c| {
                 let vertex = &verts[t[c] as usize];
                 let mut pos = Vec3::from(vertex.pos);
@@ -283,7 +282,7 @@ pub fn build(scene: &Scene3) -> PtScene {
                 record[row + 5] = [axis[0], axis[1], axis[2], 0.0];
             }
             if let Some(sh) = cloud.gpu.cpu_sh.get(index) {
-                for (row, values) in sh.chunks_exact(4).enumerate() {
+                for (row, values) in sh.as_chunks::<4>().0.iter().enumerate() {
                     record[row + 8].copy_from_slice(values);
                 }
                 record[20][0] = cloud.gpu.sh_degree as f32;
@@ -750,7 +749,7 @@ pub fn render(
         verts.push(*n);
         verts.push(data.colors.get(c).copied().unwrap_or([1.0; 4]));
         let uv = data.uv.get(c).copied().unwrap_or([[0.0; 2]; 6]);
-        for pair in uv.chunks_exact(2) {
+        for pair in uv.as_chunks::<2>().0 {
             verts.push([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]);
         }
         if c % 3 == 2 {

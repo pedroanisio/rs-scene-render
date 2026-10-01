@@ -892,8 +892,9 @@ mod tests {
     fn caches_stay_inside_the_root() {
         let base = Path::new("/proj/scenes");
         let inside = |src: &str, root: &str| local_in(src, base, Path::new(root));
-        // as the platform spells them: a drive is added on Windows
-        let at = |p: &str| lexical(Path::new(p)).unwrap();
+        // as the platform spells them: on Windows a drive is added, and the part of the path that exists
+        // comes back in its canonical form (`\\?\C:\`), as it does from `local_in`
+        let at = |p: &str| physical(&lexical(Path::new(p)).unwrap()).unwrap();
         assert_eq!(inside("gen/vo.wav", "/proj/scenes").unwrap(), at("/proj/scenes/gen/vo.wav"));
         assert_eq!(inside("./a/../vo%20x.wav", "/proj/scenes").unwrap(), at("/proj/scenes/vo x.wav"));
         assert_eq!(inside("file:///proj/scenes/vo.wav", "/proj/scenes/").unwrap(), at("/proj/scenes/vo.wav"));

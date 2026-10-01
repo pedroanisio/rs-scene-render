@@ -154,7 +154,7 @@ fn mesh_triangles(p: &Program, n: &FrameNode) -> Result<Triangles, String> {
             let prim = &model.primitives[pi];
             let base = pts.len() as u32;
             pts.extend(prim.vertices.iter().map(|v| m.transform_point3(glam::Vec3::from(v.pos)).as_dvec3().to_array()));
-            tris.extend(prim.indices.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
+            tris.extend(prim.indices.as_chunks::<3>().0.iter().map(|t| [base + t[0], base + t[1], base + t[2]]));
         }
     }
     if tris.is_empty() {
@@ -165,7 +165,7 @@ fn mesh_triangles(p: &Program, n: &FrameNode) -> Result<Triangles, String> {
 
 fn prim_triangles(prim: &sr_3d::Primitive) -> Triangles {
     let pts = prim.vertices.iter().map(|v| v.pos.map(|c| c as f64)).collect();
-    let tris = prim.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    let tris = prim.indices.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]).collect();
     (pts, tris)
 }
 

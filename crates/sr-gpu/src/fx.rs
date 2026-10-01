@@ -287,8 +287,8 @@ impl Timer {
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
             let bytes = slice.get_mapped_range().expect("mapped");
-            for (k, c) in bytes.chunks_exact(8).enumerate() {
-                ticks[k] = u64::from_le_bytes(c.try_into().expect("8 bytes"));
+            for (k, c) in bytes.as_chunks::<8>().0.iter().enumerate() {
+                ticks[k] = u64::from_le_bytes(*c);
             }
             drop(bytes);
             self.read.unmap();
