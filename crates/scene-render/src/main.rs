@@ -946,7 +946,7 @@ fn render(
     }
     let eval_warnings = ev.warnings().len();
     // a renderer kept from an earlier render of this document (watch), while it still fits
-    let setup = changes::setup_key(&text);
+    let setup = changes::setup_key(&text, file, &doc);
     let mut keep = inc.keep;
     let kept = keep.as_mut().and_then(|k| k.take()).filter(|(key, _)| *key == setup).map(|(_, r)| r);
     let mut r = match kept {
@@ -1132,7 +1132,13 @@ fn render(
             writeln!(out.w, "wrote {} (t = {:.4} s, {} draws)", path.display(), g.time, frame.stats.draws)?;
             rendered += 1;
             if let (Some(p), Some(side)) = (print, sidecar.as_mut()) {
-                side.frames.insert(name, p);
+                // Unsupported output must be rendered again so --strict cannot lose diagnostics,
+                // including when a prior invocation did not request strict validation.
+                if frame.stats.unsupported.is_empty() {
+                    side.frames.insert(name, p);
+                } else {
+                    side.frames.remove(&name);
+                }
             }
         }
         if let (Some(side), Some(prints)) = (&sidecar, &prints) {

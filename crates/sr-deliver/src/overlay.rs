@@ -12,7 +12,7 @@ use std::sync::Arc;
 use sr_eval::{EvalOptions, Evaluator};
 use sr_gpu::output::{OutputStage, Placement};
 use sr_gpu::resources::Tex;
-use sr_gpu::{Gpu, Renderer};
+use sr_gpu::{ContrastTarget, Gpu, Renderer};
 use sr_model::model as m;
 use sr_model::values::{Color, Paint, Rgba};
 
@@ -114,7 +114,7 @@ impl Overlay {
         let mut pixels = |renderer: &mut Renderer,
                           hidden: Option<usize>,
                           captions_off: bool,
-                          ink: Option<(&str, f64)>|
+                          ink: Option<(&ContrastTarget, f64)>|
          -> Result<Vec<[f32; 4]>, DeliverError> {
             let mut graph = g.clone();
             if let Some(i) = hidden {
@@ -152,10 +152,11 @@ impl Overlay {
         let mut ratios = Vec::new();
         for (hidden, id, opacity) in targets {
             let before = pixels(&mut self.renderer, hidden, hidden.is_none(), None)?;
+            let target = if hidden.is_some() { ContrastTarget::Node(id.clone()) } else { ContrastTarget::Captions };
             let mut ratio = self.renderer.contrast_of(&before, &after);
             if ratio.is_none() {
-                let dark = pixels(&mut self.renderer, None, false, Some((&id, 0.0)))?;
-                let light = pixels(&mut self.renderer, None, false, Some((&id, 1.0)))?;
+                let dark = pixels(&mut self.renderer, None, false, Some((&target, 0.0)))?;
+                let light = pixels(&mut self.renderer, None, false, Some((&target, 1.0)))?;
                 ratio = self.renderer.contrast_of_coverage(&before, &after, &dark, &light);
             }
             if let Some(ratio) = ratio {

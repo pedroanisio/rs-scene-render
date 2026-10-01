@@ -351,18 +351,22 @@ impl Video<'_> {
         // Each text is judged at its most visible: the lowest ratio among the frames where its accumulated
         // opacity is at its maximum over the encode. A label fading in passes through every ratio down to
         // 1:1 on its way to rest, which is not what a reader faces; text held dim is judged dim.
-        let mut lowest: std::collections::BTreeMap<String, (f64, f64, f64)> = Default::default(); // (opacity, ratio, t)
-                                                                                                  // text inside isolated groups: (frame index, opacity) where each appears (measured after the pass)
-        let mut unprobed: std::collections::BTreeMap<String, Vec<(usize, f64)>> = Default::default();
-        let opacity_of = |g: &sr_eval::FrameGraph, id: &str| {
-            g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0)
+        // (opacity, ratio, time) for each independent text target.
+        let mut lowest: std::collections::BTreeMap<sr_gpu::ContrastTarget, (f64, f64, f64)> = Default::default();
+        // Text requiring final-frame measurement: (frame index, opacity) where each appears.
+        let mut unprobed: std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>> = Default::default();
+        let opacity_of = |g: &sr_eval::FrameGraph, id: &sr_gpu::ContrastTarget| match id {
+            sr_gpu::ContrastTarget::Node(id) => {
+                g.nodes.iter().find(|n| &*n.id == id).map(|n| n.world_opacity).unwrap_or(1.0)
+            }
+            sr_gpu::ContrastTarget::Captions => 1.0,
         };
-        let keep = |lowest: &mut std::collections::BTreeMap<String, (f64, f64, f64)>,
-                    id: &str,
+        let keep = |lowest: &mut std::collections::BTreeMap<sr_gpu::ContrastTarget, (f64, f64, f64)>,
+                    id: &sr_gpu::ContrastTarget,
                     op: f64,
                     ratio: f64,
                     t: f64| {
-            let e = lowest.entry(id.to_string()).or_insert((f64::MIN, f64::MAX, t));
+            let e = lowest.entry(id.clone()).or_insert((f64::MIN, f64::MAX, t));
             if op > e.0 + 1e-3 {
                 *e = (op, ratio, t);
             } else if (op - e.0).abs() <= 1e-3 && ratio < e.1 {
@@ -413,7 +417,13 @@ impl Video<'_> {
                 if contrast_mode != "off" {
                     if let Some(o) = self.overlay.as_mut() {
                         for (id, opacity, ratio) in o.contrast(&mut self.stage, out_t, &picture, placement)? {
-                            keep(&mut lowest, &format!("output layer: {id}"), opacity, ratio, out_t);
+                            keep(
+                                &mut lowest,
+                                &sr_gpu::ContrastTarget::Node(format!("output layer: {id}")),
+                                opacity,
+                                ratio,
+                                out_t,
+                            );
                         }
                     }
                 }

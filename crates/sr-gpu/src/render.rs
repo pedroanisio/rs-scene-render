@@ -94,12 +94,12 @@ pub struct RenderStats {
     pub triangles: u64,
     /// Gaussian splats drawn.
     pub splats: u64,
-    /// WCAG contrast ratio of burned-in text against the backdrop behind it (node id or "captions").
-    pub contrast: Vec<(String, f64)>,
+    /// WCAG contrast ratio of burned-in text against the backdrop behind it (authored node or caption burn-in).
+    pub contrast: Vec<(ContrastTarget, f64)>,
     /// Text layers drawn inside an isolated group (offscreen), where the inline probe cannot
     /// see the final backdrop; delivery measures them by rendering the frame with and without
     /// the layer (`Renderer::contrast_with_without`).
-    pub contrast_unprobed: Vec<String>,
+    pub contrast_unprobed: Vec<ContrastTarget>,
 }
 
 struct Cmd {
@@ -187,7 +187,7 @@ struct Plan {
     post: Vec<fx::Pass>,
     post_out: Option<Arc<Tex>>,
     /// Contrast probes: node id, target rectangle, backdrop snapshot.
-    probes: Vec<(String, [u32; 4], Arc<Tex>)>,
+    probes: Vec<(ContrastTarget, [u32; 4], Arc<Tex>)>,
 }
 
 /// Simple vector nodes waiting to rasterise together into their target's space.
@@ -439,6 +439,22 @@ fn paint_refs(props: &sr_eval::Props, out: &mut std::collections::BTreeSet<Arc<s
     }
 }
 
+/// The text measured by an accessibility probe. Captions are not an authored node ID.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub enum ContrastTarget {
+    Node(String),
+    Captions,
+}
+
+impl std::fmt::Display for ContrastTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Node(id) => f.write_str(id),
+            Self::Captions => f.write_str("captions (burn-in)"),
+        }
+    }
+}
+
 /// Every attribute the schema types as a paint.
 const PAINT_ATTRS: &[&str] = &[
     "fill",
@@ -449,6 +465,7 @@ const PAINT_ATTRS: &[&str] = &[
     "colorHigh",
     "background",
     "paint",
+    "paint2",
     "strokeColor",
     "outline",
     "headFill",
@@ -459,7 +476,7 @@ const PAINT_ATTRS: &[&str] = &[
 
 /// Ids of paints that element `e` and its descendants name in their attributes.
 fn static_paint_refs(e: &dyn Element, out: &mut std::collections::BTreeSet<Arc<str>>) {
-    e.visit(&mut |d| {
+    sr_model::element::walk(e, &mut |d| {
         for name in PAINT_ATTRS {
             if let Some(AttrValue::Paint(sr_model::values::Paint::Ref(r))) = d.get_attr(name) {
                 out.insert(Arc::from(r.0.as_str()));
@@ -2516,7 +2533,7 @@ impl Renderer {
         }
         if let (Some(at), Some(b)) = (probe, bounds) {
             self.flush_vec(plan, cmds);
-            self.attach_probe(plan, space, cmds, at, "captions", b);
+            self.attach_probe(plan, space, cmds, at, ContrastTarget::Captions, b);
         }
     }
 

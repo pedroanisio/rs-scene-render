@@ -4,8 +4,7 @@
 usage: tools/perf_impact.py OUTDIR [--duration SECONDS]
     Writes perf_impact.scene.xml: a 1080p60 scene with a posterize-time group (30 fps
     cadence) holding a fractal-noise backdrop, gradient shapes, 150-wedge focus lines and a
-    particle emitter; a stroked title (a wide stroke, drawn from a distance field, and a thin
-    one); a blurred rigid layer under 12-sample motion blur; a feathered-ring adjustment
+    particle emitter; a stroked title (wide and thin alpha-morphology strokes); a blurred rigid layer under 12-sample motion blur; a feathered-ring adjustment
     with a turbulent displacement; and a finishing adjustment with a grade, a vignette and
     film grain.
     then: scene-render render OUTDIR/perf_impact.scene.xml --bench --frames 0..60

@@ -417,3 +417,39 @@ fn caption_contrast_is_checked_over_the_picture() {
         }
     }
 }
+
+fn regression_contrast_case(id: &str, cover: &str) -> Result<sr_deliver::pipeline::Report, sr_deliver::DeliverError> {
+    let dir = fixtures().unwrap();
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="0.2" background="#000000"/>
+      <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata>
+      <output path="out/regression.mkv" codec="ffv1" audio="false"/>
+      <assets><text id="label" text="AB" width="56" height="28" size="24" color="#000000" font="DejaVu Sans"/></assets>
+      <composition><layer id="{id}" asset="label" y="4"/>{cover}</composition></scene>"##
+    );
+    let path = dir.join("regression.xml");
+    std::fs::write(&path, xml).unwrap();
+    let doc = sr_model::load_file(path, &Default::default()).unwrap();
+    deliver(&doc)
+}
+
+#[test]
+fn regression_captions_id_does_not_bypass_contrast() {
+    if gpu().is_none() {
+        return;
+    }
+    let result = regression_contrast_case("captions", "");
+    assert!(matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("1.00")), "{result:?}");
+}
+
+#[test]
+fn regression_occluded_text_has_no_contrast_requirement() {
+    if gpu().is_none() {
+        return;
+    }
+    let result = regression_contrast_case(
+        "label-layer",
+        r##"<shape id="cover" shape="rect" width="64" height="36" fill="#303030"/>"##,
+    );
+    assert!(result.unwrap().accessibility.is_empty());
+}

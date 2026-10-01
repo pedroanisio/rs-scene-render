@@ -615,3 +615,125 @@ fn strict_encode_rejects_unresolved_placeholders_and_reports_them() {
     let human = run(&["encode", scene.to_str().unwrap(), "-o", output.to_str().unwrap()]);
     assert!(String::from_utf8_lossy(&human.stdout).contains("warning[E16]"));
 }
+
+#[test]
+fn regression_incremental_transitions_change_pixels() {
+    let (dir, scene) = two_halves("transition-regression", "");
+    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="4"/>
+      <composition><shape id="a" shape="rect" width="64" height="64" fill="#FF0000" end="2"/>
+      <shape id="b" shape="rect" width="64" height="64" fill="#0000FF" start="2"/>
+      <transition type="crossfade" from="a" to="b" duration="1" curve="linear"/></composition></scene>"##;
+    std::fs::write(&scene, xml).unwrap();
+    let output = dir.join("transition.png");
+    let args = ["render", scene.to_str().unwrap(), "--time", "1.75", "-o", output.to_str().unwrap(), "--changed-only"];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    let before = image::open(&output).unwrap().to_rgba8();
+    std::fs::write(&scene, xml.replace("crossfade", "wipe")).unwrap();
+    let second = run(&args);
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(rendered(&second), (1, 1));
+    assert_ne!(image::open(&output).unwrap().to_rgba8(), before);
+    // Static attributes are skipped by FrameTransition's serialization, but change pixels too.
+    let wipe = image::open(&output).unwrap().to_rgba8();
+    std::fs::write(
+        &scene,
+        xml.replace("crossfade", "wipe").replace("curve=\"linear\"", "curve=\"linear\" direction=\"right\""),
+    )
+    .unwrap();
+    assert_eq!(rendered(&run(&args)), (1, 1));
+    assert_ne!(image::open(&output).unwrap().to_rgba8(), wipe);
+}
+
+#[test]
+fn regression_incremental_strict_repeats_shader_diagnostics() {
+    let (dir, scene) = two_halves("strict-regression", "");
+    std::fs::write(dir.join("broken.glsl"), "vec4 effect(vec2 uv) { return missingVariable; }").unwrap();
+    std::fs::write(
+        &scene,
+        r##"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
+      <composition><shape id="s" shape="rect" width="16" height="16" fill="#FF0000" effects="bad"/></composition>
+      <effects><effect id="bad" type="shader" src="broken.glsl"/></effects></scene>"##,
+    )
+    .unwrap();
+    let output = dir.join("strict.png");
+    let args = ["render", scene.to_str().unwrap(), "-o", output.to_str().unwrap(), "--changed-only", "--strict"];
+    for _ in 0..2 {
+        let o = run(&args);
+        if no_gpu(&o) {
+            return;
+        }
+        assert_eq!(o.status.code(), Some(1), "{o:?}");
+        assert!(String::from_utf8_lossy(&o.stdout).contains("GLSL"), "{o:?}");
+    }
+    // A non-strict render must not let a later strict run skip its diagnostics either.
+    assert!(run(&args[..args.len() - 1]).status.success());
+    assert_eq!(run(&args).status.code(), Some(1));
+}
+
+#[test]
+fn regression_watch_reloads_changed_image_bytes() {
+    use std::io::{BufRead, BufReader};
+    let (dir, scene) = two_halves("watch-image-regression", "");
+    let source = dir.join("source.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255])).save(&source).unwrap();
+    std::fs::write(
+        &scene,
+        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
+      <assets><image id="img" src="source.png" width="16" height="16"/></assets>
+      <composition><layer id="l" asset="img"/></composition></scene>"#,
+    )
+    .unwrap();
+    let output = dir.join("watch.png");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args([
+            "watch",
+            scene.to_str().unwrap(),
+            "--frames",
+            "0..1",
+            "-o",
+            output.to_str().unwrap(),
+            "--interval",
+            "50",
+            "--max-runs",
+            "2",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap().contains("watching") {
+                let _ = tx.send(());
+            }
+        }
+    });
+    if rx.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        let o = child.wait_with_output().unwrap();
+        reader.join().unwrap();
+        if no_gpu(&o) {
+            return;
+        }
+        panic!("watch did not become ready: {o:?}");
+    }
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&source).unwrap();
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed().as_secs() > 60 {
+            let _ = child.kill();
+            panic!("watch did not finish");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let o = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(image::open(output).unwrap().to_rgba8().get_pixel(8, 8).0, [0, 0, 255, 255]);
+}

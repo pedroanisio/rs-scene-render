@@ -948,7 +948,7 @@ fn fs_conv(in: VOut) -> @location(0) vec4<f32> {
 // ------------------------------------------------------------ alpha morphology
 
 // Max (dilate) or min (erode) of alpha over a disc. v0: radius px, mode (0 dilate, 1 erode),
-// softness px; i.x: 0 plain result, 1 stroke ring (v1 colour, v0.w position: 0 outside, 1 inside, 2 centre),
+// wide-disc flag; i.x: 0 plain result, 1 stroke ring (v1 colour, v0.w position: 0 outside, 1 inside, 2 centre),
 // 2 outline only.
 @fragment
 fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
@@ -959,12 +959,30 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     var mx = s.a;
     var mn = s.a;
     if (v[0].z > 0.5) {
-        // aux: the jump-flooded field (fs_jfa). A texel whose nearest inside texel is `din` away
-        // is covered once the edge (half a texel out from that texel) moves out by din - 0.5,
-        // and one whose nearest outside texel is `dout` away stays covered while r < dout - 0.5.
-        let f = textureLoad(aux, vec2<i32>(in.pos.xy), 0);
-        mx = max(mx, clamp(r - length(f.xy) + 1.0, 0.0, 1.0));
-        mn = min(mn, clamp(length(f.zw) - r, 0.0, 1.0));
+        // A binary distance field loses fractional alpha. For wide morphology visit
+        // every texel in the disc, retaining the actual min/max coverage. Stop once
+        // the extrema required by this operation cannot change any further.
+        let p = vec2<i32>(in.pos.xy);
+        let size = vec2<i32>(textureDimensions(src));
+        let reach = i32(ceil(r));
+        let need_max = select(v[0].w != 1.0, v[0].y < 0.5, fx.i.x == 0u);
+        let need_min = select(v[0].w != 0.0, v[0].y > 0.5, fx.i.x == 0u);
+        // Outside the texture is transparent, including for erosion.
+        let edge = f32(min(min(p.x + 1, p.y + 1), min(size.x - p.x, size.y - p.y)));
+        mn = min(mn, clamp(edge - r, 0.0, 1.0));
+        let lo = max(-vec2(reach), -p);
+        let hi = min(vec2(reach), size - vec2(1) - p);
+        for (var y = lo.y; y <= hi.y; y++) {
+            if ((!need_max || mx >= 1.0) && (!need_min || mn <= 0.0)) { break; }
+            for (var x = lo.x; x <= hi.x; x++) {
+                let weight = clamp(r + 1.0 - length(vec2<f32>(f32(x), f32(y))), 0.0, 1.0);
+                if (weight <= 0.0) { continue; }
+                let a = textureLoad(src, p + vec2(x, y), 0).a;
+                mx = max(mx, a * weight);
+                mn = min(mn, a + 1.0 - weight);
+                if ((!need_max || mx >= 1.0) && (!need_min || mn <= 0.0)) { break; }
+            }
+        }
     } else {
         let rings = clamp(i32(ceil(r / 1.5)), 1, 12);
         for (var ring = 1; ring <= rings; ring++) {

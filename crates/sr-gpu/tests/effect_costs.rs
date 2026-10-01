@@ -293,3 +293,46 @@ fn rigid_motion_blur_matches_sampling_for_entries_and_rotation() {
         assert!(db >= 40.0, "{anim}: motion blur vs the average of sharp frames: {db:.1} dB");
     }
 }
+
+#[test]
+fn regression_generator_secondary_paint_invalidates_effects() {
+    let xml = format!(
+        r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
+      <assets><generator id="a" kind="checkerboard" width="64" height="64" scale="16" paint="#FFFFFF" paint2="url(#g)"/></assets>
+      {GRADIENT}<composition><layer id="l" asset="a" effects="soft"/></composition>
+      <effects><effect id="soft" type="blur" radius="1"/></effects></scene>"##
+    );
+    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let Some(f) = render_sub_frames(&d, &[0.0, 0.5]) else { return };
+    let fresh = render_sub(&d, 0.5).unwrap();
+    assert_ne!(f[0].px, fresh.px, "the secondary paint must actually animate");
+    assert!(f[1].px == fresh.px, "cached rendering must follow paint2");
+}
+
+#[test]
+fn regression_wide_morphology_preserves_partial_alpha() {
+    for alpha in ["40", "BF"] {
+        for radius in [4, 5, 12] {
+            for kind in ["stroke", "matte-choke"] {
+                let d = scene(
+                    r##"width="96" height="96" fps="10" duration="1" background="#00000000""##,
+                    "",
+                    &format!(
+                        r##"<shape id="sq" shape="rect" x="28" y="28" width="40" height="40" fill="#FFFFFF{alpha}" effects="fx"/>"##
+                    ),
+                    &format!(
+                        r##"<effect id="fx" type="{kind}" size="{radius}" amount="{radius}" softness="0" color="#FF0000"/>"##
+                    ),
+                );
+                let Some(r) = render_sub(&d, 0.0) else { return };
+                let expected = u8::from_str_radix(alpha, 16).unwrap() as f32 / 255.0;
+                let point = if kind == "stroke" { (26, 48) } else { (48, 48) };
+                let got = r.at(point.0, point.1)[3];
+                assert!((got - expected).abs() < 0.02, "{kind} radius {radius}, alpha {alpha}: {got} != {expected}");
+                if kind == "matte-choke" {
+                    assert!(r.at(29, 48)[3] < 0.02, "the edge must still erode");
+                }
+            }
+        }
+    }
+}

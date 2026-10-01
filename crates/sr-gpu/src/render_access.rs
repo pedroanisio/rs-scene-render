@@ -27,18 +27,20 @@ impl Renderer {
     /// A counterfactual frame for accessibility measurement. Only the selected text's
     /// RGB changes; its sampled alpha, transforms, masks and later occluders remain.
     /// The private property participates in normal cache hashes.
-    pub fn contrast_ink_graph(g: &sr_eval::FrameGraph, id: &str, ink: f64) -> sr_eval::FrameGraph {
+    pub fn contrast_ink_graph(g: &sr_eval::FrameGraph, target: &ContrastTarget, ink: f64) -> sr_eval::FrameGraph {
         let mut g = g.clone();
-        if id == "captions" {
+        if let ContrastTarget::Captions = target {
             g.elements.retain(|e| &*e.key != CONTRAST_INK);
             g.elements.push(sr_eval::eval::ElementState {
                 key: CONTRAST_INK.into(),
                 element: "contrastProbe",
                 props: sr_eval::eval::Props(vec![(CONTRAST_INK.into(), Value::Num(ink))]),
             });
-        } else if let Some(n) = g.nodes.iter_mut().find(|n| &*n.id == id) {
-            n.props.0.retain(|(k, _)| &**k != CONTRAST_INK);
-            n.props.0.push((CONTRAST_INK.into(), Value::Num(ink)));
+        } else if let ContrastTarget::Node(id) = target {
+            if let Some(n) = g.nodes.iter_mut().find(|n| &*n.id == id) {
+                n.props.0.retain(|(k, _)| &**k != CONTRAST_INK);
+                n.props.0.push((CONTRAST_INK.into(), Value::Num(ink)));
+            }
         }
         g
     }
@@ -108,9 +110,11 @@ impl Renderer {
         // `root_hash` is 0 exactly when emitting into an offscreen (isolated groups, masks,
         // mattes, effects and transitions all emit with 0; frame roots pass their subtree hash).
         // An unsized isolated group shares the frame's space, so the space alone cannot tell.
-        if root_hash == 0 || !self.is_root_space(ctx, space) {
+        if root_hash == 0 || !self.is_root_space(ctx, space) || ctx.g.nodes[i + 1..].iter().any(|n| n.draw) {
+            // Later draws can cover these glyphs. A pre-text snapshot cannot distinguish
+            // their pixels from text, so measure with/without the text in the final frame.
             // inside an isolated group: the backdrop here is not what the viewer sees
-            let id = ctx.g.nodes[i].id.to_string();
+            let id = ContrastTarget::Node(ctx.g.nodes[i].id.to_string());
             if !plan.stats.contrast_unprobed.contains(&id) {
                 plan.stats.contrast_unprobed.push(id);
             }
@@ -141,8 +145,8 @@ impl Renderer {
             pts.iter().map(|p| p[0]).fold(f64::MIN, f64::max),
             pts.iter().map(|p| p[1]).fold(f64::MIN, f64::max),
         ];
-        let id = n.id.to_string();
-        self.attach_probe(plan, space, cmds, at, &id, b);
+        let id = ContrastTarget::Node(n.id.to_string());
+        self.attach_probe(plan, space, cmds, at, id, b);
     }
 
     /// Gives command `at` a backdrop snapshot and records the probe over `b` (x0, y0, x1, y1).
@@ -152,7 +156,7 @@ impl Renderer {
         space: &Space,
         cmds: &mut [Cmd],
         at: usize,
-        id: &str,
+        id: ContrastTarget,
         b: [f64; 4],
     ) {
         let Some(c) = cmds.get_mut(at) else { return };
@@ -171,11 +175,7 @@ impl Renderer {
         }
         let snapshot = self.pool.get(&self.gpu.device, &self.bgl1, space.size);
         c.pre = Some(Box::new(AdjPre { snapshot: snapshot.clone(), passes: Vec::new(), three: None }));
-        plan.probes.push((
-            id.to_string(),
-            [r[0] as u32, r[1] as u32, (r[2] - r[0]) as u32, (r[3] - r[1]) as u32],
-            snapshot,
-        ));
+        plan.probes.push((id, [r[0] as u32, r[1] as u32, (r[2] - r[0]) as u32, (r[3] - r[1]) as u32], snapshot));
     }
 
     /// Reads a rectangle (x, y, w, h) of a texture.
@@ -288,11 +288,15 @@ impl Renderer {
         &mut self,
         g: &sr_eval::FrameGraph,
         p: &sr_eval::Program,
-        node_id: &str,
+        target: &ContrastTarget,
         sub: &mut dyn FnMut(f64) -> sr_eval::FrameGraph,
     ) -> Option<f64> {
-        let k = g.nodes.iter().position(|n| &*n.id == node_id);
-        let captions = node_id == "captions";
+        let node_id = match target {
+            ContrastTarget::Node(id) => Some(id.as_str()),
+            ContrastTarget::Captions => None,
+        };
+        let k = g.nodes.iter().position(|n| Some(&*n.id) == node_id);
+        let captions = matches!(target, ContrastTarget::Captions);
         if !captions && k.is_none() {
             return None;
         }
@@ -313,7 +317,7 @@ impl Renderer {
             let mut hidden_sub = |t| {
                 let mut graph = sub(t);
                 for n in &mut graph.nodes {
-                    if &*n.id == node_id {
+                    if Some(&*n.id) == node_id {
                         n.draw = false;
                     }
                 }
@@ -326,8 +330,8 @@ impl Renderer {
         let ratio = self.contrast_of(&before, &after).or_else(|| {
             let mut inks = Vec::new();
             for ink in [0.0, 1.0] {
-                let graph = Self::contrast_ink_graph(g, node_id, ink);
-                let mut ink_sub = |t| Self::contrast_ink_graph(&sub(t), node_id, ink);
+                let graph = Self::contrast_ink_graph(g, target, ink);
+                let mut ink_sub = |t| Self::contrast_ink_graph(&sub(t), target, ink);
                 let frame = self.render_with(&graph, p, Some(&mut ink_sub));
                 inks.push(self.read_rect(&frame.texture, r));
             }

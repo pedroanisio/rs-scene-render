@@ -115,14 +115,17 @@ pub fn stamp(f: &Path) -> Option<Stamp> {
     std::fs::metadata(f).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
-/// Hash of what a renderer is built from (the project, colour management and styles): while it
+/// Hash of what a renderer is built from (the project, colour management, styles and media dependencies): while it
 /// stays the same, a renderer made for an earlier version of the document can render this one.
-pub fn setup_key(text: &str) -> u64 {
+pub fn setup_key(text: &str, path: &Path, doc: &sr_model::Document) -> u64 {
     let mut h = SEED;
     for tag in ["<project", "<colorManagement", "<styles"] {
         if let Some(at) = text.find(tag) {
             h = fnv(element_span(text, at).unwrap_or("").as_bytes(), h);
         }
+    }
+    for f in files(path, doc) {
+        h = fnv(format!("{}:{:?}", f.display(), stamp(&f)).as_bytes(), h);
     }
     h
 }
@@ -165,6 +168,8 @@ impl Fingerprints {
     pub fn new(text: &str, path: &Path, doc: &sr_model::Document, settings: &str) -> Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
+        // Invalidate fingerprints produced before transitions/diagnostics were tracked.
+        shared = fnv(b"frame-fingerprint-v2", shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
         shared = fnv(&text.as_bytes()[..a], shared);
@@ -201,6 +206,12 @@ impl Fingerprints {
             h = fnv(serde_json::to_string(n).unwrap_or_default().as_bytes(), h);
             let off = n.elem.loc().offset as usize;
             h = fnv(element_span(text, off).unwrap_or("").as_bytes(), h);
+        }
+        for tr in &g.transitions {
+            h = fnv(serde_json::to_string(tr).unwrap_or_default().as_bytes(), h);
+            if let Some(elem) = &tr.elem {
+                h = fnv(element_span(text, elem.loc().offset as usize).unwrap_or("").as_bytes(), h);
+            }
         }
         fnv(serde_json::to_string(&g.elements).unwrap_or_default().as_bytes(), h)
     }

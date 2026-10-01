@@ -1227,20 +1227,6 @@ impl Builder<'_> {
         self.run(entry, [op, 0, 0, 0], v, src, aux, None, None, size)
     }
 
-    /// Radii up to this many texels sample rings around each pixel (cheap and gap-free at that
-    /// size); wider ones read a distance field.
-    const RING_RADIUS: f64 = 4.0;
-
-    /// For a morphology radius `r` in texels, the distance field `fs_morph` reads (flagged in
-    /// `v[0].z`) when rings would be too sparse or too many.
-    fn morph_field(&mut self, src: &Arc<Tex>, r: f64, v: &mut [[f32; 4]; 8]) -> Aux {
-        if r <= Self::RING_RADIUS {
-            return Aux::None;
-        }
-        v[0][2] = 1.0;
-        Aux::Tex(self.distance_field(src, r))
-    }
-
     /// Jump flooding (Rong and Tan): per texel, the offset to the nearest texel inside the input
     /// (alpha ≥ 0.5) in rg and to the nearest texel outside it in ba, exact enough within `reach`
     /// texels: one pass per power of two from the first above `reach` down to 1, plus one more at 1.
@@ -1977,7 +1963,8 @@ impl Builder<'_> {
                 if kind == "matte-choke" {
                     let choke = amount * px;
                     v[0] = [choke.abs() as f32, (choke > 0.0) as u8 as f32, 0.0, 0.0];
-                    let aux = self.morph_field(input, choke.abs(), &mut v);
+                    v[0][2] = f32::from(choke.abs() > 4.0);
+                    let aux = Aux::None;
                     let o = self.simple(Entry::Morph, 0, v, input, aux);
                     let soft = a.num("softness", 0.1) * px * 4.0;
                     return Ok(if soft >= 1.0 { self.blur(&o, soft * 0.5) } else { o });
@@ -1990,7 +1977,8 @@ impl Builder<'_> {
                 };
                 v[0] = [(sz.max(1.0) * px) as f32, 0.0, 0.0, pos];
                 v[1] = v4(c);
-                let aux = self.morph_field(input, sz.max(1.0) * px, &mut v);
+                v[0][2] = f32::from(sz.max(1.0) * px > 4.0);
+                let aux = Aux::None;
                 self.simple(Entry::Morph, if kind == "stroke" { 1 } else { 2 }, v, input, aux)
             }
             "shader" => return self.shader_effect(e, a, input, cx),
