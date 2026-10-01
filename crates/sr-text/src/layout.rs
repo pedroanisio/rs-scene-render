@@ -793,6 +793,33 @@ fn hyphen_point(chars: &[char], from: usize, to: usize, fits: impl Fn(usize) -> 
     use hyphenation::Hyphenator;
     let lower = word.to_lowercase();
     let h = d.hyphenate(&lower);
-    let bytes: Vec<usize> = word.char_indices().map(|(b, _)| b).collect();
+    // breaks are byte offsets in the lowercased word, where a character may take another length
+    let mut at = 0;
+    let bytes: Vec<usize> = chars[s..e]
+        .iter()
+        .map(|c| {
+            let b = at;
+            at += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+            b
+        })
+        .collect();
     h.breaks.iter().rev().map(|&b| s + bytes.partition_point(|&x| x < b)).find(|&c| c > s && fits(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyphenation::Hyphenator;
+
+    #[test]
+    fn hyphen_points_are_positions_in_the_original_word() {
+        // `İ` lowercases to two characters and one more byte
+        for word in ["İİİİhyphenation", "hyphenationİİİİ", "HYPHENATION", "Überhyphenation"] {
+            let chars: Vec<char> = word.chars().collect();
+            let lower = word.to_lowercase();
+            let last = *hyphenator().unwrap().hyphenate(&lower).breaks.last().expect(word);
+            let h = hyphen_point(&chars, 0, chars.len(), |_| true).unwrap();
+            assert_eq!(chars[..h].iter().collect::<String>().to_lowercase(), lower[..last], "{word}");
+        }
+    }
 }

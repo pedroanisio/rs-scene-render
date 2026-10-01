@@ -121,9 +121,13 @@ fn symbol(name: &str) -> Option<N> {
     })
 }
 
+/// Nested atoms and rows a formula may have (a braced group is two).
+const MAX_DEPTH: usize = 128;
+
 struct Parser<'a> {
     s: &'a [char],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -202,7 +206,20 @@ impl Parser<'_> {
             None => Err("missing delimiter".into()),
         }
     }
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(format!("nested deeper than {} groups", MAX_DEPTH / 2));
+        }
+        Ok(())
+    }
     fn atom(&mut self) -> Result<Option<N>, String> {
+        self.enter()?;
+        let r = self.atom_in();
+        self.depth -= 1;
+        r
+    }
+    fn atom_in(&mut self) -> Result<Option<N>, String> {
         self.skip_ws();
         let Some(c) = self.peek() else { return Ok(None) };
         self.i += 1;
@@ -257,6 +274,12 @@ impl Parser<'_> {
         }))
     }
     fn row(&mut self, until: Option<char>) -> Result<N, String> {
+        self.enter()?;
+        let r = self.row_in(until);
+        self.depth -= 1;
+        r
+    }
+    fn row_in(&mut self, until: Option<char>) -> Result<N, String> {
         let mut items = Vec::new();
         loop {
             self.skip_ws();
@@ -639,7 +662,7 @@ pub fn draw(
     tol: f64,
 ) -> Result<Drawing, String> {
     let chars: Vec<char> = tex.chars().collect();
-    let ast = Parser { s: &chars, i: 0 }.row(None)?;
+    let ast = Parser { s: &chars, i: 0, depth: 0 }.row(None)?;
     let face = lib.math_face().ok_or("no font with an OpenType MATH table is installed")?;
     let b = lib
         .with_face(face, &[], |f| {
