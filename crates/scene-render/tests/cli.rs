@@ -737,3 +737,87 @@ fn regression_watch_reloads_changed_image_bytes() {
     assert!(o.status.success(), "{o:?}");
     assert_eq!(image::open(output).unwrap().to_rgba8().get_pixel(8, 8).0, [0, 0, 255, 255]);
 }
+
+#[test]
+fn regression_sequence_edits_invalidate_incremental_frames() {
+    let (dir, scene) = two_halves("sequence-input", "");
+    let source = dir.join("f00.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255])).save(&source).unwrap();
+    std::fs::write(
+        &scene,
+        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="0.1"/>
+      <assets><imageSequence id="seq" src="f%02d.png" width="16" height="16" fps="10" first="0" last="0"/></assets>
+      <composition><layer id="l" asset="seq"/></composition></scene>"#,
+    )
+    .unwrap();
+    let output = dir.join("out.png");
+    let args = ["render", scene.to_str().unwrap(), "-o", output.to_str().unwrap(), "--changed-only"];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(rendered(&run(&args)), (0, 1));
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])).save(&source).unwrap();
+    let edited = run(&args);
+    assert!(edited.status.success(), "{edited:?}");
+    assert_eq!(rendered(&edited), (1, 1));
+    assert_eq!(image::open(output).unwrap().to_rgba8().get_pixel(8, 8).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn regression_transition_shader_edits_invalidate_incremental_frames() {
+    let (dir, scene) = two_halves("shader-input", "");
+    let shader = dir.join("transition.glsl");
+    std::fs::write(&shader, "vec4 transition(vec2 uv) { return vec4(1.0,0.0,0.0,1.0); }").unwrap();
+    std::fs::write(&scene, r##"<scene version="1.2"><project width="16" height="16" fps="10" duration="4"/>
+      <composition><shape id="a" shape="rect" width="16" height="16" fill="#FF0000" end="2"/>
+      <shape id="b" shape="rect" width="16" height="16" fill="#0000FF" start="2"/>
+      <transition type="shader" shader="transition.glsl" from="a" to="b" duration="1" curve="linear"/></composition></scene>"##).unwrap();
+    let output = dir.join("out.png");
+    let args = [
+        "render",
+        scene.to_str().unwrap(),
+        "--time",
+        "1.75",
+        "-o",
+        output.to_str().unwrap(),
+        "--changed-only",
+        "--strict",
+    ];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    std::fs::write(&shader, "vec4 transition(vec2 uv) { return vec4(0.0,0.0,1.0,1.0); }").unwrap();
+    let edited = run(&args);
+    assert!(edited.status.success(), "{edited:?}");
+    assert_eq!(rendered(&edited), (1, 1));
+    assert_eq!(image::open(output).unwrap().to_rgba8().get_pixel(8, 8).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn regression_incremental_time_changes_update_captions_without_nodes() {
+    let (dir, scene) = two_halves("caption-time", "");
+    std::fs::write(
+        &scene,
+        r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="1" background="#000000"/>
+      <styles><textStyle id="cs" size="18" color="#FFFFFF"/></styles><composition/>
+      <captions><captionTrack id="cc" language="en" mode="burn" style="cs" x="32" y="2" width="56">
+      <cue start="0" end="0.5" text="AB"/></captionTrack></captions></scene>"##,
+    )
+    .unwrap();
+    let output = dir.join("out.png");
+    let args = ["render", scene.to_str().unwrap(), "-o", output.to_str().unwrap(), "--changed-only"];
+    let first = run(&[args.as_slice(), &["--time", "0"]].concat());
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    assert!(image::open(&output).unwrap().to_rgba8().pixels().any(|p| p[0] > 0));
+    let later = run(&[args.as_slice(), &["--time", "0.8"]].concat());
+    assert!(later.status.success(), "{later:?}");
+    assert_eq!(rendered(&later), (1, 1));
+    assert!(image::open(output).unwrap().to_rgba8().pixels().all(|p| p.0 == [0, 0, 0, 255]));
+}

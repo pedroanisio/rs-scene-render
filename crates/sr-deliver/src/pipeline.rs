@@ -471,18 +471,18 @@ impl Video<'_> {
             Ok(())
         })?;
         report.unsupported = unsupported.into_iter().collect();
-        // text the inline probe could not reach: measure once, at the middle of the longest run of
-        // frames in which it is drawn, by rendering that frame with and without it
+        // Probe every frame at maximum visibility. A middle-frame sample can miss low
+        // contrast at either end, or a transient change in the text's backdrop.
         for (id, seen) in &unprobed {
-            // among the frames where the text is at its most visible, the middle of the longest run
             let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
-            let frames: Vec<usize> = seen.iter().filter(|s| s.1 >= top - 1e-3).map(|s| s.0).collect();
-            let Some(t) = middle_of_longest_run(&frames).map(|k| times[k]) else { continue };
-            let g = self.ev.evaluate(t);
-            let ev = &self.ev;
-            let mut sub = |st: f64| ev.evaluate(st);
-            if let Some(ratio) = self.renderer.contrast_with_without(&g, p, id, &mut sub) {
-                keep(&mut lowest, id, top, ratio, t);
+            for &(k, opacity) in seen.iter().filter(|s| s.1 >= top - 1e-3) {
+                let t = times[k];
+                let g = self.ev.evaluate(t);
+                let ev = &self.ev;
+                let mut sub = |st: f64| ev.evaluate(st);
+                if let Some(ratio) = self.renderer.contrast_with_without(&g, p, id, &mut sub) {
+                    keep(&mut lowest, id, opacity, ratio, t);
+                }
             }
         }
         // accessibility verdicts
@@ -1392,33 +1392,6 @@ fn write_sidecars(
         files.push(path);
     }
     Ok(files)
-}
-
-/// Index (into `frames`' values) of the middle frame of the longest run of consecutive indices.
-fn middle_of_longest_run(frames: &[usize]) -> Option<usize> {
-    let (mut best, mut start) = ((0usize, 0usize), 0usize);
-    for i in 1..=frames.len() {
-        if i == frames.len() || frames[i] != frames[i - 1] + 1 {
-            if i - start > best.1 - best.0 {
-                best = (start, i);
-            }
-            start = i;
-        }
-    }
-    (best.1 > best.0).then(|| frames[(best.0 + best.1 - 1) / 2])
-}
-
-#[cfg(test)]
-mod run_tests {
-    use super::middle_of_longest_run;
-
-    #[test]
-    fn middle_of_longest_run_picks_the_longest_contiguous_span() {
-        assert_eq!(middle_of_longest_run(&[]), None);
-        assert_eq!(middle_of_longest_run(&[7]), Some(7));
-        assert_eq!(middle_of_longest_run(&[0, 1, 5, 6, 7, 8, 9, 20]), Some(7));
-        assert_eq!(middle_of_longest_run(&[3, 4, 10, 11]), Some(3));
-    }
 }
 
 /// Live stage times of the frames rendered so far in this process, readable while an encode runs, so a progress

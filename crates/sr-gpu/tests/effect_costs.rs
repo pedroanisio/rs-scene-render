@@ -336,3 +336,43 @@ fn regression_wide_morphology_preserves_partial_alpha() {
         }
     }
 }
+
+#[test]
+fn regression_animated_generator_paint_references_follow_their_gradients() {
+    // The reference stays constant in evaluated props while the referenced gradient changes.
+    // Check both generator paint slots and an isolated parent effect cache.
+    for property in ["paint", "paint2"] {
+        for grouped in [false, true] {
+            let body = if grouped {
+                r#"<group id="outer" effects="soft"><layer id="l" asset="a"/></group>"#
+            } else {
+                r#"<layer id="l" asset="a" effects="soft"/>"#
+            };
+            let xml = format!(
+                r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
+              <assets><generator id="a" kind="checkerboard" width="64" height="64" scale="16" paint="#FFFFFF" paint2="#FFFFFF">
+              <animate property="{property}"><key time="0" value="url(#g)"/><key time="1" value="url(#g)"/></animate></generator></assets>
+              {GRADIENT}<composition>{body}</composition><effects><effect id="soft" type="blur" radius="1"/></effects></scene>"##
+            );
+            let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+            let Some(f) = render_sub_frames(&doc, &[0.0, 0.5]) else { return };
+            let fresh = render_sub(&doc, 0.5).unwrap();
+            assert!(f[0].px != fresh.px, "gradient must animate");
+            assert!(f[1].px == fresh.px, "{property}, grouped={grouped}: stale animated paint dependency");
+        }
+    }
+}
+
+#[test]
+fn regression_film_grain_keeps_animating_under_cached_effects() {
+    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
+      <assets><generator id="a" kind="film-grain" width="64" height="64" paint="#FFFFFF" paint2="#000000" seed="7"/></assets>
+      <composition><layer id="l" asset="a" effects="soft"/></composition><effects><effect id="soft" type="blur" radius="1"/></effects></scene>"##;
+    let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let Some(f) = render_sub_frames(&doc, &[0.0, 0.5, 0.5]) else { return };
+    let fresh = render_sub(&doc, 0.5).unwrap();
+    assert!(f[0].px != fresh.px, "grain must change with its frame");
+    assert!(f[1].px == fresh.px, "effect cache froze the grain");
+    assert!(f[2].px == f[1].px, "grain remains deterministic");
+    assert_eq!(f[2].stats.fx_passes, 0, "same-time grain still reuses its effects");
+}

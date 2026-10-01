@@ -453,3 +453,71 @@ fn regression_occluded_text_has_no_contrast_requirement() {
     );
     assert!(result.unwrap().accessibility.is_empty());
 }
+
+#[test]
+fn regression_draft_contrast_probes_use_rendered_coordinates() {
+    let Some(gpu) = gpu() else { return };
+    let dir = fixtures().unwrap();
+    for quality in [sr_model::model::ProjectQuality::Final, sr_model::model::ProjectQuality::Draft] {
+        for color in ["#000000", "#FFFFFF"] {
+            let xml = format!(
+                r##"<scene version="1.2"><project width="640" height="360" fps="10" duration="0.2" background="#000000"/>
+              <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata><output path="out/draft-probe.mkv" codec="ffv1" audio="false"/>
+              <assets><text id="txt" text="AB" width="56" height="28" size="24" color="{color}" font="DejaVu Sans"/></assets>
+              <composition><layer id="label" asset="txt" x="200" y="40"/><shape id="unrelated" shape="rect" width="1" height="1" fill="#FFFFFF"/></composition></scene>"##
+            );
+            let path = dir.join("draft-probe.xml");
+            std::fs::write(&path, xml).unwrap();
+            let doc = sr_model::load_file(path, &Default::default()).unwrap();
+            let opts = sr_deliver::Options {
+                quality: Some(quality),
+                hardware: sr_media::encode::Hardware::Software,
+                ..Default::default()
+            };
+            let result = sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu), &opts, &mut |_, _| {});
+            if color == "#000000" {
+                assert!(
+                    matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("1.00")),
+                    "{quality:?}: {result:?}"
+                );
+            } else {
+                assert!(result.unwrap().accessibility.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn regression_contrast_checks_all_times_even_with_a_later_layer() {
+    if gpu().is_none() {
+        return;
+    }
+    let dir = fixtures().unwrap();
+    for later in [false, true] {
+        for low_at_end in [false, true] {
+            let (before, after, at) =
+                if low_at_end { ("#FFFFFF", "#000000", "0.9") } else { ("#000000", "#FFFFFF", "0.1") };
+            let extra = if later {
+                r##"<shape id="unrelated" shape="rect" width="1" height="1" fill="#FFFFFF"/>"##
+            } else {
+                ""
+            };
+            let xml = format!(
+                r##"<scene version="1.2"><project width="64" height="36" fps="10" duration="1" background="#000000"/>
+              <metadata><accessibility contrastCheck="error" flashCheck="off"/></metadata><output path="out/temporal-probe.mkv" codec="ffv1" audio="false"/>
+              <assets><text id="txt" text="AB" width="56" height="28" size="24" color="#000000" font="DejaVu Sans"/></assets>
+              <composition><shape id="backdrop" shape="rect" width="64" height="36" fill="{before}"><animate property="fill">
+              <key time="0" value="{before}" interpolation="hold"/><key time="{at}" value="{after}"/></animate></shape>
+              <layer id="label" asset="txt" x="4" y="4"/>{extra}</composition></scene>"##
+            );
+            let path = dir.join("temporal-probe.xml");
+            std::fs::write(&path, xml).unwrap();
+            let doc = sr_model::load_file(path, &Default::default()).unwrap();
+            let result = deliver(&doc);
+            assert!(
+                matches!(result, Err(sr_deliver::DeliverError::Accessibility(ref m)) if m.contains("1.00")),
+                "later={later}, low_at_end={low_at_end}: {result:?}"
+            );
+        }
+    }
+}

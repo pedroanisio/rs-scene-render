@@ -12,10 +12,12 @@ use super::*;
 
 pub(super) const CONTRAST_INK: &str = "__sr_contrast_ink";
 
-/// The integer frame-space rectangle (x, y, w, h) covering a node's box, grown by `pad`, clamped to the frame.
-fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, pad: f64) -> Option<[u32; 4]> {
+/// The texture-space rectangle covering a node, grown by `pad` document pixels and scaled to the quality tier.
+fn node_rect(n: &sr_eval::FrameNode, w: u32, h: u32, scale: f64, pad: f64) -> Option<[u32; 4]> {
     let [nw, nh] = n.size?;
-    let pts = [[0.0, 0.0], [nw, 0.0], [nw, nh], [0.0, nh]].map(|p| n.world.apply(p));
+    let xform = Affine::scale(scale, scale).then(&n.world);
+    let pts = [[0.0, 0.0], [nw, 0.0], [nw, nh], [0.0, nh]].map(|p| xform.apply(p));
+    let pad = pad * scale;
     let x0 = (pts.iter().map(|p| p[0]).fold(f64::MAX, f64::min) - pad).floor().clamp(0.0, w as f64);
     let y0 = (pts.iter().map(|p| p[1]).fold(f64::MAX, f64::min) - pad).floor().clamp(0.0, h as f64);
     let x1 = (pts.iter().map(|p| p[0]).fold(f64::MIN, f64::max) + pad).ceil().clamp(0.0, w as f64);
@@ -305,7 +307,7 @@ impl Renderer {
         let with = self.render_with(g, p, Some(&mut *sub)).texture;
         let [w, h] = with.size;
         // read back only around the node (its box in frame space, plus room for glows), not the whole frame
-        let r = k.and_then(|k| node_rect(&g.nodes[k], w, h, 48.0)).unwrap_or([0, 0, w, h]);
+        let r = k.and_then(|k| node_rect(&g.nodes[k], w, h, self.tier.scale, 48.0)).unwrap_or([0, 0, w, h]);
         let after = self.read_rect(&with, r);
         let mut hidden = g.clone();
         if let Some(k) = k {

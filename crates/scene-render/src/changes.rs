@@ -91,14 +91,36 @@ const SEED: u64 = 0xcbf2_9ce4_8422_2325;
 /// Effects that make a frame show the scene at other times.
 const TIME_EFFECTS: &[&str] = &["posterize-time", "echo", "pixel-motion-blur"];
 
-/// The files document `doc` at `path` names (sources, caches, environments).
+/// Local input files named by the document, including every declared sequence frame.
 pub fn files(path: &Path, doc: &sr_model::Document) -> Vec<PathBuf> {
+    use sr_model::assets::{input_uri_attributes, resolve, sequence_frame, Resolved};
     let base = path.parent().unwrap_or(Path::new("."));
     let mut files = Vec::new();
+    let mut add = |uri: &str| {
+        if let Resolved::Local(path) = resolve(uri, base) {
+            files.push(path);
+        }
+    };
     sr_model::element::walk(&doc.scene, &mut |e| {
-        for attr in ["src", "cache", "environment"] {
+        let sequence = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>();
+        if let Some(seq) = sequence {
+            // i128 also handles a step or a final increment beyond the i64 frame range.
+            let mut frame = seq.first as i128;
+            while frame <= seq.last as i128 {
+                if let Some(uri) = sequence_frame(&seq.src, frame as i64) {
+                    add(&uri);
+                }
+                frame += seq.step.max(1) as i128;
+            }
+        }
+        // Share the validator's schema-derived inputs (including transition shaders,
+        // proxies and colour configurations), rather than maintaining a second list.
+        for &attr in input_uri_attributes() {
+            if attr == "src" && sequence.is_some() {
+                continue;
+            }
             if let Some(sr_model::element::AttrValue::Str(s)) = e.get_attr(attr) {
-                files.push(base.join(s));
+                add(&s);
             }
         }
     });
@@ -168,8 +190,8 @@ impl Fingerprints {
     pub fn new(text: &str, path: &Path, doc: &sr_model::Document, settings: &str) -> Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
-        // Invalidate fingerprints produced before transitions/diagnostics were tracked.
-        shared = fnv(b"frame-fingerprint-v2", shared);
+        // Invalidate fingerprints produced without frame time or complete file dependencies.
+        shared = fnv(b"frame-fingerprint-v3", shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
         shared = fnv(&text.as_bytes()[..a], shared);
@@ -200,7 +222,9 @@ impl Fingerprints {
 
     /// The fingerprint of an evaluated frame.
     pub fn frame(&self, text: &str, g: &FrameGraph) -> u64 {
-        let mut h = self.shared;
+        // Captions and procedural content can change with time even without any nodes.
+        let state = (g.time, g.frame, g.size, &g.background, g.camera);
+        let mut h = fnv(serde_json::to_string(&state).unwrap_or_default().as_bytes(), self.shared);
         for n in &g.nodes {
             // what the evaluation decided, and the element's own attributes
             h = fnv(serde_json::to_string(n).unwrap_or_default().as_bytes(), h);

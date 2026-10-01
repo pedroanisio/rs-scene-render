@@ -1621,7 +1621,7 @@ impl Renderer {
         sr_model::element::children(assets).into_iter().find(|a| a.element_id() == Some(id))
     }
 
-    /// Hash of one animated element and its animated descendants (`id/…` keys).
+    /// Hash of an element's animated descendants (`id/…` keys) and intrinsic time dependence.
     fn element_state(ctx: &Ctx, id: &str) -> u64 {
         let mut words: Vec<u64> = ctx
             .el
@@ -1629,6 +1629,13 @@ impl Renderer {
             .filter(|(k, _)| &***k == id || (k.starts_with(id) && k[id.len()..].starts_with('/')))
             .map(|(k, v)| h(&[sr_eval::rng::hash_str(k), *v]))
             .collect();
+        if Self::asset_element(ctx.p, id)
+            .and_then(|a| a.as_any().downcast_ref::<m::GeneratorAsset>())
+            .is_some_and(|a| a.kind == m::GeneratorAssetKind::FilmGrain)
+        {
+            // Match generator_texture: grain changes by composition frame even without keys.
+            words.push(hf(libm::floor(ctx.g.time * ctx.p.fps.as_f64() + 1e-6)));
+        }
         words.sort_unstable();
         h(&words)
     }
@@ -1685,6 +1692,24 @@ impl Renderer {
                 stack.push(mt as usize);
             }
             stack.extend(ctx.kids[k].iter().copied());
+        }
+        // An asset's evaluated paint can name another animated element even when its
+        // static paint is a colour. Follow these references transitively, with a visited
+        // set so a reference cycle cannot loop forever or invalidate unrelated caches.
+        let mut pending: Vec<_> = ids.iter().cloned().collect();
+        while let Some(id) = pending.pop() {
+            let mut refs = std::collections::BTreeSet::new();
+            for state in &ctx.g.elements {
+                let key = &*state.key;
+                if key == &*id || (key.starts_with(&*id) && key[id.len()..].starts_with('/')) {
+                    paint_refs(&state.props, &mut refs);
+                }
+            }
+            for reference in refs {
+                if ids.insert(reference.clone()) {
+                    pending.push(reference);
+                }
+            }
         }
         let mut words: Vec<u64> =
             ids.iter().map(|id| h(&[sr_eval::rng::hash_str(id), Self::element_state(ctx, id)])).collect();
