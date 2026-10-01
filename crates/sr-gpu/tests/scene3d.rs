@@ -677,3 +677,22 @@ fn a_2d_node_between_3d_objects_ends_their_block() {
     assert!(under[2] > under[0] * 5.0, "the wall covers the earlier block: {under:?}");
     assert!(over[0] > over[2] * 5.0, "the later block is drawn over the wall: {over:?}");
 }
+
+#[test]
+fn draft_quality_360_renders_its_faces_at_the_tier_size() {
+    let mats = r##"<material id="m-red" baseColor="#FF0000" unlit="true"/><material id="m-blue" baseColor="#0000FF" unlit="true"/><material id="m-green" baseColor="#00FF00" unlit="true"/>"##;
+    let xml = format!(
+        r##"<scene version="1.1"><project width="128" height="128" fps="10" duration="4" background="#00000000" quality="draft"/>{ASSETS}<materials>{mats}</materials><scene360 layout="equirectangular" width="256" height="128"/><composition>{SPHERES}</composition></scene>"##
+    );
+    let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) };
+    let d = sr_model::load_str(&xml, &opts).unwrap_or_else(|e| panic!("{e:?}\n{xml}"));
+    let Some(r) = render(&d) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert_eq!(r.size, [256, 128]);
+    // half-size faces soften the spheres' edges
+    let mostly = |p: [f32; 4], c: usize| p[3] > 0.5 && p[c] > 0.5 && (0..3).filter(|k| *k != c).all(|k| p[k] < 0.2);
+    assert!(mostly(r.at(128, 64), 0), "front: {:?}", r.at(128, 64));
+    assert!(mostly(r.at(1, 64), 2) && mostly(r.at(254, 64), 2), "back: {:?} {:?}", r.at(1, 64), r.at(254, 64));
+    assert!(mostly(r.at(40, 1), 1), "up along the top row: {:?}", r.at(40, 1));
+    assert_eq!(r.at(64, 100)[3], 0.0, "nothing to the lower left");
+}

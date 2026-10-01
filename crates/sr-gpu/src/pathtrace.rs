@@ -107,6 +107,38 @@ pub fn notes(scene: &Scene3) -> Vec<String> {
     n
 }
 
+/// Whether the tracer's buffers for a `size` frame of `triangles` fit one storage binding of
+/// the device; the error is the note to report when the pass is rasterised instead.
+pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(), String> {
+    let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+    let mib = |b: u64| b.div_ceil(1 << 20);
+    // the guides take 32 bytes a pixel; the corners 96 bytes a triangle (more than its BVH nodes)
+    let guides = (size[0].max(1) as u64 * size[1].max(1) as u64).saturating_mul(32);
+    let corners = triangles.saturating_mul(96);
+    if guides > cap {
+        return Err(format!(
+            "path tracing a {}×{} frame needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
+            size[0],
+            size[1],
+            mib(guides),
+            cap >> 20
+        ));
+    }
+    if corners > cap {
+        return Err(format!(
+            "path tracing {triangles} triangles needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
+            mib(corners),
+            cap >> 20
+        ));
+    }
+    Ok(())
+}
+
+/// Why `scene` cannot be path traced on a device with `limits`, if it cannot.
+pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
+    fits(scene.size, scene.draws.iter().map(|d| d.mesh_triangles()).sum(), limits).err()
+}
+
 /// Flattens `scene` into triangles, materials and lights, and builds the BVH.
 pub fn build(scene: &Scene3) -> PtScene {
     let mut s = PtScene::default();
