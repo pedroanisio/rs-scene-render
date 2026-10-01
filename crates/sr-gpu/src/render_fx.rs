@@ -875,9 +875,12 @@ impl Renderer {
             h(&[
                 Self::node_hash(&src_ctx, sn, &inner.xform.then(&sn.world)),
                 Self::content_hash(&src_ctx, j, &inner.xform),
-                Self::deps_hash(&src_ctx, j),
+                Self::deps_hash(&src_ctx, j, &inner.xform),
             ])
         };
+        // the nodes the effects read are drawn as they are now, whatever time the chain shows
+        let read: Vec<u64> =
+            Self::source_nodes(ctx, n).into_iter().map(|j| Self::subtree_hash(ctx, j, &inner.xform)).collect();
         let time_dep =
             effs.iter().any(|e| TIME_VARYING.contains(&e.r#type.as_str()) && e.r#type.as_str() != "posterize-time");
         let echo_times = if echo.is_some() { h(&shown.iter().map(|&s| hf(s)).collect::<Vec<_>>()) } else { 0 };
@@ -889,6 +892,7 @@ impl Renderer {
             if time_dep { hf(t) } else { 0 },
             echo_times,
             sr_eval::rng::hash_str(&ids.join(" ")),
+            h(&read),
         ]);
         let key = format!("fx:{}:{}x{}", n.id, size[0], size[1]);
         self.used.insert(key.clone());

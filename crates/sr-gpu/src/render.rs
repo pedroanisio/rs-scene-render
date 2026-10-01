@@ -886,18 +886,58 @@ impl Renderer {
         if let Some(t) = self.images.get(&key) {
             return t.clone();
         }
-        let t = match resources::decode_image(&path, space, transfer, alpha, embedded, &self.working, self.max_texture)
-        {
+        let t = self.load_image(&path, space, transfer, alpha, embedded);
+        self.images.insert(key, t.clone());
+        t
+    }
+
+    /// A frame of an image sequence: held like a video frame, while it is in use (a sequence
+    /// would otherwise keep every frame it has shown). A frame that cannot be read is remembered.
+    fn sequence_frame(
+        &mut self,
+        path: std::path::PathBuf,
+        space: m::ColorSpace,
+        transfer: m::Transfer,
+        alpha: m::AlphaMode,
+        embedded: bool,
+    ) -> Option<Arc<Tex>> {
+        let key = format!("{}|{space}|{transfer}|{alpha}|{embedded}", path.display());
+        self.used.insert(format!("video:{key}"));
+        if let Some(t) = self.video_frames.get(&key) {
+            return Some(t.clone());
+        }
+        if let Some(t) = self.images.get(&key) {
+            return t.clone();
+        }
+        match self.load_image(&path, space, transfer, alpha, embedded) {
+            Some(t) => {
+                self.video_frames.insert(key, t.clone());
+                Some(t)
+            }
+            None => {
+                self.images.insert(key, None);
+                None
+            }
+        }
+    }
+
+    fn load_image(
+        &mut self,
+        path: &std::path::Path,
+        space: m::ColorSpace,
+        transfer: m::Transfer,
+        alpha: m::AlphaMode,
+        embedded: bool,
+    ) -> Option<Arc<Tex>> {
+        match resources::decode_image(path, space, transfer, alpha, embedded, &self.working, self.max_texture) {
             Ok(d) => {
                 if let Some(note) = &d.note {
-                    self.image_notes.insert(path.clone(), note.clone());
+                    self.image_notes.insert(path.to_path_buf(), note.clone());
                 }
                 Some(Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "image")))
             }
             Err(_) => None,
-        };
-        self.images.insert(key, t.clone());
-        t
+        }
     }
 
     /// Source texture for a layer's asset at a source time.
@@ -1031,7 +1071,7 @@ impl Renderer {
                     let file = sr_model::assets::sequence_frame(&s.src, frame)?;
                     if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&file, &base) {
                         if path.is_file() {
-                            return self.image(
+                            return self.sequence_frame(
                                 path,
                                 s.color_space,
                                 s.transfer,
@@ -1640,15 +1680,41 @@ impl Renderer {
         h(&words)
     }
 
-    /// Hash of the animated elements outside the composition that node `i`, its subtree and
-    /// its mattes use (the paints they fill and stroke with, generator assets, and the paints
-    /// and lights of their effects), and of the camera. A node's cached effect result depends
-    /// on these and on nothing else outside its own subtree.
-    fn deps_hash(ctx: &Ctx, i: usize) -> u64 {
+    /// The nodes that node `n`'s effects read: their `source`, and a shader's `<param>` samplers.
+    pub(super) fn source_nodes(ctx: &Ctx, n: &FrameNode) -> Vec<usize> {
+        let mut out = Vec::new();
+        for id in render_fx::effect_ids(&*n.elem) {
+            let Some(e) = render_fx::find_effect(ctx.p, &id) else { continue };
+            let a = Attrs { e: e as &dyn Element, props: render_fx::element_props(ctx.g, &id) };
+            let mut names: Vec<String> = a.str("source").into_iter().collect();
+            if e.r#type.as_str() == "shader" {
+                names.extend(crate::shader::param_map(e as &dyn Element).into_values());
+            }
+            for name in names {
+                out.extend(ctx.g.nodes.iter().position(|s| *s.id == *name.trim()));
+            }
+        }
+        out
+    }
+
+    /// Hash of what node `i`, its subtree and its mattes use from outside the subtree: the
+    /// animated elements outside the composition (the paints they fill and stroke with, generator
+    /// assets, and the paints and lights of their effects) and the nodes their effects read, as
+    /// they are in the space `to_space`. A node's cached content depends on these and on nothing
+    /// else outside its own subtree.
+    fn used_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
         let mut ids = std::collections::BTreeSet::new();
         let mut stack = vec![i];
+        let mut read = std::collections::BTreeSet::new();
+        let mut words = Vec::new();
         while let Some(k) = stack.pop() {
             let n = &ctx.g.nodes[k];
+            for j in Self::source_nodes(ctx, n) {
+                if read.insert(j) {
+                    words.push(Self::subtree_hash(ctx, j, to_space));
+                    stack.push(j);
+                }
+            }
             paint_refs(&n.props, &mut ids);
             // static references: the node's attributes and parts (spans, masks), and the asset it draws
             for name in PAINT_ATTRS {
@@ -1711,10 +1777,14 @@ impl Renderer {
                 }
             }
         }
-        let mut words: Vec<u64> =
-            ids.iter().map(|id| h(&[sr_eval::rng::hash_str(id), Self::element_state(ctx, id)])).collect();
-        words.push(ctx.cam);
+        words.extend(ids.iter().map(|id| h(&[sr_eval::rng::hash_str(id), Self::element_state(ctx, id)])));
         h(&words)
+    }
+
+    /// `used_hash` and the camera: what a node's cached effect result depends on outside its
+    /// own subtree.
+    pub(super) fn deps_hash(ctx: &Ctx, i: usize, to_space: &Affine) -> u64 {
+        h(&[Self::used_hash(ctx, i, to_space), ctx.cam])
     }
 
     /// Hash of how node `i` looks, apart from where it is: everything its drawing depends on
@@ -1758,7 +1828,7 @@ impl Renderer {
         let mut words = vec![
             f.0,
             Self::effects_state(ctx, n),
-            Self::deps_hash(ctx, i),
+            Self::deps_hash(ctx, i, &local),
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
             hf(n.world_opacity),
@@ -1785,6 +1855,7 @@ impl Renderer {
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
+            Self::used_hash(ctx, i, to_space),
         ];
         for &c in &ctx.kids[i] {
             words.push(Self::subtree_hash(ctx, c, to_space));
@@ -1873,6 +1944,7 @@ impl Renderer {
     fn matte(&mut self, plan: &mut Plan, ctx: &Ctx, mt: usize, space: &Space) -> Arc<Tex> {
         let hash = h(&[
             Self::subtree_hash(ctx, mt, &space.xform),
+            Self::used_hash(ctx, mt, &space.xform),
             hf(ctx.g.nodes[mt].world_opacity),
             space.size[0] as u64,
             space.size[1] as u64,
@@ -2389,6 +2461,7 @@ impl Renderer {
     }
 
     fn glyph_texture(&mut self, b: &sr_text::Bitmap) -> Option<Arc<Tex>> {
+        self.used.insert(format!("glyph:{}", b.key));
         if let Some(t) = self.glyph_tex.get(&b.key) {
             return t.clone();
         }
@@ -2839,6 +2912,11 @@ impl Renderer {
         self.pool.held()
     }
 
+    /// Decoded pictures held for reuse: images, sequence and video frames, glyph and tile bitmaps.
+    pub fn cached_textures(&self) -> usize {
+        self.images.values().flatten().count() + self.video_frames.len() + self.glyph_tex.values().flatten().count()
+    }
+
     /// Texels of the pooled offscreen textures.
     pub fn pooled_texels(&self) -> u64 {
         self.pool.held_texels()
@@ -3034,6 +3112,8 @@ impl Renderer {
             keep
         });
         self.video_frames.retain(|k, _| live.contains_key(&format!("video:{k}")));
+        // colour glyphs and raster map tiles: a map that pans or zooms shows new tiles every frame
+        self.glyph_tex.retain(|k, _| live.contains_key(&format!("glyph:{k}")));
         for t in evicted {
             self.pool.put(t);
         }
