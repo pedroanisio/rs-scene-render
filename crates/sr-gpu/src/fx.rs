@@ -324,6 +324,29 @@ impl Pass {
 /// against, and the source hash.
 pub(crate) type BuiltEffect = (crate::glsl::Program, std::path::PathBuf, u64);
 
+/// Only structural shader choices enter the cache: animated values and seeds remain uniforms.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PipelineKey {
+    entry: Entry,
+    additive: bool,
+    operation: u32,
+    transfer: u32,
+    fused: [u32; 4],
+}
+
+impl PipelineKey {
+    fn new(entry: Entry, additive: bool, params: &Params) -> Self {
+        let specialize = matches!(entry, Entry::Combine | Entry::Color);
+        Self {
+            entry,
+            additive,
+            operation: if specialize { params.i[0] } else { u32::MAX },
+            transfer: if specialize { params.i[3] } else { u32::MAX },
+            fused: if entry == Entry::Color && params.i[0] == 90 { params.ops.map(|op| op[0]) } else { [u32::MAX; 4] },
+        }
+    }
+}
+
 /// Pipelines, samplers and caches.
 pub struct FxEngine {
     pub(crate) device: Arc<wgpu::Device>,
@@ -331,7 +354,7 @@ pub struct FxEngine {
     bgl: wgpu::BindGroupLayout,
     layout: wgpu::PipelineLayout,
     pub(crate) module: wgpu::ShaderModule,
-    pipes: HashMap<(Entry, bool), wgpu::RenderPipeline>,
+    pipes: HashMap<PipelineKey, wgpu::RenderPipeline>,
     custom: HashMap<u64, Result<wgpu::ShaderModule, String>>,
     pub(crate) samp: wgpu::Sampler,
     dummy2: wgpu::TextureView,
@@ -455,8 +478,9 @@ impl FxEngine {
         }
     }
 
-    fn pipeline(&mut self, entry: Entry, additive: bool) -> Option<&wgpu::RenderPipeline> {
-        if !self.pipes.contains_key(&(entry, additive)) {
+    fn pipeline(&mut self, key: PipelineKey) -> Option<&wgpu::RenderPipeline> {
+        let PipelineKey { entry, additive, .. } = key;
+        if !self.pipes.contains_key(&key) {
             let frag_module = match entry {
                 Entry::Custom(h) => self.custom.get(&h)?.as_ref().ok()?,
                 _ => &self.module,
@@ -473,6 +497,14 @@ impl FxEngine {
                     operation: wgpu::BlendOperation::Add,
                 },
             });
+            let constants = [
+                ("FX_OP", key.operation as f64),
+                ("FX_TRANSFER", key.transfer as f64),
+                ("FUSED_0", key.fused[0] as f64),
+                ("FUSED_1", key.fused[1] as f64),
+                ("FUSED_2", key.fused[2] as f64),
+                ("FUSED_3", key.fused[3] as f64),
+            ];
             let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry.name()),
                 layout: Some(&self.layout),
@@ -485,7 +517,10 @@ impl FxEngine {
                 fragment: Some(wgpu::FragmentState {
                     module: frag_module,
                     entry_point: Some(entry.name()),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: if matches!(entry, Entry::Custom(_)) { &[] } else { &constants },
+                        ..Default::default()
+                    },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: FORMAT,
                         blend,
@@ -498,9 +533,9 @@ impl FxEngine {
                 multiview_mask: None,
                 cache: None,
             });
-            self.pipes.insert((entry, additive), p);
+            self.pipes.insert(key, p);
         }
-        self.pipes.get(&(entry, additive))
+        self.pipes.get(&key)
     }
 
     /// Records passes in order. The parameters of every pass go into one uniform buffer (a
@@ -574,7 +609,7 @@ impl FxEngine {
                 })
             });
             let bg = bg.clone();
-            let Some(pipe) = self.pipeline(p.entry, p.additive) else { continue };
+            let Some(pipe) = self.pipeline(PipelineKey::new(p.entry, p.additive, &p.params)) else { continue };
             let pipe = pipe.clone();
             let stamp = self.timer.as_mut().and_then(|t| {
                 let a = t.pair()?;
@@ -607,7 +642,9 @@ impl FxEngine {
             });
             rp.set_pipeline(&pipe);
             rp.set_bind_group(0, &bg, &[offset]);
-            rp.draw(0..3, 0..1);
+            let instances =
+                if p.entry == Entry::Combine && p.params.i[0] == 10 { p.params.i[1].clamp(1, 16) } else { 1 };
+            rp.draw(0..3, 0..instances);
             n += 1;
         }
         n
@@ -2086,6 +2123,37 @@ impl Builder<'_> {
         v[0][0] = k as f32;
         v[1] = [m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32];
         v[2] = [m[4] as f32, m[5] as f32, 0.0, 0.0];
+        // Fuse only a run that starts from a cleared accumulator. Later
+        // samples past the uniform block's capacity keep the original passes,
+        // so their additions still round against the existing half-float sum.
+        if !first {
+            if let Some(last) = self.passes.last_mut().filter(|p| {
+                p.entry == Entry::Combine
+                    && p.clear
+                    && p.additive
+                    && p.custom.is_none()
+                    && p.params.i[3] == self.store
+                    && Arc::ptr_eq(&p.src, src)
+                    && Arc::ptr_eq(&p.out, acc)
+                    && matches!(&p.aux, Aux::Tex(t) if Arc::ptr_eq(t, src))
+                    && p.aux2.is_none()
+                    && p.lut.is_none()
+                    && (p.params.i[0] == 9 || (p.params.i[0] == 10 && p.params.i[1] < 16))
+            }) {
+                if last.params.i[0] == 9 {
+                    let old = &mut last.params;
+                    old.x[0] = old.v[1];
+                    old.x[1] = [old.v[2][0], old.v[2][1], old.v[0][0], 0.0];
+                    old.i[0] = 10;
+                    old.i[1] = 1;
+                }
+                let at = last.params.i[1] as usize * 2;
+                last.params.x[at] = v[1];
+                last.params.x[at + 1] = [v[2][0], v[2][1], v[0][0], 0.0];
+                last.params.i[1] += 1;
+                return;
+            }
+        }
         self.passes.push(Pass {
             entry: Entry::Combine,
             params: Params::new(v, [9, 0, 0, self.store]),
@@ -2776,6 +2844,188 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, text).unwrap();
         p
+    }
+
+    #[test]
+    fn moved_samples_fuse_without_changing_half_float_accumulation() {
+        let gpu = match crate::Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                eprintln!("skipping GPU test: {error}");
+                return;
+            }
+        };
+        let d = &gpu.device;
+        let layout = crate::resources::source_layout(d);
+        let size = [7, 5];
+        let input = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle input"));
+        let output = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle output"));
+        let bytes: Vec<u8> = (0..35)
+            .flat_map(|i| {
+                let alpha = (i % 5) as f32 / 4.0;
+                [i as f32 / 16.0 * alpha, 0.3 * alpha, 0.7 * alpha, alpha]
+                    .into_iter()
+                    .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
+            })
+            .collect();
+        gpu.queue.write_texture(
+            input.tex.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(56), rows_per_image: Some(5) },
+            wgpu::Extent3d { width: 7, height: 5, depth_or_array_layers: 1 },
+        );
+        let document = sr_model::load_str(
+            r#"<scene version="1.2"><project width="7" height="5" fps="1" duration="1"/><composition/></scene>"#,
+            &sr_model::LoadOptions::default(),
+        )
+        .unwrap();
+        let evaluator = sr_eval::Evaluator::new(&document, &sr_eval::EvalOptions::default()).unwrap();
+        let reader = crate::Renderer::new(gpu.clone(), evaluator.program());
+        let mut engine = FxEngine::new(gpu.device.clone(), gpu.queue.clone());
+        let mut pool = Pool::default();
+        for count in [2usize, 16, 19] {
+            let mut builder = Builder {
+                eng: &mut engine,
+                pool: &mut pool,
+                device: d,
+                bgl1: &layout,
+                passes: Vec::new(),
+                temps: Vec::new(),
+                store: 0,
+                problems: Vec::new(),
+                max_samples: 256.0,
+            };
+            let mut reference = Vec::new();
+            for k in 0..count {
+                let shift = (k as f64 - count as f64 / 2.0) / 8.0;
+                let m = [1.0, 0.07, -0.13, 0.93, shift, -shift];
+                let weight = 1.0 / count as f64;
+                builder.accumulate_moved(&output, &input, weight, k == 0, m);
+                let mut v = [[0.0; 4]; 8];
+                v[0][0] = weight as f32;
+                v[1] = [m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32];
+                v[2] = [m[4] as f32, m[5] as f32, 0.0, 0.0];
+                reference.push(Pass {
+                    entry: Entry::Combine,
+                    params: Params::new(v, [9, 0, 0, 0]),
+                    src: input.clone(),
+                    aux: Aux::Tex(input.clone()),
+                    aux2: None,
+                    lut: None,
+                    out: output.clone(),
+                    additive: true,
+                    clear: k == 0,
+                    custom: None,
+                    label: String::new(),
+                });
+            }
+            let fused = builder.passes;
+            let render = |engine: &mut FxEngine, passes: &[Pass]| {
+                let mut encoder = d.create_command_encoder(&Default::default());
+                engine.record(&mut encoder, passes);
+                gpu.queue.submit([encoder.finish()]);
+                reader.read(&output)
+            };
+            let expected = render(&mut engine, &reference);
+            let actual = render(&mut engine, &fused);
+            assert_eq!(actual, expected, "{count} samples must retain every intermediate rounding");
+            assert_eq!(fused.len(), 1 + count.saturating_sub(16), "consecutive samples should share a pass");
+        }
+    }
+
+    #[test]
+    fn specialized_effects_match_general_shading_with_animated_parameters() {
+        let gpu = match crate::Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                eprintln!("skipping GPU test: {error}");
+                return;
+            }
+        };
+        let d = &gpu.device;
+        let layout = crate::resources::source_layout(d);
+        let size = [7, 5];
+        let input = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle input"));
+        let output = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle output"));
+        let bytes: Vec<u8> = (0..35)
+            .flat_map(|i| {
+                let alpha = (i % 5) as f32 / 4.0;
+                [i as f32 / 16.0 * alpha, 0.3 * alpha, 0.7 * alpha, alpha]
+                    .into_iter()
+                    .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
+            })
+            .collect();
+        gpu.queue.write_texture(
+            input.tex.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(56), rows_per_image: Some(5) },
+            wgpu::Extent3d { width: 7, height: 5, depth_or_array_layers: 1 },
+        );
+        let document = sr_model::load_str(
+            r#"<scene version="1.2"><project width="7" height="5" fps="1" duration="1"/><composition/></scene>"#,
+            &sr_model::LoadOptions::default(),
+        )
+        .unwrap();
+        let evaluator = sr_eval::Evaluator::new(&document, &sr_eval::EvalOptions::default()).unwrap();
+        let reader = crate::Renderer::new(gpu.clone(), evaluator.program());
+        let mut engine = FxEngine::new(gpu.device.clone(), gpu.queue.clone());
+        let mut pass = Pass {
+            entry: Entry::Combine,
+            params: Params::default(),
+            src: input.clone(),
+            aux: Aux::Tex(input),
+            aux2: None,
+            lut: None,
+            out: output,
+            additive: false,
+            clear: true,
+            custom: None,
+            label: String::new(),
+        };
+        let render = |engine: &mut FxEngine, pass: &Pass| {
+            let mut encoder = d.create_command_encoder(&Default::default());
+            engine.record(&mut encoder, std::slice::from_ref(pass));
+            gpu.queue.submit([encoder.finish()]);
+            reader.read(&pass.out)
+        };
+        let cases =
+            (0..10).map(|op| (Entry::Combine, op)).chain([7, 13, 15, 21, 22, 64, 90].map(|op| (Entry::Color, op)));
+        for (entry, operation) in cases {
+            for transfer in [0, 2] {
+                pass.entry = entry;
+                pass.params = Params::new([[0.2, 0.8, 1.0, 0.0]; 8], [operation, 17, 31, transfer]);
+                pass.params.v[1] = [1.0, 0.5, 0.25, 0.75];
+                pass.params.v[2] = [0.5, 0.5, 0.0, 0.0];
+                for (k, op) in [7, 13, 0, 15].into_iter().enumerate() {
+                    pass.params.ops[k] = [op, 17, 31, 0];
+                    pass.params.x[k * 8..k * 8 + 8].copy_from_slice(&pass.params.v);
+                }
+                let key = PipelineKey::new(entry, false, &pass.params);
+                let general_key = PipelineKey {
+                    entry,
+                    additive: false,
+                    operation: u32::MAX,
+                    transfer: u32::MAX,
+                    fused: [u32::MAX; 4],
+                };
+                let general = engine.pipeline(general_key).unwrap().clone();
+                let specialized = engine.pipeline(key).unwrap().clone();
+                for frame in 0..2 {
+                    pass.params.i[1] += frame;
+                    pass.params.v[0][0] += frame as f32 * 0.1;
+                    pass.params.ops[0][1] += frame;
+                    pass.params.x[0][0] += frame as f32 * 0.1;
+                    engine.pipes.insert(key, general.clone());
+                    let expected = render(&mut engine, &pass);
+                    engine.pipes.insert(key, specialized.clone());
+                    let actual = render(&mut engine, &pass);
+                    assert!(expected.iter().flatten().all(|v| v.is_finite()));
+                    assert_eq!(actual, expected, "{entry:?} op={operation} transfer={transfer} frame={frame}");
+                }
+            }
+        }
     }
 
     #[test]

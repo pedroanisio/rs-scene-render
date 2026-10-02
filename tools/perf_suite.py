@@ -30,7 +30,8 @@ records wall_seconds and its command line.
 
 With --baseline: prints baseline, new and ratio = baseline / new per fixture (above 1
 is faster) and the geometric mean of the ratios over the fixtures present in both;
-a ratio below 0.95 is flagged REGRESSION and makes the exit code 1.
+a ratio below 0.95 is flagged REGRESSION and makes the exit code 1. Any failed
+workload makes the exit code 2, including when no baseline was supplied.
 """
 import argparse
 import json
@@ -329,7 +330,7 @@ def main():
     if failed:
         print(f"failed runs: {', '.join(failed)}")
     print(f"wrote {args.out}")
-    sys.exit(1 if regressions else 0)
+    sys.exit(2 if failed else 1 if regressions else 0)
 
 
 if __name__ == "__main__":

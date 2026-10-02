@@ -34,6 +34,8 @@ struct RParams {
     tiles_y: u32,
     width: u32,
     height: u32,
+    active_count: u32,
+    pad: [u32; 3],
 }
 
 /// A rasterisation job: encoded tiles with paints resolved, and its target.
@@ -45,6 +47,9 @@ pub struct RasterJob {
     cmds: Vec<RCmd>,
     pieces: Vec<[f32; 4]>,
     backdrops: Vec<f32>,
+    /// No layer stack or gradient evaluation is needed by any command.
+    solid_fills: bool,
+    active_tiles: Option<Vec<u32>>,
 }
 
 /// An sRGB-encoded straight colour into the stored working representation.
@@ -119,6 +124,8 @@ impl RasterJob {
     /// Resolves an encoded scene's paints and prepares its buffers.
     pub fn new(e: Encoded, target: Arc<Tex>, t: &mut PaintTable, w: &Working) -> RasterJob {
         let map: Vec<u32> = e.paints.iter().map(|p| resolve_paint(t, w, p)).collect();
+        let solid_fills = e.cmds.iter().all(|c| c.kind == sr_vector::tile::kind::FILL)
+            && map.iter().all(|&i| t.paints[i as usize].kind == 0);
         let cmds = e
             .cmds
             .iter()
@@ -137,6 +144,9 @@ impl RasterJob {
                 param: c.param,
             })
             .collect();
+        let nonempty = e.ranges.iter().filter(|r| r[1] != 0).count();
+        let active_tiles = (nonempty * 2 < e.ranges.len())
+            .then(|| e.ranges.iter().enumerate().filter_map(|(i, r)| (r[1] != 0).then_some(i as u32)).collect());
         RasterJob {
             target,
             size: e.size,
@@ -145,13 +155,15 @@ impl RasterJob {
             cmds,
             pieces: e.pieces,
             backdrops: e.backdrops,
+            solid_fills,
+            active_tiles,
         }
     }
 }
 
 /// The fine-stage pipeline.
 pub struct Raster {
-    pipeline: wgpu::ComputePipeline,
+    pipelines: [wgpu::ComputePipeline; 4],
     bgl: wgpu::BindGroupLayout,
 }
 
@@ -202,6 +214,7 @@ impl Raster {
                 st(3),
                 st(4),
                 st(5),
+                st(9),
                 un(6),
                 un(7),
                 wgpu::BindGroupLayoutEntry {
@@ -225,15 +238,20 @@ impl Raster {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raster"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("raster_main"),
-            compilation_options: Default::default(),
-            cache: None,
+        let pipelines = std::array::from_fn(|i| {
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("raster"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some("raster_main"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("SOLID_FILLS", (i & 1) as f64), ("SPARSE_TILES", (i >> 1) as f64)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
         });
-        Raster { pipeline, bgl }
+        Raster { pipelines, bgl }
     }
 
     /// Records a job into `enc`, reading the frame's paint buffers.
@@ -247,7 +265,39 @@ impl Raster {
         globals: &wgpu::Buffer,
     ) {
         use wgpu::util::DeviceExt;
-        let params = RParams { tiles_x: job.tiles[0], tiles_y: job.tiles[1], width: job.size[0], height: job.size[1] };
+        let view =
+            job.target.tex.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
+        if let Some(active) = &job.active_tiles {
+            // A clear covers empty tiles more cheaply than launching a pixel
+            // invocation for each of them. Every populated tile is overwritten.
+            drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear sparse raster"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }));
+            if active.is_empty() {
+                return;
+            }
+        }
+        let params = RParams {
+            tiles_x: job.tiles[0],
+            tiles_y: job.tiles[1],
+            width: job.size[0],
+            height: job.size[1],
+            active_count: job.active_tiles.as_ref().map_or(0, |a| a.len() as u32),
+            pad: [0; 3],
+        };
         let pb = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("raster params"),
             contents: bytemuck::bytes_of(&params),
@@ -259,8 +309,7 @@ impl Raster {
             storage(d, &job.pieces, "pieces"),
             storage(d, &job.backdrops, "backdrops"),
         );
-        let view =
-            job.target.tex.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
+        let active = job.active_tiles.as_ref().map(|tiles| storage(d, tiles, "active tiles"));
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster"),
             layout: &self.bgl,
@@ -274,12 +323,96 @@ impl Raster {
                 wgpu::BindGroupEntry { binding: 6, resource: globals.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: pb.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 9, resource: active.as_ref().unwrap_or(&r).as_entire_binding() },
             ],
         });
         let mut pass =
             enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("raster"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.pipelines[job.solid_fills as usize + 2 * job.active_tiles.is_some() as usize]);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(job.tiles[0], job.tiles[1], 1);
+        if job.active_tiles.is_some() {
+            let n = params.active_count;
+            pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
+        } else {
+            pass.dispatch_workgroups(job.tiles[0], job.tiles[1], 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solid_fill_specialization_matches_general_rasterization_exactly() {
+        let gpu = match crate::Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                eprintln!("skipping GPU test: {error}");
+                return;
+            }
+        };
+        let d = &gpu.device;
+        let layout = crate::resources::source_layout(d);
+        // Partial edge tiles, an empty tile, fractional edge coverage, overlapping
+        // translucent paints, and both winding rules exercise the shared arithmetic.
+        let target = Arc::new(crate::resources::create(d, &layout, [31, 19], 1, "raster oracle"));
+        let mut job = RasterJob {
+            target: target.clone(),
+            size: target.size,
+            tiles: [2, 2],
+            ranges: vec![[0, 3], [0, 0], [1, 2], [0, 3]],
+            cmds: vec![
+                RCmd { backdrop: u32::MAX, backdrop_val: 0.25, param: 0.75, ..Default::default() },
+                RCmd { backdrop: 0, piece_count: 1, paint: 1, param: 0.5, ..Default::default() },
+                RCmd { backdrop: u32::MAX, backdrop_val: 1.4, flags: 1, param: 0.9, ..Default::default() },
+            ],
+            pieces: vec![[0.3, 0.1, 12.7, 15.9]],
+            backdrops: (0..16).map(|y| y as f32 / 32.0).collect(),
+            solid_fills: false,
+            active_tiles: None,
+        };
+        let paints = storage(d, &[PaintDesc::default(), PaintDesc { stop_off: 1, ..Default::default() }], "paints");
+        let stops = storage(
+            d,
+            &[
+                Stop { color: [0.1, 0.7, 0.3, 0.65], ..Default::default() },
+                Stop { color: [0.9, 0.2, 0.4, 0.35], ..Default::default() },
+            ],
+            "stops",
+        );
+        let globals = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("globals"),
+            size: std::mem::size_of::<crate::types::Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let document = sr_model::load_str(
+            r#"<scene version="1.2"><project width="31" height="19" fps="1" duration="1"/><composition/></scene>"#,
+            &sr_model::LoadOptions::default(),
+        )
+        .unwrap();
+        let evaluator = sr_eval::Evaluator::new(&document, &sr_eval::EvalOptions::default()).unwrap();
+        let reader = crate::Renderer::new(gpu.clone(), evaluator.program());
+        let raster = Raster::new(d);
+        let render = |job: &RasterJob| {
+            let mut encoder = d.create_command_encoder(&Default::default());
+            raster.record(d, &mut encoder, job, &paints, &stops, &globals);
+            gpu.queue.submit([encoder.finish()]);
+            reader.read(&job.target)
+        };
+        let general = render(&job);
+        job.solid_fills = true;
+        let specialized = render(&job);
+        assert!(general.iter().any(|p| p[3] > 0.0));
+        assert!(general.contains(&[0.0; 4]));
+        assert_eq!(specialized, general);
+        job.active_tiles = Some(vec![0, 2, 3]);
+        assert_eq!(render(&job), general, "sparse solid tiles");
+        job.solid_fills = false;
+        assert_eq!(render(&job), general, "sparse general tiles");
+        job.active_tiles = Some(Vec::new());
+        assert!(render(&job).iter().all(|p| *p == [0.0; 4]), "empty jobs clear stale texels");
     }
 }

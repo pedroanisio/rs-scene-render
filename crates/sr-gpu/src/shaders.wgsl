@@ -41,7 +41,7 @@ struct Mask {
 
 
 
-@group(0) @binding(0) var<storage, read> draws: array<Draw>;
+@group(0) @binding(0) var<uniform> draw_params: Draw;
 @group(0) @binding(1) var<storage, read> masks: array<Mask>;
 @group(0) @binding(2) var<storage, read> edges: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> paints: array<PaintDesc>;
@@ -92,13 +92,19 @@ fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   return length(pa - ba * h);
 }
 
+override SINGLE_FEATHERED_ELLIPSE: bool = false;
+fn mask_kind(m: Mask) -> u32 {
+  if (SINGLE_FEATHERED_ELLIPSE) { return 1u; }
+  return m.kind;
+}
+
 fn mask_distance(m: Mask, p: vec2<f32>) -> f32 {
   let half_size = m.rect.zw * 0.5;
   let c = m.rect.xy + half_size;
   let q = p - c;
-  if (m.kind == 0u) { return sd_box(q, half_size, 0.0); }
-  if (m.kind == 2u) { return sd_box(q, half_size, min(m.radius, min(half_size.x, half_size.y))); }
-  if (m.kind == 1u) {
+  if (mask_kind(m) == 0u) { return sd_box(q, half_size, 0.0); }
+  if (mask_kind(m) == 2u) { return sd_box(q, half_size, min(m.radius, min(half_size.x, half_size.y))); }
+  if (mask_kind(m) == 1u) {
     let r = max(half_size, vec2(1e-6));
     let k = length(q / r);
     return (k - 1.0) * min(r.x, r.y);
@@ -144,7 +150,7 @@ fn rounded_half_width(h: vec2<f32>, r: f32, y: f32) -> f32 {
 // outline row by row (exact for rectangles); polygons and paths take Φ of the signed distance, exact
 // along straight edges. Expansion grows or shrinks the outline first (a disc's maximum or minimum).
 fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
-  if (m.feather <= 0.0) {
+  if (!SINGLE_FEATHERED_ELLIPSE && m.feather <= 0.0) {
     let dist = mask_distance(m, p) - m.expansion;
     return clamp(0.5 - dist / max(aa, 1e-4), 0.0, 1.0);
   }
@@ -152,19 +158,19 @@ fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
   let e = m.expansion;
   let h = m.rect.zw * 0.5 + vec2(e);
   let q = p - (m.rect.xy + m.rect.zw * 0.5);
-  if (m.kind == 3u) {
+  if (mask_kind(m) == 3u) {
     return phi(-(mask_distance(m, p) - e) / sigma);
   }
   if (any(h <= vec2(0.0))) { return 0.0; }
-  if (m.kind == 0u && e <= 0.0) {
+  if (mask_kind(m) == 0u && e <= 0.0) {
     // eroding a rectangle keeps it a rectangle: a product of two edge integrals
     let cx = phi((q.x + h.x) / sigma) - phi((q.x - h.x) / sigma);
     let cy = phi((q.y + h.y) / sigma) - phi((q.y - h.y) / sigma);
     return clamp(cx * cy, 0.0, 1.0);
   }
   var r = 0.0;
-  if (m.kind == 0u) { r = e; }
-  if (m.kind == 2u) { r = max(min(m.radius, min(m.rect.z, m.rect.w) * 0.5) + e, 0.0); }
+  if (mask_kind(m) == 0u) { r = e; }
+  if (mask_kind(m) == 2u) { r = max(min(m.radius, min(m.rect.z, m.rect.w) * 0.5) + e, 0.0); }
   r = min(r, min(h.x, h.y));
   // ∫ G(v) [Φ((q.x + w(y + v)) / σ) − Φ((q.x − w(y + v)) / σ)] dv over ±4σ, w the outline's half width
   let n = 32;
@@ -177,7 +183,7 @@ fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
     wsum = wsum + g;
     let y = q.y + v;
     var hw = -1.0;
-    if (m.kind == 1u) {
+    if (mask_kind(m) == 1u) {
       let k = y / h.y;
       if (abs(k) < 1.0) { hw = h.x * sqrt(1.0 - k * k); }
     } else {
@@ -189,11 +195,11 @@ fn mask_value(m: Mask, p: vec2<f32>, aa: f32) -> f32 {
 }
 
 fn mask_coverage(d: Draw, p: vec2<f32>, aa: f32) -> f32 {
-  if (d.mask_count == 0u) { return 1.0; }
+  if (!SINGLE_FEATHERED_ELLIPSE && d.mask_count == 0u) { return 1.0; }
   let first = masks[d.mask_off].mode;
   // add, lighten and difference start from nothing; the other modes carve from full coverage
   var cov = select(1.0, 0.0, first == 1u || first == 3u || first == 5u);
-  for (var i = 0u; i < d.mask_count; i = i + 1u) {
+  for (var i = 0u; i < select(d.mask_count, 1u, SINGLE_FEATHERED_ELLIPSE); i = i + 1u) {
     let m = masks[d.mask_off + i];
     if (m.mode == 6u) { continue; }
     var v = mask_value(m, p, aa);
@@ -335,33 +341,36 @@ fn composite(mode: u32, bd: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
 // The coverage (masks, matte, opacity) shade() applied last.
 var<private> COV: f32 = 1.0;
 
-fn shade(v: VOut) -> vec4<f32> {
-  let d = draws[v.draw];
+fn shade(v: VOut, cached_mask: bool) -> vec4<f32> {
+  let d = draw_params;
   let pixel = vec2<u32>(v.pos.xy);
   let dlx = dpdx(v.local);
   let dly = dpdy(v.local);
   let aa = max(length(dlx), length(dly));
   let aa2 = vec2(max(length(vec2(dlx.x, dly.x)), 1e-6), max(length(vec2(dlx.y, dly.y)), 1e-6));
-  let t_main = textureSample(src, samp, v.uv);
-  let pg = paints[d.paint];
-  let puv = vec2(pg.xform0.x * v.local.x + pg.xform0.z * v.local.y + pg.xform1.x, pg.xform0.y * v.local.x + pg.xform0.w * v.local.y + pg.xform1.y);
-  let t_pattern = textureSample(src_rep, samp_repeat, puv);
   var c: vec4<f32>;
   switch (d.src_kind) {
-    case 0u: { c = t_main; }
+    case 0u: { c = textureSample(src, samp, v.uv); }
     case 1u: { c = vec4(d.color.rgb * d.color.a, d.color.a); }
     case 2u: {
       let p = eval_paint(d.paint, v.local, pixel);
       c = vec4(p.rgb * p.a, p.a);
     }
     case 3u: { c = textureSampleLevel(src, samp, v.uv, d.lod); }
-    case 4u: { c = t_pattern; }
+    case 4u: {
+      let pg = paints[d.paint];
+      let puv = vec2(pg.xform0.x * v.local.x + pg.xform0.z * v.local.y + pg.xform1.x, pg.xform0.y * v.local.x + pg.xform0.w * v.local.y + pg.xform1.y);
+      c = textureSample(src_rep, samp_repeat, puv);
+    }
     default: { c = vec4(0.0); }
   }
   if ((d.flags & 16u) != 0u) {
     c = vec4(vec3(d.color.r) * c.a, c.a);
   }
-  var cov = mask_coverage(d, v.local, aa) * d.opacity;
+  var coverage = 0.0;
+  if (cached_mask) { coverage = textureLoad(matte, vec2<i32>(pixel), 0).r; }
+  else { coverage = mask_coverage(d, v.local, aa); }
+  var cov = coverage * d.opacity;
   if ((d.flags & 8u) != 0u) {
     // analytic edge coverage against the content rectangle
     let lo = min(d.box_rect.xy, d.box_rect.zw);
@@ -380,7 +389,7 @@ fn shade(v: VOut) -> vec4<f32> {
   }
   c = c * cov;
   COV = cov;
-  if (d.blend == 1u) {                                                   // dissolve
+  if (d.blend == 1u) {                                             // dissolve
     let r = dissolve_hash(pixel.x, pixel.y, vec2(globals.seed, globals.pad0));
     if (c.a > 0.0 && r < c.a) { c = vec4(c.rgb / c.a, 1.0); } else { c = vec4(0.0); }
   }
@@ -389,16 +398,60 @@ fn shade(v: VOut) -> vec4<f32> {
 
 @fragment
 fn fs_over(v: VOut) -> @location(0) vec4<f32> {
-  return shade(v);
+  return shade(v, false);
+}
+
+// Full-precision coverage is reusable only with the identical rasterized geometry.
+@fragment
+fn fs_mask_coverage(v: VOut) -> @location(0) f32 {
+  let aa = max(length(dpdx(v.local)), length(dpdy(v.local)));
+  return mask_coverage(draw_params, v.local, aa);
+}
+
+@fragment
+fn fs_cached_mask(v: VOut) -> @location(0) vec4<f32> {
+  return shade(v, true);
+}
+
+// The CPU selects these only for unmasked draws without mattes, analytic
+// edges, contrast replacement, or dissolve. Keep the premultiplication and
+// opacity arithmetic in the same order as shade().
+@fragment
+fn fs_texture(v: VOut) -> @location(0) vec4<f32> {
+  return textureSample(src, samp, v.uv) * draw_params.opacity;
+}
+
+@fragment
+fn fs_texture_edge(v: VOut) -> @location(0) vec4<f32> {
+  let d = draw_params;
+  let c = textureSample(src, samp, v.uv);
+  let dlx = dpdx(v.local);
+  let dly = dpdy(v.local);
+  let aa2 = vec2(max(length(vec2(dlx.x, dly.x)), 1e-6), max(length(vec2(dlx.y, dly.y)), 1e-6));
+  let lo = min(d.box_rect.xy, d.box_rect.zw);
+  let hi = max(d.box_rect.xy, d.box_rect.zw);
+  let half_size = (hi - lo) * 0.5;
+  let q = abs(v.local - (lo + half_size)) - half_size;
+  let e = clamp(vec2(0.5) - q / aa2, vec2(0.0), vec2(1.0));
+  return c * (d.opacity * e.x * e.y);
+}
+
+@fragment
+fn fs_solid(v: VOut) -> @location(0) vec4<f32> {
+  let d = draw_params;
+  var c = d.color;
+  if (d.src_kind == 2u) { c = stops[paints[d.paint].stop_off].color; }
+  return vec4(c.rgb * c.a, c.a) * d.opacity;
 }
 
 @fragment
 fn fs_blend(v: VOut) -> @location(0) vec4<f32> {
-  let d = draws[v.draw];
-  let s = shade(v);
+  let d = draw_params;
+  let s = shade(v, false);
   let bd = textureLoad(backdrop, vec2<i32>(v.pos.xy), 0);
-  if (d.blend == 35u) { return s + bd * (1.0 - COV); } // adjustment: mix(backdrop, effect, coverage)
-  return composite(d.blend, bd, s);
+  let mode = d.blend;
+  if (mode == 35u) { return s + bd * (1.0 - COV); } // adjustment: mix(backdrop, effect, coverage)
+  return composite(mode, bd, s);
 }
 
 // ------------------------------------------------------------------ generators

@@ -414,7 +414,6 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
 struct PipeKey {
     cull: bool,
     blend: bool,
-    depth_write: bool,
 }
 
 /// GPU state of the 3D renderer.
@@ -1047,7 +1046,7 @@ impl ThreeEngine {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(key.depth_write),
+                    depth_write_enabled: Some(!key.blend),
                     depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -1296,6 +1295,39 @@ fn corners(lo: Vec3, hi: Vec3) -> [Vec3; 8] {
     })
 }
 
+/// Conservatively rejects object bounds outside a standard-depth clip volume.
+fn bounds_outside_clip(lo: Vec3, hi: Vec3, model: Mat4, clip: Mat4) -> bool {
+    if !lo.is_finite() || !hi.is_finite() || lo.cmpgt(hi).any() {
+        return false;
+    }
+    let abs = |m: Mat4| Mat4::from_cols(m.x_axis.abs(), m.y_axis.abs(), m.z_axis.abs(), m.w_axis.abs());
+    let (model_abs, clip_abs) = (abs(model), abs(clip));
+    let mut outside = 0b11_1111u8;
+    for corner in corners(lo, hi) {
+        let local = corner.extend(1.0);
+        // Match the vertex shader's two transforms. Bound cancellation error
+        // with absolute products, rather than the potentially tiny result.
+        let p = clip * (model * local);
+        if !p.is_finite() {
+            return false;
+        }
+        let magnitude = (clip_abs * (model_abs * local.abs())).max_element();
+        let margin = 64.0 * f32::EPSILON * magnitude.max(1.0);
+        let planes = [p.x + p.w, p.w - p.x, p.y + p.w, p.w - p.y, p.z, p.w - p.z];
+        let mut bits = 0;
+        for (k, distance) in planes.into_iter().enumerate() {
+            if distance < -margin {
+                bits |= 1 << k;
+            }
+        }
+        outside &= bits;
+        if outside == 0 {
+            return false;
+        }
+    }
+    outside != 0
+}
+
 /// Screen tile range touched by a light (inclusive), or `None` when it is off screen.
 fn light_tiles(l: &Light3, vp: &Mat4, size: [u32; 2], tiles: [u32; 2]) -> Option<[u32; 4]> {
     let all = Some([0, 0, tiles[0] - 1, tiles[1] - 1]);
@@ -1400,13 +1432,6 @@ impl ThreeEngine {
         let pool = |size: [u32; 2], format, mips, samples, layers, label| {
             targets.lock().unwrap_or_else(|e| e.into_inner()).take(&d, (size, format, mips, samples, layers, label))
         };
-        for cull in [true, false] {
-            for blend in [false, true] {
-                for write in [false, true] {
-                    self.pipe(PipeKey { cull, blend, depth_write: write });
-                }
-            }
-        }
 
         let mut stats = Stats3::default();
         let vp = scene.clip_fix * scene.cam.view_proj();
@@ -1668,7 +1693,7 @@ impl ThreeEngine {
             key: [u64; 6],
             vbuf: Option<wgpu::Buffer>,
             depth: f32,
-            cull: bool,
+            pipe: PipeKey,
         }
         let mut preps: Vec<Prep> = Vec::new();
         for dr in &scene.draws {
@@ -1688,29 +1713,30 @@ impl ThreeEngine {
             } else {
                 Kind::Opaque
             };
+            let pipe = PipeKey { cull: !dr.material.double_sided, blend: kind == Kind::Blend };
+            self.pipe(pipe);
             let center = dr.model.transform_point3((m.lo + m.hi) * 0.5);
             let vbuf = match &dr.mesh {
                 MeshSrc::Deformed(vs, _) => Some(buf(bytemuck::cast_slice(vs), wgpu::BufferUsages::VERTEX, "deformed")),
                 MeshSrc::Cached(_) => None,
             };
             stats.triangles += m.count as u64 / 3;
-            preps.push(Prep {
-                kind,
-                obj,
-                mat,
-                key: [0; 6],
-                vbuf,
-                depth: scene.cam.depth_of(center),
-                cull: !dr.material.double_sided,
-            });
+            preps.push(Prep { kind, obj, mat, key: [0; 6], vbuf, depth: scene.cam.depth_of(center), pipe });
         }
         stats.draws = preps.len();
         stats.transmissive = preps.iter().filter(|p| p.kind == Kind::Transmissive).count();
         // shadow-pass object uniforms: one per (caster, view)
         let mut shadow_objs: Vec<(usize, u32, u32)> = Vec::new();
-        for v in 0..shadow_mats.len() {
+        for (v, &shadow_mat) in shadow_mats.iter().enumerate() {
             for (i, dr) in scene.draws.iter().enumerate() {
                 if dr.cast_shadow && dr.opacity > 0.0 {
+                    // Cached undeformed bounds are authoritative only without
+                    // shader displacement. Other casters keep the full path.
+                    if let MeshSrc::Cached(mesh) = &dr.mesh {
+                        if dr.maps[5].is_none() && bounds_outside_clip(mesh.lo, mesh.hi, dr.model, shadow_mat) {
+                            continue;
+                        }
+                    }
                     let mut o: ObjectU = *bytemuck::from_bytes(
                         &obj_bytes[preps[i].obj as usize..preps[i].obj as usize + std::mem::size_of::<ObjectU>()],
                     );
@@ -1903,11 +1929,11 @@ impl ThreeEngine {
         // ------------------------------------------------ opaque pass
         let mut order: Vec<usize> = (0..preps.len()).collect();
         order.sort_by(|a, b| preps[*a].depth.total_cmp(&preps[*b].depth));
-        let draw_list = |rp: &mut wgpu::RenderPass, list: &[usize], eng: &ThreeEngine, blend: bool| {
+        let draw_list = |rp: &mut wgpu::RenderPass, list: &[usize], eng: &ThreeEngine| {
             for &i in list {
                 let dr = &scene.draws[i];
                 let m = dr.mesh.mesh();
-                rp.set_pipeline(&eng.pipes[&PipeKey { cull: preps[i].cull, blend, depth_write: !blend }]);
+                rp.set_pipeline(&eng.pipes[&preps[i].pipe]);
                 rp.set_bind_group(1, &eng.mat_binds[&preps[i].key], &[preps[i].mat]);
                 rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
                 rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
@@ -1960,7 +1986,7 @@ impl ThreeEngine {
                 for &i in &opaque {
                     let dr = &scene.draws[i];
                     let m = dr.mesh.mesh();
-                    rp.set_pipeline(&self.pre_pipes[if preps[i].cull { 0 } else { 1 }]);
+                    rp.set_pipeline(&self.pre_pipes[if preps[i].pipe.cull { 0 } else { 1 }]);
                     rp.set_bind_group(1, &self.mat_binds[&preps[i].key], &[preps[i].mat]);
                     rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
                     rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
@@ -2001,7 +2027,7 @@ impl ThreeEngine {
                 rp.set_bind_group(2, &obj_bind, &[0]);
                 rp.draw(0..3, 0..1);
             }
-            draw_list(&mut rp, &opaque, self, false);
+            draw_list(&mut rp, &opaque, self);
         }
         // ------------------------------------------------ transmission: backdrop + opaque, mip chain
         let mut fb_trans = None;
@@ -2141,7 +2167,7 @@ impl ThreeEngine {
             });
             if let Some(fb) = &fb_trans {
                 rp.set_bind_group(0, fb, &[]);
-                draw_list(&mut rp, &trans, self, false);
+                draw_list(&mut rp, &trans, self);
             }
             rp.set_bind_group(0, &fb_plain, &[]);
             for (sb, n) in &splat_binds {
@@ -2149,7 +2175,7 @@ impl ThreeEngine {
                 rp.set_bind_group(1, sb, &[]);
                 rp.draw(0..6, 0..*n);
             }
-            draw_list(&mut rp, &blended, self, true);
+            draw_list(&mut rp, &blended, self);
         }
         // ------------------------------------------------ depth resolve, post
         {
@@ -2320,6 +2346,77 @@ pub fn sort_src() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raster_compiles_only_pipelines_used_by_the_scene() {
+        use super::*;
+        let gpu = match crate::Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let mut engine = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+        let mesh = sr_3d::prim::plane(16.0, 16.0, 1);
+        let draw = Draw3 {
+            mesh: MeshSrc::Cached(engine.upload_mesh(&mesh.vertices, &mesh.indices)),
+            model: Mat4::from_translation(Vec3::new(16.0, 16.0, 0.0)),
+            material: MaterialParams::default(),
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+        };
+        let mut scene = Scene3 {
+            cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 32.0, 32.0),
+            clip_fix: Mat4::IDENTITY,
+            size: [32, 32],
+            exposure: 1.0,
+            dof: None,
+            lens_k1: 0.0,
+            draws: vec![draw],
+            lights: Vec::new(),
+            env: None,
+            splats: Vec::new(),
+            encode_srgb: false,
+            ao: None,
+            ssr: false,
+            path: None,
+        };
+        assert_eq!(engine.render_now(&scene, None).len(), 32 * 32);
+        assert_eq!(engine.pipes.len(), 1, "one material and blend/culling configuration");
+        engine.pipes.clear();
+        scene.draws.clear();
+        engine.render_now(&scene, None);
+        assert!(engine.pipes.is_empty(), "an empty scene needs no material pipeline");
+    }
+
+    #[test]
+    fn shadow_bounds_cull_only_when_wholly_outside_one_clip_plane() {
+        use super::*;
+        let lo = Vec3::new(-0.25, -0.25, 0.25);
+        let hi = Vec3::new(0.25, 0.25, 0.75);
+        let outside = |shift| bounds_outside_clip(lo, hi, Mat4::from_translation(shift), Mat4::IDENTITY);
+        assert!(!outside(Vec3::ZERO));
+        for shift in [Vec3::X * 2.0, -Vec3::X * 2.0, Vec3::Y * 2.0, -Vec3::Y * 2.0, Vec3::Z, -Vec3::Z] {
+            assert!(outside(shift), "wholly outside: {shift:?}");
+        }
+        for shift in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z * 0.5, -Vec3::Z * 0.5] {
+            assert!(!outside(shift), "intersects: {shift:?}");
+        }
+        // Contact with a plane, including roundoff-sized excursions, stays visible.
+        assert!(!outside(Vec3::X * (1.25 + f32::EPSILON)));
+        assert!(!bounds_outside_clip(Vec3::splat(-2.0), Vec3::splat(2.0), Mat4::IDENTITY, Mat4::IDENTITY));
+        let perspective = shadow_proj(70.0, 1.0, 100.0);
+        assert!(!bounds_outside_clip(lo, hi, Mat4::from_translation(Vec3::Z), perspective));
+        assert!(bounds_outside_clip(lo, hi, Mat4::from_translation(-Vec3::Z * 4.0), perspective));
+        // Invalid or cancellation-heavy transforms are retained conservatively.
+        assert!(!bounds_outside_clip(Vec3::splat(f32::NAN), hi, Mat4::IDENTITY, Mat4::IDENTITY));
+        assert!(!bounds_outside_clip(lo, hi, Mat4::from_translation(Vec3::splat(f32::INFINITY)), perspective));
+        let huge = Mat4::from_translation(Vec3::splat(1e20));
+        assert!(!bounds_outside_clip(lo, hi, huge, huge.inverse()));
+    }
+
     #[test]
     fn shaders_validate() {
         for (name, src) in [

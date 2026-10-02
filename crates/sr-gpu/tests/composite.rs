@@ -13,6 +13,23 @@ fn background_and_image_placement() {
 }
 
 #[test]
+fn solid_background_fast_path_matches_a_constant_gradient_exactly() {
+    for color in ["#334455", "#33445580"] {
+        let body = r#"<layer id="a" asset="half" x="8" y="4" scaleX="2" scaleY="2" opacity="0.7"/>"#;
+        let solid = doc(&format!(r#"background="{color}""#), "", body);
+        let gradient = doc(
+            r#"background="url(#flat)""#,
+            &format!(
+                r#"<paints><linearGradient id="flat" x1="2" x2="3" dither="false"><stop offset="0" color="{color}"/><stop offset="1" color="{color}"/></linearGradient></paints>"#
+            ),
+            body,
+        );
+        let (Some(solid), Some(general)) = (render(&solid), render(&gradient)) else { return };
+        assert_eq!(solid.px, general.px, "background {color}");
+    }
+}
+
+#[test]
 fn opacity_rotation_and_anchor() {
     let d = doc(
         r##"background="#0000FF""##,
@@ -808,4 +825,33 @@ fn isolated_content_fading_in_from_zero_is_not_cached_empty() {
         assert_px(&r, 8, 8, green, 1e-3);
         assert_px(&r, 40, 8, green, 1e-3);
     }
+}
+
+#[test]
+fn specialized_ellipse_masks_match_general_masks_exactly() {
+    let mut body = String::new();
+    for (b, blend) in ["normal", "dissolve", "multiply", "add"].iter().enumerate() {
+        for (f, feather) in [0.001, 0.5, 7.0].iter().enumerate() {
+            for (e, expansion) in [-0.75, 0.0, 1.25].iter().enumerate() {
+                let x = 6 + b * 42 + e * 9;
+                let y = 6 + f * 38 + e * 3;
+                body.push_str(&format!(
+                    r#"<layer id="l{b}_{f}_{e}" asset="quad" x="{x}" y="{y}" scaleX="9" scaleY="7" rotation="13" opacity="0.7" blend="{blend}">
+                    <mask type="ellipse" x="0.1" y="0.2" width="1.6" height="1.2" feather="{feather}" expansion="{expansion}" invert="{}" opacity="0.8"/>
+                    </layer>"#,
+                    e == 1,
+                ));
+            }
+        }
+    }
+    let project = r##"width="200" height="140" background="#33445580""##;
+    let Some(specialized) = render(&doc(project, "", &body)) else { return };
+    // A disabled second mask preserves coverage but forces the general shader.
+    let general = render(&doc(
+        project,
+        "",
+        &body.replace("</layer>", r#"<mask type="rect" width="2" height="2" mode="none"/></layer>"#),
+    ))
+    .unwrap();
+    assert_eq!(specialized.px, general.px);
 }

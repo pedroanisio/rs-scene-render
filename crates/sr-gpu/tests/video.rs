@@ -195,3 +195,44 @@ fn dis_optical_flow_recovers_a_translation() {
     let (ew, em) = (err(&warped), err(&mixed));
     assert!(ew < em * 0.2, "optical flow error {ew} vs frame mix {em}");
 }
+
+#[test]
+fn identical_decoded_frames_reuse_conversion_but_changed_planes_do_not() {
+    if videos().is_none() {
+        return;
+    }
+    let static_doc = video_doc(r#"<layer id="v" asset="red10"/>"#);
+    let Some(first) = render_times(&static_doc, &[0.0]) else { return };
+    let reused = render_times(&static_doc, &[0.0, 0.04]).unwrap();
+    assert_eq!(first.px, reused.px);
+    assert_eq!(first.stats.video_frames, 1);
+    assert_eq!(reused.stats.video_frames, 0, "identical planes need no new GPU conversion");
+    let moving_doc = video_doc(r#"<layer id="v" asset="counter"/>"#);
+    let initial = render_times(&moving_doc, &[1.2]).unwrap();
+    let changed = render_times(&moving_doc, &[1.2, 1.24]).unwrap();
+    assert_ne!(initial.px, changed.px);
+    assert_eq!(changed.stats.video_frames, 1, "changed planes must be converted");
+}
+
+#[test]
+fn video_cache_separates_input_transfer_and_decoder_frame_rate() {
+    if videos().is_none() {
+        return;
+    }
+    for (attributes, equal) in [(r#"fps="25" transfer="linear""#, false), (r#"fps="50""#, true)] {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="32" fps="25" duration="2" background="#000000"/>
+            <assets>{VIDEOS}<video id="other" src="counter.mp4" width="32" height="16" duration="4" colorSpace="rec709" {attributes}/></assets>
+            <composition><layer id="left" asset="counter"/><layer id="right" asset="other" x="32"/></composition></scene>"##
+        );
+        let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) };
+        let d = sr_model::load_str(&xml, &opts).unwrap();
+        let Some(r) = render_times(&d, &[1.2]) else { return };
+        let (left, right) = (r.at(4, 4), r.at(36, 4));
+        assert_eq!(left == right, equal, "{attributes}: {left:?} vs {right:?}");
+        if !equal {
+            assert!((right[0] - (120.0 - 16.0) / 219.0).abs() < 0.002);
+        }
+        assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+    }
+}

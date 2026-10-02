@@ -33,6 +33,28 @@ struct Out {
 @group(0) @binding(5) var over: texture_2d<f32>;     // the output's overlay, output-sized
 @group(0) @binding(6) var placed_out: texture_storage_2d<rgba16float, write>;  // cs_place's target
 
+// Fix the colour path per output; the defaults retain the general shader.
+override OUTPUT_FORMAT: u32 = 0xffffffffu;
+fn out_format() -> u32 {
+  if (OUTPUT_FORMAT != 0xffffffffu) { return OUTPUT_FORMAT; }
+  return o.format;
+}
+override OUTPUT_TRANSFER: u32 = 0xffffffffu;
+fn out_transfer() -> u32 {
+  if (OUTPUT_TRANSFER != 0xffffffffu) { return OUTPUT_TRANSFER; }
+  return o.transfer;
+}
+override WORKING_LINEAR: u32 = 0xffffffffu;
+fn out_linear_light() -> u32 {
+  if (WORKING_LINEAR != 0xffffffffu) { return WORKING_LINEAR; }
+  return o.linear_light;
+}
+override WORKING_TRANSFER: u32 = 0xffffffffu;
+fn out_store_transfer() -> u32 {
+  if (WORKING_TRANSFER != 0xffffffffu) { return WORKING_TRANSFER; }
+  return o.store_transfer;
+}
+
 fn hash(p: vec2<u32>, s: u32) -> f32 {
   var h = p.x * 1664525u + p.y * 1013904223u + s * 2654435761u;
   h = (h ^ (h >> 16u)) * 2246822519u;
@@ -75,9 +97,9 @@ fn px(x: u32, y: u32) -> vec4<f32> {
   let c = composited(x, y);
   var a = clamp(c.a, 0.0, 1.0);
   var rgb = select(vec3(0.0), c.rgb / a, a > 0.0);
-  if (o.linear_light == 0u) { rgb = tf_decode3(o.store_transfer, rgb); }
+  if (out_linear_light() == 0u) { rgb = tf_decode3(out_store_transfer(), rgb); }
   rgb = o.to_out * rgb;
-  if (o.format == 4u) {
+  if (out_format() == 4u) {
     // scene-linear, premultiplied
     if (o.keep_alpha == 0u) { return vec4(rgb * a, 1.0); }
     return vec4(rgb * a, a);
@@ -87,7 +109,7 @@ fn px(x: u32, y: u32) -> vec4<f32> {
     rgb = rgb * a;
     a = 1.0;
   }
-  return vec4(clamp(tf_encode3(o.transfer, max(rgb, vec3(0.0))), vec3(0.0), vec3(1.0)), a);
+  return vec4(clamp(tf_encode3(out_transfer(), max(rgb, vec3(0.0))), vec3(0.0), vec3(1.0)), a);
 }
 
 fn yuv(c: vec3<f32>) -> vec3<f32> {
@@ -149,7 +171,7 @@ fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
   let total_y = n;
   let cw = (w + 1u) / 2u; let ch = (h + 1u) / 2u;
   var word = 0u;
-  switch (o.format) {
+  switch (out_format()) {
     case 0u: {
       let samples = total_y + cw * ch * 2u;
       for (var k = 0u; k < 4u; k = k + 1u) {
@@ -186,6 +208,48 @@ fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
   dst[wi - o.base] = word;
+}
+
+// One invocation owns a 4×2 block: each pixel is converted once, then shared
+// between luma and the two chroma samples. Preserve chroma's summation order.
+fn nv12_code(value: f32, luma: bool, index: u32) -> u32 {
+  let d = hash(vec2(index, 7u), o.seed) - hash(vec2(index, 11u), o.seed);
+  return code(value, luma, 8u, d);
+}
+
+@compute @workgroup_size(64)
+fn cs_pack_nv12_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let block = gid.x + gid.y * 65535u * 64u;
+  let w = o.osize.x;
+  let h = o.osize.y;
+  if (block >= w * h / 8u) { return; }
+  let x = (block % (w / 4u)) * 4u;
+  let y = (block / (w / 4u)) * 2u;
+  var pixels: array<vec3<f32>, 8>;
+  for (var row = 0u; row < 2u; row++) {
+    var word = 0u;
+    for (var col = 0u; col < 4u; col++) {
+      let c = px(x + col, y + row).rgb;
+      pixels[row * 4u + col] = c;
+      let i = (y + row) * w + x + col;
+      word |= nv12_code(yuv(c).x, true, i) << (8u * col);
+    }
+    dst[((y + row) * w + x) / 4u] = word;
+  }
+  var uv_word = 0u;
+  for (var pair = 0u; pair < 2u; pair++) {
+    let col = pair * 2u;
+    var sum = vec3(0.0);
+    sum += pixels[col];
+    sum += pixels[col + 1u];
+    sum += pixels[col + 4u];
+    sum += pixels[col + 5u];
+    let c = yuv(sum / 4.0);
+    let i = w * h + (y / 2u) * w + x + col;
+    uv_word |= nv12_code(c.y, false, i) << (16u * pair);
+    uv_word |= nv12_code(c.z, false, i + 1u) << (16u * pair + 8u);
+  }
+  dst[(w * h + (y / 2u) * w + x) / 4u] = uv_word;
 }
 
 // the placed frame, unconverted: a transition then combines two of them in the output's frame

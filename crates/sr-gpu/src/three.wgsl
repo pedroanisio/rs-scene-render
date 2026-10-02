@@ -497,18 +497,21 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     for (var k = 0u; k < count; k++) {
         let li = lights[tiles[base + 1u + k]];
         let ty = u32(li.pos.w);
+        let contribution = shade_light(li, s);
         var sh = 1.0;
-        if (ty != 0u) {
+        // Shadowing cannot change a zero contribution (back-facing or unlit
+        // pixels, for example), so avoid its texture comparisons there.
+        if (ty != 0u && any(contribution != vec3(0.0))) {
             sh = shadow_factor(li, s.world, s.n);
             if (li.right.w > 0.0 && sh > 0.0) {
                 var l = -li.dir.xyz;
                 if (ty != 1u) { l = normalize(li.pos.xyz - s.world); }
                 sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
             }
-        } else {
+        } else if (ty == 0u) {
             sh = ao;
         }
-        col += shade_light(li, s) * sh;
+        col += contribution * sh;
     }
     // image-based lighting from the dome
     if (fr.params2.z > 0.5) {
@@ -589,4 +592,3 @@ fn fs_dome(i: BgOut) -> @location(0) vec4<f32> {
     let dir = far.xyz / far.w - fr.eye.xyz;
     return vec4(textureSampleLevel(sky_tex, env_smp, env_uv(dir), 0.0).rgb * fr.params.w, 1.0);
 }
-

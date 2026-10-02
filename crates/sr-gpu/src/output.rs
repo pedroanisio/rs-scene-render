@@ -138,11 +138,35 @@ pub struct Pending {
 /// Staging buffers in the ring: one mapping, one converting, one spare.
 const RING: usize = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PackKey {
+    format: u32,
+    transfer: u32,
+    linear_light: u32,
+    store_transfer: u32,
+    blocks: bool,
+}
+
+impl PackKey {
+    fn of(p: &Params, blocks: bool) -> Self {
+        Self {
+            format: p.format,
+            transfer: p.transfer,
+            linear_light: p.linear_light,
+            store_transfer: p.store_transfer,
+            blocks,
+        }
+    }
+}
+
 /// The converter and its staging ring.
 pub struct OutputStage {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    pipe: wgpu::ComputePipeline,
+    pack_module: wgpu::ShaderModule,
+    pack_layout: wgpu::PipelineLayout,
+    /// Most recently used colour/format programs, capped at eight configurations.
+    pack_pipes: std::collections::VecDeque<(PackKey, wgpu::ComputePipeline)>,
     bgl: wgpu::BindGroupLayout,
     /// Placement into a working-space texture, without conversion (transitions between outputs' frames).
     place_pipe: wgpu::ComputePipeline,
@@ -337,14 +361,6 @@ impl OutputStage {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipe = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pack"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("cs_pack"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let place_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&place_bgl)],
@@ -372,7 +388,9 @@ impl OutputStage {
         OutputStage {
             device,
             queue,
-            pipe,
+            pack_module: module,
+            pack_layout: layout,
+            pack_pipes: Default::default(),
             bgl,
             place_pipe,
             place_bgl,
@@ -389,6 +407,40 @@ impl OutputStage {
             head: 0,
             frame_index: 0,
         }
+    }
+
+    fn compile_pack(&self, blocks: bool, constants: &[(&str, f64)]) -> wgpu::ComputePipeline {
+        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("pack output"),
+            layout: Some(&self.pack_layout),
+            module: &self.pack_module,
+            entry_point: Some(if blocks { "cs_pack_nv12_blocks" } else { "cs_pack" }),
+            compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
+            cache: None,
+        })
+    }
+
+    fn pack_pipeline(&mut self, key: PackKey) -> wgpu::ComputePipeline {
+        if let Some(at) = self.pack_pipes.iter().position(|(k, _)| *k == key) {
+            let item = self.pack_pipes.remove(at).expect("found");
+            let pipe = item.1.clone();
+            self.pack_pipes.push_back(item);
+            return pipe;
+        }
+        let pipe = self.compile_pack(
+            key.blocks,
+            &[
+                ("OUTPUT_FORMAT", key.format as f64),
+                ("OUTPUT_TRANSFER", key.transfer as f64),
+                ("WORKING_LINEAR", key.linear_light as f64),
+                ("WORKING_TRANSFER", key.store_transfer as f64),
+            ],
+        );
+        if self.pack_pipes.len() == 8 {
+            self.pack_pipes.pop_front();
+        }
+        self.pack_pipes.push_back((key, pipe.clone()));
+        pipe
     }
 
     /// Makes the next submitted frame frame number `frame` of the programme: it seeds that
@@ -451,6 +503,8 @@ impl OutputStage {
             assert_eq!(o.size, size, "the overlay is output-sized");
             p.overlay = 1;
         }
+        let blocks = p.format == 0 && size[0].is_multiple_of(4) && size[1].is_multiple_of(2) && pieces.len() == 1;
+        let pipe = self.pack_pipeline(PackKey::of(&p, blocks));
         let mode = p.mode;
         self.frame_index = self.frame_index.wrapping_add(1);
         let mut enc = d.create_command_encoder(&Default::default());
@@ -521,9 +575,12 @@ impl OutputStage {
             let mut enc = enc.take().unwrap_or_else(|| d.create_command_encoder(&Default::default()));
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.pipe);
+                // A 4×2 block owns two complete Y words and one UV word. Odd
+                // dimensions and split readbacks retain the word-at-a-time path.
+                pass.set_pipeline(&pipe);
                 pass.set_bind_group(0, &bg, &[]);
-                let groups = n.div_ceil(64);
+                let invocations = if blocks { size[0] * size[1] / 8 } else { *n };
+                let groups = invocations.div_ceil(64);
                 let (x, y) = if groups > 65535 { (65535, groups.div_ceil(65535)) } else { (groups, 1) };
                 pass.dispatch_workgroups(x, y, 1);
             }
@@ -691,5 +748,142 @@ impl OutputStage {
         }
         self.ring[slot] = Some(buffers);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nv12_blocks_match_piecewise_packing_byte_for_byte() {
+        let gpu = match crate::Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                eprintln!("skipping GPU test: {error}");
+                return;
+            }
+        };
+        let layout = crate::resources::source_layout(&gpu.device);
+        let frame = crate::resources::create(&gpu.device, &layout, [8, 6], 1, "NV12 oracle");
+        let bytes: Vec<u8> = (0..48)
+            .flat_map(|i| {
+                let alpha = (i % 7) as f32 / 6.0;
+                [i as f32 / 20.0 * alpha, (i % 9) as f32 / 8.0 * alpha, 0.7 * alpha, alpha]
+                    .into_iter()
+                    .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
+            })
+            .collect();
+        gpu.queue.write_texture(
+            frame.tex.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64), rows_per_image: Some(6) },
+            wgpu::Extent3d { width: 8, height: 6, depth_or_array_layers: 1 },
+        );
+        let mut block = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
+        let mut piecewise = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
+        piecewise.limit_buffers(4);
+        let generic = piecewise.compile_pack(false, &[]);
+        let force_general = |stage: &mut OutputStage, params: &Params| {
+            stage.pack_pipes.clear();
+            stage.pack_pipes.push_back((PackKey::of(params, false), generic.clone()));
+        };
+        for linear in [false, true] {
+            let working = Working { space: ColorSpace::Srgb, linear };
+            for (size, placement) in [
+                ([8, 6], Placement::default()),
+                ([12, 6], Placement::FitBlur { focus: [0.25, 0.75] }),
+                ([4, 2], Placement::Crop { focus: [0.75, 0.25] }),
+                ([5, 3], Placement::default()),
+            ] {
+                for full_range in [false, true] {
+                    let out = OutputColor::new(ColorSpace::Rec709, Transfer::Auto, full_range);
+                    for stage in [&mut block, &mut piecewise] {
+                        stage.seek(137);
+                    }
+                    force_general(&mut piecewise, &OutputStage::params(&frame, &working, &out, size, placement));
+                    let a =
+                        block.submit_placed(&frame, &working, &out, InputFormat::Nv12, size, false, placement, None);
+                    let b = piecewise.submit_placed(
+                        &frame,
+                        &working,
+                        &out,
+                        InputFormat::Nv12,
+                        size,
+                        false,
+                        placement,
+                        None,
+                    );
+                    assert_eq!(block.wait(a), piecewise.wait(b), "size={size:?} linear={linear} full={full_range}");
+                }
+            }
+        }
+        // Overlay composition must be shared by luma and chroma too.
+        let working = Working { space: ColorSpace::Rec2020, linear: true };
+        let out = OutputColor::new(ColorSpace::Rec2020, Transfer::Pq, false);
+        for stage in [&mut block, &mut piecewise] {
+            stage.seek(u32::MAX);
+        }
+        force_general(&mut piecewise, &OutputStage::params(&frame, &working, &out, [8, 6], Placement::default()));
+        let a = block.submit_placed(
+            &frame,
+            &working,
+            &out,
+            InputFormat::Nv12,
+            [8, 6],
+            false,
+            Placement::default(),
+            Some(&frame),
+        );
+        let b = piecewise.submit_placed(
+            &frame,
+            &working,
+            &out,
+            InputFormat::Nv12,
+            [8, 6],
+            false,
+            Placement::default(),
+            Some(&frame),
+        );
+        assert_eq!(block.wait(a), piecewise.wait(b));
+        // Changing colour/format configuration on one stage must not reuse a
+        // conversion for the previous output. The split path is the reference.
+        for linear in [false, true] {
+            let working = Working { space: ColorSpace::Srgb, linear };
+            for transfer in [Transfer::Srgb, Transfer::Bt1886, Transfer::Pq, Transfer::Hlg] {
+                let out = OutputColor::new(ColorSpace::Rec2020, transfer, false);
+                for format in [
+                    InputFormat::Nv12,
+                    InputFormat::P010,
+                    InputFormat::Rgba8,
+                    InputFormat::Rgba16,
+                    InputFormat::Gbrapf32,
+                ] {
+                    for keep_alpha in [false, true] {
+                        for stage in [&mut block, &mut piecewise] {
+                            stage.seek(911);
+                        }
+                        let mut params = OutputStage::params(&frame, &working, &out, [8, 6], Placement::default());
+                        params.format = match format {
+                            InputFormat::Nv12 => 0,
+                            InputFormat::P010 => 1,
+                            InputFormat::Rgba8 => 2,
+                            InputFormat::Rgba16 => 3,
+                            InputFormat::Gbrapf32 => 4,
+                        };
+                        force_general(&mut piecewise, &params);
+                        let a = block.submit(&frame, &working, &out, format, [8, 6], keep_alpha);
+                        let b = piecewise.submit(&frame, &working, &out, format, [8, 6], keep_alpha);
+                        assert!(block.pack_pipes.len() <= 8);
+                        assert_eq!(
+                            block.wait(a),
+                            piecewise.wait(b),
+                            "linear={linear} transfer={transfer:?} format={format:?} alpha={keep_alpha}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

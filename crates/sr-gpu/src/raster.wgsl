@@ -20,6 +20,10 @@ struct RParams {
   tiles_y: u32,
   width: u32,
   height: u32,
+  active_count: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> rcmds: array<RCmd>;
@@ -31,6 +35,13 @@ struct RParams {
 @group(0) @binding(6) var<uniform> globals: Globals;
 @group(0) @binding(7) var<uniform> rp: RParams;
 @group(0) @binding(8) var out_tex: texture_storage_2d<rgba16float, write>;
+
+@group(0) @binding(9) var<storage, read> active_tiles: array<u32>;
+
+override SPARSE_TILES: bool = false;
+
+// Selected only when the complete command stream consists of solid fills.
+override SOLID_FILLS: bool = false;
 
 fn g_clamp(x: f32) -> f32 {
   if (x <= 0.0) { return 0.0; }
@@ -78,11 +89,35 @@ fn mask_op(m: f32, v: f32, op: u32) -> f32 {
 
 @compute @workgroup_size(16, 16)
 fn raster_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: vec3<u32>) {
-  let x = wg.x * 16u + li.x;
-  let y = wg.y * 16u + li.y;
+  var tile = wg.xy;
+  if (SPARSE_TILES) {
+    let index = wg.x + wg.y * 65535u;
+    if (index >= rp.active_count) { return; }
+    let tile_index = active_tiles[index];
+    tile = vec2(tile_index % rp.tiles_x, tile_index / rp.tiles_x);
+  }
+  let x = tile.x * 16u + li.x;
+  let y = tile.y * 16u + li.y;
   if (x >= rp.width || y >= rp.height) { return; }
-  let r = ranges[wg.y * rp.tiles_x + wg.x];
+  let r = ranges[tile.y * rp.tiles_x + tile.x];
   var acc = vec4<f32>(0.0);
+  if (r.y == 0u) {
+    textureStore(out_tex, vec2<i32>(i32(x), i32(y)), acc);
+    return;
+  }
+  if (SOLID_FILLS) {
+    for (var i = r.x; i < r.x + r.y; i = i + 1u) {
+      let c = rcmds[i];
+      let cov = cmd_cov(c, li.x, li.y) * c.param;
+      if (cov > 0.0) {
+        let s = stops[paints[c.paint].stop_off].color;
+        let a = s.a * cov;
+        acc = vec4<f32>(s.rgb * a, a) + acc * (1.0 - a);
+      }
+    }
+    textureStore(out_tex, vec2<i32>(i32(x), i32(y)), acc);
+    return;
+  }
   var m = 1.0;
   var st: array<vec4<f32>, 8>;
   var sm: array<f32, 8>;

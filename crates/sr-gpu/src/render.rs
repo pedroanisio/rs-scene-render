@@ -226,16 +226,28 @@ pub struct Frame {
     pub stats: RenderStats,
 }
 
+/// Coverage for one exact combination of mask, vertices and target size.
+struct MaskCoverage {
+    last_used: u64,
+    bytes: u64,
+    view: Option<wgpu::TextureView>,
+}
+
 /// The compositor for one program.
 pub struct Renderer {
     gpu: Gpu,
-    over: wgpu::RenderPipeline,
+    // General shading, plain/antialiased texture, and solid colour variants. The simple
+    // variants avoid the mask/gradient machinery for common full-frame draws.
+    over: [wgpu::RenderPipeline; 5],
     /// Premultiplied destination-over: the project background, drawn last beneath everything.
-    under: wgpu::RenderPipeline,
-    blend: wgpu::RenderPipeline,
+    under: [wgpu::RenderPipeline; 5],
+    blend: [wgpu::RenderPipeline; 2],
     /// Add and linear-dodge through the blender (see `fixed_function_blend`).
-    additive: wgpu::RenderPipeline,
+    additive: [wgpu::RenderPipeline; 5],
     generator: wgpu::RenderPipeline,
+    mask_coverage: HashMap<Vec<u8>, MaskCoverage>,
+    mask_coverage_budget: u64,
+    mask_coverage_pipelines: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
     bgl2: wgpu::BindGroupLayout,
@@ -265,6 +277,8 @@ pub struct Renderer {
     video: crate::video::VideoEngine,
     decoders: HashMap<String, Result<sr_media::VideoDecoder, String>>,
     video_frames: HashMap<String, Arc<Tex>>,
+    // One previous decoded image per interpretation, evicted with the frame cache.
+    video_previous: HashMap<String, (Arc<sr_media::VideoFrame>, Arc<Tex>)>,
     raster: Raster,
     lotties: crate::vector::LottieCache,
     svgs: HashMap<(String, i32), Result<Arc<sr_vector::svg::Svg>, String>>,
@@ -598,6 +612,50 @@ fn to_clip(p: [f64; 2], size: [u32; 2]) -> [f32; 4] {
     [(2.0 * p[0] / size[0] as f64 - 1.0) as f32, (1.0 - 2.0 * p[1] / size[1] as f64) as f32, 0.0, 1.0]
 }
 
+fn compositor_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    fragment: &str,
+    blend: Option<wgpu::BlendState>,
+    full_screen: bool,
+    ellipse: bool,
+) -> wgpu::RenderPipeline {
+    let vertices = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x2],
+    })];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fragment),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some(if full_screen { "vs_full" } else { "vs_main" }),
+            buffers: if full_screen { &[] } else { &vertices },
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fragment),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: if fragment == "fs_mask_coverage" { wgpu::TextureFormat::R32Float } else { resources::FORMAT },
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[("SINGLE_FEATHERED_ELLIPSE", ellipse as u32 as f64)],
+                ..Default::default()
+            },
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 impl Renderer {
     /// Builds pipelines and resources for `program`.
     pub fn new(gpu: Gpu, program: &Program) -> Renderer {
@@ -616,7 +674,7 @@ impl Renderer {
             binding: b,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
@@ -625,7 +683,16 @@ impl Renderer {
         let bgl0 = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame"),
             entries: &[
-                storage(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<Draw>() as u64),
+                    },
+                    count: None,
+                },
                 storage(1),
                 storage(2),
                 storage(3),
@@ -683,11 +750,6 @@ impl Renderer {
             bind_group_layouts: &[Some(&bgl0), Some(&bgl1), Some(&bgl2), Some(&bgl3)],
             immediate_size: 0,
         });
-        let vbuf = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x2],
-        };
         let premul = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
@@ -700,50 +762,33 @@ impl Renderer {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipe =
-            |fs: &str, blend: Option<wgpu::BlendState>, vs: &str, buffers: &[Option<wgpu::VertexBufferLayout>]| {
-                d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(fs),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(vs),
-                        buffers,
-                        compilation_options: Default::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some(fs),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: resources::FORMAT,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
-        let vbufs = [Some(vbuf)];
-        let over = pipe("fs_over", Some(premul), "vs_main", &vbufs);
+        let pipe = |fs: &str, blend: Option<wgpu::BlendState>, full_screen: bool, ellipse: bool| {
+            compositor_pipeline(d, &module, &layout, fs, blend, full_screen, ellipse)
+        };
+        let blend = [pipe("fs_blend", None, false, false), pipe("fs_blend", None, false, true)];
+        let variants = [
+            ("fs_over", false),
+            ("fs_texture", false),
+            ("fs_solid", false),
+            ("fs_texture_edge", false),
+            ("fs_over", true),
+        ];
+        let over = variants.map(|(fs, ellipse)| pipe(fs, Some(premul), false, ellipse));
         let dst_over = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
-        let under = pipe("fs_over", Some(wgpu::BlendState { color: dst_over, alpha: dst_over }), "vs_main", &vbufs);
-        let blend = pipe("fs_blend", None, "vs_main", &vbufs);
+        let under = variants
+            .map(|(fs, ellipse)| pipe(fs, Some(wgpu::BlendState { color: dst_over, alpha: dst_over }), false, ellipse));
         let add = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
-        let additive = pipe("fs_over", Some(wgpu::BlendState { color: add, alpha: premul.alpha }), "vs_main", &vbufs);
-        let generator = pipe("fs_generator", None, "vs_full", &[]);
+        let additive = variants
+            .map(|(fs, ellipse)| pipe(fs, Some(wgpu::BlendState { color: add, alpha: premul.alpha }), false, ellipse));
+        let generator = pipe("fs_generator", None, true, false);
         let sampler = |mode: wgpu::AddressMode| {
             d.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: mode,
@@ -798,6 +843,9 @@ impl Renderer {
             additive,
             blend,
             generator,
+            mask_coverage: HashMap::new(),
+            mask_coverage_budget: 32 * 1024 * 1024,
+            mask_coverage_pipelines: None,
             bgl0,
             bgl1,
             bgl2,
@@ -843,6 +891,7 @@ impl Renderer {
             video: crate::video::VideoEngine::new(gpu_device, gpu_queue),
             decoders: HashMap::new(),
             video_frames: HashMap::new(),
+            video_previous: HashMap::new(),
             max_texture,
             representation: None,
             raster,
@@ -1181,7 +1230,9 @@ impl Renderer {
         rotation: m::VideoAssetRotation,
         blend: u8,
     ) -> Option<Arc<Tex>> {
-        let pkey = path.display().to_string();
+        let pkey = format!("{path:?}/{:016x}", fps.to_bits());
+        let vkey = format!("{pkey}/{space:?}/{transfer:?}/{alpha:?}/{rotation:?}");
+        self.used.insert(format!("video-previous:{vkey}"));
         if !self.decoders.contains_key(&pkey) {
             let d = sr_media::VideoDecoder::open(path, Some(fps), 8).map_err(|e| e.to_string());
             self.decoders.insert(pkey.clone(), d);
@@ -1190,7 +1241,7 @@ impl Renderer {
         let n0 = libm::floor(x + 1e-6) as i64;
         let f = (x - n0 as f64).clamp(0.0, 1.0);
         let frame_tex = |this: &mut Self, plan: &mut Plan, k: i64| -> Option<Arc<Tex>> {
-            let fkey = format!("{pkey}#{k}");
+            let fkey = format!("{vkey}#{k}");
             this.used.insert(format!("video:{fkey}"));
             if let Some(t) = this.video_frames.get(&fkey) {
                 return Some(t.clone());
@@ -1219,6 +1270,13 @@ impl Renderer {
                 }
             }
             let info = dec.info.clone();
+            if let Some((previous, texture)) = this.video_previous.get(&vkey) {
+                if same_video_pixels(previous, &frame) {
+                    let texture = texture.clone();
+                    this.video_frames.insert(fkey, texture.clone());
+                    return Some(texture);
+                }
+            }
             let quarter = match rotation {
                 m::VideoAssetRotation::V0 => (info.rotation / 90) as u32,
                 m::VideoAssetRotation::V90 => 1,
@@ -1241,6 +1299,7 @@ impl Renderer {
             let working = this.working;
             let t = Arc::new(this.video.convert(&frame, &it, &working, &this.bgl1));
             plan.stats.video_frames += 1;
+            this.video_previous.insert(vkey.clone(), (frame, t.clone()));
             this.video_frames.insert(fkey, t.clone());
             Some(t)
         };
@@ -1249,7 +1308,7 @@ impl Renderer {
             return Some(a);
         }
         let b = frame_tex(self, plan, n0 + 1)?;
-        let bkey = format!("{pkey}#{n0}~{}~{blend}", (f * 1e4).round());
+        let bkey = format!("{vkey}#{n0}~{}~{blend}", (f * 1e4).round());
         self.used.insert(format!("video:{bkey}"));
         if let Some(t) = self.video_frames.get(&bkey) {
             return Some(t.clone());
@@ -3184,6 +3243,7 @@ impl Renderer {
             keep
         });
         self.video_frames.retain(|k, _| live.contains_key(&format!("video:{k}")));
+        self.video_previous.retain(|k, _| live.contains_key(&format!("video-previous:{k}")));
         // colour glyphs and raster map tiles: a map that pans or zooms shows new tiles every frame
         self.glyph_tex.retain(|k, _| live.contains_key(&format!("glyph:{k}")));
         for t in evicted {
@@ -3198,7 +3258,13 @@ impl Renderer {
     /// Writes `data` into a grow-only buffer, reallocating (at least doubling) when it does not
     /// fit. Returns whether it was reallocated, in which case bind groups over it must be rebuilt.
     /// The write is queued, so it is ordered after the frames already submitted.
-    fn upload<T: bytemuck::Pod + Default>(&self, slot: &mut Option<GrowBuf>, data: &[T], label: &str) -> bool {
+    fn upload<T: bytemuck::Pod + Default>(
+        &self,
+        slot: &mut Option<GrowBuf>,
+        data: &[T],
+        label: &str,
+        usage: wgpu::BufferUsages,
+    ) -> bool {
         let one = [T::default()];
         let bytes: &[u8] = if data.is_empty() { bytemuck::cast_slice(&one) } else { bytemuck::cast_slice(data) };
         let need = bytes.len() as u64;
@@ -3208,7 +3274,7 @@ impl Renderer {
             let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: cap,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             *slot = Some(GrowBuf { buf, cap });
@@ -3240,9 +3306,142 @@ impl Renderer {
         );
     }
 
+    /// Reuse coverage only after identical geometry has occurred in another frame.
+    /// Keys compare every input bit; at most 64 candidates and 32 MiB of R32F images
+    /// survive, so animated geometry cannot accumulate a texture per frame.
+    fn prepare_mask_coverage(&mut self, plan: &mut Plan) -> HashMap<u32, (wgpu::TextureView, bool)> {
+        let mut out = HashMap::new();
+        let now = self.cache_frame;
+        self.mask_coverage.retain(|_, e| now.saturating_sub(e.last_used) <= CACHE_KEEP);
+        if self.mask_coverage_budget == 0 || self.gpu.scalar_target != wgpu::TextureFormat::R32Float {
+            return out;
+        }
+        for job in &plan.jobs {
+            for c in &job.cmds {
+                let draw = &plan.draws[c.draw as usize];
+                // The matte binding holds coverage; all other cases retain general shading.
+                if draw.blend != 0
+                    || c.backdrop.is_some()
+                    || c.matte.is_some()
+                    || draw.flags & flag::MATTE != 0
+                    || draw.mask_count != 1
+                    || c.count != 6
+                {
+                    continue;
+                }
+                let Some(mask) = plan.masks.get(draw.mask_off as usize) else {
+                    continue;
+                };
+                if mask.kind != 1 || mask.feather <= 0.0 {
+                    continue;
+                }
+                let bytes = u64::from(job.target.size[0]) * u64::from(job.target.size[1]) * 4;
+                if bytes > self.mask_coverage_budget {
+                    continue;
+                }
+                let mut key = bytemuck::bytes_of(&job.target.size).to_vec();
+                key.extend_from_slice(bytemuck::bytes_of(mask));
+                key.extend_from_slice(bytemuck::cast_slice(
+                    &plan.verts[c.first_vertex as usize..(c.first_vertex + c.count) as usize],
+                ));
+                let previous = self.mask_coverage.get(&key).map(|e| (e.last_used, e.view.clone()));
+                if let Some((_, Some(view))) = previous {
+                    self.mask_coverage.get_mut(&key).expect("existing coverage").last_used = now;
+                    out.insert(c.draw, (view, false));
+                    plan.stats.cache_hits += 1;
+                    continue;
+                }
+                if !self.mask_coverage.contains_key(&key) {
+                    if self.mask_coverage.len() >= 64 {
+                        let oldest = self
+                            .mask_coverage
+                            .iter()
+                            .filter(|(_, e)| e.last_used != now)
+                            .min_by_key(|(_, e)| e.last_used)
+                            .map(|(k, _)| k.clone());
+                        let Some(k) = oldest else {
+                            continue;
+                        };
+                        self.mask_coverage.remove(&k);
+                    }
+                    self.mask_coverage.insert(key, MaskCoverage { last_used: now, bytes: 0, view: None });
+                    continue;
+                }
+                let e = self.mask_coverage.get_mut(&key).expect("existing candidate");
+                let previous_frame = e.last_used != now;
+                e.last_used = now;
+                if !previous_frame {
+                    continue;
+                }
+                while self.mask_coverage.values().map(|e| e.bytes).sum::<u64>() + bytes > self.mask_coverage_budget {
+                    let oldest = self
+                        .mask_coverage
+                        .iter()
+                        .filter(|(_, e)| e.last_used != now && e.bytes != 0)
+                        .min_by_key(|(_, e)| e.last_used)
+                        .map(|(k, _)| k.clone());
+                    let Some(k) = oldest else {
+                        break;
+                    };
+                    self.mask_coverage.remove(&k);
+                }
+                if self.mask_coverage.values().map(|e| e.bytes).sum::<u64>() + bytes > self.mask_coverage_budget {
+                    continue;
+                }
+                let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("cached mask coverage"),
+                    size: wgpu::Extent3d {
+                        width: job.target.size[0],
+                        height: job.target.size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                self.mask_coverage.insert(key, MaskCoverage { last_used: now, bytes, view: Some(view.clone()) });
+                out.insert(c.draw, (view, true));
+            }
+        }
+        if !out.is_empty() && self.mask_coverage_pipelines.is_none() {
+            let d = &self.gpu.device;
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("mask coverage"),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("common.wgsl"), include_str!("d24.wgsl"), include_str!("shaders.wgsl")).into(),
+                ),
+            });
+            let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&self.bgl0), Some(&self.bgl1), Some(&self.bgl2), Some(&self.bgl3)],
+                immediate_size: 0,
+            });
+            self.mask_coverage_pipelines = Some((
+                compositor_pipeline(d, &module, &layout, "fs_mask_coverage", None, false, true),
+                compositor_pipeline(
+                    d,
+                    &module,
+                    &layout,
+                    "fs_cached_mask",
+                    Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    false,
+                    false,
+                ),
+            ));
+        }
+        out
+    }
+
     fn execute(&mut self, mut plan: Plan, restore: usize, snapshot_at: Option<usize>, hashes: &[u64]) -> RenderStats {
         let d = self.gpu.device.clone();
-        // the frame's storage buffers persist across frames; the bind group only when none grew
+        // Each draw binds one aligned record, making all its parameters uniform
+        // across fragments without changing the draw's geometry or arithmetic.
+        let (draw_bytes, draw_stride) = pack_draw_uniforms(&plan.draws, d.limits().min_uniform_buffer_offset_alignment);
+        // the frame's buffers persist across frames; the bind group only when none grew
         let (bg0, verts, paints, stops) = {
             let (mut draws, mut masks, mut edges, mut paints, mut stops, mut verts, old) = match self.frame_bufs.take()
             {
@@ -3257,12 +3456,12 @@ impl Renderer {
                 ),
                 None => (None, None, None, None, None, None, None),
             };
-            let mut grew = self.upload(&mut draws, &plan.draws, "draws");
-            grew |= self.upload(&mut masks, &plan.masks, "masks");
-            grew |= self.upload(&mut edges, &plan.edges, "edges");
-            grew |= self.upload(&mut paints, &plan.paints.paints, "paints");
-            grew |= self.upload(&mut stops, &plan.paints.stops, "stops");
-            self.upload(&mut verts, &plan.verts, "vertices");
+            let mut grew = self.upload(&mut draws, &draw_bytes, "draws", wgpu::BufferUsages::UNIFORM);
+            grew |= self.upload(&mut masks, &plan.masks, "masks", wgpu::BufferUsages::STORAGE);
+            grew |= self.upload(&mut edges, &plan.edges, "edges", wgpu::BufferUsages::STORAGE);
+            grew |= self.upload(&mut paints, &plan.paints.paints, "paints", wgpu::BufferUsages::STORAGE);
+            grew |= self.upload(&mut stops, &plan.paints.stops, "stops", wgpu::BufferUsages::STORAGE);
+            self.upload(&mut verts, &plan.verts, "vertices", wgpu::BufferUsages::VERTEX);
             let (draws, masks, edges, paints, stops, verts) = (
                 draws.expect("allocated"),
                 masks.expect("allocated"),
@@ -3277,7 +3476,14 @@ impl Renderer {
                     label: Some("frame"),
                     layout: &self.bgl0,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: draws.buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &draws.buf,
+                                offset: 0,
+                                size: std::num::NonZeroU64::new(std::mem::size_of::<Draw>() as u64),
+                            }),
+                        },
                         wgpu::BindGroupEntry { binding: 1, resource: masks.buf.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 2, resource: edges.buf.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: paints.buf.as_entire_binding() },
@@ -3369,12 +3575,44 @@ impl Renderer {
         for gj in &plan.gens {
             let mut pass = clear_pass(&mut enc, &gj.target, true);
             pass.set_pipeline(&self.generator);
-            pass.set_bind_group(0, &bg0, &[]);
+            pass.set_bind_group(0, &bg0, &[0]);
             pass.set_bind_group(1, &self.dummy.bind, &[]);
             pass.set_bind_group(2, &dummy_pair, &[]);
             pass.set_bind_group(3, &gj.bind, &[]);
             pass.draw(0..3, 0..1);
             plan.stats.targets += 1;
+        }
+        let coverage = self.prepare_mask_coverage(&mut plan);
+        for job in &plan.jobs {
+            for c in &job.cmds {
+                let Some((view, true)) = coverage.get(&c.draw) else {
+                    continue;
+                };
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("mask coverage"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.mask_coverage_pipelines.as_ref().expect("coverage pipelines").0);
+                pass.set_vertex_buffer(0, verts.slice(..));
+                pass.set_bind_group(0, &bg0, &[c.draw * draw_stride]);
+                pass.set_bind_group(1, &self.dummy.bind, &[]);
+                pass.set_bind_group(2, &dummy_pair, &[]);
+                pass.set_bind_group(3, &dummy_gen, &[]);
+                pass.draw(c.first_vertex..c.first_vertex + c.count, c.draw..c.draw + 1);
+                plan.stats.targets += 1;
+            }
         }
         let jobs = std::mem::take(&mut plan.jobs);
         let mut scratch: HashMap<[u32; 2], Arc<Tex>> = HashMap::new();
@@ -3431,7 +3669,13 @@ impl Renderer {
                         eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view);
                     }
                 }
-                if let Some(b) = job.cmds[i].backdrop {
+                let j = compositor_batch_end(job.cmds.len(), i, snapshot_at.filter(|_| job.root), |k| {
+                    (job.cmds[k].backdrop, job.cmds[k].pre.is_some())
+                });
+                // Disjoint backdrop reads see the same pixels before this batch
+                // as immediately before their draw. Copy them first, then keep
+                // every draw in its original order within one render pass.
+                for b in job.cmds[i..j].iter().filter_map(|c| c.backdrop) {
                     if clear {
                         drop(clear_pass(&mut enc, &job.target, true));
                         clear = false;
@@ -3443,17 +3687,12 @@ impl Renderer {
                     Self::copy(&mut enc, &job.target, &s, b);
                     plan.stats.backdrop_copies += 1;
                 }
-                let mut j = i + 1;
-                while j < job.cmds.len()
-                    && job.cmds[j].backdrop.is_none()
-                    && job.cmds[j].pre.is_none()
-                    && !(job.root && snapshot_at == Some(j))
-                {
-                    j += 1;
-                }
                 let groups: Vec<Option<wgpu::BindGroup>> = job.cmds[i..j]
                     .iter()
                     .map(|c| match (&c.backdrop, &c.matte) {
+                        (None, None) if coverage.contains_key(&c.draw) => {
+                            Some(pair(&self.dummy.view, &coverage[&c.draw].0))
+                        }
                         (None, None) => None,
                         (bd, mt) => {
                             let (bk, back) = match bd {
@@ -3474,18 +3713,44 @@ impl Renderer {
                 {
                     let mut pass = clear_pass(&mut enc, &job.target, clear);
                     pass.set_vertex_buffer(0, verts.slice(..));
-                    pass.set_bind_group(0, &bg0, &[]);
+                    pass.set_bind_group(0, &bg0, &[0]);
                     pass.set_bind_group(3, &dummy_gen, &[]);
                     for (k, c) in job.cmds[i..j].iter().enumerate() {
-                        pass.set_pipeline(if c.backdrop.is_some() {
-                            &self.blend
-                        } else if plan.draws[c.draw as usize].blend == BLEND_UNDER {
-                            &self.under
-                        } else if fixed_function_blend(plan.draws[c.draw as usize].blend) {
-                            &self.additive
+                        let draw = &plan.draws[c.draw as usize];
+                        let ellipse = draw.mask_count == 1
+                            && plan.masks.get(draw.mask_off as usize).is_some_and(|m| m.kind == 1 && m.feather > 0.0);
+                        let variant = if ellipse {
+                            4
+                        } else if draw.mask_count == 0
+                            && draw.blend != 1
+                            && draw.flags == flag::EDGE
+                            && draw.src_kind == src::TEXTURE
+                        {
+                            3
+                        } else if draw.flags != 0 || draw.mask_count != 0 || draw.blend == 1 {
+                            0
+                        } else if draw.src_kind == src::TEXTURE {
+                            1
+                        } else if draw.src_kind == src::SOLID
+                            || (draw.src_kind == src::PAINT
+                                && plan.paints.paints.get(draw.paint as usize).is_some_and(|p| p.kind == 0))
+                        {
+                            2
                         } else {
-                            &self.over
+                            0
+                        };
+                        pass.set_pipeline(if coverage.contains_key(&c.draw) {
+                            &self.mask_coverage_pipelines.as_ref().expect("coverage pipelines").1
+                        } else if c.backdrop.is_some() {
+                            &self.blend[ellipse as usize]
+                        } else if draw.blend == BLEND_UNDER {
+                            &self.under[variant]
+                        } else if fixed_function_blend(draw.blend) {
+                            &self.additive[variant]
+                        } else {
+                            &self.over[variant]
                         });
+                        pass.set_bind_group(0, &bg0, &[c.draw * draw_stride]);
                         pass.set_bind_group(1, &c.src.bind, &[]);
                         pass.set_bind_group(2, groups[k].as_ref().unwrap_or(&dummy_pair), &[]);
                         pass.draw(c.first_vertex..c.first_vertex + c.count, c.draw..c.draw + 1);
@@ -3674,5 +3939,227 @@ impl SubSource for SubFrames<'_> {
         let s = Arc::new(SubGraph { g, kids, index, elements, el });
         self.cache.borrow_mut().insert(key, s.clone());
         s
+    }
+}
+
+fn compositor_batch_end(
+    len: usize,
+    start: usize,
+    snapshot: Option<usize>,
+    info: impl Fn(usize) -> (Option<[u32; 4]>, bool),
+) -> usize {
+    let mut end = start + 1;
+    while end < len && Some(end) != snapshot {
+        let (backdrop, pre) = info(end);
+        if pre {
+            break;
+        }
+        if let Some(b) = backdrop {
+            // Bound the pairwise checks for scenes with thousands of tiny,
+            // mutually disjoint draws. Normal-only runs remain unrestricted.
+            if end - start >= 64 {
+                break;
+            }
+            // Backdrop rectangles conservatively contain all pixels written by
+            // their draw. Normal draws have no recorded bounds, so treat them
+            // as barriers to subsequent backdrop reads.
+            let independent = (start..end)
+                .all(|i| info(i).0.is_some_and(|a| a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]));
+            if !independent {
+                break;
+            }
+        }
+        end += 1;
+    }
+    end
+}
+
+// Frame indices intentionally differ: reuse is based on complete decoded content,
+// never a hash that could alias different samples.
+fn same_video_pixels(a: &sr_media::VideoFrame, b: &sr_media::VideoFrame) -> bool {
+    a.width == b.width
+        && a.height == b.height
+        && a.layout == b.layout
+        && a.planes.len() == b.planes.len()
+        && a.planes.iter().zip(&b.planes).all(|(a, b)| a.width == b.width && a.height == b.height && a.data == b.data)
+}
+
+fn pack_draw_uniforms(draws: &[Draw], alignment: u32) -> (Vec<u8>, u32) {
+    let size = std::mem::size_of::<Draw>();
+    let stride = (size as u32).div_ceil(alignment) * alignment;
+    // Generators and empty jobs still bind the frame group, so keep a dummy record.
+    let mut bytes = vec![0; draws.len().max(1) * stride as usize];
+    for (draw, record) in draws.iter().zip(bytes.chunks_exact_mut(stride as usize)) {
+        record[..size].copy_from_slice(bytemuck::bytes_of(draw));
+    }
+    (bytes, stride)
+}
+
+#[cfg(test)]
+mod draw_uniform_tests {
+    use super::*;
+
+    #[test]
+    fn mask_coverage_budget_counts_all_images_used_in_the_current_frame() {
+        let gpu = match Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let cache_supported = gpu.scalar_target == wgpu::TextureFormat::R32Float;
+        let document = sr_model::load_str(
+            r#"<scene version="1.1"><project width="32" height="32" fps="10" duration="1"/><composition/></scene>"#,
+            &sr_model::LoadOptions::default(),
+        )
+        .unwrap();
+        let evaluator = sr_eval::Evaluator::new(&document, &sr_eval::EvalOptions::default()).unwrap();
+        let mut renderer = Renderer::new(gpu.clone(), evaluator.program());
+        renderer.mask_coverage_budget = 2 * 32 * 32 * 4;
+        let target = Arc::new(resources::create(&gpu.device, &renderer.bgl1, [32, 32], 1, "coverage budget test"));
+        let mut plan = Plan { verts: vec![Vertex::default(); 6], ..Default::default() };
+        let mut commands = Vec::new();
+        for i in 0..80 {
+            plan.masks.push(Mask { kind: 1, feather: 2.0, rect: [i as f32, 0.0, 20.0, 20.0], ..Default::default() });
+            plan.draws.push(Draw { mask_count: 1, mask_off: i, ..Default::default() });
+            commands.push(Cmd {
+                draw: i,
+                first_vertex: 0,
+                count: 6,
+                src: target.clone(),
+                backdrop: None,
+                matte: None,
+                hash: 0,
+                pre: None,
+            });
+        }
+        plan.jobs.push(Job::draws(target, true, commands, true));
+        assert!(renderer.prepare_mask_coverage(&mut plan).is_empty());
+        renderer.cache_frame += 1;
+        let prepared = renderer.prepare_mask_coverage(&mut plan);
+        if !cache_supported {
+            assert!(prepared.is_empty());
+            assert!(renderer.mask_coverage.is_empty());
+            return;
+        }
+        assert_eq!(prepared.len(), 2, "in-flight images must also fit the cache budget");
+        assert!(renderer.mask_coverage.len() <= 64);
+        assert!(renderer.mask_coverage.values().map(|e| e.bytes).sum::<u64>() <= renderer.mask_coverage_budget);
+        drop(prepared);
+        renderer.cache_frame += 1;
+        plan.masks[0].opacity = 0.75;
+        plan.masks[1].feather = 3.0;
+        let changed = renderer.prepare_mask_coverage(&mut plan);
+        assert!(!changed.contains_key(&0), "changed opacity must invalidate coverage");
+        assert!(!changed.contains_key(&1), "changed feather must invalidate coverage");
+        drop(changed);
+        renderer.cache_frame += 1;
+        plan.verts[0].local[0] = 1.0;
+        assert!(renderer.prepare_mask_coverage(&mut plan).is_empty(), "changed geometry must invalidate every draw");
+        renderer.cache_frame += CACHE_KEEP + 1;
+        renderer.prepare_mask_coverage(&mut Plan::default());
+        assert!(renderer.mask_coverage.is_empty(), "unused candidates and images must expire");
+        renderer.gpu.scalar_target = wgpu::TextureFormat::R16Float;
+        assert!(renderer.prepare_mask_coverage(&mut plan).is_empty(), "never cache at reduced precision");
+        assert!(renderer.mask_coverage.is_empty());
+    }
+
+    #[test]
+    fn cached_mask_coverage_preserves_pixels_across_opacity_and_geometry_changes() {
+        let gpu = match Gpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let cache_supported = gpu.scalar_target == wgpu::TextureFormat::R32Float;
+        let document = sr_model::load_str(r##"<scene version="1.1">
+            <project width="127" height="97" fps="10" duration="3" background="#173546"/>
+            <assets><generator id="g" kind="checkerboard" width="96" height="80" scale="7" paint="#CA459180" paint2="#439AE0"/></assets>
+            <composition><layer id="a" asset="g" x="9.3" y="3.7" rotation="17">
+              <mask type="ellipse" x="1.2" y="0.7" width="88.1" height="73.7" feather="3.17" expansion="0.23" invert="true" opacity="0.81"/>
+              <animate property="opacity"><key time="0" value="0.2"/><key time="3" value="0.9"/></animate>
+              <animate property="rotation"><key time="0" value="17"/><key time="1" value="17"/><key time="2" value="32"/></animate>
+            </layer></composition></scene>"##, &sr_model::LoadOptions::default()).unwrap();
+        let evaluator = sr_eval::Evaluator::new(&document, &sr_eval::EvalOptions::default()).unwrap();
+        let mut cached = Renderer::new(gpu.clone(), evaluator.program());
+        let mut reference = Renderer::new(gpu, evaluator.program());
+        reference.mask_coverage_budget = 0;
+        for time in [0.0, 0.1, 0.2, 1.5, 1.6, 0.3] {
+            let graph = evaluator.evaluate(time);
+            let a = cached.render(&graph, evaluator.program());
+            let a = cached.read(&a.texture);
+            let b = reference.render(&graph, evaluator.program());
+            let b = reference.read(&b.texture);
+            assert_eq!(a, b, "coverage cache at {time}");
+            if time == 0.2 {
+                assert_eq!(
+                    cached.mask_coverage.values().filter(|e| e.view.is_some()).count(),
+                    usize::from(cache_supported),
+                    "stable coverage should be cached only at full precision"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compositor_batches_disjoint_backdrops_without_crossing_dependencies() {
+        let a = Some([0, 0, 10, 10]);
+        let b = Some([10, 0, 20, 10]);
+        let overlap = Some([5, 5, 15, 15]);
+        let c = Some([0, 10, 10, 20]);
+        let batch =
+            |items: &[(Option<[u32; 4]>, bool)], snapshot| compositor_batch_end(items.len(), 0, snapshot, |i| items[i]);
+        assert_eq!(batch(&[(a, false), (b, false), (c, false)], None), 3);
+        assert_eq!(batch(&[(a, false), (b, false), (overlap, false)], None), 2);
+        // A normal draw may overlap any later backdrop: keep the existing barrier.
+        assert_eq!(batch(&[(None, false), (b, false)], None), 1);
+        assert_eq!(batch(&[(a, false), (None, false), (b, false)], None), 2);
+        assert_eq!(batch(&[(a, false), (b, true)], None), 1);
+        assert_eq!(batch(&[(a, false), (b, false), (c, false)], Some(2)), 2);
+        assert_eq!(batch(&[(None, false), (None, false)], None), 2);
+    }
+
+    #[test]
+    fn compositor_dependency_checks_stay_bounded_for_many_disjoint_draws() {
+        let count = 1_000;
+        let reads = std::cell::Cell::new(0);
+        let mut start = 0;
+        while start < count {
+            let end = compositor_batch_end(count, start, None, |i| {
+                reads.set(reads.get() + 1);
+                let x = i as u32 * 4;
+                (Some([x, 0, x + 2, 2]), false)
+            });
+            assert!(end > start && end <= count);
+            start = end;
+        }
+        assert!(reads.get() < 64 * count, "{} dependency reads for {count} draws", reads.get());
+    }
+
+    #[test]
+    fn draw_uniform_records_respect_device_alignment_and_keep_all_fields() {
+        let draws = [
+            Draw { color: [0.1, 0.2, 0.3, 0.4], opacity: 0.75, mask_off: 7, blend: 5, ..Default::default() },
+            Draw { box_rect: [-3.0, 4.0, 9.0, 8.0], seed: u32::MAX, flags: 8, ..Default::default() },
+        ];
+        let size = std::mem::size_of::<Draw>();
+        for alignment in [16, 64, 256, 512] {
+            let (bytes, stride) = pack_draw_uniforms(&draws, alignment);
+            assert_eq!(stride % alignment, 0);
+            assert!(stride as usize >= size);
+            assert_eq!(bytes.len(), 2 * stride as usize);
+            for (index, draw) in draws.iter().enumerate() {
+                let at = index * stride as usize;
+                assert_eq!(&bytes[at..at + size], bytemuck::bytes_of(draw));
+                assert!(bytes[at + size..at + stride as usize].iter().all(|b| *b == 0));
+            }
+            let (empty, empty_stride) = pack_draw_uniforms(&[], alignment);
+            assert_eq!(empty_stride, stride);
+            assert_eq!(empty.len(), stride as usize);
+            assert!(empty.iter().all(|b| *b == 0));
+        }
     }
 }

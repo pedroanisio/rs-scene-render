@@ -1,6 +1,32 @@
 // Effect, transition and finishing passes. Every pass draws a full-screen
 // triangle into its output; inputs are premultiplied working-space RGBA.
-// fx.i.w is the working storage transfer id + 1 (0: linear storage).
+// fx_transfer() is the working storage transfer id + 1 (0: linear storage).
+
+// Sentinel defaults keep the general shader available as an output oracle.
+override FX_OP: u32 = 0xffffffffu;
+override FX_TRANSFER: u32 = 0xffffffffu;
+override FUSED_0: u32 = 0xffffffffu;
+override FUSED_1: u32 = 0xffffffffu;
+override FUSED_2: u32 = 0xffffffffu;
+override FUSED_3: u32 = 0xffffffffu;
+fn fx_op() -> u32 {
+    if (FX_OP == 0xffffffffu) { return fx.i.x; }
+    return FX_OP;
+}
+fn fx_transfer() -> u32 {
+    if (FX_TRANSFER == 0xffffffffu) { return fx.i.w; }
+    return FX_TRANSFER;
+}
+fn fused_step(s: vec4<f32>, in: VOut, k: u32, code: u32) -> vec4<f32> {
+    for (var j = 0u; j < 8u; j++) { gv[j] = fx.x[k * 8u + j]; }
+    gop = code;
+    gseed = fx.ops[k].yz;
+    return color_step(s, in.uv, in.uv * dims(), dims());
+}
+fn fused_op(k: u32, code: u32) -> u32 {
+    if (code == 0xffffffffu) { return fx.ops[k].x; }
+    return code;
+}
 
 struct Fx {
     v: array<vec4<f32>, 8>,
@@ -28,14 +54,16 @@ var<private> gseed: vec2<u32>;
 struct VOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) sample: u32,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
+fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance: u32) -> VOut {
     var o: VOut;
     let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
     o.pos = vec4(p * 2.0 - 1.0, 0.0, 1.0);
     o.uv = vec2(p.x, 1.0 - p.y);
+    o.sample = instance;
     return o;
 }
 
@@ -82,12 +110,12 @@ fn Wt(uv: vec2<f32>) -> vec4<f32> {
 
 fn unpre(c: vec4<f32>) -> vec3<f32> { return select(vec3(0.0), c.rgb / c.a, c.a > 1e-6); }
 fn lin(c: vec3<f32>) -> vec3<f32> {
-    if (fx.i.w == 0u) { return c; }
-    return tf_decode3(fx.i.w - 1u, c);
+    if (fx_transfer() == 0u) { return c; }
+    return tf_decode3(fx_transfer() - 1u, c);
 }
 fn stored(c: vec3<f32>) -> vec3<f32> {
-    if (fx.i.w == 0u) { return c; }
-    return tf_encode3(fx.i.w - 1u, c);
+    if (fx_transfer() == 0u) { return c; }
+    return tf_encode3(fx_transfer() - 1u, c);
 }
 fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 fn enc(c: vec3<f32>) -> vec3<f32> { return tf_encode3(1u, max(c, vec3(0.0))); }
@@ -184,7 +212,7 @@ fn fs_up(in: VOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_pre(in: VOut) -> @location(0) vec4<f32> {
     let c = S(in.uv);
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: {
             let l = luma(lin(unpre(c)));
             let th = fx.v[0].x;
@@ -214,7 +242,7 @@ fn fs_combine(in: VOut) -> @location(0) vec4<f32> {
     let s = S(in.uv);
     let p = A(in.uv);
     let k = fx.v[0].x;
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: { return mix(s, p, k); }
         case 1u: { return vec4(s.rgb + p.rgb * k * fx.v[1].rgb, max(s.a, min(1.0, s.a + p.a * k))); }
         case 2u: { let q = p * k; return s + q * (1.0 - s.a); }
@@ -238,6 +266,16 @@ fn fs_combine(in: VOut) -> @location(0) vec4<f32> {
             let at = vec2(m.x * q.x + m.z * q.y + fx.v[2].x, m.y * q.x + m.w * q.y + fx.v[2].y);
             let uv = at / vec2<f32>(textureDimensions(aux));
             return select(vec4(0.0), A(uv), in_unit(uv)) * k;
+        }
+        case 10u: {
+            // Each instance contributes one rigid-motion sample. The fixed
+            // function blender retains the original per-sample RGBA16F rounding.
+            let m = fx.x[2u * in.sample];
+            let offset = fx.x[2u * in.sample + 1u];
+            let q = in.pos.xy;
+            let at = vec2(m.x * q.x + m.z * q.y + offset.x, m.y * q.x + m.w * q.y + offset.y);
+            let uv = at / vec2<f32>(textureDimensions(aux));
+            return select(vec4(0.0), A(uv), in_unit(uv)) * offset.z;
         }
         default: { return s; }
     }
@@ -503,24 +541,28 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
     let d = dims();
     let px = in.uv * d;
     let v = fx.v;
-    if (fx.i.x == 90u) {
+    if (fx_op() == 90u) {
         // fused: each operation in turn, the pixel kept in registers between them
         var o = s;
-        for (var k = 0u; k < 4u; k++) {
-            let op = fx.ops[k];
-            if (op.x == 0u) { break; }
-            for (var j = 0u; j < 8u; j++) { gv[j] = fx.x[k * 8u + j]; }
-            gop = op.x;
-            gseed = op.yz;
-            o = color_step(o, in.uv, px, d);
-        }
+        let op0 = fused_op(0u, FUSED_0);
+        if (op0 == 0u) { return o; }
+        o = fused_step(o, in, 0u, op0);
+        let op1 = fused_op(1u, FUSED_1);
+        if (op1 == 0u) { return o; }
+        o = fused_step(o, in, 1u, op1);
+        let op2 = fused_op(2u, FUSED_2);
+        if (op2 == 0u) { return o; }
+        o = fused_step(o, in, 2u, op2);
+        let op3 = fused_op(3u, FUSED_3);
+        if (op3 == 0u) { return o; }
+        o = fused_step(o, in, 3u, op3);
         return o;
     }
     gv = fx.v;
-    gop = fx.i.x;
+    gop = fx_op();
     gseed = vec2(fx.i.y, fx.i.z);
-    if (fx.i.x <= 64u) { return color_step(s, in.uv, px, d); }
-    switch fx.i.x {
+    if (fx_op() <= 64u) { return color_step(s, in.uv, px, d); }
+    switch fx_op() {
         case 75u: { return vec4(grain_draws(px), 1.0); } // film grain's field, before its blur
         case 76u: { // glitch, rows and blocks: v0 amount px, row height, block weight, blocks; v1 frame, rows
             let seed = vec2(fx.i.y, fx.i.z);
@@ -655,7 +697,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
     let c = v[2].xy;
     let asp = vec2(d.x / d.y, 1.0);
     let t = v[7].x;
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: { // displacement map: v0.x amount px (horizontal from red, vertical from green)
             let m = A(in.uv);
             let o = (unpre(m).rg - 0.5) * 2.0 * v[0].x * m.a;
@@ -694,7 +736,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             let r = length(p) / max(v[0].y, 1.0);
             if (r < 1.0) {
                 var k = 0.0;
-                if (fx.i.x == 5u) { k = mix(r, asin(r) * 2.0 / PI, v[0].x) / max(r, 1e-4); }
+                if (fx_op() == 5u) { k = mix(r, asin(r) * 2.0 / PI, v[0].x) / max(r, 1e-4); }
                 else { k = pow(r, v[0].x) / max(r, 1e-4); k = select(k, 1.0, r < 1e-4); }
                 uv = c + p * k / d;
             }
@@ -795,7 +837,7 @@ fn fs_line(in: VOut) -> @location(0) vec4<f32> {
     let c = v[2].xy;
     var acc = vec4(0.0);
     var wsum = 0.0;
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: {
             for (var k = 0; k < n; k++) {
                 let t = (f32(k) + 0.5) / f32(n) - 0.5;
@@ -852,7 +894,7 @@ fn fs_bokeh(in: VOut) -> @location(0) vec4<f32> {
     let d = dims();
     let v = fx.v;
     var r = v[0].x;
-    if (fx.i.x == 1u) {
+    if (fx_op() == 1u) {
         let a = v[2].z;
         let dn = abs(dot(in.uv - vec2(0.5, v[2].x), vec2(-sin(a), cos(a))));
         r = r * smoothstep(v[2].y, v[2].y + 0.25, dn);
@@ -897,7 +939,7 @@ fn fs_conv(in: VOut) -> @location(0) vec4<f32> {
     let t = 1.0 / d;
     let v = fx.v;
     let s = S(in.uv);
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: {
             let n = S(in.uv + vec2(0.0, -t.y)) + S(in.uv + vec2(0.0, t.y)) + S(in.uv + vec2(-t.x, 0.0)) + S(in.uv + vec2(t.x, 0.0));
             return max(s + (s * 4.0 - n) * v[0].x * 0.25, vec4(0.0));
@@ -916,14 +958,14 @@ fn fs_conv(in: VOut) -> @location(0) vec4<f32> {
             let hu = Sz(in.uv - vec2(0.0, t.y * k)).a;
             let hd = Sz(in.uv + vec2(0.0, t.y * k)).a;
             var h = vec2(hr - hl, hd - hu);
-            if (fx.i.x == 3u) {
+            if (fx_op() == 3u) {
                 let l0 = luma(unpre(S(in.uv)));
                 let lx = luma(unpre(S(in.uv + vec2(t.x, 0.0))));
                 let ly = luma(unpre(S(in.uv + vec2(0.0, t.y))));
                 h = vec2(lx - l0, ly - l0) * v[0].y * 20.0;
             }
             let nrm = normalize(vec3(-h * 2.0, 1.0));
-            if (fx.i.x == 2u) {
+            if (fx_op() == 2u) {
                 let l = normalize(vec3(cos(v[0].x), sin(v[0].x), 0.7));
                 let dd = dot(nrm, l) - l.z;
                 let add = dd * v[0].z;
@@ -1033,7 +1075,7 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let d = dims();
     let v = fx.v;
     let p = vec2<i32>(in.pos.xy);
-    if (fx.i.x == 3u) {
+    if (fx_op() == 3u) {
         let own = morph_alpha(p);
         var m = Morph(own, vec2(0), own, vec2(0));
         let reach = i32(ceil(v[2].x));
@@ -1045,7 +1087,7 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
         }
         return vec4(vec2<f32>(m.at_mx), vec2<f32>(m.at_mn));
     }
-    if (fx.i.x == 4u) {
+    if (fx_op() == 4u) {
         let m = morph_wide(p, v[2].w);
         return vec4(vec2<f32>(m.at_mx), vec2<f32>(m.at_mn));
     }
@@ -1070,7 +1112,7 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
             }
         }
     }
-    if (fx.i.x == 0u) {
+    if (fx_op() == 0u) {
         let na = select(mx, mn, v[0].y > 0.5);
         let f = select(0.0, na / s.a, s.a > 1e-5);
         return select(vec4(unpre(s) * na, na), s * f, s.a > 1e-5 && v[0].y > 0.5);
@@ -1081,7 +1123,7 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     else if (pos == 1u) { ring = clamp(s.a - mn, 0.0, 1.0); }
     else { ring = clamp(mx - mn, 0.0, 1.0); }
     let col = vec4(v[1].rgb, 1.0) * v[1].a * ring;
-    if (fx.i.x == 2u) { return col; }
+    if (fx_op() == 2u) { return col; }
     if (pos == 0u) { return s + col * (1.0 - s.a); }
     return col + s * (1.0 - col.a);
 }
@@ -1097,7 +1139,7 @@ const FAR: f32 = 16384.0;
 fn fs_jfa(in: VOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(src));
     let p = vec2<i32>(in.pos.xy);
-    if (fx.i.x == 0u) {
+    if (fx_op() == 0u) {
         let a = textureLoad(src, p, 0).a;
         return select(vec4(FAR, FAR, 0.0, 0.0), vec4(0.0, 0.0, FAR, FAR), a >= 0.5);
     }
@@ -1352,7 +1394,7 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
     let asp = d.x / d.y;
     let dir = dir_vec();
     let col = vec4(fx.v[1].rgb, 1.0) * fx.v[1].a;
-    switch fx.i.x {
+    switch fx_op() {
         case 0u: { return select(F(uv), T(uv), p >= 0.5); }                       // cut
         case 1u: { return mix(F(uv), T(uv), p); }                                  // crossfade
         case 2u: { return min(F(uv) * min(1.0, 2.0 * (1.0 - p)) + T(uv) * min(1.0, 2.0 * p), vec4(1.0)); } // additive dissolve
@@ -1365,8 +1407,8 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             let q = uv * fdims();
             let bl = fx.v[4].x;
             let e = fx.v[4].y;
-            if (fx.i.x == 6u) { return over(moved(aux, q, dir * e * (p - 1.0), bl, dir), moved(src, q, dir * e * p, bl, dir)); }
-            if (fx.i.x == 8u) { return over(moved(src, q, dir * e * p, bl, dir), bil(aux, q)); }
+            if (fx_op() == 6u) { return over(moved(aux, q, dir * e * (p - 1.0), bl, dir), moved(src, q, dir * e * p, bl, dir)); }
+            if (fx_op() == 8u) { return over(moved(src, q, dir * e * p, bl, dir), bil(aux, q)); }
             return over(moved(aux, q, dir * e * (p - 1.0), bl, dir), bil(src, q));
         }
         case 9u, 10u: { // zoom in / out: v4 centre, ka, kb; v5 m, wa
@@ -1438,7 +1480,7 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
                 if ((fl & (1u << u32(idx))) == 0u) { continue; }
                 let pl = select(fx.v[4], fx.v[5], idx == 1);
                 let shade = select(fx.v[6].x, fx.v[6].y, idx == 1);
-                let is_b = select(idx == 1, (fl & 8u) != 0u, fx.i.x == 24u);
+                let is_b = select(idx == 1, (fl & 8u) != 0u, fx_op() == 24u);
                 var c: vec4<f32>;
                 if (is_b) { c = plane_px(aux, q, pl, wh, fx.v[6].z, tr, shade); } else { c = plane_px(src, q, pl, wh, fx.v[6].z, tr, shade); }
                 acc = over(c, acc);
