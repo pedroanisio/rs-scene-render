@@ -365,6 +365,25 @@ fn preset_rank(p: &str) -> usize {
         .unwrap_or(5)
 }
 
+/// The arguments that follow `-c:a CODEC`: the bitrate of a compressed stream and, for FFmpeg's own AAC
+/// encoder, neither perceptual noise substitution nor temporal noise shaping. With them the encoder
+/// codes single frames far from the signal, heard as clicks: a mix mastered to a true peak of −2 dB came
+/// out 5 dB over it in one channel for a frame. Measured with FFmpeg 8.1 at 192 kb/s on the mixes of
+/// eight films, in 20 ms windows where the decoded stream departs from the mix by more than 0.15 of full
+/// scale: 4 to 13 windows a film with both tools on (departures up to 1.4), at most 2 with noise
+/// substitution off (up to 0.22), none with both off (up to 0.14). The overall error is no higher
+/// without them. Noise substitution does the same damage at 256 and 320 kb/s.
+fn compressed_audio_args(codec: &str, bitrate: u64) -> Vec<String> {
+    if codec.starts_with("pcm") {
+        return Vec::new();
+    }
+    let mut a = vec!["-b:a".to_string(), bitrate.to_string()];
+    if codec == "aac" {
+        a.extend(["-aac_pns", "0", "-aac_tns", "0"].map(String::from));
+    }
+    a
+}
+
 impl EncodeSpec {
     /// The container in use (explicit, from the extension, or the codec default).
     pub fn container(&self) -> Option<Container> {
@@ -499,9 +518,7 @@ impl EncodeSpec {
                 codec
             };
             s(&mut a, &["-map", "0:a:0", "-c:a", &codec]);
-            if !codec.starts_with("pcm") {
-                s(&mut a, &["-b:a", &self.audio.as_ref().map(|x| x.2).unwrap_or(192000).to_string()]);
-            }
+            a.extend(compressed_audio_args(&codec, self.audio.as_ref().map(|x| x.2).unwrap_or(192000)));
             a.extend(map_chapters);
             self.tail(&mut a, container);
             return Ok((a, codec));
@@ -767,9 +784,7 @@ impl EncodeSpec {
         if let Some((_, codec, bitrate)) = audio {
             let codec = if container == Some(Container::Webm) && codec == "aac" { "libopus" } else { codec.as_str() };
             s(&mut a, &["-map", "1:a:0", "-c:a", codec]);
-            if !codec.starts_with("pcm") {
-                s(&mut a, &["-b:a", &bitrate.to_string()]);
-            }
+            a.extend(compressed_audio_args(codec, *bitrate));
             s(&mut a, &["-shortest"]);
         }
         if let Some((1, _)) = &self.pass {
@@ -823,9 +838,7 @@ impl EncodeSpec {
         if let Some((_, codec, bitrate)) = audio {
             let codec = if container == Some(Container::Webm) && codec == "aac" { "libopus" } else { codec.as_str() };
             a.extend(["-map".into(), "1:a:0".into(), "-c:a".into(), codec.into()]);
-            if !codec.starts_with("pcm") {
-                a.extend(["-b:a".into(), bitrate.to_string()]);
-            }
+            a.extend(compressed_audio_args(codec, *bitrate));
             a.push("-shortest".into());
         }
         a.extend(map_chapters);

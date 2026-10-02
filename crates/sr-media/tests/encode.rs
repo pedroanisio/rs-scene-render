@@ -412,3 +412,26 @@ fn staging_is_private_and_publication_preserves_permissions() {
         assert!(!stage.exists());
     }
 }
+
+#[test]
+fn ffmpegs_aac_encoder_runs_without_the_tools_that_click() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = dir();
+    let after_codec = |s: &EncodeSpec| {
+        let (args, _) = s.args().unwrap();
+        let at = args.iter().position(|a| a == "-c:a").unwrap();
+        args[at + 1..].iter().take_while(|a| *a != "-shortest" && !a.starts_with("-map")).cloned().collect::<Vec<_>>()
+    };
+    // muxed under a picture, and alone in an M4A file
+    let mut video = spec(&d.join("pns.mp4"), Codec::H264, InputFormat::Nv12);
+    video.audio = Some((d.join("pns.wav"), "aac".into(), 192_000));
+    assert_eq!(after_codec(&video)[..7], ["aac", "-b:a", "192000", "-aac_pns", "0", "-aac_tns", "0"]);
+    let mut alone = spec(&d.join("pns.m4a"), Codec::AudioOnly, InputFormat::Nv12);
+    alone.audio = Some((d.join("pns.wav"), "aac".into(), 128_000));
+    assert_eq!(after_codec(&alone)[..7], ["aac", "-b:a", "128000", "-aac_pns", "0", "-aac_tns", "0"]);
+    // the switches belong to that encoder alone
+    video.audio = Some((d.join("pns.wav"), "libopus".into(), 96_000));
+    assert!(!after_codec(&video).iter().any(|a| a.starts_with("-aac_")));
+}
