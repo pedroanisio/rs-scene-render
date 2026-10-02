@@ -374,3 +374,41 @@ fn caption_sidecars_are_written_next_to_outputs() {
     assert!(dir.join("cap/mix.sd.de.vtt").exists(), "sidecar-mode tracks are always written");
     assert!(r.files.iter().any(|f| f.ends_with("mix.cc.en.vtt")));
 }
+
+#[test]
+fn simulated_documents_render_in_segments_to_the_serial_frames() {
+    let Some(dir) = fixtures() else { return };
+    let Some(gpu) = gpu() else { return };
+    // Simulated state is a function of time replayed from its start, so a segment that begins partway
+    // through must show what the serial render shows there: particles alone, and bodies under gravity
+    // with particles.
+    let emitter = r##"<particleEmitter id="sparks" preset="sparks" x="32" y="18" seed="3"/>"##;
+    let body = r##"<shape id="ball" shape="ellipse" x="20" y="2" width="6" height="6" fill="#FFFFFF"><rigidBody velocityX="12"/></shape>"##;
+    for (what, physics, content) in
+        [("particles", "", emitter.to_string()), ("bodies and particles", "<physics/>", format!("{body}{emitter}"))]
+    {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="36" fps="25" duration="2" background="#000000"/>
+          <composition>{content}</composition>{physics}</scene>"##
+        );
+        let d = doc(&dir, &xml);
+        let mut frames = Vec::new();
+        for (name, workers) in [("serial", 1), ("segments", 2)] {
+            let path = dir.join(format!("out/sim-{name}.mkv"));
+            let o = sr_deliver::adhoc_output(&path.display().to_string(), "ffv1").unwrap();
+            let opts = sr_deliver::Options {
+                hardware: sr_media::encode::Hardware::Software,
+                parallel: sr_deliver::Parallel::Count(workers),
+                upload: false,
+                ..Default::default()
+            };
+            let r = sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {})
+                .unwrap_or_else(|e| panic!("{what}, {name}: {e}"));
+            assert_eq!((r.frames, r.segments), (50, workers), "{what}, {name}");
+            frames.push(framemd5(&path));
+        }
+        let lines: Vec<&str> = frames[0].lines().collect();
+        assert!(lines[5] != lines[45], "{what}: the picture must change over the range");
+        assert_eq!(frames[0], frames[1], "{what}: segments differ from the serial encode");
+    }
+}

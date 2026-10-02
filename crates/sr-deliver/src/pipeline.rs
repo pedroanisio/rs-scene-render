@@ -885,7 +885,7 @@ pub fn deliver(
         let workers = if gpu.is_software() && matches!(opts.parallel, Parallel::Auto) {
             1
         } else {
-            segment_count(output, codec, opts, &ev, end - start).min(n as usize)
+            segment_count(output, codec, opts, end - start).min(n as usize)
         };
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed
@@ -990,6 +990,14 @@ pub fn deliver(
                     .map(|gpu| {
                         sc.spawn(|| -> Result<(Report, String), DeliverError> {
                             let gpu = gpu.clone();
+                            // simulated state lives in the evaluator and is stepped in time order: a
+                            // worker of a simulated document evaluates with one of its own, which
+                            // replays the simulation up to each chunk it takes
+                            let own = match ev.has_simulation() {
+                                true => Some(Evaluator::new(doc, &eo).map_err(DeliverError::Document)?),
+                                false => None,
+                            };
+                            let ev = own.as_ref().unwrap_or(&ev);
                             let mut renderer = Renderer::new(gpu.clone(), p);
                             renderer.quality = opts.quality;
                             renderer.representation = representation.clone();
@@ -1008,7 +1016,7 @@ pub fn deliver(
                                 representation.as_deref(),
                             )?;
                             let mut worker = Video {
-                                ev: &ev,
+                                ev,
                                 renderer,
                                 stage,
                                 color,
@@ -1233,16 +1241,16 @@ pub fn deliver(
     Ok(report)
 }
 
-/// Segments to render `output` in at once: 1 unless it is a single-pass video file whose frames
-/// render the same from a cold start (no simulation). The accessibility checks compare frames across
-/// segments and do not limit the count: the segments' observations are judged together, in frame order.
-fn segment_count(output: &m::Output, codec: Codec, opts: &Options, ev: &Evaluator, duration: f64) -> usize {
+/// Segments to render `output` in at once: 1 unless it is a single-pass video file. A frame renders
+/// the same from a cold start: a simulation is replayed from its start by each segment's own
+/// evaluator. The accessibility checks compare frames across segments and do not limit the count:
+/// the segments' observations are judged together, in frame order.
+fn segment_count(output: &m::Output, codec: Codec, opts: &Options, duration: f64) -> usize {
     if output.two_pass
         || output.max_file_size.is_some()
         || codec.is_sequence()
         || codec.is_audio_only()
         || matches!(codec, Codec::Gif | Codec::Apng | Codec::Webp)
-        || ev.has_simulation()
     {
         return 1;
     }
