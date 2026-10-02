@@ -895,11 +895,8 @@ fn staged_output(path: &Path) -> std::io::Result<tempfile::TempPath> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut builder = tempfile::Builder::new();
     builder.prefix(".scene-render-");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(std::fs::Permissions::from_mode(0o666));
-    }
+    // Keep encoded bytes private until publication, including for new outputs.
+    // tempfile uses owner-only permissions; never relax them while FFmpeg writes.
     Ok(builder.tempfile_in(parent)?.into_temp_path())
 }
 

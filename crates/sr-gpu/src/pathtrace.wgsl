@@ -214,7 +214,7 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Hit {
     return h;
 }
 
-fn env_radiance(d: vec3<f32>) -> vec3<f32> {
+fn env_radiance(d: vec3<f32>, diffuse: vec3<f32>, specular: vec3<f32>) -> vec3<f32> {
     var c = vec3(0.0);
     if (pp.env.x > 0.5) {
         let r = normalize((pp.env_rot * vec4(d, 0.0)).xyz);
@@ -222,7 +222,13 @@ fn env_radiance(d: vec3<f32>) -> vec3<f32> {
         let v = acos(clamp(-r.y, -1.0, 1.0)) / PI;
         c = textureSampleLevel(env_tex, smp, vec2(u, v), 0.0).rgb * pp.env.y;
     }
-    return c + pp.ambient.rgb;
+    for (var li = 0u; li < u32(pp.ambient.w); li++) {
+        let light = plights[li];
+        if (light.pos.w != 0.0) { continue; }
+        let lobes = light_lobes(light);
+        c += light.color.rgb * (diffuse * lobes.x + specular * lobes.y);
+    }
+    return c;
 }
 
 // ---------------------------------------------------------------- BSDF (the rasteriser's lobes)
@@ -263,7 +269,12 @@ fn surf_of(m: Mat) -> Surf {
     return s;
 }
 
-fn bsdf(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
+fn light_lobes(light: PLight) -> vec2<f32> {
+    let flags = u32(light.right.w);
+    return vec2(f32(flags & 1u), f32((flags >> 1u) & 1u));
+}
+
+fn bsdf(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, lobes: vec2<f32>) -> vec3<f32> {
     let nl = dot(n, l);
     let nv = dot(n, v);
     if (nl <= 0.0 || nv <= 0.0) { return vec3(0.0); }
@@ -273,7 +284,7 @@ fn bsdf(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
     let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - vh, 5.0);
     let spec = f * d_ggx(nh, s.a) * v_smith(nl, nv, s.a) * s.specw;
     let kd = (vec3(1.0) - f) * (1.0 - s.metallic) * (1.0 - s.trans);
-    return kd * s.albedo / PI + spec;
+    return kd * s.albedo / PI * lobes.x + spec * lobes.y;
 }
 
 fn frame_of(n: vec3<f32>) -> mat3x3<f32> {
@@ -337,7 +348,7 @@ fn visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
                 opacity *= map_sample(m.maps[0],uv).a*vertex_alpha;
                 if (m.texture_params.y == 1.0) { opacity = select(0.0,1.0,opacity >= m.texture_params.x); }
             }
-            result *= 1.0-clamp(opacity,0.0,1.0);
+            if (m.extra.y > 0.5) { result *= 1.0-clamp(opacity,0.0,1.0); }
             if (result < 1e-5) { return 0.0; }
         }
         let advance = hit.t+1e-3;
@@ -428,6 +439,10 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         d=normalize(focus-o);
     }
     var thr = vec3(1.0);
+    // Fraction of the last scattering event carried by each BSDF lobe.
+    // This lets ambient lights select lobes without changing dome illumination.
+    var ambient_diffuse = vec3(0.5);
+    var ambient_specular = vec3(0.5);
     var col = vec3(0.0);
     var alpha = 0.0;
     var only_glass = true;
@@ -440,7 +455,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         if (hit.tri == 0xffffffffu) {
             if (met == 0u) {
                 // a primary miss: the pass is transparent there (the environment when visible)
-                if (pp.env.x > 1.5) { col += thr * env_radiance(d); alpha = 1.0; }
+                if (pp.env.x > 1.5) { col += thr * env_radiance(d, ambient_diffuse, ambient_specular); alpha = 1.0; }
                 break;
             }
             if (only_glass && pp.misc.x > 0.5) {
@@ -457,7 +472,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                     }
                 }
             }
-            col += thr * env_radiance(d);
+            col += thr * env_radiance(d, ambient_diffuse, ambient_specular);
             break;
         }
         let k = hit.tri;
@@ -526,6 +541,8 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         let v = -d;
         // dielectric transmission (smooth): Fresnel picks reflection or refraction
         if (s.trans > 0.0 && rnd() < s.trans) {
+            ambient_diffuse = vec3(0.0);
+            ambient_specular = vec3(1.0);
             let eta = select(s.ior, 1.0 / s.ior, entering);
             let cosi = clamp(dot(v, n), 0.0, 1.0);
             let r0 = (1.0 - eta) / (1.0 + eta);
@@ -556,8 +573,8 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             let rad = light_radiance(lt, l, ls.w);
             if (max(rad.r, max(rad.g, rad.b)) <= 0.0) { continue; }
             var visible = 1.0;
-            if (lt.size.y > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }
-            var c = thr * bsdf(s, n, v, l) * nl * rad * visible;
+            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }
+            var c = thr * bsdf(s, n, v, l, light_lobes(lt)) * nl * rad * visible;
             // clamp rare fireflies from indirect paths
             if (bounce > 0u) { c = min(c, vec3(20.0)); }
             col += c;
@@ -568,7 +585,12 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         let nl = dot(n, l);
         if (pdf <= 1e-8 || nl <= 0.0) { break; }
         let occlusion = 1.0 + m.texture_params.w * (map_sample(m.maps[3],uv[3]).r - 1.0);
-        thr *= bsdf(s, n, v, l) * nl / pdf * occlusion;
+        let diffuse = bsdf(s, n, v, l, vec2(1.0, 0.0));
+        let specular = bsdf(s, n, v, l, vec2(0.0, 1.0));
+        let total = diffuse + specular;
+        ambient_diffuse = diffuse / max(total, vec3(1e-20));
+        ambient_specular = specular / max(total, vec3(1e-20));
+        thr *= total * nl / pdf * occlusion;
         bounce += 1u;
         if (bounce > 2u) {
             let q = min(max(thr.r, max(thr.g, thr.b)), 0.95);

@@ -389,3 +389,26 @@ fn test_failed_segment_join_preserves_existing_output() {
     assert!(s.join(&[segment], &dir.path().join("segments.txt")).is_err());
     assert_eq!(std::fs::read(&output).unwrap(), b"previous render");
 }
+
+#[cfg(unix)]
+#[test]
+fn staging_is_private_and_publication_preserves_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for mode in [0o600, 0o640] {
+        let output = dir.path().join(format!("private-{mode}.mkv"));
+        std::fs::write(&output, b"old").unwrap();
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(mode)).unwrap();
+        let s = spec(&output, Codec::Ffv1, InputFormat::Rgba8);
+        let mut encoder = Encoder::start(&s).unwrap();
+        let stage = PathBuf::from(encoder.command.last().unwrap());
+        assert_eq!(std::fs::metadata(&stage).unwrap().permissions().mode() & 0o777, 0o600);
+        encoder.write(&frame(s.input, 0, 64, 36)).unwrap();
+        encoder.finish().unwrap();
+        assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o777, mode);
+        assert!(!stage.exists());
+    }
+}

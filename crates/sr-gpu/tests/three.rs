@@ -440,3 +440,62 @@ fn path_tracing_composites_gaussian_splats_in_depth_order() {
     assert_eq!(at(&pixels, 1, 1)[3], 0.0);
     assert!(sr_gpu::pathtrace::notes(&s).is_empty());
 }
+
+#[test]
+fn pathtrace_honors_object_shadow_flags() {
+    let Some(mut eng) = engine() else { return };
+    let receiver = draw(&eng, &prim::plane(110.0, 110.0, 1), Vec3::new(64.0, 64.0, 0.0), MaterialParams::default());
+    let occluder = draw(&eng, &prim::plane(20.0, 30.0, 1), Vec3::new(44.0, 64.0, -20.0), MaterialParams::default());
+    let mut s = scene(vec![receiver, occluder], vec![sun(Vec3::new(1.0, 0.0, 1.0), 5.0, true)]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let shadow = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.draws[1].cast_shadow = false;
+    let no_cast = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.draws[1].cast_shadow = true;
+    s.draws[0].receive_shadow = false;
+    let no_receive = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.draws.pop();
+    let reference = lum(at(&eng.render_now(&s, None), 64, 64));
+    assert!(reference > shadow + 1.0);
+    assert!((no_cast - reference).abs() < 0.01, "castShadow=false: {no_cast}, expected {reference}");
+    assert!((no_receive - reference).abs() < 0.01, "receiveShadow=false: {no_receive}, expected {reference}");
+}
+
+#[test]
+fn pathtrace_honors_light_lobe_flags() {
+    let Some(mut eng) = engine() else { return };
+    let receiver = draw(&eng, &prim::plane(110.0, 110.0, 1), Vec3::new(64.0, 64.0, 0.0), MaterialParams::default());
+    let mut s = scene(vec![receiver], vec![sun(Vec3::new(1.0, 0.0, 1.0), 5.0, false)]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    let full = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = false;
+    let diffuse = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = true;
+    s.lights[0].affects_diffuse = false;
+    let specular = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = false;
+    let disabled = lum(at(&eng.render_now(&s, None), 64, 64));
+    assert!(diffuse > 0.0 && specular > 0.0);
+    assert!(disabled < 1e-5, "disabled light contributes {disabled}");
+    assert!((full - diffuse - specular).abs() < 0.01, "full={full} diffuse={diffuse} specular={specular}");
+}
+
+#[test]
+fn pathtrace_honors_ambient_light_lobe_flags() {
+    let Some(mut eng) = engine() else { return };
+    let receiver = draw(&eng, &prim::plane(110.0, 110.0, 1), Vec3::new(64.0, 64.0, 0.0), MaterialParams::default());
+    let mut s = scene(vec![receiver], vec![sun(Vec3::new(1.0, 0.0, 1.0), 5.0, false)]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false });
+    s.lights[0].kind = LightKind::Ambient;
+    let full = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = false;
+    let diffuse = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = true;
+    s.lights[0].affects_diffuse = false;
+    let specular = lum(at(&eng.render_now(&s, None), 64, 64));
+    s.lights[0].affects_specular = false;
+    let disabled = lum(at(&eng.render_now(&s, None), 64, 64));
+    assert!(diffuse > 0.0 && specular > 0.0);
+    assert!(disabled < 1e-5, "disabled light contributes {disabled}");
+    assert!((full - diffuse - specular).abs() < 0.01, "full={full} diffuse={diffuse} specular={specular}");
+}

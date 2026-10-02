@@ -96,7 +96,6 @@ const TIME_EFFECTS: &[&str] = &["posterize-time", "echo", "pixel-motion-blur"];
 pub fn files(path: &Path, doc: &sr_model::Document) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     named(path, doc, &mut files, &mut vec![path.canonicalize().unwrap_or_else(|_| path.to_path_buf())])?;
-    transitive_assets(&mut files)?;
     files.sort();
     files.dedup();
     Ok(files)
@@ -110,30 +109,9 @@ pub fn effective_files(path: &Path, doc: &sr_model::Document, p: &sr_eval::Progr
         let base = p.base_dirs.get(i).map(PathBuf::as_path).unwrap_or_else(|| doc.base_dir());
         scene_inputs(scene, base, &mut files)?;
     }
-    transitive_assets(&mut files)?;
     files.sort();
     files.dedup();
     Ok(files)
-}
-
-fn transitive_assets(files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    let mut index = 0;
-    while index < files.len() {
-        let path = files[index].clone();
-        index += 1;
-        if !seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
-            continue;
-        }
-        files.extend(
-            sr_3d::import::dependencies(&path).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
-            })?,
-        );
-    }
-    files.sort();
-    files.dedup();
-    Ok(())
 }
 
 /// Adds the files `doc` at `path` names to `files`, then those of the documents it includes that are not in
@@ -200,9 +178,11 @@ fn scene_inputs(
         }
     };
     sr_model::element::walk(scene, &mut |e| {
-        if let Some(mesh) = e.as_any().downcast_ref::<sr_model::model::MeshAsset>() {
-            if let (Some(format), Resolved::Local(path)) = (mesh.format, resolve(&mesh.src, base)) {
-                match sr_3d::import::dependencies_as(&path, Some(&format.to_string())) {
+        // Discover dependencies by asset role. A buffer or image named *.gltf is
+        // still opaque data; an explicit mesh format overrides its extension.
+        let mut discover = |uri: &str, format: Option<&str>| {
+            if let Resolved::Local(path) = resolve(uri, base) {
+                match sr_3d::import::dependencies_as(&path, format) {
                     Ok(dependencies) => imported.extend(dependencies),
                     Err(message) => {
                         error = Some(std::io::Error::new(
@@ -212,6 +192,15 @@ fn scene_inputs(
                     }
                 }
             }
+        };
+        if let Some(mesh) = e.as_any().downcast_ref::<sr_model::model::MeshAsset>() {
+            let format = mesh.format.map(|f| f.to_string());
+            for uri in std::iter::once(&mesh.src).chain(mesh.proxy.iter()) {
+                discover(uri, format.as_deref());
+            }
+        }
+        if let Some(sr_model::element::AttrValue::Str(uri)) = e.get_attr("materialX") {
+            discover(&uri, Some("mtlx"));
         }
         if let Some(inc) = e.as_any().downcast_ref::<sr_model::model::Include>() {
             if let Resolved::Local(path) = resolve(&inc.src, base) {
@@ -500,8 +489,12 @@ mod tests {
         std::fs::write(dir.join("mesh.obj"), "mtllib mesh.mtl\nv 0 0 0\n").unwrap();
         std::fs::write(dir.join("mesh.mtl"), "newmtl surface\nmap_Kd diffuse.png\nmap_Bump normal.png\n").unwrap();
         std::fs::write(dir.join("surface.mtlx"), r#"<materialx fileprefix="textures/"><image name="colour"><input name="file" type="filename" value="base.png"/></image><standard_surface name="surface"><input name="base_color" nodename="colour"/></standard_surface></materialx>"#).unwrap();
-        let mut inputs = vec![dir.join("mesh.gltf"), dir.join("mesh.obj"), dir.join("surface.mtlx")];
-        transitive_assets(&mut inputs).unwrap();
+        let path = dir.join("scene.xml");
+        let doc = load(
+            &path,
+            r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><assets><mesh id="g" src="mesh.gltf"/><mesh id="o" src="mesh.obj"/></assets><materials><material id="m" materialX="surface.mtlx"/></materials><composition/></scene>"#,
+        );
+        let inputs = files(&path, &doc).unwrap();
         for file in ["mesh data.bin", "colour.png", "mesh.mtl", "diffuse.png", "normal.png", "textures/base.png"] {
             assert!(inputs.contains(&dir.join(file)), "{file} missing from {inputs:?}");
         }
@@ -520,6 +513,22 @@ mod tests {
         let mut inputs = Vec::new();
         scene_inputs(&doc.scene, &dir, &mut inputs).unwrap();
         assert!(inputs.contains(&dir.join("vertices.bin")), "{inputs:?}");
+    }
+
+    #[test]
+    fn explicit_format_overrides_conflicting_extension_in_full_discovery() {
+        let dir = scratch("conflicting-format");
+        std::fs::write(dir.join("mesh.gltf"), "mtllib mesh.mtl\nv 0 0 0\n").unwrap();
+        std::fs::write(dir.join("mesh.mtl"), "newmtl surface\nmap_Kd colour.png\n").unwrap();
+        let path = dir.join("scene.xml");
+        let doc = load(
+            &path,
+            r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><assets><mesh id="m" src="mesh.gltf" format="obj"/></assets><composition/></scene>"#,
+        );
+        let evaluator = sr_eval::Evaluator::new(&doc, &sr_eval::EvalOptions::default()).unwrap();
+        let inputs = effective_files(&path, &doc, evaluator.program()).unwrap();
+        assert!(inputs.contains(&dir.join("mesh.mtl")));
+        assert!(inputs.contains(&dir.join("colour.png")));
     }
 
     #[test]

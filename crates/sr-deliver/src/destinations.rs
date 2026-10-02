@@ -149,6 +149,30 @@ fn curl(args: &[String], uri: &str) -> Result<String, DeliverError> {
 }
 
 fn curl_with_tool(tool: &str, args: &[String], uri: &str) -> Result<String, DeliverError> {
+    let seconds = std::env::var("SR_UPLOAD_TIMEOUT")
+        .ok()
+        .map(|s| s.parse::<u64>())
+        .transpose()
+        .map_err(|_| DeliverError::Destination {
+            uri: String::new(),
+            message: "SR_UPLOAD_TIMEOUT must be a positive number of seconds".into(),
+        })?
+        .unwrap_or(1800);
+    if seconds == 0 {
+        return Err(DeliverError::Destination {
+            uri: String::new(),
+            message: "SR_UPLOAD_TIMEOUT must be positive".into(),
+        });
+    }
+    curl_with_deadline(tool, args, uri, std::time::Duration::from_secs(seconds))
+}
+
+fn curl_with_deadline(
+    tool: &str,
+    args: &[String],
+    uri: &str,
+    timeout: std::time::Duration,
+) -> Result<String, DeliverError> {
     use std::io::Write;
     use std::process::Stdio;
     // No credential, signed URL or notification body enters argv. Disable the
@@ -156,7 +180,12 @@ fn curl_with_tool(tool: &str, args: &[String], uri: &str) -> Result<String, Deli
     fn quote(s: &str) -> String {
         s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
     }
-    let mut config = String::from("silent\nshow-error\nfail-with-body\nretry = 2\n");
+    let mut config = format!(
+        "silent\nshow-error\nfail-with-body\nretry = 2\nconnect-timeout = {}\nmax-time = {}\nretry-max-time = {}\n",
+        timeout.as_secs_f64().min(30.0),
+        timeout.as_secs_f64(),
+        timeout.as_secs_f64()
+    );
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let option = match arg.as_str() {
@@ -185,24 +214,56 @@ fn curl_with_tool(tool: &str, args: &[String], uri: &str) -> Result<String, Deli
         None => safe_uri.to_string(),
     };
     let error = |message| DeliverError::Destination { uri: safe_uri.clone(), message };
-    let mut child = Command::new(tool)
-        .args(["--disable", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| error(format!("cannot run curl: {e}")))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    let writer = std::thread::spawn(move || stdin.write_all(config.as_bytes()));
-    let out = child.wait_with_output().map_err(|e| error(format!("curl: {e}")))?;
-    let sent = writer.join().map_err(|_| error("curl request writer failed".into()))?;
-    if !out.status.success() {
-        // Servers and curl diagnostics may echo authentication data. Report the
-        // exit code instead of untrusted response bodies in failure messages.
-        return Err(error(format!("curl upload failed ({})", out.status)));
+    // Upload responses are unused. Discard both streams without allocating or
+    // retaining server-controlled data (which may also reflect credentials).
+    let mut command = Command::new(tool);
+    command.args(["--disable", "--config", "-"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-    sent.map_err(|e| error(format!("curl request: {e}")))?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let start = std::time::Instant::now();
+    let mut child = command.spawn().map_err(|e| error(format!("cannot run curl: {e}")))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let (tx, written) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(stdin.write_all(config.as_bytes()));
+    });
+    let result = (|| {
+        let status = loop {
+            if start.elapsed() >= timeout {
+                return Err(error("curl upload timed out".into()));
+            }
+            if let Some(status) = child.try_wait().map_err(|e| error(format!("curl: {e}")))? {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10).min(timeout.saturating_sub(start.elapsed())));
+        };
+        if !status.success() {
+            return Err(error(format!("curl upload failed ({status})")));
+        }
+        written
+            .recv_timeout(timeout.saturating_sub(start.elapsed()))
+            .map_err(|_| error("curl request timed out".into()))?
+            .map_err(|e| error(format!("curl request: {e}")))?;
+        Ok(String::new())
+    })();
+    if result.is_err() {
+        // A wrapper may have inherited stdin into descendants. Terminate the
+        // process group too so a blocked request writer can release its buffer.
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 fn join(base: &str, name: &str) -> String {
@@ -462,6 +523,43 @@ pub fn deliver_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn curl_fixture(name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sr-curl-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("curl.py");
+        std::fs::write(&tool, format!("#!/usr/bin/env python3\n{script}\n")).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        tool
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upload_discards_untrusted_response_bodies() {
+        let tool = curl_fixture("large-response", "import sys\nsys.stdin.read()\nsys.stdout.write('x' * (8 * 1024 * 1024))\nsys.stderr.write('y' * (8 * 1024 * 1024))");
+        let response = curl_with_tool(tool.to_str().unwrap(), &[], "https://example.test").unwrap();
+        assert!(response.is_empty(), "delivery does not consume response bodies");
+        std::fs::remove_dir_all(tool.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upload_deadline_covers_a_tool_that_does_not_read_stdin() {
+        let tool = curl_fixture("deadline", "import time\ntime.sleep(1)");
+        let start = std::time::Instant::now();
+        let result = curl_with_deadline(
+            tool.to_str().unwrap(),
+            &["--data-binary".into(), "x".repeat(1024 * 1024)],
+            "https://user:secret@example.test?token=secret",
+            std::time::Duration::from_millis(100),
+        );
+        assert!(start.elapsed() < std::time::Duration::from_millis(700), "upload exceeded its deadline");
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("timed out") && !error.contains("secret"), "{error}");
+        std::fs::remove_dir_all(tool.parent().unwrap()).unwrap();
+    }
 
     #[test]
     #[cfg(unix)]

@@ -72,3 +72,129 @@ fn connected_maps_preserve_surface_weights_and_emission() {
     assert!(material.warnings.is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn roughness_graph(body: &str) -> f32 {
+    let xml = format!(
+        r#"<materialx>{body}<standard_surface name="s"><input name="specular_roughness" nodename="result"/></standard_surface></materialx>"#
+    );
+    mtlx::parse(&xml, Path::new(".")).unwrap().params.roughness
+}
+
+#[test]
+fn arithmetic_uses_operator_defaults() {
+    for op in ["multiply", "divide", "power"] {
+        let value =
+            roughness_graph(&format!(r#"<{op} name="result" type="float"><input name="in1" value="0.4"/></{op}>"#));
+        assert!((value - 0.4).abs() < 1e-6, "{op}: {value}");
+    }
+}
+
+#[test]
+fn vector_operations_use_all_declared_components() {
+    let value = roughness_graph(
+        r#"<constant name="v" type="vector4"><input name="value" type="vector4" value="0,0,0,0.5"/></constant><magnitude name="result" type="float"><input name="in" nodename="v"/></magnitude>"#,
+    );
+    assert_eq!(value, 0.5);
+    let value = roughness_graph(
+        r#"<dotproduct name="result" type="float"><input name="in1" type="vector4" value="0,0,0,0.5"/><input name="in2" type="vector4" value="0,0,0,0.5"/></dotproduct>"#,
+    );
+    assert_eq!(value, 0.25);
+    let value = roughness_graph(
+        r#"<normalize name="n" type="vector4"><input name="in" type="vector4" value="0,0,0,2"/></normalize><extract name="result" type="float"><input name="in" nodename="n"/><input name="index" value="3"/></extract>"#,
+    );
+    assert_eq!(value, 1.0);
+}
+
+#[test]
+fn remap_preserves_descending_ranges_and_handles_zero_span() {
+    for (high, expected) in [("0", 0.75), ("1", 0.0)] {
+        let value = roughness_graph(&format!(
+            r#"<remap name="result" type="float"><input name="in" value="0.25"/><input name="inlow" value="1"/><input name="inhigh" value="{high}"/></remap>"#
+        ));
+        assert_eq!(value, expected);
+    }
+}
+
+#[test]
+fn image_graphs_honor_address_filter_and_tiling_controls() {
+    let dir = std::env::temp_dir().join(format!("sr-materialx-sampling-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap().save(dir.join("rg.png")).unwrap();
+    for (op, inputs, expected) in [
+        ("tiledimage", r#"<input name="uvoffset" type="vector2" value="0.5,0"/>"#, [0, 255, 0]),
+        ("tiledimage", r#"<input name="uvtiling" type="vector2" value="3,1"/>"#, [0, 255, 0]),
+        (
+            "image",
+            r#"<input name="texcoord" type="vector2" value="1.25,0.5"/><input name="uaddressmode" type="string" value="clamp"/>"#,
+            [0, 255, 0],
+        ),
+        (
+            "image",
+            r#"<input name="texcoord" type="vector2" value="1.25,0.5"/><input name="uaddressmode" type="string" value="mirror"/>"#,
+            [0, 255, 0],
+        ),
+        (
+            "image",
+            r#"<input name="texcoord" type="vector2" value="1.25,0.5"/><input name="uaddressmode" type="string" value="constant"/><input name="default" type="color3" value="0,0,1"/>"#,
+            [0, 0, 255],
+        ),
+        (
+            "image",
+            r#"<input name="texcoord" type="vector2" value="0.4,0.5"/><input name="filtertype" type="string" value="closest"/>"#,
+            [255, 0, 0],
+        ),
+    ] {
+        let xml = format!(
+            r#"<materialx><{op} name="im" type="color3" colorspace="lin_rec709"><input name="file" type="filename" value="rg.png"/>{inputs}</{op}><standard_surface name="s"><input name="base_color" nodename="im"/></standard_surface></materialx>"#
+        );
+        let material = mtlx::parse(&xml, &dir).unwrap();
+        let map = material.generated_maps[0].as_ref().unwrap();
+        assert_eq!(&map.rgba[..3], &expected, "{op}: {inputs}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn range_applies_gamma_and_boolean_clamping() {
+    assert_eq!(
+        roughness_graph(
+            r#"<range name="result" type="float"><input name="in" value="0"/><input name="gamma" value="0"/></range>"#
+        ),
+        0.0
+    );
+    assert_eq!(
+        roughness_graph(
+            r#"<range name="result" type="float"><input name="in" value="0.25"/><input name="gamma" value="2"/></range>"#
+        ),
+        0.5
+    );
+    assert_eq!(
+        roughness_graph(
+            r#"<range name="result" type="float"><input name="in" value="2"/><input name="doclamp" type="boolean" value="true"/></range>"#
+        ),
+        1.0
+    );
+}
+
+#[test]
+fn image_sampler_filters_borders_and_rejects_unknown_modes() {
+    let dir = std::env::temp_dir().join(format!("sr-materialx-borders-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap().save(dir.join("rg.png")).unwrap();
+    for (uv, mode, filter, expected) in [
+        ("0.375,0.5", "periodic", "linear", [191, 64, 0]),
+        ("0.375,0.5", "periodic", "cubic", [215, 40, 0]),
+        ("-0.25,0.5", "periodic", "closest", [0, 255, 0]),
+        ("-0.25,0.5", "mirror", "closest", [255, 0, 0]),
+        ("0,0.5", "clamp", "linear", [255, 0, 0]),
+        ("0.25,1.5", "constant", "closest", [0, 0, 0]),
+    ] {
+        let xml = format!(
+            r#"<materialx><image name="im" type="color3" colorspace="lin_rec709"><input name="file" type="filename" value="rg.png"/><input name="texcoord" type="vector2" value="{uv}"/><input name="uaddressmode" type="string" value="{mode}"/><input name="vaddressmode" type="string" value="{mode}"/><input name="filtertype" type="string" value="{filter}"/></image><standard_surface name="s"><input name="base_color" nodename="im"/></standard_surface></materialx>"#
+        );
+        let material = mtlx::parse(&xml, &dir).unwrap();
+        assert_eq!(&material.generated_maps[0].as_ref().unwrap().rgba[..3], &expected, "{uv} {mode} {filter}");
+        assert!(mtlx::parse(&xml.replace(&format!("value=\"{filter}\""), "value=\"unknown\""), &dir).is_err());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

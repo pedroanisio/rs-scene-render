@@ -36,7 +36,7 @@ pub struct PtMat {
     pub params: [f32; 4],
     /// emitted radiance, unlit flag
     pub emissive: [f32; 4],
-    /// specular weight (KHR_materials_specular), unused ×3
+    /// Specular weight, cast-shadow flag, receive-shadow flag, unused
     pub extra: [f32; 4],
     /// Offset, width, height and sRGB flag for each map in the shared pixel buffer.
     pub maps: [[u32; 4]; 6],
@@ -69,7 +69,7 @@ pub struct PtLight {
     pub spot: [f32; 4],
     /// Radius, casts shadows, packed IES pixel offset, IES width.
     pub size: [f32; 4],
-    /// right axis (rect lights), unused
+    /// Right axis (rect lights), light influence bits (1 diffuse, 2 specular)
     pub right: [f32; 4],
 }
 
@@ -196,7 +196,12 @@ pub fn build(scene: &Scene3) -> PtScene {
                 m.ior.max(1.0),
             ],
             emissive: [emissive[0], emissive[1], emissive[2], unlit as u32 as f32],
-            extra: [m.specular * srgb_luma(m.specular_color).max(0.0), 0.0, 0.0, 0.0],
+            extra: [
+                m.specular * srgb_luma(m.specular_color).max(0.0),
+                dr.cast_shadow as u32 as f32,
+                dr.receive_shadow as u32 as f32,
+                0.0,
+            ],
             maps,
             texture_params: [
                 m.alpha_cutoff,
@@ -327,7 +332,12 @@ pub fn build(scene: &Scene3) -> PtScene {
                 f32::from_bits(ies.unwrap_or(0)),
                 if ies.is_some() { 128.0 } else { 0.0 },
             ],
-            right: [l.right.x, l.right.y, l.right.z, 0.0],
+            right: [
+                l.right.x,
+                l.right.y,
+                l.right.z,
+                (l.affects_diffuse as u32 | ((l.affects_specular as u32) << 1)) as f32,
+            ],
         });
     }
     if s.lights.is_empty() {

@@ -2,25 +2,163 @@
 use roxmltree::Node;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+// A collapsed input range maps to its lower output endpoint. Preserve the
+// denominator sign for descending ranges instead of replacing it with epsilon.
+fn unit_range(value: f32, low: f32, high: f32) -> f32 {
+    if high == low {
+        0.0
+    } else {
+        (value - low) / (high - low)
+    }
+}
+
+fn value_width(ty: Option<&str>, fallback: usize) -> usize {
+    match ty {
+        Some("float" | "integer" | "boolean") => 1,
+        Some("vector2") => 2,
+        Some("vector3" | "color3") => 3,
+        Some("vector4" | "color4") => 4,
+        _ => fallback.clamp(1, 4),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum Address {
+    #[default]
+    Periodic,
+    Clamp,
+    Mirror,
+    Constant,
+}
+impl Address {
+    fn index(self, value: i64, size: u32) -> Option<u32> {
+        let size = i64::from(size);
+        Some(match self {
+            Self::Periodic => value.rem_euclid(size),
+            Self::Clamp => value.clamp(0, size - 1),
+            Self::Mirror => {
+                let v = value.rem_euclid(size * 2);
+                if v < size {
+                    v
+                } else {
+                    size * 2 - 1 - v
+                }
+            }
+            Self::Constant if !(0..size).contains(&value) => return None,
+            Self::Constant => value,
+        } as u32)
+    }
+}
+#[derive(Clone, Copy, Default)]
+enum Filter {
+    Closest,
+    #[default]
+    Linear,
+    Cubic,
+}
+#[derive(Clone, Copy, Default)]
+struct Sampler {
+    address: [Address; 2],
+    filter: Filter,
+}
+impl Sampler {
+    fn from_node(node: Node<'_, '_>) -> Result<Self, String> {
+        let value = |name, default| -> Result<&str, String> {
+            node.children().find(|n| n.attribute("name") == Some(name)).map_or(Ok(default), |n| {
+                n.attribute("value").ok_or_else(|| format!("MaterialX {name} must be a uniform value"))
+            })
+        };
+        let address = |name| -> Result<Address, String> {
+            match value(name, "periodic")? {
+                "periodic" => Ok(Address::Periodic),
+                "clamp" => Ok(Address::Clamp),
+                "mirror" => Ok(Address::Mirror),
+                "constant" => Ok(Address::Constant),
+                other => Err(format!("unknown MaterialX {name}: {other}")),
+            }
+        };
+        let filter = match value("filtertype", "linear")? {
+            "closest" => Filter::Closest,
+            "linear" => Filter::Linear,
+            "cubic" => Filter::Cubic,
+            other => return Err(format!("unknown MaterialX filtertype: {other}")),
+        };
+        Ok(Self { address: [address("uaddressmode")?, address("vaddressmode")?], filter })
+    }
+    fn sample(&self, image: &image::Rgba32FImage, uv: [f32; 2], default: [f32; 4]) -> [f32; 4] {
+        if uv.iter().any(|v| !v.is_finite()) {
+            return default;
+        }
+        let (w, h) = image.dimensions();
+        let get = |x, y| match (self.address[0].index(x, w), self.address[1].index(y, h)) {
+            (Some(x), Some(y)) => image.get_pixel(x, y).0,
+            _ => default,
+        };
+        // Reduce large coordinates before conversion so neighbour offsets cannot overflow.
+        let coord = |v: f32, mode: Address| match mode {
+            Address::Periodic => v.rem_euclid(1.0),
+            Address::Mirror => v.rem_euclid(2.0),
+            Address::Clamp => v.clamp(0.0, 1.0),
+            Address::Constant => v.clamp(-1.0, 2.0),
+        };
+        let px = coord(uv[0], self.address[0]) * w as f32 - 0.5;
+        let py = coord(uv[1], self.address[1]) * h as f32 - 0.5;
+        let (x, y) = (px.floor() as i64, py.floor() as i64);
+        let (u, v) = (px - px.floor(), py - py.floor());
+        match self.filter {
+            Filter::Closest => get((px + 0.5).floor() as i64, (py + 0.5).floor() as i64),
+            Filter::Linear => {
+                let (a, b, c, d) = (get(x, y), get(x + 1, y), get(x, y + 1), get(x + 1, y + 1));
+                std::array::from_fn(|i| (a[i] * (1.0 - u) + b[i] * u) * (1.0 - v) + (c[i] * (1.0 - u) + d[i] * u) * v)
+            }
+            Filter::Cubic => {
+                let weights = |t: f32| {
+                    [
+                        -0.5 * t + t * t - 0.5 * t * t * t,
+                        1.0 - 2.5 * t * t + 1.5 * t * t * t,
+                        0.5 * t + 2.0 * t * t - 1.5 * t * t * t,
+                        -0.5 * t * t + 0.5 * t * t * t,
+                    ]
+                };
+                let (wx, wy) = (weights(u), weights(v));
+                let mut out = [0.0; 4];
+                for (j, wy) in wy.iter().enumerate() {
+                    for (i, wx) in wx.iter().enumerate() {
+                        let pixel = get(x + i as i64 - 1, y + j as i64 - 1);
+                        for c in 0..4 {
+                            out[c] += pixel[c] * wx * wy;
+                        }
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Expr {
     op: String,
+    width: usize,
     inputs: HashMap<String, Arc<Expr>>,
     value: [f32; 4],
     image: Option<Arc<image::Rgba32FImage>>,
     channels: String,
+    sampler: Sampler,
     pub varying: bool,
     pub size: [u32; 2],
 }
 
 impl Expr {
-    fn constant(value: [f32; 4]) -> Arc<Self> {
+    fn constant(value: [f32; 4], width: usize) -> Arc<Self> {
         Arc::new(Self {
             op: "constant".into(),
+            width,
             inputs: HashMap::new(),
             value,
             image: None,
             channels: String::new(),
+            sampler: Sampler::default(),
             varying: false,
             size: [1; 2],
         })
@@ -36,7 +174,12 @@ impl Expr {
         let mut input =
             |name: &str, default: f32| self.inputs.get(name).map_or([default; 4], |v| v.eval_cached(uv, cache));
         let a = input("in1", 0.0);
-        let b = input("in2", 0.0);
+        let b = input(
+            "in2",
+            if matches!(self.op.as_str(), "multiply" | "divide" | "modulo" | "power") { 1.0 } else { 0.0 },
+        );
+        let width = self.inputs.get("in").map_or(self.width, |v| v.width);
+        let pair_width = self.inputs.get("in1").map_or(self.width, |v| v.width);
         let x = input("in", 0.0);
         let unary = |f: fn(f32) -> f32| x.map(f);
         let value = match self.op.as_str() {
@@ -50,19 +193,25 @@ impl Expr {
             "texcoord" => [uv[0], uv[1], 0.0, 1.0],
             "image" | "tiledimage" => {
                 let image = self.image.as_ref().expect("compiled image");
-                let p = if self.inputs.contains_key("texcoord") {
+                let mut p = if self.inputs.contains_key("texcoord") {
                     input("texcoord", 0.0)
                 } else {
                     [uv[0], uv[1], 0.0, 1.0]
                 };
-                let (w, h) = image.dimensions();
-                let (px, py) = (p[0].rem_euclid(1.0) * w as f32 - 0.5, p[1].rem_euclid(1.0) * h as f32 - 0.5);
-                let (x, y) = (px.floor() as i64, py.floor() as i64);
-                let get =
-                    |x: i64, y: i64| image.get_pixel(x.rem_euclid(w as i64) as u32, y.rem_euclid(h as i64) as u32).0;
-                let (a, b, c, d) = (get(x, y), get(x + 1, y), get(x, y + 1), get(x + 1, y + 1));
-                let (u, v) = (px - px.floor(), py - py.floor());
-                std::array::from_fn(|i| (a[i] * (1.0 - u) + b[i] * u) * (1.0 - v) + (c[i] * (1.0 - u) + d[i] * u) * v)
+                if self.op == "tiledimage" {
+                    let tiling = input("uvtiling", 1.0);
+                    let offset = input("uvoffset", 0.0);
+                    let image_size = input("realworldimagesize", 1.0);
+                    let tile_size = input("realworldtilesize", 1.0);
+                    for i in 0..2 {
+                        p[i] = if image_size[i] == 0.0 {
+                            0.0
+                        } else {
+                            (p[i] * tiling[i] - offset[i]) / image_size[i] * tile_size[i]
+                        };
+                    }
+                }
+                self.sampler.sample(image, [p[0], p[1]], input("default", 0.0))
             }
             "add" => std::array::from_fn(|i| a[i] + b[i]),
             "subtract" => std::array::from_fn(|i| a[i] - b[i]),
@@ -103,22 +252,36 @@ impl Expr {
                 let hi = input("inhigh", 1.0);
                 let outlo = input("outlow", 0.0);
                 let outhi = input("outhigh", 1.0);
-                std::array::from_fn(|i| outlo[i] + (x[i] - lo[i]) / (hi[i] - lo[i]).max(1e-20) * (outhi[i] - outlo[i]))
+                let gamma = input("gamma", 1.0);
+                let clamp = self.op == "range" && input("doclamp", 0.0)[0] != 0.0;
+                std::array::from_fn(|i| {
+                    let mut t = unit_range(x[i], lo[i], hi[i]);
+                    if self.op == "range" && gamma[i] != 1.0 && t != 0.0 {
+                        let exponent = if gamma[i] == 0.0 { 0.0 } else { 1.0 / gamma[i] };
+                        t = t.abs().powf(exponent).copysign(t);
+                    }
+                    let value = outlo[i] + t * (outhi[i] - outlo[i]);
+                    if clamp {
+                        value.clamp(outlo[i].min(outhi[i]), outlo[i].max(outhi[i]))
+                    } else {
+                        value
+                    }
+                })
             }
             "smoothstep" => {
                 let lo = input("low", 0.0);
                 let hi = input("high", 1.0);
                 std::array::from_fn(|i| {
-                    let t = ((x[i] - lo[i]) / (hi[i] - lo[i]).max(1e-20)).clamp(0.0, 1.0);
+                    let t = (unit_range(x[i], lo[i], hi[i])).clamp(0.0, 1.0);
                     t * t * (3.0 - 2.0 * t)
                 })
             }
             "normalize" => {
-                let length = x[..3].iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-20);
-                [x[0] / length, x[1] / length, x[2] / length, x[3]]
+                let length = x[..width].iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-20);
+                std::array::from_fn(|i| if i < width { x[i] / length } else { x[i] })
             }
-            "magnitude" => [x[..3].iter().map(|v| v * v).sum::<f32>().sqrt(); 4],
-            "dotproduct" => [a[..3].iter().zip(&b).map(|(a, b)| a * b).sum(); 4],
+            "magnitude" => [x[..width].iter().map(|v| v * v).sum::<f32>().sqrt(); 4],
+            "dotproduct" => [a[..pair_width].iter().zip(&b).map(|(a, b)| a * b).sum(); 4],
             "crossproduct" => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], 1.0],
             "combine2" | "combine3" | "combine4" => {
                 std::array::from_fn(|i| input(&format!("in{}", i + 1), if i == 3 { 1.0 } else { 0.0 })[0])
@@ -178,6 +341,23 @@ impl Expr {
     }
 }
 
+fn load_image(path: &Path) -> Result<image::Rgba32FImage, String> {
+    let error = |e| format!("{}: {e}", path.display());
+    let mut reader = image::ImageReader::open(path).map_err(error)?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_image_width = Some(32768);
+    limits.max_image_height = Some(32768);
+    reader.limits(limits);
+    let mut image = reader.decode().map_err(|e| format!("{}: {e}", path.display()))?;
+    // Resize in the decoded representation first. Expanding an 8-bit source to
+    // four float channels before this step can allocate gigabytes unnecessarily.
+    if image.width() > 4096 || image.height() > 4096 {
+        image = image.thumbnail(4096, 4096);
+    }
+    Ok(image.into_rgba32f())
+}
+
 pub(crate) struct Compiler<'a, 'input> {
     root: Node<'a, 'input>,
     base: &'a Path,
@@ -193,6 +373,13 @@ impl<'a, 'input> Compiler<'a, 'input> {
     }
     pub fn input(&mut self, input: Node<'a, 'input>) -> Result<Arc<Expr>, String> {
         if let Some(value) = input.attribute("value") {
+            if input.attribute("type") == Some("boolean") {
+                return match value {
+                    "true" | "1" => Ok(Expr::constant([1.0; 4], 1)),
+                    "false" | "0" => Ok(Expr::constant([0.0; 4], 1)),
+                    _ => Err(format!("invalid MaterialX boolean {value}")),
+                };
+            }
             let values: Vec<f32> = value
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|s| !s.is_empty())
@@ -201,15 +388,18 @@ impl<'a, 'input> Compiler<'a, 'input> {
             if values.is_empty() {
                 return Err("empty MaterialX value".into());
             }
-            return Ok(Expr::constant(std::array::from_fn(|i| {
-                values.get(i).copied().unwrap_or(if values.len() == 1 {
-                    values[0]
-                } else if i == 3 {
-                    1.0
-                } else {
-                    0.0
-                })
-            })));
+            return Ok(Expr::constant(
+                std::array::from_fn(|i| {
+                    values.get(i).copied().unwrap_or(if values.len() == 1 {
+                        values[0]
+                    } else if i == 3 {
+                        1.0
+                    } else {
+                        0.0
+                    })
+                }),
+                value_width(input.attribute("type"), values.len()),
+            ));
         }
         if let Some(graph) = input.attribute("nodegraph") {
             let graph = self.named(input, graph).ok_or_else(|| format!("missing nodegraph {graph}"))?;
@@ -241,10 +431,12 @@ impl<'a, 'input> Compiler<'a, 'input> {
         let op = node.tag_name().name();
         let mut expression = Expr {
             op: op.into(),
+            width: value_width(node.attribute("type"), 3),
             inputs: HashMap::new(),
             value: [0.0; 4],
             image: None,
             channels: String::new(),
+            sampler: Sampler::default(),
             varying: false,
             size: [1; 2],
         };
@@ -265,6 +457,7 @@ impl<'a, 'input> Compiler<'a, 'input> {
                 expression.value = expression.inputs.get("value").ok_or("constant without value")?.eval([0.0; 2])
             }
             "image" | "tiledimage" => {
+                expression.sampler = Sampler::from_node(node)?;
                 let file = node
                     .children()
                     .find(|n| n.attribute("name") == Some("file"))
@@ -278,14 +471,7 @@ impl<'a, 'input> Compiler<'a, 'input> {
                     .rev()
                     .collect::<String>();
                 let path = self.base.join(format!("{prefix}{file}"));
-                let mut image = image::ImageReader::open(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?
-                    .decode()
-                    .map_err(|e| e.to_string())?
-                    .to_rgba32f();
-                if image.width() > 4096 || image.height() > 4096 {
-                    image = image::imageops::thumbnail(&image, 4096, 4096);
-                }
+                let mut image = load_image(&path)?;
                 let srgb = node
                     .attribute("colorspace")
                     .or_else(|| self.root.attribute("colorspace"))
@@ -325,5 +511,49 @@ impl<'a, 'input> Compiler<'a, 'input> {
         let expression = Arc::new(expression);
         self.cache.insert(node.id(), expression.clone());
         Ok(expression)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn large_images_resize_within_memory_budget() {
+        const CHILD_INPUT: &str = "SR_MATERIALX_MEMORY_TEST_INPUT";
+        if let Some(path) = std::env::var_os(CHILD_INPUT) {
+            let image = load_image(Path::new(&path)).unwrap();
+            assert_eq!(image.dimensions(), (4096, 4096));
+            assert_eq!(image.get_pixel(0, 0).0, [1.0; 4]);
+            return;
+        }
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("sr-mtlx-memory-{}.ppm", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        write!(file, "P6\n8192 8192\n255\n").unwrap();
+        let row = vec![255u8; 8192 * 3];
+        for _ in 0..8192 {
+            file.write_all(&row).unwrap();
+        }
+        drop(file);
+        // Old code allocates a 1 GiB float buffer before shrinking; the bounded
+        // decode plus integer thumbnail fits this 900 MiB address-space limit.
+        let output = std::process::Command::new("sh")
+            .args(["-c", "ulimit -c 0; ulimit -v 921600; exec \"$@\"", "memory-test"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mtlx_graph::resource_tests::large_images_resize_within_memory_budget",
+                "--test-threads=1",
+            ])
+            .env(CHILD_INPUT, &path)
+            .output()
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
