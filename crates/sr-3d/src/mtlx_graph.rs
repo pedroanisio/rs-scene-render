@@ -22,45 +22,7 @@ fn value_width(ty: Option<&str>, fallback: usize) -> usize {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-enum Address {
-    #[default]
-    Periodic,
-    Clamp,
-    Mirror,
-    Constant,
-}
-impl Address {
-    fn index(self, value: i64, size: u32) -> Option<u32> {
-        let size = i64::from(size);
-        Some(match self {
-            Self::Periodic => value.rem_euclid(size),
-            Self::Clamp => value.clamp(0, size - 1),
-            Self::Mirror => {
-                let v = value.rem_euclid(size * 2);
-                if v < size {
-                    v
-                } else {
-                    size * 2 - 1 - v
-                }
-            }
-            Self::Constant if !(0..size).contains(&value) => return None,
-            Self::Constant => value,
-        } as u32)
-    }
-}
-#[derive(Clone, Copy, Default)]
-enum Filter {
-    Closest,
-    #[default]
-    Linear,
-    Cubic,
-}
-#[derive(Clone, Copy, Default)]
-struct Sampler {
-    address: [Address; 2],
-    filter: Filter,
-}
+use crate::sampling::{AddressMode, TextureFilter, TextureSampler as Sampler};
 impl Sampler {
     fn from_node(node: Node<'_, '_>) -> Result<Self, String> {
         let value = |name, default| -> Result<&str, String> {
@@ -68,71 +30,22 @@ impl Sampler {
                 n.attribute("value").ok_or_else(|| format!("MaterialX {name} must be a uniform value"))
             })
         };
-        let address = |name| -> Result<Address, String> {
+        let address = |name| -> Result<AddressMode, String> {
             match value(name, "periodic")? {
-                "periodic" => Ok(Address::Periodic),
-                "clamp" => Ok(Address::Clamp),
-                "mirror" => Ok(Address::Mirror),
-                "constant" => Ok(Address::Constant),
+                "periodic" => Ok(AddressMode::Periodic),
+                "clamp" => Ok(AddressMode::Clamp),
+                "mirror" => Ok(AddressMode::Mirror),
+                "constant" => Ok(AddressMode::Constant),
                 other => Err(format!("unknown MaterialX {name}: {other}")),
             }
         };
         let filter = match value("filtertype", "linear")? {
-            "closest" => Filter::Closest,
-            "linear" => Filter::Linear,
-            "cubic" => Filter::Cubic,
+            "closest" => TextureFilter::Closest,
+            "linear" => TextureFilter::Linear,
+            "cubic" => TextureFilter::Cubic,
             other => return Err(format!("unknown MaterialX filtertype: {other}")),
         };
-        Ok(Self { address: [address("uaddressmode")?, address("vaddressmode")?], filter })
-    }
-    fn sample(&self, image: &image::Rgba32FImage, uv: [f32; 2], default: [f32; 4]) -> [f32; 4] {
-        if uv.iter().any(|v| !v.is_finite()) {
-            return default;
-        }
-        let (w, h) = image.dimensions();
-        let get = |x, y| match (self.address[0].index(x, w), self.address[1].index(y, h)) {
-            (Some(x), Some(y)) => image.get_pixel(x, y).0,
-            _ => default,
-        };
-        // Reduce large coordinates before conversion so neighbour offsets cannot overflow.
-        let coord = |v: f32, mode: Address| match mode {
-            Address::Periodic => v.rem_euclid(1.0),
-            Address::Mirror => v.rem_euclid(2.0),
-            Address::Clamp => v.clamp(0.0, 1.0),
-            Address::Constant => v.clamp(-1.0, 2.0),
-        };
-        let px = coord(uv[0], self.address[0]) * w as f32 - 0.5;
-        let py = coord(uv[1], self.address[1]) * h as f32 - 0.5;
-        let (x, y) = (px.floor() as i64, py.floor() as i64);
-        let (u, v) = (px - px.floor(), py - py.floor());
-        match self.filter {
-            Filter::Closest => get((px + 0.5).floor() as i64, (py + 0.5).floor() as i64),
-            Filter::Linear => {
-                let (a, b, c, d) = (get(x, y), get(x + 1, y), get(x, y + 1), get(x + 1, y + 1));
-                std::array::from_fn(|i| (a[i] * (1.0 - u) + b[i] * u) * (1.0 - v) + (c[i] * (1.0 - u) + d[i] * u) * v)
-            }
-            Filter::Cubic => {
-                let weights = |t: f32| {
-                    [
-                        -0.5 * t + t * t - 0.5 * t * t * t,
-                        1.0 - 2.5 * t * t + 1.5 * t * t * t,
-                        0.5 * t + 2.0 * t * t - 1.5 * t * t * t,
-                        -0.5 * t * t + 0.5 * t * t * t,
-                    ]
-                };
-                let (wx, wy) = (weights(u), weights(v));
-                let mut out = [0.0; 4];
-                for (j, wy) in wy.iter().enumerate() {
-                    for (i, wx) in wx.iter().enumerate() {
-                        let pixel = get(x + i as i64 - 1, y + j as i64 - 1);
-                        for c in 0..4 {
-                            out[c] += pixel[c] * wx * wy;
-                        }
-                    }
-                }
-                out
-            }
-        }
+        Ok(Self { address: [address("uaddressmode")?, address("vaddressmode")?], filter, border: [0.0; 4] })
     }
 }
 
@@ -211,7 +124,11 @@ impl Expr {
                         };
                     }
                 }
-                self.sampler.sample(image, [p[0], p[1]], input("default", 0.0))
+                Sampler { border: input("default", 0.0), ..self.sampler }.sample(
+                    [image.width(), image.height()],
+                    [p[0], p[1]],
+                    |x, y| image.get_pixel(x, y).0,
+                )
             }
             "add" => std::array::from_fn(|i| a[i] + b[i]),
             "subtract" => std::array::from_fn(|i| a[i] - b[i]),
@@ -313,49 +230,124 @@ impl Expr {
         cache.insert(key, value);
         value
     }
+    fn output_sampler(&self, factor: [f32; 4], normal: bool) -> Option<Sampler> {
+        let mut sampler = self.sampler_cached(&mut HashMap::new(), &mut HashMap::new())?;
+        for (i, f) in factor.iter().enumerate() {
+            if normal && i < 3 {
+                sampler.border[i] = sampler.border[i] * 0.5 + 0.5;
+            }
+            sampler.border[i] /= f;
+        }
+        Some(sampler)
+    }
+
+    fn sampler_cached(
+        &self,
+        cache: &mut HashMap<*const Expr, Option<Sampler>>,
+        border_values: &mut HashMap<*const Expr, [f32; 4]>,
+    ) -> Option<Sampler> {
+        let key = self as *const Expr;
+        if let Some(sampler) = cache.get(&key) {
+            return *sampler;
+        }
+        // Cache absence too: mixed/coordinate graphs can share subgraphs just
+        // as heavily as graphs whose image samplers are compatible.
+        let result = if self.image.is_some()
+            && self.inputs.get("texcoord").is_none_or(|v| v.op == "texcoord")
+            && !self.inputs.contains_key("uvtiling")
+            && !self.inputs.contains_key("uvoffset")
+        {
+            let mut sampler = self.sampler;
+            sampler.border = self.inputs.get("default").map_or([0.0; 4], |v| v.eval([0.0; 2]));
+            Some(sampler)
+        } else if self.image.is_none() {
+            let mut samplers = self.inputs.values().filter_map(|v| v.sampler_cached(cache, border_values));
+            let common = samplers.next().filter(|first| samplers.all(|s| s == *first));
+            common.map(|mut sampler| {
+                sampler.border = self.eval_cached([-1.0; 2], border_values);
+                sampler
+            })
+        } else {
+            None
+        };
+        cache.insert(key, result);
+        result
+    }
+
     pub fn bake(&self, normal: bool) -> (crate::Texture, [f32; 4]) {
         let [w, h] = self.size;
-        let mut values = Vec::with_capacity((w * h) as usize);
+        let value = |x, y| {
+            let mut v = self.eval([(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32]);
+            if normal {
+                for channel in &mut v[..3] {
+                    *channel = *channel * 0.5 + 0.5;
+                }
+            }
+            v
+        };
+        // Two passes avoid retaining a second, float-sized copy of the output.
         let mut factor = [1.0f32; 4];
         for y in 0..h {
             for x in 0..w {
-                let mut v = self.eval([(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32]);
-                if normal {
-                    for channel in &mut v[..3] {
-                        *channel = *channel * 0.5 + 0.5;
-                    }
-                }
+                let v = value(x, y);
                 for i in 0..4 {
                     factor[i] = factor[i].max(v[i]);
                 }
-                values.push(v);
             }
         }
-        let rgba = values
-            .into_iter()
-            .flat_map(|v| {
-                std::array::from_fn::<_, 4, _>(|i| (v[i] / factor[i]).clamp(0.0, 1.0).mul_add(255.0, 0.5) as u8)
-            })
-            .collect();
-        (crate::Texture { width: w, height: h, rgba, srgb: false }, factor)
+        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let v = value(x, y);
+                rgba.extend(std::array::from_fn::<_, 4, _>(|i| {
+                    (v[i] / factor[i]).clamp(0.0, 1.0).mul_add(255.0, 0.5) as u8
+                }));
+            }
+        }
+        (
+            crate::Texture { width: w, height: h, rgba, srgb: false, sampler: self.output_sampler(factor, normal) },
+            factor,
+        )
     }
 }
 
+const GRAPH_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(test)]
 fn load_image(path: &Path) -> Result<image::Rgba32FImage, String> {
+    let mut remaining = GRAPH_MEMORY_BYTES;
+    load_image_with_budget(path, &mut remaining)
+}
+
+fn load_image_with_budget(path: &Path, remaining: &mut u64) -> Result<image::Rgba32FImage, String> {
+    use image::ImageDecoder;
     let error = |e| format!("{}: {e}", path.display());
     let mut reader = image::ImageReader::open(path).map_err(error)?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_alloc = Some((*remaining).min(256 * 1024 * 1024));
     limits.max_image_width = Some(32768);
     limits.max_image_height = Some(32768);
     reader.limits(limits);
-    let mut image = reader.decode().map_err(|e| format!("{}: {e}", path.display()))?;
+    let decoder = reader.into_decoder().map_err(|e| format!("{}: {e}", path.display()))?;
+    let (w, h) = decoder.dimensions();
+    // Conservative upper bound also accounts for the float conversion's overlap
+    // with decoded pixels. Reject before decoding or allocating output pixels.
+    let float_bytes = u64::from(w.min(4096)) * u64::from(h.min(4096)) * 16;
+    if decoder.total_bytes() > 256 * 1024 * 1024 {
+        return Err("MaterialX image exceeds its 256 MiB decode budget".into());
+    }
+    if float_bytes.saturating_add(decoder.total_bytes()) > *remaining {
+        return Err("MaterialX graph exceeds its 512 MiB aggregate image/bake memory budget".into());
+    }
+    let mut image = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("{}: {e}", path.display()))?;
     // Resize in the decoded representation first. Expanding an 8-bit source to
     // four float channels before this step can allocate gigabytes unnecessarily.
     if image.width() > 4096 || image.height() > 4096 {
         image = image.thumbnail(4096, 4096);
     }
-    Ok(image.into_rgba32f())
+    let image = image.into_rgba32f();
+    *remaining -= u64::from(image.width()) * u64::from(image.height()) * 16;
+    Ok(image)
 }
 
 pub(crate) struct Compiler<'a, 'input> {
@@ -363,10 +355,23 @@ pub(crate) struct Compiler<'a, 'input> {
     base: &'a Path,
     cache: HashMap<roxmltree::NodeId, Arc<Expr>>,
     visiting: Vec<roxmltree::NodeId>,
+    remaining: u64,
 }
 impl<'a, 'input> Compiler<'a, 'input> {
     pub fn new(root: Node<'a, 'input>, base: &'a Path) -> Self {
-        Self { root, base, cache: HashMap::new(), visiting: Vec::new() }
+        Self { root, base, cache: HashMap::new(), visiting: Vec::new(), remaining: GRAPH_MEMORY_BYTES }
+    }
+    #[cfg(test)]
+    fn with_budget(root: Node<'a, 'input>, base: &'a Path, bytes: u64) -> Self {
+        Self { remaining: bytes, ..Self::new(root, base) }
+    }
+    pub fn reserve_bake(&mut self, size: [u32; 2]) -> Result<(), String> {
+        let bytes = u64::from(size[0]) * u64::from(size[1]) * 4;
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
+            .ok_or("MaterialX graph exceeds its 512 MiB aggregate image/bake memory budget")?;
+        Ok(())
     }
     fn named(&self, from: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
         from.ancestors().skip(1).find_map(|scope| scope.children().find(|n| n.attribute("name") == Some(name)))
@@ -421,6 +426,9 @@ impl<'a, 'input> Compiler<'a, 'input> {
         if let Some(expr) = self.cache.get(&node.id()) {
             return Ok(expr.clone());
         }
+        if self.cache.len() + self.visiting.len() >= 1024 {
+            return Err("MaterialX graph exceeds 1024 connected nodes".into());
+        }
         if self.visiting.contains(&node.id()) {
             return Err("MaterialX graph contains a cycle".into());
         }
@@ -471,7 +479,7 @@ impl<'a, 'input> Compiler<'a, 'input> {
                     .rev()
                     .collect::<String>();
                 let path = self.base.join(format!("{prefix}{file}"));
-                let mut image = load_image(&path)?;
+                let mut image = load_image_with_budget(&path, &mut self.remaining)?;
                 let srgb = node
                     .attribute("colorspace")
                     .or_else(|| self.root.attribute("colorspace"))
@@ -555,5 +563,71 @@ mod resource_tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn shared_dag_sampler_planning_is_bounded() {
+        const CHILD: &str = "SR_MTLX_DAG_PROBE";
+        if std::env::var_os(CHILD).is_some() {
+            let base = std::env::temp_dir().join(format!("sr-mtlx-dag-{}", std::process::id()));
+            std::fs::create_dir_all(&base).unwrap();
+            std::fs::write(base.join("a.ppm"), b"P6\n1 1\n255\n\xff\0\0").unwrap();
+            let mut text = String::from(
+                r#"<materialx><image name="n0" type="color3"><input name="file" type="filename" value="a.ppm"/><input name="filtertype" type="string" value="closest"/></image>"#,
+            );
+            for i in 1..=28 {
+                text.push_str(&format!(r#"<add name="n{i}" type="color3"><input name="in1" nodename="n{}"/><input name="in2" nodename="n{}"/></add>"#, i-1, i-1));
+            }
+            text.push_str(r#"<input nodename="n28"/></materialx>"#);
+            let doc = roxmltree::Document::parse(&text).unwrap();
+            let root = doc.root_element();
+            let expression =
+                Compiler::new(root, &base).input(root.children().find(|n| n.has_tag_name("input")).unwrap()).unwrap();
+            let (texture, factor) = expression.bake(false);
+            assert_eq!(texture.sampler.unwrap().filter, TextureFilter::Closest);
+            assert_eq!(factor[0], 268435456.0);
+            std::fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "mtlx_graph::budget_tests::shared_dag_sampler_planning_is_bounded"])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("sampler planning revisits shared DAG nodes");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn graph_rejects_images_exceeding_aggregate_budget() {
+        let base = std::env::temp_dir().join(format!("sr-mtlx-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.ppm"), b"P6\n2 1\n255\n\xff\0\0\0\xff\0").unwrap();
+        std::fs::write(base.join("b.ppm"), b"P6\n2 1\n255\n\0\0\xff\xff\xff\0").unwrap();
+        let xml = roxmltree::Document::parse(r#"<materialx><image name="a"><input name="file" type="filename" value="a.ppm"/></image><image name="b"><input name="file" type="filename" value="b.ppm"/></image><input nodename="a"/><input nodename="b"/></materialx>"#).unwrap();
+        let root = xml.root_element();
+        let mut graph = Compiler::with_budget(root, &base, 64);
+        let inputs: Vec<_> = root.children().filter(|n| n.has_tag_name("input")).collect();
+        assert!(graph.input(inputs[0]).is_ok());
+        // The same DAG node is shared, not charged repeatedly.
+        assert!(graph.input(inputs[0]).is_ok());
+        let error = graph.input(inputs[1]).err().expect("aggregate budget must reject the second decode");
+        assert!(error.contains("budget"), "{error}");
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

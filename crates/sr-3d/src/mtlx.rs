@@ -186,6 +186,7 @@ pub fn parse(text: &str, base: &Path) -> Result<MtlxMaterial, String> {
         p.roughness = 1.0;
     }
     for (name, expression) in graph_maps {
+        graph.reserve_bake(expression.size)?;
         let (mut texture, factor) = expression.bake(name == "normal");
         let slot = match name.as_str() {
             "base_color" => {
@@ -195,6 +196,10 @@ pub fn parse(text: &str, base: &Path) -> Result<MtlxMaterial, String> {
             "normal" => 1,
             "specular_roughness" | "roughness" => {
                 p.roughness = factor[0];
+                if let Some(sampler) = texture.sampler.as_mut() {
+                    sampler.border[1] = sampler.border[0];
+                    sampler.border[2] = 1.0;
+                }
                 for pixel in texture.rgba.chunks_exact_mut(4) {
                     pixel[1] = pixel[0];
                     pixel[2] = 255;

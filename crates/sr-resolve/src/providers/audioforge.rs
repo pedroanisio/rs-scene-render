@@ -61,12 +61,9 @@ impl Provider for AudioForge {
         ]);
         run(&mut cmd, "audioforge")?;
         convert(&wav, &PathBuf::from(&req.output))?;
-        let version = Command::new(&exe)
-            .arg("--version")
-            .output()
+        let version = run(Command::new(&exe).arg("--version"), "audioforge version")
             .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "audioforge".into());
         Ok(Response { ok: true, version: Some(version), ..Default::default() })

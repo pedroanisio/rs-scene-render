@@ -15,6 +15,8 @@ runs:
         test -s "$RUNNER_TEMP/hevc-check.png"
         # The HEIC tests skip where the decoder is missing; here that must be a failure.
         echo "SR_REQUIRE_HEIC=1" >> "$GITHUB_ENV"
+        echo "SR_REQUIRE_GPU=1" >> "$GITHUB_ENV"
+        echo "SR_GPU_BACKEND=vulkan" >> "$GITHUB_ENV"
         python3 -m venv --system-site-packages "$RUNNER_TEMP/evidence-python"
         "$RUNNER_TEMP/evidence-python/bin/pip" install -r tools/evidence/requirements.txt
         echo "$RUNNER_TEMP/evidence-python/bin" >> "$GITHUB_PATH"

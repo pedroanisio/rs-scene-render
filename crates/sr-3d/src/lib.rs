@@ -29,6 +29,7 @@ pub mod mtlx;
 mod mtlx_graph;
 
 pub mod prim;
+pub mod sampling;
 pub mod usdc;
 
 use glam::{Mat4, Quat, Vec3};
@@ -141,6 +142,8 @@ pub struct Texture {
     pub rgba: Vec<u8>,
     /// Encoded with the sRGB transfer (colour maps) or linear (data maps).
     pub srgb: bool,
+    /// Explicit base-level filtering; absent uses the renderer's mipmapped default.
+    pub sampler: Option<sampling::TextureSampler>,
 }
 
 /// Texture slots of an imported material (indices into [`Model::textures`]).

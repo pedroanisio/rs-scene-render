@@ -20,6 +20,8 @@ struct Material {
     aniso: vec4<f32>,
     // uv scale xy
     uv: vec4<f32>,
+    sampling: array<vec4<u32>, 6>,
+    borders: array<vec4<f32>, 6>,
 };
 
 @group(1) @binding(0) var<uniform> mat: Material;
@@ -30,6 +32,37 @@ struct Material {
 @group(1) @binding(5) var emissive_map: texture_2d<f32>;
 @group(1) @binding(6) var disp_map: texture_2d<f32>;
 @group(1) @binding(7) var mat_smp: sampler;
+
+fn material_texel(tex: texture_2d<f32>, xy: vec2<i32>, slot: u32) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(tex));
+    let flags = mat.sampling[slot].x;
+    let q = vec2(address_index(xy.x, size.x, (flags >> 3u) & 3u), address_index(xy.y, size.y, (flags >> 5u) & 3u));
+    if (any(q < vec2(0))) { return mat.borders[slot]; }
+    return textureLoad(tex, q, 0);
+}
+fn material_sample(tex: texture_2d<f32>, uv: vec2<f32>, slot: u32) -> vec4<f32> {
+    let flags = mat.sampling[slot].x;
+    let p = sample_position(uv, vec2<f32>(textureDimensions(tex)), flags);
+    let q = vec2<i32>(floor(p)); let f = fract(p);
+    let filtering = (flags >> 1u) & 3u;
+    if (filtering == 1u) { return material_texel(tex, vec2<i32>(floor(p + 0.5)), slot); }
+    if (filtering == 2u) {
+        let wx = cubic_weights(f.x); let wy = cubic_weights(f.y);
+        var out = vec4(0.0);
+        for (var y = 0; y < 4; y++) { for (var x = 0; x < 4; x++) {
+            out += material_texel(tex, q + vec2(x-1,y-1), slot) * wx[x] * wy[y];
+        }}
+        return out;
+    }
+    return mix(mix(material_texel(tex,q,slot), material_texel(tex,q+vec2(1,0),slot),f.x),
+        mix(material_texel(tex,q+vec2(0,1),slot),material_texel(tex,q+vec2(1,1),slot),f.x),f.y);
+}
+fn material_fragment(tex: texture_2d<f32>, uv: vec2<f32>, slot: u32) -> vec4<f32> {
+    // Evaluate derivatives outside the per-material branch for uniform control flow.
+    let dx = dpdx(uv); let dy = dpdy(uv);
+    if (mat.sampling[slot].x == 0u) { return textureSampleGrad(tex, mat_smp, uv, dx, dy); }
+    return material_sample(tex, uv, slot);
+}
 
 struct Object {
     model: mat4x4<f32>,
@@ -70,7 +103,7 @@ struct VOut {
 fn displaced(v: VIn) -> vec3<f32> {
     var p = v.pos;
     if ((u32(mat.aniso.w) & 32u) != 0u) {
-        let h = textureSampleLevel(disp_map, mat_smp, v.uv * mat.uv.xy, 0.0).r;
+        let h = material_sample(disp_map, v.uv * mat.uv.xy, 5u).r;
         p = p + normalize(v.normal) * h * mat.aniso.z;
     }
     return p;
@@ -344,13 +377,13 @@ fn surface(i: VOut, front: bool) -> Surface {
     var s: Surface;
     let bits = u32(mat.aniso.w);
     var base = mat.base_color * i.color;
-    if ((bits & 1u) != 0u) { base = base * textureSample(base_map, mat_smp, i.uv); }
+    if ((bits & 1u) != 0u) { base = base * material_fragment(base_map, i.uv, 0u); }
     s.albedo = base.rgb;
     s.alpha = base.a * mat.p0.z * obj.params.x;
     var metallic = mat.p0.x;
     var rough = mat.p0.y;
     if ((bits & 4u) != 0u) {
-        let mr = textureSample(mr_map, mat_smp, i.mr_uv);
+        let mr = material_fragment(mr_map, i.mr_uv, 2u);
         rough = rough * mr.g;
         metallic = metallic * mr.b;
     }
@@ -361,7 +394,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     var t = normalize(i.tangent.xyz - n * dot(n, i.tangent.xyz));
     var b = cross(n, t) * i.tangent.w;
     if ((bits & 2u) != 0u) {
-        var tn = textureSample(normal_map, mat_smp, i.normal_uv).xyz * 2.0 - 1.0;
+        var tn = material_fragment(normal_map, i.normal_uv, 1u).xyz * 2.0 - 1.0;
         tn = vec3(tn.xy * mat.p1.w, tn.z);
         // glTF normal maps are y-up in texture space; scene space flips y (and z) relative to glTF
         n = normalize(t * tn.x - b * tn.y + n * tn.z);
@@ -376,7 +409,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     s.world = i.world;
     s.v = normalize(fr.eye.xyz - i.world);
     s.occlusion = 1.0;
-    if ((bits & 8u) != 0u) { s.occlusion = 1.0 + mat.irid.w * (textureSample(occ_map, mat_smp, i.occ_uv).r - 1.0); }
+    if ((bits & 8u) != 0u) { s.occlusion = 1.0 + mat.irid.w * (material_fragment(occ_map, i.occ_uv, 3u).r - 1.0); }
     let ior = mat.p2.w;
     let f0d = pow((ior - 1.0) / (ior + 1.0), 2.0);
     let dielectric = min(vec3(f0d) * mat.specular_color.rgb, vec3(1.0));
@@ -499,7 +532,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         col += transmission(s) * ft * mat.p2.z * (1.0 - s.metallic);
     }
     var em = mat.emissive.rgb * mat.emissive.w;
-    if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * textureSample(emissive_map, mat_smp, i.emissive_uv).rgb; }
+    if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * material_fragment(emissive_map, i.emissive_uv, 4u).rgb; }
     col += em;
     // transmissive surfaces are opaque layers over what they refract
     var a = 1.0;

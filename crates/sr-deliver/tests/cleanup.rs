@@ -1,6 +1,7 @@
 //! A delivery that fails leaves nothing behind. One test, in a process of its own: it looks for this process's
 //! temporary directories.
 
+mod common;
 fn leftovers() -> Vec<std::path::PathBuf> {
     let prefix = format!("scene-render-{}-", std::process::id());
     std::fs::read_dir(std::env::temp_dir())
@@ -31,7 +32,7 @@ fn a_failed_delivery_leaves_no_temporary_directory_or_truncated_output() {
     assert_eq!(leftovers(), Vec::<std::path::PathBuf>::new());
 
     // a frame that cannot be rendered half way: serial, and through the two-pass intermediate
-    let Ok(gpu) = sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")) else { return };
+    let Some(gpu) = common::gpu() else { return };
     std::fs::write(dir.join("bad.png"), b"not an image").unwrap();
     for (name, extra) in [("serial", ""), ("twopass", r#"twoPass="true" bitrate="200000""#)] {
         let doc = load(

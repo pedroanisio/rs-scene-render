@@ -1,10 +1,11 @@
 //! Delivery at a quality tier: a draft renders at half size and the output stage scales it to
 //! the output's size, so a draft delivery has the final's dimensions, and the report says so.
 
+mod common;
 use std::path::PathBuf;
 
 fn gpu() -> Option<sr_gpu::Gpu> {
-    sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()
+    common::gpu()
 }
 
 fn dir(name: &str) -> PathBuf {

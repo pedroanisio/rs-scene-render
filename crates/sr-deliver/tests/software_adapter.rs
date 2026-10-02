@@ -1,6 +1,6 @@
 //! Delivery on a software adapter: the report says so, and the automatic worker count is one
-//! (each more worker would be one more llvmpipe device competing for the same cores), while an
-//! explicit count is honoured. It runs in its own test binary because workers open devices.
+//! (workers compete for the same CPU cores), while an explicit count is honoured.
+//! Workers use independent devices on the caller's selected adapter.
 
 use std::path::PathBuf;
 
@@ -47,10 +47,12 @@ fn software_rendering_is_reported_and_runs_one_automatic_worker() {
 }
 
 #[test]
-fn workers_open_the_adapter_the_caller_chose() {
+fn workers_open_independent_devices_on_the_adapter_the_caller_chose() {
     let Some(gpu) = software() else { return };
-    let twin = gpu.open_like().expect("the same adapter opens again");
-    assert_eq!((twin.info.name.as_str(), twin.info.backend), (gpu.info.name.as_str(), gpu.info.backend));
+    let worker = gpu.open_like().expect("worker context");
+    assert_eq!((worker.info.name.as_str(), worker.info.backend), (gpu.info.name.as_str(), gpu.info.backend));
+    assert!(!std::sync::Arc::ptr_eq(&worker.device, &gpu.device));
+    assert!(!std::sync::Arc::ptr_eq(&worker.queue, &gpu.queue));
 }
 
 #[test]

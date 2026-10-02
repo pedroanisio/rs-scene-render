@@ -1,9 +1,10 @@
 //! Caller inputs reach output overlays in serial and parallel delivery.
 //! Kept in a separate binary so its worker devices do not race other GPU tests.
 
+mod common;
 #[test]
 fn overlays_use_caller_parameters_and_data_rows() {
-    let Ok(gpu) = sr_gpu::Gpu::new() else { return };
+    let Some(gpu) = common::gpu() else { return };
     for workers in [1, 2] {
         for cli in [false, true] {
             let d = std::env::temp_dir().join(format!("sr-overlay-{}-{workers}-{cli}", std::process::id()));

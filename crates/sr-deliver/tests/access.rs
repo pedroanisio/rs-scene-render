@@ -1,12 +1,12 @@
 //! Accessibility: flash analysis, text contrast and required captions.
 
+mod common;
 use sr_deliver::access::{FlashDetector, COLS, ROWS};
 
 // As in the segment tests, share one device: concurrent device creation can crash
 // the software Vulkan driver. Each test still owns its renderers and outputs.
 fn gpu() -> Option<sr_gpu::Gpu> {
-    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
-    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
+    common::gpu()
 }
 
 fn frame(v: [f64; 3], cells: Option<usize>) -> Vec<[f64; 3]> {

@@ -131,7 +131,7 @@ fn finish_primitive(p: &mut Primitive, had_normals: bool) {
 
 fn decode_image(bytes: &[u8], srgb: bool) -> Result<Texture, String> {
     let img = image::load_from_memory(bytes).map_err(|e| format!("image: {e}"))?.to_rgba8();
-    Ok(Texture { width: img.width(), height: img.height(), rgba: img.into_raw(), srgb })
+    Ok(Texture { width: img.width(), height: img.height(), rgba: img.into_raw(), srgb, sampler: None })
 }
 
 fn load_uri(uri: &str, base: &Path) -> Result<Vec<u8>, String> {

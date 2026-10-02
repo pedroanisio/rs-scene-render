@@ -1,10 +1,11 @@
 //! Parallel encoding of an output with segments. It runs in its own test binary: each worker opens its
 //! own GPU device, which is not safe alongside the other GPU tests of one process.
 
+mod common;
 use std::path::{Path, PathBuf};
 
 fn gpu() -> Option<sr_gpu::Gpu> {
-    sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()
+    common::gpu()
 }
 
 fn dir(name: &str) -> PathBuf {

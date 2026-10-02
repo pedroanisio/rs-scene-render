@@ -38,10 +38,11 @@ pub struct PtMat {
     pub emissive: [f32; 4],
     /// Specular weight, cast-shadow flag, receive-shadow flag, unused
     pub extra: [f32; 4],
-    /// Offset, width, height and sRGB flag for each map in the shared pixel buffer.
+    /// Offset, width, height and packed sRGB/sampler flags for each shared pixel map.
     pub maps: [[u32; 4]; 6],
     /// Alpha cutoff, alpha mode, normal scale, occlusion strength.
     pub texture_params: [f32; 4],
+    pub borders: [[f32; 4]; 6],
 }
 
 /// A BVH node: bounds, and either (first triangle, count) for a leaf or (second child, 0) for an
@@ -175,7 +176,12 @@ pub fn build(scene: &Scene3) -> PtScene {
                         .extend(texture.rgba.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().expect("RGBA"))));
                     offset
                 });
-                [offset, texture.size[0], texture.size[1], texture.srgb as u32]
+                [
+                    offset,
+                    texture.size[0],
+                    texture.size[1],
+                    texture.srgb as u32 | texture.sampler.map_or(0, |s| s.flags()),
+                ]
             })
         });
         let unlit = m.unlit;
@@ -203,6 +209,9 @@ pub fn build(scene: &Scene3) -> PtScene {
                 0.0,
             ],
             maps,
+            borders: std::array::from_fn(|i| {
+                dr.maps[i].as_ref().and_then(|t| t.sampler).map_or([0.0; 4], |s| s.border)
+            }),
             texture_params: [
                 m.alpha_cutoff,
                 match m.alpha_mode {
@@ -357,6 +366,7 @@ pub fn build(scene: &Scene3) -> PtScene {
             emissive: [0.0; 4],
             extra: [0.0; 4],
             maps: [[0; 4]; 6],
+            borders: [[0.0; 4]; 6],
             texture_params: [0.0; 4],
         });
     }
@@ -599,7 +609,9 @@ impl PtGpu {
     pub fn new(d: &wgpu::Device, format: wgpu::TextureFormat) -> PtGpu {
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pathtrace"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("pathtrace.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", include_str!("sampling.wgsl"), include_str!("pathtrace.wgsl")).into(),
+            ),
         });
         let vis = wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT;
         let buf = |binding: u32, ty: wgpu::BufferBindingType, dynamic: bool| wgpu::BindGroupLayoutEntry {

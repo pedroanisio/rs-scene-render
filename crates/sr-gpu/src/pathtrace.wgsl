@@ -31,6 +31,7 @@ struct Mat {
     extra: vec4<f32>,
     maps: array<vec4<u32>, 6>,
     texture_params: vec4<f32>,
+    borders: array<vec4<f32>, 6>,
 };
 
 struct Node {
@@ -73,21 +74,31 @@ fn tuv(k: u32, c: u32, slot: u32) -> vec2<f32> {
     let row = tverts[k * 24u + c * 6u + 3u + slot / 2u];
     return select(row.xy, row.zw, slot % 2u == 1u);
 }
-fn texel(info: vec4<u32>, xy: vec2<i32>) -> vec4<f32> {
+fn texel(info: vec4<u32>, xy: vec2<i32>, border: vec4<f32>) -> vec4<f32> {
     let size = vec2<i32>(info.yz);
-    let q = ((xy % size) + size) % size;
+    let q = vec2(address_index(xy.x, size.x, (info.w >> 3u) & 3u), address_index(xy.y, size.y, (info.w >> 5u) & 3u));
+    if (any(q < vec2(0))) { return border; }
     let index = info.x + u32(q.y) * info.y + u32(q.x);
     let c = unpack4x8unorm(bitcast<u32>(tverts[index / 4u][index % 4u]));
-    if (info.w == 0u) { return c; }
+    if ((info.w & 1u) == 0u) { return c; }
     let rgb = select(pow((c.rgb + 0.055) / 1.055, vec3(2.4)), c.rgb / 12.92, c.rgb <= vec3(0.04045));
     return vec4(rgb, c.a);
 }
-fn map_sample(info: vec4<u32>, uv: vec2<f32>) -> vec4<f32> {
+fn map_sample(info: vec4<u32>, uv: vec2<f32>, border: vec4<f32>) -> vec4<f32> {
     if (info.y == 0u || info.z == 0u) { return vec4(1.0); }
-    let p = fract(uv) * vec2<f32>(info.yz) - 0.5;
-    let q = vec2<i32>(floor(p));
-    let f = fract(p);
-    return mix(mix(texel(info,q),texel(info,q+vec2(1,0)),f.x),mix(texel(info,q+vec2(0,1)),texel(info,q+vec2(1,1)),f.x),f.y);
+    let p = sample_position(uv, vec2<f32>(info.yz), info.w);
+    let q = vec2<i32>(floor(p)); let f = fract(p);
+    let filtering = (info.w >> 1u) & 3u;
+    if (filtering == 1u) { return texel(info, vec2<i32>(floor(p + 0.5)), border); }
+    if (filtering == 2u) {
+        let wx = cubic_weights(f.x); let wy = cubic_weights(f.y);
+        var out = vec4(0.0);
+        for (var y = 0; y < 4; y++) { for (var x = 0; x < 4; x++) {
+            out += texel(info, q + vec2(x-1,y-1), border) * wx[x] * wy[y];
+        }}
+        return out;
+    }
+    return mix(mix(texel(info,q,border),texel(info,q+vec2(1,0),border),f.x),mix(texel(info,q+vec2(0,1),border),texel(info,q+vec2(1,1),border),f.x),f.y);
 }
 
 fn pt_sh_c(i:u32,k:u32)->vec3<f32> {
@@ -265,7 +276,7 @@ fn surf_of(m: Mat) -> Surf {
     s.ior = m.params.w;
     let r = (s.ior - 1.0) / (s.ior + 1.0);
     s.f0 = mix(vec3(r * r), s.albedo, s.metallic);
-    s.specw = mix(select(1.0, m.extra.x, m.extra.x > 0.0), 1.0, s.metallic);
+    s.specw = mix(clamp(m.extra.x, 0.0, 1.0), 1.0, s.metallic);
     return s;
 }
 
@@ -345,7 +356,7 @@ fn visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
                 let b = vec3(1.0-hit.u-hit.v,hit.u,hit.v);
                 let uv = tuv(k,0u,0u)*b.x+tuv(k,1u,0u)*b.y+tuv(k,2u,0u)*b.z;
                 let vertex_alpha = tverts[k*24u+2u].a*b.x+tverts[k*24u+8u].a*b.y+tverts[k*24u+14u].a*b.z;
-                opacity *= map_sample(m.maps[0],uv).a*vertex_alpha;
+                opacity *= map_sample(m.maps[0], uv, m.borders[0]).a*vertex_alpha;
                 if (m.texture_params.y == 1.0) { opacity = select(0.0,1.0,opacity >= m.texture_params.x); }
             }
             if (m.extra.y > 0.5) { result *= 1.0-clamp(opacity,0.0,1.0); }
@@ -494,12 +505,12 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         let bary = vec3(1.0 - hit.u - hit.v, hit.u, hit.v);
         var uv: array<vec2<f32>,6>;
         for (var slot = 0u; slot < 6u; slot++) { uv[slot] = tuv(k,0u,slot)*bary.x + tuv(k,1u,slot)*bary.y + tuv(k,2u,slot)*bary.z; }
-        let base_texel = map_sample(m.maps[0],uv[0]);
+        let base_texel = map_sample(m.maps[0], uv[0], m.borders[0]);
         let color = tverts[k*24u+2u]*bary.x+tverts[k*24u+8u]*bary.y+tverts[k*24u+14u]*bary.z;
         m.base = m.base * base_texel * color;
-        let mr = map_sample(m.maps[2],uv[2]);
+        let mr = map_sample(m.maps[2], uv[2], m.borders[2]);
         m.params.x *= mr.b; m.params.y *= mr.g;
-        m.emissive = vec4(m.emissive.rgb * map_sample(m.maps[4],uv[4]).rgb, m.emissive.w);
+        m.emissive = vec4(m.emissive.rgb * map_sample(m.maps[4], uv[4], m.borders[4]).rgb, m.emissive.w);
         if (m.emissive.w > 0.5) { m.emissive = vec4(m.base.rgb, m.emissive.w); }
         if (m.texture_params.y == 0.0) { m.base.a = mats[tmat_of(k)].base.a; }
         if (m.texture_params.y == 1.0) { m.base.a = select(0.0,1.0,m.base.a >= m.texture_params.x); }
@@ -515,7 +526,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                 let tangent = ((tp(k,1u)-p0)*duv2.y-(tp(k,2u)-p0)*duv1.y)/det;
                 let t = normalize(tangent-n*dot(n,tangent));
                 let b = cross(n,t)*sign(det);
-                var mapped = map_sample(m.maps[1],uv[1]).xyz*2.0-1.0;
+                var mapped = map_sample(m.maps[1], uv[1], m.borders[1]).xyz*2.0-1.0;
                 mapped = vec3(mapped.xy*m.texture_params.z,mapped.z);
                 n = normalize(t*mapped.x-b*mapped.y+n*mapped.z);
             }
@@ -584,7 +595,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         let pdf = pdf_of(s, n, v, l);
         let nl = dot(n, l);
         if (pdf <= 1e-8 || nl <= 0.0) { break; }
-        let occlusion = 1.0 + m.texture_params.w * (map_sample(m.maps[3],uv[3]).r - 1.0);
+        let occlusion = 1.0 + m.texture_params.w * (map_sample(m.maps[3], uv[3], m.borders[3]).r - 1.0);
         let diffuse = bsdf(s, n, v, l, vec2(1.0, 0.0));
         let specular = bsdf(s, n, v, l, vec2(0.0, 1.0));
         let total = diffuse + specular;

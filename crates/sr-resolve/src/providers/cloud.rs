@@ -11,13 +11,11 @@
 //!   id, `model` the model id, `seed` passed through). Key `ELEVENLABS_API_KEY`,
 //!   base URL `ELEVENLABS_BASE_URL`.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use super::{base64, convert, tail, wav_from_pcm16, Provider};
+use super::{base64, convert, wav_from_pcm16, Provider};
 use crate::protocol::{Request, Response};
 
 fn key(var: &str) -> Result<String, String> {
@@ -38,7 +36,7 @@ fn base(var: &str, default: &str) -> String {
 fn post(url: &str, headers: &[(&str, String)], body: &Value, work: &Path, out: &Path) -> Result<u16, String> {
     let req_file = work.join("request.json");
     std::fs::write(&req_file, serde_json::to_vec(body).expect("json")).map_err(|e| e.to_string())?;
-    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let q = super::curl_quote;
     let mut cfg = String::new();
     cfg += &format!("url = {}\nrequest = \"POST\"\nsilent\nshow-error\n", q(url));
     cfg += "header = \"Content-Type: application/json\"\n";
@@ -50,36 +48,15 @@ fn post(url: &str, headers: &[(&str, String)], body: &Value, work: &Path, out: &
         q(&format!("@{}", req_file.display())),
         q(&out.display().to_string())
     );
-    let curl = std::env::var("SR_CURL").unwrap_or_else(|_| "curl".into());
-    let mut child = Command::new(&curl)
-        .args(["--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run {curl}: {e}"))?;
-    child.stdin.take().expect("piped").write_all(cfg.as_bytes()).map_err(|e| e.to_string())?;
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !o.status.success() {
-        return Err(format!("curl failed: {}", tail(&String::from_utf8_lossy(&o.stderr))));
-    }
-    String::from_utf8_lossy(&o.stdout).trim().parse().map_err(|_| "curl gave no HTTP status".into())
+    super::curl(&cfg)
 }
 
 /// The service's error message from a failed response body.
 fn failure(service: &str, status: u16, body: &Path) -> String {
-    let text = std::fs::read_to_string(body).unwrap_or_default();
-    let msg = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v["error"]["message"]
-                .as_str()
-                .or(v["detail"]["message"].as_str())
-                .or(v["detail"].as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| text.chars().take(200).collect());
-    format!("{service} answered HTTP {status}: {msg}")
+    // Remote bodies may reflect credentials or private prompts. Report the
+    // status without reading or logging untrusted response content.
+    let _ = body;
+    format!("{service} answered HTTP {status}")
 }
 
 pub struct OpenAi;
@@ -178,5 +155,46 @@ impl Provider for ElevenLabs {
             .map_err(|e| e.to_string())?;
         convert(&wav, &PathBuf::from(&req.output))?;
         Ok(Response { ok: true, version: Some(format!("elevenlabs {}", req.model)), ..Default::default() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn remote_errors_do_not_echo_credentials_or_unbounded_bodies() {
+        let work = tempfile::tempdir().unwrap();
+        let body = work.path().join("body");
+        std::fs::write(
+            &body,
+            serde_json::to_vec(&json!({"error":{"message":format!("Bearer dummy-secret {}", "x".repeat(100000))}}))
+                .unwrap(),
+        )
+        .unwrap();
+        let error = failure("OpenAI", 400, &body);
+        assert!(!error.contains("dummy-secret"), "{error}");
+        assert!(error.len() < 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_disables_user_config_and_keeps_error_stream_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap();
+        let curl = work.path().join("curl");
+        std::fs::write(&curl, "#!/usr/bin/env python3\nimport sys,pathlib\nconfig=sys.stdin.read()\npathlib.Path(__file__).with_suffix('.args').write_text(' '.join(sys.argv[1:]))\nsys.stderr.write(config)\nsys.exit(1)\n").unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var("SR_CURL", &curl);
+        let result = post(
+            "https://example.invalid/?token=dummy-url-secret",
+            &[("Authorization", "Bearer dummy-api-secret".into())],
+            &json!({}),
+            work.path(),
+            &work.path().join("out"),
+        );
+        std::env::remove_var("SR_CURL");
+        let error = result.unwrap_err();
+        assert!(!error.contains("dummy-"), "{error}");
+        assert!(std::fs::read_to_string(curl.with_extension("args")).unwrap().starts_with("--disable "));
     }
 }

@@ -1,8 +1,8 @@
+mod common;
 use std::path::PathBuf;
 
 fn gpu() -> Option<sr_gpu::Gpu> {
-    static GPU: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
-    GPU.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
+    common::gpu()
 }
 
 fn directory(name: &str) -> PathBuf {

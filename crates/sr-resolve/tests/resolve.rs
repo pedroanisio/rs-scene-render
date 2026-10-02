@@ -648,3 +648,62 @@ fn online_tiles_are_fetched_for_the_views_and_pinned() {
     assert_eq!(resolve(&doc, &Options { allow_cloud: true, ..opts(&d) }).unwrap()[0].status, Status::UpToDate);
     assert_eq!(seen.lock().unwrap().len(), 4);
 }
+
+#[test]
+fn destination_plan_preserves_document_and_inputs_before_generation() {
+    setup();
+    for (label, destination) in [
+        ("document", "scene.scene.xml"),
+        ("lock", "scene.scene.xml.resolve.lock"),
+        ("input", "input.wav"),
+        ("sidecar", "gen/vo.wav.resolve.json"),
+        ("duplicate", "gen/vo.wav"),
+    ] {
+        let xml = narrated("hello").replace("gen/subs.json", destination);
+        let xml = if label == "input" {
+            xml.replace("<assets>", "<assets><audio id=\"original\" src=\"input.wav\"/>")
+        } else {
+            xml
+        };
+        sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: false, ..Default::default() }).unwrap();
+        let d = project(&format!("destination-{label}"), &xml);
+        std::fs::write(d.join("input.wav"), b"protected input").unwrap();
+        let result = resolve(&d.join("scene.scene.xml"), &opts(&d));
+        assert!(result.is_err(), "{label}: {result:?}");
+        assert_eq!(std::fs::read_to_string(d.join("scene.scene.xml")).unwrap(), xml, "{label}");
+        assert_eq!(std::fs::read(d.join("input.wav")).unwrap(), b"protected input");
+        assert_eq!(calls(&d), 0, "{label}: provider ran before validation");
+        assert!(!d.join("gen/vo.wav").exists());
+    }
+}
+
+#[test]
+fn different_requests_cannot_share_a_cache_even_with_only_filter() {
+    setup();
+    let xml = format!(
+        r#"<scene version="1.2"><project width="16" height="16" fps="10" duration="1"/>
+    <assets><generated id="a" kind="image" provider="example" model="m" prompt="red" width="2" height="2" cache="shared.png" cacheSha256="{ZERO}"/>
+    <generated id="b" kind="image" provider="example" model="m" prompt="green" width="2" height="2" cache="shared.png" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+    );
+    let d = project("cache-collision", &xml);
+    std::fs::write(d.join("shared.png"), b"previous cache").unwrap();
+    for only in [vec![], vec!["a".into()]] {
+        let result = resolve(&d.join("scene.scene.xml"), &Options { only, ..opts(&d) });
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(std::fs::read(d.join("shared.png")).unwrap(), b"previous cache");
+        assert_eq!(std::fs::read_to_string(d.join("scene.scene.xml")).unwrap(), xml);
+        assert_eq!(calls(&d), 0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn destination_plan_detects_document_symlink_aliases() {
+    setup();
+    let xml = narrated("hello").replace("gen/subs.json", "alias.json");
+    let d = project("destination-alias", &xml);
+    std::os::unix::fs::symlink(d.join("scene.scene.xml"), d.join("alias.json")).unwrap();
+    assert!(resolve(&d.join("scene.scene.xml"), &opts(&d)).is_err());
+    assert_eq!(std::fs::read_to_string(d.join("scene.scene.xml")).unwrap(), xml);
+    assert_eq!(calls(&d), 0);
+}

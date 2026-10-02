@@ -68,97 +68,15 @@ impl Provider for External {
     }
 
     fn run(&self, req: &Request) -> Result<Response, String> {
-        let timeout = std::env::var("SR_PROVIDER_TIMEOUT")
-            .ok()
-            .map(|s| s.parse::<u64>().map_err(|_| "SR_PROVIDER_TIMEOUT must be positive seconds".to_string()))
-            .transpose()?
-            .unwrap_or(1800);
-        if timeout == 0 {
-            return Err("SR_PROVIDER_TIMEOUT must be positive seconds".into());
-        }
-        self.run_with_timeout(req, std::time::Duration::from_secs(timeout))
+        self.run_with_timeout(req, provider_timeout()?)
     }
 }
 
 impl External {
     fn run_with_timeout(&self, req: &Request, timeout: std::time::Duration) -> Result<Response, String> {
-        use std::io::Read;
-        use std::sync::mpsc;
-        use std::time::Instant;
-        // Drain both pipes while writing stdin. Keep only the response/error tail,
-        // so a noisy provider cannot fill a pipe or grow our memory indefinitely.
-        fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result = (|| {
-                    let mut tail = std::collections::VecDeque::new();
-                    let mut buf = [0; 8192];
-                    loop {
-                        let n = pipe.read(&mut buf)?;
-                        if n == 0 {
-                            break;
-                        }
-                        let excess = (tail.len() + n).saturating_sub(1024 * 1024);
-                        tail.drain(..excess);
-                        tail.extend(&buf[..n]);
-                    }
-                    Ok(tail.into_iter().collect())
-                })();
-                let _ = tx.send(result);
-            });
-            rx
-        }
         let mut command = Command::new(&self.command[0]);
-        command.args(&self.command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let mut child = command.spawn().map_err(|e| format!("cannot run provider {}: {e}", self.name))?;
-        let stdout = drain(child.stdout.take().expect("piped"));
-        let stderr = drain(child.stderr.take().expect("piped"));
-        let mut stdin = child.stdin.take().expect("piped");
-        let body = serde_json::to_vec(req).expect("serialisable");
-        let (tx, written) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(stdin.write_all(&body));
-        });
-        let start = Instant::now();
-        let result = (|| {
-            let status = loop {
-                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                    break status;
-                }
-                if start.elapsed() >= timeout {
-                    return Err(format!("provider {} timed out", self.name));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
-            let remaining = || timeout.saturating_sub(start.elapsed());
-            let stdout = stdout
-                .recv_timeout(remaining())
-                .map_err(|_| "provider stdout timed out".to_string())?
-                .map_err(|e| e.to_string())?;
-            let stderr = stderr
-                .recv_timeout(remaining())
-                .map_err(|_| "provider stderr timed out".to_string())?
-                .map_err(|e| e.to_string())?;
-            written
-                .recv_timeout(remaining())
-                .map_err(|_| "provider stdin timed out".to_string())?
-                .map_err(|e| format!("provider request: {e}"))?;
-            Ok(std::process::Output { status, stdout, stderr })
-        })();
-        if result.is_err() {
-            #[cfg(unix)]
-            {
-                let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        let out = result?;
+        command.args(&self.command[1..]);
+        let out = execute(&mut command, &self.name, &serde_json::to_vec(req).expect("serialisable"), timeout)?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let last = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
         let resp: Option<Response> = serde_json::from_str(last).ok();
@@ -173,6 +91,149 @@ impl External {
             )),
         }
     }
+}
+
+fn provider_timeout() -> Result<std::time::Duration, String> {
+    let seconds = std::env::var("SR_PROVIDER_TIMEOUT")
+        .ok()
+        .map(|s| s.parse::<u64>().map_err(|_| "SR_PROVIDER_TIMEOUT must be positive seconds".to_string()))
+        .transpose()?
+        .unwrap_or(1800);
+    if seconds == 0 {
+        return Err("SR_PROVIDER_TIMEOUT must be positive seconds".into());
+    }
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
+thread_local! {
+    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// One budget for all subprocesses/retries making a target, including conversions.
+pub(crate) fn invoke(provider: &dyn Provider, req: &Request) -> Result<Response, String> {
+    struct Reset(Option<std::time::Instant>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEADLINE.set(self.0);
+        }
+    }
+    let deadline = std::time::Instant::now().checked_add(provider_timeout()?).ok_or("provider timeout is too large")?;
+    let _reset = Reset(DEADLINE.replace(Some(deadline)));
+    provider.run(req)
+}
+
+/// Concurrent, bounded pipe draining and request writing under one deadline.
+fn execute(
+    command: &mut Command,
+    what: &str,
+    body: &[u8],
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let timeout =
+        DEADLINE.get().map_or(timeout, |d| timeout.min(d.saturating_duration_since(std::time::Instant::now())));
+    if timeout.is_zero() {
+        return Err(format!("{what} timed out"));
+    }
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::time::Instant;
+    // Drain both pipes while writing stdin. Keep only the response/error tail,
+    // so a noisy provider cannot fill a pipe or grow our memory indefinitely.
+    fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let mut tail = std::collections::VecDeque::new();
+                let mut buf = [0; 8192];
+                loop {
+                    let n = pipe.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    let excess = (tail.len() + n).saturating_sub(1024 * 1024);
+                    tail.drain(..excess);
+                    tail.extend(&buf[..n]);
+                }
+                Ok(tail.into_iter().collect())
+            })();
+            let _ = tx.send(result);
+        });
+        rx
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| format!("cannot run {what}: {e}"))?;
+    let stdout = drain(child.stdout.take().expect("piped"));
+    let stderr = drain(child.stderr.take().expect("piped"));
+    let mut stdin = child.stdin.take().expect("piped");
+    let body = body.to_vec();
+    let (tx, written) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(stdin.write_all(&body));
+    });
+    let start = Instant::now();
+    let result = (|| {
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                break status;
+            }
+            if start.elapsed() >= timeout {
+                return Err(format!("{what} timed out"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let remaining = || timeout.saturating_sub(start.elapsed());
+        let stdout = stdout
+            .recv_timeout(remaining())
+            .map_err(|_| "provider stdout timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        let stderr = stderr
+            .recv_timeout(remaining())
+            .map_err(|_| "provider stderr timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        written
+            .recv_timeout(remaining())
+            .map_err(|_| "provider stdin timed out".to_string())?
+            .map_err(|e| format!("provider request: {e}"))?;
+        Ok(std::process::Output { status, stdout, stderr })
+    })();
+    if result.is_err() {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
+/// Curl deliberately omits untrusted stderr: it can reflect headers and signed URLs.
+/// `--disable` must be the first argument to ignore inherited curl configuration.
+pub(crate) fn curl(config: &str) -> Result<u16, String> {
+    let exe = std::env::var("SR_CURL").unwrap_or_else(|_| "curl".into());
+    let output = execute(
+        Command::new(exe).args(["--disable", "--max-filesize", "268435456", "--config", "-"]),
+        "curl",
+        config.as_bytes(),
+        provider_timeout()?,
+    )?;
+    if !output.status.success() {
+        return Err(format!("curl failed ({})", output.status));
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().map_err(|_| "curl gave no HTTP status".into())
+}
+
+/// Quote a curl config value without allowing line injection.
+pub(crate) fn curl_quote(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\").replace('\"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+    )
 }
 
 /// The last lines of a program's error output.
@@ -233,7 +294,7 @@ pub(crate) fn tool(env: &str, default: &str) -> Option<PathBuf> {
 
 /// Runs a command and returns its standard output, or its error output on failure.
 pub(crate) fn run(cmd: &mut Command, what: &str) -> Result<String, String> {
-    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run {what}: {e}"))?;
+    let out = execute(cmd, what, &[], provider_timeout()?)?;
     if !out.status.success() {
         return Err(format!("{what} failed ({}): {}", out.status, tail(&String::from_utf8_lossy(&out.stderr))));
     }
@@ -365,6 +426,46 @@ pub(crate) fn base64(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_covers_blocked_stdin_and_inherited_pipes() {
+        for script in [
+            "import time;time.sleep(10)",
+            "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'])",
+        ] {
+            let start = std::time::Instant::now();
+            let result = execute(
+                Command::new("python3").args(["-c", script]),
+                "blocked provider",
+                &vec![b'x'; 262144],
+                std::time::Duration::from_millis(100),
+            );
+            assert!(result.is_err_and(|e| e.contains("timed out")));
+            assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        }
+    }
+
+    #[test]
+    fn builtin_execution_honours_deadline_and_bounds_output() {
+        const CHILD: &str = "SR_TEST_BUILTIN_EXECUTION";
+        if std::env::var_os(CHILD).is_some() {
+            let start = std::time::Instant::now();
+            let result = run(Command::new("python3").args(["-c", "import time; time.sleep(3)"]), "sleeping tool");
+            assert!(result.is_err_and(|e| e.contains("timed out")));
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            let out = run(Command::new("python3").args(["-c", "print('x'*3000000)"]), "noisy tool").unwrap();
+            assert!(out.len() <= 1024 * 1024);
+            return;
+        }
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "providers::tests::builtin_execution_honours_deadline_and_bounds_output", "--nocapture"])
+            .env(CHILD, "1")
+            .env("SR_PROVIDER_TIMEOUT", "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+    }
 
     #[test]
     fn test_external_provider_timeout_reaps_the_child() {

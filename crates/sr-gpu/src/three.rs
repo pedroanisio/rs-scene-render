@@ -49,17 +49,15 @@ pub struct TexGpu {
     /// Base-level RGBA8 pixels retained for ray tracing and displacement.
     pub rgba: Arc<[u8]>,
     pub srgb: bool,
+    pub sampler: Option<sr_3d::sampling::TextureSampler>,
 }
 
 impl TexGpu {
-    /// Bilinear repeat sampling of the retained base level, in linear colour.
+    /// Samples the retained base level in linear colour using the texture sampler.
     pub fn sample(&self, uv: [f32; 2]) -> [f32; 4] {
-        let [w, h] = self.size;
-        let x = uv[0].rem_euclid(1.0) * w as f32 - 0.5;
-        let y = uv[1].rem_euclid(1.0) * h as f32 - 0.5;
-        let fetch = |x: i64, y: i64| {
-            let offset = (y.rem_euclid(h as i64) as usize * w as usize + x.rem_euclid(w as i64) as usize) * 4;
-            std::array::from_fn::<_, 4, _>(|i| {
+        self.sampler.unwrap_or_default().sample(self.size, uv, |x, y| {
+            let offset = (y as usize * self.size[0] as usize + x as usize) * 4;
+            std::array::from_fn(|i| {
                 let v = self.rgba[offset + i] as f32 / 255.0;
                 if self.srgb && i < 3 {
                     sr_3d::material::srgb_to_linear(v)
@@ -67,11 +65,7 @@ impl TexGpu {
                     v
                 }
             })
-        };
-        let (ix, iy) = (x.floor() as i64, y.floor() as i64);
-        let (a, b, c, d) = (fetch(ix, iy), fetch(ix + 1, iy), fetch(ix, iy + 1), fetch(ix + 1, iy + 1));
-        let (u, v) = (x - x.floor(), y - y.floor());
-        std::array::from_fn(|i| (a[i] * (1.0 - u) + b[i] * u) * (1.0 - v) + (c[i] * (1.0 - u) + d[i] * u) * v)
+        })
     }
 }
 
@@ -341,6 +335,8 @@ struct MaterialU {
     irid: [f32; 4],
     aniso: [f32; 4],
     uv: [f32; 4],
+    sampling: [[u32; 4]; 6],
+    borders: [[f32; 4]; 6],
 }
 
 #[repr(C)]
@@ -409,6 +405,8 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
         irid: [m.iridescence, m.iridescence_ior, m.iridescence_thickness, m.occlusion_strength],
         aniso: [m.anisotropy, m.anisotropy_rotation, m.displacement_scale, bits as f32],
         uv: [m.uv_scale[0], m.uv_scale[1], m.separate_uvs as u32 as f32, 0.0],
+        sampling: std::array::from_fn(|i| [maps[i].as_ref().and_then(|t| t.sampler).map_or(0, |s| s.flags()), 0, 0, 0]),
+        borders: std::array::from_fn(|i| maps[i].as_ref().and_then(|t| t.sampler).map_or([0.0; 4], |s| s.border)),
     }
 }
 
@@ -956,6 +954,7 @@ impl ThreeEngine {
                 size: [1, 1],
                 rgba: Arc::from([255u8; 4]),
                 srgb: false,
+                sampler: None,
             }),
             brdf: texture(d, [1, 1], FORMAT, 1, 1, 1, "brdf").create_view(&Default::default()),
             black_env: texture(d, [1, 1], FORMAT, 1, 1, 1, "black-env").create_view(&Default::default()),
@@ -1091,7 +1090,21 @@ impl ThreeEngine {
             self.write_tex(&t, level, [lw, lh], img.as_raw(), 4);
         }
         self.next_key += 1;
-        Arc::new(TexGpu { view: t.create_view(&Default::default()), key: self.next_key, size: [w, h], rgba, srgb })
+        Arc::new(TexGpu {
+            view: t.create_view(&Default::default()),
+            key: self.next_key,
+            size: [w, h],
+            rgba,
+            srgb,
+            sampler: None,
+        })
+    }
+
+    /// Uploads a decoded material texture, retaining its explicit sampling contract.
+    pub fn upload_texture(&mut self, texture: &sr_3d::Texture) -> Arc<TexGpu> {
+        let mut gpu = self.upload_rgba8(texture.width, texture.height, &texture.rgba, texture.srgb);
+        Arc::get_mut(&mut gpu).expect("new texture").sampler = texture.sampler;
+        gpu
     }
 
     /// Uploads a mesh.
@@ -2273,7 +2286,7 @@ const BIND: &str = include_str!("three_bind.wgsl");
 
 /// Main passes: meshes, shadows, dome background.
 pub fn main_src() -> String {
-    format!("{TYPES}\n{BIND}\n{}", include_str!("three.wgsl"))
+    format!("{TYPES}\n{BIND}\n{}\n{}", include_str!("sampling.wgsl"), include_str!("three.wgsl"))
 }
 
 /// Splat drawing.

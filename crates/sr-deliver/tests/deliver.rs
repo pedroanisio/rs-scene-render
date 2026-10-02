@@ -1,6 +1,7 @@
 //! End to end: a scene with a video layer carrying audio, a music track, a
 //! beat grid and four outputs, rendered, encoded, measured and delivered.
 
+mod common;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -91,8 +92,7 @@ fn doc(dir: &std::path::Path, xml: &str) -> sr_model::Document {
 /// One device for the whole binary: tests run in parallel, and creating a device per test has
 /// deadlocked and crashed the driver.
 fn gpu() -> Option<sr_gpu::Gpu> {
-    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
-    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
+    common::gpu()
 }
 
 #[test]

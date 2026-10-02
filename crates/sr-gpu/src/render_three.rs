@@ -591,12 +591,7 @@ impl Renderer {
                             maps[slot] = Some(match self.three_engine().textures.get(&key) {
                                 Some(texture) => texture.clone(),
                                 None => {
-                                    let uploaded = self.three_engine().upload_rgba8(
-                                        texture.width,
-                                        texture.height,
-                                        &texture.rgba,
-                                        texture.srgb,
-                                    );
+                                    let uploaded = self.three_engine().upload_texture(texture);
                                     self.three_engine().textures.insert(key, uploaded.clone());
                                     uploaded
                                 }
@@ -902,9 +897,7 @@ impl Renderer {
                                                 Some(t) => t.clone(),
                                                 None => {
                                                     let tx = &model.textures[ti];
-                                                    let up = self
-                                                        .three_engine()
-                                                        .upload_rgba8(tx.width, tx.height, &tx.rgba, tx.srgb);
+                                                    let up = self.three_engine().upload_texture(tx);
                                                     self.three_engine().textures.insert(tkey, up.clone());
                                                     up
                                                 }

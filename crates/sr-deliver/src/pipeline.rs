@@ -936,15 +936,16 @@ pub fn deliver(
             let map = segments.as_ref();
             let next = AtomicUsize::new(0);
             let done = AtomicU64::new(0);
-            // each worker opens the adapter the delivery was given, not whichever ranks best
-            let shared = &gpu;
+            // Create worker devices sequentially and keep them alive until every
+            // worker has joined. Concurrent device creation crashed the Vulkan loader;
+            // independent devices avoid allocation contention between renderers.
+            let worker_gpus: Vec<_> = (0..workers).map(|_| gpu.open_like()).collect::<Result<_, _>>()?;
             let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
-                let handles: Vec<_> = (0..workers)
-                    .map(|_| {
+                let handles: Vec<_> = worker_gpus
+                    .iter()
+                    .map(|gpu| {
                         sc.spawn(|| -> Result<(Report, String), DeliverError> {
-                            // a device of its own: renderers sharing one device slowed each other
-                            // down to a crawl over a long programme (buffer creation dominated)
-                            let gpu = shared.open_like()?;
+                            let gpu = gpu.clone();
                             let mut renderer = Renderer::new(gpu.clone(), p);
                             renderer.quality = opts.quality;
                             renderer.representation = representation.clone();

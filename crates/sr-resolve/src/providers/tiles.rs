@@ -9,13 +9,11 @@
 //! `SR_TILES_MAX` tiles (default 2000) is refused, to keep fetches small. The
 //! service is on the network, so this provider runs only with `--allow-cloud`.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use sr_geo::pmtiles::{self, TileType};
 
-use super::{tail, Provider};
+use super::Provider;
 use crate::protocol::{Request, Response};
 
 pub struct Tiles;
@@ -40,27 +38,14 @@ pub fn over_budget(max: usize) -> String {
 
 /// GETs `url` into `out`; returns the HTTP status.
 fn get(url: &str, out: &Path) -> Result<u16, String> {
-    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let q = super::curl_quote;
     let cfg = format!(
         "url = {}\nsilent\nshow-error\nlocation\nmax-time = 60\nretry = 2\nheader = {}\noutput = {}\nwrite-out = \"%{{http_code}}\"\n",
         q(url),
         q(&format!("User-Agent: {}", user_agent())),
         q(&out.display().to_string())
     );
-    let curl = std::env::var("SR_CURL").unwrap_or_else(|_| "curl".into());
-    let mut child = Command::new(&curl)
-        .args(["--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run {curl}: {e}"))?;
-    child.stdin.take().expect("piped").write_all(cfg.as_bytes()).map_err(|e| e.to_string())?;
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !o.status.success() {
-        return Err(format!("{url}: {}", tail(&String::from_utf8_lossy(&o.stderr))));
-    }
-    String::from_utf8_lossy(&o.stdout).trim().parse().map_err(|_| format!("{url}: no HTTP status"))
+    super::curl(&cfg)
 }
 
 /// The URL of one tile.
@@ -127,7 +112,7 @@ impl Provider for Tiles {
                     tiles.push(((z, x, y), b));
                 }
                 404 | 204 => missing += 1,
-                code => return Err(format!("{url}: HTTP {code}")),
+                code => return Err(format!("tile {z}/{x}/{y}: HTTP {code}")),
             }
         }
         let (tt, comp) = kind.unwrap_or((TileType::Png, 1));

@@ -161,25 +161,22 @@ fn store_entry(store: &Path, req: &Request, key: &str) -> PathBuf {
 }
 
 /// A scratch folder removed on drop.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(tag: &str) -> Result<Scratch, String> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "scene-render-resolve-{}-{}-{tag}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-        Ok(Scratch(d))
-    }
+struct Scratch {
+    path: PathBuf,
+    _owner: tempfile::TempDir,
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+impl Scratch {
+    fn new(_tag: &str) -> Result<Scratch, String> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("scene-render-resolve-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let owner = builder.tempdir().map_err(|e| e.to_string())?;
+        Ok(Scratch { path: owner.path().to_owned(), _owner: owner })
     }
 }
 
@@ -242,6 +239,61 @@ fn local(src: &str, base: &Path) -> Result<PathBuf, String> {
         Some(root) => local_in(src, base, Path::new(&root)),
         None => local_in(src, base, base),
     }
+}
+
+/// Validate the complete destination plan before any target publishes data. Even
+/// unselected targets reserve their paths: `--only` must not invalidate their pins.
+fn preflight_destinations(text: &str, document: &Path, base: &Path) -> Result<(), String> {
+    let xml = roxmltree::Document::parse(text).map_err(|e| e.to_string())?;
+    let document = physical(&lexical(document)?)?;
+    let mut lock = document.as_os_str().to_owned();
+    lock.push(".resolve.lock");
+    let mut protected = vec![document, physical(Path::new(&lock))?];
+    let mut destinations: Vec<(PathBuf, String)> = Vec::new();
+    for node in xml.descendants().filter(|n| n.is_element()) {
+        let writable = match node.tag_name().name() {
+            "generated" => true,
+            "tiles" => node.attribute("url").is_some(),
+            "captionTrack" => node.attribute("transcribe").is_some(),
+            _ => false,
+        };
+        for attr in node.attributes() {
+            if attr.name() == "cache" && writable {
+                // Invalid roots/URIs retain the existing per-target diagnostics.
+                if let Ok(cache) = local(attr.value(), base) {
+                    let id = node.attribute("id").unwrap_or(node.tag_name().name()).to_string();
+                    destinations.push((physical(&sidecar_path(&cache))?, format!("{id} sidecar")));
+                    destinations.push((cache, id));
+                }
+            } else if matches!(attr.name(), "src" | "cache" | "model") {
+                if let sr_model::assets::Resolved::Local(p) = sr_model::assets::resolve(attr.value(), base) {
+                    if attr.name() != "model" || p.is_file() {
+                        protected.push(physical(&lexical(&p)?)?);
+                    }
+                }
+            }
+        }
+    }
+    // Include ancestor conflicts: publishing a file where another destination
+    // needs a directory is just as destructive as using the same file twice.
+    let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
+    for (i, (path, id)) in destinations.iter().enumerate() {
+        if let Some(input) = protected.iter().find(|p| overlaps(path, p)) {
+            return Err(format!(
+                "destination for {id} ({}) conflicts with protected input {}",
+                path.display(),
+                input.display()
+            ));
+        }
+        if let Some((other, owner)) = destinations[..i].iter().find(|(p, _)| overlaps(path, p)) {
+            return Err(format!(
+                "destination for {id} ({}) conflicts with {owner} ({}); use a distinct cache for each target",
+                path.display(),
+                other.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Where a generated asset plays: composition time of its start in the first audio track that
@@ -352,7 +404,7 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         let out = work.join(format!("result.{ext}"));
         let provider_req =
             Request { output: out.display().to_string(), workdir: work.display().to_string(), ..req.clone() };
-        let resp: Response = match provider.run(&provider_req) {
+        let resp: Response = match providers::invoke(provider.as_ref(), &provider_req) {
             Ok(r) => r,
             Err(e) => return fail(r, format!("{}: {e}", t.req.provider)),
         };
@@ -437,6 +489,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
 
     // generated media
     let doc = load(&text)?;
+    preflight_destinations(&text, path, &base)?;
     let scene = &doc.scene;
     let (rate, bits) = audio_format(scene);
     let timeline = |start| Timeline { project_duration: scene.project.duration.get(), start };
@@ -484,7 +537,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
     }
     for t in &targets {
         let work = Scratch::new(&t.id)?;
-        let (r, pin) = settle(t, o, &work.0);
+        let (r, pin) = settle(t, o, &work.path);
         if let Some(sha) = pin {
             text = doc::set_attr(&text, "generated", &t.id, "cacheSha256", &sha)?;
         }
@@ -546,7 +599,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
             },
         };
         let work = Scratch::new(&t.id)?;
-        let (r, pin) = settle(&target, o, &work.0);
+        let (r, pin) = settle(&target, o, &work.path);
         if let Some(sha) = pin {
             text = doc::set_attr(&text, "tiles", &target.id, "cacheSha256", &sha)?;
         }
@@ -603,7 +656,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
             let input = match mixed {
                 Ok((rate, nodes)) => match nodes.get(&source) {
                     Some(buf) => {
-                        let wav = work.0.join("input.wav");
+                        let wav = work.path.join("input.wav");
                         let mono: Vec<f32> = mono(buf);
                         if let Err(e) =
                             sr_audio::wav::write(&wav, &vec![mono], *rate, 24, sr_audio::layout::Layout::Mono, false)
@@ -648,7 +701,7 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
                     ..Default::default()
                 },
             };
-            let (r, pin) = settle(&t, o, &work.0);
+            let (r, pin) = settle(&t, o, &work.path);
             if let Some(sha) = pin {
                 text = doc::set_attr(&text, "captionTrack", &t.id, "cacheSha256", &sha)?;
             }
@@ -813,6 +866,27 @@ fn mix(doc: &sr_model::Document) -> Result<TrackSignals, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_is_private_and_does_not_reuse_existing_paths() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let victim = std::env::temp_dir().join(format!("sr-scratch-victim-{}", std::process::id()));
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("request.json"), "sentinel").unwrap();
+        let planted = std::env::temp_dir().join(format!("scene-render-resolve-{}-0-probe", std::process::id()));
+        let _ = std::fs::remove_file(&planted);
+        symlink(&victim, &planted).unwrap();
+        let scratch = Scratch::new("probe").unwrap();
+        let path = scratch.path.clone();
+        std::fs::write(path.join("request.json"), "request").unwrap();
+        assert_eq!(std::fs::read_to_string(victim.join("request.json")).unwrap(), "sentinel");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        drop(scratch);
+        assert!(!path.exists());
+        std::fs::remove_file(planted).unwrap();
+        std::fs::remove_dir_all(victim).unwrap();
+    }
 
     #[test]
     fn caches_stay_inside_the_root() {

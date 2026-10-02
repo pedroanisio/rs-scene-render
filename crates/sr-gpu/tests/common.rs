@@ -12,6 +12,7 @@ pub fn gpu() -> Option<Gpu> {
     G.get_or_init(|| match Gpu::new() {
         Ok(g) => Some(g),
         Err(e) => {
+            assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "required GPU unavailable: {e}");
             eprintln!("skipping GPU tests: {e}");
             None
         }

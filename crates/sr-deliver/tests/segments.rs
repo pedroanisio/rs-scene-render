@@ -1,13 +1,13 @@
 //! Outputs with segments (SREP 13) and layouts that reframe: which composition time each output
 //! frame shows, where the reframing focus puts the picture, and motion blur at segment speed.
 
+mod common;
 use std::path::{Path, PathBuf};
 
 /// One device for the whole binary: tests run in parallel, and creating a device per test has
 /// deadlocked and crashed the driver.
 fn gpu() -> Option<sr_gpu::Gpu> {
-    static G: std::sync::OnceLock<Option<sr_gpu::Gpu>> = std::sync::OnceLock::new();
-    G.get_or_init(|| sr_gpu::Gpu::new().map_err(|e| eprintln!("skipping: {e}")).ok()).clone()
+    common::gpu()
 }
 
 fn dir(name: &str) -> PathBuf {

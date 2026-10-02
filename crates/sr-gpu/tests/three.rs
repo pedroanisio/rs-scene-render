@@ -499,3 +499,103 @@ fn pathtrace_honors_ambient_light_lobe_flags() {
     assert!(disabled < 1e-5, "disabled light contributes {disabled}");
     assert!((full - diffuse - specular).abs() < 0.01, "full={full} diffuse={diffuse} specular={specular}");
 }
+
+#[test]
+fn zero_specular_disables_highlights_in_both_renderers() {
+    let Some(mut e) = engine() else { return };
+    let receiver = draw(&e, &prim::plane(110.0, 110.0, 1), Vec3::new(64.0, 64.0, 0.0), MaterialParams::default());
+    let mut s = scene(vec![receiver], vec![sun(Vec3::Z, 2.0, false)]);
+    s.lights[0].affects_diffuse = false;
+    for path in [None, Some(sr_gpu::pathtrace::PathOpts { samples: 4, bounces: 1, denoise: false })] {
+        s.path = path;
+        let mut values = Vec::new();
+        for weight in [0.0, 0.5, 1.0] {
+            s.draws[0].material.specular = weight;
+            values.push(lum(at(&e.render_now(&s, None), 64, 64)));
+        }
+        assert!(values[0] < 0.001, "{path:?}: {values:?}");
+        assert!(values[2] > 0.01 && (values[1] / values[2] - 0.5).abs() < 0.05, "{path:?}: {values:?}");
+        s.draws[0].material.specular_color = [0.0; 3];
+        assert!(lum(at(&e.render_now(&s, None), 64, 64)) < 0.001);
+        s.draws[0].material.specular_color = [1.0; 3];
+    }
+}
+
+#[test]
+fn materialx_filtering_survives_upload_and_final_pixel_sampling() {
+    let Some(mut e) = engine() else { return };
+    let dir = common::fixtures();
+    std::fs::write(dir.join("filter-rg.ppm"), b"P6\n2 1\n255\n\xff\0\0\0\xff\0").unwrap();
+    for (filter, want) in [("closest", [1.0, 0.0]), ("linear", [0.7, 0.3]), ("cubic", [0.784, 0.216])] {
+        let xml = format!(
+            r#"<materialx><image name="im" type="color3" colorspace="lin_rec709"><input name="file" type="filename" value="filter-rg.ppm"/><input name="filtertype" type="string" value="{filter}"/></image><standard_surface name="s"><input name="base_color" nodename="im"/></standard_surface></materialx>"#
+        );
+        let material = sr_3d::mtlx::parse(&xml, &dir).unwrap();
+        let map = material.generated_maps[0].as_ref().unwrap();
+        let tex = e.upload_texture(map);
+        let mut p = prim::plane(110.0, 110.0, 1);
+        for v in &mut p.vertices {
+            v.uv = [0.4, 0.5];
+        }
+        let mut dr = draw(&e, &p, Vec3::new(64.0, 64.0, 0.0), MaterialParams { unlit: true, ..material.params });
+        dr.maps[0] = Some(tex);
+        let mut s = scene(vec![dr], vec![]);
+        for path in [None, Some(sr_gpu::pathtrace::PathOpts { samples: 1, bounces: 1, denoise: false })] {
+            s.path = path;
+            let got = at(&e.render_now(&s, None), 64, 64);
+            assert!(
+                (got[0] - want[0]).abs() < 0.015 && (got[1] - want[1]).abs() < 0.015,
+                "{filter} {path:?}: {got:?}, expected {want:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn required_gpu_cannot_silently_skip_when_adapter_is_missing() {
+    if std::env::var_os("SR_TEST_MISSING_GPU").is_some() {
+        let _ = common::gpu();
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "required_gpu_cannot_silently_skip_when_adapter_is_missing", "--nocapture"])
+        .env("SR_TEST_MISSING_GPU", "1")
+        .env("SR_REQUIRE_GPU", "1")
+        .env("SR_GPU_ADAPTER", "nonexistent-adapter-regression-fixture")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "GPU absence was reported as a passing test");
+}
+
+#[test]
+fn materialx_address_modes_reach_raster_pathtrace_and_cpu_samples() {
+    let Some(mut e) = engine() else { return };
+    let dir = common::fixtures();
+    std::fs::write(dir.join("address-rg.ppm"), b"P6\n2 1\n255\n\xff\0\0\0\xff\0").unwrap();
+    for (mode, expected) in [
+        ("periodic", [1.0, 0.0, 0.0]),
+        ("clamp", [0.0, 1.0, 0.0]),
+        ("mirror", [0.0, 1.0, 0.0]),
+        ("constant", [0.0, 0.0, 1.0]),
+    ] {
+        let xml = format!(
+            r#"<materialx><image name="im" type="color3" colorspace="lin_rec709"><input name="file" type="filename" value="address-rg.ppm"/><input name="filtertype" type="string" value="closest"/><input name="uaddressmode" type="string" value="{mode}"/><input name="default" type="color3" value="0,0,1"/></image><standard_surface name="s"><input name="base_color" nodename="im"/></standard_surface></materialx>"#
+        );
+        let material = sr_3d::mtlx::parse(&xml, &dir).unwrap();
+        let tex = e.upload_texture(material.generated_maps[0].as_ref().unwrap());
+        let sampled = tex.sample([1.1, 0.5]);
+        assert_eq!(&sampled[..3], &expected, "CPU {mode}");
+        let mut p = prim::plane(110.0, 110.0, 1);
+        for v in &mut p.vertices {
+            v.uv = [1.1, 0.5];
+        }
+        let mut dr = draw(&e, &p, Vec3::new(64.0, 64.0, 0.0), MaterialParams { unlit: true, ..material.params });
+        dr.maps[0] = Some(tex);
+        let mut s = scene(vec![dr], vec![]);
+        for path in [None, Some(sr_gpu::pathtrace::PathOpts { samples: 1, bounces: 1, denoise: false })] {
+            s.path = path;
+            let got = at(&e.render_now(&s, None), 64, 64);
+            assert!((0..3).all(|i| (got[i] - expected[i]).abs() < 0.01), "{mode} {path:?}: {got:?}");
+        }
+    }
+}

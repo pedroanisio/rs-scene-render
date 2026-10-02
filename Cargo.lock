@@ -2531,6 +2531,7 @@ name = "sr-resolve"
 version = "0.1.2"
 dependencies = [
  "image",
+ "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "sha2",
@@ -2540,6 +2541,7 @@ dependencies = [
  "sr-geo",
  "sr-media",
  "sr-model",
+ "tempfile",
 ]
 
 [[package]]

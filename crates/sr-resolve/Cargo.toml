@@ -17,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 image.workspace = true
+roxmltree.workspace = true
+tempfile = "3"
 
 [[bin]]
 name = "scene-render-provider-example"
