@@ -528,6 +528,57 @@ pub fn timed_words(c: &Cue) -> Vec<Word> {
         .collect()
 }
 
+/// Caption line breaking. Greedy preserves the historical whitespace-only paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineBreaks {
+    #[default]
+    Greedy,
+    Source,
+}
+
+/// Source-mode words and the word indices starting an explicit source line.
+/// Newlines are metadata, never extra words, so glyph word indices stay contiguous.
+/// Multiword timing spans are split by length; single-word timings and emphasis are kept.
+pub fn source_words(c: &Cue) -> (Vec<Word>, Vec<usize>) {
+    fn starts(text: &str) -> Vec<usize> {
+        let mut index = 0;
+        let mut out = Vec::new();
+        for line in text.split('\n') {
+            let count = line.split_whitespace().count();
+            if count > 0 {
+                if index > 0 {
+                    out.push(index);
+                }
+                index += count;
+            }
+        }
+        out
+    }
+    let mut words = Vec::new();
+    let original = timed_words(c);
+    let fallback = original.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    for word in original {
+        let parts: Vec<&str> = word.text.split_whitespace().collect();
+        if parts.len() == 1 {
+            words.push(Word { text: parts[0].to_string(), ..word });
+        } else if !parts.is_empty() {
+            let total = parts.iter().map(|p| p.chars().count() + 1).sum::<usize>();
+            let mut start = word.start;
+            for (i, part) in parts.iter().enumerate() {
+                let end = if i + 1 == parts.len() {
+                    word.end
+                } else {
+                    start + (word.end - word.start) * (part.chars().count() + 1) as f64 / total as f64
+                };
+                words.push(Word { start, end, text: part.to_string(), emphasis: word.emphasis });
+                start = end;
+            }
+        }
+    }
+    let text = if c.text.split_whitespace().eq(words.iter().map(|w| w.text.as_str())) { &c.text } else { &fallback };
+    (words, starts(text))
+}
+
 /// A page shown on screen: lines of words.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
@@ -563,9 +614,24 @@ pub fn paginate(
     max_lines: usize,
     one_word: bool,
 ) -> Vec<Page> {
+    paginate_with_line_breaks(cues, max_words, max_chars, max_lines, one_word, LineBreaks::Greedy)
+}
+
+/// Paginates with opt-in source newlines; limits still wrap each source line.
+pub fn paginate_with_line_breaks(
+    cues: &[Cue],
+    max_words: Option<usize>,
+    max_chars: usize,
+    max_lines: usize,
+    one_word: bool,
+    line_breaks: LineBreaks,
+) -> Vec<Page> {
     let mut pages = Vec::new();
     for (ci, c) in cues.iter().enumerate() {
-        let words: Vec<Word> = timed_words(c).into_iter().filter(|w| !w.text.is_empty()).collect();
+        let (words, breaks) = match line_breaks {
+            LineBreaks::Greedy => (timed_words(c).into_iter().filter(|w| !w.text.is_empty()).collect(), Vec::new()),
+            LineBreaks::Source => source_words(c),
+        };
         if one_word {
             for (i, w) in words.iter().enumerate() {
                 let start = if i == 0 { c.start } else { c.start.max(w.start) };
@@ -577,11 +643,11 @@ pub fn paginate(
         let mut lines: Vec<Vec<Word>> = Vec::new();
         let mut cur: Vec<Word> = Vec::new();
         let mut len = 0;
-        for w in words {
+        for (wi, w) in words.into_iter().enumerate() {
             let wl = w.text.chars().count();
             let over =
                 (!cur.is_empty() && len + 1 + wl > max_chars.max(1)) || max_words.is_some_and(|m| cur.len() >= m);
-            if over {
+            if over || (!cur.is_empty() && breaks.binary_search(&wi).is_ok()) {
                 lines.push(std::mem::take(&mut cur));
                 len = 0;
             }

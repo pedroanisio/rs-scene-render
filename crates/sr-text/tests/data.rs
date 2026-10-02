@@ -422,3 +422,91 @@ fn formulas_draw_matrices_accents_and_infix_fractions() {
         assert!(formula::draw(&mut lib, tex, 32.0, [400.0, 160.0], paint.clone(), 0.25).is_err(), "{tex}");
     }
 }
+
+#[test]
+fn caption_source_breaks_are_opt_in_and_limits_still_apply() {
+    use captions::LineBreaks::{Greedy, Source};
+    let cue = captions::Cue { start: 0.0, end: 8.0, text: "aa bb\ncc dd ee ff\ngg hh".into(), ..Default::default() };
+    let cues = std::slice::from_ref(&cue);
+    let legacy = captions::paginate(cues, Some(2), 32, 2, false);
+    assert_eq!(legacy, captions::paginate_with_line_breaks(cues, Some(2), 32, 2, false, Greedy));
+    assert_eq!(captions::paginate(cues, None, 80, 2, false)[0].text(), "aa bb cc dd ee ff gg hh");
+    let pages = captions::paginate_with_line_breaks(cues, None, 80, 2, false, Source);
+    assert_eq!(pages.iter().map(|p| p.text()).collect::<Vec<_>>(), ["aa bb\ncc dd ee ff", "gg hh"]);
+    assert_eq!((pages[0].start, pages[1].end), (cue.start, cue.end));
+    assert_eq!(pages[0].end, pages[1].start);
+    let limited = captions::paginate_with_line_breaks(cues, Some(2), 80, 2, false, Source);
+    assert_eq!(limited.iter().map(|p| p.text()).collect::<Vec<_>>(), ["aa bb\ncc dd", "ee ff\ngg hh"]);
+    assert_eq!(limited, captions::paginate_with_line_breaks(cues, None, 5, 2, false, Source));
+    assert_eq!(pages.iter().flat_map(|p| p.words()).cloned().collect::<Vec<_>>(), captions::timed_words(&cue));
+    for words in [None, Some(1), Some(3)] {
+        for chars in [1, 5, 80] {
+            for lines in [1, 2, 4] {
+                for one in [false, true] {
+                    assert_eq!(
+                        captions::paginate(cues, words, chars, lines, one),
+                        captions::paginate_with_line_breaks(cues, words, chars, lines, one, Greedy)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn caption_source_breaks_handle_crlf_blank_lines_and_timed_spans() {
+    let cue = captions::Cue { start: 0.0, end: 4.0, text: "\n aa bb\r\n\n cc dd\n".into(), ..Default::default() };
+    let p = captions::paginate_with_line_breaks(&[cue], None, 80, 2, false, captions::LineBreaks::Source);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].text(), "aa bb\ncc dd");
+    assert_eq!(p[0].words().len(), 4);
+    let cue = captions::Cue {
+        start: 0.0,
+        end: 4.0,
+        words: vec![
+            captions::Word { start: 0.2, end: 1.8, text: "aa\nbb".into(), emphasis: true },
+            captions::Word { start: 2.1, end: 3.7, text: "cc".into(), emphasis: false },
+        ],
+        ..Default::default()
+    };
+    let p = captions::paginate_with_line_breaks(&[cue], None, 80, 2, false, captions::LineBreaks::Source);
+    assert_eq!(p[0].text(), "aa\nbb cc");
+    let words = p[0].words();
+    assert_eq!((words[0].start, words[1].end, words[2].start, words[2].end), (0.2, 1.8, 2.1, 3.7));
+    assert!(words[0].emphasis && words[1].emphasis && !words[2].emphasis);
+    assert_eq!(words[0].end, words[1].start);
+}
+
+#[test]
+fn caption_source_breaks_keep_karaoke_and_highlight_word_indices() {
+    let mut lib = lib();
+    let cue = captions::Cue { start: 0.0, end: 4.0, text: "aa bb\ncc dd".into(), ..Default::default() };
+    let page = captions::paginate_with_line_breaks(&[cue], None, 80, 2, false, captions::LineBreaks::Source).remove(0);
+    let l = lay(&mut lib, &[(&page.text(), None)]);
+    let active = Paint::Solid { rgba: [1.0, 0.8, 0.0, 1.0], srgb: true };
+    for (wi, word) in page.words().iter().enumerate() {
+        let t = (word.start + word.end) * 0.5;
+        for preset in [CapPreset::Highlight, CapPreset::Karaoke, CapPreset::BoxedWord] {
+            let fx = captions::effects(preset, &l, &page, t, &active);
+            for (g, f) in l.glyphs.iter().zip(&fx).filter(|(g, _)| !l.chars[g.ch].is_whitespace()) {
+                match preset {
+                    CapPreset::Highlight => assert_eq!(f.fill.is_some(), g.word == wi),
+                    CapPreset::Karaoke => assert!(
+                        (f.fill_mix
+                            - if g.word < wi {
+                                1.0
+                            } else if g.word == wi {
+                                0.5
+                            } else {
+                                0.0
+                            })
+                        .abs()
+                            < 1e-9
+                    ),
+                    CapPreset::BoxedWord => assert_eq!(f.highlight.is_some(), g.word == wi),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}

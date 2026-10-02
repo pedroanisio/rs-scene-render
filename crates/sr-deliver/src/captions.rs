@@ -54,7 +54,7 @@ pub fn output_captions(p: &Program, output: &m::Output, tm: Option<&TimeMap>) ->
                         continue;
                     }
                     let map = CueMap::new(tm, i);
-                    mapped.extend(cues.iter().flat_map(|c| map.cues(c)));
+                    mapped.extend(cues.iter().flat_map(|c| map.cues(c, tr.line_breaks.as_str() == "source")));
                 }
             }
             mapped.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -189,7 +189,8 @@ impl<'a> CueMap<'a> {
         intervals
     }
 
-    fn cues(&self, c: &Cue) -> Vec<Cue> {
+    fn cues(&self, c: &Cue, source_lines: bool) -> Vec<Cue> {
+        let breaks = if source_lines { sr_text::captions::source_words(c).1 } else { Vec::new() };
         let origin = self.tm.segments[self.segment].start;
         let word_times: Vec<_> =
             c.words.iter().map(|w| self.intervals(w.start.max(c.start), w.end.min(c.end))).collect();
@@ -198,12 +199,12 @@ impl<'a> CueMap<'a> {
             .filter_map(|(start, end)| {
                 let mut words = Vec::new();
                 let mut retained = 0;
-                for (w, times) in c.words.iter().zip(&word_times) {
+                for (wi, (w, times)) in c.words.iter().zip(&word_times).enumerate() {
                     let before = words.len();
                     for &(a, b) in times {
                         let (a, b) = (a.max(start), b.min(end));
                         if a < b {
-                            words.push(Word { start: origin + a, end: origin + b, ..w.clone() });
+                            words.push((Word { start: origin + a, end: origin + b, ..w.clone() }, wi));
                         }
                     }
                     retained += usize::from(words.len() > before);
@@ -211,13 +212,32 @@ impl<'a> CueMap<'a> {
                 if !c.words.is_empty() && words.is_empty() {
                     return None;
                 }
-                words.sort_by(|a, b| a.start.total_cmp(&b.start));
-                let text = if retained < c.words.len() {
-                    words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+                words.sort_by(|a, b| a.0.start.total_cmp(&b.0.start));
+                let text = if source_lines {
+                    // Carry source-line membership with words through trims and reversing remaps.
+                    let mut text = String::new();
+                    let mut previous = None;
+                    for (word, wi) in &words {
+                        let line = breaks.partition_point(|start| start <= wi);
+                        if let Some(last) = previous {
+                            text.push(if last == line { ' ' } else { '\n' });
+                        }
+                        text.push_str(&word.text);
+                        previous = Some(line);
+                    }
+                    text
+                } else if retained < c.words.len() {
+                    words.iter().map(|(w, _)| w.text.as_str()).collect::<Vec<_>>().join(" ")
                 } else {
                     c.text.clone()
                 };
-                Some(Cue { start: origin + start, end: origin + end, text, words, ..c.clone() })
+                Some(Cue {
+                    start: origin + start,
+                    end: origin + end,
+                    text,
+                    words: words.into_iter().map(|(w, _)| w).collect(),
+                    ..c.clone()
+                })
             })
             .collect()
     }
@@ -397,6 +417,35 @@ mod tests {
             let tm = TimeMap::of(ev.program(), &o).unwrap().unwrap();
             let caps = output_captions(ev.program(), &o, Some(&tm)).unwrap();
             assert_eq!(caps.tracks[0].cues.len(), want, "{attrs} {audio}");
+        }
+    }
+    #[test]
+    fn source_line_breaks_follow_trimmed_and_reversed_words() {
+        let track = r#"<captions><captionTrack id="cc" language="en" lineBreaks="source">
+          <cue start="0" end="4" text="aa bb&#10;cc dd"/></captionTrack></captions>"#;
+        for (segment, expected) in [
+            (r#"<segment from="1" to="4"/>"#, "bb\ncc dd"),
+            (
+                r#"<segment><timeRemap><key time="0" value="4"/><key time="4" value="0"/></timeRemap></segment>"#,
+                "dd cc\nbb aa",
+            ),
+        ] {
+            let (ev, out) = eval(&format!(r#"<output path="a.mp4" codec="h264">{segment}</output>"#), track);
+            let tm = TimeMap::of(ev.program(), &out).unwrap().unwrap();
+            let caps = output_captions(ev.program(), &out, Some(&tm)).unwrap();
+            assert_eq!(caps.tracks[0].line_breaks.as_str(), "source");
+            assert_eq!(caps.tracks[0].cues[0].text.as_deref(), Some(expected));
+            let cues = sr_gpu::text::track_cues(&caps.tracks[0], std::path::Path::new("")).unwrap();
+            let pages = sr_text::captions::paginate_with_line_breaks(
+                &cues,
+                None,
+                80,
+                2,
+                false,
+                sr_text::captions::LineBreaks::Source,
+            );
+            assert_eq!(pages[0].text(), expected);
+            assert_eq!(pages[0].words().len(), expected.split_whitespace().count());
         }
     }
 }

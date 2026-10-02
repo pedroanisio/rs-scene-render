@@ -1068,7 +1068,34 @@ pub fn track_cues(tr: &m::CaptionTrack, base: &FsPath) -> Result<Vec<Cue>, Strin
         cues.extend(captions::from_transcript(&text).map_err(|e| format!("{}: {e}", tr.id))?);
     }
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
-    if tr.profanity_filter {
+    if tr.line_breaks.as_str() == "source" {
+        for cue in &mut cues {
+            let (mut words, breaks) = captions::source_words(cue);
+            if tr.profanity_filter {
+                for word in &mut words {
+                    word.text = captions::profanity(&word.text);
+                }
+            }
+            cue.text = words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    format!(
+                        "{}{}",
+                        if i == 0 {
+                            ""
+                        } else if breaks.binary_search(&i).is_ok() {
+                            "\n"
+                        } else {
+                            " "
+                        },
+                        w.text
+                    )
+                })
+                .collect();
+            cue.words = words;
+        }
+    } else if tr.profanity_filter {
         for c in &mut cues {
             c.text = captions::profanity(&c.text);
             for w in &mut c.words {
@@ -1082,12 +1109,13 @@ pub fn track_cues(tr: &m::CaptionTrack, base: &FsPath) -> Result<Vec<Cue>, Strin
 fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
     let at = Attrs { e: tr, props: None };
     let cues = track_cues(tr, base)?;
-    let pages = captions::paginate(
+    let pages = captions::paginate_with_line_breaks(
         &cues,
         tr.max_words_per_line.map(|x| x as usize),
         tr.max_chars_per_line as usize,
         tr.max_lines as usize,
         at.str("preset").as_deref() == Some("one-word"),
+        if tr.line_breaks.as_str() == "source" { captions::LineBreaks::Source } else { captions::LineBreaks::Greedy },
     );
     let mode = at.str("mode").unwrap_or_default();
     Ok(Track {

@@ -202,3 +202,57 @@ fn text_takes_its_colour_from_its_style_when_it_sets_none() {
     let Some((red, green)) = run(r##"color="#00FF00""##) else { return };
     assert!(green > 50.0 && red < green * 0.05, "an explicit colour wins over the style: r {red} g {green}");
 }
+
+#[test]
+fn caption_source_newlines_are_opt_in_and_default_pixels_stay_identical() {
+    let make = |attrs: &str, text: &str, preset: &str| {
+        doc_text(
+            "",
+            &format!(
+                r##"<captions><captionTrack id="cc" language="en" preset="{preset}" {attrs} maxCharsPerLine="80" y="50%"><cue start="0" end="4" text="{text}"/></captionTrack></captions>"##
+            ),
+            "",
+            320,
+            240,
+        )
+    };
+    for preset in ["classic", "highlight", "karaoke", "one-word"] {
+        for time in [0.25, 1.75, 3.25] {
+            let Some(legacy) = render_times(&make("", "aa bb&#10;cc dd", preset), &[time]) else {
+                panic!("a software Vulkan adapter is required for caption compatibility evidence")
+            };
+            let greedy = render_times(&make(r#"lineBreaks="greedy""#, "aa bb&#10;cc dd", preset), &[time]).unwrap();
+            let flattened = render_times(&make("", "aa bb cc dd", preset), &[time]).unwrap();
+            assert!(legacy.stats.errors.is_empty() && legacy.stats.unsupported.is_empty());
+            assert_eq!(legacy.px, greedy.px, "explicit greedy changes {preset} at {time}");
+            assert_eq!(legacy.px, flattened.px, "default no longer flattens newlines: {preset} at {time}");
+            {
+                let source = render_times(&make(r#"lineBreaks="source""#, "aa bb&#10;cc dd", preset), &[time]).unwrap();
+                if preset == "one-word" {
+                    assert_eq!(legacy.px, source.px);
+                } else {
+                    assert_ne!(legacy.px, source.px, "source did not preserve the newline");
+                }
+                assert!(source.stats.errors.is_empty() && source.stats.unsupported.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn caption_source_words_keep_breaks_when_profanity_is_filtered() {
+    let d = doc_text(
+        "",
+        r#"<captions><captionTrack id="cc" language="en" lineBreaks="source" profanityFilter="true"><cue start="0" end="4" text="fuck&#10;shit"/></captionTrack></captions>"#,
+        "",
+        320,
+        240,
+    );
+    let track = &d.scene.captions.as_ref().unwrap().caption_tracks[0];
+    let cues = sr_gpu::text::track_cues(track, std::path::Path::new("")).unwrap();
+    assert_eq!(cues[0].text, "f***\ns***");
+    let pages =
+        sr_text::captions::paginate_with_line_breaks(&cues, None, 80, 2, false, sr_text::captions::LineBreaks::Source);
+    assert_eq!(pages[0].text(), "f***\ns***");
+    assert_eq!(pages[0].words().len(), 2);
+}

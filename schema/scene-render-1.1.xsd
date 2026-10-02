@@ -3232,6 +3232,16 @@
     <xs:attribute name="style" type="xs:IDREF"/>
     <xs:attribute name="activeStyle" type="xs:IDREF"/>
     <xs:attribute name="activeColor" type="paintType"/>
+    <xs:attribute name="lineBreaks" default="greedy">
+      <xs:annotation><xs:documentation>
+        greedy treats source newlines as spaces (legacy). source ends a line at each
+        cue newline; maxCharsPerLine, maxWordsPerLine and maxLines still apply.
+        Blank source lines do not add empty caption rows; one-word still pages each word.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="greedy"/><xs:enumeration value="source"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="maxWordsPerLine" type="xs:positiveInteger"/>
     <xs:attribute name="maxCharsPerLine" type="xs:positiveInteger" default="32"/>
     <xs:attribute name="maxLines" type="xs:positiveInteger" default="2"/>
