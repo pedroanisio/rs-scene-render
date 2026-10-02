@@ -412,3 +412,27 @@ fn simulated_documents_render_in_segments_to_the_serial_frames() {
         assert_eq!(frames[0], frames[1], "{what}: segments differ from the serial encode");
     }
 }
+
+#[test]
+fn a_duration_between_frames_keeps_its_last_frames() {
+    let Some(dir) = fixtures() else { return };
+    let Some(gpu) = gpu() else { return };
+    // 1.97 s at 25 fps is 50 frames (2.00 s of picture) over 1.97 s of sound: the picture must not be cut
+    // to the sound, serially or at the end of the last segment
+    let d = doc(&dir, &SCENE.replacen(r#"duration="2""#, r#"duration="1.97""#, 1));
+    for (name, workers) in [("serial", 1), ("segments", 2)] {
+        let path = dir.join(format!("out/tail-{name}.mp4"));
+        let o = sr_deliver::adhoc_output(&path.display().to_string(), "h264").unwrap();
+        let opts = sr_deliver::Options {
+            hardware: sr_media::encode::Hardware::Software,
+            parallel: sr_deliver::Parallel::Count(workers),
+            upload: false,
+            ..Default::default()
+        };
+        let r =
+            sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((r.frames, r.segments), (50, workers), "{name}");
+        assert!(!sr_media::probe(&path).unwrap().audio.is_empty(), "{name}: the mix is muxed");
+        assert_eq!(framemd5(&path).lines().count(), 50, "{name}: frames in the file");
+    }
+}

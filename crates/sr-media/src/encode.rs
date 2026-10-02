@@ -785,7 +785,6 @@ impl EncodeSpec {
             let codec = if container == Some(Container::Webm) && codec == "aac" { "libopus" } else { codec.as_str() };
             s(&mut a, &["-map", "1:a:0", "-c:a", codec]);
             a.extend(compressed_audio_args(codec, *bitrate));
-            s(&mut a, &["-shortest"]);
         }
         if let Some((1, _)) = &self.pass {
             s(&mut a, &["-an", "-f", "null", if cfg!(windows) { "NUL" } else { "/dev/null" }]);
@@ -839,7 +838,6 @@ impl EncodeSpec {
             let codec = if container == Some(Container::Webm) && codec == "aac" { "libopus" } else { codec.as_str() };
             a.extend(["-map".into(), "1:a:0".into(), "-c:a".into(), codec.into()]);
             a.extend(compressed_audio_args(codec, *bitrate));
-            a.push("-shortest".into());
         }
         a.extend(map_chapters);
         self.tail(&mut a, container);
