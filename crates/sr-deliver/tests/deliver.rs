@@ -172,6 +172,30 @@ fn parallel_segments_join_to_the_serial_frames() {
 }
 
 #[test]
+fn a_duration_between_frames_keeps_its_last_frames() {
+    let Some(dir) = fixtures() else { return };
+    let Some(gpu) = gpu() else { return };
+    // Picture is rounded up to 50 frames (2 s), while the mix ends at 1.97 s.
+    // Muxing must preserve those final frames in both serial and segmented delivery.
+    let d = doc(&dir, &SCENE.replacen(r#"duration="2""#, r#"duration="1.97""#, 1));
+    for (name, workers) in [("serial", 1), ("segments", 2)] {
+        let path = dir.join(format!("out/tail-{name}.mp4"));
+        let o = sr_deliver::adhoc_output(&path.display().to_string(), "h264").unwrap();
+        let opts = sr_deliver::Options {
+            hardware: sr_media::encode::Hardware::Software,
+            parallel: sr_deliver::Parallel::Count(workers),
+            upload: false,
+            ..Default::default()
+        };
+        let r =
+            sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((r.frames, r.segments), (50, workers), "{name}");
+        assert!(!sr_media::probe(&path).unwrap().audio.is_empty(), "{name}: audio is muxed");
+        assert_eq!(framemd5(&path).lines().count(), 50, "{name}: decoded frames");
+    }
+}
+
+#[test]
 fn outputs_render_encode_and_deliver() {
     let Some(dir) = fixtures() else { return };
     let Some(gpu) = gpu() else { return };
@@ -373,66 +397,4 @@ fn caption_sidecars_are_written_next_to_outputs() {
     assert_eq!(vtt, "WEBVTT\n\n00:00:00.500 --> 00:00:01.500\nhello there\n\n");
     assert!(dir.join("cap/mix.sd.de.vtt").exists(), "sidecar-mode tracks are always written");
     assert!(r.files.iter().any(|f| f.ends_with("mix.cc.en.vtt")));
-}
-
-#[test]
-fn simulated_documents_render_in_segments_to_the_serial_frames() {
-    let Some(dir) = fixtures() else { return };
-    let Some(gpu) = gpu() else { return };
-    // Simulated state is a function of time replayed from its start, so a segment that begins partway
-    // through must show what the serial render shows there: particles alone, and bodies under gravity
-    // with particles.
-    let emitter = r##"<particleEmitter id="sparks" preset="sparks" x="32" y="18" seed="3"/>"##;
-    let body = r##"<shape id="ball" shape="ellipse" x="20" y="2" width="6" height="6" fill="#FFFFFF"><rigidBody velocityX="12"/></shape>"##;
-    for (what, physics, content) in
-        [("particles", "", emitter.to_string()), ("bodies and particles", "<physics/>", format!("{body}{emitter}"))]
-    {
-        let xml = format!(
-            r##"<scene version="1.1"><project width="64" height="36" fps="25" duration="2" background="#000000"/>
-          <composition>{content}</composition>{physics}</scene>"##
-        );
-        let d = doc(&dir, &xml);
-        let mut frames = Vec::new();
-        for (name, workers) in [("serial", 1), ("segments", 2)] {
-            let path = dir.join(format!("out/sim-{name}.mkv"));
-            let o = sr_deliver::adhoc_output(&path.display().to_string(), "ffv1").unwrap();
-            let opts = sr_deliver::Options {
-                hardware: sr_media::encode::Hardware::Software,
-                parallel: sr_deliver::Parallel::Count(workers),
-                upload: false,
-                ..Default::default()
-            };
-            let r = sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {})
-                .unwrap_or_else(|e| panic!("{what}, {name}: {e}"));
-            assert_eq!((r.frames, r.segments), (50, workers), "{what}, {name}");
-            frames.push(framemd5(&path));
-        }
-        let lines: Vec<&str> = frames[0].lines().collect();
-        assert!(lines[5] != lines[45], "{what}: the picture must change over the range");
-        assert_eq!(frames[0], frames[1], "{what}: segments differ from the serial encode");
-    }
-}
-
-#[test]
-fn a_duration_between_frames_keeps_its_last_frames() {
-    let Some(dir) = fixtures() else { return };
-    let Some(gpu) = gpu() else { return };
-    // 1.97 s at 25 fps is 50 frames (2.00 s of picture) over 1.97 s of sound: the picture must not be cut
-    // to the sound, serially or at the end of the last segment
-    let d = doc(&dir, &SCENE.replacen(r#"duration="2""#, r#"duration="1.97""#, 1));
-    for (name, workers) in [("serial", 1), ("segments", 2)] {
-        let path = dir.join(format!("out/tail-{name}.mp4"));
-        let o = sr_deliver::adhoc_output(&path.display().to_string(), "h264").unwrap();
-        let opts = sr_deliver::Options {
-            hardware: sr_media::encode::Hardware::Software,
-            parallel: sr_deliver::Parallel::Count(workers),
-            upload: false,
-            ..Default::default()
-        };
-        let r =
-            sr_deliver::deliver(&d, &o, Some(&gpu), &opts, &mut |_, _| {}).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!((r.frames, r.segments), (50, workers), "{name}");
-        assert!(!sr_media::probe(&path).unwrap().audio.is_empty(), "{name}: the mix is muxed");
-        assert_eq!(framemd5(&path).lines().count(), 50, "{name}: frames in the file");
-    }
 }

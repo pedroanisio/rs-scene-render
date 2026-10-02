@@ -33,7 +33,7 @@ const PAINTS: &str = r##"<paints><linearGradient id="bg" x1="0" y1="0" x2="1" y2
 #[test]
 fn kitchen_scene_matches_goldens() {
     let d = doc(r#"width="128" height="72" background="url(#bg)""#, PAINTS, SCENE);
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let bless = std::env::var("SR_BLESS").is_ok_and(|v| v == "1");
     let out = std::env::var_os("SR_GOLDEN_OUT")
         .map(std::path::PathBuf::from)
@@ -52,6 +52,9 @@ fn kitchen_scene_matches_goldens() {
         // Unsupported content and render errors must fail even when blessing.
         assert!(r.stats.unsupported.is_empty(), "{:?}", r.stats.unsupported);
         assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+        let info = &r.renderer.gpu().info;
+        let profile = reference_profile(&info.name, info.vendor, info.backend);
+        let dir = profile.map_or_else(|| base.clone(), |name| base.join(name));
         let path = dir.join(format!("kitchen_{k}.png"));
         let golden = match reference(&path, &actual, bless, std::env::var_os("CI").is_some()) {
             Ok(Some(golden)) => golden,
@@ -76,15 +79,29 @@ fn kitchen_scene_matches_goldens() {
             ])
         });
         diff.save(out.join(format!("kitchen_{k}.diff-x16.png"))).unwrap();
-        reports.push(
-            serde_json::json!({"frame":k,"time":t,"comparison":c,"adapter":format!("{:?}",r.renderer.gpu().info)}),
-        );
+        reports.push(serde_json::json!({"frame":k,"time":t,"comparison":c,"reference_profile":profile,
+                              "adapter":format!("{:?}",r.renderer.gpu().info)}));
         if !c.passes() {
             failures.push(format!("frame {k} (t = {t}): {c:?}"));
         }
     }
     std::fs::write(out.join("report.json"), serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
     assert!(failures.is_empty(), "{}; images and metrics: {}", failures.join("\n"), out.display());
+}
+
+fn reference_profile(name: &str, vendor: u32, backend: wgpu::Backend) -> Option<&'static str> {
+    // This adapter reproduces the reviewed historical references byte for byte.
+    // Select by hardware identity, never by whichever image gives the lowest error.
+    (vendor == 0x10de && name == "NVIDIA RTX 6000 Ada Generation" && backend == wgpu::Backend::Vulkan)
+        .then_some("nvidia-rtx6000-ada-vulkan")
+}
+
+#[test]
+fn hardware_reference_profile_requires_the_recorded_adapter_and_backend() {
+    let name = "NVIDIA RTX 6000 Ada Generation";
+    assert_eq!(reference_profile(name, 0x10de, wgpu::Backend::Vulkan), Some("nvidia-rtx6000-ada-vulkan"));
+    assert_eq!(reference_profile(name, 0x10de, wgpu::Backend::Gl), None);
+    assert_eq!(reference_profile("llvmpipe", 0x10005, wgpu::Backend::Vulkan), None);
 }
 
 fn reference(

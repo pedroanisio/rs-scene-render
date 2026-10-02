@@ -360,7 +360,11 @@ fn shade(v: VOut, cached_mask: bool) -> vec4<f32> {
     case 4u: {
       let pg = paints[d.paint];
       let puv = vec2(pg.xform0.x * v.local.x + pg.xform0.z * v.local.y + pg.xform1.x, pg.xform0.y * v.local.x + pg.xform0.w * v.local.y + pg.xform1.y);
-      c = textureSample(src_rep, samp_repeat, puv);
+      // Derive the footprint from geometry before the per-draw paint lookup: helper
+      // lanes can have a different paint descriptor at a triangle boundary.
+      let pdx = vec2(pg.xform0.x * dlx.x + pg.xform0.z * dlx.y, pg.xform0.y * dlx.x + pg.xform0.w * dlx.y);
+      let pdy = vec2(pg.xform0.x * dly.x + pg.xform0.z * dly.y, pg.xform0.y * dly.x + pg.xform0.w * dly.y);
+      c = textureSampleGrad(src_rep, samp_repeat, puv, pdx, pdy);
     }
     default: { c = vec4(0.0); }
   }

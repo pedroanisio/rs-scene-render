@@ -1,5 +1,9 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
 permissions:
   contents: read
 env:
@@ -61,6 +65,9 @@ jobs:
       - id: base
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ "${{ github.ref_type }}" = tag ] && git rev-parse HEAD^ >/dev/null 2>&1; then
+            base="$(git rev-parse HEAD^)"
+          fi
           if [ -n "$base" ] && [ "$base" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "sha=$base" >> "$GITHUB_OUTPUT"
           else

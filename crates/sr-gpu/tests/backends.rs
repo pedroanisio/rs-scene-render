@@ -60,8 +60,10 @@ fn gl_draws_pattern_paints() {
     let r = render_times_on(g, &pattern_scene(), &[0.0]).expect("GL renders");
     // the tile (left half red, right half blue) repeats every 16 px across and 8 px down
     let (red, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
-    for (x, y, want) in [(4, 4, red), (12, 4, blue), (20, 4, red), (28, 4, blue), (52, 60, red), (60, 60, blue)] {
-        assert_px(&r, x, y, want, 0.05);
+    for y in (4..64).step_by(8) {
+        for x in (4..64).step_by(8) {
+            assert_px(&r, x, y, if x % 16 < 8 { red } else { blue }, 0.05);
+        }
     }
 }
 

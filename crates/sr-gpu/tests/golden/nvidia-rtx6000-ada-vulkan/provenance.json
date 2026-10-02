@@ -1,0 +1,25 @@
+{
+  "review_date": "2026-10-02",
+  "reference_source": "dd6504651cb2b6a910859897fc7ec30f38673d09",
+  "adapter": "NVIDIA RTX 6000 Ada Generation",
+  "backend": "Vulkan",
+  "driver": "580.178.04",
+  "method": "Recovered previously reviewed reference PNGs from the recorded Git commit; all three current GPU outputs are byte-identical in decoded RGBA. Existing llvmpipe references and PSNR>=50/max DeltaE<=1 thresholds remain intact. No image was auto-blessed.",
+  "frames": [
+    {
+      "file": "kitchen_0.png",
+      "decoded_rgba_sha256": "0b40e109c2aa6206f7f9ff6f4133cfe5240866b876fec88bfc7b61a8b9d0386d",
+      "actual_matches_historical_reference": true
+    },
+    {
+      "file": "kitchen_1.png",
+      "decoded_rgba_sha256": "4e5a8b8dabd1849400ba5a60e543e7941162b8845a2eeb849297b2bb59ff41c1",
+      "actual_matches_historical_reference": true
+    },
+    {
+      "file": "kitchen_2.png",
+      "decoded_rgba_sha256": "3c5c79b018997cd593af253704135aa9fbafe3ca3bc235469ac8daebf6ef5927",
+      "actual_matches_historical_reference": true
+    }
+  ]
+}
