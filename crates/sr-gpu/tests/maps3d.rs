@@ -133,3 +133,58 @@ fn buildings_rise_from_the_basemap() {
     // Baixa's buildings (around 20 m) stand up in the object's material
     assert!(red(&city) > 500, "{} red pixels", red(&city));
 }
+
+#[test]
+fn globe_elevation_changes_the_silhouette_and_replays_animated_exaggeration() {
+    let dir = std::env::temp_dir().join(format!(
+        "sr-globe-relief-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    struct Clean(PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _clean = Clean(dir.clone());
+    let img = image::RgbImage::from_pixel(2, 2, image::Rgb([128, 250, 0]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    std::fs::write(
+        dir.join("dem.pmtiles"),
+        sr_geo::pmtiles::write(
+            &[((0, 0, 0), png.into_inner())],
+            sr_geo::pmtiles::TileType::Png,
+            1,
+            &serde_json::json!({}),
+        ),
+    )
+    .unwrap();
+    let xml = r##"<scene version="1.3"><project width="128" height="128" fps="10" duration="2" background="#000000"/><assets><tiles id="dem" src="dem.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><materials><material id="white" baseColor="#FFFFFF" unlit="true"/></materials><composition><group id="isolated" opacity="0.9"><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="30" x="64" y="64" segments="32" textureSize="64" material="white"><animate property="exaggeration"><key time="0" value="0"/><key time="1" value="2"/></animate></object3D></group></composition></scene>"##;
+    let Some(gpu) = gpu() else { return };
+    for camera in [
+        "",
+        r#"<camera id="camera" x="64" y="64" z="-200" projection="orthographic" orthoHeight="128" renderer="pathtrace" pathSamples="1" maxBounces="1" denoise="false"/>"#,
+    ] {
+        let xml = xml.replace("<composition>", &format!("<composition>{camera}"));
+        let d = load(&dir, &xml);
+        let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+        let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let mut images = Vec::new();
+        for time in [0., 1., 0.] {
+            let out = renderer.render(&ev.evaluate(time), ev.program());
+            assert!(out.stats.errors.is_empty() && out.stats.unsupported.is_empty(), "{:?}", out.stats);
+            images.push(renderer.read(&out.texture));
+        }
+        let lit = |pixels: &Vec<[f32; 4]>| pixels.iter().filter(|p| p[0] > 0.3).count();
+        assert!(
+            lit(&images[1]) > lit(&images[0]) * 3 / 2,
+            "globe ignored terrain: {} vs {}",
+            lit(&images[0]),
+            lit(&images[1])
+        );
+        assert_eq!(images[0], images[2]);
+    }
+}

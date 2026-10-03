@@ -113,6 +113,19 @@ impl MeshSrc {
             MeshSrc::Cached(m) | MeshSrc::Deformed(_, m) => m,
         }
     }
+
+    fn bounds(&self) -> (Vec3, Vec3) {
+        match self {
+            Self::Cached(m) => (m.lo, m.hi),
+            Self::Deformed(vertices, _) if vertices.is_empty() => (Vec3::ZERO, Vec3::ZERO),
+            Self::Deformed(vertices, _) => {
+                vertices.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
+                    let p = Vec3::from_array(v.pos);
+                    (lo.min(p), hi.max(p))
+                })
+            }
+        }
+    }
 }
 
 /// Texture slots: base colour, normal, metallic-roughness, occlusion, emissive, displacement.
@@ -269,6 +282,8 @@ pub struct Scene3 {
     pub lights: Vec<Light3>,
     pub env: Option<Env3>,
     pub splats: Vec<SplatDraw>,
+    /// Participating media in the same world and depth system as surface geometry.
+    pub volumes: Vec<crate::volume::VolumeDraw>,
     /// Encode the output with the sRGB curve (working spaces that blend on encoded values).
     pub encode_srgb: bool,
     /// Screen-space ambient occlusion: radius (scene units) and intensity.
@@ -1391,16 +1406,26 @@ impl ThreeEngine {
 
     /// Records the 3D pass into `enc`, writing premultiplied linear colour into `out`
     /// (same size as the scene). `backdrop` is what lies behind (for transmission).
+    /// Invalid or over-budget volumes return an error before recording a pass.
     pub fn render(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
         scene: &Scene3,
         backdrop: Option<&wgpu::TextureView>,
         out: &wgpu::TextureView,
-    ) {
+    ) -> Result<(), String> {
         let limits = self.device.limits();
+        let path = scene.path.or_else(|| {
+            (!scene.volumes.is_empty()).then_some(crate::pathtrace::PathOpts { samples: 4, bounces: 2, denoise: true })
+        });
+        let note = path.and_then(|_| crate::pathtrace::limit_note(scene, &limits));
+        if !scene.volumes.is_empty() {
+            if let Some(note) = &note {
+                return Err(note.clone());
+            }
+        }
         // a scene too large for the tracer's buffers is rasterised (the caller reports `limit_note`)
-        if let Some(opts) = scene.path.filter(|_| crate::pathtrace::limit_note(scene, &limits).is_none()) {
+        if let Some(opts) = path.filter(|_| note.is_none()) {
             let data = crate::pathtrace::build(scene);
             if self.pt.is_none() {
                 self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
@@ -1424,7 +1449,7 @@ impl ThreeEngine {
             );
             self.stats =
                 Stats3 { draws: scene.draws.len(), triangles: data.tri_mat.len() as u64, ..Default::default() };
-            return;
+            return Ok(());
         }
         let d = self.device.clone();
         let size = [scene.size[0].max(1), scene.size[1].max(1)];
@@ -1437,10 +1462,12 @@ impl ThreeEngine {
         let vp = scene.clip_fix * scene.cam.view_proj();
         // ------------------------------------------------ lights, IES, shadow views
         let (ies_view, ies_rows) = self.ies_atlas(&scene.lights);
+        // Skinning, morphs and terrain deformation can move vertices outside the
+        // uploaded mesh. Compute current bounds once for lighting and depth sorting.
+        let draw_bounds: Vec<_> = scene.draws.iter().map(|dr| dr.mesh.bounds()).collect();
         let (mut blo, mut bhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for dr in &scene.draws {
-            let m = dr.mesh.mesh();
-            for c in corners(m.lo, m.hi) {
+        for (dr, &(lo, hi)) in scene.draws.iter().zip(&draw_bounds) {
+            for c in corners(lo, hi) {
                 let w = dr.model.transform_point3(c);
                 blo = blo.min(w);
                 bhi = bhi.max(w);
@@ -1696,7 +1723,7 @@ impl ThreeEngine {
             pipe: PipeKey,
         }
         let mut preps: Vec<Prep> = Vec::new();
-        for dr in &scene.draws {
+        for (dr, &(lo, hi)) in scene.draws.iter().zip(&draw_bounds) {
             let m = dr.mesh.mesh();
             let o = ObjectU {
                 model: dr.model.to_cols_array_2d(),
@@ -1715,7 +1742,7 @@ impl ThreeEngine {
             };
             let pipe = PipeKey { cull: !dr.material.double_sided, blend: kind == Kind::Blend };
             self.pipe(pipe);
-            let center = dr.model.transform_point3((m.lo + m.hi) * 0.5);
+            let center = dr.model.transform_point3(lo * 0.5 + hi * 0.5);
             let vbuf = match &dr.mesh {
                 MeshSrc::Deformed(vs, _) => Some(buf(bytemuck::cast_slice(vs), wgpu::BufferUsages::VERTEX, "deformed")),
                 MeshSrc::Cached(_) => None,
@@ -2242,6 +2269,7 @@ impl ThreeEngine {
         post_pass(enc, &self.dof_pipe, &pb, out);
         self.targets.lock().unwrap_or_else(|e| e.into_inner()).end_call();
         self.stats = stats;
+        Ok(())
     }
 }
 
@@ -2293,7 +2321,7 @@ impl ThreeEngine {
     pub fn render_now(&mut self, scene: &Scene3, backdrop: Option<&wgpu::TextureView>) -> Vec<[f32; 4]> {
         let out = self.target(scene.size);
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.render(&mut enc, scene, backdrop, &out.create_view(&Default::default()));
+        self.render(&mut enc, scene, backdrop, &out.create_view(&Default::default())).expect("valid 3D test scene");
         self.queue.submit([enc.finish()]);
         self.read(&out)
     }
@@ -2378,6 +2406,7 @@ mod tests {
             lights: Vec::new(),
             env: None,
             splats: Vec::new(),
+            volumes: Vec::new(),
             encode_srgb: false,
             ao: None,
             ssr: false,

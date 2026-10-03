@@ -201,7 +201,7 @@ fn drawn_bounds(ctx: &Ctx, i: usize, space: &Space) -> Option<[f64; 4]> {
     let mut stack = vec![(i, 0.0f64)];
     while let Some((k, outer)) = stack.pop() {
         let n = &ctx.g.nodes[k];
-        if n.three_d.is_some() || n.kind == "object3D" || n.particles.is_some() {
+        if n.three_d.is_some() || matches!(n.kind, "object3D" | "particles3D" | "ocean") || n.particles.is_some() {
             return None;
         }
         if sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name())) {
@@ -1283,7 +1283,7 @@ impl Renderer {
         let Some(sub) = ctx.sub else { return false };
         let g = ctx.g;
         let n = &g.nodes[i];
-        let three = n.kind == "object3D";
+        let three = matches!(n.kind, "object3D" | "particles3D" | "ocean");
         if three && Self::three_members(g, i).first() != Some(&i) {
             // drawn, and blurred, with the pass of the first object that shares its parent
             return true;
@@ -1502,7 +1502,7 @@ impl Renderer {
     ) -> Option<(Arc<Tex>, [f64; 2], Affine)> {
         let sub = ctx.sub?;
         let n = &ctx.g.nodes[i];
-        if n.matte.is_some() || n.three_d.is_some() || n.kind == "object3D" {
+        if n.matte.is_some() || n.three_d.is_some() || matches!(n.kind, "object3D" | "particles3D" | "ocean") {
             return None;
         }
         let mut look = None;

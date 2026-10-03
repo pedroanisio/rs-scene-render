@@ -12,6 +12,37 @@ use glam::{Mat4, Vec3};
 use sr_3d::camera::{self, CameraParams, CameraView};
 use sr_3d::{AlphaMode, Asset, MaterialParams};
 
+enum LoadedMesh {
+    Static(Arc<Result<Asset, String>>),
+    Sequence(sr_eval::mesh_sequence::Loaded),
+}
+impl LoadedMesh {
+    fn model(&self) -> Option<&sr_3d::Model> {
+        match self {
+            Self::Static(a) => match &**a {
+                Ok(Asset::Model(m)) => Some(m),
+                _ => None,
+            },
+            Self::Sequence(s) => s.frame.model.as_deref(),
+        }
+    }
+    fn splats(&self) -> Option<&sr_3d::Splats> {
+        match self {
+            Self::Static(a) => match &**a {
+                Ok(Asset::Splats(s)) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn opacity(&self) -> f32 {
+        match self {
+            Self::Static(_) => 1.,
+            Self::Sequence(s) => s.frame.opacity,
+        }
+    }
+}
+
 /// Replaces the frame camera (360 cube faces, stereo eyes).
 #[derive(Clone, Copy, Debug)]
 pub struct ViewOverride {
@@ -87,42 +118,25 @@ impl CamExtras {
     }
 }
 
-/// The blobs of a clay object at this frame: static attributes, overridden by the animated
-/// values of each `<blob>` (part `{id}/blob[k]`).
-fn clay_blobs(n: &sr_eval::FrameNode) -> Vec<sr_3d::clay::Blob> {
-    let mut out = Vec::new();
-    for (k, c) in sr_model::element::children(&*n.elem).iter().filter(|c| c.element_name() == "blob").enumerate() {
-        let key = format!("{}/blob[{k}]", n.id);
-        let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
-        let a = Attrs { e: *c, props };
-        let f = |name: &str, d: f64| a.num(name, d) as f32;
-        let rot = glam::Quat::from_euler(
-            glam::EulerRot::YXZ,
-            f("rotationY", 0.0).to_radians(),
-            f("rotationX", 0.0).to_radians(),
-            f("rotation", 0.0).to_radians(),
-        );
-        out.push(sr_3d::clay::Blob {
-            shape: match a.str("shape").as_deref() {
-                Some("box") => sr_3d::clay::BlobShape::Box,
-                Some("capsule") => sr_3d::clay::BlobShape::Capsule,
-                Some("torus") => sr_3d::clay::BlobShape::Torus,
-                _ => sr_3d::clay::BlobShape::Sphere,
-            },
-            center: Vec3::new(f("x", 0.0), f("y", 0.0), f("z", 0.0)),
-            rotation: rot,
-            radius: f("radius", 30.0),
-            size: Vec3::new(f("width", 60.0), f("height", 60.0), f("depth", 60.0)),
-            length: f("length", 60.0),
-            blend: f("blend", 10.0),
-            subtract: a.num("subtract", 0.0) != 0.0 || a.str("subtract").as_deref() == Some("true"),
-        });
-    }
-    out
-}
-
 fn attrs<'a>(n: &'a sr_eval::FrameNode) -> Attrs<'a> {
     Attrs { e: &*n.elem, props: Some(&n.props) }
+}
+
+fn primitive_kind(n: &FrameNode) -> String {
+    let a = attrs(n);
+    if n.kind == "particles3D" {
+        match a.str("shape").as_deref() {
+            Some("mesh") => "mesh",
+            Some("billboard") => "plane",
+            Some("streak") => "cylinder",
+            _ => "sphere",
+        }
+        .into()
+    } else if n.kind == "ocean" {
+        "ocean".into()
+    } else {
+        a.str("primitive").unwrap_or_else(|| "box".into())
+    }
 }
 
 fn flag(a: &Attrs, name: &str, d: bool) -> bool {
@@ -248,7 +262,7 @@ impl Renderer {
         if let Some(j) = g.nodes.iter().position(|m| &*m.id == id) {
             let n = &g.nodes[j];
             return Some(match n.kind {
-                "object3D" => Self::world3(g, lights, j, depth),
+                "object3D" | "particles3D" | "ocean" => Self::world3(g, lights, j, depth),
                 // the camera as it looks: its pose, look-at target and shake
                 "camera" => {
                     let cp = Self::cam_params(g, lights, j, depth);
@@ -274,7 +288,12 @@ impl Renderer {
     }
 
     fn world_point(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Vec3> {
-        if let Some(n) = g.nodes.iter().find(|m| &*m.id == id).filter(|n| !matches!(n.kind, "object3D" | "camera")) {
+        if let Some(n) = g
+            .nodes
+            .iter()
+            .find(|m| &*m.id == id)
+            .filter(|n| !matches!(n.kind, "object3D" | "particles3D" | "ocean" | "camera"))
+        {
             let p = n.world.apply(n.anchor);
             return Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32));
         }
@@ -610,12 +629,7 @@ impl Renderer {
 
     /// The mesh of a clay object, re-extracted when its blobs, finish or boil frame change.
     fn clay_mesh(&mut self, n: &sr_eval::FrameNode) -> Option<Arc<crate::three::MeshGpu>> {
-        let a = attrs(n);
-        let blobs = clay_blobs(n);
-        let res = a.num("resolution", 64.0).clamp(8.0, 256.0) as u32;
-        let seed = a.opt("seed").map(|s| s as u64).unwrap_or_else(|| sr_eval::rng::hash_str(&n.id));
-        let finish =
-            sr_3d::clay::Finish { amount: a.num("fingerprints", 0.0) as f32, seed, boil: a.num("boil", 0.0) as f32 };
+        let sr_eval::solid::Clay { blobs, finish, resolution: res } = sr_eval::solid::clay(n);
         let boil_frame = if finish.boil > 0.0 { (n.local_time * finish.boil as f64).floor() as i64 } else { 0 };
         let key = format!("clay|{}|{blobs:?}|{finish:?}|{res}|{boil_frame}", n.id);
         if let Some(m) = self.three_engine().meshes.get(&key) {
@@ -639,8 +653,25 @@ impl Renderer {
         ctx: &Ctx,
         n: &sr_eval::FrameNode,
     ) -> Option<Arc<crate::three::MeshGpu>> {
+        if n.kind == "ocean" {
+            let Some(surface) = &n.sim_ocean else {
+                plan.stats.errors.push(format!("{}: ocean evaluation produced no surface", n.id));
+                return None;
+            };
+            if surface.mesh.indices.is_empty() {
+                return None;
+            }
+            let vertex_bytes = surface.mesh.vertices.len() as u64 * std::mem::size_of::<sr_3d::Vertex>() as u64;
+            let index_bytes = surface.mesh.indices.len() as u64 * 4;
+            let cap = self.gpu.device.limits().max_buffer_size;
+            if vertex_bytes > cap || index_bytes > cap {
+                plan.stats.errors.push(format!("{}: ocean surface exceeds device buffer limits", n.id));
+                return None;
+            }
+            return Some(self.three_engine().upload_mesh(&surface.mesh.vertices, &surface.mesh.indices));
+        }
         let a = attrs(n);
-        let kind = a.str("primitive").unwrap_or_else(|| "box".into());
+        let kind = primitive_kind(n);
         let r = a.num("radius", 50.0) as f32;
         let segs = a.num("segments", 32.0).clamp(3.0, 512.0) as u32;
         let (w, hh) = (a.opt("width").map(|v| v as f32).unwrap_or(2.0 * r), a.opt("height").map(|v| v as f32));
@@ -716,12 +747,39 @@ impl Renderer {
         }
     }
 
-    fn mesh_asset(
-        &mut self,
-        plan: &mut Plan,
-        ctx: &Ctx,
-        n: &sr_eval::FrameNode,
-    ) -> Option<(String, Arc<Result<Asset, String>>)> {
+    fn mesh_asset(&mut self, plan: &mut Plan, ctx: &Ctx, n: &sr_eval::FrameNode) -> Option<(String, LoadedMesh)> {
+        match sr_eval::mesh_sequence::sample(ctx.p, n) {
+            Ok(Some(sequence)) => {
+                if let Some(model) = &sequence.frame.model {
+                    let limits = self.gpu.device.limits();
+                    if model.primitives.iter().any(|p| {
+                        p.vertices.len() as u64 * std::mem::size_of::<sr_3d::Vertex>() as u64 > limits.max_buffer_size
+                            || p.indices.len() as u64 * 4 > limits.max_buffer_size
+                    }) || model.textures.iter().any(|t| {
+                        t.width > limits.max_texture_dimension_2d || t.height > limits.max_texture_dimension_2d
+                    }) {
+                        plan.stats
+                            .errors
+                            .push(format!("{}: mesh sequence exceeds device geometry/texture limits", n.id));
+                        return None;
+                    }
+                    for warning in &model.warnings {
+                        plan.stats.unsupported.push(format!("{}: {warning}", n.id));
+                    }
+                }
+                let prefix = format!("mesh-sequence:{}|", n.id);
+                let key = format!("{prefix}{}|", sequence.key);
+                let engine = self.three_engine();
+                engine.meshes.retain(|k, _| !k.starts_with(&prefix) || k.starts_with(&key));
+                engine.textures.retain(|k, _| !k.starts_with(&prefix) || k.starts_with(&key));
+                return Some((key, LoadedMesh::Sequence(sequence)));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                plan.stats.errors.push(format!("{}: {e}", n.id));
+                return None;
+            }
+        }
         let a = attrs(n);
         let id = a.str("mesh")?;
         let key = n.asset.as_deref().map(str::to_string).unwrap_or_else(|| id.clone());
@@ -756,7 +814,318 @@ impl Renderer {
             Ok(Asset::Splats(_)) => {}
             Err(e) => plan.stats.errors.push(format!("{}: {e}", n.id)),
         }
-        Some((key, asset))
+        Some((key, LoadedMesh::Static(asset)))
+    }
+
+    /// Draws of one 3D object.
+    /// A missing cache is distinct from a malformed or unreadable cache. Keep
+    /// immutable frames shared across instances and bounded by bytes and entries.
+    fn volume_cache(
+        &mut self,
+        path: &std::path::Path,
+        format: &str,
+    ) -> Result<Option<Arc<sr_volume::Volume>>, sr_volume::Error> {
+        let key = (path.to_owned(), format.to_owned());
+        if let Some(cached) = self.volume_assets.get(&key) {
+            return cached.clone().map_err(|e| sr_volume::Error::Io(std::io::Error::other(e)));
+        }
+        let loaded = (|| {
+            let file = match std::fs::File::open(path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => {
+                    return Err(sr_volume::Error::Io(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))))
+                }
+            };
+            let cap = self.gpu.device.limits().max_storage_buffer_binding_size.min(128 << 20);
+            let limits =
+                sr_volume::CacheLimits { max_bytes: cap, max_bricks: (cap / 2060) as usize, ..Default::default() };
+            let reader = std::io::BufReader::new(file);
+            let decoded = match format {
+                "srvol" => sr_volume::Volume::read(reader, limits),
+                "openvdb" => sr_volume::openvdb::read(reader, limits),
+                _ => Err(sr_volume::Error::Invalid("unsupported volume format")),
+            };
+            decoded
+                .map(|v| Some(Arc::new(v)))
+                .map_err(|e| sr_volume::Error::Io(std::io::Error::other(format!("{}: {e}", path.display()))))
+        })();
+        let bytes = loaded.as_ref().ok().and_then(|v| v.as_ref()).map_or(0, |v| v.bytes());
+        if self.volume_cache_bytes.saturating_add(bytes) > 256 << 20 || self.volume_assets.len() >= 64 {
+            self.volume_assets.clear();
+            self.baked_frames.clear();
+            self.volume_cache_bytes = 0;
+        }
+        self.volume_cache_bytes += bytes;
+        self.volume_assets.insert(key, loaded.as_ref().cloned().map_err(ToString::to_string));
+        loaded
+    }
+
+    fn baked_volume(
+        &mut self,
+        path: &std::path::Path,
+        sha: &str,
+        time: f64,
+        interpolation: sr_volume::sequence::Interpolation,
+        advect: bool,
+    ) -> Result<sr_volume::sequence::TimedFramePair, sr_volume::Error> {
+        let cap = self.gpu.device.limits().max_storage_buffer_binding_size.min(128 << 20);
+        let limits = sr_volume::bake::BakeLimits {
+            frame: sr_volume::CacheLimits { max_bytes: cap, max_bricks: (cap / 2060) as usize, ..Default::default() },
+            ..Default::default()
+        };
+        let key = (path.to_owned(), sha.to_owned());
+        let sequence = match self.baked_sequences.get(&key) {
+            Some(sequence) => sequence.clone(),
+            None => {
+                let sequence = Arc::new(sr_volume::bake::BakedSequence::open(path, Some(sha), limits)?);
+                // Each manifest is at most 4 MB; keep at most eight resident.
+                if self.baked_sequences.len() >= 8 {
+                    self.baked_sequences.clear();
+                }
+                self.baked_sequences.insert(key, sequence.clone());
+                sequence
+            }
+        };
+        let load = |frame: &sr_volume::bake::BakedFrame| {
+            let key = (sequence.directory().to_owned(), frame.sha256());
+            if let Some(volume) = self.baked_frames.get(&key) {
+                return Ok(volume.clone());
+            }
+            let volume = frame.read(sequence.directory(), limits.frame)?;
+            let bytes = volume.bytes();
+            if bytes > 256 << 20 {
+                return Err(sr_volume::Error::Limit("baked frame resident bytes"));
+            }
+            if self.volume_cache_bytes.saturating_add(bytes) > 256 << 20 || self.baked_frames.len() >= 64 {
+                self.volume_assets.clear();
+                self.baked_frames.clear();
+                self.volume_cache_bytes = 0;
+            }
+            self.volume_cache_bytes += bytes;
+            self.baked_frames.insert(key, volume.clone());
+            Ok(volume)
+        };
+        if advect {
+            sequence.load_timed_with(time, interpolation, 256 << 20, load)
+        } else {
+            sequence
+                .load_with(time, interpolation, 256 << 20, load)
+                .map(|frames| sr_volume::sequence::TimedFramePair { frames, elapsed: [0.; 2] })
+        }
+    }
+
+    fn volume_draw(&mut self, ctx: &Ctx, j: usize, opacity: f32) -> Result<Option<crate::volume::VolumeDraw>, String> {
+        use sr_volume::medium::{Bounds, March, Medium, Optical};
+        use sr_volume::sequence::{FramePair, Interpolation, MissingFrame, Sequence, TimedFramePair};
+        let n = &ctx.g.nodes[j];
+        let a = attrs(n);
+        let (timed, label, channel, temperature_channel, bounds, velocity_channels) = if let Some(native) =
+            &n.sim_volume
+        {
+            (
+                TimedFramePair {
+                    frames: FramePair {
+                        first: Some(native.data.clone()),
+                        second: Some(native.data.clone()),
+                        blend: 0.0,
+                    },
+                    elapsed: [0.; 2],
+                },
+                n.id.to_string(),
+                "density".to_string(),
+                Some("temperature".to_string()),
+                None,
+                None,
+            )
+        } else {
+            let id = a.str("volume").ok_or("volume primitive requires @volume")?;
+            let key = n.asset.as_deref().unwrap_or(&id);
+            let Some((AssetsChild::Volume(asset), doc)) = self.asset(ctx.p, key) else {
+                return Err(format!("volume asset {id} not found"));
+            };
+            let a = Attrs { e: asset, props: None };
+            let base = ctx.p.base_dirs.get(doc).cloned().unwrap_or_default();
+            let mut read = |src: &str| match sr_model::assets::resolve(src, &base) {
+                sr_model::assets::Resolved::Local(path) => self.volume_cache(&path, asset.format.as_str()),
+                sr_model::assets::Resolved::Remote(_) => {
+                    Err(sr_volume::Error::Invalid("remote volume must be resolved before rendering"))
+                }
+            };
+            let advect = asset.interpolation.as_str() == "advect";
+            let frames = if asset.format.as_str() == "srvseq" {
+                let sha = asset.sha256.as_ref().ok_or("srvseq requires a manifest SHA-256")?.to_string();
+                let interpolation =
+                    if asset.interpolation.as_str() != "hold" { Interpolation::Linear } else { Interpolation::Hold };
+                match sr_model::assets::resolve(&asset.src, &base) {
+                    sr_model::assets::Resolved::Local(path) => self
+                        .baked_volume(&path, &sha, ctx.g.time, interpolation, advect)
+                        .map_err(|e| format!("{}: {e}", path.display()))?,
+                    sr_model::assets::Resolved::Remote(_) => {
+                        return Err("remote volume bake must be resolved before rendering".into())
+                    }
+                }
+            } else if let (Some(first), Some(last)) = (a.opt("first"), a.opt("last")) {
+                let interpolation =
+                    if asset.interpolation.as_str() != "hold" { Interpolation::Linear } else { Interpolation::Hold };
+                let missing = match asset.missing_frame.as_str() {
+                    "hold" => MissingFrame::Hold,
+                    "transparent" => MissingFrame::Transparent,
+                    _ => MissingFrame::Error,
+                };
+                let sequence = Sequence::new(
+                    first as i64,
+                    last as i64,
+                    asset.fps.unwrap_or(ctx.p.fps).as_f64(),
+                    interpolation,
+                    missing,
+                )
+                .map_err(|e| e.to_string())?;
+                let object = attrs(n);
+                let time = n.local_time * object.num("animationSpeed", 1.0) + object.num("animationOffset", 0.0);
+                let load = |frame| {
+                    let src = sr_model::assets::sequence_frame(&asset.src, frame)
+                        .ok_or(sr_volume::Error::Invalid("volume sequence src has no valid frame placeholder"))?;
+                    read(&src)
+                };
+                (if advect {
+                    sequence.load_timed(time, 256 << 20, load)
+                } else {
+                    sequence.load(time, 256 << 20, load).map(|frames| TimedFramePair { frames, elapsed: [0.; 2] })
+                })
+                .map_err(|e| format!("{}: {e}", asset.src))?
+            } else {
+                let cache = read(&asset.src)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("volume {} does not exist", asset.src))?;
+                TimedFramePair {
+                    frames: FramePair { first: Some(cache.clone()), second: Some(cache), blend: 0.0 },
+                    elapsed: [0.; 2],
+                }
+            };
+            let bounds = if a.opt("boundsMinX").is_some() {
+                Some(
+                    Bounds::new(
+                        [a.num("boundsMinX", 0.0), a.num("boundsMinY", 0.0), a.num("boundsMinZ", 0.0)],
+                        [a.num("boundsMaxX", 0.0), a.num("boundsMaxY", 0.0), a.num("boundsMaxZ", 0.0)],
+                    )
+                    .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+            (
+                frames,
+                asset.src.clone(),
+                a.str("densityGrid").unwrap_or_else(|| "density".into()),
+                a.str("temperatureGrid"),
+                bounds,
+                if advect {
+                    Some([
+                        a.str("velocityGridX").ok_or("advect requires velocityGridX")?,
+                        a.str("velocityGridY").ok_or("advect requires velocityGridY")?,
+                        a.str("velocityGridZ").ok_or("advect requires velocityGridZ")?,
+                    ])
+                } else {
+                    None
+                },
+            )
+        };
+        let TimedFramePair { frames, elapsed } = timed;
+        if frames.first.is_none() && frames.second.is_none() {
+            return Ok(None);
+        }
+        let zero =
+            Arc::new(sr_volume::SparseGrid::new(sr_volume::Transform::identity(), 0.0, 0).map_err(|e| e.to_string())?);
+        let grid = |frame: &Option<Arc<sr_volume::Volume>>, channel: &str, kind: &str| match frame {
+            None => Ok(zero.clone()),
+            Some(frame) => {
+                frame.shared_grid(channel).ok_or_else(|| format!("volume {} lacks {kind} channel {channel}", label))
+            }
+        };
+        // Validate selected channels even at exact or clamped endpoints.
+        let advection = if let Some(channels) = velocity_channels {
+            let trace = |frame, dt| {
+                let components = [
+                    grid(frame, &channels[0], "velocity")?,
+                    grid(frame, &channels[1], "velocity")?,
+                    grid(frame, &channels[2], "velocity")?,
+                ];
+                sr_volume::advection::Advection::new(components, dt).map_err(|e| e.to_string())
+            };
+            Some([trace(&frames.first, elapsed[0])?, trace(&frames.second, elapsed[1])?])
+        } else {
+            None
+        };
+        let density = grid(&frames.first, &channel, "density")?;
+        let next_density = grid(&frames.second, &channel, "density")?;
+        let mut optical = Optical { albedo: [1.0; 3], ..Default::default() };
+        let mut march = March { step_size: 1.0, max_steps: 2048 };
+        // Declaring a channel is an asset contract even when this instance does
+        // not emit thermally. Missing files alone may become transparent.
+        let temperature_grids = if let Some(channel) = temperature_channel {
+            let first = grid(&frames.first, &channel, "temperature")?;
+            let second = grid(&frames.second, &channel, "temperature")?;
+            for grid in [&first, &second] {
+                if std::iter::once(grid.background())
+                    .chain(grid.bricks().flat_map(|(_, v)| v.iter().copied()))
+                    .any(|v| v < 0.0)
+                {
+                    return Err(format!("volume {} has negative kelvin samples in {channel}", label));
+                }
+            }
+            Some((first, second))
+        } else {
+            None
+        };
+        let mut temperature = None;
+        if let Some(child) = sr_model::element::children(&*n.elem).into_iter().find(|c| c.element_name() == "medium") {
+            let key = format!("{}/medium[0]", n.id);
+            let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
+            let a = Attrs { e: child, props };
+            let albedo = self.working_color(a.paint("albedo"), self.literal_linear([1.0; 4]));
+            let emission = self.working_color(a.paint("emissionColor"), self.literal_linear([0.0, 0.0, 0.0, 1.0]));
+            optical = Optical {
+                density_scale: a.num("densityScale", 1.0),
+                extinction: a.num("extinction", 1.0),
+                albedo: std::array::from_fn(|i| f64::from(albedo[i])),
+                emission: std::array::from_fn(|i| f64::from(emission[i]) * a.num("emissionScale", 0.0)),
+                anisotropy: a.num("anisotropy", 0.0),
+            };
+            march = March { step_size: a.num("stepSize", 1.0), max_steps: a.num("maxSteps", 2048.0) as u32 };
+            if flag(&a, "blackbody", false) {
+                let (first, second) = temperature_grids.as_ref().ok_or("blackbody requires temperatureGrid")?;
+                temperature =
+                    Some((first.clone(), second.clone(), a.num("temperatureScale", 1.0), a.num("emissionScale", 0.0)));
+            }
+        }
+        optical.density_scale *= f64::from(opacity);
+        let world = Self::world3(ctx.g, doc_lights(ctx.p), j, 0);
+        let transform = sr_volume::Transform::new(world.as_dmat4().to_cols_array()).map_err(|e| e.to_string())?;
+        let mut medium = Medium::new(density, bounds, transform, optical).map_err(|e| e.to_string())?;
+        let mut next_temperature = None;
+        if let Some((grid, next, scale, emission_scale)) = temperature {
+            medium = medium.with_temperature(grid, scale, emission_scale).map_err(|e| e.to_string())?;
+            next_temperature = Some(next);
+        }
+        let same = matches!((&frames.first,&frames.second),(Some(a),Some(b)) if Arc::ptr_eq(a,b));
+        // Content-addressed bakes may share storage for different sample times.
+        // Only identical timing, not identical storage, freezes a moving pair.
+        let moving = advection.as_ref().is_some_and(|traces| traces.iter().any(|t| t.elapsed() != 0.0));
+        if frames.blend > 0.0 && (!same || moving) {
+            medium = medium.with_next_frame(next_density, next_temperature, frames.blend).map_err(|e| e.to_string())?;
+            if let Some([first, second]) = advection {
+                medium = medium.with_advection(first, second).map_err(|e| e.to_string())?;
+            }
+        }
+        let thermal_color = glam::DMat3::from_cols(
+            Vec3::from_array(self.lin_srgb([1.0, 0.0, 0.0])).as_dvec3(),
+            Vec3::from_array(self.lin_srgb([0.0, 1.0, 0.0])).as_dvec3(),
+            Vec3::from_array(self.lin_srgb([0.0, 0.0, 1.0])).as_dvec3(),
+        );
+        crate::volume::VolumeDraw::new(Arc::new(medium), march)?.with_thermal_color(thermal_color).map(|draw| {
+            Some(draw.with_shadows(flag(&attrs(n), "castShadow", true), flag(&attrs(n), "receiveShadow", true)))
+        })
     }
 
     /// Draws of one 3D object.
@@ -772,8 +1141,118 @@ impl Renderer {
     ) {
         let g = ctx.g;
         let n = &g.nodes[j];
-        let a = attrs(n);
+        if let Some(fracture) = &n.fracture {
+            self.fracture_draws3(plan, ctx, j, fracture, opacity, draws);
+            return;
+        }
         let world = Self::world3(g, doc_lights(ctx.p), j, 0);
+        let draw_start = draws.len();
+        let splat_start = splats.len();
+        self.object_draws_at(plan, ctx, j, n, world, opacity, draws, splats);
+        let deformation = (|| -> Result<(), String> {
+            let Some(crater) = sr_eval::crater::at(n)? else { return Ok(()) };
+            if splats.len() != splat_start {
+                return Err("craters require triangle surfaces, not Gaussian splats".into());
+            }
+            if crater.progress == 0. {
+                return Ok(());
+            }
+            let bytes = draws[draw_start..]
+                .iter()
+                .try_fold(0usize, |total, draw| {
+                    draw.mesh
+                        .cpu()
+                        .0
+                        .len()
+                        .checked_mul(std::mem::size_of::<sr_3d::Vertex>())
+                        .and_then(|b| total.checked_add(b))
+                })
+                .ok_or("crater vertex memory overflow")?;
+            if bytes > crater.max_bytes {
+                return Err("crater draw vertices exceed memory budget".into());
+            }
+            let inverse = world.as_dmat4().inverse();
+            for draw in &mut draws[draw_start..] {
+                let transform = inverse * draw.model.as_dmat4();
+                let vertices =
+                    crater.kernel.deform_in(draw.mesh.cpu().0, transform, crater.progress, crater.max_bytes)?;
+                let mesh = match &draw.mesh {
+                    MeshSrc::Cached(mesh) | MeshSrc::Deformed(_, mesh) => mesh.clone(),
+                };
+                draw.mesh = MeshSrc::Deformed(vertices, mesh);
+            }
+            Ok(())
+        })();
+        if let Err(error) = deformation {
+            draws.truncate(draw_start);
+            splats.truncate(splat_start);
+            plan.stats.errors.push(format!("{}: {error}", n.id));
+        }
+        if n.kind == "ocean" {
+            if let Some(sea) = &n.sim_ocean {
+                let config =
+                    sr_model::element::children(&*n.elem).into_iter().find(|e| e.element_name() == "whitewater");
+                for (i, mesh) in sea.whitewater_mesh.iter().enumerate() {
+                    if mesh.indices.is_empty() {
+                        continue;
+                    }
+                    let cap = self.gpu.device.limits().max_buffer_size;
+                    if mesh.vertices.len() as u64 * std::mem::size_of::<sr_3d::Vertex>() as u64 > cap
+                        || mesh.indices.len() as u64 * 4 > cap
+                    {
+                        plan.stats.errors.push(format!("{}: whitewater exceeds device buffer limits", n.id));
+                        continue;
+                    }
+                    let id = config
+                        .and_then(|c| c.get_attr(if i == 0 { "foamMaterial" } else { "sprayMaterial" }))
+                        .map(|v| v.to_string());
+                    let material = match id {
+                        Some(id) => match self.document_material(plan, ctx, &id) {
+                            Some(m) => m,
+                            None => {
+                                plan.stats.errors.push(format!("{}: whitewater material {id} not found", n.id));
+                                continue;
+                            }
+                        },
+                        None => (
+                            MaterialParams {
+                                base_color: [1.; 4],
+                                roughness: if i == 0 { 0.8 } else { 0.12 },
+                                transmission: if i == 0 { 0. } else { 0.6 },
+                                ior: 1.333,
+                                double_sided: true,
+                                ..Default::default()
+                            },
+                            Maps::default(),
+                        ),
+                    };
+                    draws.push(Draw3 {
+                        mesh: MeshSrc::Cached(self.three_engine().upload_mesh(&mesh.vertices, &mesh.indices)),
+                        model: world,
+                        material: material.0,
+                        maps: material.1,
+                        opacity,
+                        cast_shadow: flag(&attrs(n), "castShadow", true),
+                        receive_shadow: flag(&attrs(n), "receiveShadow", true),
+                    });
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn object_draws_at(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        j: usize,
+        n: &FrameNode,
+        world: Mat4,
+        opacity: f32,
+        draws: &mut Vec<Draw3>,
+        splats: &mut Vec<SplatDraw>,
+    ) {
+        let a = attrs(n);
         let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
         let doc_mat = match a.str("material") {
             Some(id) => {
@@ -785,13 +1264,26 @@ impl Renderer {
             }
             None => None,
         };
-        let default_mat =
-            || (MaterialParams { base_color: [0.8, 0.8, 0.8, 1.0], ..Default::default() }, Maps::default());
-        if matches!(a.str("primitive").as_deref(), Some("map" | "globe")) {
+        let default_mat = || {
+            let material = if n.kind == "ocean" {
+                MaterialParams {
+                    base_color: [1.0; 4],
+                    roughness: 0.05,
+                    transmission: 1.0,
+                    ior: 1.333,
+                    double_sided: true,
+                    ..Default::default()
+                }
+            } else {
+                MaterialParams { base_color: [0.8, 0.8, 0.8, 1.0], ..Default::default() }
+            };
+            (material, Maps::default())
+        };
+        if matches!(primitive_kind(n).as_str(), "map" | "globe") {
             self.map3d_draws(plan, ctx, j, world, opacity, doc_mat, cast, receive, draws);
             return;
         }
-        if a.str("primitive").as_deref() != Some("mesh") {
+        if primitive_kind(n) != "mesh" {
             if let Some(mesh) = self.primitive_mesh(plan, ctx, n) {
                 let (material, maps) = doc_mat.unwrap_or_else(default_mat);
                 draws.push(Draw3 {
@@ -807,131 +1299,454 @@ impl Renderer {
             return;
         }
         let Some((key, asset)) = self.mesh_asset(plan, ctx, n) else { return };
-        match &*asset {
-            Ok(Asset::Splats(s)) => {
-                let gpu = match self.three_engine().splat_cache.get(&key) {
-                    Some(g) => g.clone(),
+        let opacity = opacity * asset.opacity();
+        if let Some(s) = asset.splats() {
+            let gpu = match self.three_engine().splat_cache.get(&key) {
+                Some(g) => g.clone(),
+                None => {
+                    let g = self.three_engine().upload_splats(s);
+                    self.three_engine().splat_cache.insert(key.clone(), g.clone());
+                    g
+                }
+            };
+            if let Some(m) = crate::three::splat_note(s.len() as u64, gpu.n as u64) {
+                let m = format!("{}: {m}", n.id);
+                if !plan.stats.unsupported.contains(&m) {
+                    plan.stats.unsupported.push(m);
+                }
+            }
+            splats.push(SplatDraw { gpu, model: world * s.basis, opacity });
+        }
+        if let Some(model) = asset.model() {
+            // animation clip at the object's local time
+            let clip = a.str("animationClip").and_then(|c| {
+                model
+                    .animations
+                    .iter()
+                    .find(|x| x.name == c)
+                    .or_else(|| c.parse::<usize>().ok().and_then(|k| model.animations.get(k)))
+            });
+            if let (Some(c), None) = (a.str("animationClip"), clip) {
+                plan.stats.errors.push(format!("{}: animation clip {c} not found", n.id));
+            }
+            let t = (n.local_time * a.num("animationSpeed", 1.0) + a.num("animationOffset", 0.0)) as f32;
+            let t = clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0);
+            let (locals, weights) = sr_3d::anim::pose(model, clip, t);
+            let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
+            let variant = a.str("materialVariant");
+            for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
+                let prim = &model.primitives[item.prim];
+                let mi = variant
+                    .as_ref()
+                    .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
+                    .or(prim.material);
+                let imported = if doc_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
+                let mkey = format!("{key}#{}#material{:?}", item.prim, imported.map(|_| mi));
+                let mesh = match self.three_engine().meshes.get(&mkey) {
+                    Some(m) => m.clone(),
                     None => {
-                        let g = self.three_engine().upload_splats(s);
-                        self.three_engine().splat_cache.insert(key.clone(), g.clone());
-                        g
+                        let mut vertices = prim.vertices.clone();
+                        if let Some(material) = imported {
+                            material.apply_texture_coordinates(prim, &mut vertices);
+                        }
+                        let m = self.three_engine().upload_mesh(&vertices, &prim.indices);
+                        self.three_engine().meshes.insert(mkey, m.clone());
+                        m
                     }
                 };
-                if let Some(m) = crate::three::splat_note(s.len() as u64, gpu.n as u64) {
-                    let m = format!("{}: {m}", n.id);
-                    if !plan.stats.unsupported.contains(&m) {
-                        plan.stats.unsupported.push(m);
-                    }
-                }
-                splats.push(SplatDraw { gpu, model: world * s.basis, opacity });
-            }
-            Ok(Asset::Model(model)) => {
-                // animation clip at the object's local time
-                let clip = a.str("animationClip").and_then(|c| {
-                    model
-                        .animations
-                        .iter()
-                        .find(|x| x.name == c)
-                        .or_else(|| c.parse::<usize>().ok().and_then(|k| model.animations.get(k)))
-                });
-                if let (Some(c), None) = (a.str("animationClip"), clip) {
-                    plan.stats.errors.push(format!("{}: animation clip {c} not found", n.id));
-                }
-                let t = (n.local_time * a.num("animationSpeed", 1.0) + a.num("animationOffset", 0.0)) as f32;
-                let t = clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0);
-                let (locals, weights) = sr_3d::anim::pose(model, clip, t);
-                let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
-                let variant = a.str("materialVariant");
-                for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
-                    let prim = &model.primitives[item.prim];
-                    let mi = variant
-                        .as_ref()
-                        .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
-                        .or(prim.material);
-                    let imported = if doc_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
-                    let mkey = format!("{key}#{}#material{:?}", item.prim, imported.map(|_| mi));
-                    let mesh = match self.three_engine().meshes.get(&mkey) {
-                        Some(m) => m.clone(),
-                        None => {
-                            let mut vertices = prim.vertices.clone();
-                            if let Some(material) = imported {
-                                material.apply_texture_coordinates(prim, &mut vertices);
-                            }
-                            let m = self.three_engine().upload_mesh(&vertices, &prim.indices);
-                            self.three_engine().meshes.insert(mkey, m.clone());
-                            m
-                        }
-                    };
-                    let (material, maps) = match &doc_mat {
-                        Some((p, m)) => (p.clone(), m.clone()),
-                        None => {
-                            let mi = variant
-                                .as_ref()
-                                .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
-                                .or(prim.material);
-                            match mi.and_then(|k| model.materials.get(k).map(|m| (k, m))) {
-                                Some((k, im)) => {
-                                    let mut p = im.params.clone();
-                                    // imported colours are linear sRGB
-                                    for c in [
-                                        &mut p.base_color[..3],
-                                        &mut p.emissive[..],
-                                        &mut p.sheen_color[..],
-                                        &mut p.attenuation_color[..],
-                                        &mut p.specular_color[..],
-                                    ] {
-                                        let l = self.lin_srgb([c[0], c[1], c[2]]);
-                                        c.copy_from_slice(&l);
-                                    }
-                                    let mut maps = Maps::default();
-                                    for (slot, t) in [
-                                        (0, im.maps.base_color),
-                                        (1, im.maps.normal),
-                                        (2, im.maps.metallic_roughness),
-                                        (3, im.maps.occlusion),
-                                        (4, im.maps.emissive),
-                                    ] {
-                                        if let Some(ti) = t {
-                                            let tkey = format!("{key}#tex{ti}");
-                                            maps[slot] = Some(match self.three_engine().textures.get(&tkey) {
-                                                Some(t) => t.clone(),
-                                                None => {
-                                                    let tx = &model.textures[ti];
-                                                    let up = self.three_engine().upload_texture(tx);
-                                                    self.three_engine().textures.insert(tkey, up.clone());
-                                                    up
-                                                }
-                                            });
-                                        }
-                                    }
-                                    let _ = k;
-                                    (p, maps)
+                let (material, maps) = match &doc_mat {
+                    Some((p, m)) => (p.clone(), m.clone()),
+                    None => {
+                        let mi = variant
+                            .as_ref()
+                            .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
+                            .or(prim.material);
+                        match mi.and_then(|k| model.materials.get(k).map(|m| (k, m))) {
+                            Some((k, im)) => {
+                                let mut p = im.params.clone();
+                                // imported colours are linear sRGB
+                                for c in [
+                                    &mut p.base_color[..3],
+                                    &mut p.emissive[..],
+                                    &mut p.sheen_color[..],
+                                    &mut p.attenuation_color[..],
+                                    &mut p.specular_color[..],
+                                ] {
+                                    let l = self.lin_srgb([c[0], c[1], c[2]]);
+                                    c.copy_from_slice(&l);
                                 }
-                                None => default_mat(),
+                                let mut maps = Maps::default();
+                                for (slot, t) in [
+                                    (0, im.maps.base_color),
+                                    (1, im.maps.normal),
+                                    (2, im.maps.metallic_roughness),
+                                    (3, im.maps.occlusion),
+                                    (4, im.maps.emissive),
+                                ] {
+                                    if let Some(ti) = t {
+                                        let tkey = format!("{key}#tex{ti}");
+                                        maps[slot] = Some(match self.three_engine().textures.get(&tkey) {
+                                            Some(t) => t.clone(),
+                                            None => {
+                                                let tx = &model.textures[ti];
+                                                let up = self.three_engine().upload_texture(tx);
+                                                self.three_engine().textures.insert(tkey, up.clone());
+                                                up
+                                            }
+                                        });
+                                    }
+                                }
+                                let _ = k;
+                                (p, maps)
                             }
+                            None => default_mat(),
                         }
-                    };
-                    let src = match item.vertices {
-                        Some(mut vs) => {
-                            if let Some(material) = imported {
-                                material.apply_texture_coordinates(prim, &mut vs);
-                            }
-                            MeshSrc::Deformed(vs, mesh)
+                    }
+                };
+                let src = match item.vertices {
+                    Some(mut vs) => {
+                        if let Some(material) = imported {
+                            material.apply_texture_coordinates(prim, &mut vs);
                         }
-                        None => MeshSrc::Cached(mesh),
-                    };
-                    draws.push(Draw3 {
-                        mesh: src,
-                        model: world * model.basis * item.matrix,
-                        material,
-                        maps,
-                        opacity,
-                        cast_shadow: cast,
-                        receive_shadow: receive,
-                    });
-                }
+                        MeshSrc::Deformed(vs, mesh)
+                    }
+                    None => MeshSrc::Cached(mesh),
+                };
+                draws.push(Draw3 {
+                    mesh: src,
+                    model: world * model.basis * item.matrix,
+                    material,
+                    maps,
+                    opacity,
+                    cast_shadow: cast,
+                    receive_shadow: receive,
+                });
             }
-            Err(_) => {}
+        }
+    }
+
+    fn fracture_draws3(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        j: usize,
+        fracture: &sr_eval::fracture::SimFracture,
+        opacity: f32,
+        draws: &mut Vec<Draw3>,
+    ) {
+        let n = &ctx.g.nodes[j];
+        let a = attrs(n);
+        let mut exterior = a.str("material").and_then(|id| self.document_material(plan, ctx, &id));
+        let Some(interior) = self.document_material(plan, ctx, &fracture.geometry.interior_material) else {
+            plan.stats.errors.push(format!("{}: fracture interior material missing", n.id));
+            return;
+        };
+        let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
+        if primitive_kind(n) == "globe" {
+            let mut templates = Vec::new();
+            self.map3d_draws(plan, ctx, j, Mat4::IDENTITY, opacity, exterior, cast, receive, &mut templates);
+            let Some(template) = templates.into_iter().next() else { return };
+            exterior = Some((template.material, template.maps));
+        }
+        for (index, piece) in fracture.geometry.pieces.iter().enumerate() {
+            if !fracture.enabled[index] {
+                continue;
+            }
+            let pose = fracture.poses[index];
+            let model = Mat4::from_rotation_translation(
+                glam::Quat::from_array(pose.rot.map(|v| v as f32)),
+                glam::Vec3::from_array(pose.pos.map(|v| v as f32)),
+            );
+            if !model.is_finite() {
+                plan.stats.errors.push(format!("{}: fracture pose exceeds render precision", n.id));
+                return;
+            }
+            for (batch, surface) in piece.surfaces.iter().enumerate() {
+                let key = format!("fracture:{}:{index}:{batch}", fracture.geometry.key);
+                let mesh = if let Some(mesh) = self.three_engine().meshes.get(&key) {
+                    mesh.clone()
+                } else {
+                    let mesh = self.three_engine().upload_mesh(&surface.mesh.vertices, &surface.mesh.indices);
+                    self.three_engine().meshes.insert(key, mesh.clone());
+                    mesh
+                };
+                let (material, maps) = if surface.material == sr_3d::fracture::SurfaceMaterial::Interior {
+                    interior.clone()
+                } else if let Some(material) = &exterior {
+                    material.clone()
+                } else if let Some((asset, im)) = fracture
+                    .geometry
+                    .model
+                    .as_ref()
+                    .and_then(|asset| Some(asset).zip(surface.mesh.material.and_then(|k| asset.materials.get(k))))
+                {
+                    let mut material = im.params.clone();
+                    for c in [
+                        &mut material.base_color[..3],
+                        &mut material.emissive[..],
+                        &mut material.sheen_color[..],
+                        &mut material.attenuation_color[..],
+                        &mut material.specular_color[..],
+                    ] {
+                        c.copy_from_slice(&self.lin_srgb([c[0], c[1], c[2]]));
+                    }
+                    let mut maps = Maps::default();
+                    for (slot, texture) in [
+                        (0, im.maps.base_color),
+                        (1, im.maps.normal),
+                        (2, im.maps.metallic_roughness),
+                        (3, im.maps.occlusion),
+                        (4, im.maps.emissive),
+                    ] {
+                        if let Some(texture) = texture {
+                            let key = format!("fracture:{}:texture{texture}", fracture.geometry.key);
+                            let tex = if let Some(tex) = self.three_engine().textures.get(&key) {
+                                tex.clone()
+                            } else {
+                                let tex = self.three_engine().upload_texture(&asset.textures[texture]);
+                                self.three_engine().textures.insert(key, tex.clone());
+                                tex
+                            };
+                            maps[slot] = Some(tex);
+                        }
+                    }
+                    (material, maps)
+                } else {
+                    (MaterialParams { base_color: [0.8, 0.8, 0.8, 1.], ..Default::default() }, Maps::default())
+                };
+                draws.push(Draw3 {
+                    mesh: MeshSrc::Cached(mesh),
+                    model,
+                    material,
+                    maps,
+                    opacity,
+                    cast_shadow: cast,
+                    receive_shadow: receive,
+                });
+            }
+        }
+    }
+
+    /// Shared prototype meshes, placed from each particle's world-space state.
+    fn particle_draws3(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        j: usize,
+        cam: &CameraView,
+        opacity: f32,
+        draws: &mut Vec<Draw3>,
+    ) {
+        let n = &ctx.g.nodes[j];
+        let Some(particles) = &n.particles3d else {
+            return;
+        };
+        if particles.frame.particles.is_empty() {
+            return;
+        }
+        let a = attrs(n);
+        let shape = a.str("shape").unwrap_or_else(|| "sphere".into());
+        let mut prototype = n.clone();
+        prototype
+            .props
+            .0
+            .retain(|(k, _)| !matches!(&**k, "primitive" | "radius" | "width" | "height" | "depth" | "segments"));
+        for (key, value) in [
+            ("radius", 0.5),
+            ("width", 1.),
+            ("height", 1.),
+            ("depth", 1.),
+            ("segments", if shape == "billboard" { 1. } else { a.num("segments", 12.).max(3.) }),
+        ] {
+            prototype.props.0.push((key.into(), Value::Num(value)));
+        }
+        let mut templates = Vec::new();
+        let mut splats = Vec::new();
+        self.object_draws_at(plan, ctx, j, &prototype, Mat4::IDENTITY, 1., &mut templates, &mut splats);
+        if !splats.is_empty() {
+            plan.stats
+                .errors
+                .push(format!("{}: particle prototypes require triangle meshes, not Gaussian splats", n.id));
+            return;
+        }
+        let count = templates.len().checked_mul(particles.frame.particles.len());
+        let budget = (a.num("maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20);
+        if count.and_then(|n| n.checked_mul(std::mem::size_of::<Draw3>())).is_none_or(|b| b > budget) {
+            plan.stats.errors.push(format!("{}: particle render instances exceed memory budget", n.id));
+            return;
+        }
+        // Rest-pose skinning/morph geometry is uploaded once, never copied for
+        // every particle. Ordinary meshes already share their immutable buffers.
+        for t in &mut templates {
+            if let MeshSrc::Deformed(_, _) = &t.mesh {
+                let (v, i) = t.mesh.cpu();
+                t.mesh = MeshSrc::Cached(self.three_engine().upload_mesh(v, i));
+            }
+        }
+        if let Some(sprite) = a.str("sprite") {
+            let ns = ctx
+                .p
+                .nodes
+                .iter()
+                .find(|p| p.id == n.id)
+                .and_then(|p| p.doc.checked_sub(1))
+                .and_then(|d| ctx.p.includes.get(d as usize))
+                .map(|d| &*d.0)
+                .unwrap_or("");
+            let key = sr_eval::sim::asset_key(&ctx.p.assets, ns, &sprite);
+            let Some((AssetsChild::Image(img), doc)) = self.asset(ctx.p, &key) else {
+                plan.stats.errors.push(format!("{}: sprite image {sprite} not found", n.id));
+                return;
+            };
+            let img = img.clone();
+            let base = ctx.p.base_dirs.get(doc).cloned().unwrap_or_default();
+            let path = match sr_model::assets::resolve(&img.src, &base) {
+                sr_model::assets::Resolved::Local(path) => path,
+                sr_model::assets::Resolved::Remote(uri) => {
+                    plan.stats
+                        .errors
+                        .push(format!("{}: remote particle sprite {uri} is not fetched while rendering", n.id));
+                    return;
+                }
+            };
+            let texture_key = format!(
+                "particle-sprite|{}|{}|{}|{}|{}",
+                path.display(),
+                img.color_space,
+                img.transfer,
+                img.alpha,
+                img.color_profile
+            );
+            let texture = if let Some(texture) = self.three_engine().textures.get(&texture_key) {
+                texture.clone()
+            } else {
+                let decoded = match resources::decode_image(
+                    &path,
+                    img.color_space,
+                    img.transfer,
+                    img.alpha,
+                    img.color_profile == m::ColorProfile::Embedded,
+                    &self.working,
+                    self.max_texture,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        plan.stats.errors.push(format!("{}: cannot decode particle sprite: {error}", n.id));
+                        return;
+                    }
+                };
+                if let Some(note) = decoded.note {
+                    plan.stats.unsupported.push(format!("{}: {note}", n.id));
+                }
+                let (width, height, pixels) = &decoded.levels[0];
+                // Surface maps are straight RGBA8. Decode through the image
+                // asset's color/alpha policy, then encode linear working RGB
+                // with sRGB transfer for the surface texture sampler.
+                let rgba: Vec<u8> = pixels
+                    .iter()
+                    .flat_map(|p| {
+                        let alpha = p[3] as f64;
+                        let rgb = if alpha > 0. {
+                            self.working.to_linear([p[0] as f64 / alpha, p[1] as f64 / alpha, p[2] as f64 / alpha])
+                        } else {
+                            [0.; 3]
+                        };
+                        let rgb = rgb.map(|v| (color::encode(m::Transfer::Srgb, v.clamp(0., 1.)) * 255.).round() as u8);
+                        [rgb[0], rgb[1], rgb[2], (alpha.clamp(0., 1.) * 255.).round() as u8]
+                    })
+                    .collect();
+                let texture = self.three_engine().upload_rgba8(*width, *height, &rgba, true);
+                self.three_engine().textures.insert(texture_key, texture.clone());
+                texture
+            };
+            for t in &mut templates {
+                t.maps[0] = Some(texture.clone());
+                t.material.alpha_mode = AlphaMode::Blend;
+            }
+        }
+        let color = self.working_color(a.paint("color"), self.literal_linear([1.; 4]));
+        let end_color = if a.paint("colorEnd").is_some() {
+            self.working_color(a.paint("colorEnd"), self.literal_linear([1.; 4]))
+        } else {
+            color
+        };
+        let view = cam.view.inverse();
+        let right = view.x_axis.truncate();
+        let down = view.y_axis.truncate();
+        let forward = view.z_axis.truncate();
+        for particle in &particles.frame.particles {
+            let u = (particle.age(particles.frame.time) / particle.lifetime).clamp(0., 1.);
+            let size0 = a.num("size", 1.);
+            let size1 = a.num("sizeEnd", size0);
+            let size = (size0 + (size1 - size0) * particles.size_curve.apply(u)).max(0.) as f32;
+            let color_u = particles.color_curve.apply(u).clamp(0., 1.) as f32;
+            let color: [f32; 4] = std::array::from_fn(|k| color[k] + (end_color[k] - color[k]) * color_u);
+            let alpha = opacity * (1. + (a.num("opacityEnd", 1.) as f32 - 1.) * color_u);
+            if size == 0. || alpha <= 0. || color[3] <= 0. {
+                continue;
+            }
+            let matrix = match particle.transform(particles.frame.time) {
+                Ok(m) => Mat4::from_cols_array(&m.columns().map(|v| v as f32)),
+                Err(e) => {
+                    plan.stats.errors.push(format!("{}: {e}", n.id));
+                    return;
+                }
+            };
+            let position = Vec3::from_array(particle.position.map(|v| v as f32));
+            let lengths = Vec3::new(
+                matrix.x_axis.truncate().length(),
+                matrix.y_axis.truncate().length(),
+                matrix.z_axis.truncate().length(),
+            ) * size;
+            let model = if shape == "billboard" {
+                let x = matrix.x_axis.truncate();
+                let angle = x.dot(down).atan2(x.dot(right));
+                let (sin, cos) = angle.sin_cos();
+                Mat4::from_cols(
+                    ((right * cos + down * sin) * lengths.x).extend(0.),
+                    ((down * cos - right * sin) * lengths.y).extend(0.),
+                    forward.extend(0.),
+                    position.extend(1.),
+                )
+            } else if shape == "streak" {
+                let velocity = Vec3::from_array(particle.velocity.map(|v| v as f32));
+                let direction = velocity.try_normalize().unwrap_or(Vec3::Y);
+                let length =
+                    if velocity.length_squared() > 0. { (a.num("trail", 1.) as f32).max(lengths.y) } else { lengths.y };
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(lengths.x, length, lengths.z),
+                    glam::Quat::from_rotation_arc(Vec3::Y, direction),
+                    position - direction * ((length - lengths.y) * 0.5),
+                )
+            } else {
+                matrix * Mat4::from_scale(Vec3::splat(size))
+            };
+            if !model.is_finite() || !model.determinant().is_finite() || model.determinant() == 0. {
+                plan.stats.errors.push(format!("{}: particle instance exceeds render precision", n.id));
+                return;
+            }
+            for t in &templates {
+                let MeshSrc::Cached(mesh) = &t.mesh else { unreachable!("shared particle prototype") };
+                let mut material = t.material.clone();
+                for (a, b) in material.base_color.iter_mut().zip(color) {
+                    *a *= b;
+                }
+                if shape == "billboard" {
+                    material.double_sided = true;
+                }
+                if material.base_color[3] < 1. || alpha < 1. {
+                    material.alpha_mode = AlphaMode::Blend;
+                }
+                draws.push(Draw3 {
+                    mesh: MeshSrc::Cached(mesh.clone()),
+                    model: model * t.model,
+                    material,
+                    maps: t.maps.clone(),
+                    opacity: alpha,
+                    cast_shadow: t.cast_shadow,
+                    receive_shadow: t.receive_shadow,
+                });
+            }
         }
     }
 
@@ -1484,7 +2299,7 @@ impl Renderer {
         let mut run = Vec::new();
         let mut found = false;
         for (j, m) in g.nodes.iter().enumerate().filter(|(_, m)| m.parent == parent) {
-            let three = m.kind == "object3D" || m.kind == "camera" || m.three_d.is_some();
+            let three = matches!(m.kind, "object3D" | "particles3D" | "ocean" | "camera") || m.three_d.is_some();
             if !three && m.draw {
                 // a drawn 2D sibling ends the block
                 if found {
@@ -1493,7 +2308,7 @@ impl Renderer {
                 run.clear();
                 continue;
             }
-            if m.kind == "object3D" && visible3(g, j) {
+            if matches!(m.kind, "object3D" | "particles3D" | "ocean") && visible3(g, j) {
                 run.push(j);
             }
             found |= j == i;
@@ -1559,14 +2374,46 @@ impl Renderer {
         }
         let mut draws = Vec::new();
         let mut splats = Vec::new();
+        let mut volumes = Vec::new();
         for &j in &members {
             let opacity = if iso_op > 0.0 { (g.nodes[j].world_opacity / iso_op) as f32 } else { 0.0 };
             if opacity <= 0.0 {
                 continue;
             }
-            self.object_draws(plan, ctx, j, opacity.min(1.0), &mut draws, &mut splats);
+            if g.nodes[j].kind == "particles3D" {
+                self.particle_draws3(plan, ctx, j, &cam, opacity.min(1.0), &mut draws);
+            } else if attrs(&g.nodes[j]).str("primitive").as_deref() == Some("volume") {
+                if volumes.len() >= 64 {
+                    plan.stats.errors.push(format!("{}: a 3D pass supports at most 64 volume domains", n.id));
+                    return;
+                }
+                match self.volume_draw(ctx, j, opacity.min(1.0)) {
+                    Ok(Some(volume)) => {
+                        let cap = self.gpu.device.limits().max_storage_buffer_binding_size;
+                        let bytes =
+                            crate::volume::bytes(&volumes) + crate::volume::bytes(std::slice::from_ref(&volume));
+                        if bytes > cap {
+                            plan.stats.errors.push(format!(
+                                "{}: volume grids exceed the device's {} MiB scene binding",
+                                n.id,
+                                cap >> 20
+                            ));
+                            return;
+                        }
+                        volumes.push(volume);
+                    }
+                    Ok(None) => {}
+                    Err(error) => plan.stats.errors.push(format!("{}: {error}", g.nodes[j].id)),
+                }
+            } else {
+                self.object_draws(plan, ctx, j, opacity.min(1.0), &mut draws, &mut splats);
+            }
         }
-        if draws.is_empty() && splats.is_empty() && !env.as_ref().map(|e| e.visible).unwrap_or(false) {
+        if draws.is_empty()
+            && splats.is_empty()
+            && volumes.is_empty()
+            && !env.as_ref().map(|e| e.visible).unwrap_or(false)
+        {
             return;
         }
         plan.stats.objects3d += draws.len();
@@ -1584,6 +2431,7 @@ impl Renderer {
             lights,
             env,
             splats,
+            volumes,
             encode_srgb: !self.working.linear,
             ao: ex.ao,
             ssr: ex.ssr,
@@ -1591,8 +2439,17 @@ impl Renderer {
         };
         let mut scene = scene;
         let limits = self.gpu.device.limits();
-        if let Some(opts) = ex.path {
+        // Surface/medium depth and shadows are evaluated together. Raster-authored
+        // passes containing media use the transport pipeline with deterministic samples.
+        let transport = ex.path.or_else(|| {
+            (!scene.volumes.is_empty()).then_some(crate::pathtrace::PathOpts { samples: 4, bounces: 2, denoise: true })
+        });
+        if let Some(opts) = transport {
             if let Some(m) = crate::pathtrace::limit_note(&scene, &limits) {
+                if !scene.volumes.is_empty() {
+                    plan.stats.errors.push(format!("{}: volume pass cannot render: {m}", n.id));
+                    return;
+                }
                 plan.stats.unsupported.push(format!("{}: {m}", n.id));
             } else {
                 plan.stats
@@ -1606,6 +2463,8 @@ impl Renderer {
                 crate::three::shadow_note(&scene.lights, !scene.cam.orthographic, limits.max_texture_array_layers);
             plan.stats.unsupported.extend(lost.map(|m| format!("{}: {m}", n.id)));
         }
+        // Mesh upload normally creates this lazily, but a volume-only pass has no mesh.
+        self.three_engine();
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);
         let out = self.temp(plan, space.size);
@@ -1754,4 +2613,38 @@ impl Renderer {
 
 fn visible3(g: &FrameGraph, j: usize) -> bool {
     g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn instantiated_three_dimensional_parents_resolve_per_instance() {
+        for weight in [1.0_f32, 0.5] {
+            let link = if weight == 1.0 { r#"parent="carrier""# } else { "" };
+            let constraint = if weight == 1.0 {
+                ""
+            } else {
+                r#"<transformConstraint type="parent" target="carrier" influence="0.5"/>"#
+            };
+            let xml = format!(
+                r#"<scene version="1.2"><project width="32" height="32" fps="10" duration="1"/>
+              <symbols><symbol id="assembly" width="32" height="32">
+              <object3D id="carrier" primitive="box" x="5" rotationY="90"/>
+              <object3D id="child" primitive="box" x="1" y="2" z="3" {link}>{constraint}</object3D>
+              </symbol></symbols><composition><instance id="a" symbol="assembly"/><instance id="b" symbol="assembly" x="100"/></composition></scene>"#
+            );
+            let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+            let graph = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap().evaluate(0.0);
+            for (id, offset) in [("a/child", 0.0), ("b/child", 100.0)] {
+                let i = graph.nodes.iter().position(|n| &*n.id == id).unwrap();
+                let actual = Renderer::world3(&graph, &[], i, 0).transform_point3(Vec3::ZERO);
+                let parent = Mat4::from_translation(Vec3::new(5.0 + offset, 0.0, 0.0))
+                    * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+                let expected = toward(parent, weight).transform_point3(Vec3::new(1.0, 2.0, 3.0));
+                assert!((actual - expected).length() < 1e-4, "{id}, weight={weight}: {actual:?} != {expected:?}");
+            }
+        }
+    }
 }

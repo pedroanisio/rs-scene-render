@@ -233,6 +233,8 @@ struct MaskCoverage {
     view: Option<wgpu::TextureView>,
 }
 
+type CachedVolume = Result<Option<Arc<sr_volume::Volume>>, String>;
+
 /// The compositor for one program.
 pub struct Renderer {
     gpu: Gpu,
@@ -298,6 +300,10 @@ pub struct Renderer {
     fx_cache: bool,
     three: Option<Box<crate::three::ThreeEngine>>,
     three_assets: HashMap<String, Arc<Result<sr_3d::Asset, String>>>,
+    volume_assets: HashMap<(std::path::PathBuf, String), CachedVolume>,
+    volume_cache_bytes: usize,
+    baked_sequences: HashMap<(std::path::PathBuf, String), Arc<sr_volume::bake::BakedSequence>>,
+    baked_frames: HashMap<(std::path::PathBuf, String), Arc<sr_volume::Volume>>,
     mtlx: HashMap<String, Arc<Result<sr_3d::mtlx::MtlxMaterial, String>>>,
     ies: HashMap<String, Result<Arc<Vec<f32>>, String>>,
     /// Camera replacement for 360 faces and stereo eyes.
@@ -876,6 +882,10 @@ impl Renderer {
             fx_cache: std::env::var_os("SR_FX_NO_CACHE").is_none(),
             three: None,
             three_assets: HashMap::new(),
+            volume_assets: HashMap::new(),
+            volume_cache_bytes: 0,
+            baked_sequences: HashMap::new(),
+            baked_frames: HashMap::new(),
             mtlx: HashMap::new(),
             ies: HashMap::new(),
             view_override: None,
@@ -1664,10 +1674,24 @@ impl Renderer {
         (b, first)
     }
 
+    fn asset_time_hash(ctx: &Ctx, n: &FrameNode) -> u64 {
+        if !n.asset.as_deref().is_some_and(|a| ctx.timed.contains(a)) {
+            return 1;
+        }
+        // Baked volumes use composition time even when a parent's local clock is
+        // frozen. Other 3D clips use local time; include both clocks so isolated
+        // ancestors cannot retain a previous cache frame.
+        if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+            h(&[hf(n.local_time), hf(ctx.g.time)])
+        } else {
+            n.source_time.map(hf).unwrap_or(1)
+        }
+    }
+
     fn node_hash(ctx: &Ctx, n: &FrameNode, rel: &Affine) -> u64 {
         let props = if n.props.0.is_empty() && n.parts.is_empty() { 0 } else { props_hash(&n.props, &n.parts) };
         let asset = n.asset.as_deref();
-        let timed = asset.filter(|a| ctx.timed.contains(*a)).and(n.source_time).map(hf).unwrap_or(1);
+        let timed = Self::asset_time_hash(ctx, n);
         let generated = match asset.filter(|a| ctx.generated.contains(*a)) {
             Some(a) => Self::element_state(ctx, a),
             None => 0,
@@ -1684,13 +1708,17 @@ impl Renderer {
             n.three_d.map(|t| h(&t.map(hf))).unwrap_or(2),
             // the camera projects 3D objects and 2.5D layers: a still one looks different when it moves,
             // and a cached isolated group (mask, clip, matte, effects) holding it must redraw
-            if n.kind == "object3D" || n.three_d.is_some() { ctx.cam } else { 0 },
+            if matches!(n.kind, "object3D" | "particles3D" | "ocean") || n.three_d.is_some() { ctx.cam } else { 0 },
             n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             props,
             n.soft.as_ref().map(|s| h(&s.offsets.iter().flat_map(|o| o.map(hf)).collect::<Vec<u64>>())).unwrap_or(5),
             // simulated content changes without the node's own attributes changing
             n.sim_image.as_ref().map(|s| s.key).unwrap_or(6),
+            n.sim_volume.as_ref().map(|s| s.key).unwrap_or(8),
+            n.particles3d.as_ref().map(|s| s.key).unwrap_or(9),
+            n.fracture.as_ref().map(|s| s.key).unwrap_or(11),
+            n.sim_ocean.as_ref().map(|s| s.key).unwrap_or(10),
             n.particles
                 .as_ref()
                 .map(|p| {
@@ -1801,7 +1829,7 @@ impl Renderer {
         let mut words = Vec::new();
         while let Some(k) = stack.pop() {
             let n = &ctx.g.nodes[k];
-            if n.kind == "object3D" {
+            if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
                 if let Some(AttrValue::Str(id)) = n.elem.get_attr("material") {
                     ids.insert(Arc::from(id));
                 }
@@ -1924,7 +1952,6 @@ impl Renderer {
                 f.value(v);
             }
         }
-        let asset = n.asset.as_deref();
         let mut words = vec![
             f.0,
             Self::effects_state(ctx, n),
@@ -1932,11 +1959,14 @@ impl Renderer {
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
             hf(n.world_opacity),
-            asset.filter(|a| ctx.timed.contains(*a)).and(n.source_time).map(hf).unwrap_or(1),
+            Self::asset_time_hash(ctx, n),
             n.draw as u64,
             n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             n.sim_image.as_ref().map(|s| s.key).unwrap_or(6),
+            n.sim_volume.as_ref().map(|s| s.key).unwrap_or(8),
+            n.particles3d.as_ref().map(|s| s.key).unwrap_or(9),
+            n.fracture.as_ref().map(|s| s.key).unwrap_or(11),
             n.particles
                 .as_ref()
                 .map(|p| h(&p.pos.iter().flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>()))
@@ -2323,7 +2353,7 @@ impl Renderer {
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
             "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
-            "object3D" => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
+            "object3D" | "particles3D" | "ocean" => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}
         }
@@ -3134,6 +3164,7 @@ impl Renderer {
                     generated.insert(key.to_string());
                 }
                 Some(AssetsChild::Image(_)) | None => {}
+                Some(AssetsChild::Volume(v)) if v.first.is_none() && v.format.as_str() != "srvseq" => {}
                 Some(_) => {
                     timed.insert(key.to_string());
                 }
@@ -3673,7 +3704,9 @@ impl Renderer {
                     Self::copy(&mut enc, &job.target, &pre.snapshot, [0, 0, job.target.size[0], job.target.size[1]]);
                     plan.stats.fx_passes += self.fx.record(&mut enc, &pre.passes);
                     if let (Some(three), Some(eng)) = (&pre.three, self.three.as_mut()) {
-                        eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view);
+                        if let Err(error) = eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view) {
+                            plan.stats.errors.push(error);
+                        }
                     }
                 }
                 let j = compositor_batch_end(job.cmds.len(), i, snapshot_at.filter(|_| job.root), |k| {

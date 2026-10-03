@@ -102,23 +102,20 @@ pub fn notes(_scene: &Scene3) -> Vec<String> {
     Vec::new()
 }
 
-/// Whether the tracer's buffers for a `size` frame of `triangles` fit one storage binding of
-/// the device; the error is the note to report when the pass is rasterised instead.
+/// Whether the tracer's scene buffers fit the device. Image working buffers are tiled;
+/// geometry remains one binding. The error is the note reported on raster fallback.
 pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(), String> {
     let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
     let mib = |b: u64| b.div_ceil(1 << 20);
-    // Guides take 32 bytes per pixel; each triangle or splat occupies a 384-byte record.
-    let guides = (size[0].max(1) as u64 * size[1].max(1) as u64).saturating_mul(32);
-    let corners = triangles.saturating_mul(384);
-    if guides > cap {
-        return Err(format!(
-            "path tracing a {}×{} frame needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
-            size[0],
-            size[1],
-            mib(guides),
-            cap >> 20
-        ));
+    // Pixel indices and shader seeds are u32. Reject impossible frames before planning tiles.
+    if u64::from(size[0].max(1)) * u64::from(size[1].max(1)) > u64::from(u32::MAX) {
+        return Err("path tracing pixel indices exceed u32; rasterised instead".into());
     }
+    if cap < MIN_TILE_BYTES {
+        return Err("path tracing device cannot bind a denoising tile; rasterised instead".into());
+    }
+    // Each triangle or splat occupies a 384-byte record.
+    let corners = triangles.saturating_mul(384);
     if corners > cap {
         return Err(format!(
             "path tracing {triangles} triangles needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
@@ -131,6 +128,9 @@ pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(),
 
 /// Why `scene` cannot be path traced on a device with `limits`, if it cannot.
 pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
+    if let Err(error) = crate::volume::validate(&scene.volumes) {
+        return Some(error);
+    }
     let triangles = scene.draws.iter().map(|d| d.mesh_triangles()).sum::<u64>()
         + scene.splats.iter().map(|s| s.gpu.n as u64).sum::<u64>();
     if let Err(note) = fits(scene.size, triangles, limits) {
@@ -145,11 +145,15 @@ pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
         .fold(0u64, |n, t| n.saturating_add(t.rgba.len() as u64));
     let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
     let ies_bytes = scene.lights.iter().filter_map(|l| l.ies.as_ref()).map(|p| p.len() as u64 * 4).sum::<u64>();
-    let bytes =
-        triangles.saturating_mul(384).saturating_add(texture_bytes).saturating_add(ies_bytes).saturating_add(16);
+    let bytes = triangles
+        .saturating_mul(384)
+        .saturating_add(texture_bytes)
+        .saturating_add(ies_bytes)
+        .saturating_add(crate::volume::bytes(&scene.volumes))
+        .saturating_add(128);
     if bytes > cap {
         return Some(format!(
-            "path tracing geometry and textures require {} MiB, device permits {} MiB; rasterised instead",
+            "path tracing geometry, textures and volumes require {} MiB, device permits {} MiB; rasterised instead",
             bytes.div_ceil(1 << 20),
             cap >> 20
         ));
@@ -370,8 +374,8 @@ pub fn build(scene: &Scene3) -> PtScene {
         });
     }
     if s.pos.is_empty() {
-        s.pos.push([0.0; 4]);
-        s.nrm.push([0.0; 4]);
+        s.pos.extend([[0.0; 4]; 3]);
+        s.nrm.extend([[0.0; 4]; 3]);
         s.tri_mat.push(0);
     }
     s
@@ -576,6 +580,47 @@ use wgpu::util::DeviceExt;
 
 /// Samples a trace dispatch takes.
 const PER_DISPATCH: u32 = 4;
+const DENOISE_PASSES: u32 = 5;
+// A pass has radius 2 * step, with step = 1, 2, 4, 8, 16. The complete
+// dependency footprint is 62 pixels on each side, not just the last pass's 32.
+const DENOISE_HALO: u32 = 2 * ((1 << DENOISE_PASSES) - 1);
+// Retain a 64×64 output core even at the smallest accepted budget. A one-pixel
+// core would turn UHD into millions of largely redundant halo dispatches.
+const MIN_TILE_BYTES: u64 = ((2 * DENOISE_HALO + 64) as u64).pow(2) * 32;
+const DEFAULT_TILE_BYTES: u64 = 32 << 20;
+
+#[derive(Clone, Copy, Debug)]
+struct Tile {
+    origin: [u32; 2],
+    size: [u32; 2],
+    output_origin: [u32; 2],
+    output_size: [u32; 2],
+}
+
+/// Non-overlapping output rectangles with complete filter support around each one.
+fn tiles(size: [u32; 2], bytes: u64, denoise: bool) -> Vec<Tile> {
+    let pixels = bytes / 32;
+    if u64::from(size[0]) * u64::from(size[1]) <= pixels {
+        return vec![Tile { origin: [0; 2], size, output_origin: [0; 2], output_size: size }];
+    }
+    let halo = if denoise { DENOISE_HALO } else { 0 };
+    let side = pixels.isqrt().min(u64::from(u32::MAX)) as u32;
+    let stride = side.saturating_sub(2 * halo).max(1);
+    let mut result = Vec::new();
+    for y in (0..size[1]).step_by(stride as usize) {
+        for x in (0..size[0]).step_by(stride as usize) {
+            let origin = [x.saturating_sub(halo), y.saturating_sub(halo)];
+            let end = [x.saturating_add(stride).min(size[0]), y.saturating_add(stride).min(size[1])];
+            result.push(Tile {
+                origin,
+                size: std::array::from_fn(|i| end[i].saturating_add(halo).min(size[i]) - origin[i]),
+                output_origin: [x, y],
+                output_size: [end[0] - x, end[1] - y],
+            });
+        }
+    }
+    result
+}
 /// Spacing of per-dispatch parameter slots in the uniform buffer.
 const SLOT: u64 = (std::mem::size_of::<Params>() as u64).div_ceil(256) * 256;
 
@@ -592,6 +637,9 @@ struct Params {
     ambient: [f32; 4],
     misc: [f32; 4],
     out: [f32; 4],
+    /// Global pixel origin (xy) and extent (zw) of the working tile.
+    tile: [u32; 4],
+    media: [u32; 4],
 }
 
 /// Pipelines of the path tracer (built on first use).
@@ -600,8 +648,11 @@ pub struct PtGpu {
     bgl_pair: wgpu::BindGroupLayout,
     bgl_fin: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
+    trace_volume: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
+    module: wgpu::ShaderModule,
     atrous: wgpu::ComputePipeline,
     output: wgpu::RenderPipeline,
+    tile_bytes: u64,
 }
 
 impl PtGpu {
@@ -609,7 +660,13 @@ impl PtGpu {
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pathtrace"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}", include_str!("sampling.wgsl"), include_str!("pathtrace.wgsl")).into(),
+                format!(
+                    "{}\n{}\n{}",
+                    include_str!("sampling.wgsl"),
+                    include_str!("pathtrace.wgsl"),
+                    include_str!("volume.wgsl")
+                )
+                .into(),
             ),
         });
         let vis = wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT;
@@ -700,7 +757,54 @@ impl PtGpu {
             multiview_mask: None,
             cache: None,
         });
-        PtGpu { bgl0, bgl_pair, bgl_fin, trace, atrous, output }
+        PtGpu {
+            bgl0,
+            bgl_pair,
+            bgl_fin,
+            trace,
+            trace_volume: std::array::from_fn(|_| std::sync::OnceLock::new()),
+            module,
+            atrous,
+            output,
+            tile_bytes: DEFAULT_TILE_BYTES,
+        }
+    }
+
+    fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3) -> &wgpu::ComputePipeline {
+        if scene.volumes.is_empty() {
+            return &self.trace;
+        }
+        let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
+        self.trace_volume[lighting as usize].get_or_init(|| {
+            let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pathtrace-volumes"),
+                bind_group_layouts: &[Some(&self.bgl0)],
+                immediate_size: 0,
+            });
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pathtrace-volumes"),
+                layout: Some(&layout),
+                module: &self.module,
+                entry_point: Some("cs_trace"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("HAS_MEDIA", 1.0), ("MEDIUM_LIGHTING", lighting as u8 as f64)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        })
+    }
+
+    /// Sets the maximum size of each image storage buffer, additionally bounded by device
+    /// limits. Useful for constraining memory and verifying that tiled output is identical.
+    /// The budget must fit a 64×64 output core and its complete denoising halo
+    /// (1,131,008 bytes), bounding the amount of repeated halo work.
+    pub fn limit_buffers(&mut self, bytes: u64) -> Result<(), String> {
+        if bytes < MIN_TILE_BYTES {
+            return Err(format!("path tracing needs at least {MIN_TILE_BYTES} bytes per tile buffer"));
+        }
+        self.tile_bytes = bytes;
+        Ok(())
     }
 }
 
@@ -725,7 +829,10 @@ pub fn render(
     out: &wgpu::TextureView,
 ) {
     let size = [scene.size[0].max(1), scene.size[1].max(1)];
-    let pixels = (size[0] * size[1]) as u64;
+    let limits = d.limits();
+    let budget = pt.tile_bytes.min(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
+    let tiles = tiles(size, budget, opts.denoise);
+    let pixels = tiles.iter().map(|t| u64::from(t.size[0]) * u64::from(t.size[1])).max().unwrap_or(1);
     let storage = |label: &str, bytes: &[u8]| {
         d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -737,7 +844,7 @@ pub fn render(
         d.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: len,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
     };
@@ -769,6 +876,7 @@ pub fn render(
     for pixels in data.pixels.chunks(4) {
         verts.push(std::array::from_fn(|i| f32::from_bits(pixels.get(i).copied().unwrap_or(0))));
     }
+    let media = crate::volume::pack(&mut verts, &scene.volumes);
     let tverts = storage("pt-verts", bytemuck::cast_slice(&verts));
     let mats = storage("pt-mats", bytemuck::cast_slice(&materials));
     let nodes = storage("pt-nodes", bytemuck::cast_slice(&data.nodes));
@@ -785,144 +893,161 @@ pub fn render(
     // parameter slots: trace dispatches, denoise passes, output
     let samples = opts.samples.max(1);
     let chunks = samples.div_ceil(PER_DISPATCH);
-    const PASSES: u32 = 5;
+    const PASSES: u32 = DENOISE_PASSES;
     let ambient = scene.lights.iter().filter(|l| l.kind == LightKind::Ambient).fold(Vec3::ZERO, |a, l| a + l.color);
     let lens = scene.dof.map(|f| f.coc_scale / scene.cam.focal_px.max(1e-6) * 0.5).unwrap_or(0.0);
-    let base = Params {
-        cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
-        view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
-        inv_view_proj: (scene.clip_fix * scene.cam.view_proj()).inverse().to_cols_array_2d(),
-        // the dome's full orientation, as the rasteriser applies it
-        env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
-        size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
-        cam: [scene.lens_k1, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
-        env: [
-            scene.env.as_ref().map(|e| if e.visible { 2.0 } else { 1.0 }).unwrap_or(0.0),
-            scene.env.as_ref().map(|e| e.intensity).unwrap_or(0.0),
-            scene.cam.orthographic as u32 as f32,
-            (ambient.max_element() > 0.0) as u32 as f32,
-        ],
-        ambient: [ambient.x, ambient.y, ambient.z, data.lights.len() as f32],
-        misc: [inputs.backdrop.is_some() as u32 as f32, samples as f32, 1.0, scene.exposure],
-        out: [scene.encode_srgb as u32 as f32, 0.0, 0.0, 0.0],
-    };
-    let mut slots: Vec<Params> = Vec::new();
-    for c in 0..chunks {
-        let start = c * PER_DISPATCH;
-        slots.push(Params {
-            size: [base.size[0], base.size[1], start as f32, (samples - start).min(PER_DISPATCH) as f32],
-            ..base
-        });
-    }
-    for k in 0..PASSES {
-        slots.push(Params {
-            misc: [base.misc[0], base.misc[1], (1u32 << k) as f32, base.misc[3]],
-            out: [base.out[0], 0.0, (k == 0) as u32 as f32, 0.0],
-            ..base
-        });
-    }
-    slots.push(Params { out: [base.out[0], opts.denoise as u32 as f32, 0.0, 0.0], ..base });
-    let mut ubytes = vec![0u8; slots.len() * SLOT as usize];
-    for (k, sl) in slots.iter().enumerate() {
-        let b = bytemuck::bytes_of(sl);
-        ubytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
-    }
-    let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("pt-params"),
-        contents: &ubytes,
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
-    let group0 = |acc: &wgpu::Buffer| {
-        d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pathtrace"),
-            layout: &pt.bgl0,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &ubuf,
-                        offset: 0,
-                        size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
-                    }),
-                },
-                wgpu::BindGroupEntry { binding: 1, resource: tverts.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: mats.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: guide.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
-                },
+    // These buffers are reused by every tile in command order, bounding peak memory
+    // independently of frame area. Clear sums and guides before tracing each tile.
+    let ping = opts.denoise.then(|| zeroed("pt-denoise-a", pixels * 16));
+    let pong = opts.denoise.then(|| zeroed("pt-denoise-b", pixels * 16));
+    for (tile_index, tile) in tiles.iter().enumerate() {
+        enc.clear_buffer(&accum, 0, None);
+        enc.clear_buffer(&guide, 0, None);
+        let base = Params {
+            cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
+            view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
+            inv_view_proj: (scene.clip_fix * scene.cam.view_proj()).inverse().to_cols_array_2d(),
+            // the dome's full orientation, as the rasteriser applies it
+            env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
+            size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
+            cam: [scene.lens_k1, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
+            env: [
+                scene.env.as_ref().map(|e| if e.visible { 2.0 } else { 1.0 }).unwrap_or(0.0),
+                scene.env.as_ref().map(|e| e.intensity).unwrap_or(0.0),
+                scene.cam.orthographic as u32 as f32,
+                (ambient.max_element() > 0.0) as u32 as f32,
             ],
-        })
-    };
-    let g_trace = group0(&accum);
-    // passes that read the accumulation bind a stand-in in its read-write slot
-    let g_read = group0(&stand_in);
-    let groups = [size[0].div_ceil(8), size[1].div_ceil(8)];
-    {
-        let mut cp =
-            enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("pathtrace"), timestamp_writes: None });
-        cp.set_pipeline(&pt.trace);
+            ambient: [ambient.x, ambient.y, ambient.z, data.lights.len() as f32],
+            misc: [inputs.backdrop.is_some() as u32 as f32, samples as f32, 1.0, scene.exposure],
+            out: [scene.encode_srgb as u32 as f32, 0.0, 0.0, 0.0],
+            tile: [tile.origin[0], tile.origin[1], tile.size[0], tile.size[1]],
+            media,
+        };
+        let mut slots: Vec<Params> = Vec::new();
         for c in 0..chunks {
-            cp.set_bind_group(0, &g_trace, &[(c as u64 * SLOT) as u32]);
-            cp.dispatch_workgroups(groups[0], groups[1], 1);
-        }
-    }
-    let mut fin = &accum;
-    let (ping, pong) = (zeroed("pt-denoise-a", pixels * 16), zeroed("pt-denoise-b", pixels * 16));
-    if opts.denoise {
-        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pathtrace-denoise"),
-            timestamp_writes: None,
-        });
-        cp.set_pipeline(&pt.atrous);
-        for k in 0..PASSES {
-            let (src, dst) = if k == 0 {
-                (&accum, &ping)
-            } else if k % 2 == 1 {
-                (&ping, &pong)
-            } else {
-                (&pong, &ping)
-            };
-            let pair = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pathtrace-denoise"),
-                layout: &pt.bgl_pair,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
-                ],
+            let start = c * PER_DISPATCH;
+            slots.push(Params {
+                size: [base.size[0], base.size[1], start as f32, (samples - start).min(PER_DISPATCH) as f32],
+                ..base
             });
-            cp.set_bind_group(0, &g_read, &[((chunks + k) as u64 * SLOT) as u32]);
-            cp.set_bind_group(1, &pair, &[]);
-            cp.dispatch_workgroups(groups[0], groups[1], 1);
-            fin = dst;
         }
+        for k in 0..PASSES {
+            slots.push(Params {
+                misc: [base.misc[0], base.misc[1], (1u32 << k) as f32, base.misc[3]],
+                out: [base.out[0], 0.0, (k == 0) as u32 as f32, 0.0],
+                ..base
+            });
+        }
+        slots.push(Params { out: [base.out[0], opts.denoise as u32 as f32, 0.0, 0.0], ..base });
+        let mut ubytes = vec![0u8; slots.len() * SLOT as usize];
+        for (k, sl) in slots.iter().enumerate() {
+            let b = bytemuck::bytes_of(sl);
+            ubytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
+        }
+        let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("pt-params"),
+            contents: &ubytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let group0 = |acc: &wgpu::Buffer| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pathtrace"),
+                layout: &pt.bgl0,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: tverts.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: mats.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: guide.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
+                    },
+                ],
+            })
+        };
+        let g_trace = group0(&accum);
+        // passes that read the accumulation bind a stand-in in its read-write slot
+        let g_read = group0(&stand_in);
+        let groups = [tile.size[0].div_ceil(8), tile.size[1].div_ceil(8)];
+        {
+            let mut cp = enc
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("pathtrace"), timestamp_writes: None });
+            cp.set_pipeline(pt.trace_pipeline(d, scene));
+            for c in 0..chunks {
+                cp.set_bind_group(0, &g_trace, &[(c as u64 * SLOT) as u32]);
+                cp.dispatch_workgroups(groups[0], groups[1], 1);
+            }
+        }
+        let mut fin = &accum;
+        if let (Some(ping), Some(pong)) = (&ping, &pong) {
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pathtrace-denoise"),
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(&pt.atrous);
+            for k in 0..PASSES {
+                let (src, dst) = if k == 0 {
+                    (&accum, ping)
+                } else if k % 2 == 1 {
+                    (ping, pong)
+                } else {
+                    (pong, ping)
+                };
+                let pair = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("pathtrace-denoise"),
+                    layout: &pt.bgl_pair,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
+                    ],
+                });
+                cp.set_bind_group(0, &g_read, &[((chunks + k) as u64 * SLOT) as u32]);
+                cp.set_bind_group(1, &pair, &[]);
+                cp.dispatch_workgroups(groups[0], groups[1], 1);
+                fin = dst;
+            }
+        }
+        let gfin = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pathtrace-output"),
+            layout: &pt.bgl_fin,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: fin.as_entire_binding() }],
+        });
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("pathtrace-output"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: out,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: if tile_index == 0 {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rp.set_pipeline(&pt.output);
+        rp.set_scissor_rect(tile.output_origin[0], tile.output_origin[1], tile.output_size[0], tile.output_size[1]);
+        rp.set_bind_group(0, &g_read, &[((chunks + PASSES) as u64 * SLOT) as u32]);
+        rp.set_bind_group(1, &gfin, &[]);
+        rp.draw(0..3, 0..1);
     }
-    let gfin = d.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("pathtrace-output"),
-        layout: &pt.bgl_fin,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: fin.as_entire_binding() }],
-    });
-    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("pathtrace-output"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: out,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    rp.set_pipeline(&pt.output);
-    rp.set_bind_group(0, &g_read, &[((chunks + PASSES) as u64 * SLOT) as u32]);
-    rp.set_bind_group(1, &gfin, &[]);
-    rp.draw(0..3, 0..1);
 }

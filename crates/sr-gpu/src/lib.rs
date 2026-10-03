@@ -22,6 +22,7 @@ pub mod three;
 pub mod types;
 pub mod vector;
 pub mod video;
+pub mod volume;
 
 pub use fx::{GpuTimes, PassTime};
 pub use gpu::{Gpu, GpuError};

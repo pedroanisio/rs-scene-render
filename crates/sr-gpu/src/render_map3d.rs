@@ -91,7 +91,37 @@ impl Renderer {
                 Maps::default(),
             )
         });
-        let surface = if globe {
+        let surface = if globe && a.str("terrain").is_some() {
+            match sr_eval::terrain::globe(ctx.p, n) {
+                Ok(surface) => {
+                    let key = format!("globe-relief|{}|{}", n.id, surface.key);
+                    let cached = self.three_engine().meshes.get(&key).cloned();
+                    if cached.is_some() {
+                        cached
+                    } else {
+                        let cap = self.gpu.device.limits().max_buffer_size;
+                        if surface.vertices.len() as u64 * std::mem::size_of::<Vertex>() as u64 > cap
+                            || surface.indices.len() as u64 * 4 > cap
+                        {
+                            plan.stats.errors.push(format!("{}: globe relief exceeds device buffer limits", n.id));
+                            None
+                        } else {
+                            let mesh = self.three_engine().upload_mesh(&surface.vertices, &surface.indices);
+                            // A node retains only its current GPU relief. Arc handles
+                            // already held by other passes/shutter samples stay valid.
+                            let prefix = format!("globe-relief|{}|", n.id);
+                            self.three_engine().meshes.retain(|k, _| !k.starts_with(&prefix));
+                            self.three_engine().meshes.insert(key, mesh.clone());
+                            Some(mesh)
+                        }
+                    }
+                }
+                Err(e) => {
+                    plan.stats.errors.push(format!("{}: {e}", n.id));
+                    None
+                }
+            }
+        } else if globe {
             let r = a.num("radius", 200.0) as f32;
             let segs = a.num("segments", 96.0).clamp(24.0, 512.0) as u32;
             let key = format!("globe|{r}|{segs}");

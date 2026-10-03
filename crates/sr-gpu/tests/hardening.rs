@@ -127,14 +127,14 @@ fn output_frames_larger_than_a_buffer_are_packed_in_pieces() {
 }
 
 #[test]
-fn path_tracing_reports_frames_and_scenes_beyond_the_device() {
+fn path_tracing_tiles_large_frames_but_reports_geometry_beyond_the_device() {
     use sr_gpu::pathtrace::fits;
-    // 3840×2160 guides are 265 MiB: beyond a 128 MiB storage binding
-    let e = fits([3840, 2160], 1000, &downlevel()).expect_err("too large for the downlevel limits");
-    assert!(e.contains("3840") && e.contains("rasterised"), "{e}");
+    // UHD guides need 265,420,800 bytes. Image buffers must be tiled instead of
+    // silently changing the requested renderer on a 128 MiB binding device.
+    assert!(fits([3840, 2160], 1000, &downlevel()).is_ok(), "UHD must remain path traced");
     assert!(fits([1920, 1080], 1000, &downlevel()).is_ok());
     assert!(fits([3840, 2160], 1000, &desktop()).is_ok());
-    // 96 bytes a triangle of vertices
+    // Geometry remains a separately bounded binding (384 bytes per triangle).
     assert!(fits([64, 64], 3_000_000, &downlevel()).is_err());
     assert!(fits([u32::MAX, u32::MAX], u64::MAX, &desktop()).is_err(), "no overflow");
 }
@@ -235,6 +235,7 @@ fn more_shadow_views_than_layers_render_without_a_validation_error() {
         lights,
         env: None,
         splats: Vec::new(),
+        volumes: Vec::new(),
         encode_srgb: false,
         ao: None,
         ssr: false,

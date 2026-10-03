@@ -28,6 +28,7 @@ fn scene(draws: Vec<Draw3>, lights: Vec<Light3>) -> Scene3 {
         lights,
         env: None,
         splats: Vec::new(),
+        volumes: Vec::new(),
         encode_srgb: false,
         ao: None,
         ssr: false,
@@ -141,6 +142,61 @@ fn shadows_fall_on_the_plane_behind() {
     assert!(open > 0.1 && shadowed < open * 0.4, "shadow {shadowed} vs open {open}");
     // a directional light under a perspective camera casts through four cascades
     assert_eq!(eng.stats.shadow_views, 4);
+}
+
+#[test]
+fn deformed_bounds_sort_transparency_like_identical_uploaded_geometry() {
+    let Some(mut eng) = engine() else { return };
+    let mut front = prim::plane(70.0, 70.0, 1);
+    for v in &mut front.vertices {
+        v.pos[2] = -10.0;
+    }
+    let mut original = front.clone();
+    for v in &mut original.vertices {
+        v.pos[2] = 100.0;
+    }
+    let mut images = Vec::new();
+    for deformed in [false, true] {
+        let material = |color| MaterialParams {
+            base_color: color,
+            unlit: true,
+            alpha_mode: sr_3d::AlphaMode::Blend,
+            ..Default::default()
+        };
+        let mut a = draw(&eng, &front, Vec3::new(64.0, 64.0, 0.0), material([1.0, 0.0, 0.0, 0.5]));
+        if deformed {
+            a.mesh = MeshSrc::Deformed(front.vertices.clone(), eng.upload_mesh(&original.vertices, &original.indices));
+        }
+        let b = draw(&eng, &prim::plane(70.0, 70.0, 1), Vec3::new(64.0, 64.0, 0.0), material([0.0, 0.0, 1.0, 0.5]));
+        images.push(eng.render_now(&scene(vec![a, b], vec![]), None));
+    }
+    assert!(at(&images[0], 64, 64)[0] > at(&images[0], 64, 64)[2]);
+    assert!(images[0] == images[1], "deformation must update transparent depth ordering");
+}
+
+#[test]
+fn deformed_bounds_fit_shadows_like_identical_uploaded_geometry() {
+    let Some(mut eng) = engine() else { return };
+    let sphere = prim::sphere(15.0, 32);
+    let mut original = sphere.clone();
+    for v in &mut original.vertices {
+        v.pos[0] += 10000.0;
+        v.pos[2] += 10000.0;
+    }
+    let mut images = Vec::new();
+    for deformed in [false, true] {
+        let mat = MaterialParams { roughness: 1.0, ..Default::default() };
+        let mut caster = draw(&eng, &sphere, Vec3::new(64.0, 64.0, 0.0), mat.clone());
+        if deformed {
+            caster.mesh =
+                MeshSrc::Deformed(sphere.vertices.clone(), eng.upload_mesh(&original.vertices, &original.indices));
+        }
+        let receiver = draw(&eng, &prim::plane(400.0, 400.0, 1), Vec3::new(64.0, 64.0, 60.0), mat);
+        images
+            .push(eng.render_now(&scene(vec![caster, receiver], vec![sun(Vec3::new(1.0, 0.0, 1.0), 3.0, true)]), None));
+    }
+    let changed = images[0].iter().zip(&images[1]).filter(|(a, b)| (a[0] - b[0]).abs() > 0.001).count();
+    assert_eq!(changed, 0, "shadow fitting must use this frame's geometry");
 }
 
 #[test]

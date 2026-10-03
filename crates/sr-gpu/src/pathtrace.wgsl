@@ -1,6 +1,8 @@
 // ---------------------------------------------------------------- path tracing (see pathtrace.rs)
 
 const PI: f32 = 3.14159265358979;
+override HAS_MEDIA: bool = false;
+override MEDIUM_LIGHTING: bool = false;
 
 struct Params {
     // camera → world
@@ -22,6 +24,10 @@ struct Params {
     misc: vec4<f32>,
     // encode sRGB, `fin` holds means (denoised), first denoise pass (reads sums), unused
     out: vec4<f32>,
+    // Global origin (xy) and extent (zw) of this tile's working buffers.
+    tile: vec4<u32>,
+    // Packed medium row offset, domain count, conservative sample budget, reserved.
+    media: vec4<u32>,
 };
 
 struct Mat {
@@ -194,6 +200,7 @@ fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>)
 }
 
 fn box_hit(lo: vec3<f32>, hi: vec3<f32>, o: vec3<f32>, inv: vec3<f32>, tmax: f32) -> bool {
+    if (any(lo > hi)) { return false; }
     let t0 = (lo - o) * inv;
     let t1 = (hi - o) * inv;
     let tn = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
@@ -463,6 +470,12 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     let max_b = u32(pp.cam.w);
     for (var step = 0u; step < 64u; step++) {
         let hit = trace(o, d, 1e30);
+        if (HAS_MEDIA) {
+            let fog = volume_transport(o, d, hit.t);
+            col += thr * fog.rgb;
+            thr *= fog.a;
+            if (met == 0u) { alpha += (1.0 - alpha) * (1.0 - fog.a); }
+        }
         if (hit.tri == 0xffffffffu) {
             if (met == 0u) {
                 // a primary miss: the pass is transparent there (the environment when visible)
@@ -585,6 +598,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             if (max(rad.r, max(rad.g, rad.b)) <= 0.0) { continue; }
             var visible = 1.0;
             if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }
+            if (HAS_MEDIA && m.extra.z > 0.5) { visible *= volume_transmittance(p + ng * 1e-2, l, ls.w - 2e-2); }
             var c = thr * bsdf(s, n, v, l, light_lobes(lt)) * nl * rad * visible;
             // clamp rare fireflies from indirect paths
             if (bounce > 0u) { c = min(c, vec3(20.0)); }
@@ -616,18 +630,20 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
 
 @compute @workgroup_size(8, 8)
 fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = u32(pp.size.x);
-    let h = u32(pp.size.y);
+    let w = pp.tile.z;
+    let h = pp.tile.w;
     if (gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
+    let global_xy = pp.tile.xy + gid.xy;
+    let global_pix = global_xy.y * u32(pp.size.x) + global_xy.x;
     var sum = vec4(0.0);
     let start = u32(pp.size.z);
     let count = u32(pp.size.w);
     for (var s = 0u; s < count; s++) {
         let si = start + s;
-        rng = pcg(pix * 9781u + pcg(si * 6271u + 1u));
+        rng = pcg(global_pix * 9781u + pcg(si * 6271u + 1u));
         let jitter = vec2(rnd(), rnd());
-        sum += radiance(vec2<f32>(gid.xy) + jitter, pix, true);
+        sum += radiance(vec2<f32>(global_xy) + jitter, pix, true);
     }
     accum[pix] += sum;
 }
@@ -641,8 +657,8 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8)
 fn cs_atrous(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = i32(pp.size.x);
-    let h = i32(pp.size.y);
+    let w = i32(pp.tile.z);
+    let h = i32(pp.tile.w);
     if (i32(gid.x) >= w || i32(gid.y) >= h) { return; }
     let step = i32(pp.misc.z);
     let spp = max(pp.misc.y, 1.0);
@@ -707,8 +723,8 @@ fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_out(i: VO) -> @location(0) vec4<f32> {
-    let w = u32(pp.size.x);
-    let px = vec2<u32>(i.pos.xy);
+    let w = pp.tile.z;
+    let px = vec2<u32>(i.pos.xy) - pp.tile.xy;
     // `fin` holds per-pixel means when denoised, sums over the samples otherwise
     var c = fin[px.y * w + px.x] / select(max(pp.misc.y, 1.0), 1.0, pp.out.y > 0.5);
     var rgb = c.rgb * pp.misc.w;
