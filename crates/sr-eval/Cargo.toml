@@ -12,12 +12,14 @@ publish.workspace = true
 sr-media.workspace = true
 sr-geo.workspace = true
 sr-model.workspace = true
+sr-volume.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 libm.workspace = true
 sr-vector.workspace = true
+sr-text.workspace = true
 sr-sim = { path = "../sr-sim" }
 sr-3d = { path = "../sr-3d" }
 glam = "0.30"

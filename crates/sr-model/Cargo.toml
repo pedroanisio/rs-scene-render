@@ -17,6 +17,7 @@ serde.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 image.workspace = true
+sr-volume.workspace = true
 
 [build-dependencies]
 roxmltree.workspace = true

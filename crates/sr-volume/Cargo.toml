@@ -1,0 +1,17 @@
+[package]
+name = "sr-volume"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Sparse volumetric fields and bounded deterministic caches shared by simulation and rendering"
+
+[dependencies]
+glam = "0.30"
+thiserror.workspace = true
+sha2.workspace = true
+half.workspace = true
+flate2 = "1"
+blosc-src = { version = "0.3.8", features = ["lz4", "zlib", "zstd", "snappy"] }
