@@ -1010,7 +1010,8 @@ fn project(
             });
     }
     let strides = [1, s.cells[0], s.cells[0] * s.cells[1]];
-    let rms = |values: &[f64]| (values.iter().map(|v| v * v).sum::<f64>() / fluid as f64).sqrt() / (s.h * s.h);
+    let from_squares = |squares: f64| (squares / fluid as f64).sqrt() / (s.h * s.h);
+    let rms = |values: &[f64]| from_squares(values.iter().map(|v| v * v).sum::<f64>());
     let before = rms(&rhs);
     if !before.is_finite() {
         return Err(Error::Invalid("nonfinite pressure right hand side"));
@@ -1051,10 +1052,14 @@ fn project(
     let mut direction = z.clone();
     let mut applied = vec![0.0; count];
     let mut rz = inner(&residual, &z);
+    // Both folds below start from `Iterator::sum`'s identity and add in index
+    // order, exactly like `inner`/`rms`; fusing them only shares the pass over
+    // memory, since the two accumulation chains are independent.
+    let identity = std::iter::empty::<f64>().sum::<f64>();
+    let mut current = rms(&residual);
     let mut used = 0;
     profile.project_setup = lap(&mut clock);
     loop {
-        let current = rms(&residual);
         profile.project_reduce += lap(&mut clock);
         if !(current > tolerance && used < iterations) {
             break;
@@ -1064,7 +1069,7 @@ fn project(
         let denom = inner(&direction, &applied);
         profile.project_reduce += lap(&mut clock);
         if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-            return Err(Error::Pressure(rms(&residual)));
+            return Err(Error::Pressure(current));
         }
         let alpha = rz / denom;
         pressure
@@ -1079,7 +1084,12 @@ fn project(
                 *z = if diagonal[k] > 0.0 { *r / diagonal[k] } else { *r };
             });
         profile.project_update += lap(&mut clock);
-        let next = inner(&residual, &z);
+        let (mut next, mut squares) = (identity, identity);
+        for (r, z) in residual.iter().zip(&z) {
+            next += r * z;
+            squares += r * r;
+        }
+        current = from_squares(squares);
         profile.project_reduce += lap(&mut clock);
         let beta = next / rz;
         direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
@@ -1087,8 +1097,8 @@ fn project(
         rz = next;
         used += 1;
     }
-    if rms(&residual) > tolerance {
-        return Err(Error::Pressure(rms(&residual)));
+    if current > tolerance {
+        return Err(Error::Pressure(current));
     }
     let (cells, boundary, h) = (s.cells, s.boundary, s.h);
     for a in 0..3 {
