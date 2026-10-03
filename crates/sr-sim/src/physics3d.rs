@@ -1,6 +1,6 @@
 //! Rigid bodies and joints in 3D on Rapier 3D (f64, enhanced determinism),
-//! stepped at a fixed rate from a start time with a checkpoint every simulated
-//! second, like the 2D world ([`crate::physics`]), which stays separate.
+//! stepped at a fixed rate from a start time with bounded replay checkpoints.
+//! The 2D world ([`crate::physics`]) stays separate.
 //!
 //! Inputs and outputs use scene units (pixels) in scene axes (x right, y down,
 //! z away from the camera), rotations as quaternions in those axes. Inside,
@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 use rapier3d_f64::prelude::*;
 
 use crate::fields::{self, Field};
+
+mod fracture;
+pub use fracture::{Fracture3, FractureError, Fragment3};
 
 /// A pose in scene space: position (px) and rotation (unit quaternion x, y, z, w, scene axes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,6 +144,12 @@ pub struct World3Spec {
 
 /// Animated inputs, asked for at simulation-step times.
 pub trait Driver3 {
+    /// A replacement triangle surface in the body's local scene axes. `revision`
+    /// is the last successfully installed revision, including checkpoint restores.
+    /// Return `None` when unchanged. Deforming dynamic bodies are unsupported.
+    fn collider(&mut self, _t: f64, _which: usize, _revision: Option<u64>) -> Result<Option<ColliderUpdate3>, String> {
+        Ok(None)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -153,12 +162,46 @@ pub trait Driver3 {
     fn fields(&mut self, t: f64) -> Vec<Field>;
 }
 
+pub struct ColliderUpdate3 {
+    pub revision: u64,
+    pub vertices: Vec<[f64; 3]>,
+    pub triangles: Vec<[u32; 3]>,
+    /// Conservative ceiling for source data and collision acceleration storage.
+    pub max_bytes: usize,
+}
+
+impl ColliderUpdate3 {
+    /// Admission estimate shared with callers that must reject before tessellation.
+    pub fn required_bytes(vertices: usize, triangles: usize) -> Option<usize> {
+        vertices
+            .checked_mul(96)
+            .and_then(|v| triangles.checked_mul(524).and_then(|i| v.checked_add(i)))
+            .and_then(|v| v.checked_add(4096))
+    }
+}
+
+/// Rigid motion in scene axes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Velocity3 {
+    /// Centre-of-mass velocity in scene units per second.
+    pub linear: [f64; 3],
+    /// Angular velocity in degrees per second about scene axes.
+    pub angular: [f64; 3],
+}
+
 /// Simulated state at one time.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame3 {
     pub bodies: Vec<Pose3>,
-    /// Constraints removed by `breakForce`.
+    pub velocities: Vec<Velocity3>,
+    /// Participation after visibility and fracture activation.
+    pub enabled: Vec<bool>,
+    /// Fired fracture events, in registration order.
+    pub fractured: Vec<bool>,
+    /// Constraints removed by `breakForce` or source fracture.
     pub broken: Vec<bool>,
+    /// Failed frames contain no poses; consumers must report these diagnostics.
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -176,6 +219,13 @@ struct State {
     handles: Vec<RigidBodyHandle>,
     joint_handles: Vec<Option<ImpulseJointHandle>>,
     active: Vec<bool>,
+    collider_revisions: Vec<Option<u64>>,
+    fractured: Vec<bool>,
+}
+
+struct Checkpoint {
+    state: State,
+    charge: usize,
 }
 
 /// A deterministic 3D world.
@@ -184,8 +234,12 @@ pub struct World3 {
     params: IntegrationParameters,
     pipeline: PhysicsPipeline,
     state: State,
-    checkpoints: BTreeMap<u64, State>,
+    checkpoints: BTreeMap<u64, Checkpoint>,
     steps_per_checkpoint: u64,
+    checkpoint_budget: usize,
+    fractures: Vec<Fracture3>,
+    fracture_sources: Vec<Option<usize>>,
+    fragment_owners: Vec<Option<usize>>,
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -233,6 +287,8 @@ impl World3 {
             handles: Vec::new(),
             joint_handles: Vec::new(),
             active: Vec::new(),
+            collider_revisions: vec![None; spec.bodies.len()],
+            fractured: Vec::new(),
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -412,15 +468,80 @@ impl World3 {
         }
         let steps_per_checkpoint = ((1.0 / spec.step.max(1e-6)).round() as u64).max(1);
         let mut w = World3 {
+            fracture_sources: vec![None; spec.bodies.len()],
+            fragment_owners: vec![None; spec.bodies.len()],
+            fractures: Vec::new(),
             spec,
             params,
             pipeline: PhysicsPipeline::new(),
             state: st,
             checkpoints: BTreeMap::new(),
             steps_per_checkpoint,
+            checkpoint_budget: crate::timeline::BUDGET,
         };
-        w.checkpoints.insert(0, w.state.clone());
+        w.checkpoints.insert(0, Checkpoint { state: w.state.clone(), charge: 0 });
         w
+    }
+
+    /// Set the admission budget for optional replay copies, discarding existing
+    /// optional checkpoints. Zero disables them. The mandatory initial/current
+    /// states, input spec and solver scratch are outside this component budget.
+    /// Charges estimate shape/BVH, contacts and world storage; they are not RSS.
+    pub fn with_checkpoint_budget(mut self, bytes: usize) -> Self {
+        self.checkpoint_budget = bytes;
+        self.checkpoints.retain(|&k, _| k == 0);
+        self.steps_per_checkpoint = ((1.0 / self.spec.step.max(1e-6)).round() as u64).max(1);
+        self
+    }
+
+    /// Sum of admission charges for optional retained replay checkpoints.
+    pub fn checkpoint_bytes(&self) -> usize {
+        self.checkpoints.values().fold(0usize, |sum, cp| sum.saturating_add(cp.charge))
+    }
+
+    fn checkpoint_charge(&self) -> usize {
+        let st = &self.state;
+        let items = st.bodies.len().saturating_add(st.colliders.len()).saturating_add(self.spec.joints.len());
+        let mut bytes = items.saturating_mul(8192).saturating_add(4096);
+        for (_, collider) in st.colliders.iter() {
+            bytes = bytes.saturating_add(shape_charge(collider.shape()));
+        }
+        for pair in st.narrow.contact_pairs() {
+            bytes = bytes.saturating_add(4096);
+            for manifold in pair.manifolds() {
+                bytes = bytes.saturating_add(
+                    manifold
+                        .points
+                        .capacity()
+                        .saturating_add(manifold.data.solver_contacts.len())
+                        .saturating_add(1)
+                        .saturating_mul(1024),
+                );
+            }
+        }
+        bytes
+    }
+
+    fn save_checkpoint(&mut self) {
+        let step = self.state.step;
+        if step % self.steps_per_checkpoint != 0 || self.checkpoints.contains_key(&step) {
+            return;
+        }
+        let charge = self.checkpoint_charge();
+        if charge > self.checkpoint_budget {
+            return;
+        }
+        // Admit before cloning. Thinning doubles temporal spacing, bounds the
+        // count even for tiny worlds, and drops obsolete geometry Arcs first.
+        while self.checkpoints.len() >= 65 || self.checkpoint_bytes() > self.checkpoint_budget - charge {
+            self.steps_per_checkpoint = self.steps_per_checkpoint.saturating_mul(2);
+            let every = self.steps_per_checkpoint;
+            self.checkpoints.retain(|&k, _| k == 0 || k % every == 0);
+            if step % every != 0 {
+                return;
+            }
+        }
+        self.checkpoints.insert(step, Checkpoint { state: self.state.clone(), charge });
     }
 
     /// Synchronize birth/departure before stepping and at sample boundaries. On birth, take
@@ -429,7 +550,7 @@ impl World3 {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         let mut born = false;
         for (k, spec) in self.spec.bodies.iter().enumerate() {
-            let enabled = driver.enabled(t, k);
+            let enabled = self.fracture_enabled(k) && driver.enabled(t, k);
             let handle = self.state.handles[k];
             if enabled == self.state.bodies[handle].is_enabled() {
                 continue;
@@ -438,6 +559,12 @@ impl World3 {
             body.set_enabled(enabled);
             if enabled {
                 born = true;
+                // A fragment keeps its inherited motion when a visibility
+                // window reopens; its authored placeholder pose is never used.
+                if self.fragment_owners[k].is_some() {
+                    body.wake_up(true);
+                    continue;
+                }
                 if let Some(pose) = driver.kinematic(t, &[k]).first() {
                     body.set_position(
                         Pose::from_parts(vec3(flip(pose.pos).map(|c| c / ppm)), quat(flip_q(pose.rot))),
@@ -460,9 +587,60 @@ impl World3 {
         }
     }
 
-    fn step_once(&mut self, driver: &mut dyn Driver3) {
+    fn sync_colliders(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        // Validate every replacement before changing the world. Failure leaves
+        // all collider revisions and shapes available for a deterministic retry.
+        let mut replacements = Vec::new();
+        for k in 0..self.spec.bodies.len() {
+            if !self.fracture_enabled(k) || !driver.enabled(t, k) {
+                continue;
+            }
+            let Some(update) = driver.collider(t, k, self.state.collider_revisions[k])? else { continue };
+            if self.spec.bodies[k].kind == BodyKind::Dynamic {
+                return Err("deforming colliders require static or kinematic bodies".into());
+            }
+            let bytes = ColliderUpdate3::required_bytes(update.vertices.len(), update.triangles.len())
+                .ok_or("deforming collider memory overflow")?;
+            if bytes > update.max_bytes {
+                return Err("deforming collider memory budget exceeded".into());
+            }
+            if update.vertices.len() < 3
+                || update.triangles.is_empty()
+                || update.vertices.iter().flatten().any(|v| !v.is_finite() || !(v / ppm).is_finite())
+                || update.triangles.iter().flatten().any(|&i| i as usize >= update.vertices.len())
+            {
+                return Err("invalid deforming collider vertices or triangles".into());
+            }
+            let vertices = update.vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
+            let shape = SharedShape::trimesh(vertices, update.triangles)
+                .map_err(|e| format!("invalid deforming collider: {e}"))?;
+            replacements.push((k, update.revision, shape));
+        }
+        let changed = !replacements.is_empty();
+        for (k, revision, shape) in replacements {
+            let handle = self.state.bodies[self.state.handles[k]].colliders()[0];
+            self.state.colliders[handle].set_shape(shape);
+            self.state.collider_revisions[k] = Some(revision);
+        }
+        // Excavation can remove support from a sleeping body; a raised rim can
+        // meet a sleeping island without an existing contact edge.
+        if changed {
+            for &handle in &self.state.handles {
+                let body = &mut self.state.bodies[handle];
+                if body.is_enabled() && body.is_dynamic() {
+                    body.wake_up(true);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
+        self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
+        self.apply_fractures(t, driver)?;
         let st = &mut self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         let mut follow = Vec::new();
@@ -532,9 +710,8 @@ impl World3 {
             }
         }
         st.step += 1;
-        if st.step % self.steps_per_checkpoint == 0 && !self.checkpoints.contains_key(&st.step) {
-            self.checkpoints.insert(st.step, st.clone());
-        }
+        self.save_checkpoint();
+        Ok(())
     }
 
     /// Steps before `t` (none before the start).
@@ -551,15 +728,23 @@ impl World3 {
         let target = self.step_index(t);
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
-                if cp.step > self.state.step || self.state.step > target {
-                    self.state = cp.clone();
+                if cp.state.step > self.state.step || self.state.step > target {
+                    self.state = cp.state.clone();
                 }
             }
         }
         while self.state.step < target {
-            self.step_once(driver);
+            if let Err(error) = self.step_once(driver) {
+                return Frame3 { errors: vec![error], ..Default::default() };
+            }
+        }
+        if let Err(error) = self.sync_colliders(self.spec.start + target as f64 * self.spec.step, driver) {
+            return Frame3 { errors: vec![error], ..Default::default() };
         }
         self.sync_visibility(self.spec.start + target as f64 * self.spec.step, driver);
+        if let Err(error) = self.apply_fractures(self.spec.start + target as f64 * self.spec.step, driver) {
+            return Frame3 { errors: vec![error], ..Default::default() };
+        }
         self.snapshot()
     }
 
@@ -575,12 +760,50 @@ impl World3 {
                 Pose3 { pos: flip(b.translation().to_array()).map(|c| c * ppm), rot: flip_q([q.x, q.y, q.z, q.w]) }
             })
             .collect();
-        Frame3 { bodies, broken: st.joint_handles.iter().map(|h| h.is_none()).collect() }
+        let velocities = st
+            .handles
+            .iter()
+            .map(|h| {
+                let b = &st.bodies[*h];
+                Velocity3 {
+                    linear: flip(b.linvel().to_array()).map(|v| v * ppm),
+                    angular: flip(b.angvel().to_array()).map(f64::to_degrees),
+                }
+            })
+            .collect();
+        Frame3 {
+            bodies,
+            velocities,
+            enabled: st.handles.iter().map(|h| st.bodies[*h].is_enabled()).collect(),
+            fractured: st.fractured.clone(),
+            broken: st.joint_handles.iter().map(|h| h.is_none()).collect(),
+            errors: Vec::new(),
+        }
     }
 
     /// Steps simulated so far and checkpoints held.
     pub fn progress(&self) -> (u64, usize) {
         (self.state.step, self.checkpoints.len())
+    }
+}
+
+fn shape_charge(shape: &dyn rapier3d_f64::parry::shape::Shape) -> usize {
+    if let Some(mesh) = shape.as_trimesh() {
+        ColliderUpdate3::required_bytes(mesh.vertices().len(), mesh.indices().len()).unwrap_or(usize::MAX)
+    } else if let Some(compound) = shape.as_compound() {
+        compound
+            .shapes()
+            .iter()
+            .fold(4096usize, |sum, (_, part)| sum.saturating_add(512).saturating_add(shape_charge(part.as_ref())))
+    } else if let Some(poly) = shape.as_convex_polyhedron() {
+        poly.points()
+            .len()
+            .saturating_add(poly.edges().len())
+            .saturating_add(poly.faces().len())
+            .saturating_mul(256)
+            .saturating_add(4096)
+    } else {
+        4096
     }
 }
 
@@ -661,9 +884,12 @@ mod tests {
         };
         let mut a = mk();
         let straight: Vec<Frame3> = (0..=40).map(|k| a.frame_at(k as f64 * 0.1, &mut NoDrive)).collect();
-        let mut b = mk();
-        for k in [40, 3, 27, 0, 15, 40, 8] {
-            assert_eq!(b.frame_at(k as f64 * 0.1, &mut NoDrive), straight[k]);
+        for budget in [0, 64 << 10, crate::timeline::BUDGET] {
+            let mut b = mk().with_checkpoint_budget(budget);
+            for k in [40, 3, 27, 0, 15, 40, 8] {
+                assert_eq!(b.frame_at(k as f64 * 0.1, &mut NoDrive), straight[k]);
+                assert!(b.checkpoint_bytes() <= budget);
+            }
         }
     }
 

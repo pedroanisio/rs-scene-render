@@ -123,13 +123,18 @@ pub fn nearest(path: &[[f64; 2]], p: [f64; 2]) -> Option<[f64; 2]> {
     Some(best.1)
 }
 
-/// Summed acceleration of the fields that affect particles (`particles`) or bodies.
 /// The body acceleration of every field on a 3D body at `p` moving at `v` (pixels, scene axes):
 /// the fields' 2D action in the xy plane, with directional and wind forces along z, radial
 /// fields measured in 3D, and drag on all three axes.
 pub fn total3(fields: &[Field], p: [f64; 3], v: [f64; 3], t: f64) -> [f64; 3] {
+    total3_for(fields, p, v, t, false)
+}
+
+/// Three-dimensional acceleration, selecting particle/fluid fields when
+/// `particles` is true, or rigid-body fields otherwise. Same units as `total3`.
+pub fn total3_for(fields: &[Field], p: [f64; 3], v: [f64; 3], t: f64, particles: bool) -> [f64; 3] {
     let mut a = [0.0; 3];
-    for f in fields.iter().filter(|f| f.bodies) {
+    for f in fields.iter().filter(|f| if particles { f.particles } else { f.bodies }) {
         match f.kind {
             FieldKind::Radial => {
                 let d = [p[0] - f.pos[0], p[1] - f.pos[1], p[2] - f.z];
