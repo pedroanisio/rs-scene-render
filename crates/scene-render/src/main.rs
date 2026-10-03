@@ -43,6 +43,34 @@ struct Cli {
     command: Command,
 }
 
+/// Bake a native pyro object. Example: scene-render bake-volume impact.scene.xml --object plume -o plume-cache
+#[derive(clap::Args, Debug)]
+struct BakeArgs {
+    /// Scene document.
+    file: PathBuf,
+    /// Instantiated object ID (including its namespace, when applicable).
+    #[arg(long)]
+    object: String,
+    /// New cache directory; existing files or directories are never replaced.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// First project frame, inclusive.
+    #[arg(long, default_value_t = 0)]
+    first: u64,
+    /// Last project frame, exclusive (default: project duration).
+    #[arg(long)]
+    end: Option<u64>,
+    /// Maximum cache size in MiB, including all unique frames and the manifest.
+    #[arg(long, default_value_t=65536, value_parser=clap::value_parser!(u64).range(1..=(u64::MAX >> 20)))]
+    max_mib: u64,
+    /// Parameter value, repeatable: --param id=value.
+    #[arg(long="param", value_name="ID=VALUE", value_parser=parse_param)]
+    params: Vec<(String, String)>,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 /// Quality tier (overrides the document's `project@quality`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum QualityArg {
@@ -315,6 +343,8 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Bake one native pyro object to a verified composition-time volume sequence.
+    BakeVolume(BakeArgs),
     /// Fill the caches of generated media and transcribed captions through their providers,
     /// and pin their SHA-256 in the document.
     ///
@@ -562,6 +592,68 @@ fn simulate(file: &Path, output: Option<PathBuf>, out: &mut Out) -> std::io::Res
     writeln!(out.w, "wrote {} ({} bytes)", target.display(), bytes.len())?;
     writeln!(out.w, "cacheSha256=\"{sha}\"")?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn bake_volume(args: BakeArgs, out: &mut Out) -> std::io::Result<ExitCode> {
+    let BakeArgs { file, object, output, first, end, max_mib, params, json } = args;
+    if std::fs::symlink_metadata(&output).is_ok() {
+        eprintln!("error: {} already exists; choose a new cache directory", output.display());
+        return Ok(ExitCode::from(2));
+    }
+    let result = (|| -> Result<sr_volume::bake::BakeReceipt, String> {
+        let bytes = max_mib
+            .checked_mul(1 << 20)
+            .filter(|n| *n > 0)
+            .ok_or("--max-mib must be positive and fit a u64 byte count")?;
+        let doc = sr_model::load_file(&file, &LoadOptions::default()).map_err(|e| e.to_string())?;
+        let ev = sr_eval::Evaluator::new(&doc, &sr_eval::EvalOptions { params, ..Default::default() })
+            .map_err(|r| r.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
+        if !ev.warnings().is_empty() {
+            return Err(ev.warnings().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "));
+        }
+        let end = end.unwrap_or(ev.frame_count());
+        eprintln!("Baking {object}: project frames {first}..{end} into {}", output.display());
+        let mut last = std::time::Instant::now();
+        ev.bake_pyro_with_progress(
+            &object,
+            &output,
+            first,
+            end,
+            sr_volume::bake::BakeLimits { max_total_bytes: bytes, ..Default::default() },
+            |done, total| {
+                if done == total || last.elapsed().as_secs() >= 1 {
+                    eprintln!("Baked {done}/{total} frames");
+                    last = std::time::Instant::now();
+                }
+            },
+        )
+    })();
+    match result {
+        Ok(receipt) => {
+            if json {
+                writeln!(
+                    out.w,
+                    "{}",
+                    serde_json::json!({"manifest":receipt.manifest,"sha256":receipt.sha256,"frames":receipt.frames,"bytes":receipt.bytes,"clock":"composition","object":object})
+                )?;
+            } else {
+                writeln!(
+                    out.w,
+                    "wrote {} ({} frames, {} bytes)",
+                    receipt.manifest.display(),
+                    receipt.frames,
+                    receipt.bytes
+                )?;
+                writeln!(out.w, "sha256=\"{}\"", receipt.sha256)?;
+                writeln!(out.w,"Use a volume asset with format=\"srvseq\" and this manifest/digest; replace {object}'s pyro child with the asset reference. Playback uses composition time.")?;
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(ExitCode::from(1))
+        }
+    }
 }
 
 fn resolve(file: &Path, o: &sr_resolve::Options, json: bool, out: &mut Out) -> std::io::Result<ExitCode> {
@@ -1572,6 +1664,7 @@ fn main() -> ExitCode {
             encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
         }
         Command::Simulate { file, output } => simulate(&file, output, &mut out),
+        Command::BakeVolume(args) => bake_volume(args, &mut out),
         Command::Resolve { file, check, force, only, allow_cloud, no_store, json } => {
             let o = sr_resolve::Options { check, force, only, allow_cloud, store: no_store.then(PathBuf::new) };
             resolve(&file, &o, json, &mut out)

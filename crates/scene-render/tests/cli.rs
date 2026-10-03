@@ -560,6 +560,44 @@ fn simulate_writes_a_verified_physics_cache() {
 }
 
 #[test]
+fn bake_volume_exports_native_fields_without_replacing_existing_output() {
+    let dir = std::env::temp_dir().join(format!("sr-cli-bake-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let scene = dir.join("source.scene.xml");
+    let output = dir.join("take");
+    std::fs::write(&scene,r#"<scene version="1.3"><project width="16" height="16" fps="10" duration="0.3"/><composition><object3D id="cloud" primitive="volume"><pyro width="4" height="4" depth="4" voxelSize="1" dt="0.1"><pyroSource radius="1.5" densityRate="1"/></pyro></object3D></composition></scene>"#).unwrap();
+    let args = ["bake-volume", scene.to_str().unwrap(), "--object", "cloud", "-o", output.to_str().unwrap(), "--json"];
+    let result = run(&args);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["frames"], 3);
+    assert_eq!(report["sha256"].as_str().unwrap().len(), 64);
+    assert!(output.join("manifest.srvseq").is_file());
+    let before = std::fs::read(output.join("manifest.srvseq")).unwrap();
+    assert!(!run(&args).status.success());
+    assert_eq!(std::fs::read(output.join("manifest.srvseq")).unwrap(), before);
+    let replacement = format!(
+        r#"<scene version="1.3"><project width="16" height="16" fps="10" duration="0.3"/><assets><volume id="cache" src="take/manifest.srvseq" format="srvseq" sha256="{}" temperatureGrid="temperature"/></assets><composition><object3D id="cloud" primitive="volume" volume="cache"/></composition></scene>"#,
+        report["sha256"].as_str().unwrap()
+    );
+    let baked = dir.join("baked.scene.xml");
+    std::fs::write(&baked, replacement).unwrap();
+    let valid = run(&["validate", baked.to_str().unwrap()]);
+    assert!(valid.status.success(), "{}", String::from_utf8_lossy(&valid.stdout));
+    let frame = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "srvol"))
+        .unwrap();
+    let mut bytes = std::fs::read(&frame).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    std::fs::write(&frame, bytes).unwrap();
+    let invalid = run(&["validate", baked.to_str().unwrap()]);
+    assert!(!invalid.status.success(), "modified cache was accepted");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn strict_render_fails_on_shader_fallback() {
     if sr_gpu::Gpu::new().is_err() {
         return;
@@ -840,6 +878,31 @@ fn regression_transition_shader_edits_invalidate_incremental_frames() {
     assert!(edited.status.success(), "{edited:?}");
     assert_eq!(rendered(&edited), (1, 1));
     assert_eq!(image::open(output).unwrap().to_rgba8().get_pixel(8, 8).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn mesh_sequence_material_edits_invalidate_incremental_pixels() {
+    let (dir, scene) = two_halves("mesh-sequence-material", "");
+    std::fs::write(dir.join("frame-0.obj"), "mtllib surface.mtl\nusemtl surface\nv -0.3 -0.3 0\nv 0.3 -0.3 0\nv 0.3 0.3 0\nv -0.3 0.3 0\nf 1 2 3\nf 1 3 4\n").unwrap();
+    let material = dir.join("surface.mtl");
+    std::fs::write(&material, "newmtl surface\nKd 1 0 0\n").unwrap();
+    std::fs::write(&scene, r##"<scene version="1.3"><project width="32" height="32" fps="1" duration="1" background="#000000"/><assets><meshSequence id="frames" src="frame-%d.obj" first="0" last="0" fps="1"/></assets><composition><camera id="cam" x="16" y="16" z="-200" projection="orthographic" orthoHeight="32"/><object3D id="cache" primitive="mesh" mesh="frames" x="16" y="16"/></composition></scene>"##).unwrap();
+    let output = dir.join("out.png");
+    let args = ["render", scene.to_str().unwrap(), "-o", output.to_str().unwrap(), "--changed-only", "--strict"];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    let red = image::open(&output).unwrap().to_rgba8().get_pixel(16, 16).0;
+    assert!(red[0] > red[2], "red material must be visible: {red:?}");
+    assert_eq!(rendered(&run(&args)), (0, 1));
+    std::fs::write(material, "newmtl surface\nKd 0 0 1\n").unwrap();
+    let edited = run(&args);
+    assert!(edited.status.success(), "{edited:?}");
+    assert_eq!(rendered(&edited), (1, 1));
+    let blue = image::open(&output).unwrap().to_rgba8().get_pixel(16, 16).0;
+    assert!(blue[2] > blue[0], "updated material must change pixels: {blue:?}");
 }
 
 #[test]

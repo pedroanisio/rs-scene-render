@@ -137,6 +137,47 @@ fn named(
     Ok(())
 }
 
+struct NumberedInput<'a> {
+    kind: &'static str,
+    src: &'a str,
+    first: i128,
+    last: i128,
+    step: i128,
+    format: Option<String>,
+}
+fn numbered_input(e: &dyn Element) -> Option<NumberedInput<'_>> {
+    if let Some(s) = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>() {
+        Some(NumberedInput {
+            kind: "image",
+            src: &s.src,
+            first: s.first as i128,
+            last: s.last as i128,
+            step: s.step.max(1) as i128,
+            format: None,
+        })
+    } else if let Some(s) = e.as_any().downcast_ref::<sr_model::model::MeshSequenceAsset>() {
+        Some(NumberedInput {
+            kind: "mesh",
+            src: &s.src,
+            first: s.first.get() as i128,
+            last: s.last.get() as i128,
+            step: 1,
+            format: s.format.map(|v| v.to_string()),
+        })
+    } else if let Some(s) = e.as_any().downcast_ref::<sr_model::model::VolumeAsset>() {
+        Some(NumberedInput {
+            kind: "volume",
+            src: &s.src,
+            first: s.first?.get() as i128,
+            last: s.last?.get() as i128,
+            step: 1,
+            format: None,
+        })
+    } else {
+        None
+    }
+}
+
 fn scene_inputs(
     scene: &sr_model::model::Scene,
     base: &Path,
@@ -153,17 +194,11 @@ fn scene_inputs(
         if error.is_some() {
             return;
         }
-        if let Some(seq) = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>() {
-            let frames = if seq.last >= seq.first {
-                (seq.last as i128 - seq.first as i128) / seq.step.max(1) as i128 + 1
-            } else {
-                0
-            };
+        if let Some(seq) = numbered_input(e) {
+            let frames = if seq.last >= seq.first { (seq.last - seq.first) / seq.step + 1 } else { 0 };
             count += frames;
             if count > MAX_SEQUENCE_INPUTS {
-                error = Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!(
-                    "image sequence {:?} ({frames} frames) exceeds the dependency limit of {MAX_SEQUENCE_INPUTS} inputs; narrow its first/last range or increase its step", seq.id
-                )));
+                error=Some(std::io::Error::new(std::io::ErrorKind::InvalidInput,format!("{} sequence {:?} ({frames} frames) exceeds the dependency limit of {MAX_SEQUENCE_INPUTS} inputs; narrow its range",seq.kind,seq.src)));
             }
         }
     });
@@ -199,6 +234,13 @@ fn scene_inputs(
                 discover(uri, format.as_deref());
             }
         }
+        if let Some(seq) = numbered_input(e).filter(|s| s.kind == "mesh") {
+            for frame in seq.first..=seq.last {
+                if let Some(uri) = sequence_frame(seq.src, frame as i64) {
+                    discover(&uri, seq.format.as_deref());
+                }
+            }
+        }
         if let Some(sr_model::element::AttrValue::Str(uri)) = e.get_attr("materialX") {
             discover(&uri, Some("mtlx"));
         }
@@ -207,15 +249,15 @@ fn scene_inputs(
                 includes.push(path);
             }
         }
-        let sequence = e.as_any().downcast_ref::<sr_model::model::ImageSequenceAsset>();
-        if let Some(seq) = sequence {
+        let sequence = numbered_input(e);
+        if let Some(seq) = &sequence {
             // i128 also handles a step or a final increment beyond the i64 frame range.
-            let mut frame = seq.first as i128;
-            while frame <= seq.last as i128 {
-                if let Some(uri) = sequence_frame(&seq.src, frame as i64) {
+            let mut frame = seq.first;
+            while frame <= seq.last {
+                if let Some(uri) = sequence_frame(seq.src, frame as i64) {
                     add(&uri);
                 }
-                frame += seq.step.max(1) as i128;
+                frame += seq.step.max(1);
             }
         }
         // Share the validator's schema-derived inputs (including transition shaders,
@@ -427,7 +469,7 @@ impl Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
         // Invalidate fingerprints produced without the inputs selected by bindings and overrides.
-        shared = fnv(b"frame-fingerprint-v6", shared);
+        shared = fnv(b"frame-fingerprint-v7", shared);
         shared = fnv(&font_set(&font_dirs()).to_le_bytes(), shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
@@ -481,6 +523,20 @@ impl Fingerprints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_mesh_and_volume_frames_are_incremental_inputs() {
+        let dir = scratch("mesh-volume-sequences");
+        std::fs::write(dir.join("frame-0.obj"), "mtllib surface.mtl\nv 0 0 0\n").unwrap();
+        std::fs::write(dir.join("surface.mtl"), "newmtl surface\nmap_Kd albedo.png\n").unwrap();
+        let doc=sr_model::load_str(r#"<scene version="1.3"><project width="8" height="8" fps="1" duration="2"/><assets><meshSequence id="mesh" src="frame-%d.obj" first="0" last="1" fps="1"/><volume id="smoke" src="density-%d.srvol" first="0" last="1" fps="1"/></assets><composition/></scene>"#,&sr_model::LoadOptions::without_assets()).unwrap();
+        let mut inputs = Vec::new();
+        scene_inputs(&doc.scene, &dir, &mut inputs).unwrap();
+        for name in ["frame-0.obj", "frame-1.obj", "surface.mtl", "albedo.png", "density-0.srvol", "density-1.srvol"] {
+            assert!(inputs.contains(&dir.join(name)), "{name} missing from {inputs:?}");
+        }
+        assert!(!inputs.contains(&dir.join("frame-%d.obj")) && !inputs.contains(&dir.join("density-%d.srvol")));
+    }
 
     #[test]
     fn imported_assets_include_external_buffers_and_textures() {
