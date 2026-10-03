@@ -1253,28 +1253,5 @@ pub fn outline_polygons(
 ) -> Vec<Vec<[f64; 2]>> {
     // a font that fails to load is reported when the document's text is drawn
     let _ = register_fonts(tc, p);
-    let mut st = Style { size, ..Default::default() };
-    if let Some(f) = family.filter(|f| !f.is_empty()) {
-        st.families = f.split(',').map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).collect();
-    }
-    let para = Para {
-        runs: vec![Run { text: text.to_string(), style: 0, role: None }],
-        styles: vec![st],
-        opts: Opts::default(),
-    };
-    let lib = tc.lib();
-    let lay = layout::layout(lib, &para);
-    let mut out = Vec::new();
-    for g in &lay.glyphs {
-        let vars = &lay.styles.get(g.style).map(|s| s.variations.clone()).unwrap_or_default();
-        let o = lib.outline(g.face, g.gid, vars);
-        let s = g.size / lib.upem(g.face).max(1.0);
-        let xf = Xf([s, 0.0, 0.0, -s, g.x, g.y]);
-        for poly in o.transform(&xf).flatten(tol) {
-            if poly.pts.len() >= 3 {
-                out.push(poly.pts.iter().map(|q| [q.x, q.y]).collect());
-            }
-        }
-    }
-    out
+    sr_text::extrusion::outline_polygons(tc.lib(), text, family, size, tol, usize::MAX).unwrap_or_default()
 }

@@ -15,6 +15,7 @@ pub mod audiogram;
 pub mod captions;
 pub mod chart;
 pub mod code;
+pub mod extrusion;
 pub mod font;
 pub mod formula;
 pub mod glyph;

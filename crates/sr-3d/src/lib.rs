@@ -21,7 +21,9 @@
 pub mod anim;
 pub mod camera;
 pub mod clay;
+pub mod crater;
 pub mod env;
+pub mod fracture;
 pub mod import;
 pub mod light;
 pub mod material;
@@ -30,6 +32,8 @@ mod mtlx_graph;
 
 pub mod prim;
 pub mod sampling;
+pub mod sequence;
+pub mod terrain;
 pub mod usdc;
 
 use glam::{Mat4, Quat, Vec3};
@@ -127,14 +131,14 @@ pub struct Node {
 }
 
 /// Joints and inverse bind matrices.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Skin {
     pub joints: Vec<usize>,
     pub inverse_bind: Vec<Mat4>,
 }
 
 /// A decoded texture.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Texture {
     pub width: u32,
     pub height: u32,
@@ -147,7 +151,7 @@ pub struct Texture {
 }
 
 /// Texture slots of an imported material (indices into [`Model::textures`]).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MaterialMaps {
     pub base_color: Option<usize>,
     pub normal: Option<usize>,
@@ -180,7 +184,7 @@ impl TextureTransform {
 }
 
 /// An imported material.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImportedMaterial {
     pub name: String,
     pub params: MaterialParams,
@@ -248,7 +252,7 @@ pub enum Interp {
 }
 
 /// One animated property of one node.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Channel {
     pub node: usize,
     pub path: Path,
@@ -259,7 +263,7 @@ pub struct Channel {
 }
 
 /// A named animation clip.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Animation {
     pub name: String,
     pub channels: Vec<Channel>,

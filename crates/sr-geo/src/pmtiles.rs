@@ -75,7 +75,8 @@ pub struct Header {
     pub center: [f64; 2],
 }
 
-const HEADER_LEN: usize = 127;
+/// Length of a PMTiles version-3 header.
+pub const HEADER_LEN: usize = 127;
 
 fn u64_at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
@@ -261,10 +262,10 @@ pub fn parse_directory(b: &[u8]) -> Result<Vec<Entry>, String> {
         e.tile_id = last;
     }
     for e in entries.iter_mut() {
-        e.run_length = read_varint(b, &mut i)? as u32;
+        e.run_length = u32::try_from(read_varint(b, &mut i)?).map_err(|_| "directory run length exceeds u32")?;
     }
     for e in entries.iter_mut() {
-        e.length = read_varint(b, &mut i)? as u32;
+        e.length = u32::try_from(read_varint(b, &mut i)?).map_err(|_| "directory byte length exceeds u32")?;
     }
     for k in 0..n {
         let v = read_varint(b, &mut i)?;
@@ -309,7 +310,11 @@ pub fn decompress(code: u8, b: Vec<u8>) -> Result<Vec<u8>, String> {
     decompress_within(code, b, MAX_DECOMPRESSED)
 }
 
-fn decompress_within(code: u8, b: Vec<u8>, max: u64) -> Result<Vec<u8>, String> {
+/// Decompresses one section with a byte ceiling on both input and output.
+pub fn decompress_within(code: u8, b: Vec<u8>, max: u64) -> Result<Vec<u8>, String> {
+    if b.len() as u64 > max {
+        return Err(format!("section exceeds {max}-byte limit"));
+    }
     match code {
         0 | 1 => Ok(b),
         2 => {

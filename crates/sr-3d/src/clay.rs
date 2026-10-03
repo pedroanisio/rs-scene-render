@@ -160,9 +160,43 @@ fn roughness(f: &Finish, seed: u64, p: Vec3) -> f32 {
 
 /// The clay's surface as a triangle mesh at time `t` (seconds, for the boil).
 pub fn mesh(blobs: &[Blob], finish: &Finish, resolution: u32, t: f64) -> Primitive {
+    mesh_with_budget(blobs, finish, resolution, t, usize::MAX).unwrap_or_default()
+}
+
+/// Extract the same surface with conservative grid/output admission before
+/// allocation. Caller-owned blobs are outside this component allowance.
+pub fn mesh_with_budget(
+    blobs: &[Blob],
+    finish: &Finish,
+    resolution: u32,
+    t: f64,
+    max_bytes: usize,
+) -> Result<Primitive, String> {
+    if resolution > 256
+        || !t.is_finite()
+        || !finish.amount.is_finite()
+        || !finish.boil.is_finite()
+        || !(0.0..=1.0).contains(&finish.amount)
+        || finish.boil < 0.
+        || blobs.iter().any(|b| {
+            !b.center.is_finite()
+                || !b.rotation.is_finite()
+                || b.rotation.length_squared() == 0.
+                || !b.size.is_finite()
+                || b.size.min_element() <= 0.
+                || !b.radius.is_finite()
+                || b.radius <= 0.
+                || !b.length.is_finite()
+                || b.length < 0.
+                || !b.blend.is_finite()
+                || b.blend < 0.
+        })
+    {
+        return Err("invalid clay field, time or resolution".into());
+    }
     let mut prim = Primitive::default();
     if blobs.iter().all(|b| b.subtract) {
-        return prim;
+        return Ok(prim);
     }
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     for b in blobs.iter().filter(|b| !b.subtract) {
@@ -174,8 +208,22 @@ pub fn mesh(blobs: &[Blob], finish: &Finish, resolution: u32, t: f64) -> Primiti
     lo -= Vec3::splat(pad);
     hi += Vec3::splat(pad);
     let cell = (hi - lo).max_element() / resolution.max(4) as f32;
+    if !lo.is_finite() || !hi.is_finite() || !cell.is_finite() || cell <= 0. {
+        return Err("clay grid extent exceeds numeric precision".into());
+    }
     let dims = ((hi - lo) / cell).ceil().as_uvec3() + glam::UVec3::ONE;
     let (nx, ny, nz) = (dims.x as usize, dims.y as usize, dims.z as usize);
+    let points = nx.checked_mul(ny).and_then(|n| n.checked_mul(nz)).ok_or("clay grid size overflow")?;
+    // At most one vertex per cell and six triangles per cell; allow Vec
+    // growth capacity as well as both scalar/index grids during construction.
+    let charge =
+        points.checked_mul(8 + 2 * std::mem::size_of::<Vertex>() + 144).ok_or("clay memory budget overflow")?;
+    if charge > max_bytes {
+        return Err("clay grid and surface exceed memory budget".into());
+    }
+    if max_bytes != usize::MAX && points.saturating_mul(blobs.len()).saturating_mul(8) > 100_000_000 {
+        return Err("clay field sampling exceeds work budget".into());
+    }
     let seed = if finish.boil > 0.0 {
         finish.seed ^ ((t * finish.boil as f64).floor() as u64).wrapping_mul(0x2545_F491_4F6C_DD1D)
     } else {
@@ -243,11 +291,21 @@ pub fn mesh(blobs: &[Blob], finish: &Finish, resolution: u32, t: f64) -> Primiti
     }
     // one quad per grid edge the surface crosses, between the four cells around it
     let cell_vert = |i: usize, j: usize, k: usize| vert_of[(k * cy + j) * cx + i];
-    for k in 1..nz - 1 {
-        for j in 1..ny - 1 {
-            for i in 1..nx - 1 {
+    for k in 0..nz - 1 {
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
                 let here = d[idx(i, j, k)];
                 for axis in 0..3 {
+                    // A crossed edge may start on the first grid plane along
+                    // its own axis. Only its two transverse coordinates need
+                    // preceding cells; skipping all first planes opens holes.
+                    if match axis {
+                        0 => j == 0 || k == 0,
+                        1 => i == 0 || k == 0,
+                        _ => i == 0 || j == 0,
+                    } {
+                        continue;
+                    }
                     let (ni, nj, nk) = match axis {
                         0 => (i + 1, j, k),
                         1 => (i, j + 1, k),
@@ -291,7 +349,7 @@ pub fn mesh(blobs: &[Blob], finish: &Finish, resolution: u32, t: f64) -> Primiti
             }
         }
     }
-    prim
+    Ok(prim)
 }
 
 #[cfg(test)]
@@ -312,6 +370,32 @@ mod tests {
     }
 
     const SMOOTH: Finish = Finish { amount: 0.0, seed: 1, boil: 0.0 };
+
+    #[test]
+    fn bounded_meshing_rejects_grid_allocation_before_building() {
+        let blobs = [sphere(0., 3., 0.)];
+        assert!(mesh_with_budget(&blobs, &SMOOTH, 256, 0., 1 << 20).unwrap_err().contains("budget"));
+        assert!(mesh_with_budget(&blobs, &SMOOTH, u32::MAX, 0., usize::MAX).is_err());
+        let mesh = mesh_with_budget(&blobs, &SMOOTH, 32, 0., 32 << 20).unwrap();
+        let sphere_volume = 4. / 3. * std::f32::consts::PI * 27.;
+        assert!((volume(&mesh) / sphere_volume - 1.).abs() < 0.02);
+        assert!(mesh_with_budget(&blobs, &SMOOTH, 10, f64::NAN, 1 << 20).is_err());
+    }
+
+    #[test]
+    fn clay_sphere_is_a_closed_fracture_source_across_sizes() {
+        for radius in [3., 18., 30.] {
+            let mesh = mesh(&[sphere(0., radius, 0.)], &SMOOTH, 10, 0.);
+            let points: Vec<_> = mesh.vertices.iter().map(|v| v.pos.map(f64::from)).collect();
+            let triangles = mesh.indices.as_chunks::<3>().0;
+            let pieces = crate::fracture::fracture(
+                &points,
+                triangles,
+                crate::fracture::Spec { pieces: 4, seed: 42, ..Default::default() },
+            );
+            assert!(pieces.is_ok(), "radius={radius}: {pieces:?}");
+        }
+    }
 
     /// Signed volume by the divergence theorem (positive for outward winding).
     fn volume(p: &Primitive) -> f32 {

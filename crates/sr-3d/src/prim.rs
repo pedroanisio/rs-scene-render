@@ -137,7 +137,7 @@ pub fn cylinder(r_top: f32, r_bottom: f32, h: f32, segs: u32) -> Primitive {
             let a = u * std::f32::consts::TAU;
             let (s, c) = a.sin_cos();
             let r = r_top + (r_bottom - r_top) * t;
-            (Vec3::new(c * r, (t - 0.5) * h, s * r), Vec3::new(c, slope, s))
+            (Vec3::new(c * r, (t - 0.5) * h, s * r), Vec3::new(c, -slope, s))
         },
         &mut vs,
         &mut idx,
@@ -347,4 +347,26 @@ pub fn polys_of(p: &sr_vector::path::Path, tol: f64) -> Vec<Vec<Vec2>> {
         .into_iter()
         .map(|poly| poly.pts.iter().map(|q| Vec2::new(q.x as f32, q.y as f32)).collect())
         .collect()
+}
+
+#[cfg(test)]
+mod conical_normals {
+    use super::*;
+
+    #[test]
+    fn tapered_cylinder_side_normals_point_outward_and_are_perpendicular_to_slope() {
+        for (top, bottom) in [(0., 3.), (3., 0.), (1., 3.), (3., 1.)] {
+            let height = 2.;
+            let mesh = cylinder(top, bottom, height, 12);
+            for vertex in &mesh.vertices[..26] {
+                let uv = vertex.uv;
+                let theta = uv[0] * std::f32::consts::TAU;
+                let outward = Vec3::new(theta.cos(), 0., theta.sin());
+                let slope = outward * (bottom - top) + Vec3::Y * height;
+                let normal = Vec3::from(vertex.normal);
+                assert!(normal.dot(outward) > 0.);
+                assert!(normal.dot(slope).abs() < 1e-5, "{top}->{bottom}: normal {normal:?}, slope {slope:?}");
+            }
+        }
+    }
 }
