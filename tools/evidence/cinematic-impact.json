@@ -50,7 +50,7 @@
         "/tmp/sr-openvdb-gpu-final.log",
         "/tmp/sr-openvdb-schema-oracle.json"
       ],
-      "remaining": "Production-quality native impact volume validation; finish advection GPU transport/regression checks and identical-content bake timestamp test. Schema and scene loading are connected; completion is not yet claimed.",
+      "remaining": "Production-quality native impact volume validation and final workspace/MSRV/release acceptance. Advection transport, replay, and identical-content bake timestamp regressions now pass.",
       "implemented": [
         "Bounded SRVOL scalar-grid ingestion and immutable sharing",
         "Sparse trilinear GPU sampling with object and grid transforms",
@@ -142,7 +142,11 @@
         "/tmp/sr-cinematic-particles3d-oracle.json",
         "/tmp/sr-cinematic-particles3d-affected.log",
         "/tmp/sr-cinematic-particles3d-sprite-color-green.log",
-        "/tmp/sr-cinematic-ejecta-probe/evidence.json"
+        "/tmp/sr-cinematic-ejecta-probe/evidence.json",
+        "/tmp/cinematic-instancing-gpu.log",
+        "/tmp/cinematic-instancing-clippy.log",
+        "crates/sr-gpu/src/three.rs",
+        "crates/sr-gpu/src/three.wgsl"
       ],
       "implemented": [
         "Deterministic bounded world-space 3D emitter with exact birth timestamps, fixed-step checkpoints, fractional sampling and reverse replay",
@@ -158,7 +162,7 @@
         "Strict 24-frame native pyro/ejecta/ground-collision integration preview and H.264 encode",
         "Continuous sphere contacts with linearly moving crater triangles, barycentric surface velocities, support stabilization, canonical-step reuse and one-interval sweep retention."
       ],
-      "remaining": "Large particle-count batching and UHD performance/visual validation; bounded mesh-importer dependencies and scaled collider geometry retention audit. Rendering shares prototype buffers but still emits one Draw3 per particle/prototype and expands path-traced triangles."
+      "remaining": "CPU preparation still retains one Draw3 per particle/prototype. Native UHD sequence throughput/appearance, complete importer allocation/dependency accounting and scaled collider retention remain unverified."
     },
     {
       "id": "ocean",
@@ -267,8 +271,14 @@
     {
       "id": "delivery",
       "deliverable": "Complete schema definitions/rules/examples, regression suite and strict native 4K impact evidence",
-      "status": "pending",
-      "evidence": []
+      "status": "in_progress",
+      "evidence": [
+        "examples/cinematic-impact/impact.scene.xml",
+        "crates/sr-eval/tests/cinematic_impact.rs",
+        "cinematic-impact-uhd.log",
+        "cinematic-impact-probe-fixed.log"
+      ],
+      "remaining": "Native UHD still and low-resolution timeline pass; full UHD encode, final appearance/temporal QA, full acceptance and schema/SREP reconciliation remain."
     }
   ],
   "acceptance": [
@@ -2207,14 +2217,17 @@
     }
   },
   "volume_advection_validation": {
-    "updated_at": "2026-10-03T21:27:02.208650+00:00",
-    "status": "in_progress",
+    "updated_at": "2026-10-03T21:59:12.420938+00:00",
+    "status": "advection_regression_verified_full_goal_incomplete",
     "verified": {
       "cpu_model_tests": 125,
       "independent_schema_corpus_cases": 245,
       "corpus_generator_tests": 3,
       "clippy": "sr-volume/sr-model/sr-gpu tests passed with -D warnings",
-      "gpu_scene": "Strict software Vulkan advected-cache scene test passed: pathtrace/raster, reference-frame comparison, replay, object retiming, held frames, selected-channel errors, composition-clock bakes."
+      "gpu_scene": "Strict software Vulkan advected-cache scene test passed: pathtrace/raster, reference-frame comparison, replay, object retiming, held frames, selected-channel errors, composition-clock bakes.",
+      "gpu_volume_suite": "12 tests passed with SR_REQUIRE_GPU=1; expanded identical-digest regression passed after mutation red/restore green",
+      "cpu_model_tests_current": 125,
+      "clippy_current": "sr-volume/sr-model/sr-gpu --tests -D warnings passed on Rust 1.98; triangle chunk API modernized"
     },
     "changes": [
       "Explicit interpolation=advect and velocityGridX/Y/Z; VOL9 with independent XSD/Schematron/Rust rules; mesh interpolation enum stays hold/linear.",
@@ -2232,40 +2245,155 @@
       "/tmp/sr-advection-oracle.log",
       "/tmp/sr-advection-corpus-tests.log",
       "/tmp/sr-advection-scene-compact-shader.log",
-      "/tmp/srep-advection-patch-report.json"
+      "/tmp/srep-advection-patch-report.json",
+      "/tmp/cinematic-volume-model-current.log",
+      "/tmp/cinematic-corpus-current.log",
+      "/tmp/cinematic-advection-clippy-current.log"
     ],
     "unresolved": [
-      "Initial GPU transport comparison failed: GPU stepSize .125 versus CPU .5 on sparse thermal edges; reference corrected to use matching per-domain quadrature, rerun pending.",
-      "Identical-content baked frames share an Arc despite distinct timestamps. New regression is running; current same-Arc optimization is suspected to skip required advection.",
-      "Full volume GPU regression, MSRV and full workspace acceptance still required."
+      "MSRV 1.90 not installed in current environment; full workspace and release acceptance remain.",
+      "Production native UHD impact sequence, throughput, whole-process memory and remaining requirement ledger work remain."
     ],
-    "live_sessions": [
-      {
-        "id": 74844,
-        "log": "/tmp/sr-advection-scene-red.log",
-        "purpose": "Scene test before renderer integration, old shader"
-      },
-      {
-        "id": 67207,
-        "log": "/tmp/sr-advection-scene-green.log",
-        "purpose": "Scene integration with old shader"
-      },
-      {
-        "id": 87897,
-        "log": "/tmp/sr-advection-transport-matched.log",
-        "purpose": "Matched CPU/GPU quadrature with compact shader"
-      },
-      {
-        "id": 68514,
-        "log": "/tmp/sr-advection-volume-final.log",
-        "purpose": "Full volume GPU suite before identical-digest regression"
-      },
-      {
-        "id": 12289,
-        "log": "/tmp/sr-advection-dedup-red.log",
-        "purpose": "TDD identical-content bake timestamp regression"
-      }
+    "live_sessions": [],
+    "continuation": "Previous tool handles were missing; restarted tests against authoritative source. Full volume GPU suite and expanded duplicate-content replay regression passed. Mutation reverting timestamp condition failed with empty baked pixels vs visible numbered frames, proving regression sensitivity. Restore confirmed green. Continue remaining full-goal requirements; do not claim UHD production readiness."
+  },
+  "particle_raster_batching_validation": {
+    "checked_at": "2026-10-03T22:10:23.663346+00:00",
+    "status": "raster_instancing_passed_full_goal_incomplete",
+    "tdd": "Original shared-prototype test failed with 128 draws versus expected 1; implemented instancing passed.",
+    "covered": [
+      "Depth-sorted object indirection",
+      "Exact 128-instance pixel equivalence with separately uploaded unbatched geometry",
+      "Varying per-instance blended opacity and alternating material boundaries",
+      "Batching in primary, shadow and depth/normal passes",
+      "Device object-record admission checks before append"
     ],
-    "continuation": "Poll recorded tool handles before restarting tests; all were confirmed running when launched. Logs alone are not liveness evidence. On dedup regression failure, allow frame pairing when advection endpoint elapsed is nonzero even if Arc::ptr_eq; keep held same-label frames frozen. Re-run affected GPU tests and update this ledger. Earlier /tmp evidence paths inherited from prior environment are historical and may be absent."
-  }
+    "checks": {
+      "affected_gpu_suites": 57,
+      "final_gpu_pixel_regression": "passed after admission helper change",
+      "cpu_admission_test": "passed",
+      "clippy_all_gpu_targets": "passed -D warnings",
+      "formatting": "passed",
+      "diff": "passed"
+    },
+    "logs": [
+      "/tmp/cinematic-instancing-gpu.log",
+      "/tmp/cinematic-instancing-clippy.log"
+    ],
+    "limits": [
+      "GPU suite predates final admission helper; final pixel test and independent admission test cover that change.",
+      "Draw3 CPU preparation and path-traced triangle expansion remain.",
+      "Compatible consecutive sorted runs batch; changing materials/textures and deformed meshes split runs.",
+      "Device storage limits bound resident object records; this is not total RSS or a measured UHD throughput result.",
+      "No final impact film, release build or MSRV acceptance is claimed."
+    ],
+    "source_sha256": {
+      "crates/sr-gpu/src/three.rs": "d206a5a32f71798981e9774c4472e26e81b8116b7e05b5d2d6ba2b51ceb7088f",
+      "crates/sr-gpu/src/three.wgsl": "897de2efca17263f779616e92546844c35f9f020ba0da1eef101de03fe5023a0",
+      "srep-0000-cinematic-impact.md": "67d479e786948f7698231441b16f89bddbd5ad30198876c9f74c5965f0353cfe"
+    }
+  },
+  "native_impact_workload_validation": {
+    "checked_at": "2026-10-03T22:27:24.053936+00:00",
+    "status": "strict_uhd_still_and_timeline_probe_verified_full_goal_incomplete",
+    "scene": "examples/cinematic-impact/impact.scene.xml",
+    "adapter": "NVIDIA RTX 6000 Ada Generation (Vulkan)",
+    "uhd_still": {
+      "resolution": [
+        3840,
+        2160
+      ],
+      "time": 1.5,
+      "path_samples": 8,
+      "max_bounces": 4,
+      "denoise": true,
+      "triangles": 101272,
+      "frame_ms": 44093.661568,
+      "wall_seconds": 55.77,
+      "peak_host_rss_kib": 584708,
+      "strict_exit": 0,
+      "limits": "Measured before the settling fix; this timestamp precedes its failing landing phase. GPU memory and encoded throughput are unmeasured."
+    },
+    "tdd_red": [
+      "/tmp/cinematic-settling-red.log",
+      "/tmp/cinematic-impact-integration.log",
+      "/tmp/cinematic-impact-probe.log"
+    ],
+    "tdd_green": [
+      "/tmp/cinematic-settling-green.log",
+      "/tmp/cinematic-impact-integration-release-final.log",
+      "/tmp/cinematic-impact-probe-fixed.log"
+    ],
+    "checks": {
+      "simulation_tests": 124,
+      "particle_tests_included": 24,
+      "production_evaluator_replay_test": "passed in release, 8.89 seconds",
+      "timeline_probe": "12 strict frames 960x540, 4 samples, times 0 through 5.5 in 0.5-second intervals",
+      "schema_oracle": "valid",
+      "rust_validation": "0 errors, 0 warnings",
+      "release_build": "passed",
+      "affected_clippy": "passed -D warnings",
+      "formatting": "passed",
+      "diff": "passed"
+    },
+    "remaining": [
+      "Full native UHD encoded sequence and direct temporal/appearance QA",
+      "Noise, broad cloud and hidden terrain detail remain below the visual target",
+      "CPU/pathtrace instancing, importer/resource hardening and remaining acceptance ledger requirements",
+      "Full workspace/MSRV and final build delivery"
+    ],
+    "report": "RESEARCH-AND-STATUS.txt",
+    "source_sha256": {
+      "crates/sr-sim/src/particles3d.rs": "7bcd9c73a88df39a22b1be398caf40349a270990736070c53c94eaeab1b9d97e",
+      "crates/sr-sim/tests/particles3d.rs": "74b899a8130e393f6bfbd8a0e970ba4e1b10b01d128c1b4337b5f9fadcc0beeb",
+      "crates/sr-eval/tests/cinematic_impact.rs": "7919f68d5b2ecb5c522a0db364eb1be64f94e36054a97cc7c112b0a0563ac44c",
+      "examples/cinematic-impact/impact.scene.xml": "24e1b7e3a880cfdd1c436bc132389026d6126b844afcff0c45c6a200db88b7ef",
+      "srep-0000-cinematic-impact.md": "88631516dbf726e336bba9ef45f05aec3a1106b0c0d3af095e746b060a273a29"
+    }
+  },
+  "milestones": [
+    {
+      "name": "Path-traced shared prototype BVHs",
+      "evidence": [
+        "crates/sr-gpu/tests/pathtrace_instances.rs",
+        "crates/sr-gpu/src/pathtrace/instances.rs",
+        "cinematic-pt-instances-red.log",
+        "cinematic-pt-instances-mixed.log",
+        "cinematic-pt-instances-regression.log",
+        "cinematic-impact-instanced-uhd.log"
+      ],
+      "validation": "Red/green 2 MiB admission and expanded pixel oracle; five appearance modes; 61 broader GPU tests; CPU bounds/BVH tests; strict native UHD still.",
+      "limits": "No measured GPU speedup; rebuilt per frame; CPU per-instance draw preparation and full cinematic UHD sequence remain open."
+    },
+    {
+      "name": "glTF sparse accessor structural admission",
+      "evidence": [
+        "crates/sr-3d/src/import.rs",
+        "crates/sr-3d/tests/malformed.rs"
+      ],
+      "validation": "Reproduced silent malformed geometry acceptance before fix; rejects out-of-range, repeated and descending indices across u8/u16/u32, valid sparse geometry oracle passes. Full sr-3d suite 92 tests passed, affected helper tests 12 passed and all-target Clippy passed.",
+      "limits": "Structural admission only; importer allocation/dependency limits and final UHD sequence remain unfinished."
+    },
+    {
+      "name": "Current workspace MSRV and independent schema acceptance",
+      "validation": "Rust 1.90.0 cargo check --workspace --all-targets --locked passed; independent lxml XSD/Schematron236 corpus cases match supported rules; native impact XML valid; release hygiene, fmt and whitespace pass.",
+      "evidence": [
+        "cinematic-msrv-check.log",
+        "cinematic-schema-corpus.log",
+        "cinematic-current-oracle.log",
+        "cinematic-hygiene.log"
+      ],
+      "limits": "Schema sweep excludes seven asset/warning-only cases and two known libxml2 IDREF limitations. Full release runtime suite remains running, not passed; final UHD encoded sequence remains outstanding."
+    },
+    {
+      "name": "Exact cinematic XSD field/default inventory",
+      "evidence": [
+        "srep-0000-cinematic-impact.md",
+        "schema/scene-render-1.1.xsd",
+        "cinematic-schema-inventory.log"
+      ],
+      "validation": "297 exact rows: 13 cinematic complex types, 2 inherited attribute groups and 18 selected object/camera bindings. Inline restriction facets, requiredness, lexical defaults and absent values match executable XSD. Release hygiene passes.",
+      "limits": "This is a field/default reconciliation; final semantic coverage,31-rule review and native UHD sequence acceptance remain required."
+    }
+  ]
 }

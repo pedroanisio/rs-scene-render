@@ -554,9 +554,9 @@ The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
 implemented. The evaluator uses parent/source clocks, selected 3D force fields,
 scoped collider references and simulated body poses. Sphere, billboard, streak
 and mesh particles join the native surface pass for depth, lighting, shadows
-and shutter sampling. Prototype meshes share buffers; the current surface API
-still submits separate draws per instance and the path tracer expands their
-triangles. Large ejecta-set throughput and the complete UHD impact remain
+and shutter sampling. Raster passes batch compatible prototypes; path tracing
+shares object-space geometry and BVHs for repeated immutable cached meshes.
+Large ejecta-set throughput and the complete UHD impact remain
 unverified. The CPU API's verified contract is:
 
 - Births have exact event timestamps; rate quotas integrate over fixed intervals,
@@ -594,7 +594,15 @@ unverified. The CPU API's verified contract is:
   translating and rotating shapes, moving-surface velocity, initial penetration
   recovery, restitution and tangential friction. Collision response is one-way;
   particle/particle coupling and debris-driven rigid-body impulses are not
-  implied. More than 16 contacts in a step, more than 90 degrees of collider
+  implied. Dissipative rebounds whose estimated height is below the authored
+  collision tolerance settle into supporting contact. For normal rebound speed
+  `u`, frozen relative normal acceleration `a_n < 0`, and `0 < bounce < 1`,
+  the criterion is `u*u <= -2*a_n*collisionTolerance`. The response removes the
+  rebound normal speed and separates by at most that tolerance; tangential
+  friction remains unchanged. Elastic and force-free rebounds retain restitution,
+  and zero-restitution contacts retain their existing response. This prevents
+  finite-time accumulation of shrinking gravity-driven bounces without raising
+  the collision-count ceiling. More than 16 contacts in a step, more than 90 degrees of collider
   rotation in a sweep, unsupported queries and nonconvergence return errors.
 - Fixed checkpoints and replay make forward, backward and fractional sampling
   deterministic for a deterministic driver. A failed request preserves the
@@ -660,6 +668,45 @@ embedded-profile policy; resulting surface maps use the existing RGBA8 texture
 representation. Its plane faces the camera. Streaks align their cylinder with
 velocity and extend behind the particle; mesh and sphere prototypes retain
 the complete birth affine and spin.
+
+Raster passes instance consecutive compatible draws in their existing sorted
+order. A storage-buffer indirection preserves each instance's transform, opacity
+and shadow-reception flag even when depth sorting changes the object order.
+Prototype geometry, material bytes, texture bindings and culling/blending state
+must agree; deformed meshes and material boundaries split batches. Shadow views
+and the depth/normal prepass also batch compatible prototypes. This requires no
+new XML fields. Object records have a 256-byte storage stride; admission checks
+the device binding/buffer limits before appending each record, including shadow
+records. Exceeding those limits reports a render error. This is a component bound,
+not a whole-process memory guarantee.
+
+The regression compares 128 shared-prototype instances against independently
+uploaded meshes, with scrambled depths, varying per-instance opacity and
+alternating materials. Compatible primary-pass cases use one draw with identical
+pixels. CPU preparation still retains one draw record per particle/prototype;
+its production scaling remains part of final UHD validation.
+
+Path tracing builds a world-space BVH over surfaces and instance bounds, with
+shared object-space BVHs for repeated immutable cached meshes. Each instance
+stores its transform, inverse, normal transform and material independently.
+Local rays retain world-distance parameters, including reflected and nonuniform
+scales. UV scale and separate-UV layout define geometry sharing boundaries;
+displaced, deformed, unique, singular or non-affine draws retain expanded
+geometry. Prototype bounds include rounding padding. BVH depth is bounded to
+keep the fixed traversal stacks safe. Admission counts stored prototype
+triangles plus instance records and checks material storage separately. This
+requires no XML additions and does not provide a total process memory bound.
+
+The regression compares 64 shared instances with independently expanded meshes
+under opaque and lit textured materials, normal maps, opacity, participating
+media and coincident placement. Pixel differences stay below 0.003. Shared
+geometry fits a 2 MiB binding limit that rejects expansion. The unchanged UHD
+impact still at 1.5 seconds reports 101,272 physical triangles, 44.977 seconds GPU
+frame time, 52.91 seconds wall time and 573,220 KiB peak host RSS on RTX 6000 Ada
+Vulkan. The preceding expanded frame used 44.094 seconds GPU time, 55.77 seconds
+wall time and 584,708 KiB host RSS. These single observations demonstrate a small
+host-memory reduction, not a GPU speedup or sequence-throughput improvement.
+Geometry sharing is rebuilt per frame; persistent caching remains unverified.
 
 Scene colliders use primitive surfaces or mesh rest poses, including finite
 planes, torus holes, text/path extrusions and carved clay. Static procedural
@@ -1386,6 +1433,12 @@ source bodies and direct pyro/particle collider references still require an
 explicit proxy. Other mesh consumers still require ordinary mesh assets.
 
 Asset verification expands the declared files and honors missing-frame policies.
+The glTF importer rejects sparse accessor counts beyond the parent accessor and
+sparse indices that repeat, descend or exceed the accessor's element range,
+before geometry decoding. All three unsigned index widths are covered by invalid
+input tests and a valid sparse-geometry oracle. These are glTF input invariants,
+not new XML attributes or a complete importer allocation guarantee.
+
 Incremental/watch dependency discovery includes numbered mesh/volume files and
 mesh dependencies exposed by the shared importer. Complete dependency discovery
 for all formats remains part of importer hardening. The valid fixture is
@@ -1436,7 +1489,425 @@ decoder does not execute code or resolve paths stored inside a cache. Channel
 names and matrices are data, never filenames. Asset URIs inherit the existing
 document asset access policy.
 
+## Exact XSD attribute inventory
+
+This inventory records the executable XSD spelling, lexical type, requiredness
+and default for each cinematic element. “Optional; absent” means that XSD
+supplies no value; the behavioral sections above specify contextual defaults
+and semantic requirements. Named types refer to the shipped XSD definitions.
+Inline restrictions list their base and facets. Runtime and Schematron checks
+still apply, including finite values, ownership, version gates and references.
+
+### `volumeAssetType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `src` | volumeSourceType | Required |
+| `sha256` | sha256Type | Optional; absent |
+| `format` | xs:string; enumeration=srvol, enumeration=srvseq, enumeration=openvdb | Default `srvol` |
+| `densityGrid` | volumeChannelType | Default `density` |
+| `temperatureGrid` | volumeChannelType | Optional; absent |
+| `velocityGridX` | volumeChannelType | Optional; absent |
+| `velocityGridY` | volumeChannelType | Optional; absent |
+| `velocityGridZ` | volumeChannelType | Optional; absent |
+| `first` | volumeFrameIndexType | Optional; absent |
+| `last` | volumeFrameIndexType | Optional; absent |
+| `fps` | fpsType | Optional; absent |
+| `interpolation` | volumeInterpolationType | Default `hold` |
+| `missingFrame` | volumeMissingFrameType | Default `error` |
+| `boundsMinX` | xs:double | Optional; absent |
+| `boundsMinY` | xs:double | Optional; absent |
+| `boundsMinZ` | xs:double | Optional; absent |
+| `boundsMaxX` | xs:double | Optional; absent |
+| `boundsMaxY` | xs:double | Optional; absent |
+| `boundsMaxZ` | xs:double | Optional; absent |
+
+### `meshSequenceAssetType`
+
+Also includes `assetProvenance`, inventoried below.
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `src` | volumeSourceType | Required |
+| `format` | xs:string; enumeration=gltf, enumeration=glb, enumeration=obj, enumeration=ply, enumeration=usd, enumeration=usda, enumeration=usdc, enumeration=usdz, enumeration=fbx | Optional; absent |
+| `first` | volumeFrameIndexType | Required |
+| `last` | volumeFrameIndexType | Required |
+| `fps` | fpsType | Required |
+| `interpolation` | meshSequenceInterpolationType | Default `hold` |
+| `missingFrame` | volumeMissingFrameType | Default `error` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+
+### `mediumType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `densityScale` | nonNegativeDecimal | Default `1` |
+| `extinction` | nonNegativeDecimal | Default `1` |
+| `albedo` | colorType | Default `#FFFFFFFF` |
+| `anisotropy` | xs:double; minInclusive=-0.99, maxInclusive=0.99 | Default `0` |
+| `emissionColor` | colorType | Default `#000000FF` |
+| `emissionScale` | nonNegativeDecimal | Default `0` |
+| `blackbody` | xs:boolean | Default `false` |
+| `temperatureScale` | positiveDecimal | Default `1` |
+| `stepSize` | positiveDecimal | Default `1` |
+| `maxSteps` | xs:positiveInteger; maxInclusive=65536 | Default `2048` |
+
+### `pyroType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `colliders` | xs:IDREFS | Optional; absent |
+| `colliderThickness` | positiveDecimal | Optional; absent |
+| `forceFields` | xs:IDREFS | Optional; absent |
+| `useForceFields` | xs:boolean | Default `true` |
+| `width` | positiveDecimal | Required |
+| `height` | positiveDecimal | Required |
+| `depth` | positiveDecimal | Required |
+| `voxelSize` | positiveDecimal | Required |
+| `dt` | positiveDecimal | Default `.016666666666666666` |
+| `ambientTemperature` | positiveDecimal; maxInclusive=50000 | Default `300` |
+| `dissipation` | nonNegativeDecimal | Default `0` |
+| `cooling` | nonNegativeDecimal | Default `0` |
+| `buoyancy` | nonNegativeDecimal | Default `0` |
+| `vorticity` | nonNegativeDecimal | Default `0` |
+| `turbulence` | nonNegativeDecimal | Default `0` |
+| `seed` | xs:unsignedLong | Default `0` |
+| `pressureTolerance` | positiveDecimal | Default `0.000001` |
+| `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
+| `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `checkpointMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+
+### `pyroSourceType`
+
+Also includes `pyroShape`, inventoried below.
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `start` | xs:double | Default `0` |
+| `end` | xs:double | Optional; absent |
+| `densityRate` | nonNegativeDecimal | Default `0` |
+| `temperatureRate` | nonNegativeDecimal | Default `0` |
+| `velocityRateX` | xs:double | Default `0` |
+| `velocityRateY` | xs:double | Default `0` |
+| `velocityRateZ` | xs:double | Default `0` |
+| `expansion` | xs:double | Default `0` |
+
+### `pyroImpulseType`
+
+Also includes `pyroShape`, inventoried below.
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Required |
+| `density` | nonNegativeDecimal | Default `0` |
+| `temperature` | nonNegativeDecimal | Default `0` |
+| `velocityX` | xs:double | Default `0` |
+| `velocityY` | xs:double | Default `0` |
+| `velocityZ` | xs:double | Default `0` |
+| `expansion` | xs:double | Default `0` |
+
+### `particles3DType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional; absent |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `rotation` | xs:double | Default `0` |
+| `rotationX` | xs:double | Default `0` |
+| `rotationY` | xs:double | Default `0` |
+| `start` | xs:double | Default `0` |
+| `end` | xs:double | Optional; absent |
+| `condition` | expressionString | Optional; absent |
+| `parent` | xs:IDREF | Optional; absent |
+| `scaleX` | xs:double | Default `1` |
+| `scaleY` | xs:double | Default `1` |
+| `scaleZ` | xs:double | Default `1` |
+| `visible` | xs:boolean | Default `true` |
+| `opacity` | unitDecimal | Default `1` |
+| `motionBlur` | triStateType | Default `inherit` |
+| `castShadow` | xs:boolean | Default `true` |
+| `receiveShadow` | xs:boolean | Default `true` |
+| `useForceFields` | xs:boolean | Default `true` |
+| `rate` | nonNegativeDecimal | Default `10` |
+| `emissionStart` | nonNegativeDecimal | Default `0` |
+| `lifetimeVariance` | nonNegativeDecimal | Default `0` |
+| `speed` | nonNegativeDecimal | Default `0` |
+| `speedVariance` | nonNegativeDecimal | Default `0` |
+| `drag` | nonNegativeDecimal | Default `0` |
+| `collisionRadius` | nonNegativeDecimal | Default `0.5` |
+| `friction` | nonNegativeDecimal | Default `0` |
+| `trail` | nonNegativeDecimal | Default `1` |
+| `emissionEnd` | nonNegativeDecimal | Optional; absent |
+| `dt` | positiveDecimal | Default `.016666666666666666` |
+| `lifetime` | positiveDecimal | Default `2` |
+| `emitterWidth` | positiveDecimal | Default `1` |
+| `emitterHeight` | positiveDecimal | Default `1` |
+| `emitterDepth` | positiveDecimal | Default `1` |
+| `emitterRadius` | positiveDecimal | Default `1` |
+| `size` | positiveDecimal | Default `1` |
+| `collisionTolerance` | positiveDecimal | Default `0.001` |
+| `velocityX` | xs:double | Default `0` |
+| `velocityY` | xs:double | Default `0` |
+| `velocityZ` | xs:double | Default `0` |
+| `gravityX` | xs:double | Default `0` |
+| `gravityY` | xs:double | Default `0` |
+| `gravityZ` | xs:double | Default `0` |
+| `rotation0X` | xs:double | Default `0` |
+| `rotation0Y` | xs:double | Default `0` |
+| `rotation0Z` | xs:double | Default `0` |
+| `rotationVarianceX` | nonNegativeDecimal | Default `0` |
+| `rotationVarianceY` | nonNegativeDecimal | Default `0` |
+| `rotationVarianceZ` | nonNegativeDecimal | Default `0` |
+| `angularVelocityX` | xs:double | Default `0` |
+| `angularVelocityY` | xs:double | Default `0` |
+| `angularVelocityZ` | xs:double | Default `0` |
+| `angularVelocityVarianceX` | nonNegativeDecimal | Default `0` |
+| `angularVelocityVarianceY` | nonNegativeDecimal | Default `0` |
+| `angularVelocityVarianceZ` | nonNegativeDecimal | Default `0` |
+| `inheritedVelocityX` | xs:double | Default `0` |
+| `inheritedVelocityY` | xs:double | Default `0` |
+| `inheritedVelocityZ` | xs:double | Default `0` |
+| `directionX` | xs:double | Default `0` |
+| `directionY` | xs:double | Default `-1` |
+| `directionZ` | xs:double | Default `0` |
+| `spread` | nonNegativeDecimal; maxInclusive=360 | Default `0` |
+| `scaleVariance` | nonNegativeDecimal; maxExclusive=1 | Default `0` |
+| `bounce` | unitDecimal | Default `0.5` |
+| `seed` | xs:unsignedLong | Default `0` |
+| `maxParticles` | xs:positiveInteger; maxInclusive=1000000 | Default `10000` |
+| `maxEvents` | xs:positiveInteger; maxInclusive=1000000 | Default `16384` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `checkpointMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `64` |
+| `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `segments` | xs:positiveInteger; maxInclusive=256 | Default `12` |
+| `emitterMesh` | xs:IDREF | Optional; absent |
+| `mesh` | xs:IDREF | Optional; absent |
+| `material` | xs:IDREF | Optional; absent |
+| `sprite` | xs:IDREF | Optional; absent |
+| `forceFields` | xs:IDREFS | Optional; absent |
+| `colliders` | xs:IDREFS | Optional; absent |
+| `emitterShape` | xs:string; enumeration=point, enumeration=box, enumeration=sphere, enumeration=mesh | Default `point` |
+| `shape` | xs:string; enumeration=sphere, enumeration=billboard, enumeration=streak, enumeration=mesh | Default `sphere` |
+| `sizeEnd` | nonNegativeDecimal | Optional; absent |
+| `color` | colorType | Default `#FFFFFFFF` |
+| `colorEnd` | colorType | Optional; absent |
+| `opacityEnd` | unitDecimal | Optional; absent |
+| `sizeCurve` | curveType | Default `linear` |
+| `colorCurve` | curveType | Default `linear` |
+
+### `oceanType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional; absent |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `rotation` | xs:double | Default `0` |
+| `rotationX` | xs:double | Default `0` |
+| `rotationY` | xs:double | Default `0` |
+| `start` | xs:double | Default `0` |
+| `end` | xs:double | Optional; absent |
+| `condition` | expressionString | Optional; absent |
+| `parent` | xs:IDREF | Optional; absent |
+| `scaleX` | xs:double | Default `1` |
+| `scaleY` | xs:double | Default `1` |
+| `scaleZ` | xs:double | Default `1` |
+| `visible` | xs:boolean | Default `true` |
+| `opacity` | unitDecimal | Default `1` |
+| `motionBlur` | triStateType | Default `inherit` |
+| `castShadow` | xs:boolean | Default `true` |
+| `receiveShadow` | xs:boolean | Default `true` |
+| `width` | positiveDecimal | Default `64` |
+| `depth` | positiveDecimal | Default `64` |
+| `cellSize` | positiveDecimal | Default `1` |
+| `waterLevel` | xs:double | Default `0` |
+| `bottomDepth` | nonNegativeDecimal | Default `10` |
+| `gravity` | positiveDecimal | Default `9.81` |
+| `damping` | nonNegativeDecimal | Default `0` |
+| `dt` | positiveDecimal | Default `.016666666666666666` |
+| `dryTolerance` | positiveDecimal | Default `0.0000000001` |
+| `initialVelocityX` | xs:double | Default `0` |
+| `initialVelocityZ` | xs:double | Default `0` |
+| `bathymetryScale` | xs:double | Default `1` |
+| `bathymetryOffset` | xs:double | Default `0` |
+| `seed` | xs:unsignedLong | Default `0` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
+| `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+| `surfaceMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `boundary` | xs:string; enumeration=closed, enumeration=open, enumeration=periodic | Default `closed` |
+| `bathymetryEncoding` | xs:string; enumeration=red, enumeration=terrarium, enumeration=mapbox | Default `red` |
+| `material` | xs:IDREF | Optional; absent |
+| `bathymetry` | xs:IDREF | Optional; absent |
+
+### `oceanWaveType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `wavelength` | positiveDecimal | Default `16` |
+| `amplitude` | nonNegativeDecimal | Default `1` |
+| `direction` | xs:double | Default `0` |
+| `phase` | xs:double | Optional; absent |
+| `speed` | nonNegativeDecimal | Optional; absent |
+
+### `waterImpulseType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Default `0` |
+| `x` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `radius` | positiveDecimal | Default `1` |
+| `amplitude` | xs:double | Default `1` |
+| `velocityX` | xs:double | Default `0` |
+| `velocityZ` | xs:double | Default `0` |
+| `type` | xs:string; enumeration=displace, enumeration=add-water | Default `displace` |
+
+### `whitewaterType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `emissionRate` | nonNegativeDecimal | Default `10` |
+| `threshold` | nonNegativeDecimal | Default `0.5` |
+| `start` | nonNegativeDecimal | Default `0` |
+| `lifetime` | positiveDecimal | Default `3` |
+| `sprayFraction` | unitDecimal | Default `0.4` |
+| `launchSpeed` | nonNegativeDecimal | Default `3` |
+| `drag` | nonNegativeDecimal | Default `0.1` |
+| `radius` | positiveDecimal | Default `0.05` |
+| `seed` | xs:unsignedLong | Default `0` |
+| `end` | nonNegativeDecimal | Optional; absent |
+| `maxParticles` | xs:positiveInteger; maxInclusive=1000000 | Default `10000` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `64` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `foamMaterial` | xs:IDREF | Optional; absent |
+| `sprayMaterial` | xs:IDREF | Optional; absent |
+
+### `craterType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `centerX` | xs:double | Default `0` |
+| `centerY` | xs:double | Default `0` |
+| `centerZ` | xs:double | Default `0` |
+| `normalX` | xs:double | Default `0` |
+| `normalY` | xs:double | Default `0` |
+| `normalZ` | xs:double | Default `-1` |
+| `radius` | positiveDecimal | Default `50` |
+| `depth` | nonNegativeDecimal | Default `10` |
+| `rimHeight` | nonNegativeDecimal | Default `2` |
+| `rimWidth` | positiveDecimal | Default `10` |
+| `influenceDepth` | positiveDecimal | Optional; absent |
+| `start` | nonNegativeDecimal | Default `0` |
+| `end` | nonNegativeDecimal | Default `1` |
+| `curve` | xs:string; enumeration=linear, enumeration=ease-in, enumeration=ease-out, enumeration=ease-in-out, enumeration=step | Default `ease-in-out` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+
+### `fractureType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `at` | nonNegativeDecimal | Default `0` |
+| `pieces` | xs:positiveInteger; maxInclusive=4096 | Default `8` |
+| `seed` | xs:unsignedLong | Default `0` |
+| `interiorMaterial` | xs:IDREF | Required |
+| `interiorUvScale` | positiveDecimal | Default `1` |
+| `impulseX` | xs:double | Default `0` |
+| `impulseY` | xs:double | Default `0` |
+| `impulseZ` | xs:double | Default `0` |
+| `radialImpulse` | nonNegativeDecimal | Default `0` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+
+### `assetProvenance`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `sha256` | sha256Type | Optional; absent |
+| `license` | xs:string | Optional; absent |
+| `credit` | xs:string | Optional; absent |
+| `proxy` | xs:anyURI | Optional; absent |
+
+### `pyroShape`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `shape` | xs:string; enumeration=sphere, enumeration=box, enumeration=mesh | Default `sphere` |
+| `radius` | positiveDecimal | Default `1` |
+| `width` | positiveDecimal | Optional; absent |
+| `height` | positiveDecimal | Optional; absent |
+| `depth` | positiveDecimal | Optional; absent |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `rotation` | xs:double | Default `0` |
+| `rotationX` | xs:double | Default `0` |
+| `rotationY` | xs:double | Default `0` |
+| `scaleX` | xs:double | Default `1` |
+| `scaleY` | xs:double | Default `1` |
+| `scaleZ` | xs:double | Default `1` |
+| `mesh` | xs:IDREF | Optional; absent |
+
+
+### `object3DType` cinematic bindings
+
+The following attributes connect the new elements and terrain or path-tracing
+configuration to existing objects/cameras; other attributes retain their
+existing definitions.
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `primitive` | xs:string; enumeration=sphere, enumeration=box, enumeration=plane, enumeration=mesh, enumeration=cylinder, enumeration=cone, enumeration=torus, enumeration=capsule, enumeration=text, enumeration=extrude, enumeration=clay, enumeration=map, enumeration=globe, enumeration=volume | Required |
+| `material` | xs:IDREF | Optional; absent |
+| `mesh` | xs:IDREF | Optional; absent |
+| `volume` | xs:IDREF | Optional; absent |
+| `terrain` | xs:IDREF | Optional; absent |
+| `planetRadius` | positiveDecimal | Default `6378137` |
+| `terrainTileSize` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `terrainZoom` | xs:nonNegativeInteger; maxInclusive=22 | Optional; absent |
+| `terrainMissing` | xs:string; enumeration=error, enumeration=zero | Default `error` |
+| `terrainMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
+| `terrainEncoding` | xs:string; enumeration=terrarium, enumeration=mapbox | Default `terrarium` |
+| `exaggeration` | nonNegativeDecimal | Default `1` |
+| `textureSize` | xs:positiveInteger; minInclusive=64, maxInclusive=8192 | Default `2048` |
+| `resolution` | xs:positiveInteger; minInclusive=8, maxInclusive=256 | Default `64` |
+
+### `cameraType` cinematic bindings
+
+The following attributes connect the new elements and terrain or path-tracing
+configuration to existing objects/cameras; other attributes retain their
+existing definitions.
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `renderer` | xs:string; enumeration=raster, enumeration=pathtrace | Default `raster` |
+| `pathSamples` | xs:positiveInteger; maxInclusive=65536 | Default `64` |
+| `maxBounces` | xs:positiveInteger; maxInclusive=64 | Default `4` |
+| `denoise` | xs:boolean | Default `true` |
+
+
 ## Conformance and acceptance
+
+The runnable native combination example is
+[`examples/cinematic-impact/impact.scene.xml`](examples/cinematic-impact/impact.scene.xml).
+It authors an oblique approach, submerged crater, shallow-water displacement,
+1,500 ejecta particles and a thermal smoke plume at 3840×2160. Its units and
+timings are artistic, explicitly identified in scene metadata. It is a workload
+and integration example, not a validated scientific Chicxulub reconstruction or
+an accepted cinematic-quality film. The evaluator integration test exercises
+pre-impact, impact, late settling and reverse replay; production-size execution
+is practical with `cargo test --release -p sr-eval --test cinematic_impact`.
+The full encoded-sequence gate below remains independently required.
 
 The accompanying conformance suite must cover all of the following:
 
@@ -1472,9 +1943,10 @@ interfaces not yet integrated remain explicitly pending in that ledger.
 
 Schema-design review currently verifies the additive version policy, explicit
 identities/ownership, time and spatial units, finite values, resource limits,
-cache format and UHD behavior. **Mechanical-validator coverage and the complete
-field/default inventory are pending implementation reconciliation.** The final
-31-rule scorecard must not mark those requirements as passed before the actual
-schema and validators exist. Existing metadata supplies scene provenance;
+cache format and UHD behavior. The exact attribute inventory above reconciles
+the cinematic element fields/defaults and relevant object/camera bindings with
+the executable XSD. **Complete semantic-validator coverage and the final
+31-rule scorecard remain pending implementation reconciliation.** Inventory
+agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.

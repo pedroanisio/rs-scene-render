@@ -237,6 +237,35 @@ fn check_accessors(g: &gltf::Gltf, buffers: &[Vec<u8>]) -> Result<(), String> {
         if !ok {
             return Err(format!("accessor {} reaches past its buffer", a.index()));
         }
+        if let Some(sparse) = a.sparse() {
+            if sparse.count() > a.count() {
+                return Err(format!("accessor {} sparse count exceeds its element count", a.index()));
+            }
+            let indices = sparse.indices();
+            let view = indices.view();
+            let width = indices.index_type().size();
+            let stride = view.stride().unwrap_or(width);
+            let start = view.offset() + indices.offset();
+            let buffer = &buffers[view.buffer().index()];
+            let mut previous = None;
+            for n in 0..sparse.count() {
+                let offset = start + n * stride;
+                // Byte bounds and checked arithmetic were verified above.
+                let value = match width {
+                    1 => buffer[offset] as usize,
+                    2 => u16::from_le_bytes(buffer[offset..offset + 2].try_into().unwrap()) as usize,
+                    4 => u32::from_le_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize,
+                    _ => unreachable!("glTF sparse index width"),
+                };
+                if value >= a.count() || previous.is_some_and(|p| value <= p) {
+                    return Err(format!(
+                        "accessor {} sparse indices must increase strictly within its element count",
+                        a.index()
+                    ));
+                }
+                previous = Some(value);
+            }
+        }
     }
     Ok(())
 }

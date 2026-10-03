@@ -204,3 +204,39 @@ fn gltf_indices_past_the_vertices_are_an_error() {
     let e = import::gltf(&tmp("far.gltf", gltf_triangle(3, [0, 1, 9]).as_bytes())).unwrap_err();
     assert!(e.contains("index"), "{e}");
 }
+
+#[test]
+fn sparse_accessor_indices_must_be_ordered_and_inside_the_accessor() {
+    for (width, component) in [(1, 5121), (2, 5123), (4, 5125)] {
+        for (name, indices) in
+            [("outside", [0u32, 3]), ("duplicate", [1, 1]), ("descending", [2, 0]), ("valid", [0, 2])]
+        {
+            let mut bytes = Vec::new();
+            for value in indices {
+                bytes.extend_from_slice(&value.to_le_bytes()[..width]);
+            }
+            let index_bytes = bytes.len();
+            bytes.resize(index_bytes.next_multiple_of(4), 0);
+            let values_offset = bytes.len();
+            for v in [0.0f32, 0., 0., 1., 0., 0.] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let json = format!(
+                r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"byteLength":{},"uri":"data:application/octet-stream;base64,{}"}}],"bufferViews":[{{"buffer":0,"byteLength":{index_bytes}}},{{"buffer":0,"byteOffset":{values_offset},"byteLength":24}}],"accessors":[{{"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0],"sparse":{{"count":2,"indices":{{"bufferView":0,"componentType":{component}}},"values":{{"bufferView":1}}}}}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}]}}"#,
+                bytes.len(),
+                b64(&bytes)
+            );
+            let result = import::gltf(&tmp(&format!("sparse-{width}-{name}.gltf"), json.as_bytes()));
+            if name == "valid" {
+                let model = result.expect("strictly increasing sparse indices are valid");
+                assert_eq!(
+                    model.primitives[0].vertices.iter().map(|v| v.pos).collect::<Vec<_>>(),
+                    vec![[0., 0., 0.], [0., 0., 0.], [1., 0., 0.]]
+                );
+            } else {
+                let error = result.expect_err("invalid sparse indices must be rejected before geometry decoding");
+                assert!(error.contains("sparse"), "{width}/{name}: {error}");
+            }
+        }
+    }
+}

@@ -1,8 +1,8 @@
 //! Progressive path tracing of a 3D pass (camera `renderer="pathtrace"`).
 //!
-//! The same [`Scene3`] the rasteriser draws is flattened on the CPU into world-space triangles
-//! (instances expanded, deformed vertices used), materials and lights, and a bounding volume
-//! hierarchy is built over the triangles with the surface area heuristic (binned, 12 bins).
+//! Repeated rigid meshes use shared object-space prototype BVHs and world-space instance bounds.
+//! Unique, deformed and displaced geometry is flattened into world-space triangles. Both levels
+//! use a binned (12 bins) surface-area hierarchy; materials and lights remain per draw.
 //! `pathtrace.wgsl` then traces `samples` paths per pixel in compute dispatches of a few
 //! samples each: camera rays (thin lens for depth of field), next-event estimation toward the
 //! analytic lights with shadow rays, a metallic-roughness BSDF (Lambert plus GGX, sampled by
@@ -16,7 +16,8 @@
 
 use glam::{Mat4, Vec3};
 
-use crate::three::{LightKind, Scene3};
+use crate::three::{Draw3, LightKind, MeshSrc, Scene3};
+mod instances;
 
 /// Path-tracing options of a pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,16 +75,18 @@ pub struct PtLight {
     pub right: [f32; 4],
 }
 
-/// The flattened scene.
+/// Packed triangles, shared prototypes and top-level instances.
 #[derive(Default)]
 pub struct PtScene {
-    /// World-space positions and normals of every triangle corner (three per triangle).
+    /// Triangle corners in world space or in their shared prototype space.
     pub pos: Vec<[f32; 4]>,
     pub nrm: Vec<[f32; 4]>,
     pub uv: Vec<[[f32; 2]; 6]>,
     pub pixels: Vec<u32>,
     pub colors: Vec<[f32; 4]>,
     pub splats: std::collections::HashMap<usize, [[f32; 4]; 24]>,
+    /// Top-level instance records referencing shared local-space prototype BVHs.
+    pub instances: std::collections::HashMap<usize, [[f32; 4]; 24]>,
     /// Material of each triangle.
     pub tri_mat: Vec<u32>,
     pub mats: Vec<PtMat>,
@@ -104,7 +107,7 @@ pub fn notes(_scene: &Scene3) -> Vec<String> {
 
 /// Whether the tracer's scene buffers fit the device. Image working buffers are tiled;
 /// geometry remains one binding. The error is the note reported on raster fallback.
-pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(), String> {
+pub fn fits(size: [u32; 2], primitives: u64, limits: &wgpu::Limits) -> Result<(), String> {
     let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
     let mib = |b: u64| b.div_ceil(1 << 20);
     // Pixel indices and shader seeds are u32. Reject impossible frames before planning tiles.
@@ -114,11 +117,11 @@ pub fn fits(size: [u32; 2], triangles: u64, limits: &wgpu::Limits) -> Result<(),
     if cap < MIN_TILE_BYTES {
         return Err("path tracing device cannot bind a denoising tile; rasterised instead".into());
     }
-    // Each triangle or splat occupies a 384-byte record.
-    let corners = triangles.saturating_mul(384);
+    // Each triangle, splat or instance occupies a 384-byte record.
+    let corners = primitives.saturating_mul(384);
     if corners > cap {
         return Err(format!(
-            "path tracing {triangles} triangles needs a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
+            "path tracing {primitives} stored primitives need a {} MiB buffer and this device binds at most {} MiB; rasterised instead",
             mib(corners),
             cap >> 20
         ));
@@ -131,10 +134,14 @@ pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
     if let Err(error) = crate::volume::validate(&scene.volumes) {
         return Some(error);
     }
-    let triangles = scene.draws.iter().map(|d| d.mesh_triangles()).sum::<u64>()
-        + scene.splats.iter().map(|s| s.gpu.n as u64).sum::<u64>();
+    let triangles = instances::storage_primitives(scene);
     if let Err(note) = fits(scene.size, triangles, limits) {
         return Some(note);
+    }
+    if (scene.draws.len() as u64).saturating_mul(std::mem::size_of::<PtMat>() as u64)
+        > limits.max_storage_buffer_binding_size.min(limits.max_buffer_size)
+    {
+        return Some("path tracing materials exceed device storage binding; rasterised instead".into());
     }
     let mut keys = std::collections::HashSet::new();
     let texture_bytes = scene
@@ -161,7 +168,37 @@ pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
     None
 }
 
-/// Flattens `scene` into triangles, materials and lights, and builds the BVH.
+struct Triangle {
+    p: [Vec3; 3],
+    n: [Vec3; 3],
+    uv: [[[f32; 2]; 6]; 3],
+    colors: [[f32; 4]; 3],
+}
+fn triangle(dr: &Draw3, t: &[u32; 3], model: Mat4, nmat: Mat4) -> Triangle {
+    let m = &dr.material;
+    let verts = dr.mesh.cpu().0;
+    let p = std::array::from_fn(|c| {
+        let v = &verts[t[c] as usize];
+        let mut pos = Vec3::from(v.pos);
+        if let Some(map) = &dr.maps[5] {
+            let uv = [v.uv[0] * m.uv_scale[0], v.uv[1] * m.uv_scale[1]];
+            pos += Vec3::from(v.normal).normalize_or_zero() * map.sample(uv)[0] * m.displacement_scale;
+        }
+        model.transform_point3(pos)
+    });
+    let n =
+        std::array::from_fn(|c| nmat.transform_vector3(Vec3::from(verts[t[c] as usize].normal)).normalize_or_zero());
+    let uv = std::array::from_fn(|c| {
+        let v = &verts[t[c] as usize];
+        std::array::from_fn(|slot| {
+            let uv = if m.separate_uvs && (1..5).contains(&slot) { v.map_uv[slot - 1] } else { v.uv };
+            [uv[0] * m.uv_scale[0], uv[1] * m.uv_scale[1]]
+        })
+    });
+    Triangle { p, n, uv, colors: std::array::from_fn(|i| verts[t[i] as usize].color) }
+}
+
+/// Builds world-space and shared prototype geometry, materials, lights and both BVH levels.
 pub fn build(scene: &Scene3) -> PtScene {
     let mut s = PtScene::default();
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
@@ -170,6 +207,10 @@ pub fn build(scene: &Scene3) -> PtScene {
     let mut texcoords = Vec::new();
     let mut colors: Vec<[[f32; 4]; 3]> = Vec::new();
     let mut texture_offsets = std::collections::HashMap::new();
+    let repetitions = instances::repetitions(scene);
+    let mut prototype_ids = std::collections::HashMap::new();
+    let mut prototypes: Vec<Vec<Triangle>> = Vec::new();
+    let mut instance_records = std::collections::HashMap::new();
     for dr in &scene.draws {
         let m = &dr.material;
         let maps = std::array::from_fn(|slot| {
@@ -226,35 +267,36 @@ pub fn build(scene: &Scene3) -> PtScene {
                 m.occlusion_strength,
             ],
         });
-        let (verts, idx) = dr.mesh.cpu();
-        let nmat = dr.model.inverse().transpose();
-        // each copy of an instanced object is its own draw
-        let model = dr.model;
-        for t in idx.as_chunks::<3>().0 {
-            let p: [Vec3; 3] = std::array::from_fn(|c| {
-                let vertex = &verts[t[c] as usize];
-                let mut pos = Vec3::from(vertex.pos);
-                if let Some(map) = &dr.maps[5] {
-                    let uv = [vertex.uv[0] * m.uv_scale[0], vertex.uv[1] * m.uv_scale[1]];
-                    pos += Vec3::from(vertex.normal).normalize_or_zero() * map.sample(uv)[0] * m.displacement_scale;
-                }
-                model.transform_point3(pos)
+        if let Some(key) = instances::key(dr).filter(|k| repetitions[k] > 1) {
+            let prototype = *prototype_ids.entry(key).or_insert_with(|| {
+                let (_, indices) = dr.mesh.cpu();
+                prototypes.push(
+                    indices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|t| triangle(dr, t, Mat4::IDENTITY, Mat4::IDENTITY))
+                        .collect(),
+                );
+                prototypes.len() - 1
             });
-            let nn: [Vec3; 3] = std::array::from_fn(|c| {
-                nmat.transform_vector3(Vec3::from(verts[t[c] as usize].normal)).normalize_or_zero()
-            });
-            let uv: [[[f32; 2]; 6]; 3] = std::array::from_fn(|corner| {
-                let v = &verts[t[corner] as usize];
-                std::array::from_fn(|slot| {
-                    let uv = if m.separate_uvs && (1..5).contains(&slot) { v.map_uv[slot - 1] } else { v.uv };
-                    [uv[0] * m.uv_scale[0], uv[1] * m.uv_scale[1]]
-                })
-            });
-            texcoords.push(uv);
-            colors.push(std::array::from_fn(|i| verts[t[i] as usize].color));
-            tris.push(p);
-            norms.push(nn);
-            tmat.push(mi);
+            let MeshSrc::Cached(mesh) = &dr.mesh else { unreachable!() };
+            instance_records.insert(tris.len(), instances::record(dr.model, prototype, mi));
+            tris.push(instances::bounds(dr.model, mesh.lo, mesh.hi));
+            norms.push([Vec3::ZERO; 3]);
+            texcoords.push([[[0.; 2]; 6]; 3]);
+            colors.push([[1.; 4]; 3]);
+            tmat.push(u32::MAX - 1);
+        } else {
+            let normal = dr.model.inverse().transpose();
+            for t in dr.mesh.cpu().1.as_chunks::<3>().0 {
+                let t = triangle(dr, t, dr.model, normal);
+                tris.push(t.p);
+                norms.push(t.n);
+                texcoords.push(t.uv);
+                colors.push(t.colors);
+                tmat.push(mi);
+            }
         }
     }
 
@@ -302,9 +344,12 @@ pub fn build(scene: &Scene3) -> PtScene {
     if s.pixels.is_empty() {
         s.pixels.push(u32::MAX);
     }
-    // BVH over the triangles, then triangles in leaf order
+    // Top-level BVH, then world triangles / splats / instance records in leaf order
     let order = bvh(&tris, &mut s.nodes);
     for (new_index, &t) in order.iter().enumerate() {
+        if let Some(record) = instance_records.remove(&t) {
+            s.instances.insert(new_index, record);
+        }
         if let Some(record) = splat_records.remove(&t) {
             s.splats.insert(new_index, record);
         }
@@ -317,6 +362,32 @@ pub fn build(scene: &Scene3) -> PtScene {
             s.colors.push(colors[t][c]);
         }
         s.tri_mat.push(tmat[t]);
+    }
+    let mut roots = Vec::new();
+    for prototype in &prototypes {
+        let positions: Vec<_> = prototype.iter().map(|t| t.p).collect();
+        let mut nodes = Vec::new();
+        let order = bvh(&positions, &mut nodes);
+        let root = s.nodes.len() as u32;
+        let first = s.tri_mat.len() as u32;
+        for node in &mut nodes {
+            node.a += if node.b == 0 { root } else { first };
+        }
+        roots.push(root);
+        s.nodes.extend(nodes);
+        for &index in &order {
+            let t = &prototype[index];
+            for c in 0..3 {
+                s.pos.push(t.p[c].extend(0.).to_array());
+                s.nrm.push(t.n[c].extend(0.).to_array());
+                s.uv.push(t.uv[c]);
+                s.colors.push(t.colors[c]);
+            }
+            s.tri_mat.push(0);
+        }
+    }
+    for record in s.instances.values_mut() {
+        record[13][0] = f32::from_bits(roots[record[13][0].to_bits() as usize]);
     }
     for l in &scene.lights {
         let kind = match l.kind {
@@ -397,9 +468,9 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
         2.0 * (d.x * d.y + d.y * d.z + d.z * d.x)
     }
     // (node index, start, end) to build; a node's second child index is patched when known
-    let mut stack = vec![(0usize, 0usize, n)];
+    let mut stack = vec![(0usize, 0usize, n, 0u32)];
     nodes.push(PtNode::default());
-    while let Some((ni, start, end)) = stack.pop() {
+    while let Some((ni, start, end, depth)) = stack.pop() {
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for &t in &idx[start..end] {
@@ -412,7 +483,7 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
         let leaf = |nodes: &mut Vec<PtNode>| {
             nodes[ni] = PtNode { lo: lo.into(), a: start as u32, hi: hi.into(), b: count as u32 };
         };
-        if count <= 4 {
+        if count <= 4 || depth >= 30 {
             leaf(nodes);
             continue;
         }
@@ -485,8 +556,8 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
         let right = nodes.len();
         nodes.push(PtNode::default());
         nodes[ni] = PtNode { lo: lo.into(), a: right as u32, hi: hi.into(), b: 0 };
-        stack.push((right, mid, end));
-        stack.push((left, start, mid));
+        stack.push((right, mid, end, depth + 1));
+        stack.push((left, start, mid, depth + 1));
     }
     idx
 }
@@ -864,6 +935,9 @@ pub fn render(
         }
     }
     for (&index, record) in &data.splats {
+        verts[index * 24..(index + 1) * 24].copy_from_slice(record);
+    }
+    for (&index, record) in &data.instances {
         verts[index * 24..(index + 1) * 24].copy_from_slice(record);
     }
     let offset = (verts.len() * 4) as u32;

@@ -71,9 +71,12 @@ struct Object {
     params: vec4<f32>,
     // unused xyz, light view index for shadow passes
     spacing: vec4<f32>,
+    padding: array<vec4<f32>, 6>,
 };
 
-@group(2) @binding(0) var<uniform> obj: Object;
+@group(2) @binding(0) var<storage, read> objects: array<Object>;
+@group(2) @binding(1) var<storage, read> object_indices: array<u32>;
+var<private> obj: Object;
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -98,6 +101,7 @@ struct VOut {
     @location(6) occ_uv: vec2<f32>,
     @location(7) emissive_uv: vec2<f32>,
     @location(8) color: vec4<f32>,
+    @location(9) @interpolate(flat) object_index: u32,
 };
 
 fn displaced(v: VIn) -> vec3<f32> {
@@ -110,8 +114,10 @@ fn displaced(v: VIn) -> vec3<f32> {
 }
 
 @vertex
-fn vs_main(v: VIn) -> VOut {
+fn vs_main(v: VIn, @builtin(instance_index) instance: u32) -> VOut {
+    obj = objects[object_indices[instance]];
     var o: VOut;
+    o.object_index = object_indices[instance];
     let local = displaced(v);
     let w = obj.model * vec4(local, 1.0);
     o.world = w.xyz;
@@ -129,7 +135,8 @@ fn vs_main(v: VIn) -> VOut {
 
 // Shadow pass: obj.spacing.w selects the light view matrix.
 @vertex
-fn vs_shadow(v: VIn) -> @builtin(position) vec4<f32> {
+fn vs_shadow(v: VIn, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+    obj = objects[object_indices[instance]];
     let local = displaced(v);
     let w = obj.model * vec4(local, 1.0);
     return shadow_mats[u32(obj.spacing.w)] * w;
@@ -476,6 +483,7 @@ fn contact_shadow(world: vec3<f32>, l: vec3<f32>, len: f32) -> f32 {
 
 @fragment
 fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
+    obj = objects[i.object_index];
     var o: FOut;
     let s = surface(i, front);
     let mode = u32(mat.p1.x);
@@ -556,6 +564,7 @@ struct GOut {
 
 @fragment
 fn fs_prepass(i: VOut, @builtin(front_facing) front: bool) -> GOut {
+    obj = objects[i.object_index];
     var o: GOut;
     let s = surface(i, front);
     let mode = u32(mat.p1.x);

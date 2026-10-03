@@ -361,6 +361,7 @@ struct ObjectU {
     normal: [[f32; 4]; 4],
     params: [f32; 4],
     spacing: [f32; 4],
+    padding: [[f32; 4]; 6],
 }
 
 #[repr(C)]
@@ -388,6 +389,17 @@ fn pad(v: &mut Vec<u8>, bytes: &[u8]) -> u32 {
     v.extend_from_slice(bytes);
     v.resize(v.len().div_ceil(UNIFORM_ALIGN as usize) * UNIFORM_ALIGN as usize, 0);
     off
+}
+
+fn push_object(bytes: &mut Vec<u8>, object: &ObjectU, limit: u64) -> Result<u32, String> {
+    let size = std::mem::size_of::<ObjectU>();
+    let next = bytes.len().checked_add(size).ok_or("3D instance object size overflow")?;
+    if next as u64 > limit || next > u32::MAX as usize {
+        return Err("3D instance objects exceed device storage buffer limit".into());
+    }
+    let offset = bytes.len() as u32;
+    bytes.extend_from_slice(bytemuck::bytes_of(object));
+    Ok(offset)
 }
 
 fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
@@ -681,7 +693,13 @@ impl ThreeEngine {
         }
         mat_entries.push(smp_entry(7, VS_FS, filt));
         let bgl_mat = bgl(&mat_entries, "three-material");
-        let bgl_obj = bgl(&[buf_entry(0, VS_FS, uni, true)], "three-object");
+        let bgl_obj = bgl(
+            &[
+                buf_entry(0, VS_FS, wgpu::BufferBindingType::Storage { read_only: true }, false),
+                buf_entry(1, wgpu::ShaderStages::VERTEX, wgpu::BufferBindingType::Storage { read_only: true }, false),
+            ],
+            "three-object",
+        );
         let bgl_splat = bgl(
             &[
                 buf_entry(0, VS_FS, ro, false),
@@ -1447,8 +1465,12 @@ impl ThreeEngine {
                 &inputs,
                 out,
             );
-            self.stats =
-                Stats3 { draws: scene.draws.len(), triangles: data.tri_mat.len() as u64, ..Default::default() };
+            self.stats = Stats3 {
+                draws: scene.draws.len(),
+                triangles: scene.draws.iter().map(Draw3::mesh_triangles).sum::<u64>()
+                    + scene.splats.iter().map(|s| u64::from(s.gpu.n)).sum::<u64>(),
+                ..Default::default()
+            };
             return Ok(());
         }
         let d = self.device.clone();
@@ -1713,6 +1735,7 @@ impl ThreeEngine {
         }
         let mut obj_bytes = Vec::new();
         let mut mat_bytes = Vec::new();
+        let mut material_slots = HashMap::<Vec<u8>, u32>::new();
         struct Prep {
             kind: Kind,
             obj: u32,
@@ -1730,9 +1753,13 @@ impl ThreeEngine {
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
                 params: [dr.opacity, dr.receive_shadow as u32 as f32, 0.0, 0.0],
                 spacing: [0.0; 4],
+                padding: [[0.; 4]; 6],
             };
-            let obj = pad(&mut obj_bytes, bytemuck::bytes_of(&o));
-            let mat = pad(&mut mat_bytes, bytemuck::bytes_of(&material_u(&dr.material, &dr.maps)));
+            let obj =
+                push_object(&mut obj_bytes, &o, limits.max_storage_buffer_binding_size.min(limits.max_buffer_size))?;
+            let value = material_u(&dr.material, &dr.maps);
+            let bytes = bytemuck::bytes_of(&value);
+            let mat = *material_slots.entry(bytes.to_vec()).or_insert_with(|| pad(&mut mat_bytes, bytes));
             let kind = if dr.material.transmission > 0.0 && !dr.material.unlit {
                 Kind::Transmissive
             } else if dr.material.alpha_mode == AlphaMode::Blend || dr.opacity < 1.0 || dr.material.opacity < 1.0 {
@@ -1768,18 +1795,28 @@ impl ThreeEngine {
                         &obj_bytes[preps[i].obj as usize..preps[i].obj as usize + std::mem::size_of::<ObjectU>()],
                     );
                     o.spacing[3] = v as f32;
-                    shadow_objs.push((i, v as u32, pad(&mut obj_bytes, bytemuck::bytes_of(&o))));
+                    let offset = push_object(
+                        &mut obj_bytes,
+                        &o,
+                        limits.max_storage_buffer_binding_size.min(limits.max_buffer_size),
+                    )?;
+                    shadow_objs.push((i, v as u32, offset));
                 }
             }
         }
         if obj_bytes.is_empty() {
-            pad(&mut obj_bytes, &[0u8; 16]);
+            pad(&mut obj_bytes, &[0u8; 256]);
         }
         if mat_bytes.is_empty() {
             // the dome still binds a material slot when nothing else is drawn
             pad(&mut mat_bytes, &[0u8; std::mem::size_of::<MaterialU>()]);
         }
-        let obj_buf = buf(&obj_bytes, wgpu::BufferUsages::UNIFORM, "three-objects");
+        if obj_bytes.len() as u64 > limits.max_storage_buffer_binding_size
+            || obj_bytes.len() as u64 > limits.max_buffer_size
+        {
+            return Err("3D instance objects exceed device storage buffer limit".into());
+        }
+        let obj_buf = buf(&obj_bytes, wgpu::BufferUsages::STORAGE, "three-objects");
         // one material buffer per render, like the object buffer: several 3D passes can be recorded before a
         // single submit, and rewriting a shared buffer with queue.write_buffer would hand every pass the data of
         // the last one. Bind groups reference this buffer, so the cache lives for this render only.
@@ -1792,17 +1829,63 @@ impl ThreeEngine {
             let none: Maps = Default::default();
             self.mat_bind(&none, &mat_buf);
         }
+        let mut order: Vec<usize> = (0..preps.len()).collect();
+        order.sort_by(|a, b| preps[*a].depth.total_cmp(&preps[*b].depth));
+        let opaque: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Opaque).collect();
+        let mut trans: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Transmissive).collect();
+        let mut blended: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Blend).collect();
+        trans.reverse();
+        blended.reverse();
+        // Identity slots serve shadow/prepass draws. Sorted slots keep every
+        // primary pass's existing order while allowing nonadjacent object storage.
+        let mut object_indices: Vec<u32> = (0..(obj_bytes.len() / 256) as u32).collect();
+        let mut batches = |list: &[usize]| {
+            let mut runs: Vec<(usize, u32, u32)> = Vec::new();
+            for &i in list {
+                let merge = runs.last().is_some_and(|&(first, _, _)| {
+                    preps[i].mat == preps[first].mat
+                        && preps[i].key == preps[first].key
+                        && preps[i].pipe == preps[first].pipe
+                        && matches!((&scene.draws[i].mesh, &scene.draws[first].mesh),
+                            (MeshSrc::Cached(a), MeshSrc::Cached(b)) if Arc::ptr_eq(a, b))
+                });
+                if merge {
+                    runs.last_mut().unwrap().2 += 1;
+                } else {
+                    runs.push((i, object_indices.len() as u32, 1));
+                }
+                object_indices.push(preps[i].obj / 256);
+            }
+            runs
+        };
+        let opaque_runs = batches(&opaque);
+        let trans_runs = batches(&trans);
+        let blended_runs = batches(&blended);
+        stats.draws = opaque_runs.len() + trans_runs.len() + blended_runs.len();
+        let index_buf = buf(bytemuck::cast_slice(&object_indices), wgpu::BufferUsages::STORAGE, "three-object-order");
+        let mut shadow_runs: Vec<(usize, u32, u32, u32)> = Vec::new();
+        for &(i, view, offset) in &shadow_objs {
+            let merge = shadow_runs.last().is_some_and(|&(first, v, off, count)| {
+                view == v
+                    && offset == off + count * 256
+                    && preps[i].mat == preps[first].mat
+                    && preps[i].key == preps[first].key
+                    && matches!((&scene.draws[i].mesh, &scene.draws[first].mesh),
+                        (MeshSrc::Cached(a), MeshSrc::Cached(b)) if Arc::ptr_eq(a, b))
+            });
+            if merge {
+                shadow_runs.last_mut().unwrap().3 += 1;
+            } else {
+                shadow_runs.push((i, view, offset, 1));
+            }
+        }
         let obj_bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("three-object"),
             layout: &self.bgl_obj,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &obj_buf,
-                    offset: 0,
-                    size: std::num::NonZeroU64::new(std::mem::size_of::<ObjectU>() as u64),
-                }),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: obj_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: index_buf.as_entire_binding() },
+            ],
         });
         // ------------------------------------------------ targets
         let color_ms = pool(size, FORMAT, 1, MSAA, 1, "three-color-ms").create_view(&Default::default());
@@ -1940,39 +2023,31 @@ impl ThreeEngine {
             });
             rp.set_pipeline(&self.shadow_pipe);
             rp.set_bind_group(0, &fb_shadow, &[]);
-            for &(i, vv, off) in &shadow_objs {
+            for &(i, vv, off, count) in &shadow_runs {
                 if vv as usize != v {
                     continue;
                 }
                 let dr = &scene.draws[i];
                 let m = dr.mesh.mesh();
                 rp.set_bind_group(1, &self.mat_binds[&preps[i].key], &[preps[i].mat]);
-                rp.set_bind_group(2, &obj_bind, &[off]);
+                rp.set_bind_group(2, &obj_bind, &[]);
                 rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.count, 0, 0..1);
+                rp.draw_indexed(0..m.count, 0, off / 256..off / 256 + count);
             }
         }
         // ------------------------------------------------ opaque pass
-        let mut order: Vec<usize> = (0..preps.len()).collect();
-        order.sort_by(|a, b| preps[*a].depth.total_cmp(&preps[*b].depth));
-        let draw_list = |rp: &mut wgpu::RenderPass, list: &[usize], eng: &ThreeEngine| {
-            for &i in list {
-                let dr = &scene.draws[i];
-                let m = dr.mesh.mesh();
+        let draw_list = |rp: &mut wgpu::RenderPass, runs: &[(usize, u32, u32)], eng: &ThreeEngine| {
+            for &(i, first, count) in runs {
+                let m = scene.draws[i].mesh.mesh();
                 rp.set_pipeline(&eng.pipes[&preps[i].pipe]);
                 rp.set_bind_group(1, &eng.mat_binds[&preps[i].key], &[preps[i].mat]);
-                rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
+                rp.set_bind_group(2, &obj_bind, &[]);
                 rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.count, 0, 0..1);
+                rp.draw_indexed(0..m.count, 0, first..first + count);
             }
         };
-        let opaque: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Opaque).collect();
-        let mut trans: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Transmissive).collect();
-        let mut blended: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Blend).collect();
-        trans.reverse();
-        blended.reverse();
         // ------------------------------------------------ depth and normal prepass, ambient occlusion
         if let (Some(gn), Some(gz), Some(gd)) = (&gb_n, &gb_z, &gb_d) {
             let fb_pre = frame_bind_with(&self.white.view, env_view, &shadow_view);
@@ -2010,15 +2085,15 @@ impl ThreeEngine {
                     multiview_mask: None,
                 });
                 rp.set_bind_group(0, &fb_pre, &[]);
-                for &i in &opaque {
+                for &(i, first, count) in &opaque_runs {
                     let dr = &scene.draws[i];
                     let m = dr.mesh.mesh();
                     rp.set_pipeline(&self.pre_pipes[if preps[i].pipe.cull { 0 } else { 1 }]);
                     rp.set_bind_group(1, &self.mat_binds[&preps[i].key], &[preps[i].mat]);
-                    rp.set_bind_group(2, &obj_bind, &[preps[i].obj]);
+                    rp.set_bind_group(2, &obj_bind, &[]);
                     rp.set_vertex_buffer(0, preps[i].vbuf.as_ref().unwrap_or(&m.vbuf).slice(..));
                     rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..m.count, 0, 0..1);
+                    rp.draw_indexed(0..m.count, 0, first..first + count);
                 }
             }
             if let Some((raw, ao)) = &ao_views {
@@ -2051,10 +2126,10 @@ impl ThreeEngine {
             if env.map(|e| e.visible).unwrap_or(false) {
                 rp.set_pipeline(&self.dome_pipe);
                 rp.set_bind_group(1, &self.mat_binds[&preps.first().map(|p| p.key).unwrap_or([0; 6])], &[0]);
-                rp.set_bind_group(2, &obj_bind, &[0]);
+                rp.set_bind_group(2, &obj_bind, &[]);
                 rp.draw(0..3, 0..1);
             }
-            draw_list(&mut rp, &opaque, self);
+            draw_list(&mut rp, &opaque_runs, self);
         }
         // ------------------------------------------------ transmission: backdrop + opaque, mip chain
         let mut fb_trans = None;
@@ -2194,7 +2269,7 @@ impl ThreeEngine {
             });
             if let Some(fb) = &fb_trans {
                 rp.set_bind_group(0, fb, &[]);
-                draw_list(&mut rp, &trans, self);
+                draw_list(&mut rp, &trans_runs, self);
             }
             rp.set_bind_group(0, &fb_plain, &[]);
             for (sb, n) in &splat_binds {
@@ -2202,7 +2277,7 @@ impl ThreeEngine {
                 rp.set_bind_group(1, sb, &[]);
                 rp.draw(0..6, 0..*n);
             }
-            draw_list(&mut rp, &blended, self);
+            draw_list(&mut rp, &blended_runs, self);
         }
         // ------------------------------------------------ depth resolve, post
         {
@@ -2375,6 +2450,19 @@ pub fn sort_src() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn instance_object_admission_is_aligned_bounded_and_transactional() {
+        use super::*;
+        assert_eq!(std::mem::size_of::<ObjectU>(), 256, "WGSL storage array stride");
+        let mut bytes = Vec::new();
+        let object = ObjectU::zeroed();
+        assert_eq!(push_object(&mut bytes, &object, 512).unwrap(), 0);
+        assert_eq!(push_object(&mut bytes, &object, 512).unwrap(), 256);
+        let before = bytes.clone();
+        assert!(push_object(&mut bytes, &object, 512).is_err());
+        assert_eq!(bytes, before, "reject before growing resident object storage");
+    }
+
+    #[test]
     fn raster_compiles_only_pipelines_used_by_the_scene() {
         use super::*;
         let gpu = match crate::Gpu::new() {
@@ -2414,6 +2502,39 @@ mod tests {
         };
         assert_eq!(engine.render_now(&scene, None).len(), 32 * 32);
         assert_eq!(engine.pipes.len(), 1, "one material and blend/culling configuration");
+        let MeshSrc::Cached(prototype) = &scene.draws[0].mesh else { unreachable!() };
+        let prototype = prototype.clone();
+        scene.draws = (0..128)
+            .map(|i| Draw3 {
+                mesh: MeshSrc::Cached(prototype.clone()),
+                model: Mat4::from_translation(Vec3::new(
+                    (i % 16) as f32 * 2.,
+                    (i / 16) as f32 * 4.,
+                    ((i * 37) % 128) as f32 / 128.,
+                )),
+                material: MaterialParams { unlit: true, ..Default::default() },
+                maps: Default::default(),
+                opacity: 1.,
+                cast_shadow: false,
+                receive_shadow: false,
+            })
+            .collect();
+        for mode in 0..3 {
+            for (i, draw) in scene.draws.iter_mut().enumerate() {
+                draw.mesh = MeshSrc::Cached(prototype.clone());
+                draw.opacity = if mode == 1 { 0.25 + (i % 3) as f32 * 0.25 } else { 1. };
+                draw.material.base_color = if mode == 2 && i % 2 == 0 { [1., 0., 0., 1.] } else { [1.; 4] };
+            }
+            let batched = engine.render_now(&scene, None);
+            assert_eq!(engine.stats.draws, if mode == 2 { 128 } else { 1 }, "compatible instance runs, mode {mode}");
+            // Independent uploads force the ordinary single-instance path.
+            for draw in &mut scene.draws {
+                draw.mesh = MeshSrc::Cached(engine.upload_mesh(&mesh.vertices, &mesh.indices));
+            }
+            let individual = engine.render_now(&scene, None);
+            assert_eq!(engine.stats.draws, 128);
+            assert_eq!(batched, individual, "instance transforms/materials/opacity must preserve pixels, mode {mode}");
+        }
         engine.pipes.clear();
         scene.draws.clear();
         engine.render_now(&scene, None);

@@ -653,13 +653,26 @@ fn motion(
         let speed = length(tangent);
         let friction =
             if speed > 0. { (1. - s.friction * (1. + s.restitution) * (-vn).max(0.) / speed).max(0.) } else { 0. };
-        p.velocity =
-            add(hit.velocity, add(scale(n, if vn < 0. { -s.restitution * vn } else { vn }), scale(tangent, friction)));
+        let mut rebound = if vn < 0. { -s.restitution * vn } else { vn };
+        // Inelastic bounces under inward acceleration have a finite-time
+        // accumulation point. Resolve sub-tolerance rebound height as contact
+        // instead of spending the impact budget on an endless shrinking series.
+        // Keep elastic and force-free impacts, including very slow ones, intact.
+        let normal_acceleration = dot(add(a, scale(hit.velocity, -s.drag)), n);
+        let settled = s.restitution > 0.
+            && s.restitution < 1.
+            && vn < 0.
+            && normal_acceleration < 0.
+            && rebound * rebound <= -2. * normal_acceleration * s.collision_tolerance;
+        if settled {
+            rebound = 0.;
+        }
+        p.velocity = add(hit.velocity, add(scale(n, rebound), scale(tangent, friction)));
         // Persistent contact on a changing normal needs finite contact slop.
         // A numerical epsilon alone causes infinitely many grazing impacts on
         // an accelerating/rotating boundary. Bound separation by the authored
         // spatial collision tolerance; isolated impacts retain the small bias.
-        let separation = if contact.is_some_and(|(previous, _)| dot(previous, n) > 0.95) {
+        let separation = if settled || contact.is_some_and(|(previous, _)| dot(previous, n) > 0.95) {
             s.collision_tolerance
         } else {
             radius.max(1.) * 1e-8

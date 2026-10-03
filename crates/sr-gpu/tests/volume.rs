@@ -790,7 +790,18 @@ fn advected_cache_documents_move_fields_replay_and_validate_channels() {
     let repeated_bake = xml
         .replace("%d.srvol", "repeated/manifest.srvseq")
         .replace("first=\"0\" last=\"1\"", &format!(r#"format="srvseq" sha256="{}""#, receipt.sha256));
-    let numbered = render(&xml.replace("%d.srvol", "repeated-%d.srvol"), &[1.5]);
-    assert!(numbered.at(2, 2)[3] > 0.1);
-    assert_eq!(render(&repeated_bake, &[1.5]).px, numbered.px);
+    for renderer in ["pathtrace", "raster"] {
+        let numbered_xml = xml.replace("%d.srvol", "repeated-%d.srvol").replace("pathtrace", renderer);
+        let baked_xml = repeated_bake.replace("pathtrace", renderer);
+        for time in [1.5, 1.25, 1.75, 1.5] {
+            let numbered = render(&numbered_xml, &[time]);
+            assert!(numbered.stats.errors.is_empty(), "{:?}", numbered.stats);
+            let baked = render(&baked_xml, &[1., 1.75, time]);
+            assert!(baked.stats.errors.is_empty(), "{:?}", baked.stats);
+            assert_eq!(baked.px, numbered.px, "{renderer}: shared frame storage at {time}");
+            if time == 1.5 {
+                assert!(numbered.at(2, 2)[3] > 0.1);
+            }
+        }
+    }
 }
