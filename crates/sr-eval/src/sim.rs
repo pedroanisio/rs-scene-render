@@ -405,6 +405,8 @@ struct Cached {
     bodies: usize,
     soft_points: Vec<usize>,
     bodies3: usize,
+    fractures: usize,
+    extended: bool,
     frames: Vec<Vec<f64>>,
 }
 
@@ -415,15 +417,24 @@ impl Cached {
     }
 
     /// 3D body poses: position then quaternion, after the 2D bodies and soft lattices.
-    fn frame3(&self, t: f64) -> Vec<Pose3> {
+    fn frame3(&self, t: f64) -> sr_sim::physics3d::Frame3 {
         let f = self.row(t);
         let o = self.bodies * 3 + self.soft_points.iter().sum::<usize>() * 2;
-        (0..self.bodies3)
+        let bodies = (0..self.bodies3)
             .map(|k| {
                 let v = &f[o + 7 * k..o + 7 * k + 7];
                 Pose3 { pos: [v[0], v[1], v[2]], rot: [v[3], v[4], v[5], v[6]] }
             })
-            .collect()
+            .collect();
+        let flags = o + 7 * self.bodies3;
+        let enabled = if self.extended {
+            f[flags..flags + self.bodies3].iter().map(|v| *v == 1.).collect()
+        } else {
+            vec![true; self.bodies3]
+        };
+        let fractured =
+            if self.extended { f[flags + self.bodies3..].iter().map(|v| *v == 1.).collect() } else { vec![] };
+        sr_sim::physics3d::Frame3 { bodies, enabled, fractured, ..Default::default() }
     }
 
     fn frame(&self, t: f64) -> sr_sim::physics::Frame {
@@ -442,7 +453,7 @@ impl Cached {
     }
 }
 
-struct PhysicsRt {
+pub(crate) struct PhysicsRt {
     /// The 2D world (none without 2D bodies, or when cached).
     world: Option<World>,
     three: Option<crate::sim3d::Phys3>,
@@ -618,6 +629,15 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
     }
     let g3 = crate::eval::evaluate_for_physics(p, start);
     let ids3 = crate::sim3d::body_ids(&g3);
+    let fracture_counts: Vec<_> = g3
+        .nodes
+        .iter()
+        .filter(|n| ids3.contains(&n.id))
+        .flat_map(|n| children(&*n.elem))
+        .filter_map(|c| c.as_any().downcast_ref::<sr_model::model::Fracture>())
+        .map(|f| f.pieces as usize)
+        .collect();
+    let bodies3_count = ids3.len() + fracture_counts.iter().sum::<usize>();
     if bodies.is_empty() && softs.is_empty() && ids3.is_empty() {
         return None;
     }
@@ -702,7 +722,8 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
                 match read_cache(&path, ph.and_then(|p| p.cache_sha256.as_ref()).map(|s| s.to_string())) {
                     Ok(c)
                         if c.bodies == bodies.len()
-                            && c.bodies3 == ids3.len()
+                            && c.bodies3 == bodies3_count
+                            && c.fractures == fracture_counts.len()
                             && c.soft_points == softs.iter().map(|s| s.rows * s.cols).collect::<Vec<_>>() =>
                     {
                         cached = Some(c)
@@ -724,6 +745,7 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
 
 /// Cache files: version 2 adds 3D bodies (7 numbers each per frame); version 1 is still read.
 const CACHE_MAGIC: &[u8; 8] = b"SRPHYS02";
+const CACHE_MAGIC_V3: &[u8; 8] = b"SRPHYS03";
 const CACHE_MAGIC_V1: &[u8; 8] = b"SRPHYS01";
 
 fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, String> {
@@ -739,7 +761,8 @@ fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, Str
 }
 
 fn parse_cache(data: &[u8]) -> Result<Cached, String> {
-    let v2 = data.len() >= 8 && &data[..8] == CACHE_MAGIC;
+    let v3 = data.len() >= 8 && &data[..8] == CACHE_MAGIC_V3;
+    let v2 = v3 || (data.len() >= 8 && &data[..8] == CACHE_MAGIC);
     if data.len() < 40 || !(v2 || &data[..8] == CACHE_MAGIC_V1) {
         return Err("not a scene-render physics cache".into());
     }
@@ -750,7 +773,16 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
     let _ = nframes;
     let mut o = 40;
     // the soft bodies' point counts, then the 3D body count (version 2) and the frame count
-    if nsoft > (data.len() - o) / 8 || data.len() - o - nsoft * 8 < if v2 { 16 } else { 8 } {
+    if nsoft > (data.len() - o) / 8
+        || data.len() - o - nsoft * 8
+            < if v3 {
+                24
+            } else if v2 {
+                16
+            } else {
+                8
+            }
+    {
         return Err("truncated".into());
     }
     let mut soft_points = Vec::new();
@@ -759,6 +791,12 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
         o += 8;
     }
     let bodies3 = if v2 {
+        o += 8;
+        u64_at(o - 8) as usize
+    } else {
+        0
+    };
+    let fractures = if v3 {
         o += 8;
         u64_at(o - 8) as usize
     } else {
@@ -774,14 +812,19 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
         .try_fold(0usize, |a, n| a.checked_add(*n))
         .and_then(|n| n.checked_mul(2))
         .and_then(|n| n.checked_add(bodies.checked_mul(3)?))
-        .and_then(|n| n.checked_add(bodies3.checked_mul(7)?));
+        .and_then(|n| n.checked_add(bodies3.checked_mul(if v3 { 8 } else { 7 })?))
+        .and_then(|n| n.checked_add(fractures));
     let bytes = per.and_then(|per| per.checked_mul(frames_n)).and_then(|n| n.checked_mul(8));
     let (Some(per), Some(bytes)) = (per, bytes) else { return Err("truncated".into()) };
     if data.len() - o < bytes {
         return Err("truncated".into());
     }
-    let frames = (0..frames_n).map(|k| (0..per).map(|i| f64_at(o + (k * per + i) * 8)).collect()).collect();
-    Ok(Cached { step, start, bodies, soft_points, bodies3, frames })
+    let frames: Vec<Vec<f64>> =
+        (0..frames_n).map(|k| (0..per).map(|i| f64_at(o + (k * per + i) * 8)).collect()).collect();
+    if v3 && frames.iter().any(|row| row[per - bodies3 - fractures..].iter().any(|v| *v != 0. && *v != 1.)) {
+        return Err("invalid physics cache state flag".into());
+    }
+    Ok(Cached { step, start, bodies, soft_points, bodies3, fractures, extended: v3, frames })
 }
 
 // ------------------------------------------------------------------ particles
@@ -1068,7 +1111,7 @@ impl Attr<'_> {
     }
 }
 
-fn curve_of(e: &dyn Element, name: &str) -> crate::curve::Ease {
+pub(crate) fn curve_of(e: &dyn Element, name: &str) -> crate::curve::Ease {
     let c = text(e, name)
         .and_then(|s| sr_model::model::Curve::parse_value(&s).ok())
         .unwrap_or(sr_model::model::Curve::Linear);
@@ -1077,7 +1120,7 @@ fn curve_of(e: &dyn Element, name: &str) -> crate::curve::Ease {
 
 /// The key of asset `id` named from the document with namespace `ns`: that document's own asset,
 /// else the main document's, else the first by key that any include holds under that id.
-fn asset_key(assets: &HashMap<Arc<str>, (u16, String)>, ns: &str, id: &str) -> Arc<str> {
+pub fn asset_key(assets: &HashMap<Arc<str>, (u16, String)>, ns: &str, id: &str) -> Arc<str> {
     let own = if ns.is_empty() { id.to_string() } else { format!("{ns}/{id}") };
     if let Some((k, _)) = assets.get_key_value(own.as_str()).or_else(|| assets.get_key_value(id)) {
         return k.clone();
@@ -1203,7 +1246,7 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
     }
 }
 
-fn linear_emitter_clock(p: &Program, n: u32) -> bool {
+pub(crate) fn linear_emitter_clock(p: &Program, n: u32) -> bool {
     use crate::program::Clock;
     let Some(parent) = p.nodes[n as usize].parent else { return true };
     if !linear_emitter_clock(p, parent) {
@@ -1219,7 +1262,7 @@ fn linear_emitter_clock(p: &Program, n: u32) -> bool {
 /// Map source history back through every ancestor. A looping/remapped source
 /// uses the branch nearest this output frame; overridden child clocks also let
 /// us simulate source frames skipped by jumps, trims and freezes.
-fn source_sample(p: &Program, node: u32, mut time: f64, at: f64) -> (f64, Vec<(u32, f64)>) {
+pub(crate) fn source_sample(p: &Program, node: u32, mut time: f64, at: f64) -> (f64, Vec<(u32, f64)>) {
     use crate::program::Clock;
     let mut clocks = Vec::new();
     let mut parent = p.nodes[node as usize].parent;
@@ -1312,7 +1355,7 @@ impl EDriver<'_, '_> {
             Arc::new(crate::eval::evaluate_with_clocks(self.p, t, &clocks))
         };
         if let Some(ph) = self.physics.as_deref_mut() {
-            apply_physics(ph, Arc::make_mut(&mut g), self.graphs, self.fields, t);
+            apply_physics(self.p, ph, Arc::make_mut(&mut g), self.graphs, self.fields, t);
         }
         let v = match index_of(&g, &self.id) {
             Some(i) => (g.nodes[i].world.0, node_prop(&g.nodes[i].props, &*g.nodes[i].elem, "rate", 10.0)),
@@ -1400,6 +1443,9 @@ pub struct Runtime {
     physics: Option<PhysicsRt>,
     emitters: HashMap<Arc<str>, EmitterRt>,
     agents: crate::agents::Sims,
+    pyro: crate::pyro::Sims,
+    particles3d: crate::particles3d::Sims,
+    ocean: crate::ocean::Sims,
     /// Frame graphs without simulation, kept across frames: animated emitters sample them on the frame grid,
     /// so the previous frame's graph is still here when the next frame's steps need it.
     graph_cache: Vec<(u64, Arc<FrameGraph>)>,
@@ -1417,13 +1463,20 @@ impl std::fmt::Debug for Runtime {
 pub fn needed(p: &Program) -> bool {
     p.scene.physics.is_some()
         || p.nodes.iter().any(|n| {
-            n.name == "particleEmitter"
+            matches!(n.name, "particleEmitter" | "particles3D" | "ocean")
                 || crate::agents::is_sim(n.name)
-                || children(&*n.elem).iter().any(|c| matches!(c.element_name(), "rigidBody" | "softBody"))
+                || children(&*n.elem).iter().any(|c| matches!(c.element_name(), "rigidBody" | "softBody" | "pyro"))
         })
 }
 
-fn apply_physics(ph: &mut PhysicsRt, g: &mut FrameGraph, graphs: &mut Graphs<'_>, fields: &FieldSrc, t: f64) {
+pub(crate) fn apply_physics(
+    p: &Program,
+    ph: &mut PhysicsRt,
+    g: &mut FrameGraph,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+    t: f64,
+) {
     if t >= ph.start {
         let (frame, frame3) = if let Some(c) = &ph.cached {
             (c.frame(t), c.frame3(t))
@@ -1431,10 +1484,13 @@ fn apply_physics(ph: &mut PhysicsRt, g: &mut FrameGraph, graphs: &mut Graphs<'_>
             let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
             let frame3 = match ph.three.as_mut() {
                 Some(three) => {
-                    let mut drv = crate::sim3d::Driver { graphs, bodies: &three.bodies, fields, statics: &statics };
-                    three.world.as_mut().expect("world").frame_at(t, &mut drv).bodies
+                    let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics };
+                    let Some(world) = three.world.as_mut() else { return };
+                    let frame = world.frame_at(t, &mut drv);
+                    g.problems.extend(frame.errors.clone());
+                    frame
                 }
-                None => Vec::new(),
+                None => sr_sim::physics3d::Frame3::default(),
             };
             let frame = match ph.world.as_mut() {
                 Some(w) => {
@@ -1447,7 +1503,7 @@ fn apply_physics(ph: &mut PhysicsRt, g: &mut FrameGraph, graphs: &mut Graphs<'_>
         };
         apply_bodies(g, &ph.bodies, &frame.bodies);
         if let Some(three) = &ph.three {
-            crate::sim3d::apply(g, &three.bodies, &frame3);
+            crate::sim3d::apply(g, three, &frame3);
         }
         for (k, s) in ph.softs.iter().enumerate() {
             let Some(i) = index_of(g, &s.id) else { continue };
@@ -1479,7 +1535,7 @@ impl Runtime {
         let fields = self.fields.as_ref().expect("built");
         // ---- physics
         if let Some(ph) = self.physics.as_mut() {
-            apply_physics(ph, g, &mut graphs, fields, t);
+            apply_physics(p, ph, g, &mut graphs, fields, t);
         }
         // ---- particles
         let ids: Vec<usize> =
@@ -1512,8 +1568,13 @@ impl Runtime {
             rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
+        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
+        self.ocean.apply(p, g);
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
+        let mut pyro_problems = Vec::new();
+        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_problems);
+        g.problems.extend(pyro_problems);
         self.graph_cache = graphs.cache;
     }
 }
@@ -1611,6 +1672,9 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
     let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
     let g0 = base(start);
     let mut ph = build_physics(p, &g0, &fields, &mut problems).ok_or("the document has no physics bodies")?;
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
     if ph.cached.is_some() {
         return Err("already cached".into());
     }
@@ -1618,7 +1682,8 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
     let mut three = ph.three.take();
     let steps = (((end - start) / ph.step).ceil().max(0.0) as u64) + 1;
     let mut out = Vec::new();
-    out.extend_from_slice(CACHE_MAGIC);
+    let fractures = three.as_ref().map_or(0, |t| t.fractures.len());
+    out.extend_from_slice(if fractures == 0 { CACHE_MAGIC } else { CACHE_MAGIC_V3 });
     out.extend_from_slice(&ph.step.to_le_bytes());
     out.extend_from_slice(&start.to_le_bytes());
     out.extend_from_slice(&(ph.bodies.len() as u64).to_le_bytes());
@@ -1627,6 +1692,9 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
         out.extend_from_slice(&((s.rows * s.cols) as u64).to_le_bytes());
     }
     out.extend_from_slice(&(three.as_ref().map(|t| t.bodies.len()).unwrap_or(0) as u64).to_le_bytes());
+    if fractures > 0 {
+        out.extend_from_slice(&(fractures as u64).to_le_bytes());
+    }
     out.extend_from_slice(&steps.to_le_bytes());
     let mut graphs = Graphs { base, cache: Vec::new() };
     let statics = if fields.animated { Vec::new() } else { fields.at(start, None) };
@@ -1643,14 +1711,19 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
         let f3 = match three.as_mut() {
             Some(th) => {
                 let mut drv = crate::sim3d::Driver {
+                    p,
                     graphs: &mut graphs,
                     bodies: &th.bodies,
                     fields: &fields,
                     statics: &statics,
                 };
-                th.world.as_mut().expect("world").frame_at(t + 1e-9, &mut drv).bodies
+                let frame = th.world.as_mut().expect("world").frame_at(t, &mut drv);
+                if !frame.errors.is_empty() {
+                    return Err(frame.errors.join("; "));
+                }
+                frame
             }
-            None => Vec::new(),
+            None => sr_sim::physics3d::Frame3::default(),
         };
         for b in &f.bodies {
             for v in [b.x, b.y, b.angle] {
@@ -1663,9 +1736,14 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
                 out.extend_from_slice(&q[1].to_le_bytes());
             }
         }
-        for b in &f3 {
+        for b in &f3.bodies {
             for v in b.pos.iter().chain(&b.rot) {
                 out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        if fractures > 0 {
+            for flag in f3.enabled.iter().chain(&f3.fractured) {
+                out.extend_from_slice(&f64::from(u8::from(*flag)).to_le_bytes());
             }
         }
     }

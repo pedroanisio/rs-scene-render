@@ -208,9 +208,20 @@ pub struct FrameNode {
     /// Live particles of an emitter or agents of a flock, in frame space.
     #[serde(skip)]
     pub particles: Option<Arc<crate::sim::ParticleFrame>>,
+    /// World-space native 3D particles and instance state.
+    #[serde(skip)]
+    pub particles3d: Option<Arc<crate::particles3d::SimParticles3D>>,
+    #[serde(skip)]
+    pub sim_ocean: Option<Arc<crate::ocean::SimOcean>>,
+    /// Active fracture replaces the source mesh with these rigid pieces.
+    #[serde(skip)]
+    pub fracture: Option<Arc<crate::fracture::SimFracture>>,
     /// The picture of a grid simulation (fluid, slime, erosion), filling the node's box.
     #[serde(skip)]
     pub sim_image: Option<Arc<crate::agents::SimImage>>,
+    /// Native participating-medium simulation, in the object's local 3D frame.
+    #[serde(skip)]
+    pub sim_volume: Option<Arc<crate::pyro::SimVolume>>,
     /// A 3D rigid body's pose: the object's world matrix (column-major, scene space), replacing
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +298,9 @@ pub struct FrameGraph {
 }
 
 struct Frame<'p> {
+    /// Discovery/endpoint snapshots retain conditionally hidden nodes; ordinary
+    /// frames still determine simulation participation at each step boundary.
+    include_inactive: bool,
     p: &'p Program,
     t: f64,
     /// Time on each node's own timeline.
@@ -957,9 +971,16 @@ pub(crate) fn evaluate_for_physics(p: &Program, t: f64) -> FrameGraph {
     evaluate_inner(p, t, &[], true)
 }
 
+/// Pose sampling across a window edge, preserving an overridden source clock.
+/// Callers decide which bodies are active from the ordinary frame at step start.
+pub(crate) fn evaluate_pose_with_clocks(p: &Program, t: f64, clocks: &[(u32, f64)]) -> FrameGraph {
+    evaluate_inner(p, t, clocks, true)
+}
+
 fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: bool) -> FrameGraph {
     let n = p.nodes.len();
     let mut f = Frame {
+        include_inactive,
         p,
         t,
         tl: vec![0.0; n],
@@ -1004,7 +1025,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             Kind::Transition(_) => false,
             Kind::Plain => f.alive[n as usize],
         };
-        if !active || !f.condition(n) {
+        if !active || (!f.include_inactive && !f.condition(n)) {
             return;
         }
         let lc = f.local(n, bx);
@@ -1064,7 +1085,11 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             skin: None,
             soft: None,
             particles: None,
+            particles3d: None,
+            sim_ocean: None,
+            fracture: None,
             sim_image: None,
+            sim_volume: None,
             pose3: None,
             elem: node.elem.clone(),
         });

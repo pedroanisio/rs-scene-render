@@ -21,18 +21,24 @@ use crate::program::Program;
 use crate::sim::{index_of, num, opt, text, FieldSrc, Graphs};
 
 /// A simulated object.
+#[derive(Clone)]
 pub(crate) struct Body3Node {
+    fragment: bool,
+    sequence_budget: Option<usize>,
     pub(crate) id: Arc<str>,
     /// The object's scale at the start (x, y, z).
     scale: [f64; 3],
     /// Ancestor windows and clocks, from the composition down to this object.
     windows: Vec<(f64, Option<f64>, crate::program::Clock)>,
+    /// Undeformed object-space surface; each substep maps this original mesh.
+    crater_surface: Option<Triangles>,
 }
 
 /// The 3D world of a document.
 pub(crate) struct Phys3 {
     pub(crate) world: Option<World3>,
     pub(crate) bodies: Vec<Body3Node>,
+    pub(crate) fractures: Vec<FractureNode>,
 }
 
 fn attr(n: &FrameNode, name: &str, d: f64) -> f64 {
@@ -84,7 +90,11 @@ pub(crate) fn world3(g: &FrameGraph, i: usize, depth: u32) -> DMat4 {
     if depth < 32 {
         if let Some((pid, w)) = parent3(&*n.elem) {
             if let Some(j) = index_of(g, &pid) {
-                let pw = if g.nodes[j].kind == "object3D" { world3(g, j, depth + 1) } else { embed(&g.nodes[j].world) };
+                let pw = if matches!(g.nodes[j].kind, "object3D" | "particles3D" | "ocean") {
+                    world3(g, j, depth + 1)
+                } else {
+                    embed(&g.nodes[j].world)
+                };
                 return toward(pw, w) * own;
             }
         }
@@ -117,10 +127,10 @@ fn compose(p: &Pose3, s: [f64; 3]) -> DMat4 {
 // ------------------------------------------------------------------ shapes
 
 /// Points and triangles.
-type Triangles = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+pub(crate) type Triangles = (Vec<[f64; 3]>, Vec<[u32; 3]>);
 
 /// The local file of mesh asset `key` and its declared format.
-fn mesh_path(p: &Program, key: &str) -> Result<(std::path::PathBuf, Option<String>), String> {
+pub(crate) fn mesh_path(p: &Program, key: &str) -> Result<(std::path::PathBuf, Option<String>), String> {
     let (doc, id) = p.assets.get(key).ok_or_else(|| format!("asset {key} not found"))?;
     let scene = if *doc == 0 { &p.scene } else { &p.includes.get(*doc as usize - 1).ok_or("include missing")?.1 };
     let a = scene
@@ -142,7 +152,17 @@ fn mesh_path(p: &Program, key: &str) -> Result<(std::path::PathBuf, Option<Strin
 /// Triangles of a mesh asset in object space (the model's rest pose, in scene axes).
 fn mesh_triangles(p: &Program, n: &FrameNode) -> Result<Triangles, String> {
     let key = n.asset.as_deref().map(str::to_string).or_else(|| text(&*n.elem, "mesh")).ok_or("no @mesh")?;
-    let (path, fmt) = mesh_path(p, &key)?;
+    mesh_asset_triangles(p, &key, usize::MAX)
+}
+
+/// Shared rest-pose geometry in scene axes. The flattened geometry and input
+/// file are bounded before copying. Importer-internal/material allocations
+/// retain the existing mesh importer's resource behavior.
+pub(crate) fn mesh_asset_triangles(p: &Program, key: &str, max_bytes: usize) -> Result<Triangles, String> {
+    let (path, fmt) = mesh_path(p, key)?;
+    if std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len() > max_bytes as u64 {
+        return Err(format!("{}: mesh file exceeds geometry budget", path.display()));
+    }
     let model = match sr_3d::import::load(&path, fmt.as_deref())? {
         sr_3d::Asset::Model(m) => m,
         sr_3d::Asset::Splats(_) => return Err("splats have no surface to collide with".into()),
@@ -154,9 +174,24 @@ fn mesh_triangles(p: &Program, n: &FrameNode) -> Result<Triangles, String> {
         let m = model.basis * worlds[k];
         for &pi in &nd.primitives {
             let prim = &model.primitives[pi];
+            let vertices = pts.len().checked_add(prim.vertices.len()).ok_or("mesh vertex count overflow")?;
+            let triangles = tris.len().checked_add(prim.indices.len() / 3).ok_or("mesh triangle count overflow")?;
+            let bytes = vertices
+                .checked_mul(24)
+                .and_then(|v| triangles.checked_mul(12).and_then(|t| v.checked_add(t)))
+                .ok_or("mesh geometry size overflow")?;
+            if bytes > max_bytes || vertices > u32::MAX as usize {
+                return Err("flattened mesh exceeds geometry budget".into());
+            }
             let base = pts.len() as u32;
             pts.extend(prim.vertices.iter().map(|v| m.transform_point3(glam::Vec3::from(v.pos)).as_dvec3().to_array()));
-            tris.extend(prim.indices.as_chunks::<3>().0.iter().map(|t| [base + t[0], base + t[1], base + t[2]]));
+            tris.extend(prim.indices.as_chunks::<3>().0.iter().map(|t| {
+                if m.determinant() < 0.0 {
+                    [base + t[0], base + t[2], base + t[1]]
+                } else {
+                    [base + t[0], base + t[1], base + t[2]]
+                }
+            }));
         }
     }
     if tris.is_empty() {
@@ -180,14 +215,79 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     let hh = opt(e, "height");
     let depth = num(e, "depth", 10.0);
     let segs = num(e, "segments", 32.0).clamp(3.0, 512.0) as u32;
+    let crater = children(e).into_iter().any(|c| c.element_name() == "crater");
+    if crater {
+        let admission = (|| -> Result<(), String> {
+            let crater = crate::crater::at(n)?.ok_or("missing crater")?;
+            let s = segs as usize;
+            let grid = |u: usize, v: usize| ((u + 1) * (v + 1), 2 * u * v);
+            let counts = match kind.as_str() {
+                "plane" => {
+                    let s = num(e, "segments", 32.).clamp(1., 1024.) as usize;
+                    Some(grid(s, s))
+                }
+                "sphere" | "globe" => Some(grid(s, (s / 2).max(2))),
+                "capsule" => Some(grid(s, 2 * (s / 2).max(2) + 1)),
+                "torus" => Some(grid(s, (s / 2).max(3))),
+                "box" => Some((24, 12)),
+                "cylinder" => Some((4 * s + 6, 4 * s)),
+                "cone" => Some((3 * s + 4, 3 * s)),
+                _ => None,
+            };
+            if let Some((vertices, triangles)) = counts {
+                let bytes = sr_sim::physics3d::ColliderUpdate3::required_bytes(vertices, triangles)
+                    .ok_or("crater collider memory overflow")?;
+                if bytes > crater.max_bytes {
+                    return Err("crater collider exceeds memory budget".into());
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = admission {
+            problems.push(format!("{}: {error}", n.id));
+            return Shape3::Sphere(1.);
+        }
+    }
     let [sx, sy, sz] = s.map(f64::abs);
     let uniform = (sx - sy).abs() <= 1e-9 * sx.max(1.0) && (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     let round_xz = (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     // the object's triangles (object space, unscaled)
     let triangles = |problems: &mut Vec<String>| -> Option<Triangles> {
+        if kind == "globe" && text(e, "terrain").is_some() {
+            let budget = (num(e, "terrainMemoryMiB", 128.) as usize).saturating_mul(1 << 20);
+            let geometry = p
+                .nodes
+                .iter()
+                .find(|node| node.id == n.id)
+                .ok_or("globe collider missing".to_string())
+                .and_then(|node| crate::terrain::collider_triangles(p, node, budget));
+            return match geometry {
+                Ok(t) => Some(t),
+                Err(err) => {
+                    problems.push(format!("{}: rigidBody: {err}", n.id));
+                    None
+                }
+            };
+        }
         let prim = match kind.as_str() {
+            "clay" | "text" => match if kind == "clay" {
+                crate::solid::clay_mesh(n, 256 << 20)
+            } else {
+                crate::solid::text_mesh(p, n, 256 << 20)
+            } {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    problems.push(format!("{}: rigidBody: {error}", n.id));
+                    return None;
+                }
+            },
             "sphere" | "globe" => sr_3d::prim::sphere(r as f32, segs),
             "box" => sr_3d::prim::cuboid(w as f32, hh.unwrap_or(2.0 * r) as f32, depth as f32),
+            "plane" if crater => sr_3d::prim::plane(
+                w as f32,
+                hh.unwrap_or(2.0 * r) as f32,
+                num(e, "segments", 32.0).clamp(1.0, 1024.0) as u32,
+            ),
             "plane" => sr_3d::prim::cuboid(w as f32, hh.unwrap_or(2.0 * r) as f32, 1.0),
             "cylinder" => sr_3d::prim::cylinder(r as f32, r as f32, hh.unwrap_or(2.0 * r) as f32, segs),
             "cone" => sr_3d::prim::cylinder(0.0, r as f32, hh.unwrap_or(2.0 * r) as f32, segs),
@@ -225,6 +325,21 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         };
         Some(prim_triangles(&prim))
     };
+    if crater {
+        // Deformation requires the actual tessellated surface, even for shapes
+        // normally represented by analytic collision primitives.
+        return match triangles(problems) {
+            Some((points, mut triangles)) => {
+                if s.iter().product::<f64>() < 0. {
+                    for triangle in &mut triangles {
+                        triangle.swap(1, 2);
+                    }
+                }
+                Shape3::TriMesh(points.into_iter().map(|q| std::array::from_fn(|i| q[i] * s[i])).collect(), triangles)
+            }
+            None => Shape3::Sphere(r),
+        };
+    }
     let scaled =
         |(pts, tris): Triangles| (pts.into_iter().map(|q| [q[0] * sx, q[1] * sy, q[2] * sz]).collect::<Vec<_>>(), tris);
     let hull = |problems: &mut Vec<String>| match triangles(problems) {
@@ -260,6 +375,18 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         },
         // auto: the primitive's own form where one fits, else its convex hull
         _ => match kind.as_str() {
+            "globe" if text(e, "terrain").is_some() => match triangles(problems) {
+                Some((points, mut triangles)) => {
+                    let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
+                    if s.iter().product::<f64>() < 0. {
+                        for t in &mut triangles {
+                            t.swap(1, 2);
+                        }
+                    }
+                    Shape3::TriMesh(points, triangles)
+                }
+                None => Shape3::Sphere(r * sx.max(sy).max(sz)),
+            },
             "box" | "plane" => Shape3::Box(box_dims()),
             "sphere" | "globe" if uniform => Shape3::Sphere(r * sx),
             "cylinder" if round_xz => Shape3::Cylinder(tall * 0.5 * sy, r * sx),
@@ -268,7 +395,22 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 let total = hh.unwrap_or(4.0 * r).max(2.0 * r);
                 Shape3::Capsule((total * 0.5 - r).max(0.0) * sy, r * sx)
             }
-            "text" => Shape3::Box(box_dims()),
+            "text" | "clay" | "extrude" => match triangles(problems) {
+                Some((points, mut triangles)) => {
+                    let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
+                    if s.iter().product::<f64>() < 0. {
+                        for triangle in &mut triangles {
+                            triangle.swap(1, 2);
+                        }
+                    }
+                    if matches!(text(b, "type").as_deref(), Some("static" | "kinematic")) {
+                        Shape3::TriMesh(points, triangles)
+                    } else {
+                        Shape3::Decomposition(points, triangles)
+                    }
+                }
+                None => Shape3::Sphere(r * sx.max(sy).max(sz)),
+            },
             _ => hull(problems),
         },
     }
@@ -313,7 +455,32 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             None | Some("all") => None,
             Some(list) => Some(list.split([' ', ',']).filter_map(|t| t.trim().parse::<u32>().ok()).collect()),
         };
-        let shape = if cached { Shape3::Sphere(1.0) } else { shape_for(p, n, c, scale, problems) };
+        let sequence_budget = children(&*n.elem)
+            .into_iter()
+            .find(|c| c.element_name() == "fracture")
+            .filter(|_| {
+                n.asset.as_deref().and_then(|key| p.assets.get(key)).is_some_and(|(doc, id)| {
+                    let scene = if *doc == 0 { &p.scene } else { &p.includes[*doc as usize - 1].1 };
+                    scene.assets.as_ref().is_some_and(|a| {
+                        a.children
+                            .iter()
+                            .any(|a| matches!(a,sr_model::model::AssetsChild::MeshSequence(v) if &v.id==id))
+                    })
+                })
+            })
+            .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
+        let shape =
+            if cached || sequence_budget.is_some() { Shape3::Sphere(1.0) } else { shape_for(p, n, c, scale, problems) };
+        let crater_surface = if children(&*n.elem).into_iter().any(|c| c.element_name() == "crater") {
+            match &shape {
+                Shape3::TriMesh(points, triangles) => {
+                    Some((points.iter().map(|p| std::array::from_fn(|i| p[i] / scale[i])).collect(), triangles.clone()))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         specs.push(Body3Spec {
             kind,
             shape,
@@ -349,10 +516,83 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             index = node.parent.map(|i| i as usize);
         }
         windows.reverse();
-        bodies.push(Body3Node { id: n.id.clone(), scale, windows });
+        bodies.push(Body3Node { id: n.id.clone(), scale, windows, crater_surface, fragment: false, sequence_budget });
     }
     if bodies.is_empty() {
         return None;
+    }
+    let mut fractures = Vec::new();
+    let mut events = Vec::new();
+    let real_count = bodies.len();
+    for source in 0..real_count {
+        let n = &g0.nodes[index_of(g0, &bodies[source].id).expect("source")];
+        let Some(config) =
+            children(&*n.elem).into_iter().find_map(|c| c.as_any().downcast_ref::<sr_model::model::Fracture>())
+        else {
+            continue;
+        };
+        let prepare = || -> Result<_, String> {
+            let start = ph.map_or(0., |p| p.start);
+            let step = ph.map_or(1. / 120., |p| p.fixed_step.get());
+            let at = num(config, "at", 0.).max(start);
+            let mut boundary = ((at - start) / step).ceil();
+            let mut release = start + boundary * step;
+            let mut found = false;
+            for _ in 0..1_000_000 {
+                if release >= at && enabled(&bodies[source], release) {
+                    found = true;
+                    break;
+                }
+                boundary += 1.;
+                release = start + boundary * step;
+            }
+            if !found {
+                return Err("fracture source has no eligible boundary within seek work allowance".into());
+            }
+            let graph = crate::eval::evaluate_for_physics(p, release);
+            let sample = &graph.nodes[index_of(&graph, &n.id).ok_or("fracture source missing at release")?];
+            crate::fracture::prepare(p, sample, bodies[source].scale, config, specs[source].mass)
+        };
+        let geometry = match prepare() {
+            Ok(g) => g,
+            Err(e) => {
+                problems.push(format!("{}: {e}", n.id));
+                continue;
+            }
+        };
+        let mut fragments = Vec::new();
+        let mut indices = Vec::new();
+        let impulse = [num(config, "impulseX", 0.), num(config, "impulseY", 0.), num(config, "impulseZ", 0.)];
+        for piece in &geometry.pieces {
+            let index = specs.len();
+            let mut spec = specs[source].clone();
+            spec.kind = BodyKind::Dynamic;
+            spec.shape = piece.shape.clone();
+            spec.mass = piece.mass;
+            spec.velocity = [0.; 3];
+            spec.angular_velocity = [0.; 3];
+            spec.activate_at = ph.map_or(0., |p| p.start);
+            specs.push(spec);
+            let mut body = bodies[source].clone();
+            body.sequence_budget = None;
+            body.fragment = true;
+            body.crater_surface = None;
+            body.scale = [1.; 3];
+            bodies.push(body);
+            fragments.push(sr_sim::physics3d::Fragment3 {
+                body: index,
+                offset: piece.offset,
+                impulse: impulse.map(|v| v * piece.mass / specs[source].mass),
+            });
+            indices.push(index);
+        }
+        events.push(sr_sim::physics3d::Fracture3 {
+            source,
+            at: num(config, "at", 0.).max(ph.map_or(0., |p| p.start)),
+            radial_impulse: num(config, "radialImpulse", 0.),
+            fragments,
+        });
+        fractures.push(FractureNode { source, indices, geometry });
     }
     let mut joints = Vec::new();
     for c in ph.map(|p| &p.children[..]).unwrap_or(&[]) {
@@ -415,7 +655,7 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
         }
     }
     if cached {
-        return Some(Phys3 { world: None, bodies });
+        return Some(Phys3 { world: None, bodies, fractures });
     }
     let [fw, fh] = p.size;
     let bounds = match ph.map(|p| p.bounds.to_string()).as_deref() {
@@ -437,12 +677,20 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
         bodies: specs,
         joints,
     };
-    Some(Phys3 { world: Some(World3::new(spec)), bodies })
+    let world = match World3::new(spec).with_fractures(events) {
+        Ok(world) => Some(world),
+        Err(e) => {
+            problems.push(e.to_string());
+            None
+        }
+    };
+    Some(Phys3 { world, bodies, fractures })
 }
 
 // ------------------------------------------------------------------ stepping
 
 pub(crate) struct Driver<'a, 'b> {
+    pub(crate) p: &'a Program,
     pub(crate) graphs: &'a mut Graphs<'b>,
     pub(crate) bodies: &'a [Body3Node],
     pub(crate) fields: &'a FieldSrc,
@@ -450,14 +698,72 @@ pub(crate) struct Driver<'a, 'b> {
 }
 
 impl Driver3 for Driver<'_, '_> {
-    fn enabled(&mut self, mut t: f64, which: usize) -> bool {
-        for (start, end, clock) in &self.bodies[which].windows {
-            if t < *start || end.is_some_and(|end| t >= end) {
-                return false;
+    fn collider(
+        &mut self,
+        t: f64,
+        which: usize,
+        revision: Option<u64>,
+    ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
+        let body = &self.bodies[which];
+        if let Some(budget) = body.sequence_budget {
+            use std::hash::{Hash, Hasher};
+            let graph = self.graphs.at(t);
+            let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
+            let (sources, _) = crate::fracture::source::load(self.p, &graph.nodes[i], body.scale, budget)?;
+            let mut vertices = Vec::new();
+            let mut triangles = Vec::new();
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            for mesh in sources {
+                let offset = vertices.len() as u32;
+                for v in mesh.vertices {
+                    v.pos.map(f32::to_bits).hash(&mut hash);
+                    vertices.push(v.pos.map(f64::from));
+                }
+                for t in mesh.indices.as_chunks::<3>().0 {
+                    triangles.push(t.map(|i| i + offset));
+                }
             }
-            t = crate::eval::clock_map(clock, t);
+            triangles.hash(&mut hash);
+            let key = hash.finish();
+            if revision == Some(key) {
+                return Ok(None);
+            }
+            return Ok(Some(sr_sim::physics3d::ColliderUpdate3 {
+                revision: key,
+                vertices,
+                triangles,
+                max_bytes: budget,
+            }));
         }
-        true
+        let Some((points, triangles)) = &body.crater_surface else { return Ok(None) };
+        let graph = self.graphs.at(t);
+        let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
+        let Some(crater) = crate::crater::at(&graph.nodes[i])? else { return Ok(None) };
+        let current = crater.progress.to_bits();
+        if revision == Some(current) {
+            return Ok(None);
+        }
+        let bytes = sr_sim::physics3d::ColliderUpdate3::required_bytes(points.len(), triangles.len())
+            .ok_or("crater collider memory overflow")?;
+        if bytes > crater.max_bytes {
+            return Err(format!("{}: crater collider exceeds memory budget", body.id));
+        }
+        let vertices = points
+            .iter()
+            .map(|&p| {
+                crater.kernel.map(p, crater.progress).map(|m| std::array::from_fn(|i| m.position[i] * body.scale[i]))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(sr_sim::physics3d::ColliderUpdate3 {
+            revision: current,
+            vertices,
+            triangles: triangles.clone(),
+            max_bytes: crater.max_bytes,
+        }))
+    }
+
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        enabled(&self.bodies[which], t)
     }
 
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
@@ -472,11 +778,53 @@ impl Driver3 for Driver<'_, '_> {
     }
 }
 
-/// Sets each body's pose on its node.
-pub(crate) fn apply(g: &mut FrameGraph, bodies: &[Body3Node], poses: &[Pose3]) {
-    for (b, pose) in bodies.iter().zip(poses) {
+pub(crate) struct FractureNode {
+    source: usize,
+    indices: Vec<usize>,
+    geometry: Arc<crate::fracture::Geometry>,
+}
+
+fn enabled(body: &Body3Node, mut t: f64) -> bool {
+    for (start, end, clock) in &body.windows {
+        if t < *start || end.is_some_and(|end| t >= end) {
+            return false;
+        }
+        t = crate::eval::clock_map(clock, t);
+    }
+    true
+}
+
+/// Sets source poses and the active fracture snapshot, preserving piece visibility.
+pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d::Frame3) {
+    use std::hash::{Hash, Hasher};
+    for (b, pose) in three.bodies.iter().zip(&frame.bodies) {
+        if b.fragment {
+            continue;
+        }
         let Some(i) = index_of(g, &b.id) else { continue };
         g.nodes[i].pose3 = Some(compose(pose, b.scale).to_cols_array());
+    }
+    for (k, fracture) in three.fractures.iter().enumerate() {
+        if !frame.fractured.get(k).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(i) = index_of(g, &three.bodies[fracture.source].id) else { continue };
+        let poses: Vec<_> = fracture.indices.iter().map(|&i| frame.bodies[i]).collect();
+        let enabled: Vec<_> = fracture.indices.iter().map(|&i| frame.enabled[i]).collect();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        fracture.geometry.key.hash(&mut hash);
+        enabled.hash(&mut hash);
+        for pose in &poses {
+            for v in pose.pos.iter().chain(&pose.rot) {
+                v.to_bits().hash(&mut hash);
+            }
+        }
+        g.nodes[i].fracture = Some(Arc::new(crate::fracture::SimFracture {
+            key: hash.finish(),
+            geometry: fracture.geometry.clone(),
+            poses,
+            enabled,
+        }));
     }
 }
 

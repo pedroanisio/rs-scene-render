@@ -445,6 +445,8 @@ pub struct BeatGrid {
 pub struct Program {
     /// Allocation identity retained by downstream caches across moves and document reloads.
     identity: Arc<()>,
+    /// Imported animation frames live only as long as their compiled scene.
+    pub(crate) mesh_sequence_cache: std::sync::Mutex<crate::mesh_sequence::Cache>,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -1244,8 +1246,10 @@ impl Builder {
             let seed = attr_num(e, "seed").map(|s| s as u64).unwrap_or_else(|| crate::rng::hash_str(&id));
             let asset_ref = match name {
                 "layer" => attr_str(e, "asset"),
-                // 3D objects reference mesh assets
-                "object3D" => attr_str(e, "mesh"),
+                // Shared assets retain their namespace when objects occur in included documents.
+                "object3D" if attr_str(e, "primitive").as_deref() == Some("volume") => attr_str(e, "volume"),
+                "object3D" | "particles3D" => attr_str(e, "mesh"),
+                "ocean" => attr_str(e, "bathymetry"),
                 _ => None,
             };
             let asset = asset_ref.map(|a| {
@@ -1254,12 +1258,32 @@ impl Builder {
                 self.assets.insert(key.clone(), (ctx.doc, a));
                 key
             });
-            if name == "particleEmitter" {
+            if matches!(name, "particleEmitter" | "particles3D") {
                 // sprites and emission masks are image assets too
-                for r in [attr_str(e, "sprite"), attr_str(e, "emitterAsset")].into_iter().flatten() {
+                for r in [attr_str(e, "sprite"), attr_str(e, "emitterAsset"), attr_str(e, "emitterMesh")]
+                    .into_iter()
+                    .flatten()
+                {
                     let ns = &self.doc(ctx.doc).ns;
                     let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
                     self.assets.insert(key, (ctx.doc, r));
+                }
+            }
+            if name == "object3D" {
+                if let Some(r) = attr_str(e, "terrain") {
+                    let ns = &self.doc(ctx.doc).ns;
+                    let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                    self.assets.insert(key, (ctx.doc, r));
+                }
+                for pyro in sr_model::element::children(e).into_iter().filter(|c| c.element_name() == "pyro") {
+                    for source in sr_model::element::children(pyro) {
+                        if let Some(r) = attr_str(source, "mesh") {
+                            let ns = &self.doc(ctx.doc).ns;
+                            let key: Arc<str> =
+                                if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                            self.assets.insert(key, (ctx.doc, r));
+                        }
+                    }
                 }
             }
             let node = InstNode {
@@ -1279,7 +1303,11 @@ impl Builder {
                 media: None,
                 tf,
                 tf_slots: TfSlots::default(),
-                z: if matches!(name, "object3D" | "camera") { 0 } else { attr_num(e, "z").unwrap_or(0.0) as i32 },
+                z: if matches!(name, "object3D" | "particles3D" | "ocean" | "camera") {
+                    0
+                } else {
+                    attr_num(e, "z").unwrap_or(0.0) as i32
+                },
                 z_slot: None,
                 restack: false,
                 three_d: attr_bool(e, "threeD").unwrap_or(false),
@@ -2274,6 +2302,64 @@ impl Builder {
             if let Some(mt) = matte_attr {
                 self.nodes[n].matte = self.resolve(&scope, &mt);
             }
+            // The 3D renderer and simulation read these links from the element
+            // snapshot, rather than the 2D parent_link. Resolve them once here
+            // using the compiler's lexical scope, including targets omitted by
+            // a frame condition; a hidden local target must not bind globally.
+            let parent = self.nodes[n].parent_link.map(|i| self.nodes[i as usize].id.clone());
+            let constraints: HashMap<String, Arc<str>> = sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "transformConstraint")
+                .filter_map(|e| attr_str(e, "target"))
+                .filter_map(|id| self.resolve(&scope, &id).map(|i| (id, self.nodes[i as usize].id.clone())))
+                .collect();
+            let mut lists: Vec<_> = sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "pyro")
+                .filter_map(|e| attr_str(e, "colliders").map(|s| (s, e.loc())))
+                .collect();
+            if self.nodes[n].name == "particles3D" {
+                if let Some(list) = attr_str(&*self.nodes[n].elem, "colliders") {
+                    lists.push((list, self.nodes[n].elem.loc()));
+                }
+            }
+            let mut colliders = HashMap::new();
+            for (list, loc) in lists {
+                let mut resolved = Vec::new();
+                for id in list.split_whitespace() {
+                    match self.resolve(&scope, id) {
+                        Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
+                        None => self.diags.push(err(
+                            "E11",
+                            format!("pyro collider {id:?} is not instantiated in this scope"),
+                            loc,
+                            &*self.nodes[n].id,
+                        )),
+                    }
+                }
+                colliders.insert(list, resolved.join(" "));
+            }
+            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() {
+                let elem = Arc::make_mut(&mut self.nodes[n].elem);
+                if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
+                    elem.set_attr("colliders", list).expect("resolved particle colliders");
+                }
+                if let Some(parent) = parent {
+                    elem.set_attr("parent", &parent).expect("resolved string parent attribute");
+                }
+                elem.visit_mut(&mut |child| {
+                    if child.element_name() == "transformConstraint" {
+                        if let Some(target) = attr_str(child, "target").and_then(|id| constraints.get(&id)) {
+                            child.set_attr("target", target).expect("resolved string constraint target");
+                        }
+                    }
+                    if child.element_name() == "pyro" {
+                        if let Some(list) = attr_str(child, "colliders").and_then(|list| colliders.get(&list)) {
+                            child.set_attr("colliders", list).expect("resolved collider token list");
+                        }
+                    }
+                });
+            }
         }
         // Overrides and symbol expansion can introduce matte cycles absent from the source XML.
         let children: Vec<Vec<usize>> =
@@ -2737,7 +2823,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let zs: Vec<i32> = b.nodes.iter().map(|n| n.z).collect();
     // an animated `z` (keys, expression or link) restacks its siblings every frame
     for i in 0..b.nodes.len() {
-        if matches!(b.nodes[i].name, "object3D" | "camera") {
+        if matches!(b.nodes[i].name, "object3D" | "particles3D" | "ocean" | "camera") {
             continue;
         }
         b.nodes[i].z_slot = b.nodes[i].slots.iter().copied().find(|&s| {
@@ -2794,6 +2880,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
     Ok(Program {
         identity: Arc::new(()),
+        mesh_sequence_cache: Default::default(),
         base_dirs,
         safe_area,
         scene: (*scene).clone(),

@@ -19,18 +19,26 @@
 pub mod agents;
 pub mod channel;
 pub mod codes;
+pub mod crater;
 pub mod curve;
 pub mod data;
 pub mod eval;
 pub mod expr;
+pub mod fracture;
 pub mod geo;
 pub mod layout;
+pub mod mesh_sequence;
+pub mod ocean;
+pub mod particles3d;
 pub mod path;
 pub mod program;
+pub mod pyro;
 pub mod rig;
 pub mod rng;
 pub mod sim;
 mod sim3d;
+pub mod solid;
+pub mod terrain;
 pub mod value;
 
 /// Closest candidate within a small edit distance ("did you mean").
