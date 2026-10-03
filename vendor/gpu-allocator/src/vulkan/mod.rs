@@ -5,6 +5,8 @@ use core::{fmt, marker::PhantomData};
 #[cfg(feature = "std")]
 use std::backtrace::Backtrace;
 
+mod memory_type;
+
 use ash::vk;
 use log::{debug, Level};
 
@@ -817,8 +819,11 @@ impl Allocator {
             }
             MemoryLocation::Unknown => vk::MemoryPropertyFlags::empty(),
         };
-        let mut memory_type_index_opt =
-            self.find_memorytype_index(&desc.requirements, mem_loc_preferred_bits);
+        let mut memory_type_index_opt = if desc.location == MemoryLocation::CpuToGpu {
+            self.find_upload_memorytype(&desc.requirements, None)
+        } else {
+            self.find_memorytype_index(&desc.requirements, mem_loc_preferred_bits)
+        };
 
         if memory_type_index_opt.is_none() {
             let mem_loc_required_bits = match desc.location {
@@ -855,15 +860,14 @@ impl Allocator {
 
         if desc.location == MemoryLocation::CpuToGpu {
             if allocation.is_err() {
-                let mem_loc_preferred_bits =
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
+                // Retry another compatible heap, never the type that just failed. This also
+                // retains a device-local fallback on UMA or when host memory is exhausted.
                 let memory_type_index_opt =
-                    self.find_memorytype_index(&desc.requirements, mem_loc_preferred_bits);
+                    self.find_upload_memorytype(&desc.requirements, Some(memory_type_index as u32));
 
                 let memory_type_index = match memory_type_index_opt {
                     Some(x) => x as usize,
-                    None => return Err(AllocationError::NoCompatibleMemoryTypeFound),
+                    None => return allocation,
                 };
 
                 self.memory_types[memory_type_index].allocate(
@@ -931,6 +935,16 @@ impl Allocator {
                 }
             }
         }
+    }
+
+    fn find_upload_memorytype(&self, requirements: &vk::MemoryRequirements, skip: Option<u32>) -> Option<u32> {
+        memory_type::upload_type(
+            self.memory_types.iter().map(|m| (m.memory_type_index as u32, m.memory_properties.as_raw())),
+            requirements.memory_type_bits,
+            (vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).as_raw(),
+            vk::MemoryPropertyFlags::DEVICE_LOCAL.as_raw(),
+            skip,
+        )
     }
 
     fn find_memorytype_index(

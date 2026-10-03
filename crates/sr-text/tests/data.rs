@@ -510,3 +510,31 @@ fn caption_source_breaks_keep_karaoke_and_highlight_word_indices() {
         }
     }
 }
+
+#[test]
+fn captions_reject_partial_records_and_invalid_ranges() {
+    for input in [
+        r#"{"segments":[{"start":0,"text":"lost"}]}"#,
+        r#"{"words":[{"start":0,"end":1,"text":"ok"},{"start":1,"text":"lost"}]}"#,
+        r#"{"segments":[{"start":0,"end":2,"text":"hello world","words":[{"start":0,"end":1,"text":"hello"},{"start":1,"text":"world"}]}]}"#,
+        r#"{"words":[{"start":2,"end":1,"text":"backwards"}]}"#,
+        r#"{"words":[{"start":-1,"end":1,"text":"negative"}]}"#,
+        r#"{"segments":[{"start":0,"end":1,"words":"invalid"}]}"#,
+        r#"{"segments":[{"start":0,"end":1,"text":42}]}"#,
+        r#"{"words":[{"start":0,"end":1,"text":"hi","emphasis":"yes"}]}"#,
+    ] {
+        assert!(captions::from_transcript(input).is_err(), "accepted {input}");
+    }
+    for timing in ["00:00:NaN --> 00:00:01", "00:00:02 --> 00:00:01", "-1 --> 1", "0 --> inf"] {
+        assert!(captions::parse(&format!("1\n{timing}\ntext\n"), "srt").is_err(), "accepted {timing}");
+    }
+    // Silence and zero-duration word markers are valid; overlapping spans may be intentional.
+    assert!(captions::from_transcript(r#"{"words":[]}"#).unwrap().is_empty());
+    assert_eq!(
+        captions::from_transcript(r#"{"words":[{"start":0,"end":0,"word":"hi"},{"start":0,"end":1,"text":"there"}]}"#)
+            .unwrap()[0]
+            .words
+            .len(),
+        2
+    );
+}

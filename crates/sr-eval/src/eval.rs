@@ -338,7 +338,7 @@ pub(crate) fn in_window(p: &Program, n: u32, t: f64) -> bool {
     true
 }
 
-fn clock_map(c: &Clock, t: f64) -> f64 {
+pub(crate) fn clock_map(c: &Clock, t: f64) -> f64 {
     match c {
         Clock::Same => t,
         Clock::Affine { origin, offset, scale } => origin + (t - origin - offset) * scale,
@@ -949,6 +949,15 @@ pub fn evaluate(p: &Program, t: f64) -> FrameGraph {
 /// Sample source history that a remap jumps over or a freeze holds. Composition
 /// properties still use `t`; the supplied container clocks drive their children.
 pub(crate) fn evaluate_with_clocks(p: &Program, t: f64, clocks: &[(u32, f64)]) -> FrameGraph {
+    evaluate_inner(p, t, clocks, false)
+}
+
+/// Discover physics bodies even when their render windows have not started yet.
+pub(crate) fn evaluate_for_physics(p: &Program, t: f64) -> FrameGraph {
+    evaluate_inner(p, t, &[], true)
+}
+
+fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: bool) -> FrameGraph {
     let n = p.nodes.len();
     let mut f = Frame {
         p,
@@ -962,6 +971,9 @@ pub(crate) fn evaluate_with_clocks(p: &Program, t: f64, clocks: &[(u32, f64)]) -
         memo: Memo::default(),
     };
     f.timelines(clocks);
+    if include_inactive {
+        f.alive.fill(true);
+    }
     f.slots();
 
     struct Out {

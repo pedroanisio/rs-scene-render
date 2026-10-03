@@ -141,6 +141,12 @@ pub struct World3Spec {
 
 /// Animated inputs, asked for at simulation-step times.
 pub trait Driver3 {
+    /// Whether the body participates at composition time `t`. Invisible future bodies must
+    /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
+    fn enabled(&mut self, _t: f64, _which: usize) -> bool {
+        true
+    }
+
     /// Poses of the bodies that follow animation at `t`.
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3>;
     /// Force fields at `t` (pixel space, scene axes).
@@ -417,12 +423,53 @@ impl World3 {
         w
     }
 
+    /// Synchronize birth/departure before stepping and at sample boundaries. On birth, take
+    /// the animated pose at that time rather than the transform at physics initialization.
+    fn sync_visibility(&mut self, t: f64, driver: &mut dyn Driver3) {
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let mut born = false;
+        for (k, spec) in self.spec.bodies.iter().enumerate() {
+            let enabled = driver.enabled(t, k);
+            let handle = self.state.handles[k];
+            if enabled == self.state.bodies[handle].is_enabled() {
+                continue;
+            }
+            let body = &mut self.state.bodies[handle];
+            body.set_enabled(enabled);
+            if enabled {
+                born = true;
+                if let Some(pose) = driver.kinematic(t, &[k]).first() {
+                    body.set_position(
+                        Pose::from_parts(vec3(flip(pose.pos).map(|c| c / ppm)), quat(flip_q(pose.rot))),
+                        true,
+                    );
+                }
+                body.set_linvel(vec3(flip(spec.velocity).map(|c| c / ppm)), true);
+                body.set_angvel(vec3(flip(spec.angular_velocity.map(f64::to_radians))), true);
+            }
+        }
+        // Newly enabled scenery may overlap a sleeping island that had no contact edge
+        // while the scenery was disabled. Wake it so narrow-phase contacts get solved.
+        if born {
+            for &handle in &self.state.handles {
+                let body = &mut self.state.bodies[handle];
+                if body.is_enabled() && body.is_dynamic() {
+                    body.wake_up(true);
+                }
+            }
+        }
+    }
+
     fn step_once(&mut self, driver: &mut dyn Driver3) {
+        let t = self.spec.start + self.state.step as f64 * self.spec.step;
+        self.sync_visibility(t, driver);
         let st = &mut self.state;
-        let t = self.spec.start + st.step as f64 * self.spec.step;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         let mut follow = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {
+            if !st.bodies[st.handles[k]].is_enabled() {
+                continue;
+            }
             if b.kind == BodyKind::Dynamic && !st.active[k] && t >= b.activate_at {
                 let body = &mut st.bodies[st.handles[k]];
                 body.set_body_type(RigidBodyType::Dynamic, true);
@@ -447,7 +494,7 @@ impl World3 {
         for k in 0..self.spec.bodies.len() {
             let body = &mut st.bodies[st.handles[k]];
             body.reset_forces(false);
-            if !body.is_dynamic() || fields.is_empty() {
+            if !body.is_enabled() || !body.is_dynamic() || fields.is_empty() {
                 continue;
             }
             let p = flip(body.translation().to_array()).map(|c| c * ppm);
@@ -512,6 +559,7 @@ impl World3 {
         while self.state.step < target {
             self.step_once(driver);
         }
+        self.sync_visibility(self.spec.start + target as f64 * self.spec.step, driver);
         self.snapshot()
     }
 

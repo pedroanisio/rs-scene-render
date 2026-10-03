@@ -2,7 +2,7 @@ use sr_eval::{EvalOptions, Evaluator};
 
 fn evaluator(body: &str, physics: &str) -> Evaluator {
     let xml = format!(
-        r#"<scene version="1.1"><project width="400" height="400" fps="30" duration="4"/><assets><image id="img" src="unused.png" width="10" height="10"/></assets><composition>{body}</composition>{physics}</scene>"#
+        r#"<scene version="1.2"><project width="400" height="400" fps="30" duration="4"/><assets><image id="img" src="unused.png" width="10" height="10"/></assets><composition>{body}</composition>{physics}</scene>"#
     );
     let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
     Evaluator::new(&doc, &EvalOptions::default()).unwrap()
@@ -167,4 +167,69 @@ fn particle_collisions_do_not_depend_on_the_frames_rendered_before() {
     let skipping = evaluator(&scene, physics);
     skipping.evaluate(1.0);
     assert!(parts(&skipping.evaluate(0.5)) == early && parts(&skipping.evaluate(1.5)) == direct, "skipping differs");
+}
+
+#[test]
+fn delayed_3d_bodies_spawn_at_their_time_and_replay_identically() {
+    for body in [
+        r#"<object3D id="b" start="1" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D>"#,
+        r#"<group id="g" timeOffset="0.5" timeScale="2"><object3D id="b" start="1" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D></group>"#,
+        r#"<group id="g" start="1"><object3D id="b" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D></group>"#,
+    ] {
+        let make = || evaluator(body, r#"<physics gravityY="-1" bounds="none"/>"#);
+        let ev = make();
+        assert!(ev.evaluate(0.5).nodes.iter().all(|n| &*n.id != "b"));
+        let at_start = ev.evaluate(1.0);
+        let pose = node(&at_start, "b").pose3.expect("delayed body must be registered");
+        assert!((pose[13] - 100.0).abs() < 1e-9);
+        let later = ev.evaluate(1.5);
+        let pose = node(&later, "b").pose3.unwrap();
+        assert!((pose[13] - 112.5).abs() < 0.1, "{pose:?}");
+        assert_eq!(node(&make().evaluate(1.5), "b").pose3, Some(pose));
+        ev.evaluate(3.0);
+        assert_eq!(node(&ev.evaluate(1.5), "b").pose3, Some(pose));
+        assert!(!ev.physics_cache().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn activation_and_force_windows_defer_3d_motion() {
+    let body = r#"<object3D id="b" primitive="sphere" radius="10" x="100" y="100"><rigidBody activateAt="1" linearDamping="0"/></object3D>"#;
+    let ev = evaluator(body, r#"<physics gravityY="-1" bounds="none"/>"#);
+    assert!((node(&ev.evaluate(1.0), "b").pose3.unwrap()[13] - 100.0).abs() < 1e-9);
+    assert!((node(&ev.evaluate(1.5), "b").pose3.unwrap()[13] - 112.5).abs() < 0.1);
+    let ev = evaluator(
+        &body.replace("activateAt=\"1\"", ""),
+        r#"<physics gravityY="0" bounds="none"><forceField id="f" type="directional" forceX="1" start="1" end="2"/></physics>"#,
+    );
+    let x = |t| node(&ev.evaluate(t), "b").pose3.unwrap()[12];
+    assert_eq!(x(1.0), 100.0);
+    assert!((x(1.5) - 112.5).abs() < 0.1);
+    assert!((x(2.5) - x(2.0) - 50.0).abs() < 0.1);
+    assert!((x(3.0) - x(2.5) - 50.0).abs() < 0.1);
+}
+
+#[test]
+fn delayed_3d_bodies_sample_birth_animation_and_do_not_collide_early() {
+    let ev = evaluator(
+        r#"<object3D id="b" start="1" primitive="sphere" radius="10" x="100" y="100">
+      <animate property="x" timeBase="composition"><key time="0" value="100"/><key time="1" value="200"/></animate>
+      <rigidBody activateAt="2" velocityX="20" linearDamping="0"/>
+    </object3D>"#,
+        r#"<physics gravityY="-1" bounds="none"/>"#,
+    );
+    let at = |t| node(&ev.evaluate(t), "b").pose3.unwrap();
+    assert!((at(1.0)[12] - 200.0).abs() < 1e-9);
+    assert!((at(2.0)[13] - 100.0).abs() < 1e-9);
+    assert!((at(2.5)[12] - 210.0).abs() < 0.1);
+    assert!((at(2.5)[13] - 112.5).abs() < 0.1);
+
+    let ev = evaluator(
+        r#"<object3D id="b" primitive="sphere" radius="10" x="100" y="100"><rigidBody linearDamping="0"/></object3D>
+        <object3D id="late" start="1" primitive="sphere" radius="10" x="105" y="100"><rigidBody type="static"/></object3D>"#,
+        r#"<physics gravityY="0" bounds="none"/>"#,
+    );
+    let at = |t| node(&ev.evaluate(t), "b").pose3.unwrap();
+    assert!((at(0.5)[12] - 100.0).abs() < 1e-9, "unborn collider affected the body");
+    assert!(at(1.5)[12] < 95.0, "spawned collider never participated: {:?}", at(1.5));
 }

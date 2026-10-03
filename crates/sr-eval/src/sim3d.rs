@@ -25,6 +25,8 @@ pub(crate) struct Body3Node {
     pub(crate) id: Arc<str>,
     /// The object's scale at the start (x, y, z).
     scale: [f64; 3],
+    /// Ancestor windows and clocks, from the composition down to this object.
+    windows: Vec<(f64, Option<f64>, crate::program::Clock)>,
 }
 
 /// The 3D world of a document.
@@ -334,7 +336,20 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             activate_at: num(c, "activateAt", 0.0),
             start,
         });
-        bodies.push(Body3Node { id: n.id.clone(), scale });
+        let mut windows = Vec::new();
+        let mut index = p.nodes.iter().position(|node| node.id == n.id);
+        while let Some(k) = index {
+            let node = &p.nodes[k];
+            let (start, end) = if matches!(node.kind, crate::program::Kind::Plain) {
+                (node.vis_start, node.vis_end)
+            } else {
+                (f64::NEG_INFINITY, None)
+            };
+            windows.push((start, end, node.clock.clone()));
+            index = node.parent.map(|i| i as usize);
+        }
+        windows.reverse();
+        bodies.push(Body3Node { id: n.id.clone(), scale, windows });
     }
     if bodies.is_empty() {
         return None;
@@ -435,6 +450,16 @@ pub(crate) struct Driver<'a, 'b> {
 }
 
 impl Driver3 for Driver<'_, '_> {
+    fn enabled(&mut self, mut t: f64, which: usize) -> bool {
+        for (start, end, clock) in &self.bodies[which].windows {
+            if t < *start || end.is_some_and(|end| t >= end) {
+                return false;
+            }
+            t = crate::eval::clock_map(clock, t);
+        }
+        true
+    }
+
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
         let g = self.graphs.at(t);
         which

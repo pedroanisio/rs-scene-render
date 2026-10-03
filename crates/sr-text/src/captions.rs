@@ -48,6 +48,9 @@ fn clock(s: &str) -> Option<f64> {
     let s = s.trim().replace(',', ".");
     let parts: Vec<&str> = s.split(':').collect();
     let nums: Vec<f64> = parts.iter().map(|x| x.parse::<f64>().ok()).collect::<Option<Vec<_>>>()?;
+    if nums.iter().any(|n| !n.is_finite() || *n < 0.0) {
+        return None;
+    }
     Some(match nums.len() {
         3 => nums[0] * 3600.0 + nums[1] * 60.0 + nums[2],
         2 => nums[0] * 60.0 + nums[1],
@@ -73,14 +76,15 @@ fn strip_tags(s: &str) -> String {
 /// Parses a subtitle file.
 pub fn parse(text: &str, format: &str) -> Result<Vec<Cue>, CaptionError> {
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    match format {
+    let cues = match format {
         "srt" => parse_srt(&text),
         "vtt" => parse_vtt(&text),
         "ass" => parse_ass(&text),
         "ttml" | "itt" => parse_ttml(&text),
         "scc" => parse_scc(&text),
         other => Err(err("captions", 0, format!("unknown format {other}"))),
-    }
+    }?;
+    validate_cues(cues, "captions")
 }
 
 fn parse_srt(text: &str) -> Result<Vec<Cue>, CaptionError> {
@@ -464,50 +468,82 @@ fn parse_scc(text: &str) -> Result<Vec<Cue>, CaptionError> {
 /// Reads a transcription cache: `{"words": [{"start", "end", "text"|"word"}]}` or
 /// `{"segments": [{"start", "end", "text", "words": [...]}]}` (Whisper-style).
 pub fn from_transcript(json: &str) -> Result<Vec<Cue>, CaptionError> {
+    #[derive(serde::Deserialize)]
+    struct TimedWord {
+        start: f64,
+        end: f64,
+        #[serde(alias = "word")]
+        text: String,
+        #[serde(default)]
+        emphasis: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Segment {
+        start: f64,
+        end: f64,
+        text: Option<String>,
+        speaker: Option<String>,
+        #[serde(default)]
+        words: Vec<TimedWord>,
+    }
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| err("transcript", e.line(), e.to_string()))?;
-    let word = |w: &serde_json::Value| -> Option<Word> {
-        Some(Word {
-            start: w["start"].as_f64()?,
-            end: w["end"].as_f64()?,
-            text: w["text"].as_str().or(w["word"].as_str())?.trim().to_string(),
-            emphasis: w["emphasis"].as_bool().unwrap_or(false),
-        })
-    };
-    if let Some(segs) = v["segments"].as_array() {
-        return Ok(segs
-            .iter()
-            .filter_map(|s| {
-                let words: Vec<Word> =
-                    s["words"].as_array().map(|a| a.iter().filter_map(word).collect()).unwrap_or_default();
-                Some(Cue {
-                    start: s["start"].as_f64()?,
-                    end: s["end"].as_f64()?,
-                    text: s["text"].as_str().unwrap_or("").trim().to_string(),
-                    speaker: s["speaker"].as_str().map(str::to_string),
-                    words,
-                    ..Default::default()
-                })
-            })
-            .collect());
-    }
-    let words: Vec<Word> = v["words"]
-        .as_array()
-        .ok_or_else(|| err("transcript", 1, "needs \"segments\" or \"words\""))?
-        .iter()
-        .filter_map(word)
-        .collect();
-    // one cue per sentence-ish group of up to 12 words
+    let word =
+        |w: TimedWord| Word { start: w.start, end: w.end, text: w.text.trim().to_string(), emphasis: w.emphasis };
+    let records =
+        |name: &str| v[name].as_array().ok_or_else(|| err("transcript", 1, format!("{name} must be an array")));
     let mut out = Vec::new();
-    for chunk in words.chunks(12) {
-        out.push(Cue {
-            start: chunk[0].start,
-            end: chunk[chunk.len() - 1].end,
-            text: chunk.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
-            words: chunk.to_vec(),
-            ..Default::default()
-        });
+    if v.get("segments").is_some() {
+        for (i, value) in records("segments")?.iter().enumerate() {
+            let s: Segment = serde_json::from_value(value.clone())
+                .map_err(|e| err("transcript", i + 1, format!("segment {}: {e}", i + 1)))?;
+            if s.text.is_none() && s.words.is_empty() {
+                return Err(err("transcript", i + 1, "segment needs text or timed words"));
+            }
+            out.push(Cue {
+                start: s.start,
+                end: s.end,
+                text: s.text.unwrap_or_default().trim().to_string(),
+                speaker: s.speaker,
+                words: s.words.into_iter().map(word).collect(),
+                ..Default::default()
+            });
+        }
+    } else {
+        let words = records("words")?
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                serde_json::from_value::<TimedWord>(value.clone())
+                    .map(&word)
+                    .map_err(|e| err("transcript", i + 1, format!("word {}: {e}", i + 1)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for chunk in words.chunks(12) {
+            out.push(Cue {
+                start: chunk[0].start,
+                end: chunk[chunk.len() - 1].end,
+                text: chunk.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                words: chunk.to_vec(),
+                ..Default::default()
+            });
+        }
     }
-    Ok(out)
+    validate_cues(out, "transcript")
+}
+
+fn validate_cues(cues: Vec<Cue>, format: &'static str) -> Result<Vec<Cue>, CaptionError> {
+    let valid = |start: f64, end: f64| start.is_finite() && end.is_finite() && start >= 0.0 && end >= start;
+    for (i, cue) in cues.iter().enumerate() {
+        if !valid(cue.start, cue.end) {
+            return Err(err(format, i + 1, format!("cue {} has invalid timing", i + 1)));
+        }
+        for (j, word) in cue.words.iter().enumerate() {
+            if !valid(word.start, word.end) {
+                return Err(err(format, i + 1, format!("cue {}, word {} has invalid timing", i + 1, j + 1)));
+            }
+        }
+    }
+    Ok(cues)
 }
 
 /// Words of a cue, timed from the source or spread over the cue by length.

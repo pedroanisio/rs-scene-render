@@ -11,6 +11,7 @@ sr-model.workspace = true
 sr-eval.workspace = true
 sr-audio.workspace = true
 sr-media.workspace = true
+sr-text.workspace = true
 sr-deliver.workspace = true
 sr-geo.workspace = true
 serde.workspace = true

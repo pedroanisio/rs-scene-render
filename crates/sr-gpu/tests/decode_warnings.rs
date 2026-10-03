@@ -43,5 +43,23 @@ fn a_clip_that_stops_decoding_is_reported_on_the_frames_it_cannot_show() {
         "{:?}",
         r.stats.errors
     );
+    for times in [&[0.0, 0.4, 0.4][..], &[0.0, 0.4, 0.44, 0.44][..]] {
+        let r = render_times(&d, times).unwrap();
+        assert!(
+            r.stats.errors.iter().any(|e| e.starts_with("v: ") && e.contains("Invalid data found")),
+            "cached failure was lost: {:?}",
+            r.stats.errors
+        );
+    }
+    let two = xml.replace("</composition>", "<layer id=\"other\" asset=\"c\"/></composition>");
+    let two = sr_model::load_str(&two, &opts).unwrap();
+    let r = render_times(&two, &[0.0, 0.4, 0.4]).unwrap();
+    for id in ["v", "other"] {
+        assert!(r.stats.errors.iter().any(|e| e.starts_with(&format!("{id}: "))));
+    }
+    // A normal EOF may hold the final frame without treating it as a decode failure.
+    std::fs::write(&fake, "#!/bin/sh\nhead -c 2304 /dev/zero\nexit 0\n").unwrap();
+    let r = render_times(&d, &[0.0, 0.4, 0.4]).unwrap();
+    assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
     let _ = std::fs::remove_dir_all(&dir);
 }

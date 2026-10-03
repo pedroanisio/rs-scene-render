@@ -546,14 +546,14 @@ fn parallel_delivery_counts_flashes_across_its_segments() {
     if gpu().is_none() {
         return;
     }
-    // 60 frames in two segments of 30. The frame turns white and black ten times around the join, four
+    // 270 frames in three bounded segments of 90, reusing the first worker. The frame turns white and black ten times around the join, four
     // times before it and six after: neither side alone reaches the eight transitions in a second that
     // make a flash, so the check must follow the frames across the join.
-    let keys: String = (26..=35)
+    let keys: String = (86..=95)
         .map(|k| format!(r#"<key time="{}" value="{}" interpolation="hold"/>"#, (k as f64 - 0.5) / 30.0, k % 2))
         .collect();
     let xml = format!(
-        r##"<scene version="1.2"><project width="64" height="36" fps="30" duration="2" background="#000000"/>
+        r##"<scene version="1.2"><project width="64" height="36" fps="30" duration="9" background="#000000"/>
       <metadata><accessibility flashCheck="warn" contrastCheck="off"/></metadata>
       <output path="out/join-flash.mkv" codec="ffv1" audio="false"/>
       <composition><shape id="flash" shape="rect" width="64" height="36" fill="#FFFFFF"><animate property="opacity">

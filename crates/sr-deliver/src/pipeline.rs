@@ -17,7 +17,7 @@ use sr_gpu::{Gpu, Renderer};
 use sr_media::encode::{Codec, ColorTags, Container, EncodeSpec, Encoder, Hardware, Hdr, InputFormat, StillFormat};
 use sr_model::model as m;
 
-use crate::access::{Judge, Observe, Seen};
+use crate::access::{Judge, Observe, Seen, Streaming, OBSERVATION_FRAMES};
 use crate::audio::{self, SceneAudio};
 use crate::DeliverError;
 
@@ -410,6 +410,7 @@ impl Video<'_> {
                     self.stage.place_with_overlay(&picture, &working, tex, placement, over);
                     seen.flash(out_t, self.renderer.flash_grid(tex));
                 }
+                seen.finish_frame().map_err(DeliverError::Invalid)?;
                 let next = self.stage.submit_placed(
                     &picture,
                     &working,
@@ -478,27 +479,6 @@ impl Video<'_> {
             if *ratio < min_contrast {
                 fail(&checks.contrast, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
             }
-        }
-    }
-}
-
-/// The accessibility checks' judge behind time segments rendered at once: chunks of frames finish in any
-/// order and are judged in frame order, each as soon as the chunks before it have been.
-struct InOrder {
-    judge: Judge,
-    /// The chunk the judge takes next.
-    next: usize,
-    /// Chunks that finished before an earlier one did.
-    waiting: std::collections::BTreeMap<usize, Seen>,
-}
-
-impl InOrder {
-    /// Takes what chunk `i` showed; `bounds[i]` is the index of the chunk's first frame in the output.
-    fn take(&mut self, i: usize, seen: Seen, bounds: &[usize]) {
-        self.waiting.insert(i, seen);
-        while let Some(seen) = self.waiting.remove(&self.next) {
-            self.judge.replay(seen, bounds[self.next]);
-            self.next += 1;
         }
     }
 }
@@ -951,11 +931,13 @@ pub fn deliver(
                 }
             }
         } else if workers > 1 {
-            // `workers` workers, each with its own renderer and encoder, take contiguous chunks of
-            // the range in order (about three per worker, so a heavy stretch does not hold up the
-            // rest); every chunk starts on a keyframe and the chunks are joined by stream copy
-            use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+            // Each worker renders contiguous chunks with its own encoder. Accessibility-enabled
+            // chunks fit one bounded observation batch, so ordering does not serialize the workers.
+            // Every chunk starts on a keyframe; stream copy joins them without re-encoding.
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
             let chunks = (workers * 3).min(((end - start) / 10.0).floor() as usize).max(workers).min(n as usize);
+            let observe = checks.flash_on() || checks.contrast_on();
+            let chunks = if observe { chunks.max((n as usize).div_ceil(OBSERVATION_FRAMES)) } else { chunks };
             let bounds: Vec<usize> = (0..=chunks).map(|i| (i as u64 * n / chunks as u64) as usize).collect();
             let ext = report.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
             let parts: Vec<PathBuf> = (0..chunks).map(|i| tmp.join(format!("segment{i:04}.{ext}"))).collect();
@@ -971,24 +953,49 @@ pub fn deliver(
             // with output segments, the frame time of each entry of `times`
             let all_frames = video.segments.as_ref().map(|(_, f)| f.clone());
             let map = segments.as_ref();
-            let next = AtomicUsize::new(0);
+            let cancelled = AtomicBool::new(false);
             let done = AtomicU64::new(0);
             // Create worker devices sequentially and keep them alive until every
             // worker has joined. Concurrent device creation crashed the Vulkan loader;
             // independent devices avoid allocation contention between renderers.
             let worker_gpus: Vec<_> = (0..workers).map(|_| gpu.open_like()).collect::<Result<_, _>>()?;
-            // the accessibility checks follow frames across chunks, and chunks finish in any order: one
-            // judge takes what each chunk showed once the chunks before it are in
-            let judged = std::sync::Mutex::new(InOrder {
-                judge: Judge::new(checks.flash_on()),
-                next: 0,
-                waiting: std::collections::BTreeMap::new(),
-            });
+            // Fixed round-robin chunk ownership lets the coordinator drain each worker in time
+            // order. Two queued batches per worker plus one being rendered: at most 384 flash
+            // grids (about 11.4 MiB) per worker, independent of output duration.
+            let mut judge = Judge::new(checks.flash_on());
+            let (senders, receivers): (Vec<_>, Vec<_>) = (0..workers).map(|_| sync_channel::<Seen>(2)).unzip();
             let results: Vec<Result<(Report, String), DeliverError>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = worker_gpus
                     .iter()
-                    .map(|gpu| {
-                        sc.spawn(|| -> Result<(Report, String), DeliverError> {
+                    .zip(senders)
+                    .enumerate()
+                    .map(|(worker_index, (gpu, tx))| {
+                        let (
+                            cancelled,
+                            done,
+                            bounds,
+                            times,
+                            part_spec,
+                            audio,
+                            all_frames,
+                            representation,
+                            ev,
+                            eo,
+                            captions,
+                        ) = (
+                            &cancelled,
+                            &done,
+                            &bounds,
+                            &times,
+                            &part_spec,
+                            &audio,
+                            &all_frames,
+                            &representation,
+                            &ev,
+                            &eo,
+                            &captions,
+                        );
+                        sc.spawn(move || -> Result<(Report, String), DeliverError> {
                             let gpu = gpu.clone();
                             let mut renderer = Renderer::new(gpu.clone(), p);
                             renderer.quality = opts.quality;
@@ -1002,13 +1009,13 @@ pub fn deliver(
                                 output,
                                 timeline,
                                 size,
-                                &captions,
+                                captions,
                                 &gpu,
-                                &eo,
+                                eo,
                                 representation.as_deref(),
                             )?;
                             let mut worker = Video {
-                                ev: &ev,
+                                ev,
                                 renderer,
                                 stage,
                                 color,
@@ -1023,9 +1030,9 @@ pub fn deliver(
                                 join_tex: None,
                             };
                             let (mut part, mut encoder) = (Report::default(), String::new());
-                            loop {
-                                let i = next.fetch_add(1, Relaxed);
-                                if i >= chunks {
+                            let mut seen = Streaming::new(tx, observe);
+                            for i in (worker_index..chunks).step_by(workers) {
+                                if cancelled.load(Relaxed) {
                                     return Ok((part, encoder));
                                 }
                                 let chunk = (|| {
@@ -1034,26 +1041,45 @@ pub fn deliver(
                                     worker.segments = map
                                         .zip(all_frames.as_ref())
                                         .map(|(tm, f)| (tm, f[bounds[i]..bounds[i + 1]].to_vec()));
-                                    let mut seen = Seen::default();
                                     worker.run(&times[bounds[i]..bounds[i + 1]], &mut part, &mut seen, |b| {
                                         done.fetch_add(1, Relaxed);
                                         feeder.send(b)
                                     })?;
-                                    judged.lock().unwrap_or_else(|e| e.into_inner()).take(i, seen, &bounds);
+                                    seen.flush().map_err(DeliverError::Invalid)?;
                                     feeder.finish()
                                 })();
                                 match chunk {
                                     Ok(e) => encoder = e,
                                     Err(e) => {
                                         // stop the other workers at their next chunk
-                                        next.store(chunks, Relaxed);
+                                        cancelled.store(true, Relaxed);
                                         return Err(e);
                                     }
                                 }
                             }
+                            Ok((part, encoder))
                         })
                     })
                     .collect();
+                'chunks: for i in 0..chunks {
+                    for _ in 0..if observe { (bounds[i + 1] - bounds[i]).div_ceil(OBSERVATION_FRAMES) } else { 1 } {
+                        loop {
+                            match receivers[i % workers].recv_timeout(std::time::Duration::from_millis(200)) {
+                                Ok(seen) => {
+                                    judge.replay(seen, bounds[i]);
+                                    break;
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => progress(done.load(Relaxed), n),
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    cancelled.store(true, Relaxed);
+                                    break 'chunks;
+                                }
+                            }
+                        }
+                    }
+                }
+                // On an error or panic, unblock every producer before joining the scoped threads.
+                drop(receivers);
                 while !handles.iter().all(|h| h.is_finished()) {
                     progress(done.load(Relaxed), n);
                     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1081,7 +1107,6 @@ pub fn deliver(
             report.unsupported = unsupported.into_iter().collect();
             // every chunk was rendered, so every chunk has been judged; text the workers could not
             // measure in place is measured by this thread's renderer
-            let judge = judged.into_inner().unwrap_or_else(|e| e.into_inner()).judge;
             video.judge(judge, &times, &mut report);
             progress(n, n);
             spec.join(&parts, &tmp.join("segments.txt"))?;

@@ -616,7 +616,8 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
             }
         }
     }
-    let ids3 = crate::sim3d::body_ids(g0);
+    let g3 = crate::eval::evaluate_for_physics(p, start);
+    let ids3 = crate::sim3d::body_ids(&g3);
     if bodies.is_empty() && softs.is_empty() && ids3.is_empty() {
         return None;
     }
@@ -717,7 +718,7 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
     }
     let has2 = !spec.bodies.is_empty() || !spec.softs.is_empty();
     let world = if cached.is_some() || !has2 { None } else { Some(World::new(spec)) };
-    let three = crate::sim3d::build(p, g0, cached.is_some(), problems);
+    let three = crate::sim3d::build(p, &g3, cached.is_some(), problems);
     Some(PhysicsRt { world, three, cached, start, step, bodies, softs })
 }
 

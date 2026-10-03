@@ -1,5 +1,10 @@
 # Vendored dependencies
 
+## Disclaimer
+
+This work is subject to the methodological caveats and commitments described in [@DISCLAIMER.md](../DISCLAIMER.md).
+> No statement or premise not backed by a real logical definition or verifiable reference should be taken for granted.
+
 Crates kept in the repository because the build needs a change that their released versions do not have.
 They are used through `[patch.crates-io]` in the workspace `Cargo.toml` and are not workspace members:
 formatting, lints and tests of the workspace do not apply to them, and their own formatting is left as
@@ -12,8 +17,10 @@ wgpu's Vulkan backend allocates all device memory through this crate. Upstream: 
 
 **The change** is in `src/vulkan/mod.rs`, `Allocator::allocate`: for `MemoryLocation::CpuToGpu` (mappable
 buffers and the staging buffers behind `create_buffer_init`, `Queue::write_buffer` and `Queue::write_texture`)
-the preferred memory type is `HOST_VISIBLE | HOST_COHERENT`, without `DEVICE_LOCAL`. Nothing else differs
-from the released crate, apart from the files a registry download adds, which are left out.
+the selector in `src/vulkan/memory_type.rs` explicitly prefers compatible
+`HOST_VISIBLE | HOST_COHERENT` types without `DEVICE_LOCAL`. Device-local host-visible memory remains
+a fallback for UMA, resource compatibility, or a failed host allocation. A retry excludes the failed
+type. Behavioral tests compile the same policy module from `tools/tests/test_vendor.py`.
 
 **Why.** On NVIDIA the type that is both host-visible and device-local is device memory mapped through the
 BAR1 window, 256 MiB on the card this was measured on, shared by every process using the GPU. Each device

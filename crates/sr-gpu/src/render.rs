@@ -1264,7 +1264,8 @@ impl Renderer {
                 }
             };
             // a clip that stopped decoding holds its last good frame: say so on the frames it stands in for
-            if frame.index != k {
+            let failed = frame.index != k && !dec.warnings.is_empty();
+            if failed {
                 if let Some(w) = dec.warnings.last() {
                     plan.stats.errors.push(format!("{}: {w}", n.id));
                 }
@@ -1273,7 +1274,9 @@ impl Renderer {
             if let Some((previous, texture)) = this.video_previous.get(&vkey) {
                 if same_video_pixels(previous, &frame) {
                     let texture = texture.clone();
-                    this.video_frames.insert(fkey, texture.clone());
+                    if !failed {
+                        this.video_frames.insert(fkey, texture.clone());
+                    }
                     return Some(texture);
                 }
             }
@@ -1300,7 +1303,9 @@ impl Renderer {
             let t = Arc::new(this.video.convert(&frame, &it, &working, &this.bgl1));
             plan.stats.video_frames += 1;
             this.video_previous.insert(vkey.clone(), (frame, t.clone()));
-            this.video_frames.insert(fkey, t.clone());
+            if !failed {
+                this.video_frames.insert(fkey, t.clone());
+            }
             Some(t)
         };
         let a = frame_tex(self, plan, n0)?;

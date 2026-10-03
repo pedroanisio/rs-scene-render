@@ -314,6 +314,35 @@ struct Target {
     req: Request,
 }
 
+/// Validate the content as the consumer will use it, before trusting a digest or publishing it.
+fn validate_content(path: &Path, kind: &str) -> Result<(), String> {
+    if std::fs::metadata(path).map_err(|e| e.to_string())?.len() == 0 {
+        return Err("empty provider output".into());
+    }
+    match kind {
+        "image" => sr_media::still::open(path).map(|_| ()),
+        "captions" => {
+            let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            sr_text::captions::from_transcript(&json).map(|_| ()).map_err(|e| e.to_string())
+        }
+        "tiles" => sr_geo::pmtiles::Archive::open(path).map(|_| ()),
+        "video" | "speech" | "music" | "sound-effect" => {
+            let info = sr_media::probe(path).map_err(|e| e.to_string())?;
+            let usable = if kind == "video" {
+                info.video.is_some_and(|v| v.width > 0 && v.height > 0)
+            } else {
+                info.audio.iter().any(|a| a.sample_rate > 0 && a.channels > 0)
+            };
+            if usable {
+                Ok(())
+            } else {
+                Err(format!("no usable {kind} stream"))
+            }
+        }
+        _ => Err(format!("unknown generated content kind {kind}")),
+    }
+}
+
 /// Brings one target up to date (or, in check mode, reports whether it is).
 fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) {
     let mut r = Resolution {
@@ -334,7 +363,10 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
     // 1. cache and sidecar agree with the request
     if !o.force {
         if let (Some(sc), true) = (read_sidecar(&t.cache), t.cache.is_file()) {
-            if sc.key == key && file_sha256(&t.cache).ok().as_deref() == Some(sc.sha256.as_str()) {
+            if sc.key == key
+                && file_sha256(&t.cache).ok().as_deref() == Some(sc.sha256.as_str())
+                && validate_content(&t.cache, &req.kind).is_ok()
+            {
                 r.sha256 = Some(sc.sha256.clone());
                 if pinned_ok(&sc.sha256) {
                     r.status = Status::UpToDate;
@@ -377,6 +409,7 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         // Missing, stale or damaged entries are misses, never new content to pin.
         read_sidecar(&path)
             .filter(|side| side.key == key && file_sha256(&path).ok().as_deref() == Some(side.sha256.as_str()))
+            .filter(|_| validate_content(&path, &req.kind).is_ok())
             .map(|side| (path, side))
     });
     if let Some((src, side)) = stored {
@@ -410,6 +443,9 @@ fn settle(t: &Target, o: &Options, work: &Path) -> (Resolution, Option<String>) 
         };
         if !out.is_file() {
             return fail(r, format!("{} reported success but wrote nothing", t.req.provider));
+        }
+        if let Err(e) = validate_content(&out, &req.kind) {
+            return fail(r, format!("{} produced invalid {}: {e}", t.req.provider, req.kind));
         }
         if let Err(e) = copy_atomic(&out, &t.cache) {
             return fail(r, format!("{}: {e}", t.cache.display()));

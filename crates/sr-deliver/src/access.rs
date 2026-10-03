@@ -166,6 +166,10 @@ pub(crate) trait Observe {
     fn contrast(&mut self, id: &ContrastTarget, opacity: f64, ratio: f64, t: f64);
     /// A text the inline probe cannot measure, seen at `opacity` in frame `frame` of the frames observed.
     fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64);
+    /// Flush one complete frame, applying backpressure when observations are streamed.
+    fn finish_frame(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The state of the checks over an output.
@@ -242,5 +246,107 @@ impl Observe for Seen {
 
     fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64) {
         self.unprobed.push((id.clone(), frame, opacity));
+    }
+}
+
+/// One bounded batch in flight plus a bounded channel per rendering worker. The coordinator drops
+/// receivers on failure before joining producers, so a blocked send always has an escape.
+pub(crate) const OBSERVATION_FRAMES: usize = 128;
+
+pub(crate) struct Streaming {
+    seen: Seen,
+    frames: usize,
+    limit: usize,
+    tx: std::sync::mpsc::SyncSender<Seen>,
+}
+
+impl Streaming {
+    pub fn new(tx: std::sync::mpsc::SyncSender<Seen>, checks: bool) -> Self {
+        Self { seen: Seen::default(), frames: 0, limit: if checks { OBSERVATION_FRAMES } else { usize::MAX }, tx }
+    }
+    pub fn flush(&mut self) -> Result<(), String> {
+        if self.frames == 0 {
+            return Ok(());
+        }
+        self.tx.send(std::mem::take(&mut self.seen)).map_err(|_| "accessibility coordinator stopped".to_string())?;
+        self.frames = 0;
+        Ok(())
+    }
+}
+
+impl Observe for Streaming {
+    fn flash(&mut self, t: f64, cells: Vec<[f64; 3]>) {
+        self.seen.flash(t, cells);
+    }
+    fn contrast(&mut self, id: &ContrastTarget, opacity: f64, ratio: f64, t: f64) {
+        self.seen.contrast(id, opacity, ratio, t);
+    }
+    fn unprobed(&mut self, id: &ContrastTarget, frame: usize, opacity: f64) {
+        self.seen.unprobed(id, frame, opacity);
+    }
+    fn finish_frame(&mut self) -> Result<(), String> {
+        self.frames += 1;
+        if self.frames == self.limit {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn accessibility_stream_is_bounded_and_disconnect_unblocks_producer() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let (ready, progress) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let mut stream = Streaming::new(tx, true);
+            for k in 0..10000 {
+                stream.flash(k as f64, vec![[0.5; 3]; 48 * 27]);
+                if stream.finish_frame().is_err() {
+                    return k;
+                }
+                if (k + 1) % OBSERVATION_FRAMES == 0 {
+                    ready.send(k / OBSERVATION_FRAMES).unwrap();
+                }
+            }
+            10000
+        });
+        assert_eq!(progress.recv().unwrap(), 0);
+        assert_eq!(progress.recv().unwrap(), 1);
+        assert!(progress.recv_timeout(std::time::Duration::from_millis(30)).is_err());
+        let mut judge = Judge::new(true);
+        judge.replay(rx.recv().unwrap(), 0);
+        assert_eq!(progress.recv().unwrap(), 2);
+        drop(rx);
+        assert_eq!(producer.join().unwrap(), 4 * OBSERVATION_FRAMES - 1);
+    }
+
+    #[test]
+    fn streamed_frames_preserve_order_and_chunk_offsets() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let mut stream = Streaming::new(tx, true);
+        let id = ContrastTarget::Node("label".into());
+        let mut direct = Judge::new(true);
+        let mut replayed = Judge::new(true);
+        for k in 0..120 {
+            let cells = vec![[if k % 2 == 0 { 0.0 } else { 1.0 }; 3]; 48 * 27];
+            let t = k as f64 / 30.0;
+            let opacity = 0.5 + k as f64 * 0.0004;
+            direct.flash(t, cells.clone());
+            direct.contrast(&id, opacity, 2.0 + t, t);
+            direct.unprobed(&id, 200 + k, opacity);
+            stream.flash(t, cells);
+            stream.contrast(&id, opacity, 2.0 + t, t);
+            stream.unprobed(&id, k, opacity);
+            stream.finish_frame().unwrap();
+            stream.flush().unwrap();
+            replayed.replay(rx.recv().unwrap(), 200);
+        }
+        assert_eq!(direct.flash.unwrap().verdict(), replayed.flash.unwrap().verdict());
+        assert_eq!(direct.lowest, replayed.lowest);
+        assert_eq!(direct.unprobed, replayed.unprobed);
     }
 }

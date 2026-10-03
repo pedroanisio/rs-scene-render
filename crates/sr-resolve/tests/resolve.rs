@@ -227,7 +227,7 @@ fn images_and_errors() {
 #[test]
 fn test_store_invalid_entries_regenerate_without_pinning_corruption() {
     setup();
-    for damage in ["bytes", "missing-sidecar", "malformed-sidecar", "wrong-key"] {
+    for damage in ["bytes", "matching-digest", "missing-sidecar", "malformed-sidecar", "wrong-key"] {
         let d = project(
             &format!("store-integrity-{damage}"),
             &format!(
@@ -245,6 +245,12 @@ fn test_store_invalid_entries_regenerate_without_pinning_corruption() {
         let metadata = stored.with_file_name(format!("{}.resolve.json", stored.file_name().unwrap().to_string_lossy()));
         match damage {
             "bytes" => std::fs::write(&stored, b"corrupted cache").unwrap(),
+            "matching-digest" => {
+                std::fs::write(&stored, b"invalid image").unwrap();
+                let mut side = side;
+                side["sha256"] = sr_resolve::protocol::file_sha256(&stored).unwrap().into();
+                std::fs::write(&metadata, serde_json::to_vec(&side).unwrap()).unwrap();
+            }
             "missing-sidecar" => std::fs::remove_file(&metadata).unwrap(),
             "malformed-sidecar" => std::fs::write(&metadata, b"{").unwrap(),
             "wrong-key" => {
@@ -706,4 +712,74 @@ fn destination_plan_detects_document_symlink_aliases() {
     assert!(resolve(&d.join("scene.scene.xml"), &opts(&d)).is_err());
     assert_eq!(std::fs::read_to_string(d.join("scene.scene.xml")).unwrap(), xml);
     assert_eq!(calls(&d), 0);
+}
+
+#[test]
+fn invalid_provider_content_never_replaces_a_valid_cache() {
+    setup();
+    for (kind, ext) in [("image", "png"), ("speech", "wav"), ("video", "mp4")] {
+        let xml = format!(
+            r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/><assets><generated id="g" kind="{kind}" provider="badcontent" model="m" prompt="test" width="16" height="16" duration="1" cache="asset.{ext}" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+        );
+        let d = project(&format!("bad-content-{kind}"), &xml);
+        let provider = d.join("provider.py");
+        std::fs::write(&provider, "import json,sys,pathlib\nr=json.load(sys.stdin)\npathlib.Path(r['output']).write_bytes(b'not media')\nprint('{\"ok\":true}')\n").unwrap();
+        std::env::set_var("SR_PROVIDER_BADCONTENT", format!("python3 {}", provider.display()));
+        let doc = d.join("scene.scene.xml");
+        let rows = resolve(&doc, &opts(&d)).unwrap();
+        assert_eq!(status(&rows, "g"), Status::Error, "{rows:?}");
+        assert!(!d.join(format!("asset.{ext}")).exists());
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), xml);
+        if kind == "video" {
+            continue;
+        }
+        // A failed forced regeneration must preserve the existing cache, sidecar and pin.
+        std::env::set_var("SR_PROVIDER_BADCONTENT", env!("CARGO_BIN_EXE_scene-render-provider-example"));
+        assert_eq!(status(&resolve(&doc, &opts(&d)).unwrap(), "g"), Status::Made);
+        let before = [doc.clone(), d.join(format!("asset.{ext}")), d.join(format!("asset.{ext}.resolve.json"))]
+            .map(|p| (p.clone(), std::fs::read(p).unwrap()));
+        std::env::set_var("SR_PROVIDER_BADCONTENT", format!("python3 {}", provider.display()));
+        assert_eq!(status(&resolve(&doc, &Options { force: true, ..opts(&d) }).unwrap(), "g"), Status::Error);
+        for (p, bytes) in before {
+            assert_eq!(std::fs::read(p).unwrap(), bytes);
+        }
+    }
+    std::env::remove_var("SR_PROVIDER_BADCONTENT");
+}
+
+#[test]
+fn matching_digest_does_not_make_invalid_cache_content_current() {
+    setup();
+    let xml = format!(
+        r#"<scene version="1.2"><project width="16" height="16" fps="1" duration="1"/><assets><generated id="g" kind="image" provider="example" model="m" prompt="test" width="8" height="8" cache="image.png" cacheSha256="{ZERO}"/></assets><composition/></scene>"#
+    );
+    let d = project("invalid-current", &xml);
+    let doc = d.join("scene.scene.xml");
+    resolve(&doc, &opts(&d)).unwrap();
+    let metadata = d.join("image.png.resolve.json");
+    let mut side: serde_json::Value = serde_json::from_slice(&std::fs::read(&metadata).unwrap()).unwrap();
+    let old_sha = side["sha256"].as_str().unwrap().to_owned();
+    std::fs::write(d.join("image.png"), b"invalid").unwrap();
+    let sha = sr_resolve::protocol::file_sha256(&d.join("image.png")).unwrap();
+    side["sha256"] = sha.clone().into();
+    std::fs::write(&metadata, serde_json::to_vec(&side).unwrap()).unwrap();
+    std::fs::write(&doc, std::fs::read_to_string(&doc).unwrap().replace(&old_sha, &sha)).unwrap();
+    assert_eq!(status(&resolve(&doc, &Options { check: true, ..opts(&d) }).unwrap(), "g"), Status::Stale);
+}
+
+#[test]
+fn malformed_transcription_is_not_published() {
+    setup();
+    let xml = narrated("hello").replace(
+        "id=\"subs\" language=\"en\" transcribe=\"voice\" provider=\"example\"",
+        "id=\"subs\" language=\"en\" transcribe=\"voice\" provider=\"badtranscript\"",
+    );
+    let d = project("bad-transcript", &xml);
+    let provider = d.join("provider.py");
+    std::fs::write(&provider, "import json,sys,pathlib\nr=json.load(sys.stdin)\npathlib.Path(r['output']).write_text('{\"segments\":[{\"start\":0,\"text\":\"lost\"}]}')\nprint('{\"ok\":true}')\n").unwrap();
+    std::env::set_var("SR_PROVIDER_BADTRANSCRIPT", format!("python3 {}", provider.display()));
+    let rows = resolve(&d.join("scene.scene.xml"), &opts(&d)).unwrap();
+    assert_eq!(status(&rows, "subs"), Status::Error, "{rows:?}");
+    assert!(!d.join("gen/subs.json").exists());
+    std::env::remove_var("SR_PROVIDER_BADTRANSCRIPT");
 }

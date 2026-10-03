@@ -2539,6 +2539,7 @@ dependencies = [
  "sr-geo",
  "sr-media",
  "sr-model",
+ "sr-text",
  "tempfile",
 ]
 
