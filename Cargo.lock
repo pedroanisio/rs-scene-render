@@ -2622,6 +2622,7 @@ version = "0.1.2"
 dependencies = [
  "rapier2d-f64",
  "rapier3d-f64",
+ "rayon",
  "sr-volume",
  "thiserror",
 ]

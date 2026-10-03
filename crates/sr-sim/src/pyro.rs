@@ -13,8 +13,12 @@
 
 use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub mod mesh;
+
+#[cfg(test)]
+mod determinism;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -537,6 +541,45 @@ pub struct StepReport {
     pub pressure_iterations: usize,
 }
 
+/// Wall time per stage of one fixed step, from `Simulation::step_profiled`.
+/// `project_*` split the pressure solve; the conjugate-gradient parts sum over
+/// all iterations. Timing never feeds back into the solver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepProfile {
+    /// Cloning the committed state at the start of the step.
+    pub clone: Duration,
+    /// Collider voxelization, solid velocities and the cell clearing they imply.
+    pub obstacles: Duration,
+    /// Face boundary conditions and state validation, summed over the step.
+    pub boundaries_validate: Duration,
+    /// Semi-Lagrangian advection, including its private copy of the state.
+    pub advect: Duration,
+    pub advect_clone: Duration,
+    /// Sources and impulses.
+    pub inject: Duration,
+    /// Acceleration, buoyancy, turbulence and vorticity confinement.
+    pub forces: Duration,
+    /// Diagonal, right-hand side and initial residual of the pressure solve.
+    pub project_setup: Duration,
+    /// Operator applications inside the conjugate-gradient loop.
+    pub project_apply: Duration,
+    /// Inner products and residual norms (serial folds) inside that loop.
+    pub project_reduce: Duration,
+    /// Elementwise vector updates inside that loop.
+    pub project_update: Duration,
+    /// Pressure-gradient subtraction and the final divergence check.
+    pub project_finish: Duration,
+    pub total: Duration,
+    pub pressure_iterations: usize,
+}
+
+fn lap(since: &mut Instant) -> Duration {
+    let now = Instant::now();
+    let elapsed = now - *since;
+    *since = now;
+    elapsed
+}
+
 pub struct Simulation {
     spec: Spec,
     state: State,
@@ -608,6 +651,14 @@ impl Simulation {
     /// Advance exactly one fixed step. Inputs must describe this substep's
     /// collider pose. Failure leaves both the previous state and clock intact.
     pub fn step(&mut self, input: &Inputs) -> Result<StepReport, Error> {
+        self.step_profiled(input).map(|(report, _)| report)
+    }
+
+    /// `step` plus the wall time of each stage. Results are identical.
+    pub fn step_profiled(&mut self, input: &Inputs) -> Result<(StepReport, StepProfile), Error> {
+        let mut profile = StepProfile::default();
+        let started = Instant::now();
+        let mut clock = started;
         input.validate()?;
         if !input.spatial_acceleration.is_empty() && input.spatial_acceleration.len() != self.state.density.len() {
             return Err(Error::Invalid("spatial acceleration must match the domain cell count"));
@@ -622,6 +673,7 @@ impl Simulation {
         }
         let dt = self.spec.dt;
         let mut state = self.state.clone();
+        profile.clone = lap(&mut clock);
         for k in 0..state.density.len() {
             let p = state.cell_world(k);
             let collider = input.obstacles.iter().find(|o| o.shape.contains(p));
@@ -643,9 +695,12 @@ impl Simulation {
                 state.temperature[k] = state.ambient;
             }
         }
+        profile.obstacles = lap(&mut clock);
         boundaries(&mut state);
         validate_state(&state)?;
-        advect(&mut state, dt, self.spec.dissipation, self.spec.cooling)?;
+        profile.boundaries_validate += lap(&mut clock);
+        advect(&mut state, dt, self.spec.dissipation, self.spec.cooling, &mut profile)?;
+        profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
             let overlap = (end.min(source.end.unwrap_or(end)) - start.max(source.start)).max(0.0);
@@ -676,17 +731,25 @@ impl Simulation {
                 );
             }
         }
+        profile.inject = lap(&mut clock);
         forces(&mut state, &self.spec, input, self.step);
+        profile.forces = lap(&mut clock);
         boundaries(&mut state);
         validate_state(&state)?;
         if target.iter().any(|v| !v.is_finite()) {
             return Err(Error::Invalid("nonfinite expansion"));
         }
-        let report = project(&mut state, &target, self.spec.pressure_iterations, self.spec.pressure_tolerance)?;
+        profile.boundaries_validate += lap(&mut clock);
+        let report =
+            project(&mut state, &target, self.spec.pressure_iterations, self.spec.pressure_tolerance, &mut profile)?;
+        clock = Instant::now();
         validate_state(&state)?;
+        profile.boundaries_validate += lap(&mut clock);
         self.state = state;
         self.step += 1;
-        Ok(report)
+        profile.pressure_iterations = report.pressure_iterations;
+        profile.total = started.elapsed();
+        Ok((report, profile))
     }
 }
 
@@ -737,8 +800,10 @@ fn boundaries(s: &mut State) {
     }
 }
 
-fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64) -> Result<(), Error> {
+fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut StepProfile) -> Result<(), Error> {
+    let started = Instant::now();
     let old = s.clone();
+    profile.advect_clone = started.elapsed();
     for k in 0..s.density.len() {
         if s.solid[k] {
             continue;
@@ -849,7 +914,14 @@ fn neighbours(p: [usize; 3], dims: [usize; 3]) -> [Option<usize>; 6] {
     })
 }
 
-fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> Result<StepReport, Error> {
+fn project(
+    s: &mut State,
+    target: &[f64],
+    iterations: usize,
+    tolerance: f64,
+    profile: &mut StepProfile,
+) -> Result<StepReport, Error> {
+    let mut clock = Instant::now();
     let count = s.density.len();
     let fluid = s.solid.iter().filter(|&&solid| !solid).count();
     if fluid == 0 {
@@ -895,9 +967,17 @@ fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> 
     let mut applied = vec![0.0; count];
     let mut rz = inner(&residual, &z);
     let mut used = 0;
-    while rms(&residual) > tolerance && used < iterations {
+    profile.project_setup = lap(&mut clock);
+    loop {
+        let current = rms(&residual);
+        profile.project_reduce += lap(&mut clock);
+        if !(current > tolerance && used < iterations) {
+            break;
+        }
         apply(&direction, &mut applied);
+        profile.project_apply += lap(&mut clock);
         let denom = inner(&direction, &applied);
+        profile.project_reduce += lap(&mut clock);
         if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
             return Err(Error::Pressure(rms(&residual)));
         }
@@ -907,11 +987,14 @@ fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> 
             residual[k] -= alpha * applied[k];
             z[k] = if diagonal[k] > 0.0 { residual[k] / diagonal[k] } else { residual[k] };
         }
+        profile.project_update += lap(&mut clock);
         let next = inner(&residual, &z);
+        profile.project_reduce += lap(&mut clock);
         let beta = next / rz;
         for k in 0..count {
             direction[k] = z[k] + beta * direction[k];
         }
+        profile.project_update += lap(&mut clock);
         rz = next;
         used += 1;
     }
@@ -942,6 +1025,7 @@ fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> 
     if !after.is_finite() || after > tolerance * 1.01 {
         return Err(Error::Pressure(after));
     }
+    profile.project_finish = lap(&mut clock);
     Ok(StepReport { divergence_before: before, divergence_after: after, pressure_iterations: used })
 }
 
