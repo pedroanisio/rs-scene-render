@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: PYRO6 -->
+<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>
+<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition><object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource shape="mesh" mesh="source-mesh" densityRate="2" start="0.15" end="0.35"><animate property="mesh"><key time="0" value="source-mesh"/></animate></pyroSource><pyroImpulse shape="box" width="2" height="2" depth="2" time="0.5" density="1" temperature="3000"/></pyro><medium blackbody="true" emissionScale="0.1"/></object3D></composition></scene>

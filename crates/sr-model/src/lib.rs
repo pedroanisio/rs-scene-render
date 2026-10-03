@@ -48,4 +48,4 @@ pub use document::{
 };
 
 /// Schema version implemented by this crate.
-pub const SCHEMA_VERSION: &str = "1.2";
+pub const SCHEMA_VERSION: &str = "1.3";

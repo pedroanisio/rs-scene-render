@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: P3D1 -->
+<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="floor" primitive="box" y="20" width="64" height="1" depth="64"/><particles3D id="dust" rate="0" speed="5" spread="120" gravityY="8" colliders="floor" lifetime="2"><burst time="0" count="12"/></particles3D></composition></scene>

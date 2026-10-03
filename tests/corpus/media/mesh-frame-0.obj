@@ -1,0 +1,5 @@
+# Synthetic triangle, metres, Y up.
+v -0.3 -0.3 0
+v 0.3 -0.3 0
+v 0 0.3 0
+f 1 2 3

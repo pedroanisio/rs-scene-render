@@ -5,7 +5,7 @@
 //! to an existing file. Where the document declares a digest — `@sha256` for
 //! `@src`, `@cacheSha256` for `@cache` — the file's SHA-256 must match it,
 //! which is what makes renders of generated media and transcriptions
-//! reproducible. Image sequences are expanded and every frame is checked.
+//! reproducible. Image, mesh and volume sequences expand and check every declared frame.
 //!
 //! Codes: `A01` missing file, `A02` digest mismatch, `A03` remote input not
 //! verified offline, `A04` missing sequence frames, `A05` unreadable file,
@@ -185,14 +185,43 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     let mut remote: Vec<(Node, &'static str, String)> = Vec::new();
     for n in doc.root_element().descendants().filter(|n| n.is_element()) {
         let name = n.tag_name().name();
-        if name == "imageSequence" {
+        let numbered = matches!(name, "imageSequence" | "meshSequence")
+            || (name == "volume" && (n.has_attribute("first") || n.has_attribute("last")));
+        if numbered {
             sequence(n, base_dir, out);
         }
         for &attr in uri_attrs {
-            if name == "imageSequence" && attr == "src" {
+            if numbered && attr == "src" {
                 continue;
             }
             let Some(value) = n.attribute(attr) else { continue };
+            if name == "volume" && n.attribute("format") == Some("srvseq") && attr == "src" {
+                match resolve(value, base_dir) {
+                    Resolved::Local(path) => {
+                        let result = (|| -> Result<(), sr_volume::Error> {
+                            let limits = sr_volume::bake::BakeLimits::default();
+                            let bake = sr_volume::bake::BakedSequence::open(&path, n.attribute("sha256"), limits)?;
+                            let mut seen = BTreeSet::new();
+                            for frame in bake.frames() {
+                                if seen.insert(frame.sha256()) {
+                                    frame.read(bake.directory(), limits.frame)?;
+                                }
+                            }
+                            Ok(())
+                        })();
+                        if let Err(e) = result {
+                            out.push(Diagnostic::error(
+                                "A05",
+                                format!("volume bake {}: {e}", path.display()),
+                                attr_loc(n, attr),
+                                element_path(n),
+                            ));
+                        }
+                    }
+                    Resolved::Remote(scheme) => remote.push((n, attr, scheme)),
+                }
+                continue;
+            }
             let (expected, hash_attr) = match attr {
                 "src" => (n.attribute("sha256").and_then(parse_digest), "sha256"),
                 "cache" => (n.attribute("cacheSha256").and_then(parse_digest), "cacheSha256"),
@@ -340,6 +369,13 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
 }
 
 fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
+    let kind = if n.has_tag_name("volume") {
+        "volume"
+    } else if n.has_tag_name("meshSequence") {
+        "mesh"
+    } else {
+        "image"
+    };
     let Some(src) = n.attribute("src") else { return };
     let int = |k: &str| {
         n.attribute(k).and_then(|v| crate::xsd::parse_xsd_integer(v.trim())).and_then(|v| i64::try_from(v).ok())
@@ -351,7 +387,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     if last < first {
         out.push(Diagnostic::error(
             "A04",
-            format!("image sequence runs from frame {first} to {last}; last precedes first"),
+            format!("{kind} sequence runs from frame {first} to {last}; last precedes first"),
             loc,
             path,
         ));
@@ -361,7 +397,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
         out.push(Diagnostic::error(
             "A04",
             format!(
-                "image sequence src {src:?} has no frame placeholder (%0Nd, %d or ####) of at most \
+                "{kind} sequence src {src:?} has no frame placeholder (%0Nd, %d or ####) of at most \
                  {MAX_FRAME_DIGITS} digits"
             ),
             loc,
@@ -374,7 +410,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     if count > MAX_SEQUENCE_FRAMES {
         out.push(Diagnostic::warning(
             "A04",
-            format!("image sequence has {count} frames; frames were not checked individually"),
+            format!("{kind} sequence has {count} frames; frames were not checked individually"),
             loc,
             path,
         ));
@@ -392,7 +428,7 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
     if let Some(Resolved::Remote(scheme)) = sequence_frame(src, first).map(|f| resolve(&f, base_dir)) {
         out.push(Diagnostic::warning(
             "A03",
-            format!("image sequence is a {scheme} URI and was not verified offline"),
+            format!("{kind} sequence is a {scheme} URI and was not verified offline"),
             loc,
             path,
         ));
@@ -416,12 +452,13 @@ fn sequence(n: Node, base_dir: &Path, out: &mut Vec<Diagnostic>) {
         runs.iter().take(5).map(|(a, b)| if a == b { a.to_string() } else { format!("{a}–{b}") }).collect();
     let more = if runs.len() > 5 { ", …" } else { "" };
     let policy = n.attribute("missingFrame").unwrap_or("error");
-    let msg = format!("image sequence is missing {} of {count} frames ({}{more})", missing.len(), shown.join(", "));
-    if policy == "error" {
-        out.push(
-            Diagnostic::error("A04", msg, loc, path)
-                .with_help("add the frames or set missingFrame to hold, black or transparent"),
-        );
+    let msg = format!("{kind} sequence is missing {} of {count} frames ({}{more})", missing.len(), shown.join(", "));
+    if policy == "error" || (kind != "image" && policy == "hold" && missing.first() == Some(&first)) {
+        out.push(Diagnostic::error("A04", msg, loc, path).with_help(if kind != "image" {
+            "add the frames, use transparent, or use hold with an available first frame"
+        } else {
+            "add the frames or set missingFrame to hold, black or transparent"
+        }));
     } else {
         out.push(Diagnostic::warning("A04", format!("{msg}; missingFrame=\"{policy}\" applies"), loc, path));
     }

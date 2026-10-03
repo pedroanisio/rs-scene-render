@@ -952,6 +952,21 @@
     </xs:attribute>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+  <xs:complexType name="meshSequenceAssetType">
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="volumeSourceType" use="required"/>
+    <xs:attribute name="format"><xs:simpleType><xs:restriction base="xs:string">
+      <xs:enumeration value="gltf"/><xs:enumeration value="glb"/><xs:enumeration value="obj"/><xs:enumeration value="ply"/>
+      <xs:enumeration value="usd"/><xs:enumeration value="usda"/><xs:enumeration value="usdc"/><xs:enumeration value="usdz"/><xs:enumeration value="fbx"/>
+    </xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="first" type="volumeFrameIndexType" use="required"/>
+    <xs:attribute name="last" type="volumeFrameIndexType" use="required"/>
+    <xs:attribute name="fps" type="fpsType" use="required"/>
+    <xs:attribute name="interpolation" type="meshSequenceInterpolationType" default="hold"/>
+    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attributeGroup ref="assetProvenance"/>
+  </xs:complexType>
   <xs:complexType name="slotType">
     <xs:annotation><xs:documentation>Overrides a Lottie slot (sid) or a named text/colour layer inside the animation.</xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:string" use="required"/>
@@ -1333,6 +1348,57 @@
     <xs:attribute name="outlineWidth" type="nonNegativeDecimal" default="1"/>
     <xs:attribute name="precision" type="positiveDecimal" default="0.7071"/>
   </xs:complexType>
+  <!-- Local cinematic SREP, document version 1.3. -->
+  <xs:simpleType name="volumeChannelType">
+    <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z0-9_.\-]{1,64}"/></xs:restriction>
+  </xs:simpleType>
+  <!-- A printf placeholder such as %d is not itself a percent-encoded URI. -->
+  <xs:simpleType name="volumeSequencePatternType">
+    <xs:restriction base="xs:string"><xs:pattern value=".*(%[0-9]*d|#+).*"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="volumeSourceType"><xs:union memberTypes="xs:anyURI volumeSequencePatternType"/></xs:simpleType>
+  <xs:complexType name="volumeAssetType">
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="volumeSourceType" use="required"/>
+    <xs:attribute name="sha256" type="sha256Type"/>
+    <xs:attribute name="format" default="srvol"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="srvol"/><xs:enumeration value="srvseq"/><xs:enumeration value="openvdb"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="densityGrid" type="volumeChannelType" default="density"/>
+    <xs:attribute name="temperatureGrid" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridX" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridY" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridZ" type="volumeChannelType"/>
+    <xs:attribute name="first" type="volumeFrameIndexType"/>
+    <xs:attribute name="last" type="volumeFrameIndexType"/>
+    <xs:attribute name="fps" type="fpsType"/>
+    <xs:attribute name="interpolation" type="volumeInterpolationType" default="hold"/>
+    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
+    <xs:attribute name="boundsMinX" type="xs:double"/>
+    <xs:attribute name="boundsMinY" type="xs:double"/>
+    <xs:attribute name="boundsMinZ" type="xs:double"/>
+    <xs:attribute name="boundsMaxX" type="xs:double"/>
+    <xs:attribute name="boundsMaxY" type="xs:double"/>
+    <xs:attribute name="boundsMaxZ" type="xs:double"/>
+  </xs:complexType>
+  <xs:simpleType name="volumeFrameIndexType"><xs:restriction base="xs:integer"><xs:minInclusive value="-2147483648"/><xs:maxInclusive value="2147483647"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="meshSequenceInterpolationType"><xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="volumeInterpolationType">
+    <xs:annotation><xs:documentation>Version 1.3. Hold freezes a frame; linear blends scalar fields in asset-world coordinates. Advect requires all three velocityGrid components (VOL9): signed asset-world vectors in scene units/second, with matching component transforms per frame. Frozen endpoint midpoint traces precede density/kelvin blending. Numbered caches use object-local seconds; SRVSEQ uses composition seconds. Clamped or identical held endpoints freeze. Grid transforms locate samples without transforming velocity vectors. Assets and their channel references are immutable during rendering; channel names identify owned cache fields, not paths.</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/><xs:enumeration value="advect"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="volumeMissingFrameType"><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="hold"/><xs:enumeration value="transparent"/></xs:restriction></xs:simpleType>
+  <xs:complexType name="mediumType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
+    <xs:attribute name="densityScale" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="extinction" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="albedo" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="anisotropy" default="0"><xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="-0.99"/><xs:maxInclusive value="0.99"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="emissionColor" type="colorType" default="#000000FF"/>
+    <xs:attribute name="emissionScale" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="blackbody" type="xs:boolean" default="false"/>
+    <xs:attribute name="temperatureScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="stepSize" type="positiveDecimal" default="1"/>
+    <xs:attribute name="maxSteps" default="2048"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
   <xs:complexType name="assetsType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="image" type="imageAssetType"/>
@@ -1342,6 +1408,8 @@
       <xs:element name="text" type="textAssetType"/>
       <xs:element name="vector" type="vectorAssetType"/>
       <xs:element name="mesh" type="meshAssetType"/>
+      <xs:element name="meshSequence" type="meshSequenceAssetType"/>
+      <xs:element name="volume" type="volumeAssetType"/>
       <xs:element name="lottie" type="lottieAssetType"/>
       <xs:element name="font" type="fontAssetType"/>
       <xs:element name="generator" type="generatorAssetType"/>
@@ -2005,12 +2073,317 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
   </xs:complexType>
 
+  <xs:complexType name="oceanType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="waterImpulse" type="waterImpulseType"/><xs:element name="wave" type="oceanWaveType"/><xs:element name="whitewater" type="whitewaterType"/></xs:choice>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="condition" type="expressionString"/>
+    <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="visible" type="xs:boolean" default="true"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="width" type="positiveDecimal" default="64"/>
+    <xs:attribute name="depth" type="positiveDecimal" default="64"/>
+    <xs:attribute name="cellSize" type="positiveDecimal" default="1"/>
+    <xs:attribute name="waterLevel" type="xs:double" default="0"/>
+    <xs:attribute name="bottomDepth" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="gravity" type="positiveDecimal" default="9.81"/>
+    <xs:attribute name="damping" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="dryTolerance" type="positiveDecimal" default="0.0000000001"/>
+    <xs:attribute name="initialVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="initialVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="bathymetryScale" type="xs:double" default="1"/>
+    <xs:attribute name="bathymetryOffset" type="xs:double" default="0"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="surfaceMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="periodic"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="bathymetryEncoding" default="red"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="bathymetry" type="xs:IDREF"/>
+  </xs:complexType>
+  <xs:complexType name="waterImpulseType">
+    <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="amplitude" type="xs:double" default="1"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="type" default="displace"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="displace"/><xs:enumeration value="add-water"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="whitewaterType">
+    <xs:annotation><xs:documentation>Cinematic read-only water tracers. Births at ocean dt endpoints follow excess surface slope or Froude number. Foam follows water; spray is ballistic with drag and becomes foam on landing. Own budgets and full-u64 seed; at most one child per ocean.</xs:documentation></xs:annotation>
+    <xs:attribute name="emissionRate" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="threshold" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="lifetime" type="positiveDecimal" default="3"/>
+    <xs:attribute name="sprayFraction" type="unitDecimal" default="0.4"/>
+    <xs:attribute name="launchSpeed" type="nonNegativeDecimal" default="3"/>
+    <xs:attribute name="drag" type="nonNegativeDecimal" default="0.1"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="0.05"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="end" type="nonNegativeDecimal"/>
+    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="foamMaterial" type="xs:IDREF"/>
+    <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
+  </xs:complexType>
+  <xs:complexType name="oceanWaveType">
+    <xs:attribute name="wavelength" type="positiveDecimal" default="16"/>
+    <xs:attribute name="amplitude" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="direction" type="xs:double" default="0"/>
+    <xs:attribute name="phase" type="xs:double"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal"/>
+  </xs:complexType>
+
+  <xs:complexType name="particles3DType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burstType"/></xs:choice>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="condition" type="expressionString"/>
+    <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="visible" type="xs:boolean" default="true"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
+    <xs:attribute name="rate" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="emissionStart" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="lifetimeVariance" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="speedVariance" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="drag" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="collisionRadius" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="friction" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="trail" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="emissionEnd" type="nonNegativeDecimal"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="lifetime" type="positiveDecimal" default="2"/>
+    <xs:attribute name="emitterWidth" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterHeight" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterDepth" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterRadius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="size" type="positiveDecimal" default="1"/>
+    <xs:attribute name="collisionTolerance" type="positiveDecimal" default="0.001"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="gravityX" type="xs:double" default="0"/>
+    <xs:attribute name="gravityY" type="xs:double" default="0"/>
+    <xs:attribute name="gravityZ" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0X" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0Y" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0Z" type="xs:double" default="0"/>
+    <xs:attribute name="rotationVarianceX" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="rotationVarianceY" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="rotationVarianceZ" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityY" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityVarianceX" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityVarianceY" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityVarianceZ" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="inheritedVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="inheritedVelocityY" type="xs:double" default="0"/>
+    <xs:attribute name="inheritedVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="directionX" type="xs:double" default="0"/>
+    <xs:attribute name="directionY" type="xs:double" default="-1"/>
+    <xs:attribute name="directionZ" type="xs:double" default="0"/>
+    <xs:attribute name="spread" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="360"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="scaleVariance" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxExclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="bounce" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxEvents" default="16384"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="segments" default="12"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="emitterMesh" type="xs:IDREF"/>
+    <xs:attribute name="mesh" type="xs:IDREF"/>
+    <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="sprite" type="xs:IDREF"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="emitterShape" default="point"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="point"/><xs:enumeration value="box"/><xs:enumeration value="sphere"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="billboard"/><xs:enumeration value="streak"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="sizeEnd" type="nonNegativeDecimal"/>
+    <xs:attribute name="color" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="colorEnd" type="colorType"/>
+    <xs:attribute name="opacityEnd" type="unitDecimal"/>
+    <xs:attribute name="sizeCurve" type="curveType" default="linear"/>
+    <xs:attribute name="colorCurve" type="curveType" default="linear"/>
+  </xs:complexType>
+
+  <xs:attributeGroup name="pyroShape">
+    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="box"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="width" type="positiveDecimal"/>
+    <xs:attribute name="height" type="positiveDecimal"/>
+    <xs:attribute name="depth" type="positiveDecimal"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="mesh" type="xs:IDREF"/>
+  </xs:attributeGroup>
+  <xs:complexType name="pyroSourceType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
+    <xs:attributeGroup ref="pyroShape"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="densityRate" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="temperatureRate" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="velocityRateX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityRateY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityRateZ" type="xs:double" default="0"/>
+    <xs:attribute name="expansion" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="pyroImpulseType">
+    <xs:attributeGroup ref="pyroShape"/>
+    <xs:attribute name="time" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="density" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="temperature" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="expansion" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="pyroType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/></xs:choice>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="colliderThickness" type="positiveDecimal"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="depth" type="positiveDecimal" use="required"/>
+    <xs:attribute name="voxelSize" type="positiveDecimal" use="required"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="ambientTemperature" default="300"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="dissipation" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="cooling" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="buoyancy" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="vorticity" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="turbulence" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
+    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="fractureType">
+    <xs:annotation><xs:documentation>
+      Owned seeded closed-solid fracture. at is composition time, quantized to the first
+      physics boundary at or after that time when the source object participates.
+      Exactly one rigidBody supplies total mass, collision properties and inherited motion.
+      Exterior materials and attributes come from the frozen source surface; cut faces use
+      interiorMaterial, with planar UV repeats per scene unit given by interiorUvScale.
+      impulseX/Y/Z are the total directed world-scene impulse in kg*scene-unit/second,
+      distributed in proportion to piece mass. radialImpulse is a nonnegative total scalar
+      impulse, distributed by piece mass along the source-centroid-to-piece directions.
+      maxMemoryMiB bounds component geometry/reconstruction admission, not whole-process RSS.
+      Fracture is cinematic partitioning, not a material stress/failure calculation.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="interiorMaterial" type="xs:IDREF" use="required"/>
+    <xs:attribute name="interiorUvScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="impulseX" type="xs:double" default="0"/>
+    <xs:attribute name="impulseY" type="xs:double" default="0"/>
+    <xs:attribute name="impulseZ" type="xs:double" default="0"/>
+    <xs:attribute name="radialImpulse" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="craterType">
+    <xs:annotation><xs:documentation>
+      Owned cinematic deformation in object-space scene units, after imported basis/node transforms.
+      Let p be the clamped eased fraction of local time from start to end; dimensions grow with p.
+      With outward unit n, h=dot(vertex-center,n), r=length(vertex-center-n*h), and B(x)=max(0,1-x*x)^2
+      for abs(x)&lt;1 (zero otherwise), displace along n by
+      p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
+      At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
+      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
+      This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
+      maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
+      by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.
+      Static and kinematic rigid surfaces are rebuilt at fixed physics substeps. Dynamic rigid bodies are rejected.
+      Particle collider references interpolate deformed world-space vertices over canonical particle dt intervals,
+      with continuous sphere/triangle contacts and barycentric boundary velocities. Particle geometry admission
+      also uses this memory allowance. Pyro collider references sample closed midpoint surfaces with
+      barycentric material velocities evaluated at MAC faces, reserving retained and step-local geometry
+      under both this allowance and the domain meshMemoryMiB. Crater planes retain a centred colliderThickness slab.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="centerX" type="xs:double" default="0"/>
+    <xs:attribute name="centerY" type="xs:double" default="0"/>
+    <xs:attribute name="centerZ" type="xs:double" default="0"/>
+    <xs:attribute name="normalX" type="xs:double" default="0"/>
+    <xs:attribute name="normalY" type="xs:double" default="0"/>
+    <xs:attribute name="normalZ" type="xs:double" default="-1"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="50"/>
+    <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="rimHeight" type="nonNegativeDecimal" default="2"/>
+    <xs:attribute name="rimWidth" type="positiveDecimal" default="10"/>
+    <xs:attribute name="influenceDepth" type="positiveDecimal"/>
+    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="end" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="curve" default="ease-in-out"><xs:simpleType><xs:restriction base="xs:string">
+      <xs:enumeration value="linear"/><xs:enumeration value="ease-in"/><xs:enumeration value="ease-out"/><xs:enumeration value="ease-in-out"/><xs:enumeration value="step"/>
+    </xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
   <xs:complexType name="object3DType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
       <xs:element name="blob" type="clayBlobType"/>
       <xs:element name="rigidBody" type="rigidBody3DType"/>
+      <xs:element name="medium" type="mediumType"/>
+      <xs:element name="pyro" type="pyroType"/>
+      <xs:element name="crater" type="craterType"/>
+      <xs:element name="fracture" type="fractureType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
@@ -2022,6 +2395,7 @@
         <xs:enumeration value="torus"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
         <xs:enumeration value="clay"/><xs:enumeration value="map"/><xs:enumeration value="globe"/>
+        <xs:enumeration value="volume"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
@@ -2039,6 +2413,13 @@
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="terrain" type="xs:IDREF"/>
+    <xs:attribute name="planetRadius" type="positiveDecimal" default="6378137">
+      <xs:annotation><xs:documentation>Version 1.3 globe relief: physical datum radius in metres. Radial scene displacement is elevationMetres * radius / planetRadius * exaggeration. Flat map terrain keeps its existing scale.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="terrainTileSize" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainZoom"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="22"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainMissing" default="error"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="zero"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="terrainEncoding" default="terrarium">
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/>
@@ -2056,6 +2437,7 @@
     <xs:attribute name="boil" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mesh" type="xs:IDREF"/>
+    <xs:attribute name="volume" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
     <xs:attribute name="path" type="xs:string"/>
@@ -2604,6 +2986,8 @@
       <xs:element name="object3D" type="object3DType"/>
       <xs:element name="camera" type="cameraType"/>
       <xs:element name="particleEmitter" type="particleEmitterType"/>
+      <xs:element name="particles3D" type="particles3DType"/>
+      <xs:element name="ocean" type="oceanType"/>
       <xs:element name="flock" type="flockType"/>
       <xs:element name="fluid" type="fluidType"/>
       <xs:element name="slime" type="slimeType"/>
@@ -3714,7 +4098,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: PYRO7 -->
+<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>
+<composition><object3D id="solid" primitive="box" width="2" height="2" depth="2"/><object3D id="cloud" primitive="volume"><pyro colliders="cloud" width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource shape="sphere" radius="2" densityRate="2" start="0.15" end="0.35"/><pyroImpulse shape="box" width="2" height="2" depth="2" time="0.5" density="1" temperature="3000"/></pyro><medium blackbody="true" emissionScale="0.1"/></object3D></composition></scene>

@@ -23,6 +23,33 @@ MEDIA = CORPUS / "media"
 base = re.sub(r"\{sha:([^}]+)\}", lambda m: hashlib.sha256((MEDIA / m.group(1)).read_bytes()).hexdigest(),
               (TOOLS / "kitchen_sink.xml.in").read_text())
 MINIMAL = '<scene version="1.1"><project width="1920" height="1080" fps="30" duration="5"/><composition/></scene>\n'
+VOLUME = '''<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>
+<assets><volume id="smoke" src="../media/uniform.srvol" boundsMinX="0" boundsMinY="0" boundsMinZ="0" boundsMaxX="32" boundsMaxY="32" boundsMaxZ="2"/></assets>
+<composition><object3D id="cloud" primitive="volume" volume="smoke"><medium albedo="#000000" emissionColor="#FF4000" emissionScale="0.2"/></object3D></composition></scene>\n'''
+VOLUME_SEQUENCE = VOLUME.replace('src="../media/uniform.srvol"',
+    'src="../media/uniform-%02d.srvol" first="0" last="0" fps="24000/1001" interpolation="linear"')
+
+VOLUME_BAKED = VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/baked-volume/manifest.srvseq" format="srvseq" sha256="68cb87c6720ed0ac07c87a7ae48f5a3a69c326c085f8dcb655be7738035432d8"')
+
+PYRO = '<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>\n<composition><object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource shape="sphere" radius="2" densityRate="2" start="0.15" end="0.35"/><pyroImpulse shape="box" width="2" height="2" depth="2" time="0.5" density="1" temperature="3000"/></pyro><medium blackbody="true" emissionScale="0.1"/></object3D></composition></scene>\n'
+
+PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
+
+PYRO_COLLIDERS = PYRO.replace("<composition>", '<composition><object3D id="solid" primitive="box" width="2" height="2" depth="2"/>').replace("<pyro ", '<pyro colliders="solid" ')
+
+SOLID_COLLIDERS = '<scene version="1.3"><project width="32" height="32" fps="10" duration="1"/><composition><object3D id="letters" primitive="text" text="O"/><object3D id="path" primitive="extrude" path="M0 0 L2 0 L2 2 Z"/><object3D id="clay" primitive="clay"><blob/></object3D><particles3D id="dust" colliders="letters path clay"/><object3D id="cloud" primitive="volume"><pyro width="4" height="4" depth="4" voxelSize="1" colliders="letters path clay"/></object3D></composition></scene>\n'
+
+PARTICLES3D = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="floor" primitive="box" y="20" width="64" height="1" depth="64"/><particles3D id="dust" rate="0" speed="5" spread="120" gravityY="8" colliders="floor" lifetime="2"><burst time="0" count="12"/></particles3D></composition></scene>\n'
+
+OCEAN = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2"><waterImpulse time="0.3" radius="2" amplitude="0.1"/><wave wavelength="4" amplitude="0.1" phase="0"/></ocean></composition></scene>\n'
+
+GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
+
+MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
+
+FRACTURE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><materials><material id="interior" baseColor="#A06030"/></materials><composition><object3D id="rock" primitive="box" width="4" height="4" depth="4"><rigidBody mass="8"/><fracture at="1" pieces="8" seed="18446744073709551615" interiorMaterial="interior" radialImpulse="4"/></object3D></composition></scene>\n'
+
+CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="ground" primitive="plane" width="20" height="20" segments="40"><crater radius="4" depth="3" rimWidth="1" rimHeight="0.5" start="1" end="2"/><rigidBody type="static"/></object3D></composition></scene>\n'
 
 def sub(old, new, count=1):
     def f(t):
@@ -45,6 +72,53 @@ def v10(body, extra_sections=""):
 
 # (name, expected codes, transform-or-document, asset codes the oracle cannot see)
 CASES = [
+    ("solid-colliders-boil", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('primitive="clay"', 'primitive="clay" boil=" +12 " fingerprints=" +0.5 "')),
+    ("solid-colliders-blob", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('<blob/>', '<blob><animate property="x"><key time="0" value="2"/></animate></blob>')),
+    ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),
+    ("frx2", ["FRX2"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '')),
+    ("frx3", ["FRX3"], lambda _: FRACTURE.replace('interiorMaterial="interior"', 'interiorMaterial="rock"')),
+    ("frx4", ["FRX4", "W01"], lambda _: FRACTURE.replace('radialImpulse="4"', 'radialImpulse="4" impulseX="NaN"')),
+    ("crt1", ["CRT1"], lambda _: CRATER.replace('version="1.3"', 'version="1.2"')),
+    ("crt2", ["CRT2"], lambda _: CRATER.replace('<crater ', '<crater/><crater ')),
+    ("crt3", ["CRT3"], lambda _: CRATER.replace('end="2"', 'end="0"')),
+    ("crt4", ["CRT4"], lambda _: CRATER.replace('rimWidth="1"', 'rimWidth="5"')),
+    ("crt5", ["CRT5"], lambda _: CRATER.replace('type="static"', 'type="dynamic"')),
+    ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
+    ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
+    ("msq3", ["MSQ3"], lambda _: MESH_SEQUENCE.replace('first="0"', 'sha256="' + '0' * 64 + '" first="0"')),
+    ("msq4", ["MSQ4"], lambda _: MESH_SEQUENCE.replace('y="32"/>', 'y="32"><rigidBody type="static"/></object3D>')),
+    ("geo1", ["GEO1"], lambda _: GLOBE.replace('version="1.3"', 'version="1.2"')),
+    ("geo2", ["GEO2"], lambda _: GLOBE.replace('terrainTileSize="2"', 'terrainTileSize=" +260 "')),
+    ("geo3", ["GEO3"], lambda _: GLOBE.replace('segments="32"/>', 'segments="32"><animate property="planetRadius"><key time="0" value="1000"/></animate></object3D>')),
+    ("ocn1", ["OCN1"], lambda _: OCEAN.replace('version="1.3"', 'version="1.2"')),
+    ("ocn2", ["OCN2"], lambda _: OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" bathymetryEncoding="terrarium"')),
+    ("ocn3", ["OCN3"], lambda _: OCEAN.replace('width="8"', 'width="8.1"')),
+    ("ocn4", ["OCN4"], lambda _: OCEAN.replace('</ocean>', '<animate property="bottomDepth"><key time="0" value="2"/></animate></ocean>')),
+    ("ocn5", ["OCN5"], lambda _: OCEAN.replace('</ocean>', '<whitewater start="1" end="0.5"/></ocean>')),
+    ("p3d1", ["P3D1"], lambda _: PARTICLES3D.replace('version="1.3"', 'version="1.2"')),
+    ("p3d2", ["P3D2"], lambda _: PARTICLES3D.replace('rate="0"', 'rate="0" emitterShape="mesh"')),
+    ("p3d3", ["P3D3"], lambda _: PARTICLES3D.replace('lifetime="2"', 'lifetime="2" lifetimeVariance="2"')),
+    ("p3d4", ["P3D4"], lambda _: PARTICLES3D.replace('</particles3D>', '<animate property="lifetime"><key time="0" value="2"/></animate></particles3D>')),
+    ("p3d5", ["P3D5"], lambda _: PARTICLES3D.replace('colliders="floor"', 'colliders="dust"')),
+    ("p3d6", ["P3D6"], lambda _: PARTICLES3D.replace('depth="64"/>', 'depth="64"><animate property="width"><key time="0" value="64"/><key time="1" value="32"/></animate></object3D>')),
+    ("pyro1", ["PYRO1"], lambda _: PYRO.replace('voxelSize="1"', 'voxelSize="3"')),
+    ("pyro2", ["PYRO2"], lambda _: PYRO.replace('end="0.35"', 'end="0.1"')),
+    ("pyro3", ["PYRO3"], lambda _: PYRO.replace('shape="sphere" radius="2"', 'shape="box"')),
+    ("pyro4", ["PYRO4"], lambda _: PYRO.replace('radius="2"', 'radius="2" scaleX="0"')),
+    ("pyro5", ["PYRO5"], lambda _: PYRO.replace('shape="sphere" radius="2"', 'shape="mesh"')),
+    ("pyro6", ["PYRO6"], lambda _: PYRO_MESH.replace('end="0.35"/>', 'end="0.35"><animate property="mesh"><key time="0" value="source-mesh"/></animate></pyroSource>')),
+    ("pyro7", ["PYRO7"], lambda _: PYRO_COLLIDERS.replace('colliders="solid"', 'colliders="cloud"')),
+    ("pyro8", ["PYRO8"], lambda _: PYRO_COLLIDERS.replace('depth="2"/>', 'depth="2"><animate property="width"><key time="0" value="2"/><key time="1" value="4"/></animate></object3D>')),
+    ("v8-volumes", ["V8"], lambda _: VOLUME.replace('version="1.3"', 'version="1.2"')),
+    ("vol1", ["VOL1"], lambda _: VOLUME.replace(' volume="smoke"', '')),
+    ("vol2", ["VOL2"], lambda _: VOLUME.replace('volume="smoke"', 'volume="cloud"')),
+    ("vol3", ["VOL3"], lambda _: VOLUME.replace('primitive="volume"', 'primitive="box"')),
+    ("vol4", ["VOL4"], lambda _: VOLUME.replace(' boundsMaxZ="2"', '')),
+    ("vol5", ["VOL5"], lambda _: VOLUME.replace('<medium ', '<medium blackbody="true" ')),
+    ("vol6", ["VOL6"], lambda _: VOLUME_SEQUENCE.replace(' last="0"', '')),
+    ("vol9", ["VOL9"], lambda _: VOLUME_SEQUENCE.replace('interpolation="linear"', 'interpolation="advect" velocityGridX="velocity.x" velocityGridY="velocity.y"')),
+    ("vol8", ["VOL8"], lambda _: VOLUME_BAKED.replace('format="srvseq"', 'format="srvseq" fps="1"')),
+    ("vol7", ["VOL7"], lambda _: VOLUME_SEQUENCE.replace('id="smoke"', 'id="smoke" sha256="' + '0' * 64 + '"')),
     # ---- structure
     ("s01-root", ["S01"], lambda t: MINIMAL.replace("scene", "movie")),
     ("s02-unknown-element", ["S02"], ins_comp('<lyer id="z" asset="logo"/>')),
@@ -254,6 +328,24 @@ WARN_CASES = [
 ]
 
 VALID = {
+    "solid-colliders": SOLID_COLLIDERS,
+    "fracture": FRACTURE,
+    "openvdb": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-0.vdb" format="openvdb" temperatureGrid="temperature"').replace('<medium ', '<medium blackbody="true" '),
+    "openvdb-sequence": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-%d.vdb" format="openvdb" first="0" last="1" interpolation="linear"'),
+    "crater": CRATER,
+    "mesh-sequence": MESH_SEQUENCE,
+    "globe-relief": GLOBE,
+    "particles3d": PARTICLES3D,
+    "ocean": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3"/></ocean>'),
+    "pyro": PYRO,
+    "pyro-mesh": PYRO_MESH,
+    "pyro-colliders": PYRO_COLLIDERS,
+    "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
+    "baked-volume": VOLUME_BAKED,
+    "volume": VOLUME,
+    "advected-volume": VOLUME_SEQUENCE.replace('uniform-%02d', 'advected-%d').replace('last="0"', 'last="1"').replace('fps="24000/1001"', 'fps="1"').replace('interpolation="linear"', 'interpolation="advect" velocityGridX="velocity.x" velocityGridY="velocity.y" velocityGridZ="velocity.z"').replace(' boundsMinX="0" boundsMinY="0" boundsMinZ="0" boundsMaxX="32" boundsMaxY="32" boundsMaxZ="2"', '').replace('<composition>', '<composition><camera id="camera" x="0" y="0" z="-30" projection="orthographic"/>'),
+    "volume-sequence": VOLUME_SEQUENCE.replace('first="0" last="0"', 'first=" +0 " last=" 0000 "').replace('uniform-%02d', 'uniform-0%d').replace('</assets>', '<volume id="hash" src="../media/uniform-##.srvol" first="0" last="0"/></assets>'),
+    "thermal-volume": VOLUME.replace('id="smoke" src=', 'id="smoke" temperatureGrid="density" src=').replace('<medium ', '<medium blackbody="true" temperatureScale="5000" '),
     "kitchen-sink": base,
     "minimal": MINIMAL,
     "version-1.0": v10('<layer id="l" asset="img" x="10" y="10"/>').replace("<composition>", '<assets><image id="img" src="../media/logo.png" width="16" height="16"/></assets><composition>'),
@@ -264,12 +356,22 @@ VALID = {
 # Table)) and minLength 1 on whitespace-only IDREFS lists.
 ORACLE_BLIND = {"s06-idrefs-empty", "s10-dangling-idref"}
 
+CASES.append(("openvdb-format", ["S06"], lambda _: VALID["openvdb"].replace('format="openvdb"', 'format="guess"')))
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text
     decl = '<?xml version="1.0" encoding="UTF-8"?>\n'
     path.write_text(decl + header + body)
     return (decl + header + body).encode()
+
+def oracle_codes(expected, blind=False):
+    """Translate Rust diagnostics into the independent schema oracle's scope."""
+    codes = {code for code in expected if not code.startswith(("S", "A", "W"))}
+    if not blind and any(code.startswith("S") for code in expected):
+        codes.add("XSD")
+    return sorted(codes)
+
 
 def main():
     manifest = {"valid": {}, "invalid": {}, "warnings": {}}
@@ -289,9 +391,8 @@ def main():
         data = write(CORPUS / "invalid" / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         got = sorted(set(i for i, _ in sch) | ({"XSD"} if xsd else set()))
-        want = sorted(set(e for e in expect if not e.startswith("S")) | ({"XSD"} if any(e.startswith("S") for e in expect) else set()))
-        if name in ORACLE_BLIND:
-            want = sorted(set(e for e in expect if not e.startswith("S")))
+        # Asset diagnostics and renderer warnings are outside XSD/Schematron.
+        want = oracle_codes(expect, blind=name in ORACLE_BLIND)
         if got != want:
             ok = False
             print(f"invalid/{name}: expected {want}, oracle says {got}: {xsd[:2]}")

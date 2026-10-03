@@ -14,3 +14,18 @@ Local additions pending in sr-core: SREPs 9 (map tiles and basemaps), 10
 (R27-R29, R38-R41, C46-C48, C54-C59), scene/@version "1.2" and rule V5, and
 amend C20, C33 and R14. They are replaced by the sr-core 1.2.0 files once
 released.
+
+Local cinematic implementation in progress: srep-0000-cinematic-impact.md
+introduces document version 1.3. The current patch adds bounded SRVOL/OpenVDB volume
+assets, numbered cache sequences and integrity-pinned SRVSEQ render bakes,
+explicit velocity-driven midpoint interpolation (advect and velocityGridX/Y/Z),
+object3D volume instances, medium shading with temperature emission, native pyro
+sources/impulses, scoped moving colliders and force fields, and
+native particles3D emission, appearance and rigid collider references, and
+ocean surfaces, image/mesh bathymetry, procedural swell, timed water impulses,
+bounded native foam/spray tracers, and globe elevation shared by rendering and
+rigid-body, particle and pyro colliders with explicit physical scale and DEM budgets,
+and numbered mesh-sequence rendering with explicit interpolation/missing-frame policies.
+The local rules are V8/VOL1-VOL9/PYRO1-PYRO8/P3D1-P3D6/OCN1-OCN5/GEO1-GEO3/MSQ1-MSQ4.
+The remaining proposal surface is tracked in tools/evidence/cinematic-impact.json;
+this is not an accepted upstream schema release.

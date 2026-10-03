@@ -91,6 +91,8 @@ mod coverage {
             "colorType" => Some("#ff8800"),
             "paintRefType" => Some("url(#p)"),
             "numberListType" => Some("1 2.5 -3"),
+            "volumeChannelType" => Some("density"),
+            "volumeSequencePatternType" => Some("frame-%d.srvol"),
             _ => None,
         };
         if let Some(v) = named {

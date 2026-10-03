@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: valid -->
+<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>
+<assets><volume id="smoke" src="../media/impact-0.vdb" format="openvdb" temperatureGrid="temperature" boundsMinX="0" boundsMinY="0" boundsMinZ="0" boundsMaxX="32" boundsMaxY="32" boundsMaxZ="2"/></assets>
+<composition><object3D id="cloud" primitive="volume" volume="smoke"><medium blackbody="true" albedo="#000000" emissionColor="#FF4000" emissionScale="0.2"/></object3D></composition></scene>

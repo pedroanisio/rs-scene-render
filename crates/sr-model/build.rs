@@ -44,6 +44,7 @@ const BUILTINS: &[(&str, &str)] = &[
 
 /// Named simple types whose Rust representation is hand-written in `values.rs`.
 const HANDWRITTEN: &[(&str, &str)] = &[
+    ("volumeSourceType", "String"),
     ("fpsType", "crate::values::Fps"),
     ("aspectType", "crate::values::Aspect"),
     ("sha256Type", "crate::values::Sha256"),

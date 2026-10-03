@@ -198,6 +198,116 @@
     "c9.scene.xml": [
       "C9"
     ],
+    "crt1.scene.xml": [
+      "CRT1"
+    ],
+    "crt2.scene.xml": [
+      "CRT2"
+    ],
+    "crt3.scene.xml": [
+      "CRT3"
+    ],
+    "crt4.scene.xml": [
+      "CRT4"
+    ],
+    "crt5.scene.xml": [
+      "CRT5"
+    ],
+    "frx1.scene.xml": [
+      "FRX1"
+    ],
+    "frx2.scene.xml": [
+      "FRX2"
+    ],
+    "frx3.scene.xml": [
+      "FRX3"
+    ],
+    "frx4.scene.xml": [
+      "FRX4",
+      "W01"
+    ],
+    "geo1.scene.xml": [
+      "GEO1"
+    ],
+    "geo2.scene.xml": [
+      "GEO2"
+    ],
+    "geo3.scene.xml": [
+      "GEO3"
+    ],
+    "msq1.scene.xml": [
+      "MSQ1"
+    ],
+    "msq2.scene.xml": [
+      "MSQ2",
+      "A04"
+    ],
+    "msq3.scene.xml": [
+      "MSQ3"
+    ],
+    "msq4.scene.xml": [
+      "MSQ4"
+    ],
+    "ocn1.scene.xml": [
+      "OCN1"
+    ],
+    "ocn2.scene.xml": [
+      "OCN2"
+    ],
+    "ocn3.scene.xml": [
+      "OCN3"
+    ],
+    "ocn4.scene.xml": [
+      "OCN4"
+    ],
+    "ocn5.scene.xml": [
+      "OCN5"
+    ],
+    "openvdb-format.scene.xml": [
+      "S06"
+    ],
+    "p3d1.scene.xml": [
+      "P3D1"
+    ],
+    "p3d2.scene.xml": [
+      "P3D2"
+    ],
+    "p3d3.scene.xml": [
+      "P3D3"
+    ],
+    "p3d4.scene.xml": [
+      "P3D4"
+    ],
+    "p3d5.scene.xml": [
+      "P3D5"
+    ],
+    "p3d6.scene.xml": [
+      "P3D6"
+    ],
+    "pyro1.scene.xml": [
+      "PYRO1"
+    ],
+    "pyro2.scene.xml": [
+      "PYRO2"
+    ],
+    "pyro3.scene.xml": [
+      "PYRO3"
+    ],
+    "pyro4.scene.xml": [
+      "PYRO4"
+    ],
+    "pyro5.scene.xml": [
+      "PYRO5"
+    ],
+    "pyro6.scene.xml": [
+      "PYRO6"
+    ],
+    "pyro7.scene.xml": [
+      "PYRO7"
+    ],
+    "pyro8.scene.xml": [
+      "PYRO8"
+    ],
     "r1.scene.xml": [
       "R1"
     ],
@@ -498,6 +608,14 @@
     "s10-dangling-idref.scene.xml": [
       "S10"
     ],
+    "solid-colliders-blob.scene.xml": [
+      "P3D6",
+      "PYRO8"
+    ],
+    "solid-colliders-boil.scene.xml": [
+      "P3D6",
+      "PYRO8"
+    ],
     "v1-sections.scene.xml": [
       "V1"
     ],
@@ -518,12 +636,60 @@
     ],
     "v7-primitives.scene.xml": [
       "V7"
+    ],
+    "v8-volumes.scene.xml": [
+      "V8"
+    ],
+    "vol1.scene.xml": [
+      "VOL1"
+    ],
+    "vol2.scene.xml": [
+      "VOL2"
+    ],
+    "vol3.scene.xml": [
+      "VOL3"
+    ],
+    "vol4.scene.xml": [
+      "VOL4"
+    ],
+    "vol5.scene.xml": [
+      "VOL5"
+    ],
+    "vol6.scene.xml": [
+      "VOL6"
+    ],
+    "vol7.scene.xml": [
+      "VOL7"
+    ],
+    "vol8.scene.xml": [
+      "VOL8"
+    ],
+    "vol9.scene.xml": [
+      "VOL9"
     ]
   },
   "valid": {
+    "advected-volume.scene.xml": [],
+    "baked-volume.scene.xml": [],
+    "crater.scene.xml": [],
+    "fracture.scene.xml": [],
+    "globe-relief.scene.xml": [],
     "kitchen-sink.scene.xml": [],
+    "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
-    "version-1.0.scene.xml": []
+    "ocean.scene.xml": [],
+    "openvdb-sequence.scene.xml": [],
+    "openvdb.scene.xml": [],
+    "particles3d.scene.xml": [],
+    "pyro-colliders.scene.xml": [],
+    "pyro-fields.scene.xml": [],
+    "pyro-mesh.scene.xml": [],
+    "pyro.scene.xml": [],
+    "solid-colliders.scene.xml": [],
+    "thermal-volume.scene.xml": [],
+    "version-1.0.scene.xml": [],
+    "volume-sequence.scene.xml": [],
+    "volume.scene.xml": []
   },
   "warnings": {
     "a03-remote.scene.xml": [

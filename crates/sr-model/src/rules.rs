@@ -212,8 +212,14 @@ struct Sets<'a> {
     text_assets: HashSet<&'a str>,
     font_assets: HashSet<&'a str>,
     mesh_assets: HashSet<&'a str>,
+    mesh_sequences: HashSet<&'a str>,
+    sequence_colliders: HashSet<&'a str>,
+    volume_assets: HashSet<&'a str>,
+    pyro_colliders: HashSet<&'a str>,
+    dynamic_pyro_geometry: HashSet<&'a str>,
     geo_assets: Vec<&'a str>,
     image_assets: HashSet<&'a str>,
+    layered_images: HashSet<&'a str>,
     /// Image, image sequence, video and generator assets (sprites).
     sprite_assets: HashSet<&'a str>,
     /// `@id` of every `/scene/physics/forceField`.
@@ -252,6 +258,54 @@ struct Sets<'a> {
 fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     let mut s = Sets::default();
     let Some(scene) = scene else { return s };
+    for object in scene.descendants().filter(|n| is(*n, "object3D")) {
+        let Some(id) = object.attribute("id") else { continue };
+        if matches!(
+            object.attribute("primitive"),
+            Some(
+                "box"
+                    | "sphere"
+                    | "globe"
+                    | "plane"
+                    | "cylinder"
+                    | "cone"
+                    | "capsule"
+                    | "torus"
+                    | "mesh"
+                    | "text"
+                    | "extrude"
+                    | "clay"
+            )
+        ) {
+            s.pyro_colliders.insert(id);
+        }
+        let procedural_motion = object.children().any(|child| match object.attribute("primitive") {
+            Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel")),
+            Some("extrude") => matches!(child.attribute("property"), Some("path" | "bevel")),
+            Some("clay") => {
+                matches!(child.attribute("property"), Some("resolution" | "fingerprints" | "seed" | "boil"))
+            }
+            _ => false,
+        }) || (object.attribute("primitive") == Some("clay")
+            && (kids(object, "blob").any(|b| b.children().any(|c| c.attribute("property").is_some()))
+                || (object.attribute("boil").and_then(|s| s.trim().parse::<f64>().ok()).is_some_and(|v| v > 0.)
+                    && object
+                        .attribute("fingerprints")
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .is_some_and(|v| v > 0.))));
+        if procedural_motion
+            || object.children().any(|child| {
+                matches!(
+                    child.attribute("property"),
+                    Some("primitive" | "mesh" | "radius" | "width" | "height" | "depth" | "segments")
+                ) || (object.attribute("primitive") == Some("globe")
+                    && object.attribute("terrain").is_some()
+                    && child.attribute("property") == Some("exaggeration"))
+            })
+        {
+            s.dynamic_pyro_geometry.insert(id);
+        }
+    }
     for assets in kids(scene, "assets") {
         for a in assets.children().filter(|c| c.is_element()) {
             let Some(i) = a.attribute("id") else { continue };
@@ -261,6 +315,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             }
             if is(a, "image") {
                 s.image_assets.insert(i);
+                if a.attribute("layer").is_some() {
+                    s.layered_images.insert(i);
+                }
             }
             if is(a, "text") {
                 s.text_assets.insert(i);
@@ -268,6 +325,10 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.font_assets.insert(i);
             } else if is(a, "mesh") {
                 s.mesh_assets.insert(i);
+            } else if is(a, "meshSequence") {
+                s.mesh_sequences.insert(i);
+            } else if is(a, "volume") {
+                s.volume_assets.insert(i);
             } else if is(a, "geo") {
                 s.geo_assets.push(i);
             } else if is(a, "tiles") {
@@ -335,6 +396,13 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     }
     for c in kids(scene, "symbols") {
         s.symbols_desc.extend(c.descendants().skip(1).filter(|d| d.is_element()).filter_map(|d| d.attribute("id")));
+    }
+    for object in scene.descendants().filter(|n| is(*n, "object3D")) {
+        if object.attribute("primitive") == Some("mesh") && contains(&s.mesh_sequences, object.attribute("mesh")) {
+            if let Some(id) = object.attribute("id") {
+                s.sequence_colliders.insert(id);
+            }
+        }
     }
     s
 }
@@ -412,7 +480,94 @@ impl<'a> Eval<'a> {
         let local = if n.tag_name().namespace().is_none() { n.tag_name().name() } else { "" };
         let parent_is = |name: &str| n.parent_element().is_some_and(|p| is(p, name));
 
+        if local == "scene" && n.parent_element().is_none() && a("version") != Some("1.3") {
+            let uses_volume = n.descendants().any(|d| {
+                is(d, "volume")
+                    || is(d, "medium")
+                    || is(d, "pyro")
+                    || (is(d, "object3D")
+                        && (d.attribute("primitive") == Some("volume") || d.attribute("volume").is_some()))
+            });
+            self.check(!uses_volume, n, "V8", || "volumetric assets and media require version=\"1.3\".".into());
+        }
+
+        if matches!(local, "object3D" | "pyro" | "particles3D") {
+            let own = local == "object3D"
+                && a("primitive") == Some("mesh")
+                && kids(n, "rigidBody").next().is_some()
+                && !(kids(n, "fracture").next().is_some()
+                    && kids(n, "rigidBody").any(|b| matches!(b.attribute("type"), Some("static" | "kinematic"))))
+                && contains(&self.sets.mesh_sequences, a("mesh"));
+            let reference = a("colliders")
+                .is_some_and(|ids| ids.split_whitespace().any(|id| self.sets.sequence_colliders.contains(id)));
+            self.check(!own && !reference, n, "MSQ4", || "mesh sequences are changing render geometry; rigid collider consumers require an explicit static proxy.".into());
+        }
         match local {
+            "fracture" => {
+                self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "FRX1", || {
+                    "fracture requires version=\"1.3\".".into()
+                });
+                self.check(
+                    n.parent_element().is_some_and(|o| {
+                        is(o, "object3D")
+                            && !matches!(o.attribute("primitive"), Some("volume" | "plane" | "map"))
+                            && kids(o, "fracture").count() == 1
+                            && kids(o, "rigidBody").count() == 1
+                    }),
+                    n,
+                    "FRX2",
+                    || "fracture requires one closed surface object3D owner and exactly one rigidBody.".into(),
+                );
+                self.check(contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
+                    "fracture interiorMaterial must reference a declared material.".into()
+                });
+                let finite = n.attributes().filter(|a| a.name() != "interiorMaterial").all(|a| {
+                    let s = a.value().trim();
+                    xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
+                });
+                self.check(finite, n, "FRX4", || "fracture numeric values must be finite.".into());
+            }
+            "crater" => {
+                let number = |k, default| {
+                    a(k).map(|s| xpath_number(s.trim().strip_prefix('+').unwrap_or(s.trim()))).unwrap_or(default)
+                };
+                self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "CRT1", || {
+                    "crater deformation requires version=\"1.3\".".into()
+                });
+                let owner = n.parent_element();
+                self.check(
+                    owner.is_some_and(|o| {
+                        is(o, "object3D")
+                            && o.attribute("primitive") != Some("volume")
+                            && kids(o, "crater").count() == 1
+                    }),
+                    n,
+                    "CRT2",
+                    || "one crater belongs to a surface object3D, not a volume.".into(),
+                );
+                self.check(number("end", 1.) > number("start", 0.), n, "CRT3", || {
+                    "crater end must be greater than start in the object's local clock.".into()
+                });
+                let finite = n.attributes().filter(|a| a.name() != "curve").all(|a| number(a.name(), 0.).is_finite());
+                let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
+                let envelope = !has("influenceDepth")
+                    || (number("influenceDepth", 0.) * 0.5 >= number("depth", 10.).max(number("rimHeight", 2.)));
+                self.check(finite && direction.iter().any(|&x|x!=0.) && number("rimWidth",10.)<=number("radius",50.) && envelope,n,"CRT4",||"crater values must be finite, its normal nonzero, rimWidth <= radius and influenceDepth >= twice max(depth,rimHeight).".into());
+                self.check(
+                    owner.is_none_or(|o| {
+                        kids(o, "rigidBody").all(|b| {
+                            matches!(b.attribute("type"), Some("static" | "kinematic"))
+                                && matches!(b.attribute("shape"), None | Some("auto" | "trimesh"))
+                        })
+                    }),
+                    n,
+                    "CRT5",
+                    || {
+                        "crater rigid bodies require static/kinematic type with auto or trimesh collision geometry."
+                            .into()
+                    },
+                );
+            }
             // p1 — version gate
             "scene" if n.parent_element().is_none() && matches!(a("version"), Some("1.0" | "1.1")) => {
                 if a("version") == Some("1.0") {
@@ -457,8 +612,279 @@ impl<'a> Eval<'a> {
                     format!("mask type=\"{}\" requires @width and @height.", v("type"))
                 });
             }
+            "ocean" => {
+                self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "OCN1", || {
+                    "ocean requires version=\"1.3\".".into()
+                });
+                let asset = !has("bathymetry")
+                    || (contains(&self.sets.image_assets, a("bathymetry"))
+                        && !contains(&self.sets.layered_images, a("bathymetry")))
+                    || contains(&self.sets.mesh_assets, a("bathymetry"));
+                let encoding = a("bathymetryEncoding").is_none_or(|s| s == "red")
+                    || contains(&self.sets.image_assets, a("bathymetry"));
+                let options = has("bathymetry")
+                    || !(has("bathymetryScale") || has("bathymetryOffset") || has("bathymetryEncoding"));
+                self.check(asset && encoding && options && (!has("material") || contains(&self.sets.materials,a("material"))),n,"OCN2",||"ocean bathymetry must name a primary-raster image (no layer selection) or mesh, material must name a material, and bathymetry options require the corresponding asset kind.".into());
+                let number = |k, default| a(k).map(xpath_number).unwrap_or(default);
+                let cell = number("cellSize", 1.);
+                let dims = [number("width", 64.) / cell, number("depth", 64.) / cell];
+                let mut valid =
+                    dims.iter().all(|v| v.is_finite() && *v >= 1. && (*v - v.round()).abs() <= 1e-9 * v.abs().max(1.))
+                        && dims[0].round() * dims[1].round() <= 4_000_000.
+                        && number("dt", 1. / 60.) >= 1e-6;
+                valid &= ["waterLevel", "bathymetryScale", "bathymetryOffset", "initialVelocityX", "initialVelocityZ"]
+                    .iter()
+                    .all(|k| number(k, 0.).is_finite());
+                let mut waves = 0;
+                let mut impulses = 0;
+                for c in n.children().filter(|c| c.is_element()) {
+                    let v = |k, default| c.attribute(k).map(xpath_number).unwrap_or(default);
+                    match c.tag_name().name() {
+                        "wave" => {
+                            waves += 1;
+                            valid &= v("wavelength", 16.) >= 2. * cell
+                                && ["direction", "phase"].iter().all(|k| v(k, 0.).is_finite());
+                        }
+                        "waterImpulse" => {
+                            impulses += 1;
+                            valid &= (c.attribute("type") != Some("add-water") || v("amplitude", 1.) >= 0.)
+                                && ["x", "z", "amplitude", "velocityX", "velocityZ"]
+                                    .iter()
+                                    .all(|k| v(k, 0.).is_finite());
+                        }
+                        _ => {}
+                    }
+                }
+                self.check(valid&&waves<=64&&impulses<=16384,n,"OCN3",||"ocean requires finite inputs, integral grid dimensions (at most 4000000 cells), dt >= 0.000001, resolved wavelengths, at most 64 waves/16384 impulses and nonnegative added water.".into());
+                self.check(
+                    !n.children().any(|c| {
+                        c.attribute("property").is_some_and(|k| {
+                            !matches!(
+                                k,
+                                "x" | "y"
+                                    | "z"
+                                    | "rotation"
+                                    | "rotationX"
+                                    | "rotationY"
+                                    | "scaleX"
+                                    | "scaleY"
+                                    | "scaleZ"
+                                    | "opacity"
+                            )
+                        })
+                    }),
+                    n,
+                    "OCN4",
+                    || "ocean solver configuration is static; animate its pose or opacity instead.".into(),
+                );
+                let sources: Vec<_> =
+                    n.children().filter(|c| c.is_element() && c.tag_name().name() == "whitewater").collect();
+                self.check(
+                    sources.len() <= 1
+                        && sources.iter().all(|s| {
+                            let start = s.attribute("start").map(xpath_number).unwrap_or(0.);
+                            s.attribute("end").is_none_or(|end| xpath_number(end) >= start)
+                                && ["foamMaterial", "sprayMaterial"]
+                                    .iter()
+                                    .all(|k| s.attribute(*k).is_none_or(|id| self.sets.materials.contains(id)))
+                        }),
+                    n,
+                    "OCN5",
+                    || "ocean accepts one whitewater source with end >= start and valid foam/spray materials.".into(),
+                );
+            }
+            "particles3D" => {
+                self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "P3D1", || {
+                    "particles3D requires version=\"1.3\".".into()
+                });
+                let mesh = (a("emitterShape") == Some("mesh")) == has("emitterMesh")
+                    && (!has("emitterMesh") || contains(&self.sets.mesh_assets, a("emitterMesh")))
+                    && (a("shape") == Some("mesh")) == has("mesh")
+                    && (!has("mesh") || contains(&self.sets.mesh_assets, a("mesh")))
+                    && (!has("sprite")
+                        || (a("shape") == Some("billboard") && contains(&self.sets.image_assets, a("sprite"))))
+                    && (!has("material") || contains(&self.sets.materials, a("material")));
+                self.check(mesh,n,"P3D2",|| "particles3D mesh, emitterMesh, sprite and material must name the appropriate assets and match the selected shapes.".into());
+                let number = |k, default| a(k).map(xpath_number).unwrap_or(default);
+                let start = number("emissionStart", 0.);
+                let direction = [number("directionX", 0.), number("directionY", -1.), number("directionZ", 0.)];
+                let valid = number("lifetimeVariance", 0.) < number("lifetime", 2.)
+                    && number("speedVariance", 0.) <= number("speed", 0.)
+                    && direction.iter().all(|v| v.is_finite())
+                    && direction.iter().any(|v| *v != 0.)
+                    && (!has("emissionEnd") || number("emissionEnd", 0.) >= start)
+                    && kids(n, "burst").all(|b| b.attribute("time").map(xpath_number).is_some_and(|t| t >= start));
+                self.check(valid,n,"P3D3",|| "particles3D requires bounded variances, a nonzero direction, an ordered emission window and bursts at or after emissionStart.".into());
+                let dynamic = [
+                    "x",
+                    "y",
+                    "z",
+                    "rotation",
+                    "rotationX",
+                    "rotationY",
+                    "scaleX",
+                    "scaleY",
+                    "scaleZ",
+                    "rate",
+                    "opacity",
+                    "size",
+                    "sizeEnd",
+                    "color",
+                    "colorEnd",
+                    "opacityEnd",
+                    "trail",
+                ];
+                self.check(
+                    !n.children().any(|c| c.attribute("property").is_some_and(|p| !dynamic.contains(&p))),
+                    n,
+                    "P3D4",
+                    || "particles3D solver configuration is static; animate pose, rate or appearance instead.".into(),
+                );
+                if let Some(list) = a("colliders") {
+                    let ids: Vec<_> = list.split_whitespace().collect();
+                    let unique: HashSet<_> = ids.iter().copied().collect();
+                    self.check(
+                        ids.len() <= 4096
+                            && ids.len() == unique.len()
+                            && ids.iter().all(|id| self.sets.pyro_colliders.contains(id)),
+                        n,
+                        "P3D5",
+                        || {
+                            "particles3D colliders must name at most 4096 distinct supported rigid surface objects."
+                                .into()
+                        },
+                    );
+                    self.check(!ids.iter().any(|id| self.sets.dynamic_pyro_geometry.contains(id)), n, "P3D6", || {
+                        "particles3D collider geometry must be static; animate its rigid pose instead.".into()
+                    });
+                }
+            }
+            "pyro" => {
+                if let Some(list) = a("colliders") {
+                    let ids: Vec<_> = list.split_whitespace().collect();
+                    let unique: HashSet<_> = ids.iter().copied().collect();
+                    let valid = ids.len() <= 4096
+                        && ids.len() == unique.len()
+                        && ids.iter().all(|id| self.sets.pyro_colliders.contains(id));
+                    self.check(valid, n, "PYRO7", || "pyro colliders must name at most 4096 distinct supported surface objects, including text, extrude and clay solids.".into());
+                    self.check(!ids.iter().any(|id| self.sets.dynamic_pyro_geometry.contains(id)), n, "PYRO8", || "pyro collider geometry is static; animate its position, rotation or scale instead of shape parameters.".into());
+                }
+                let h = a("voxelSize").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                let grid = ["width", "height", "depth"].iter().all(|name| {
+                    let cells = a(name).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0) / h;
+                    cells.is_finite() && (2.0..=1024.0).contains(&cells) && (cells - cells.round()).abs() <= 1e-8
+                });
+                self.check(grid, n, "PYRO1", || {
+                    "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
+                });
+            }
+            "pyroSource" | "pyroImpulse" => {
+                let mesh = if a("shape") == Some("mesh") {
+                    has("mesh") && contains(&self.sets.mesh_assets, a("mesh"))
+                } else {
+                    !has("mesh")
+                };
+                self.check(mesh, n, "PYRO5", || {
+                    "a mesh pyro source must name a mesh asset; @mesh is valid only for shape=mesh.".into()
+                });
+                self.check(
+                    !n.children().any(|c| matches!(c.attribute("property"), Some("shape" | "mesh"))),
+                    n,
+                    "PYRO6",
+                    || "pyro shape and mesh selection are static; animate the source transform instead.".into(),
+                );
+                let start = a("start").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                let end = a("end").and_then(|v| v.trim().parse::<f64>().ok());
+                self.check(end.is_none_or(|end| end > start), n, "PYRO2", || {
+                    "pyro source end must be greater than start.".into()
+                });
+                self.check(
+                    a("shape") != Some("box") || ["width", "height", "depth"].iter().all(|k| has(k)),
+                    n,
+                    "PYRO3",
+                    || "box pyro sources require width, height and depth.".into(),
+                );
+                self.check(
+                    ["scaleX", "scaleY", "scaleZ"]
+                        .iter()
+                        .all(|k| a(k).and_then(|v| v.trim().parse::<f64>().ok()).is_none_or(|v| v != 0.0)),
+                    n,
+                    "PYRO4",
+                    || "pyro source transforms must be invertible (nonzero scales).".into(),
+                );
+            }
             // p5, p26
             "object3D" => {
+                let static_inputs = a("primitive") != Some("globe")
+                    || !n.children().any(|c| {
+                        matches!(
+                            c.attribute("property"),
+                            Some(
+                                "terrain"
+                                    | "terrainEncoding"
+                                    | "planetRadius"
+                                    | "terrainTileSize"
+                                    | "terrainZoom"
+                                    | "terrainMissing"
+                                    | "terrainMemoryMiB"
+                            )
+                        )
+                    });
+                let static_collider = !(a("primitive") == Some("globe")
+                    && has("terrain")
+                    && kids(n, "rigidBody").next().is_some()
+                    && n.children()
+                        .any(|c| matches!(c.attribute("property"), Some("radius" | "segments" | "exaggeration"))));
+                self.check(static_inputs && static_collider,n,"GEO3",||"globe terrain sampling and planetRadius are static; globe rigid collider relief cannot animate radius, segments or exaggeration.".into());
+
+                let options = ["terrainTileSize", "terrainZoom", "terrainMissing", "terrainMemoryMiB"];
+                let feature = (a("primitive") == Some("globe") && has("terrain"))
+                    || has("planetRadius")
+                    || options.iter().any(|k| has(k));
+                self.check(
+                    !feature || n.document().root_element().attribute("version") == Some("1.3"),
+                    n,
+                    "GEO1",
+                    || "globe elevation and its physical-scale/budget options require version=\"1.3\".".into(),
+                );
+                let size = a("terrainTileSize").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(256);
+                self.check((!has("planetRadius") || a("primitive") == Some("globe"))
+                    && (!options.iter().any(|k| has(k)) || (a("primitive") == Some("globe") && has("terrain")))
+                    && size.is_power_of_two(), n, "GEO2", || "planetRadius belongs to globes; terrain sampling options require a globe with terrain and a power-of-two tile size.".into());
+
+                let pyro_count = kids(n, "pyro").count();
+                self.check(
+                    a("primitive") != Some("volume") || (usize::from(has("volume")) + pyro_count == 1),
+                    n,
+                    "VOL1",
+                    || "volume primitive requires exactly one source: @volume or a pyro child.".into(),
+                );
+                let target = !has("volume") || contains(&self.sets.volume_assets, a("volume"));
+                self.check(target, n, "VOL2", || "object3D/@volume must name a volume asset.".into());
+                let thermal = kids(n, "medium").any(|m| matches!(m.attribute("blackbody"), Some("true" | "1")));
+                let temperature = n
+                    .document()
+                    .root_element()
+                    .children()
+                    .filter(|c| c.has_tag_name("assets"))
+                    .flat_map(|c| c.children())
+                    .any(|c| {
+                        c.has_tag_name("volume")
+                            && c.attribute("id") == a("volume")
+                            && c.attribute("temperatureGrid").is_some()
+                    });
+                self.check(!thermal || temperature || pyro_count == 1, n, "VOL5", || {
+                    "blackbody emission requires a declared temperatureGrid on the volume asset.".into()
+                });
+                let medium_count = kids(n, "medium").count();
+                self.check(
+                    medium_count <= 1
+                        && (a("primitive") == Some("volume")
+                            || (medium_count == 0 && pyro_count == 0 && !has("volume"))),
+                    n,
+                    "VOL3",
+                    || "one medium child and @volume are permitted only on a volume primitive.".into(),
+                );
                 self.check(a("primitive") != Some("mesh") || has("mesh"), n, "C6", || {
                     "object3D primitive=\"mesh\" requires @mesh.".into()
                 });
@@ -476,8 +902,68 @@ impl<'a> Eval<'a> {
                 self.check(r29, n, "R29", || "object3D/@terrain must name a tiles asset.".into());
                 let r4 = !has("material") || contains(&self.sets.materials, a("material"));
                 self.check(r4, n, "R4", || "object3D/@material must name a material.".into());
-                let r5 = !has("mesh") || contains(&self.sets.mesh_assets, a("mesh"));
-                self.check(r5, n, "R5", || "object3D/@mesh must name a mesh asset.".into());
+                let r5 = !has("mesh")
+                    || contains(&self.sets.mesh_assets, a("mesh"))
+                    || contains(&self.sets.mesh_sequences, a("mesh"));
+                self.check(r5, n, "R5", || "object3D/@mesh must name a mesh or meshSequence asset.".into());
+            }
+            "meshSequence" if parent_is("assets") => {
+                self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "MSQ1", || {
+                    "mesh sequences require version=\"1.3\".".into()
+                });
+                let first = a("first").and_then(|v| v.trim().parse::<i64>().ok());
+                let last = a("last").and_then(|v| v.trim().parse::<i64>().ok());
+                let range = first.zip(last).is_some_and(|(first, last)| {
+                    last.checked_sub(first).is_some_and(|n| (0..1_000_000).contains(&n))
+                        && a("src").is_some_and(|s| crate::assets::sequence_frame(s, first).is_some())
+                });
+                self.check(range, n, "MSQ2", || {
+                    "mesh sequences require 1..1000000 ordered frames and a numbered src pattern.".into()
+                });
+                self.check(!has("sha256"), n, "MSQ3", || {
+                    "mesh sequence sha256 cannot identify multiple numbered files.".into()
+                });
+            }
+            // p42
+            "volume" if parent_is("assets") => {
+                let baked = a("format") == Some("srvseq");
+                let velocities = ["velocityGridX", "velocityGridY", "velocityGridZ"].iter().filter(|k| has(k)).count();
+                self.check(
+                    if a("interpolation") == Some("advect") { velocities == 3 } else { velocities == 0 },
+                    n,
+                    "VOL9",
+                    || {
+                        "advect requires all three velocity channels; velocity channels require advect interpolation."
+                            .into()
+                    },
+                );
+                self.check(!baked || (has("sha256") && !has("first") && !has("last") && !has("fps") && a("missingFrame").is_none_or(|s|s=="error")),n,"VOL8",|| {
+                    "srvseq requires sha256 and owns its frame range and composition clock; first, last, fps and missing-frame substitution are not permitted.".into()
+                });
+                let sequence = has("first") || has("last");
+                let first = a("first").and_then(|s| s.trim().parse::<i64>().ok());
+                let last = a("last").and_then(|s| s.trim().parse::<i64>().ok());
+                let range = first.zip(last).is_some_and(|(first, last)| {
+                    last.checked_sub(first).is_some_and(|n| (0..1_000_000).contains(&n))
+                        && a("src").is_some_and(|s| crate::assets::sequence_frame(s, first).is_some())
+                });
+                self.check(baked || if sequence { range } else { !has("fps") && a("interpolation").is_none_or(|s| s=="hold") && a("missingFrame").is_none_or(|s| s=="error") }, n,"VOL6",|| {
+                    "volume sequences require first/last, 1..1000000 ordered frames and a numbered src pattern; sequence options require a sequence.".into()
+                });
+                self.check(!sequence || !has("sha256"), n, "VOL7", || {
+                    "volume sha256 applies to a single cache file, not a numbered sequence.".into()
+                });
+                let bounds = ["boundsMinX", "boundsMinY", "boundsMinZ", "boundsMaxX", "boundsMaxY", "boundsMaxZ"];
+                let count = bounds.iter().filter(|k| has(k)).count();
+                let ordered = count == 6
+                    && (0..3).all(|i| {
+                        let lo = a(bounds[i]).and_then(|s| s.parse::<f64>().ok());
+                        let hi = a(bounds[i + 3]).and_then(|s| s.parse::<f64>().ok());
+                        matches!((lo, hi), (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && lo < hi)
+                    });
+                self.check(count == 0 || ordered, n, "VOL4", || {
+                    "volume bounds require all six finite coordinates with each minimum below its maximum.".into()
+                });
             }
             // p42
             "geoLayer" => {
