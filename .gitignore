@@ -2,3 +2,5 @@
 *.pyc
 _tmp/
 .agent-tasks/
+.claude/settings.json
+.repo/
