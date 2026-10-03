@@ -982,35 +982,59 @@ fn project(
     }
     let mut diagonal = vec![0.0; count];
     let mut rhs = vec![0.0; count];
+    // Bit `side` (neighbours() order: -x, +x, -y, +y, -z, +z) is set when that
+    // neighbour exists and is fluid, i.e. when the operator subtracts its value.
+    let mut open = vec![0u8; count];
     {
         let state: &State = s;
-        diagonal.par_iter_mut().zip(rhs.par_iter_mut()).enumerate().with_min_len(HEAVY).for_each(|(k, (d, r))| {
-            if state.solid[k] {
-                return;
-            }
-            let p = coords(k, state.cells);
-            for n in neighbours(p, state.cells) {
-                if n.map_or(state.boundary == Boundary::Open, |n| !state.solid[n]) {
-                    *d += 1.0;
+        diagonal
+            .par_iter_mut()
+            .zip(rhs.par_iter_mut())
+            .zip(open.par_iter_mut())
+            .enumerate()
+            .with_min_len(HEAVY)
+            .for_each(|(k, ((d, r), mask))| {
+                if state.solid[k] {
+                    return;
                 }
-            }
-            *r = (target[k] - state.divergence_at(p)) * state.h * state.h;
-        });
+                let p = coords(k, state.cells);
+                for (side, n) in neighbours(p, state.cells).into_iter().enumerate() {
+                    if n.map_or(state.boundary == Boundary::Open, |n| !state.solid[n]) {
+                        *d += 1.0;
+                    }
+                    if n.is_some_and(|n| !state.solid[n]) {
+                        *mask |= 1 << side;
+                    }
+                }
+                *r = (target[k] - state.divergence_at(p)) * state.h * state.h;
+            });
     }
+    let strides = [1, s.cells[0], s.cells[0] * s.cells[1]];
     let rms = |values: &[f64]| (values.iter().map(|v| v * v).sum::<f64>() / fluid as f64).sqrt() / (s.h * s.h);
     let before = rms(&rhs);
     if !before.is_finite() {
         return Err(Error::Invalid("nonfinite pressure right hand side"));
     }
+    // Same per-cell arithmetic as the neighbours()-based operator: diagonal term
+    // first, then the open neighbours subtracted in -x, +x, -y, +y, -z, +z order.
+    // A solid cell has an empty mask, so it keeps only its diagonal term.
     let apply = |x: &[f64], out: &mut [f64]| {
         out.par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, o)| {
             *o = diagonal[k] * x[k];
-            if s.solid[k] {
-                return;
-            }
-            for n in neighbours(coords(k, s.cells), s.cells).into_iter().flatten() {
-                if !s.solid[n] {
-                    *o -= x[n];
+            let mask = open[k];
+            if mask == 0x3F {
+                *o -= x[k - strides[0]];
+                *o -= x[k + strides[0]];
+                *o -= x[k - strides[1]];
+                *o -= x[k + strides[1]];
+                *o -= x[k - strides[2]];
+                *o -= x[k + strides[2]];
+            } else if mask != 0 {
+                for side in 0..6 {
+                    if mask >> side & 1 == 1 {
+                        let stride = strides[side / 2];
+                        *o -= x[if side % 2 == 0 { k - stride } else { k + stride }];
+                    }
                 }
             }
         });
