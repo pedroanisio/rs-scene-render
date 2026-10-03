@@ -1,0 +1,2271 @@
+{
+  "baseline": "bc22bc86bb132ebc7dc71c7ea888d25524d54d59",
+  "objective": "The engine can author, simulate, render and deliver a native cinematic Chicxulub reconstruction at UHD, with all schema additions specified in an accompanying SREP.",
+  "requirements": [
+    {
+      "id": "tiles",
+      "deliverable": "Bounded tile buffers with deterministic full-frame sampling and seam-free denoising",
+      "status": "verified",
+      "evidence": [
+        "crates/sr-gpu/tests/pathtrace_tiles.rs",
+        "/tmp/sr-cinematic-tile-budget-green.log",
+        "/tmp/sr-cinematic-tiles-regression2.log",
+        "/tmp/sr-cinematic-uhd-release.log"
+      ],
+      "limits": "Verified on software Vulkan; production sample counts and full impact scene remain unmeasured."
+    },
+    {
+      "id": "volumes",
+      "deliverable": "Sparse volume cache ingestion, emission/absorption/scattering with depth and lights",
+      "status": "in_progress",
+      "evidence": [
+        "crates/sr-volume/tests/grid.rs",
+        "crates/sr-volume/tests/cache.rs",
+        "crates/sr-volume/tests/medium.rs",
+        "crates/sr-gpu/tests/volume.rs",
+        "crates/sr-model/tests/volume_rules.rs",
+        "tests/corpus/valid/volume.scene.xml",
+        "/tmp/sr-cinematic-volume-model-final.log",
+        "/tmp/sr-cinematic-volume-transport-tests.log",
+        "/tmp/sr-cinematic-volume-shadows-green.log",
+        "/tmp/sr-cinematic-thick-medium-green.log",
+        "/tmp/sr-cinematic-volume-final-tests.log",
+        "/tmp/sr-cinematic-volume-api-final.log",
+        "/tmp/sr-cinematic-volume-probe/render.log",
+        "/tmp/sr-cinematic-volume-probe/cloud.png",
+        "/tmp/sr-cinematic-volume-probe/uhd.log",
+        "crates/sr-volume/tests/thermal.rs",
+        "crates/sr-volume/tests/sequence.rs",
+        "tests/corpus/valid/thermal-volume.scene.xml",
+        "tests/corpus/invalid/vol5.scene.xml",
+        "/tmp/sr-cinematic-thermal-document-final.log",
+        "/tmp/sr-cinematic-thermal-gpu-gradient.log",
+        "/tmp/sr-cinematic-sequence-final.log",
+        "/tmp/sr-cinematic-thermal-probe/encode.log",
+        "tests/corpus/valid/volume-sequence.scene.xml",
+        "/tmp/sr-cinematic-sequence-gpu-final.log",
+        "/tmp/sr-cinematic-sequence-probe/evidence.json",
+        "crates/sr-volume/tests/openvdb.rs",
+        "tools/openvdb_fixture.cpp",
+        "/tmp/sr-openvdb-gpu-final.log",
+        "/tmp/sr-openvdb-schema-oracle.json"
+      ],
+      "remaining": "Production-quality native impact volume validation; finish advection GPU transport/regression checks and identical-content bake timestamp test. Schema and scene loading are connected; completion is not yet claimed.",
+      "implemented": [
+        "Bounded SRVOL scalar-grid ingestion and immutable sharing",
+        "Sparse trilinear GPU sampling with object and grid transforms",
+        "Emission, scalar extinction and single scattering",
+        "Overlapping domains, surface clipping, self-shadowing and object shadow flags",
+        "Version 1.3 volume assets and medium elements, generated model, matching XSD/Schematron/Rust rules",
+        "Volume-only scene initialization and deferred activation",
+        "Planck/CIE temperature emission with independently transformed kelvin grids and linear working-space conversion",
+        "Animated temperature scale with forward/backward seek equivalence",
+        "Bounded deterministic sequence selection, missing-frame policies, CPU/GPU world-space field interpolation, schema/asset verification and local-clock/isolated-group renderer integration",
+        "Native bounded OpenVDB scalar/vector 5/4/3 ingestion with none/ZIP/Blosc/active-mask/half storage, affine transforms, inactive values, tiles and instances",
+        "Explicit openvdb scene format, static and numbered playback, thermal selection/interpolation, replay, and decoder-specific cache identities"
+      ]
+    },
+    {
+      "id": "pyro",
+      "deliverable": "Seeded density, temperature and velocity simulation, sources, obstacles and seekable caches",
+      "status": "in_progress",
+      "evidence": [
+        "crates/sr-sim/tests/pyro.rs",
+        "crates/sr-eval/tests/pyro.rs",
+        "crates/sr-model/tests/pyro_rules.rs",
+        "crates/sr-gpu/tests/volume.rs",
+        "tests/corpus/valid/pyro.scene.xml",
+        "/tmp/sr-cinematic-pyro-schema-oracle.json",
+        "/tmp/sr-cinematic-pyro-cpu-final.log",
+        "/tmp/sr-cinematic-pyro-gpu-green.log",
+        "/tmp/sr-cinematic-pyro-probe/evidence.json",
+        "crates/sr-sim/tests/pyro_mesh.rs",
+        "tools/tests/test_build_corpus.py",
+        "tests/corpus/valid/pyro-mesh.scene.xml",
+        "tests/corpus/valid/pyro-fields.scene.xml",
+        "/tmp/sr-cinematic-pyro-mesh-fields-affected.log",
+        "/tmp/sr-cinematic-pyro-fields-clippy.log",
+        "/tmp/sr-cinematic-pyro-mesh-fields-msrv.log",
+        "/tmp/sr-cinematic-pyro-mesh-oracle.json",
+        "/tmp/sr-cinematic-pyro-fields-oracle.json",
+        "crates/sr-eval/tests/pyro_colliders.rs",
+        "tests/corpus/valid/pyro-colliders.scene.xml",
+        "/tmp/sr-cinematic-colliders-affected.log",
+        "/tmp/sr-cinematic-collider-final-eval.log",
+        "/tmp/sr-cinematic-collider-native-gpu.log",
+        "/tmp/sr-cinematic-colliders-oracle.json",
+        "/tmp/sr-cinematic-colliders-workspace-clippy.log",
+        "/tmp/sr-cinematic-colliders-msrv.log",
+        "crates/sr-volume/tests/bake.rs",
+        "crates/sr-eval/tests/pyro_bake.rs",
+        "/tmp/sr-cinematic-bake-probe/evidence.json",
+        "/tmp/sr-cinematic-bake-oracle.json"
+      ],
+      "implemented": [
+        "Bounded dense 3D MAC density/kelvin/velocity solver with midpoint advection, exponential decay, buoyancy, seeded forces, vorticity and PCG projection",
+        "Atomic errors, open/closed boundaries, moving voxelized sphere/box obstacles and per-cell acceleration in the CPU API",
+        "Timed source overlap, one-shot impulses, transformed shapes and all-bit u64 seeds",
+        "Hard-budget deterministic checkpoints and sparse five-channel volume export",
+        "Owned pyro/source/impulse XML, matching schema rules, local/parent-clock evaluation and native GPU rendering with isolated-group invalidation",
+        "Conditional source absence advances existing fields without injection; errors are frame-local",
+        "Closed oriented mesh source/obstacle regions with exact seam welding, bounded BVHs and rest-pose asset import; XML mesh sources resolve included document namespaces and animate transforms",
+        "Affine solid-boundary velocities evaluated at MAC faces, with atomic overflow rejection",
+        "Three-dimensional scene force fields with particle/fluid selection, activation, transformed positions/vectors, pre-step velocity-dependent drag and substep physics poses for moving domains",
+        "Scene collider references with lexical scope, analytic curved primitives, finite plane slabs, shared closed meshes and hidden collision proxies",
+        "Substep relative collider/domain motion including rigid bodies, midpoint affine velocities without rotation-induced expansion, activation windows and deterministic replay",
+        "Compiler-qualified 3D parent and transform-constraint targets shared by rendering and simulation",
+        "Persistent SRVSEQ render-cache authoring, per-frame SHA-256 integrity, transactional output, composition-clock playback, CLI and schema/asset validation",
+        "Crater-driven closed midpoint solids, domain-relative material motion at MAC faces, shared geometry admission, authored plane slabs, indexed rotational primitives and deterministic replay."
+      ],
+      "remaining": "Bounded importer dependencies and production visual/performance validation; persistent render bakes are implemented, while exact solver-state resumption is not claimed."
+    },
+    {
+      "id": "particles",
+      "deliverable": "Deterministic 3D particles, force fields, collisions, instancing and motion blur",
+      "status": "in_progress",
+      "evidence": [
+        "crates/sr-sim/tests/particles3d.rs",
+        "/tmp/sr-cinematic-particles3d-integrity-red.log",
+        "/tmp/sr-cinematic-particles3d-integrity-green.log",
+        "/tmp/sr-cinematic-particles3d-curvature-red.log",
+        "/tmp/sr-cinematic-particles3d-curvature-green.log",
+        "/tmp/sr-cinematic-particles3d-instances-red.log",
+        "/tmp/sr-cinematic-particles3d-instances-green.log",
+        "/tmp/sr-cinematic-particles3d-mesh-bounds-red.log",
+        "/tmp/sr-cinematic-particles3d-mesh-bounds-green.log",
+        "/tmp/sr-cinematic-particles3d-final.log",
+        "/tmp/sr-cinematic-particles3d-sim-regression.log",
+        "crates/sr-eval/tests/particles3d.rs",
+        "crates/sr-model/tests/particles3d_rules.rs",
+        "crates/sr-gpu/tests/particles3d.rs",
+        "tests/corpus/valid/particles3d.scene.xml",
+        "/tmp/sr-cinematic-particles3d-oracle.json",
+        "/tmp/sr-cinematic-particles3d-affected.log",
+        "/tmp/sr-cinematic-particles3d-sprite-color-green.log",
+        "/tmp/sr-cinematic-ejecta-probe/evidence.json"
+      ],
+      "implemented": [
+        "Deterministic bounded world-space 3D emitter with exact birth timestamps, fixed-step checkpoints, fractional sampling and reverse replay",
+        "Point/box/sphere and area-weighted mesh surface emission with full-u64 seeds, live caps and checked emitted/dropped counts",
+        "Analytic constant-force drag, midpoint force callbacks and bounded curvature subdivision before sphere sweeps",
+        "Continuous Parry collisions against static/translating/rotating rigid geometry with penetration recovery, moving-surface velocity, restitution and friction",
+        "Birth affine snapshots including scale/shear, seeded scale/rotation/spin and direct age-based world spin for instance transforms",
+        "Version 1.3 particles3D XML with typed defaults, P3D1-P3D6 Rust/Schematron rules and seven independent corpus-oracle cases",
+        "Compiler/evaluator local and parent clocks, scoped asset/collider references, full-u64 seeds, conditional emission and selected scene force fields",
+        "Rest-pose primitive/mesh surface colliders with continuous rigid motion and shared bounded query geometry",
+        "Native sphere, camera-facing billboard, velocity-aligned streak and mesh prototypes with age color/size/opacity curves, depth, lighting and shutter integration",
+        "Particle sprites honor declared color space, transfer and alpha policy",
+        "Strict 24-frame native pyro/ejecta/ground-collision integration preview and H.264 encode",
+        "Continuous sphere contacts with linearly moving crater triangles, barycentric surface velocities, support stabilization, canonical-step reuse and one-interval sweep retention."
+      ],
+      "remaining": "Large particle-count batching and UHD performance/visual validation; bounded mesh-importer dependencies and scaled collider geometry retention audit. Rendering shares prototype buffers but still emits one Draw3 per particle/prototype and expands path-traced triangles."
+    },
+    {
+      "id": "ocean",
+      "deliverable": "Animated ocean surface, impulsive waves, bathymetry, breaking-water/spray integration",
+      "status": "in_progress",
+      "evidence": [
+        "crates/sr-sim/tests/ocean.rs",
+        "/tmp/sr-cinematic-ocean-red.log",
+        "/tmp/sr-cinematic-ocean-final-15.log",
+        "/tmp/sr-cinematic-ocean-final-16b.log",
+        "crates/sr-sim/tests/whitewater.rs",
+        "crates/sr-eval/tests/ocean.rs",
+        "crates/sr-gpu/tests/ocean.rs",
+        "crates/sr-model/tests/ocean_rules.rs",
+        "/tmp/sr-cinematic-whitewater-oracle-final.json",
+        "/tmp/sr-cinematic-ocean-probe/whitewater-evidence.json"
+      ],
+      "implemented": [
+        "Bounded CPU shallow-water depth/momentum solver with hydrostatic reconstruction, CFL subdivision and wet/dry bathymetry",
+        "Closed/open/periodic boundaries, damping, conservative local displacement and explicit water addition",
+        "Exact-time impulses, disposable fractional samples, bounded checkpoint retention, deterministic reverse replay and atomic errors",
+        "Version-1.3 XML/model/evaluator ocean, owned procedural swell, local clocks and deterministic mesh replay",
+        "Bounded numeric red/Terrarium/Mapbox bathymetry and rest-mesh top-surface sampling",
+        "Native water materials, raster/path-traced meshes and bounded two-batch foam/spray rendering",
+        "Deterministic secondary whitewater emission, ballistic spray, advected foam, lifetime/window/budget handling",
+        "Strict native 36-frame render/encode preview and one-sample 3840x2160 render probe"
+      ],
+      "remaining": "Production visual/temporal validation in the full UHD impact film; shared importer dependency allocation hardening. Water is depth-averaged and whitewater is a cinematic read-only tracer effect, not overturning-sheet or compressible impact simulation."
+    },
+    {
+      "id": "geometry",
+      "deliverable": "Globe elevation, crater deformation, debris fracture and topology-changing mesh playback",
+      "status": "in_progress",
+      "evidence": [
+        "crates/sr-3d/tests/terrain.rs",
+        "crates/sr-eval/tests/terrain.rs",
+        "crates/sr-eval/tests/terrain_memory.rs",
+        "crates/sr-model/tests/terrain_rules.rs",
+        "crates/sr-geo/tests/bounded_tiles.rs",
+        "crates/sr-gpu/tests/maps3d.rs",
+        "tests/corpus/valid/globe-relief.scene.xml",
+        "/tmp/sr-cinematic-terrain-probe/evidence.json",
+        "crates/sr-3d/tests/sequence.rs",
+        "crates/sr-eval/tests/mesh_sequence.rs",
+        "crates/sr-model/tests/mesh_sequence.rs",
+        "crates/sr-gpu/tests/mesh_sequence.rs",
+        "tests/corpus/valid/mesh-sequence.scene.xml",
+        "/tmp/sr-cinematic-mesh-probe/evidence.json",
+        "/tmp/sr-cinematic-mesh-sequence-affected-final.log",
+        "/tmp/sr-cinematic-mesh-sequence-cli.log",
+        "crates/sr-3d/tests/crater.rs",
+        "crates/sr-eval/tests/crater.rs",
+        "crates/sr-eval/tests/crater_memory.rs",
+        "crates/sr-sim/tests/deforming_colliders.rs",
+        "crates/sr-gpu/tests/crater.rs",
+        "tests/corpus/valid/crater.scene.xml",
+        "crates/sr-sim/tests/deforming_particles.rs",
+        "crates/sr-sim/tests/pyro_mesh.rs",
+        "crates/sr-eval/tests/pyro_colliders.rs",
+        "/tmp/sr-crater-pyro-affected-final2.log",
+        "/tmp/sr-crater-pyro-gpu-integration.log",
+        "/tmp/sr-crater-checkpoints-count-red.log",
+        "/tmp/sr-crater-checkpoints-final2.log",
+        "/tmp/sr-crater-checkpoints-eval-final.log",
+        "crates/sr-3d/tests/fracture.rs",
+        "crates/sr-sim/tests/fracture.rs",
+        "/tmp/sr-fracture-core-final2.log",
+        "/tmp/sr-fracture-physics-final2.log",
+        "crates/sr-3d/tests/fracture_surface.rs",
+        "crates/sr-model/tests/fracture.rs",
+        "tests/corpus/valid/fracture.scene.xml",
+        "/tmp/sr-fracture-schema-oracle.json",
+        "crates/sr-eval/tests/fracture.rs",
+        "crates/sr-gpu/tests/fracture.rs",
+        "/tmp/sr-fracture-integration-final-tests.log",
+        "/tmp/sr-fracture-gpu-final.log",
+        "crates/sr-eval/tests/fracture_colliders.rs",
+        "/tmp/sr-fracture-colliders-final-tests.log",
+        "crates/sr-eval/src/solid.rs",
+        "/tmp/sr-fracture-solids-core-final.log",
+        "/tmp/sr-fracture-solids-gpu-final.log",
+        "crates/sr-eval/tests/solid_colliders.rs",
+        "tests/corpus/valid/solid-colliders.scene.xml",
+        "/tmp/sr-solid-colliders-model-eval-full.log",
+        "/tmp/sr-solid-colliders-oracle.json"
+      ],
+      "implemented": [
+        "Unit-aware radial globe elevation with welded seams/poles, corrected normals/tangents, bounded Terrarium/Mapbox sampling and explicit missing-tile/polar-cap policies",
+        "Shared relief geometry in raster/path rendering and rigid-body, particle and pyro colliders; scoped include assets and animated render-only relief with deterministic backward replay",
+        "Version 1.3 GEO1-GEO3, matching Rust/XSD/Schematron validation, legacy flat-map compatibility and synthetic conformance fixture",
+        "Mesh-sequence hold/topology changes, compatible linear interpolation, missing-frame policies, scoped local-clock sampling, per-Program cache ownership, raster/path rendering and incremental dependency discovery.",
+        "Authored crater kernel and local-clock rendering, correct deformed bounds, static/kinematic rigid collider replacement/replay, primitive pre-allocation admission, CRT1-CRT5 schema conformance.",
+        "Crater particle CCD with canonical local-time endpoints, curved-flight/support stabilization, and smoke midpoint solids with MAC-face material velocities; replay, allocation admission and native GPU integration verified.",
+        "Bounded optional rigid replay retention: geometry-aware pre-clone admission, at most 64 optional snapshots, temporal thinning and deterministic replay under zero/tiny budgets.",
+        "Seeded closed-solid fracture kernel with explicit exterior/interior provenance, concave cavities, disconnected pieces, mass/volume conservation and bounded errors.",
+        "Rigid fracture registration and timed source replacement with actual motion inheritance, exact mesh inertia, one-shot impulses, visibility windows, collision removal, joint detachment and deterministic replay.",
+        "Bounded fracture surface reconstruction preserving exterior materials/variants, UV sets and shading attributes, with distinct canonical-UV interior batches.",
+        "Owned version-1.3 fracture XML, generated typed defaults/full-u64 seed and FRX1-FRX4 Rust/XSD/Schematron conformance.",
+        "Native XML fracture sampling/rigid replacement/render batches/SRPHYS03 cache playback, imported animation and materials, crater/globe sources, and static/kinematic mesh-sequence fracture sources",
+        "Fractured-piece particle sweeps and pyro occupancy/boundary velocities with consumer-wide geometry budgets, reverse replay, domain transforms and live/baked equivalence.",
+        "Native text/clay fracture sources sharing renderer shaping/blob configuration, glyph counters, bounded clay admission and repaired surface-net boundary topology; raster/path-traced release silhouettes and replay verified.",
+        "Static text/path/clay particle and pyro surfaces preserve holes, then expand into released fragments; automatic static/kinematic rigid surfaces preserve pre-release holes, and conditionally hidden bodies are discovered. Matching Rust/Schematron rules and corpus fixtures verified."
+      ],
+      "remaining": "broader animated/imported/parent-transform geometry parity, continuous rigid deformation boundary velocities, complete importer allocation accounting and retained-world memory measurement; complete native UHD impact validation."
+    },
+    {
+      "id": "delivery",
+      "deliverable": "Complete schema definitions/rules/examples, regression suite and strict native 4K impact evidence",
+      "status": "pending",
+      "evidence": []
+    }
+  ],
+  "acceptance": [
+    "Bounded tile buffers with deterministic full-frame sampling and seam-free denoising",
+    "Sparse volume cache ingestion, emission/absorption/scattering with depth and lights",
+    "Seeded density, temperature and velocity simulation, sources, obstacles and seekable caches",
+    "Deterministic 3D particles, force fields, collisions, instancing and motion blur",
+    "Animated ocean surface, impulsive waves, bathymetry, breaking-water/spray integration",
+    "Globe elevation, crater deformation, debris fracture and topology-changing mesh playback",
+    "Complete schema definitions/rules/examples, regression suite and strict native 4K impact evidence",
+    "Every feature passes parser/validation/evaluator/render integration tests and deterministic replay checks where stateful.",
+    "Malformed or oversized caches fail safely and resource limits are explicit.",
+    "Existing scene compatibility, workspace tests, formatting, Clippy and release build pass.",
+    "Native 4K impact sample is rendered and encoded with no strict fallbacks and reviewed for temporal/visual quality."
+  ],
+  "goal_complete": false,
+  "checks": {
+    "fmt": "/tmp/sr-cinematic-thermal-fmt.log",
+    "clippy": "/tmp/sr-cinematic-clippy-final.log",
+    "msrv": "/tmp/sr-cinematic-thermal-msrv-final.log",
+    "release": "/tmp/sr-cinematic-thermal-release-final.log",
+    "workspace_compile": "/tmp/sr-cinematic-volume-workspace-check.log",
+    "workspace_clippy": "/tmp/sr-cinematic-thermal-workspace-clippy-final.log",
+    "model_volume": "/tmp/sr-cinematic-volume-model-final.log",
+    "evaluator": "/tmp/sr-cinematic-volume-eval-tests.log",
+    "gpu_volume": "/tmp/sr-cinematic-volume-final-tests.log",
+    "gpu_volume_api": "/tmp/sr-cinematic-volume-api-final.log",
+    "gpu_three": "/tmp/sr-cinematic-volume-three-tests.log",
+    "uhd_strict": "/tmp/sr-cinematic-uhd-volume-build.log",
+    "empty_bvh": "/tmp/sr-cinematic-empty-bvh-green.log",
+    "medium_precision": "/tmp/sr-cinematic-thick-medium-green.log",
+    "thermal_model_volume": "/tmp/sr-cinematic-thermal-model-volume-final.log",
+    "thermal_sequence": "/tmp/sr-cinematic-sequence-final.log",
+    "thermal_gpu": "/tmp/sr-cinematic-thermal-gpu-gradient.log",
+    "thermal_document": "/tmp/sr-cinematic-thermal-document-final.log",
+    "volume_start_regression": "/tmp/sr-cinematic-thermal-volume-regression.log",
+    "sequence_corpus": "/tmp/sr-cinematic-sequence-corpus-green.log",
+    "sequence_cpu": "/tmp/sr-cinematic-sequence-cpu-final.log",
+    "sequence_schema": "/tmp/sr-cinematic-sequence-source-final.log",
+    "sequence_oracle": "/tmp/sr-cinematic-sequence-oracle.json",
+    "sequence_clippy": "/tmp/sr-cinematic-sequence-clippy-final.log",
+    "sequence_msrv": "/tmp/sr-cinematic-sequence-msrv-final.log",
+    "sequence_fmt": "/tmp/sr-cinematic-sequence-fmt.log",
+    "sequence_gpu": "/tmp/sr-cinematic-sequence-gpu-final.log",
+    "sequence_release": "/tmp/sr-cinematic-sequence-release-final.log",
+    "pyro_cpu": "/tmp/sr-cinematic-pyro-cpu-final.log",
+    "pyro_schema_oracle": "/tmp/sr-cinematic-pyro-schema-oracle.json",
+    "pyro_native_gpu": "/tmp/sr-cinematic-pyro-gpu-green.log",
+    "pyro_seed": "/tmp/sr-cinematic-pyro-seed-green.log",
+    "pyro_visibility": "/tmp/sr-cinematic-pyro-visibility-green.log",
+    "pyro_gpu_volume_regression": "/tmp/sr-cinematic-pyro-volume-regression.log",
+    "pyro_workspace_clippy": "/tmp/sr-cinematic-pyro-workspace-clippy.log",
+    "pyro_final_eval_clippy": "/tmp/sr-cinematic-pyro-eval-clippy-final.log",
+    "pyro_msrv": "/tmp/sr-cinematic-pyro-msrv-final.log",
+    "pyro_final_eval_msrv": "/tmp/sr-cinematic-pyro-eval-msrv-final.log",
+    "pyro_release": "/tmp/sr-cinematic-pyro-release-schema-final.log",
+    "pyro_final_model": "/tmp/sr-cinematic-pyro-model-final.log",
+    "pyro_final_model_clippy": "/tmp/sr-cinematic-pyro-model-clippy-final.log",
+    "pyro_fmt": "/tmp/sr-cinematic-pyro-fmt-final.log",
+    "pyro_final_model_msrv": "/tmp/sr-cinematic-pyro-model-msrv-final.log",
+    "pyro_final_cli_validation": "/tmp/sr-cinematic-pyro-probe/validate-final.log",
+    "globe_clippy": "/tmp/sr-cinematic-terrain-clippy-final.log",
+    "globe_test_clippy": "/tmp/sr-cinematic-terrain-test-clippy.log",
+    "globe_msrv": "/tmp/sr-cinematic-terrain-msrv-final.log",
+    "globe_test_msrv": "/tmp/sr-cinematic-terrain-test-msrv.log",
+    "globe_build": "/tmp/sr-cinematic-terrain-build-final.log",
+    "globe_fmt": "/tmp/sr-cinematic-terrain-fmt-final.log",
+    "globe_diff": "/tmp/sr-cinematic-terrain-diff-final.log"
+  },
+  "tdd_evidence": [
+    "/tmp/sr-cinematic-medium-red.log",
+    "/tmp/sr-cinematic-gpu-volume-red.log",
+    "/tmp/sr-cinematic-volume-schema-red.log",
+    "/tmp/sr-cinematic-volume-document-red.log",
+    "/tmp/sr-cinematic-volume-document-debug.log",
+    "/tmp/sr-cinematic-volume-document-fixed.log",
+    "/tmp/sr-cinematic-volume-shadows-red.log",
+    "/tmp/sr-cinematic-volume-shadows-green.log",
+    "/tmp/sr-cinematic-thick-medium-red.log",
+    "/tmp/sr-cinematic-thick-medium-green.log",
+    "/tmp/sr-cinematic-empty-medium-bvh-red.log",
+    "/tmp/sr-cinematic-volume-default-render-red.log",
+    "/tmp/sr-cinematic-thermal-red.log",
+    "/tmp/sr-cinematic-thermal-green.log",
+    "/tmp/sr-cinematic-thermal-schema-red.log",
+    "/tmp/sr-cinematic-thermal-schema-green.log",
+    "/tmp/sr-cinematic-thermal-gpu-red.log",
+    "/tmp/sr-cinematic-thermal-gpu-green.log",
+    "/tmp/sr-cinematic-thermal-document-red.log",
+    "/tmp/sr-cinematic-thermal-document-final.log",
+    "/tmp/sr-cinematic-sequence-red.log",
+    "/tmp/sr-cinematic-sequence-green.log",
+    "/tmp/sr-cinematic-sequence-sampling-red.log",
+    "/tmp/sr-cinematic-sequence-final.log",
+    "/tmp/sr-cinematic-volume-asset-red.log",
+    "/tmp/sr-cinematic-volume-asset-green.log",
+    "/tmp/sr-cinematic-volume-channel-red.log",
+    "/tmp/sr-cinematic-volume-channel-green.log",
+    "/tmp/sr-cinematic-sequence-cache-clock-corrected.log",
+    "/tmp/sr-cinematic-sequence-integer-red.log",
+    "/tmp/sr-cinematic-sequence-integer-green.log",
+    "/tmp/sr-cinematic-pyro-red.log",
+    "/tmp/sr-cinematic-pyro-green.log",
+    "/tmp/sr-cinematic-pyro-seek-red.log",
+    "/tmp/sr-cinematic-pyro-seek-green.log",
+    "/tmp/sr-cinematic-pyro-input-red.log",
+    "/tmp/sr-cinematic-pyro-input-green.log",
+    "/tmp/sr-cinematic-pyro-schema-red.log",
+    "/tmp/sr-cinematic-pyro-schema-green.log",
+    "/tmp/sr-cinematic-pyro-eval-red.log",
+    "/tmp/sr-cinematic-pyro-eval-green.log",
+    "/tmp/sr-cinematic-pyro-gpu-red.log",
+    "/tmp/sr-cinematic-pyro-gpu-green.log",
+    "/tmp/sr-cinematic-pyro-seed-red.log",
+    "/tmp/sr-cinematic-pyro-seed-green.log",
+    "/tmp/sr-cinematic-pyro-impulse-schema-red.log",
+    "/tmp/sr-cinematic-pyro-visibility-red.log",
+    "/tmp/sr-cinematic-pyro-visibility-green.log",
+    "/tmp/sr-cinematic-pyro-lexical-red.log",
+    "/tmp/sr-cinematic-pyro-model-final.log",
+    "/tmp/sr-cinematic-bake-red.log",
+    "/tmp/sr-cinematic-bake-green.log",
+    "/tmp/sr-cinematic-pyro-bake-red.log",
+    "/tmp/sr-cinematic-pyro-bake-green.log",
+    "/tmp/sr-cinematic-bake-schema-red.log",
+    "/tmp/sr-cinematic-bake-cli-red.log",
+    "/tmp/sr-cinematic-bake-cli-wiring-red.log",
+    "/tmp/sr-cinematic-bake-cli-final.log",
+    "/tmp/sr-cinematic-bake-gpu-red2.log",
+    "/tmp/sr-cinematic-bake-gpu-green.log",
+    "/tmp/sr-cinematic-bake-gpu-green2.log",
+    "/tmp/sr-cinematic-bake-clock-red.log",
+    "/tmp/sr-cinematic-bake-clock-green.log",
+    "/tmp/sr-cinematic-bake-length-red.log",
+    "/tmp/sr-cinematic-bake-volume-final.log",
+    "/tmp/sr-cinematic-bake-volume-gpu-clean.log",
+    "/tmp/sr-cinematic-terrain-core-red.log",
+    "/tmp/sr-cinematic-terrain-core-green.log",
+    "/tmp/sr-cinematic-terrain-scene-red.log",
+    "/tmp/sr-cinematic-terrain-scene-green3.log",
+    "/tmp/sr-cinematic-terrain-gpu-red.log",
+    "/tmp/sr-cinematic-terrain-gpu-green.log",
+    "/tmp/sr-cinematic-terrain-colliders-red2.log",
+    "/tmp/sr-cinematic-terrain-colliders-green.log",
+    "/tmp/sr-cinematic-terrain-numeric-red.log",
+    "/tmp/sr-cinematic-terrain-numeric-green.log",
+    "/tmp/sr-cinematic-terrain-compat-red.log",
+    "/tmp/sr-cinematic-terrain-compat-green.log",
+    "/tmp/sr-cinematic-terrain-header-memory-red.log",
+    "/tmp/sr-cinematic-terrain-header-memory-green.log"
+  ],
+  "validation_counts": {
+    "model_volume": {
+      "passed": 57,
+      "failed": 0,
+      "ignored": 0
+    },
+    "evaluator": {
+      "passed": 101,
+      "failed": 0,
+      "ignored": 0
+    },
+    "three": {
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0
+    },
+    "gpu_volume": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "visual_probe": {
+    "scene": "/tmp/sr-cinematic-volume-probe/cloud.scene.xml",
+    "cache": "/tmp/sr-cinematic-volume-probe/cloud.srvol",
+    "image": "/tmp/sr-cinematic-volume-probe/cloud.png",
+    "size": [
+      160,
+      120
+    ],
+    "sparse_bricks": 8,
+    "strict_exit_code": 0,
+    "visually_inspected": true,
+    "cold_elapsed_seconds": 81.41,
+    "max_rss_kib": 1019944,
+    "adapter": "llvmpipe software Vulkan",
+    "limits": "Static small cloud; not impact simulation, production 4K volume validation, or performance promise.",
+    "warm_benchmark_log": "/tmp/sr-cinematic-volume-probe/bench.log",
+    "warm_median_ms": 24.843,
+    "warm_frames": 3,
+    "benchmark_is_production_promise": false,
+    "uhd": {
+      "scene": "/tmp/sr-cinematic-volume-probe/cloud-uhd.scene.xml",
+      "log": "/tmp/sr-cinematic-volume-probe/uhd.log",
+      "size": [
+        3840,
+        2160
+      ],
+      "strict_exit_code": 0,
+      "samples": 1,
+      "bounces": 1,
+      "denoise": false,
+      "warm_frame_ms": 7525.838,
+      "max_rss_kib": 1198472,
+      "process_elapsed": "1:17.03",
+      "limitations": "One static cloud frame on software Vulkan; native impact movie and production sample counts still outstanding."
+    }
+  },
+  "thermal_preview": {
+    "scene": "/tmp/sr-cinematic-thermal-probe/thermal.scene.xml",
+    "video": "/tmp/sr-cinematic-thermal-probe/thermal.mp4",
+    "frames": 12,
+    "fps": 6,
+    "size": [
+      160,
+      120
+    ],
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "inspected_frames": [
+      0,
+      3,
+      6
+    ],
+    "encoder": "libx264",
+    "adapter": "llvmpipe software Vulkan",
+    "limitations": "Static density with animated temperature scale, not pyro simulation, cache sequence playback or a completed impact shot.",
+    "evidence": "/tmp/sr-cinematic-thermal-probe/evidence.json"
+  },
+  "sequence_validation": {
+    "cpu_passed": 177,
+    "cpu_failed": 0,
+    "gpu_status": "passed",
+    "scope": "model, volume and evaluator suites; final source-pattern schema suite separately passed",
+    "schema_rules": [
+      "VOL6",
+      "VOL7"
+    ],
+    "pending": "OpenVDB and full cinematic scope remain unfinished",
+    "gpu_passed": 6,
+    "gpu_failed": 0
+  },
+  "sequence_preview": {
+    "scene": "/tmp/sr-cinematic-sequence-probe/sequence.scene.xml",
+    "video": "/tmp/sr-cinematic-sequence-probe/sequence.mp4",
+    "evidence": "/tmp/sr-cinematic-sequence-probe/evidence.json",
+    "frames": 12,
+    "size": [
+      160,
+      120
+    ],
+    "fps": 6,
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "visually_inspected_frames": [
+      0,
+      6,
+      11
+    ],
+    "limits": "Animated analytic cache fields, not native pyro or final UHD impact shot."
+  },
+  "pyro_validation": {
+    "cpu_passed": 223,
+    "cpu_failed": 0,
+    "cpu_ignored": 0,
+    "native_gpu_passed": 1,
+    "native_gpu_failed": 0,
+    "gpu_volume_regressions": "passed",
+    "native_preview": "passed",
+    "release_build": "passed",
+    "scope": "223 affected CPU tests, then five evaluator tests after the visibility fix. Seven GPU volume tests cover the renderer and native path; their compiled evaluator precedes only the independently verified visibility fix.",
+    "gpu_volume_passed": 7,
+    "gpu_volume_failed": 0,
+    "visibility_regressions_passed": 5,
+    "final_schema_lexical": "passed complete model suite and independent ten-case XSD/Schematron oracle"
+  },
+  "pyro_preview": {
+    "scene": "/tmp/sr-cinematic-pyro-probe/pyro.scene.xml",
+    "video": "/tmp/sr-cinematic-pyro-probe/pyro.mp4",
+    "evidence": "/tmp/sr-cinematic-pyro-probe/evidence.json",
+    "frames": 24,
+    "fps": 12,
+    "size": [
+      160,
+      120
+    ],
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "inspected_frames": [
+      1,
+      6,
+      12,
+      23
+    ],
+    "limits": "Native 16x16x12-cell plume, not a completed UHD impact shot; no external density cache input."
+  },
+  "pyro_mesh_fields_validation": {
+    "cpu_passed": 240,
+    "cpu_failed": 0,
+    "cpu_ignored": 0,
+    "cpu_suites": 33,
+    "scope": "Complete sr-model, sr-volume, sr-sim and sr-eval suites on current mesh/affine/field implementation; six independent schema-oracle cases; corpus category regression checks. Native pyro GPU rendering/isolation regression passed on software Vulkan.",
+    "clippy": "Workspace all-targets -D warnings passed",
+    "msrv": "Rust 1.90.0 affected crates/tests check passed",
+    "format": "cargo fmt --all -- --check and git diff --check passed",
+    "release": "Development release build passed; binary and source hashes recorded in target/release/build-provenance.json",
+    "limits": [
+      "Mesh input surfaces must not self-intersect; nearest-oriented-surface convention, geometric intersection detection not implemented",
+      "Mesh-region cache charge excludes importer material/texture/external-buffer decoder allocations",
+      "Smoke follows local-domain dynamics; no accelerating-reference-frame inertial forces",
+      "Full cinematic objective remains incomplete"
+    ],
+    "gpu_passed": 1,
+    "gpu_failed": 0,
+    "gpu_log": "/tmp/sr-cinematic-mesh-fields-native-gpu.log",
+    "clippy_log": "/tmp/sr-cinematic-mesh-fields-workspace-clippy.log",
+    "release_log": "/tmp/sr-cinematic-mesh-fields-release.log",
+    "native_preview": "passed strict render, native encode, ffprobe and visual inspection"
+  },
+  "pyro_mesh_fields_preview": {
+    "scene": "/tmp/sr-cinematic-mesh-fields-probe/mesh-fields.scene.xml",
+    "video": "/tmp/sr-cinematic-mesh-fields-probe/mesh-fields.mp4",
+    "evidence": "/tmp/sr-cinematic-mesh-fields-probe/evidence.json",
+    "frames": 24,
+    "unique_frames": 24,
+    "size": [
+      160,
+      120
+    ],
+    "fps": 12,
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "inspected_frames": [
+      1,
+      12,
+      23
+    ],
+    "limits": "Coarse native mesh-source/wind integration preview on software Vulkan, not the final UHD impact film."
+  },
+  "pending_verification": [
+    "Full workspace runtime suite and final release build after all cinematic features are implemented",
+    "Final native UHD impact film, temporal/visual validation and production throughput"
+  ],
+  "pyro_collider_validation": {
+    "affected_cpu_passed": 249,
+    "affected_cpu_failed": 0,
+    "final_pyro_tests_passed": 18,
+    "final_pyro_tests_failed": 0,
+    "scope": "Complete model/sim/eval/volume suites, then 18 pyro tests after the final inverse-transform checks and extra singular-motion regression. Renderer parent-scope unit test and native GPU collider carve test passed.",
+    "gpu_passed": 1,
+    "gpu_failed": 0,
+    "schema_oracle": "PYRO7, PYRO8 and valid collider fixture agree independently with lxml XSD/Schematron",
+    "clippy": "Workspace all-targets -D warnings passed",
+    "msrv": "Rust1.90 model/sim/eval/gpu tests check passed",
+    "release": "passed",
+    "limits": [
+      "Rigid collision proxies have static geometry; animate transforms, not primitive dimensions or topology",
+      "Meshes use rest pose; plane slab thickness defaults to twice the voxel size",
+      "One-way, voxelized incompressible coupling; not predictive impact physics",
+      "Full cinematic scope remains incomplete"
+    ],
+    "gpu_volume_passed": 8,
+    "gpu_volume_failed": 0,
+    "gpu_volume_log": "/tmp/sr-cinematic-colliders-volume-regression.log"
+  },
+  "pyro_bake_validation": {
+    "affected_cpu_passed": 256,
+    "final_volume_passed": 37,
+    "cli_passed": 1,
+    "schema_oracle": "passed",
+    "workspace_clippy": "passed",
+    "msrv": "passed Rust 1.90.0 affected crates and tests",
+    "release": "passed",
+    "gpu_volume": "passed",
+    "native_preview": "24 cached PNGs byte-identical to native originals; strict render passed; release/debug bake manifests identical",
+    "preview_evidence": "/tmp/sr-cinematic-bake-probe/evidence.json",
+    "full_goal_complete": false,
+    "gpu_passed": 9,
+    "gpu_failed": 0,
+    "gpu_log": "/tmp/sr-cinematic-bake-volume-gpu-clean.log",
+    "test_isolation": "Initial suite exposed a reused temporary path. Fixed exclusive temporary directory with cleanup; complete nine-test suite then passed.",
+    "format": "cargo fmt --all -- --check and git diff --check passed"
+  },
+  "particles3d_validation": {
+    "checked_at": "2026-10-03T09:28:07.507599+00:00",
+    "simulation_regression": {
+      "passed": 64,
+      "failed": 0,
+      "log": "/tmp/sr-cinematic-particles3d-sim-regression.log",
+      "note": "Includes the first 16 particle tests and 48 existing tests; four later particle tests pass in the final 20-test run."
+    },
+    "workspace_runtime_suite_for_complete_goal": "still required",
+    "render_validation": "Four focused native GPU regressions and strict render/encode preview passed. Broader ocean milestone regression passed: 4 motion blur, 2 ocean, 4 particles3D, 35 scene3D and 9 volume tests. Final UHD film remains outstanding.",
+    "release": "Existing SRVSEQ validation binary predates this particle core; build-provenance.json marks it stale.",
+    "source_sha256": {
+      "crates/sr-sim/src/particles3d.rs": "955fc74095e883b47138bf629c7150a8d33ff176f9859bc9c68e5a5f293244f9",
+      "crates/sr-sim/src/particles3d/collider.rs": "5dd13392b687a73ede440609023a25cf0c191d7d20ba6ac5ba309e4aa6bd31b4",
+      "crates/sr-sim/src/particles3d/mesh.rs": "7a94d39571f13ac53c63edaa33183f74c6a77251522192f1fd9ba0a6bfc2cb4b",
+      "crates/sr-eval/src/particles3d.rs": "31dbda17a7e76d63d1debd5077af3faa8c1d5406d64987b22a90158ad402265d",
+      "crates/sr-eval/src/particles3d/colliders.rs": "608cf41444c6d29f76398e3ec0ad92584573aff2bee91e53b7f173cba8e68c60",
+      "crates/sr-gpu/src/render_three.rs": "ace54beaee6e189459e9b5bc324805e9a2dc32ee1d76f1804f9f3e0b74969bcf"
+    },
+    "checks": {
+      "workspace_clippy": {
+        "result": "passed",
+        "log": "/tmp/sr-cinematic-particles3d-integrated-clippy-final.log"
+      },
+      "rust_1_90_tests_check": {
+        "result": "passed",
+        "log": "/tmp/sr-cinematic-particles3d-integrated-msrv.log"
+      },
+      "formatting": {
+        "result": "passed",
+        "log": "/tmp/sr-cinematic-particles3d-fmt.log"
+      },
+      "diff_check": {
+        "result": "passed",
+        "log": "/tmp/sr-cinematic-particles3d-diff.log"
+      }
+    },
+    "core_history": {
+      "passed": 20,
+      "failed": 0,
+      "log": "/tmp/sr-cinematic-particles3d-final.log"
+    },
+    "affected_cpu": {
+      "passed": 250,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 31,
+      "scope": "Complete sr-model, sr-eval and sr-sim suites including 21 particle-core, six particle evaluator and three particle model tests. Before the ocean module was added.",
+      "log": "/tmp/sr-cinematic-particles3d-affected.log"
+    },
+    "native_particle_gpu": {
+      "passed": 4,
+      "failed": 0,
+      "log": "/tmp/sr-cinematic-particles3d-sprite-color-green.log"
+    },
+    "schema_oracle": {
+      "cases": 7,
+      "result": "passed",
+      "log": "/tmp/sr-cinematic-particles3d-oracle.json"
+    },
+    "generator_tests": {
+      "passed": 40,
+      "log": "/tmp/sr-cinematic-particles3d-generator.log"
+    }
+  },
+  "particles3d_preview": {
+    "checked_at": "2026-10-03T09:26:17.672702+00:00",
+    "scene": "/tmp/sr-cinematic-ejecta-probe/review.scene.xml",
+    "frames": 24,
+    "unique_frames": 22,
+    "size": [
+      160,
+      120
+    ],
+    "fps": 12,
+    "duration": 2,
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "video": "/tmp/sr-cinematic-ejecta-probe/ejecta.mp4",
+    "encoder": "libx264",
+    "adapter": "llvmpipe software Vulkan",
+    "inspected_frames": [
+      6,
+      12,
+      23
+    ],
+    "render_diagnostics": [],
+    "binary_sha256": "6ee701547848bfda76aa105b6945f2f2ba9a537dd5d53d12199e02fcff12b146",
+    "binary_scope": "Particle geometry integration; predates the sprite transfer fix and ocean core. This preview has no sprite assets.",
+    "limits": "24-frame integration preview of 80 native ejecta particles, pyro and ground collision. Not the completed UHD Chicxulub film, and no production throughput promise."
+  },
+  "ocean_validation": {
+    "checked_at": "2026-10-03T10:16:11.821852+00:00",
+    "runtime_scope": "XML/model/evaluator/native water mesh/material, bathymetry, analytic swell and deterministic foam/spray integration",
+    "full_sim_regression": {
+      "passed": 82,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/sr-cinematic-ocean-final.log",
+      "note": "13 initial ocean tests plus 69 existing simulation tests; later overflow/resource fixes and the independently derived dam-break convergence test pass in the final focused 16-test run."
+    },
+    "focused_tests": {
+      "ocean_core": 17,
+      "whitewater_core": 7,
+      "ocean_evaluator": 8,
+      "ocean_model": 4,
+      "ocean_gpu": 3,
+      "failed": 0,
+      "logs": [
+        "/tmp/sr-cinematic-ocean-wave-green.log",
+        "/tmp/sr-cinematic-whitewater-refactor.log",
+        "/tmp/sr-cinematic-ocean-bathymetry.log",
+        "/tmp/sr-cinematic-ocean-layer-green.log",
+        "/tmp/sr-cinematic-whitewater-gpu-green.log"
+      ]
+    },
+    "research": [
+      {
+        "title": "Audusse et al. (2004), hydrostatic reconstruction",
+        "url": "https://doi.org/10.1137/S1064827503431090",
+        "tier": "T1"
+      },
+      {
+        "title": "Clawpack Riemann book, shallow water equations",
+        "url": "https://www.clawpack.org/riemann_book/html/Shallow_water.html",
+        "tier": "T2"
+      },
+      {
+        "title": "SideFX whitewater workflow and secondary simulation lifecycle (context; not a claim of implementing its FLIP model)",
+        "url": "https://www.sidefx.com/docs/houdini/fluid/sopwhitewater.html",
+        "tier": "T2"
+      }
+    ],
+    "red_green_logs": [
+      "/tmp/sr-cinematic-ocean-red.log",
+      "/tmp/sr-cinematic-ocean-green2.log",
+      "/tmp/sr-cinematic-ocean-capacity-red.log",
+      "/tmp/sr-cinematic-ocean-sim-regression.log",
+      "/tmp/sr-cinematic-ocean-clock-red.log",
+      "/tmp/sr-cinematic-ocean-final.log",
+      "/tmp/sr-cinematic-ocean-overflow-red.log",
+      "/tmp/sr-cinematic-ocean-final-14.log",
+      "/tmp/sr-cinematic-ocean-events-budget-red.log",
+      "/tmp/sr-cinematic-ocean-final-15.log",
+      "/tmp/sr-cinematic-ocean-final-16.log",
+      "/tmp/sr-cinematic-ocean-final-16b.log",
+      "/tmp/sr-cinematic-ocean-schema-red.log",
+      "/tmp/sr-cinematic-ocean-schema-green.log",
+      "/tmp/sr-cinematic-ocean-gpu-red2.log",
+      "/tmp/sr-cinematic-ocean-gpu-green2.log",
+      "/tmp/sr-cinematic-ocean-material-red2.log",
+      "/tmp/sr-cinematic-ocean-wave-red.log",
+      "/tmp/sr-cinematic-ocean-wave-green.log",
+      "/tmp/sr-cinematic-whitewater-red.log",
+      "/tmp/sr-cinematic-whitewater-green.log",
+      "/tmp/sr-cinematic-whitewater-eval-red.log",
+      "/tmp/sr-cinematic-whitewater-eval-green3.log",
+      "/tmp/sr-cinematic-whitewater-schema-red.log",
+      "/tmp/sr-cinematic-whitewater-schema-green.log",
+      "/tmp/sr-cinematic-whitewater-gpu-red.log",
+      "/tmp/sr-cinematic-whitewater-gpu-green.log",
+      "/tmp/sr-cinematic-whitewater-seed-red.log",
+      "/tmp/sr-cinematic-whitewater-overflow-red.log",
+      "/tmp/sr-cinematic-whitewater-green2.log",
+      "/tmp/sr-cinematic-ocean-layer-red.log",
+      "/tmp/sr-cinematic-ocean-layer-green.log"
+    ],
+    "checks": {
+      "result": "passed",
+      "workspace_clippy": "/tmp/sr-cinematic-whitewater-clippy-final.log",
+      "rust_1_90_tests": "/tmp/sr-cinematic-whitewater-msrv-final.log",
+      "format": "/tmp/sr-cinematic-whitewater-fmt-final-check.log",
+      "diff": "/tmp/sr-cinematic-whitewater-diff-final-check.log"
+    },
+    "source_sha256": {
+      "crates/sr-sim/src/ocean.rs": "7b08495f0bcd79ec08ccc558a0ac4ef10c50e93b6d518e6e0f060c9ce7212105",
+      "crates/sr-sim/src/ocean/flux.rs": "47f448b9bfbf0396980b92ccd39beb266a6686777bc7b4ae6638a3e413f27107",
+      "crates/sr-sim/src/ocean/impulse.rs": "24048b0f085c5b90703bb0be919a63740444c693afdfdd13c129390ffe997426",
+      "crates/sr-sim/src/ocean/waves.rs": "58862d8e1957fa1fd8c68de11fd6246ede5ea8c74cb28aa8d02a1168e8d2c596",
+      "crates/sr-sim/src/ocean/whitewater.rs": "c685e072c029be278cd729053157a30c9aa3561831f4c52665caf28fde6b0527",
+      "crates/sr-eval/src/ocean.rs": "346e7c118c52c1d6d059e22d38d461e732cd94b7087fdd5d61727c91f27ae6e9",
+      "crates/sr-eval/src/ocean/bathymetry.rs": "a64b601962291612cd5c46a47580d0d875dcac0d82aaec3a08b079c539c72f26",
+      "crates/sr-eval/src/ocean/surface.rs": "cf79cc72d1fe01782622c61dbe2eb87dc771e12cad4703f352e68d57735891b8",
+      "crates/sr-eval/src/ocean/whitewater.rs": "0096481422573133c9ef8b089bca9a81fb40b35b55693abcb7cdcaae54db4130",
+      "crates/sr-gpu/src/render_three.rs": "e4ee60664bf13778528a3164c14252ea9f306eff6f300d1c9f952ee4bc0fb7ab",
+      "crates/sr-sim/tests/ocean.rs": "3009d9e4e84e4a479193b6c57f864c7c5e7612755fb551d97236475456875b2e",
+      "crates/sr-sim/tests/whitewater.rs": "8facbbcf9955e33e0b4ad875f2ec0617cf678536c79861a5d42beeab2165a971",
+      "crates/sr-eval/tests/ocean.rs": "e39a8509b8aa008ea3462c936f3a1b21c029af3b4105df90643c632706f74af7",
+      "crates/sr-gpu/tests/ocean.rs": "65e927bcb8bc2be35daa30bafaa3fa9b3ba0e026f4aa8599b55e8f9bc87fc040",
+      "crates/sr-model/tests/ocean_rules.rs": "dd10151d7622581b6be8bca660646aefd17141fd323358a94c8088df11922cb0",
+      "schema/scene-render-1.1.xsd": "b6f00963096e971d4ec8f82a72dd09b278ef3006dd77945c496d6135a678774c",
+      "schema/scene-render-1.1.sch": "d075d8ded93fcdf2c4a1917a49a612fb5149748fdf8b08a8612262495700c09c",
+      "crates/sr-model/src/rules.rs": "7642d22c827eb164516bf2ec0679fd7b2ffc509c622499825b1ffd6ec8679059"
+    },
+    "analytic_validation": "Lake-at-rest with wet/dry bathymetry, conservation, linear wave phase speed, exponential damping and Ritter dry-bed rarefaction with resolution convergence. A coarse single-resolution tolerance failed due to first-order numerical diffusion; the test now verifies refinement toward the analytic solution and retains independent accuracy bounds.",
+    "affected_cpu": {
+      "passed": 286,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 35,
+      "log": "/tmp/sr-cinematic-whitewater-affected-final.log",
+      "scope": "Complete sr-model, sr-eval and sr-sim suites on the final ocean/whitewater integration, allocation refactor and OCN2 layered-image check"
+    },
+    "broader_gpu": {
+      "passed": 51,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/sr-cinematic-whitewater-gpu-regression-final.log",
+      "scope": "3 ocean, 4 particles3D, 35 scene3D and 9 volume tests on final ocean/whitewater source. The preceding ocean-surface regression also passed 4 motion-blur tests."
+    },
+    "schema_oracle": {
+      "result": "passed",
+      "cases": 8,
+      "log": "/tmp/sr-cinematic-whitewater-oracle-final.json"
+    },
+    "generator_tests": {
+      "passed": 40,
+      "log": "/tmp/sr-cinematic-whitewater-generator.log"
+    },
+    "corpus": {
+      "passed": 4,
+      "log": "/tmp/sr-cinematic-whitewater-corpus-final.log"
+    }
+  },
+  "ocean_preview": {
+    "checked_at": "2026-10-03T10:11:02.158307+00:00",
+    "scene": "/tmp/sr-cinematic-ocean-probe/whitewater.scene.xml",
+    "scene_sha256": "cee069bfd0d2b94e3a2986379ffff1fe933bd2647b65064ec7ea897080dd6fc2",
+    "binary_sha256": "0113ebb4d9cbefda8cfd5f0dfe5ba8dd190fff1271ceb97d4b24c2060ddc8f17",
+    "binary_scope": "Native ocean/whitewater integration; before the allocation-only whitewater refactor and layered-image bathymetry validation tightening",
+    "frames": 36,
+    "unique_frames": 36,
+    "size": [
+      240,
+      160
+    ],
+    "fps": 12,
+    "duration": 3,
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "inspected_frames": [
+      0,
+      8,
+      12,
+      24
+    ],
+    "video": "/tmp/sr-cinematic-ocean-probe/whitewater.mp4",
+    "probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "width": 240,
+          "height": 160,
+          "r_frame_rate": "12/1",
+          "duration": "3.000000",
+          "nb_frames": "36"
+        }
+      ]
+    },
+    "encode_report": {
+      "path": "/tmp/sr-cinematic-ocean-probe/whitewater.mp4",
+      "files": [
+        "/tmp/sr-cinematic-ocean-probe/whitewater.mp4"
+      ],
+      "frames": 36,
+      "size": [
+        240,
+        160
+      ],
+      "fps": 12.0,
+      "encoder": "libx264",
+      "render_adapter": {
+        "name": "llvmpipe (LLVM 19.1.7, 256 bits)",
+        "backend": "Vulkan",
+        "device_type": "Cpu",
+        "software": true
+      },
+      "quality": "final",
+      "seconds": 11.341519739,
+      "render_fps": 3.3896372199976663,
+      "stage_seconds": [
+        0.6159198009999999,
+        9.769356991999999,
+        0.0031861780000000004,
+        0.0012708390000000002
+      ],
+      "decode_wait_seconds": 0.0,
+      "vector_seconds": 0.0,
+      "audio_seconds": 5.11e-06,
+      "loudness": null,
+      "true_peak": null,
+      "unsupported": [],
+      "accessibility": [],
+      "warnings": [],
+      "evaluation_warnings": [],
+      "uploads": [],
+      "passes": 1,
+      "segments": 1
+    },
+    "triangles_range": [
+      8448,
+      11256
+    ],
+    "limits": "Small functional ocean impulse/foam/spray preview on software Vulkan. Not the completed UHD Chicxulub film or a production-quality water look."
+  },
+  "ocean_uhd_probe": {
+    "file": "/tmp/sr-cinematic-ocean-probe/uhd-0008.png",
+    "sha256": "9a981cdab6ec29431ce7c6bbb196a4b7d9e91b1891181855fff7c6758c036405",
+    "scene": "/tmp/sr-cinematic-ocean-probe/uhd.scene.xml",
+    "binary_sha256": "0113ebb4d9cbefda8cfd5f0dfe5ba8dd190fff1271ceb97d4b24c2060ddc8f17",
+    "size": [
+      3840,
+      2160
+    ],
+    "frame": 8,
+    "path_samples": 1,
+    "max_bounces": 3,
+    "denoise": false,
+    "strict_exit": 0,
+    "inspected": true,
+    "log": "/tmp/sr-cinematic-ocean-probe/uhd-render.log",
+    "limits": "Single noisy functional UHD frame; not final cinematic quality, a completed film or sustained performance validation."
+  },
+  "globe_validation": {
+    "checked_at": "2026-10-03T11:13:06.032777+00:00",
+    "scope": "Native globe elevation through geometry, bounded DEM sampling, XML/model/scoping, raster/path rendering and all three collider consumers",
+    "affected_cpu": {
+      "passed": 290,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 44,
+      "log": "/tmp/sr-cinematic-terrain-affected.log",
+      "scope": "sr-3d, sr-geo, sr-model and sr-eval; before the final scoped-include/flat-map-compatibility cases and PNG header allocation fix"
+    },
+    "final_integration": {
+      "passed": 202,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 29,
+      "log": "/tmp/sr-cinematic-terrain-integration-final.log",
+      "scope": "sr-model and sr-eval after final schema compatibility changes; before the isolated PNG header allocation fix"
+    },
+    "final_terrain": {
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/sr-cinematic-terrain-formats-final.log",
+      "scope": "7 terrain integration/decoder cases plus the dedicated-process allocation test on final production source"
+    },
+    "gpu_regression": {
+      "passed": 43,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 5,
+      "log": "/tmp/sr-cinematic-terrain-gpu-regression.log",
+      "scope": "4 maps3d (including relief in raster and path modes), 4 particles3D, 4 motion-blur, 22 scene3D and 9 volume tests; decoder-only bound tightened afterward and final CLI re-rendered"
+    },
+    "oracle": {
+      "cases": 7,
+      "log": "/tmp/sr-cinematic-terrain-oracle-final.json"
+    },
+    "corpus": {
+      "passed": 4,
+      "log": "/tmp/sr-cinematic-terrain-compat-green.log"
+    },
+    "generator": {
+      "passed": 2,
+      "log": "/tmp/sr-cinematic-terrain-generator.log"
+    },
+    "allocation_regression": {
+      "budget_bytes": 1048576,
+      "largest_allocation_before_fix": 8650752,
+      "maximum_single_allocation_after_fix": 1048576,
+      "result": "The assertion passes; the test bounds the largest individual allocation, not total process RSS.",
+      "red": "/tmp/sr-cinematic-terrain-header-memory-red.log",
+      "green": "/tmp/sr-cinematic-terrain-header-memory-green.log"
+    },
+    "source_sha256": {
+      "crates/sr-3d/src/terrain.rs": "36f7bf91cf487591f04b090833f8796ea2a790551106b3b94eb825567947bda7",
+      "crates/sr-eval/src/terrain.rs": "f6b13c9f9b761879c6c8f926a93b40ab6a1cb9fdbcfae12330cb85d04c016483",
+      "crates/sr-eval/src/terrain/dem.rs": "f42b25cc9258aa492d103662ec07945c70b09f43f7726099e5e51abe226fe183",
+      "crates/sr-eval/src/program.rs": "d8b94ff0344868939215b8fe8f9a7abb2db336caab4964238d69c505711160d0",
+      "crates/sr-eval/src/sim3d.rs": "443871c17662944749c4199c22656923eedc3d7a17e58f0b2f7c88d14ab604f9",
+      "crates/sr-eval/src/particles3d/colliders.rs": "c0e2fb9d79b0f79039a685bfc142637b177c0750688313ee4f63f3a834bd4d16",
+      "crates/sr-eval/src/pyro.rs": "d65ee0cbb6cdf0784d4e307ab935251825f028bef990ca4832f993d088d056c1",
+      "crates/sr-eval/src/pyro/colliders.rs": "73eeb9654f143b8e8ffcbc8eb0fb1efe3e956db9d36f4d627741381fcb6744aa",
+      "crates/sr-geo/src/pmtiles.rs": "3a1e25cffdb3ab5e8944b61afef649648106a25ba4ea12fc180828d1da22705c",
+      "crates/sr-gpu/src/render_map3d.rs": "df2d444e83d9de999bd44433803230ab273ac7436592488b79c8475f952cafed",
+      "crates/sr-model/src/rules.rs": "771e7a7e17b8ca6446f7419bc7557d6e2ed94d9ece7fa24e65c1743e1a721cc8",
+      "schema/scene-render-1.1.xsd": "04a50b2a73dc1015114d2ba8853d69ca7bbc0219fd5f25e608eea67e580e6372",
+      "schema/scene-render-1.1.sch": "eab1c651a8c216fe02fb6b4c5d7162f6c01215e736ee20026d435bf84ec1ff3b",
+      "crates/sr-3d/tests/terrain.rs": "d36694912c8e52c5e6a5f350a34c75b28a6c03e9d91f2b6fabed0be56006a58f",
+      "crates/sr-eval/tests/terrain.rs": "385b4bc8870c4a16549359ba82bbbb85c1a79d76f8dd6847bca1877d167a9999",
+      "crates/sr-eval/tests/terrain_memory.rs": "0d1a32390684739f725d42ab41ab6d1caafa6f5083c244125a983a69866f45ba",
+      "crates/sr-model/tests/terrain_rules.rs": "11a5be37e19419a938f428070e38678a7341ae01b9a40f0872a5c60f0c26c6e6",
+      "crates/sr-geo/tests/bounded_tiles.rs": "a91ca6d88b56e372d4f489ee26fe6e67783db77af5c2d7f258755be478c4aa14",
+      "crates/sr-gpu/tests/maps3d.rs": "053429562ec0a9442994900b12e0c04d76739fe269bf7364cf144335017d4c7f",
+      "tools/build_corpus.py": "40ec3e957b1bef2d528ed970f0b3eb6ae05d7b3a1ff4c0f510f6c134e95838c2",
+      "tests/corpus/manifest.json": "16738b970a54024e2bc776a4225d62792cae3039e7e692a048ccd0b089419bfe",
+      "tests/corpus/media/terrain.pmtiles": "9b34a8772aeaffeb8e65ece0d6595cc157e113fe214274df5094cf2dfd05a6ac",
+      "tests/corpus/valid/globe-relief.scene.xml": "d29b526d405a40a7f800a7d67c8a903f76b1db7585da7f1152af3ab6189924e6",
+      "srep-0000-cinematic-impact.md": "705166cf33b2f33e2a269d15e7413e60070cbdc54d7871fd9088322d023ff615"
+    },
+    "limits": [
+      "Mercator polar caps fade to the datum and are constructed, not measured polar relief.",
+      "Missing tiles error unless explicitly replaced with zero. Only unbuffered power-of-two RGB8/RGBA8 numeric PNG/WebP tiles are supported.",
+      "Collider relief geometry is static; rigid motion remains supported.",
+      "The per-surface construction/tile budget and bounded retained caches are not an overall process RSS limit.",
+      "No final workspace runtime run or release rebuild yet; full impact film and remaining geometry/importer features are outstanding."
+    ],
+    "checks": {
+      "globe_clippy": "/tmp/sr-cinematic-terrain-clippy-final.log",
+      "globe_test_clippy": "/tmp/sr-cinematic-terrain-test-clippy.log",
+      "globe_msrv": "/tmp/sr-cinematic-terrain-msrv-final.log",
+      "globe_test_msrv": "/tmp/sr-cinematic-terrain-test-msrv.log",
+      "globe_build": "/tmp/sr-cinematic-terrain-build-final.log",
+      "globe_fmt": "/tmp/sr-cinematic-terrain-fmt-final.log",
+      "globe_diff": "/tmp/sr-cinematic-terrain-diff-final.log"
+    }
+  },
+  "globe_preview": {
+    "checked_at": "2026-10-03T11:13:06.032777+00:00",
+    "scope": "Native globe elevation, synthetic Gaussian hills in Terrarium metres; not Earth/Chicxulub terrain or a completed impact film",
+    "binary": "target/debug/scene-render",
+    "binary_sha256": "461cc51fb07f38c74ac57f0077cc74af15994159ba0dc0f2cbe51cf25c21bd4d",
+    "binary_scope": "All globe relief production changes, including PNG header allocation bounds",
+    "scene": "/tmp/sr-cinematic-terrain-probe/preview.scene.xml",
+    "scene_sha256": "15c4b717c5d3917494fcef38140b2a8bf98b8312b3dca7617097d421a5d86964",
+    "terrain_sha256": "ff9453fe4cddd8ce09d7b6e0ea97a902fffba9a4855d8f09070d4fc7ebb67db4",
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "frame_count": 24,
+    "unique_frames": 24,
+    "size": [
+      480,
+      270
+    ],
+    "fps": "12/1",
+    "seconds": 2,
+    "video": "/tmp/sr-cinematic-terrain-probe/globe.mp4",
+    "video_sha256": "9eb66439a830252f47435b4c443a29b57952211901b4510495e61180c240ae24",
+    "ffprobe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "width": 480,
+          "height": 270,
+          "avg_frame_rate": "12/1",
+          "duration": "2.000000",
+          "nb_frames": "24"
+        }
+      ]
+    },
+    "frame_sha256": [
+      "489e41265395cc110ae8cdfe93c88cb9c985a7d4ce4715f2df91410f5e1f359a",
+      "f6de2d7e71216b4078dc0f5c4444fed7fc073071f4b820aa9ec3c6cb0b984600",
+      "dee8b3165a78b17450aa4b96b7399f1b153c535efd4dc77eecd46842fd2e37d1",
+      "222ef08fc2db38172a2b8a113b83621e3d57f052fb6988d69e50129d1ee6ce7c",
+      "b2a58f262a6874466647e8e6eecceaa327148e4c0fd2fccf01bb325694b216c0",
+      "c135041368c6828e6fe808e35af53c41187e923aacd87daec615eef24fa04e35",
+      "67152a58f9629e75adb38bdc6223cb450a4b18353dd03c9f2233ab974e753e4f",
+      "97919c7bb1ba8f48f0883fdd9be6918ea0b1509f24e74cf6da3c546251118763",
+      "33199b8e9600bb62f15a928e0cc7ed125a2ada73cb6353c226e1017d4da0baaf",
+      "95cdb18cd64937e3aeec3423f192b73b2d96bcee6ead636601ddabad598da69a",
+      "6dec9d0ef8454964485ace92f7a602f7410a2c4eea1c3a103833d5adce812ca6",
+      "4beff4488cf4f34ce8e903ee884e9afc112cf34be5b52b3f3b16bc1bfc5ba84a",
+      "b12c1bf9e267a98eb478a5734a58bf9124aba568b130cf72b6a0b7cc5a41317c",
+      "976330ea9e412da560bcb7d09a2b38f841681cf3ce68ecb9671456719d2a77f2",
+      "7d90d1025b8882c08caa3917b1588e4cf07726e80ba3854072331cc1353cc534",
+      "25d716cd2aae3d124668c8a2318311163422684f3d9cb2eb2fb468d97c35f2a2",
+      "eeb267d72f45371b06369cce4a47c0ce71084557ab62220b618d7170c81c1700",
+      "b56aa8ef09892687f6106929b280bad263bcc3fe0b8a1bd1d59a1f59a024c3ad",
+      "8f8133fed9ccbaefa09ea8156bd110bea62d01e4c39a711b4c713cb1758b7418",
+      "420fb4cc6b60e5cd0cac592fd8e692dac21f72edae5c4ccb33319e87fde60ee9",
+      "059b83538c52585f880bc2fa5df80aae5028f5aff2e44bbdac5e21a125b22ccf",
+      "b093237bb5a2249deba3b9f53b227f68088a1c774d5eb204ecdbb8bfd2c2c286",
+      "ef8de09ac9903efffd1ea0af9a5e415e7d47de5d9fc1b1b7c302bda3159b1c15",
+      "014afea80225c020267ece1a6159e22001bb9317dbebf844f3262f32dc95ecb9"
+    ],
+    "visual_review": {
+      "frames": [
+        0,
+        12,
+        23
+      ],
+      "observation": "Rotating, smoothly shaded relief changes the silhouette; whole globe remains inside the frame after camera framing adjustment. Synthetic hills are deliberately exaggerated."
+    },
+    "uhd": {
+      "path": "/tmp/sr-cinematic-terrain-probe/uhd-0012.png",
+      "sha256": "28ab8f1de2a9474dacb1c879ed3972fbd88c991354c80a20fe80e55b266ae128",
+      "size": [
+        3840,
+        2160
+      ],
+      "frame": 12,
+      "renderer": "pathtrace",
+      "samples": 2,
+      "max_bounces": 2,
+      "denoise": false,
+      "strict_exit": 0,
+      "stats": {
+        "frame": 12,
+        "gpu": {
+          "frame_ms": 1943.178763,
+          "passes": []
+        },
+        "stats": {
+          "backdrop_copies": 0,
+          "cache_hits": 0,
+          "contrast": [],
+          "contrast_unprobed": [],
+          "decode_wait": 0.0,
+          "draws": 2,
+          "effect_pixels": 0,
+          "errors": [],
+          "fx_passes": 0,
+          "objects3d": 1,
+          "prefix_restored": 0,
+          "splats": 0,
+          "subframe_seconds": 0.0,
+          "subframes": 0,
+          "targets": 1,
+          "textures_created": 2,
+          "textures_released": 0,
+          "triangles": 16128,
+          "unsupported": [],
+          "vector_seconds": 0.0,
+          "video_frames": 0
+        }
+      },
+      "limits": "Single low-sample functional frame; neither production image quality nor full-film throughput/peak RSS is established."
+    },
+    "adapter": "llvmpipe (LLVM 19.1.7, 256 bits), Vulkan software adapter",
+    "logs": [
+      "/tmp/sr-cinematic-terrain-probe/render-final.log",
+      "/tmp/sr-cinematic-terrain-probe/uhd-final.log",
+      "/tmp/sr-cinematic-terrain-probe/encode-final.log",
+      "/tmp/sr-cinematic-terrain-probe/ffprobe-final.json"
+    ]
+  },
+  "mesh_sequence_validation": {
+    "checked_at": "2026-10-03T11:45:17.346616+00:00",
+    "checks": {
+      "affected_cpu": {
+        "passed": 268,
+        "failed": 0,
+        "log": "/tmp/sr-cinematic-mesh-sequence-affected-final.log"
+      },
+      "gpu": {
+        "passed": 31,
+        "failed": 0,
+        "log": "/tmp/sr-cinematic-mesh-sequence-gpu-regression.log"
+      },
+      "dependencies": {
+        "passed": 12,
+        "failed": 0,
+        "log": "/tmp/sr-cinematic-mesh-sequence-changes-final.log"
+      },
+      "cli": {
+        "passed": 1,
+        "failed": 0,
+        "log": "/tmp/sr-cinematic-mesh-sequence-cli.log"
+      },
+      "clippy": {
+        "status": "passed",
+        "log": "/tmp/sr-cinematic-mesh-sequence-clippy-final.log"
+      },
+      "msrv": {
+        "status": "passed",
+        "log": "/tmp/sr-cinematic-mesh-sequence-msrv.log"
+      },
+      "generator": {
+        "status": "passed",
+        "log": "/tmp/sr-cinematic-mesh-sequence-generator.log"
+      },
+      "fmt": {
+        "status": "passed",
+        "log": "/tmp/sr-cinematic-mesh-sequence-fmt-final.log"
+      }
+    },
+    "oracle": "/tmp/sr-cinematic-mesh-sequence-oracle.json",
+    "oracle_cases": 5,
+    "source_sha256": {
+      "crates/sr-3d/src/lib.rs": "db6cc59fd9e19afa04a3b2818b355e0145b06a9560556acc55a51ba23057c741",
+      "crates/sr-3d/src/sequence.rs": "a1d13d91f2c353a23565cf54999268d7d18b3cd147a29b4d41b10f092c911f55",
+      "crates/sr-3d/tests/sequence.rs": "d53956bde81824e745acb6ce17364f0a48d78d3d9c8841837486829a5da64d43",
+      "crates/sr-eval/src/lib.rs": "0154260d3a32ffcf2d74d149ab730a162d9088ee1173636c1ef1a71075e10931",
+      "crates/sr-eval/src/program.rs": "11c3617d466132418c1841ecb7159dd7af781380bc15ddc9014d87679a4a4c2c",
+      "crates/sr-eval/src/mesh_sequence.rs": "644878b5dbfe9d4c134235a46ca769de67f5d8a6e43d8ace1e38df1b51da32e4",
+      "crates/sr-eval/tests/mesh_sequence.rs": "2bb0bd2286508dbfd519ec5379326fbb87d7569fb1f02bacd742b2bec3765dda",
+      "crates/sr-gpu/src/render_three.rs": "480d8e27a30952b699581f80805a592ddc1ac79a1e1ac1701f88455de9e7a624",
+      "crates/sr-gpu/tests/mesh_sequence.rs": "10c5013a6cc9888db45f3158896ce8927b24265bf48041a5b0c18ada8d636af8",
+      "crates/sr-model/src/assets.rs": "e60d026d4344d664d40c84956540ab0ef540b1d55cfb14636cf65eb420bb6f7e",
+      "crates/sr-model/src/rules.rs": "f9079f71c5896ed7eab4b382d6d02d3b7a8a99af73be3db09998c55bdf63b0a5",
+      "crates/sr-model/tests/mesh_sequence.rs": "15116ab0b762af0068464e090b7315bf0a6823e78883a535a33438a4db02094a",
+      "crates/scene-render/src/changes.rs": "bc43f7980bf28ef9ff5a405367f168172aaeb15c9603094286391b9cf1db0475",
+      "crates/scene-render/tests/cli.rs": "39d07fa6ead74365926b0c361358422b74af95c8e7b59b277d48b841c6c37cdb",
+      "schema/scene-render-1.1.xsd": "904dd809582e9d31718cb8e2d7cafef2bc305bded1a3e8bbe7a9b3121b55d925",
+      "schema/scene-render-1.1.sch": "d1a9e4fed9756c036f0231256456057834287372cda98aa43eb055e4afa501bb",
+      "schema/UPSTREAM": "84f6e4d8f0c46f913009bdaaae96f073ff9be04ba15531410e0333f43739e019",
+      "srep-0000-cinematic-impact.md": "2e4870272fcc05e3f159f72d5b0c724343d676851d9dae7a7462985ee0a9d085",
+      "tools/build_corpus.py": "874de97175ea44cfde3d1a9248c9b7a6f646bee3d09bcb56898251d0af52e91d",
+      "tests/corpus/manifest.json": "c95c28c6e3acd93e7e8ea72625479f12b1d19fd13a5676d7f26b53dc053df01c"
+    },
+    "tdd": [
+      {
+        "regression": "Recompilation refreshes external materials",
+        "red": "/tmp/sr-cinematic-mesh-sequence-recompile-red.log",
+        "green": "/tmp/sr-cinematic-mesh-sequence-recompile-green.log"
+      },
+      {
+        "regression": "512-level hierarchy limit does not depend on export order",
+        "red": "/tmp/sr-cinematic-mesh-sequence-depth-red.log",
+        "green": "/tmp/sr-cinematic-mesh-sequence-depth-green.log"
+      },
+      {
+        "regression": "Numbered mesh and volume dependencies invalidate incremental output",
+        "red": "/tmp/sr-cinematic-mesh-sequence-changes-red.log",
+        "green": "/tmp/sr-cinematic-mesh-sequence-changes-final.log"
+      },
+      {
+        "regression": "Raster and path-traced cache playback",
+        "red": "/tmp/sr-cinematic-mesh-sequence-gpu-red.log",
+        "green": "/tmp/sr-cinematic-mesh-sequence-gpu-regression.log"
+      }
+    ],
+    "documentation_patch": "/tmp/sr-cinematic-mesh-doc/contract-report.json",
+    "limits": [
+      "Shared importer dependency discovery and decode allocation admission remain unfinished; source/retained model limits do not bound importer peak RSS.",
+      "Mesh sequences are changing render geometry; static proxies are required for rigid, pyro and particle collisions.",
+      "No completed impact film or final release rebuild; preview is synthetic authored geometry."
+    ]
+  },
+  "mesh_sequence_preview": {
+    "scope": "Native mesh-sequence rendering of externally authored synthetic deformation; not native crater simulation or a completed impact film",
+    "checked_at": "2026-10-03T11:44:06.933628+00:00",
+    "binary": "target/debug/scene-render",
+    "binary_sha256": "276a7e3c20a3858503f5eb11839981b5c0efb27868dfae901751e5a9268da6b5",
+    "scene": "/tmp/sr-cinematic-mesh-probe/preview.scene.xml",
+    "scene_sha256": "56d2bea56ca9d27ba8546f6b4bcf90c24367ebf02a04ca0b4b001b91c5127145",
+    "input_sha256": {
+      "frame-00.obj": "f79d0c74fc0218bfac3665e18075612f5fcf3f73ea2c6a5273fb349217c57506",
+      "frame-01.obj": "b565bb7f28f92ba163d56fa008db4ded6d986d571af9fcaf33c1af5231618cf9",
+      "frame-02.obj": "b4f8c21341340be0fd0dcff3646f176fea72348d70ae353bbd1758086e622a3a",
+      "frame-03.obj": "6c305e8354e400e7ffaafc3688813fa546cd44b3d4c9edfe1abb465eeca4b2ce",
+      "frame-04.obj": "646d012dce28577cd97689a2f2844825a28a5f85d47b37434df35cdc17c114e3",
+      "frame-05.obj": "4579c073b8e35adf427eb83ccfb6779ec0780ee6252f63997ffb4768395e92ee",
+      "frame-06.obj": "e51c5a6dd22fef0c04a1a3eb2669bb1fa1fa61e4ff2a360d94d2f5720c2a58d4",
+      "frame-07.obj": "f9eab9da47f1b70c041314dae062c2e078c1692bd7223c0b5e7aec51d6c99310",
+      "frame-08.obj": "c1f2ebc8c4091194b04d6481b503ccf1e94dbe4b348d2c63beddfad90f32fa6d",
+      "frame-09.obj": "863925d37c1b9c36fe8a8c25d593b016d8c77cf3a447fe4ca1bb7f4830f70893",
+      "frame-10.obj": "b8f5c949ba16653e65e73e86ba3b551cd3db39b65dbbafcafe83f5e7d2de6972",
+      "frame-11.obj": "959b5c5e9b3422846cbad65a7c210d1f38ef40193471aadae4684142d1b0430a",
+      "frame-12.obj": "61d54f3cbe56883c7a62fe89800699383e1d87c89f28bafb67307a2021b67eef",
+      "frame-13.obj": "9a4fff49c450a1b18caa4cd39ec318a55b7fc8767be3442ed8f48538e4266f4c",
+      "frame-14.obj": "581f2cac223c2ee9df74bc344b789e5da8d394b626eef3b5a2175175116fea57",
+      "frame-15.obj": "34635d6f55acce7a09edd7f7416bc0dedc8358b195cf8a15c69244b77ccce86c",
+      "frame-16.obj": "eb82978bdfad442c0ac69c3f9c527bc45a6366eed1e102804ba88ad02b6e1883",
+      "frame-17.obj": "14001df5e7c8133fedd33cd27f693743759cc273c479550ea9ac0978c0e3e8fe",
+      "frame-18.obj": "b825d4edea8af1e7d627e3eed3ecec45ce8215d8ae15e6072e5de1896be06def",
+      "frame-19.obj": "1de534005828667ea659692f0868ec4b43bd9feef08eb42c2bafcb42289c303e",
+      "frame-20.obj": "e529db1ed6612a7abc86a456583b6ba4f4c44e938f334b2fc06f72e1438cfa25",
+      "frame-21.obj": "8f12f45831a1d61a8b0bd77c4198b6a593a7e732965d5bdeed4c5e7a7dcde61e",
+      "frame-22.obj": "b2c961bb69ed92f9b73dd488e6e610df6078597a35e87ae49bc7f7bbfacfdf2e",
+      "frame-23.obj": "d83bc6f7b28810a7c19cc36a48c991f17ce717901d5effba37b6cdf72c772940"
+    },
+    "frame_count": 24,
+    "unique_frames": 24,
+    "size": [
+      480,
+      270
+    ],
+    "fps": 12,
+    "video": "/tmp/sr-cinematic-mesh-probe/mesh-sequence.mp4",
+    "video_sha256": "d638346eac2516f369590c4e38af1c7c49a29fa2c032e61ea3dd51bca3d5c942",
+    "strict_render_exit": 0,
+    "strict_encode_exit": 0,
+    "visual_review": {
+      "frames": [
+        0,
+        12,
+        23
+      ],
+      "observation": "Full mesh patch stays in frame; circular relief grows smoothly. Camera framing was corrected before the final render."
+    },
+    "uhd": {
+      "path": "/tmp/sr-cinematic-mesh-probe/uhd.png",
+      "sha256": "4494a737d4cf22870f1f5220df54f4396f70b8df2da889023443d577dbf532df",
+      "size": [
+        3840,
+        2160
+      ],
+      "time": 0.875,
+      "interpolated_labels": [
+        10,
+        11
+      ],
+      "samples": 4,
+      "max_bounces": 2,
+      "denoise": false,
+      "stats": {
+        "frame": 10,
+        "gpu": {
+          "frame_ms": 1977.788368,
+          "passes": []
+        },
+        "stats": {
+          "backdrop_copies": 0,
+          "cache_hits": 0,
+          "contrast": [],
+          "contrast_unprobed": [],
+          "decode_wait": 0.0,
+          "draws": 2,
+          "effect_pixels": 0,
+          "errors": [],
+          "fx_passes": 0,
+          "objects3d": 1,
+          "prefix_restored": 0,
+          "splats": 0,
+          "subframe_seconds": 0.0,
+          "subframes": 0,
+          "targets": 1,
+          "textures_created": 2,
+          "textures_released": 0,
+          "triangles": 3200,
+          "unsupported": [],
+          "vector_seconds": 0.0,
+          "video_frames": 0
+        }
+      },
+      "strict_exit": 0,
+      "limits": "Single low-sample functional frame; timing occurred alongside tests and is not a production throughput benchmark."
+    },
+    "frame_sha256": [
+      "cbcab85bc860bd1b62369636aa38040e922edb6f6c46379a269e017304980336",
+      "c186247d96833a91aa93b0edf5cd9b6866b1a1fd2c5ce7ada4f0bf18b1677c75",
+      "ed0c090517e320b5061c53622c4a3c99fe24bb10f63be735e029c2c96375ce82",
+      "0f2447c377a716ac69d8fd21025b325b43581da593ba5ead98d109742ac4a3e9",
+      "a1be9d69a4072e79434ecef4e6a7beae4be42488a717d1335dc0daaa6bc8e788",
+      "7719387467a1c30a2fef25eec16f8567c4d5d8146e0ce13bc5e676337cb35287",
+      "f1409ccb7a9f155b2b342d6a2c7b23ef5ac7ea592f75ed3a4d690cd66331374b",
+      "007796bb9f3d905099d8e0fb4ffa16e8e11353c989c36ce4c3bce1d6da083f86",
+      "21569b8497f606b9699009e385ef3a41dc39b04f210725cd95b2d494c3f04505",
+      "14f2905ebd5f164d976193bdd7e27ca71b49c01450877c697458f717cd5ae567",
+      "96cc4139ec9f71e199a6b2be0a5a7d88d713b1794364cc7bea3e0cd98d74c94d",
+      "3c1955daf9670689fd2d6c628b69bf27925c744b692cd1ee4ba4b9a53a6f68cf",
+      "716425521d9697ac162e2978f7307b1128cdc2718e33483e3ceb966df4af5c1a",
+      "01768609b1d2d20fddc235c6e2b1fa195dda715a194bab690a27e0bfafc6d330",
+      "72d84a848260040e8ebf105ad48f461256b9a84fa8071abbdffbcbe325976dfb",
+      "8008e1a13e2c4d2276cf4ffd108995c7961812c092f7ce4e01cd2f8b71a65a54",
+      "7f81c8eefdca91f4fcf6f4ee2fa6be5b0b224424bebcd8204d57f5d63e798d7f",
+      "fd9e9b435344b93969b21209b87bf15546da1a8509f466969647a4eaf8308a76",
+      "ac269cb433f1f5cedc7dd734c7861fbb77eba855a89ad96a1342153127af3a14",
+      "ba8368eb4b8dd66e1c8901fa8f33a1d7830720bd1786c05046460c8faff126c4",
+      "86f377be74d6c589656f9be29e9ea5c39676e73d920bf488fa4dbf67af61c4fa",
+      "223fc4663f2ceadc4d3267963fc75f9c9cfe264bad53d9b100d3e7d3b198910c",
+      "04b561b6389cd39d73f25cde478ef05a0cfaeec0110743956d41ceea3826c1b3",
+      "8f802e6ba8ddc2c20373e637d48d453a7d753c34b8391ba865fced87ddd8a5b4"
+    ],
+    "adapter": {
+      "name": "llvmpipe (LLVM 19.1.7, 256 bits)",
+      "backend": "Vulkan",
+      "device_type": "Cpu",
+      "software": true
+    },
+    "ffprobe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "width": 480,
+          "height": 270,
+          "avg_frame_rate": "12/1",
+          "duration": "2.000000",
+          "nb_frames": "24"
+        }
+      ]
+    },
+    "logs": [
+      "/tmp/sr-cinematic-mesh-probe/render.log",
+      "/tmp/sr-cinematic-mesh-probe/uhd.log",
+      "/tmp/sr-cinematic-mesh-probe/encode.log"
+    ],
+    "binary_scope": "Mesh-sequence runtime, schema, CLI dependency tracking and per-Program cache fix; before removal of three redundant i128 casts."
+  },
+  "crater_validation": {
+    "checked_at": "2026-10-03T12:12:48.010943+00:00",
+    "status": "rendering_and_rigid_milestone_passed_full_feature_incomplete",
+    "scope": "Native authored crater kernel, local-clock evaluation, raster/path rendering, current deformed bounds, fixed-substep static/kinematic rigid surfaces, replay and budget/error propagation.",
+    "tdd": {
+      "bounds": "Two render comparisons failed before fix; both pass after using current vertex bounds.",
+      "rigid": "Ball remained at y=4.000069 before integration; now rests in the excavated bowl and replays.",
+      "memory": "1 MiB crater caused a 16777216-byte allocation before fix; pre-tessellation rejection now passes allocation-observing test.",
+      "schema": "Missing CRT1-CRT5 corpus coverage failed before adding independently validated fixtures."
+    },
+    "test_counts": {
+      "affected-final": 280,
+      "sim-final": 18,
+      "gpu-regression": 25
+    },
+    "logs": {
+      "affected-final": "/tmp/sr-crater-affected-final.log",
+      "sim-final": "/tmp/sr-crater-sim-final.log",
+      "gpu-regression": "/tmp/sr-crater-gpu-regression.log",
+      "clippy-final": "/tmp/sr-crater-clippy-final.log",
+      "fmt-final": "/tmp/sr-crater-fmt-final.log",
+      "msrv": "/tmp/sr-crater-msrv.log",
+      "bounds-red": "/tmp/sr-crater-bounds-red.log",
+      "bounds-green": "/tmp/sr-crater-bounds-green.log",
+      "rigid-red": "/tmp/sr-crater-rigid-red.log",
+      "memory-red": "/tmp/sr-crater-memory-red.log",
+      "memory-green": "/tmp/sr-crater-memory-green.log",
+      "corpus-red": "/tmp/sr-crater-corpus-red.log",
+      "corpus-green": "/tmp/sr-crater-corpus-green.log"
+    },
+    "oracle": "/tmp/sr-crater-oracle-final.json",
+    "checks": {
+      "workspace_clippy_all_targets": "passed with -D warnings",
+      "rust_1_90_workspace_tests_check": "passed",
+      "fmt": "passed",
+      "diff_check": "passed",
+      "generator_tests": "2 passed",
+      "schema_oracle": "6 fixtures passed"
+    },
+    "source_sha256": {
+      "crates/sr-3d/src/crater.rs": "ff22d4b45d2ff261f8babb056fea5e44fd754f38ba0fc0750849deeffb9372d8",
+      "crates/sr-3d/tests/crater.rs": "239f7cf0abe8ff1d15c4fbbbb1b1e9fa74c536e639ccd3e0c1e09cd34c643f5c",
+      "crates/sr-eval/src/crater.rs": "4b69e1e18a80dceab34e45e275183220659736cdc1b8a62add81c3f84191b051",
+      "crates/sr-eval/src/sim3d.rs": "73f443ca9987a0ad82a19d1e9868bcbea2c8138f413d0b9cfd25d8fbd0acfef2",
+      "crates/sr-eval/src/sim.rs": "e73417883fab6cd61ae654113b46d7fe7e04c500153d045173dbe8e9b7e7c154",
+      "crates/sr-eval/tests/crater.rs": "b4c004423fe827113762550fea775d05e4796e51da98c1d3b5c1e2bec653ed0c",
+      "crates/sr-eval/tests/crater_memory.rs": "16f7ebfc680f9b28fe9911faaed1a1af9d8940a2e3df468fa7ffd4503b5f6459",
+      "crates/sr-sim/src/physics3d.rs": "722ee7f0c30af1d3b9375c275070d4c2247368c92d6c4f56b6951770e5f53d78",
+      "crates/sr-sim/tests/deforming_colliders.rs": "79db827eccd4f617a2052f5e7be91b72872baf61b6ae9460cf95936c21aa437f",
+      "crates/sr-gpu/src/three.rs": "0e17567fa2d7bbd0a68e11b62ead907ae3dbcc05b486ef684ce6206a530615e1",
+      "crates/sr-gpu/src/render_three.rs": "d8b44dc40924f569449266f1ddd27d7214d1f3f9c420795bf4246dc3dae13885",
+      "crates/sr-gpu/tests/crater.rs": "cccd4b30a7a77eebc0c286b6435efd3d4de5019d3d16e0f46b057468569c18c8",
+      "crates/sr-gpu/tests/three.rs": "3f01c3be40d0756b89d1784b27fa082ca6c3c30b9da3b1479cd05af8893c2513",
+      "crates/sr-model/src/rules.rs": "be4b27bce179afbf24c47a1b1229210d0d2e5f779ecdc989297c837e273dbec5",
+      "crates/sr-model/tests/crater.rs": "c3b9a37b194cd3709bb93e5fe4cee175db1e63a6daad5b99bb06e54e5e500b64",
+      "schema/scene-render-1.1.xsd": "1142f5252aba6404845054fd7a06f9bc2122e63ab8604db9087e0898f242c7c8",
+      "schema/scene-render-1.1.sch": "eb196b5d580d21a6e4ac8c778bdb1725336671dc2e7859988c13fd1a71d63571",
+      "srep-0000-cinematic-impact.md": "b0af0fa8c7478436d7bb8da3393fa69e5018d07165c91a34682024e3f2c97ee5",
+      "tools/build_corpus.py": "99e75cc90f1a4bde7a1928f1e488d47d0b98d4b3b888d046c868654dd7280af9",
+      "tests/corpus/valid/crater.scene.xml": "7b7b196285e2939fba7f21a60ec253a4feea82ec2569ac8996b8fd85676d36fa",
+      "tests/corpus/invalid/crt1.scene.xml": "51ba5b12e85c4b03f6ea2474d48266bc362eb6d93bd6b48fd6835e8e03794863",
+      "tests/corpus/invalid/crt2.scene.xml": "446f3c66c400db4d1d2a9ba9c4d97770ddea3768d818af5b68e239127be33bfa",
+      "tests/corpus/invalid/crt3.scene.xml": "49e0265e57f717ff7c01a0b8963aae396a0c441b86ab2b1e48543b220fb17486",
+      "tests/corpus/invalid/crt4.scene.xml": "8e4859d2e4b2e54223b90d8b5bfff5c942a65527475da912733de33f59838096",
+      "tests/corpus/invalid/crt5.scene.xml": "182ecb96bfaf95f4785ba66157af0df93a9312caa659c9b387cd3cba3695232e"
+    },
+    "remaining": [
+      "Particle and pyro crater collider integration.",
+      "Complete imported/animated source geometry parity and memory admission, including checkpoint retention.",
+      "Rigid updates are discrete fixed-step surfaces; continuous deformation boundary velocities are not represented.",
+      "Fracture, OpenVDB, importer hardening, particle batching, full native UHD impact film and final release validation remain under the active goal."
+    ],
+    "release": "Existing release predates this milestone; no final release completion claimed."
+  },
+  "crater_particle_validation": {
+    "checked_at": "2026-10-03T12:54:45.851029+00:00",
+    "status": "particle_integration_passed_full_goal_incomplete",
+    "scope": "Swept sphere contacts against linearly moving crater triangles, local-clock endpoints, canonical particle intervals, barycentric boundary velocity, curved-flight refinement, support stabilization and one-interval geometry retention.",
+    "tdd": {
+      "initial": "Missing deforming collider API and unchanged crater floor reproduced before integration.",
+      "curved_flight": "Independent outgoing-velocity chord regression exhausted 16 contacts before refinement.",
+      "small_sphere": "Fast 0.001-radius sphere initially contacted at centre crossing with the wrong normal; geometric-distance refinement now passes. Unresolvable positive radii are explicitly rejected."
+    },
+    "logs": {
+      "core": "/tmp/sr-crater-particle-core-final4.log",
+      "affected": "/tmp/sr-crater-particle-affected-final2.log",
+      "gpu": "/tmp/sr-crater-particle-gpu-final.log",
+      "clippy": "/tmp/sr-crater-particle-clippy-final.log",
+      "msrv": "/tmp/sr-crater-particle-msrv-final.log",
+      "fmt": "/tmp/sr-crater-particle-fmt-final.log",
+      "api_red": "/tmp/sr-crater-particle-core-red.log",
+      "curved_chord_red": "/tmp/sr-crater-particle-chord-red.log",
+      "fast_sphere_red": "/tmp/sr-crater-fast-ccd-red.log",
+      "precision_red": "/tmp/sr-crater-ccd-precision-red.log"
+    },
+    "test_counts": {
+      "core": {
+        "passed": 30,
+        "failed": 0,
+        "ignored": 0
+      },
+      "affected": {
+        "passed": 217,
+        "failed": 0,
+        "ignored": 0
+      },
+      "gpu": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings before subsequent pyro integration",
+      "rust_1_90_workspace_tests_check": "passed before subsequent pyro integration",
+      "formatting": "passed"
+    },
+    "source_sha256": {
+      "crates/sr-sim/src/particles3d.rs": "ee70e446a1cf707ab16dd7581ab6675209ffeaf18455b84ab4e6bd7491c51e60",
+      "crates/sr-sim/src/particles3d/collider.rs": "f6bf0111d3c0e6027666730d7d0e66370138a47532c6e5b0b5e23ce0d6baf879",
+      "crates/sr-sim/src/particles3d/collider/deforming.rs": "a9db27038563dfe8192f1c1e7f06ff5cccc7942366ec21dd8b1e67199fa00e38",
+      "crates/sr-sim/tests/deforming_particles.rs": "0252dbb0779e4002521c5b1fc5268475e482a8eeab61790b862f3ceb4ef7b57a",
+      "crates/sr-sim/tests/particles3d.rs": "6b6f2c47d1cf99afb5b54c75f9b3f14c5ee9ca8b1536a8817fdba451ce98f855",
+      "crates/sr-eval/src/particles3d.rs": "ef239ddea7704d0f2119f9f621b81fd86ad777a222c4a90fe2e2e84f63e2cbc7",
+      "crates/sr-eval/src/particles3d/colliders.rs": "b9fb71559bf55d71595bc509921acafddf83b7be9ce2155e820764cb7fb2bbc1",
+      "crates/sr-eval/tests/crater.rs": "cf899344bc03976adc5f83d47940903d5c6d33033f55ebe9841b1506b2ac6d61"
+    },
+    "limitations": [
+      "Piecewise-linear collider motion depends on authored particle dt; numerical root predicates are not interval-certified.",
+      "Importer allocation hardening and production performance remain under the active goal."
+    ]
+  },
+  "crater_pyro_validation": {
+    "checked_at": "2026-10-03T12:54:45.851029+00:00",
+    "status": "pyro_integration_passed_full_goal_incomplete",
+    "scope": "Closed midpoint crater regions, material boundary velocities at MAC faces, shared domain-relative transforms and local clocks, deterministic replay, bounded procedural geometry and native raster/path-traced smoke response.",
+    "tdd": {
+      "deforming_mesh": "Added missing Mesh::moving and tested midpoint containment plus barycentric material velocity under both windings.",
+      "boundary_faces": "Actual regression returned zero instead of prescribed x-face velocity before solver integration.",
+      "scene": "Actual regressions retained smoke exclusion after excavation and reported zero boundary speed before scene integration.",
+      "query": "Extreme finite projection query silently substituted a vertex before explicit failure handling.",
+      "compatibility": "Unstarted plane crater initially changed slab occupancy; centred thickness now matches existing behavior.",
+      "budget": "512-segment cylinder was wrongly rejected by quadratic admission before exact topology counts."
+    },
+    "test_counts": {
+      "affected": {
+        "passed": 329,
+        "failed": 0,
+        "ignored": 0
+      },
+      "gpu_regressions": {
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      "gpu_crater_integration": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "logs": {
+      "affected": "/tmp/sr-crater-pyro-affected-final2.log",
+      "gpu_regressions": "/tmp/sr-crater-pyro-gpu-final.log",
+      "gpu_crater_integration": "/tmp/sr-crater-pyro-gpu-integration.log",
+      "clippy": "/tmp/sr-crater-pyro-clippy-final2.log",
+      "msrv": "/tmp/sr-crater-pyro-msrv-final2.log",
+      "fmt": "/tmp/sr-crater-pyro-fmt-final.log",
+      "diff": "/tmp/sr-crater-pyro-diff-final.log",
+      "mesh_api_red": "/tmp/sr-crater-pyro-mesh-red.log",
+      "mac_faces_red": "/tmp/sr-crater-pyro-faces-red.log",
+      "scene_red": "/tmp/sr-crater-pyro-eval-red.log",
+      "query_red": "/tmp/sr-crater-pyro-query-red.log",
+      "budget_red": "/tmp/sr-crater-pyro-budget-red.log",
+      "slab_red": "/tmp/sr-crater-pyro-slab-red.log"
+    },
+    "oracle": "/tmp/sr-crater-pyro-schema-oracle.json",
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_workspace_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed",
+      "schema_oracle": "6 fixtures passed"
+    },
+    "gpu_scope": "Required Vulkan tests passed. Broad GPU regressions precede the final crater-only primitive admission/slab refinement; both native crater tests ran after those refinements. GPU test counts overlap by one existing crater test.",
+    "source_sha256": {
+      "crates/sr-sim/src/pyro.rs": "d476d9a84729123e7c8f859484848803a905f2971dd8f9a232cf4aa5e7e379b1",
+      "crates/sr-sim/src/pyro/mesh.rs": "b32201d688cd76868810de901012653cadb5d90a5c4784d11d0461c8c8ab31cd",
+      "crates/sr-sim/tests/pyro_mesh.rs": "30487df67975526b0db42d1baa64c86e2444af24b95f7fded63ff766e97e0c55",
+      "crates/sr-eval/src/pyro.rs": "e347a43437a2920e260a2a0f67ecf24de2c772389ce751dc65536b4e8f9dd763",
+      "crates/sr-eval/src/pyro/colliders.rs": "4cbc3e578dbba0ebc3fcba8be9e95e8dc4173b2737cc3fbbea4814da3543b194",
+      "crates/sr-eval/tests/pyro_colliders.rs": "6deeab9b29939734853403f843c80848b3cf04fa8db8c4389530db5f050b22b0",
+      "crates/sr-eval/tests/crater_memory.rs": "53b5d630c5312f8f120aed404b548d3e4ed9c31f8639b55bbbe28bb5ff7b117a",
+      "crates/sr-gpu/tests/crater.rs": "c35cd806bd3f38c152efb3b9358e60cead83201eb0bc1ff6c3f985235c8fd8d9",
+      "schema/scene-render-1.1.xsd": "8f0198ba6287443c37f9908642b0df77ed62cb9368d070774b753e0fe6aa60c0",
+      "srep-0000-cinematic-impact.md": "278836554338d31e7be9fd90197a39968b98283328a8ac07f16060752370463f"
+    },
+    "limits": [
+      "Midpoint voxel occupancy and linear endpoint motion require spatial and temporal resolution; this is one-way cinematic coupling.",
+      "Nearest boundary interpolation extends velocity to voxel faces; it is not a solid continuum or compressible impact solver.",
+      "Imported sources retain existing rest-pose, decoding and self-intersection preconditions.",
+      "Self-touching horn tori are rejected for deforming closed smoke regions.",
+      "No full native UHD impact-film performance or final release completion is claimed."
+    ]
+  },
+  "rigid_checkpoint_validation": {
+    "checked_at": "2026-10-03T13:01:18.654774+00:00",
+    "status": "bounded_optional_replay_milestone_passed_full_goal_incomplete",
+    "tdd": {
+      "growth": "70-second actual repro retained 71 checkpoints before count/charge admission.",
+      "budget": "Missing CPU budget/usage API failed before implementation; zero/tiny budgets now preserve replay and evict before optional clones.",
+      "cadence": "Resetting a thinned cache missed the next one-second sample before restoring its initial cadence."
+    },
+    "scope": "Optional 3D replay checkpoints use a default 256 MiB admission estimate and a 64-copy limit, with temporal thinning before cloning. Estimates include actual triangle/convex/compound geometry, contact records and body/world metadata.",
+    "test_counts": {
+      "core": {
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      },
+      "eval": {
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "logs": {
+      "count_red": "/tmp/sr-crater-checkpoints-count-red.log",
+      "budget_api_red": "/tmp/sr-crater-checkpoints-budget-red.log",
+      "cadence_red": "/tmp/sr-crater-checkpoints-reset-red.log",
+      "core": "/tmp/sr-crater-checkpoints-final2.log",
+      "eval": "/tmp/sr-crater-checkpoints-eval-final.log",
+      "clippy": "/tmp/sr-crater-checkpoints-clippy.log",
+      "msrv": "/tmp/sr-crater-checkpoints-msrv.log",
+      "fmt": "/tmp/sr-crater-checkpoints-fmt.log",
+      "diff": "/tmp/sr-crater-checkpoints-diff.log"
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_workspace_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed"
+    },
+    "source_sha256": {
+      "crates/sr-sim/src/physics3d.rs": "4e0e543c246c5e5e6e854e5c9e506b8a8b7da6f23391fc75ad65b7ff71d89c7c",
+      "crates/sr-sim/tests/deforming_colliders.rs": "293b57dcbd1d753cc4c0d697663790c67eab33e3917c9bc90d0f8e06cee95a83",
+      "srep-0000-cinematic-impact.md": "8af8ced7b08ce716854fbbf16aa714881af6fc90c05c6a86c78b16fcbab899fc"
+    },
+    "limits": [
+      "Mandatory initial/current state, source spec, allocator overhead and solver scratch are outside the optional checkpoint allowance.",
+      "Charges are conservative admission estimates, not measured allocation/RSS guarantees.",
+      "The shared initial geometry is charged again for every optional checkpoint even when its Arc is shared.",
+      "No new schema attribute: scene worlds use the fixed default; the CPU World3 API can set or disable the allowance."
+    ]
+  },
+  "openvdb_validation": {
+    "checked_at": "2026-10-03T14:00:58.291768+00:00",
+    "scope": "Native decoder plus explicit schema/asset/renderer/sequence integration; full cinematic goal remains incomplete",
+    "tdd": {
+      "root_memory_and_instance_payload": {
+        "red": "/tmp/sr-chicxulub-assessment-openvdb.log",
+        "green": "/tmp/sr-openvdb-admission-green.log"
+      },
+      "schema_format": {
+        "red": "/tmp/sr-openvdb-model-red.log",
+        "green": "/tmp/sr-openvdb-model-green.log"
+      },
+      "native_gpu_ingestion": {
+        "red": "/tmp/sr-openvdb-gpu-red.log",
+        "green": "/tmp/sr-openvdb-gpu-green2.log"
+      }
+    },
+    "reference": {
+      "library": "Official OpenVDB 10.0.1, generated file format 224",
+      "generator": "tools/openvdb_fixture.cpp",
+      "upstream": "https://github.com/AcademySoftwareFoundation/openvdb",
+      "source_audit_commit": "86b5ea9e98a31182f8be6d71ade570f5d2561609",
+      "fixture_count": 17,
+      "fixture_sha256": {
+        "crates/sr-volume/tests/data/openvdb/affine-background.vdb": "96b7b06d4ee864e757314290d2fbd35cc1d23309ecb0b119c95350bce958d36b",
+        "crates/sr-volume/tests/data/openvdb/dense-blosc.vdb": "71065f7c0c1f9d3a674b074238cbfa4cfac63b2e2c2d8e4e603d8b707bc57b5b",
+        "crates/sr-volume/tests/data/openvdb/dense-zip.vdb": "b006428152a40fda0d5b7a543ea51246c8718b01f960c70b24cbe6da0f0a6750",
+        "crates/sr-volume/tests/data/openvdb/density-blosc.vdb": "4c13e81b448a747e68afe82bffadf15ccd70e64adc1bca5c92cb350ab4fd38a3",
+        "crates/sr-volume/tests/data/openvdb/density-half.vdb": "f6792bd14d3ec93e83c42d8b04d4a837096c6f71973bb90e7592757a2c6090fa",
+        "crates/sr-volume/tests/data/openvdb/density-none.vdb": "3cbb529f044574dfb0a1c8815fa08ed50765f5fb1773704a365d727227d73914",
+        "crates/sr-volume/tests/data/openvdb/density-zip.vdb": "2f5750c09aa6ac8eb7ae61ced2876a14881c5440f0811b7012e516ff389fd3fd",
+        "crates/sr-volume/tests/data/openvdb/double.vdb": "45a7d2a9b7f36553a0222fd4d95b30efa9edc11381a097eb3465d8f51533ecf4",
+        "crates/sr-volume/tests/data/openvdb/frustum.vdb": "d99a22d6cc6c88c8279517b7379c431b31ff66975db40ee5ae532587e4112faf",
+        "crates/sr-volume/tests/data/openvdb/instanced.vdb": "758daf32d189f4c78846a5080a636aa8aff54bd77d789c5642061b7e62e476ee",
+        "crates/sr-volume/tests/data/openvdb/large-tile.vdb": "6c29a1effae09be9f479f6d6c3a1e8a7c90f08996fb9d4b9933ba64cf513d660",
+        "crates/sr-volume/tests/data/openvdb/render-0.vdb": "2b2c9853bee924eb4cf40731c85bc71a4e79d9781b35ab51425cad53528102a8",
+        "crates/sr-volume/tests/data/openvdb/render-1.vdb": "d08974ea2eb304216d47922c953e4d9761dfdb680b09f0de2b8d6c9b5edb27ea",
+        "crates/sr-volume/tests/data/openvdb/tiles.vdb": "c6e4bfb7f08129c5db4639908f6202bc43aeb23f2541f6c1026954520b7fa2aa",
+        "crates/sr-volume/tests/data/openvdb/unsupported-bool.vdb": "db6950e5e40e23e749b1c88139c846a13f5171a60dce8f24a8e3169a0854ee83",
+        "crates/sr-volume/tests/data/openvdb/vector-double.vdb": "2733cb52276f36b311ca225ac41a202e9a66fdd202e081c91794c33f48c73265",
+        "crates/sr-volume/tests/data/openvdb/vector.vdb": "7b07fd874e8afbf4f6a6bc2f33102a1ea0279c8cd92ff407325bb8e421eaf088"
+      }
+    },
+    "checks": {
+      "volume_crate_tests_including_docs": 46,
+      "model_tests_including_full_schema_corpus": 12,
+      "volume_gpu_tests": 11,
+      "schema_oracle_cases": 3,
+      "corpus_tool_tests": 2,
+      "workspace_clippy_warnings_denied": true,
+      "rust_1_90_volume_model_gpu_tests_check": true,
+      "fmt": true,
+      "diff_check": true
+    },
+    "covered": [
+      "Official scalar, half-quantized, dense ZIP/Blosc, double and vec3 scalar-component decoding",
+      "Affine reflection/shear and background/inactive values",
+      "Root and internal tiles, bounded expansion and persistent topology admission",
+      "Shared-tree instances, exact payload boundaries and malformed codec envelopes",
+      "GPU sparse pixels versus independently constructed SRVOL fields in raster and path tracing",
+      "Analytic thermal sequence values, local-clock retiming, backward replay and isolated groups",
+      "Cache result/error isolation between different declared formats on the same path",
+      "Version 1.3, explicit format enum and static/sequence schema corpus"
+    ],
+    "limitations": [
+      "Parser accepts versions 222-225; independent fixture corpus uses version 224 only",
+      "No nonlinear/frustum maps, integer/boolean/point grids or alternate tree layouts; unsupported data errors explicitly",
+      "Stores finite f32 scalar fields; active-mask topology is not retained separately, double values round to f32",
+      "Memory limits are conservative component admission estimates, not whole-process RSS bounds",
+      "No production impact film, high-density plume benchmark or final release rebuild in this milestone",
+      "Imported vector channels do not yet implement the proposed velocity-driven volume-cache advection"
+    ],
+    "logs": [
+      "/tmp/sr-chicxulub-assessment-openvdb.log",
+      "/tmp/sr-openvdb-admission-green.log",
+      "/tmp/sr-openvdb-model-red.log",
+      "/tmp/sr-openvdb-model-green.log",
+      "/tmp/sr-openvdb-gpu-red.log",
+      "/tmp/sr-openvdb-gpu-green2.log",
+      "/tmp/sr-openvdb-volume-full.log",
+      "/tmp/sr-openvdb-model-final.log",
+      "/tmp/sr-openvdb-gpu-final.log",
+      "/tmp/sr-openvdb-schema-oracle.json",
+      "/tmp/sr-openvdb-clippy-final.log",
+      "/tmp/sr-openvdb-msrv.log",
+      "/tmp/sr-openvdb-corpus-tool.log",
+      "/tmp/sr-openvdb-fmt-final.log",
+      "/tmp/sr-openvdb-diff-final.log"
+    ],
+    "source_sha256": {
+      "crates/sr-volume/src/openvdb.rs": "c5eaa52cc2706c87fd9316305c4246e0e5e37746dab64bb23cdcffeb08a637c8",
+      "crates/sr-volume/src/openvdb/codec.rs": "bbbb2900a65b0472ff2fe00cc0f61e61cc912eaf855d2e77639a8af0ebd5b203",
+      "crates/sr-volume/src/openvdb/read.rs": "d518d0396c3fa8e32860d5c71739d19b8efe9b6485d2d8d312d0f9dc14ccb23f",
+      "crates/sr-volume/tests/openvdb.rs": "016481846ad8780bbf95382b1af4cbf9a6d40db4a53719492c25018cc7650625",
+      "tools/openvdb_fixture.cpp": "7e760f28c3d1de129ab343c9b330ad5cbcfc318e3f3436c87d971a5b9e4ac88a",
+      "crates/sr-gpu/tests/volume.rs": "698f5cabcbcaaf7fb6717d4315c621e01228d5d5fe600a3a369b6437afcb2c7e",
+      "crates/sr-gpu/src/render_three.rs": "920b8ed125bcf72ea864a024acd0e9651b81076889fd1c06bc3b8567ea627ade",
+      "crates/sr-gpu/src/render.rs": "7fe8b2e16a9fecf59324f0736264fddf8e3d4ceadc85f832e5256a2b597cf03d",
+      "schema/scene-render-1.1.xsd": "337ee4e32abcff411dbe9aa2bf3a7c9f75731f80f0360bcf38b25455c6ed490a",
+      "crates/sr-volume/Cargo.toml": "bec29f653408157f1e0196dcdc6ea5ef4abe239dfd585ace2289c8bdff758063",
+      "Cargo.lock": "e62c1f371ec8a658fd35ca93869584e913a3837851361961a576ee5599e2050f"
+    }
+  },
+  "fracture_kernel_validation": {
+    "checked_at": "2026-10-03T14:50:40.906679+00:00",
+    "status": "geometry_kernel_passed_scene_integration_incomplete",
+    "scope": "Deterministic solid partitioning with cap triangulation, exterior source-face provenance, oriented cavities, disconnected components, mass/volume conservation and explicit numerical/resource errors.",
+    "tdd": {
+      "api": "Missing fracture API was the initial failure.",
+      "overlap": "Overlapping source surfaces were accepted before intersection validation.",
+      "nested_shells": "Nested outward shells incorrectly counted the enclosed cavity as material before shell validation.",
+      "volume_underflow": "Tiny world-space fragments returned zero volume before explicit output-range validation."
+    },
+    "tests": {
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    "logs": [
+      "/tmp/sr-fracture-kernel-red.log",
+      "/tmp/sr-fracture-input-red2.log",
+      "/tmp/sr-fracture-shells-red.log",
+      "/tmp/sr-fracture-volume-red.log",
+      "/tmp/sr-fracture-kernel-green-final.log"
+    ],
+    "source_sha256": {
+      "crates/sr-3d/src/fracture.rs": "a183f065b43c3d6bb5ce5fea976ea67b57c5b2d6b2ed62e15d67b1baba5e8604",
+      "crates/sr-3d/src/fracture/cut.rs": "b1ddf77a4fef65b60169f865bc5b90e6102ab58957f8052ba0b7b40ee9a9d202",
+      "crates/sr-3d/src/fracture/validate.rs": "13b955f9a26a17f1f58bb1145485fc9dee35d0928224e8e5abd401868e3de912",
+      "crates/sr-3d/tests/fracture.rs": "9b1488889de9a721a3069e98be3a6298c7faef90674fe5707a38eccef03ba8ab",
+      "crates/sr-3d/Cargo.toml": "99a03ee7dc38fa17aeaa6735488d55a2695d1f47a9d125a24eaf83feac6136ad",
+      "Cargo.lock": "2cde8facb62a3400067fd33d49fba982b7b46e9f0238a0ada96b0b0e333d250d"
+    },
+    "limits": [
+      "Finite-precision geometric predicates; unresolved cuts return errors.",
+      "Allocation admission estimates exclude caller input and whole-process RSS.",
+      "No source material/UV reconstruction, XML invocation or production fracture render yet."
+    ]
+  },
+  "fracture_rigid_validation": {
+    "checked_at": "2026-10-03T14:50:40.906679+00:00",
+    "status": "rigid_cpu_integration_passed_scene_integration_incomplete",
+    "scope": "Registered source/piece partitions, fixed-boundary activation, inherited actual COM velocity and spin, aggregate source inertia, one-shot impulses, visibility, source collider retirement, joint detachment and checkpoint replay.",
+    "tdd": {
+      "api_red": "/tmp/sr-fracture-physics-red.log",
+      "visibility_red": "/tmp/sr-fracture-visibility-red.log",
+      "future_event_red": "/tmp/sr-fracture-timing-red.log",
+      "green": "/tmp/sr-fracture-physics-final2.log"
+    },
+    "test_counts": {
+      "full_geometry_simulation_crates": {
+        "passed": 195,
+        "failed": 0,
+        "ignored": 0
+      },
+      "evaluator_regressions": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0
+      },
+      "targeted_rigid_final": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "verification_scope": "Counts overlap. The final targeted run strengthens failed-boundary atomicity observation after the 195-test core run; no production code changed after that core run. Evaluator regressions precede the final fracture-only no-early-activation correction. No rendered fracture or final release evidence is claimed.",
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_geometry_simulation_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed"
+    },
+    "logs": [
+      "/tmp/sr-fracture-core-final2.log",
+      "/tmp/sr-fracture-eval-regression.log",
+      "/tmp/sr-fracture-physics-final2.log",
+      "/tmp/sr-fracture-inertia.log",
+      "/tmp/sr-fracture-workspace-clippy-final.log",
+      "/tmp/sr-fracture-msrv-final2.log",
+      "/tmp/sr-fracture-fmt.log",
+      "/tmp/sr-fracture-diff.log"
+    ],
+    "source_sha256": {
+      "crates/sr-sim/src/physics3d.rs": "05225346179739e310b9ddd1d7e1ae7806e6d8bc62894b7a6436aac8bbc5a1b1",
+      "crates/sr-sim/src/physics3d/fracture.rs": "1a56fd82397d6ef93ee16cb65d0f5ffb1de205a7c0e8e910aae54e0420842628",
+      "crates/sr-sim/tests/fracture.rs": "97962318ec6a14febe2b97f0d742939ad5e972fb44fc4dbe3e02d1c320d2bd1d",
+      "srep-0000-cinematic-impact.md": "c2f8799fb474d22873d40bc34d9fb34de6d5db1e91b400cde97cc7ffdc4d7378"
+    },
+    "limits": [
+      "CPU registration expects a supplied geometric partition; kernel validation is separate.",
+      "Fracture is quantized to simulation boundaries and waits for an enabled source.",
+      "Chained/repeated body ownership is rejected.",
+      "XML/generated model/schema rules, evaluator integration, material/UV reconstruction and native UHD fracture rendering remain required work."
+    ]
+  },
+  "fracture_surface_schema_validation": {
+    "checked_at": "2026-10-03T15:11:47.367030+00:00",
+    "status": "surface_reconstruction_and_schema_passed_scene_execution_incomplete",
+    "scope": "Per-source render surface reconstruction with exterior attribute/material provenance and canonical interior UVs, plus owned version-1.3 fracture schema/generated model and independent conformance fixtures.",
+    "tdd": {
+      "surface_api_red": "/tmp/sr-fracture-surface-red.log",
+      "schema_red": "/tmp/sr-fracture-schema-red2.log",
+      "corpus_tool_red": "/tmp/sr-fracture-corpus-tool-red.log",
+      "surface_green": "/tmp/sr-fracture-surfaces-final.log",
+      "schema_green": "/tmp/sr-fracture-model-final3.log",
+      "corpus_tool_green": "/tmp/sr-fracture-corpus-tool-final.log"
+    },
+    "test_counts": {
+      "kernel_and_surface": 13,
+      "model_and_corpus_tests": 7,
+      "documents_in_full_corpus": 240,
+      "independent_fracture_oracle_fixtures": 5,
+      "python_corpus_tests": 3
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_geometry_model_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed"
+    },
+    "covered": [
+      "Affine exterior UV/color fields independently recovered after cutting and recentering",
+      "Separate material batches, alternate UV sets, map UVs and orthonormal shading frames",
+      "Opposite caps share texture coordinates with outward normals and opposite tangent handedness",
+      "Malformed provenance/attributes, nonfinite output and conservative allocation rejection",
+      "Typed defaults and full u64 seed, version gating, ownership, material references, bounds and nonfinite input",
+      "Independent XSD/Schematron agreement, full Rust schema corpus, and mixed schema-error/renderer-warning generator handling"
+    ],
+    "logs": [
+      "/tmp/sr-fracture-surfaces-final.log",
+      "/tmp/sr-fracture-model-final3.log",
+      "/tmp/sr-fracture-schema-oracle.json",
+      "/tmp/sr-fracture-corpus-tool-final.log",
+      "/tmp/sr-fracture-schema-workspace-clippy.log",
+      "/tmp/sr-fracture-schema-msrv.log",
+      "/tmp/sr-fracture-schema-fmt.log",
+      "/tmp/sr-fracture-schema-diff.log"
+    ],
+    "source_sha256": {
+      "crates/sr-3d/src/fracture.rs": "ee60974c40e7bbcda334a1715d50283413bd1f72845d817bb265a23a48865426",
+      "crates/sr-3d/src/fracture/surface.rs": "e77dca3e26150edeb72b9ab2a9ed09153526c53e2a891db67bf028bb8645197d",
+      "crates/sr-3d/tests/fracture_surface.rs": "8fadb991a4a5fefc8d38cc6d82fd0f4c6cd2aeba293b9907c89c21b4cab0c602",
+      "crates/sr-model/src/rules.rs": "2409e9c95723c8eedff057d98a18d4f3d39dc05a56b06246e243d3732648ac69",
+      "crates/sr-model/tests/fracture.rs": "cc64cb83ca4dc3398a986258aaaaea316d800e2736483f56e7e229ae75fc1235",
+      "schema/scene-render-1.1.xsd": "a3eb25d112f88bf614865db6fd5ed70f3825f824e8624b762935502e822f21a4",
+      "schema/scene-render-1.1.sch": "a0962d008c45061db276ad480b1cd558fb18c184fec68136fee732875802fce6",
+      "tools/build_corpus.py": "b58488c9448b088b066ffd10cd7b0aa4d3dd38e53a56a8a672de9d6f84c36ce7",
+      "tools/tests/test_build_corpus.py": "e6b2b44a1b86ed274d1a6a66c4cedf7bd64fcb394b322e79e421b12b51ae0935",
+      "tests/corpus/manifest.json": "20cc1091e3341e2a915e7cf9670c74e963693bc8005bdad464f94c8bc33e1eb6",
+      "tests/corpus/valid/fracture.scene.xml": "822132a5a13dd0a8be4c3e0049b1ac7d14fedbe11c145427963ad46c0813783a",
+      "tests/corpus/invalid/frx1.scene.xml": "cb60b177c765a11c5295cb72bd8c6738b2ec552f9f3770c9f02a2308f594fcb6",
+      "tests/corpus/invalid/frx2.scene.xml": "34670a0e3e889e6ac24268da2bcdbad37d68befb76f786a9b0c191d3cc0da175",
+      "tests/corpus/invalid/frx3.scene.xml": "ab1b1f55d370158f7e6f5436aacd870fbaa627704a664f08a2955966f67bb1f6",
+      "tests/corpus/invalid/frx4.scene.xml": "63892e5cf022a356a006ceb6d1b412a2e2c7938fbd03bf1d4a9af52bfb7e5610",
+      "srep-0000-cinematic-impact.md": "7edb88908d29fb6ea1b5df6e9c47d882ef4b29cbe94270161fc62edb7077320a"
+    },
+    "limits": [
+      "The surface API requires source animation and transforms frozen into the kernel frame by the caller.",
+      "Schema acceptance and CPU surface tests do not establish scene execution: evaluator source sampling/ownership, GPU draws and physics-cache playback remain unconnected.",
+      "No native rendered fracture appearance, full UHD impact film, throughput or release completion is claimed."
+    ]
+  },
+  "fracture_scene_validation": {
+    "checked_at": "2026-10-03T15:58:26.312319+00:00",
+    "status": "native_scene_render_cache_milestone_passed_full_goal_incomplete",
+    "scope": "XML-to-evaluator-to-rigid-world fracture, exterior/interior GPU batches and versioned physics-cache playback; frozen animated/imported/crater/globe geometry.",
+    "tdd": {
+      "scene_api_red": "/tmp/sr-fracture-scene-red.log",
+      "radial_release_red": "/tmp/sr-fracture-radial-red.log",
+      "cache_red": "/tmp/sr-fracture-cache-red.log",
+      "gpu_red": "/tmp/sr-fracture-gpu-red.log",
+      "curved_source_red": "/tmp/sr-fracture-source-tests.log",
+      "cone_normal_red": "/tmp/sr-fracture-cone-red.log",
+      "static_morph_red": "/tmp/sr-fracture-import-red2.log",
+      "sequence_schema_red": "/tmp/sr-fracture-sequence-schema-red.log",
+      "crater_red": "/tmp/sr-fracture-crater-red.log",
+      "globe_relief_red": "/tmp/sr-fracture-globe-red2.log",
+      "map_drape_red": "/tmp/sr-fracture-drape-red.log"
+    },
+    "test_counts": {
+      "geometry_and_simulation_crates": 201,
+      "affected_model_evaluator_integration": 65,
+      "final_fracture_gpu_tests": 3,
+      "earlier_adjacent_gpu_tests_including_overlapping_fracture_tests": 5,
+      "independent_schema_oracle_cases": 3
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_affected_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed"
+    },
+    "covered": [
+      "Delayed and boundary-quantized replacement, directed/radial impulses, local-window source sampling and backward replay",
+      "Live/baked state equivalence with enabled and fired flags in SRPHYS03; existing formats remain readable",
+      "Raster/path-traced interior material, imported maps, globe drapes and isolated-group invalidation",
+      "Frozen glTF node animation/authored morph weights, primitive reflection, crater deformation and globe relief",
+      "Static/kinematic mesh sequence fracture schema and release geometry; pre-release collider sampling",
+      "Curved-mesh adjacent-triangle numerical validation and corrected tapered-cylinder outward normals"
+    ],
+    "limits": [
+      "No completed native UHD impact film, production throughput, whole-process memory or final release build is claimed.",
+      "Text/clay solid source extraction and broader animated-source/parent-transform collider parity remain.",
+      "Particle and pyro consumers still use source-object collider geometry; fractured piece expansion remains required.",
+      "Mesh-sequence source bodies are static/kinematic; dynamic deforming bodies and direct pyro/particle sequence references remain rejected.",
+      "Source-window search is capped at one million boundaries; primitive trigonometric seam canonicalization is 1e-6 of extent.",
+      "Admission estimates exclude complete importer/solver/GPU peak allocations.",
+      "The geometry/simulation suite predates the final evaluator-only source additions; final model/evaluator and GPU suites cover those additions."
+    ],
+    "logs": [
+      "/tmp/sr-fracture-integrated-core.log",
+      "/tmp/sr-fracture-integration-final-tests.log",
+      "/tmp/sr-fracture-gpu-final.log",
+      "/tmp/sr-fracture-integrated-gpu.log",
+      "/tmp/sr-fracture-final-clippy.log",
+      "/tmp/sr-fracture-integration-msrv.log",
+      "/tmp/sr-fracture-integration-fmt-final.log",
+      "/tmp/sr-fracture-integration-diff-final.log",
+      "/tmp/sr-fracture-sequence-oracle.json"
+    ],
+    "source_sha256": {
+      "crates/sr-3d/src/prim.rs": "08d4b629feebb30cef8256b63832c33c1e342d351929e66b5df1ebabf04d8ad5",
+      "crates/sr-3d/src/fracture/validate.rs": "80b5f13e7a4ce0df2df988d4872da48e137e9d888bd313365fefd6a4a3daf952",
+      "crates/sr-sim/src/physics3d/fracture.rs": "86d55ad6a88601b1d8a6ac545dfd1e611c125c912253978bd8518475bb835caa",
+      "crates/sr-sim/tests/fracture.rs": "fe5d2a1014e562c4942f45eb5b057e48a007b6c2cc06ee6785c5d0d7babc0b67",
+      "crates/sr-eval/src/fracture.rs": "18020fd65a8a0540610669a6b316bf8bef0c8c045be918b11753c25c15b4b754",
+      "crates/sr-eval/src/fracture/source.rs": "a707998781f5af258454e01efabfc0d08955bc939d5faad43505f9fd1430d07c",
+      "crates/sr-eval/src/sim3d.rs": "b10446d19d6d2e0a5c5b4206f7fbe77d661a0f7368e7bc25325516c6aa21b12d",
+      "crates/sr-eval/src/sim.rs": "9b0c3fe53125401cb0ccee5af85bd65bad4ba4cb16103b42a29a57be7d2a1a9f",
+      "crates/sr-eval/src/eval.rs": "b2cc5b65e03fb17eab0d4f0e52578b714620b428b03356c26ddb8e90a2df43cf",
+      "crates/sr-eval/src/lib.rs": "4c6bd5edb77bd31171f9c4f22907fe10c5e38812f9fc335d2585f742c8fa317c",
+      "crates/sr-eval/src/terrain.rs": "ec127d4c3c3e6e0f6b39f47c62dfbb4827b1308cf3a17350aa546b219443c729",
+      "crates/sr-eval/src/particles3d.rs": "ee2f69ea6051b84851ff986c611392e1d4539c1ab3c015c0d9c46c19d4be3992",
+      "crates/sr-eval/src/pyro.rs": "9aba11e2fb46780ec98421f4a6bc3b6c036377f970c01f36e59b1024f70757ee",
+      "crates/sr-eval/tests/fracture.rs": "464c7917504811cadef4ed201c91fef2f712a51f605f377ec628830f8439c1c9",
+      "crates/sr-gpu/src/render_three.rs": "e3ff98c2e4054f05a324b3dc461a13a7d45e3140b571025c5ae31389dff4dcc4",
+      "crates/sr-gpu/src/render.rs": "cbea41301da7ea2e9608b0c906b161e40dd47f60cf9bb7c127cf171f3b2b9035",
+      "crates/sr-gpu/tests/fracture.rs": "760c29cff61a41ccf81bbdcb23f15619a7b69c1404a5dca1e0ed2f7983839a45",
+      "crates/sr-model/src/rules.rs": "738b2dd7494e54ad2c0e90f92907a22ad548e15dccd80ad2597113b511295a8c",
+      "crates/sr-model/tests/fracture.rs": "f4678383ef9d3d5de616b0c350409388752dea8c9a8e6069eab332cd09cc6dad",
+      "schema/scene-render-1.1.sch": "c6b07502954f578fe678bb19dde5549d34a1fabb473dae808d310b5bda70bdb1",
+      "srep-0000-cinematic-impact.md": "07fbc55bda57650e3f3c666c533d6100b8f54e1f53ede58de010aa903dda837c"
+    }
+  },
+  "fracture_collider_validation": {
+    "checked_at": "2026-10-03T16:14:40.990124+00:00",
+    "status": "particle_and_pyro_integration_passed_full_goal_incomplete",
+    "tdd_red": "/tmp/sr-fracture-colliders-red.log",
+    "covered": [
+      "Retired source removal and displaced-piece particle contact",
+      "Smoke piece occupancy and moving boundary velocity",
+      "Backward replay and live/SRPHYS03 baked equivalence for both consumers",
+      "Rotated/reflected smoke domain coordinates",
+      "Shared fragment geometry budgets and replay after failed future requests"
+    ],
+    "test_counts": {
+      "new_fracture_collider_tests": 5,
+      "affected_evaluator_tests": 65,
+      "affected_test_binaries": 9
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_evaluator_tests_check": "passed",
+      "formatting": "passed"
+    },
+    "logs": [
+      "/tmp/sr-fracture-colliders-final-tests.log",
+      "/tmp/sr-fracture-colliders-clippy.log",
+      "/tmp/sr-fracture-colliders-fmt.log",
+      "/tmp/sr-fracture-colliders-msrv.log"
+    ],
+    "limits": [
+      "Release participation is sampled at each consumer fixed-step boundary; consumer steps do not split at an interior fracture event.",
+      "Broader pre-fracture animated/imported/parent-transform collider parity remains pending.",
+      "Direct mesh-sequence consumer references remain rejected by MSQ4.",
+      "No production UHD sequence, peak RSS, throughput, new GPU validation or final release build is claimed in this milestone."
+    ],
+    "source_sha256": {
+      "crates/sr-eval/src/particles3d/colliders.rs": "bbba3722775a79a87ae8cf7a65b1bed3a762b36f2b02a72b9f10025495862d18",
+      "crates/sr-eval/src/particles3d.rs": "f2fdc9d19156e3b9fc5fb85432e98c93020568572af4042a8ecbd1f952bd25cd",
+      "crates/sr-eval/src/pyro/colliders.rs": "7a921c57aa1e75600575835c5478004bd78f953d354d4b9cdf1ded389956bfb5",
+      "crates/sr-eval/src/pyro.rs": "f41c17276e486065df1310f8fd8966dca58462c0f2d544bf46742bd580c5be66",
+      "crates/sr-eval/tests/fracture_colliders.rs": "83d2a1d2aa6a444bfddc14e23db3dc108d07e1d9fb23bec2c77ff2f3929538f5",
+      "srep-0000-cinematic-impact.md": "c3c830bb67f9f7c5a1a194681c8198179c5c5b949d6b8756bc90f5814eeb901c"
+    }
+  },
+  "fracture_solid_sources_validation": {
+    "checked_at": "2026-10-03T16:33:46.990176+00:00",
+    "status": "text_clay_sources_passed_full_goal_incomplete",
+    "covered": [
+      "Shared animated clay blob/finish configuration with full-u64 seeds",
+      "Closed glyph extrusion including counters, document fonts and small component budgets",
+      "Bounded clay grid/output admission and first-grid-plane topology repair",
+      "Release-time frozen clay geometry and renderer silhouette/counter preservation in both raster and path trace",
+      "Backward renderer replay and byte-reproducible authored font fixture"
+    ],
+    "tdd_red": [
+      "/tmp/sr-fracture-solid-red.log (clay assertion; text fixture initially invalid)",
+      "/tmp/sr-fracture-text-red.log",
+      "/tmp/sr-clay-budget-red.log",
+      "/tmp/sr-fracture-solid-budget-red.log",
+      "/tmp/sr-clay-topology-red.log",
+      "/tmp/sr-fracture-solids-gpu.log"
+    ],
+    "test_counts": {
+      "geometry_text_test_executions_including_one_nested_harness_test": 102,
+      "evaluator_tests": 71,
+      "required_gpu_tests": 13
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_affected_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed",
+      "font_fixture_regeneration": "byte-identical"
+    },
+    "logs": [
+      "/tmp/sr-fracture-solids-core-final.log",
+      "/tmp/sr-fracture-solids-eval-final.log",
+      "/tmp/sr-fracture-solids-gpu-final.log",
+      "/tmp/sr-fracture-solids-clippy.log",
+      "/tmp/sr-fracture-solids-msrv.log",
+      "/tmp/sr-fracture-solids-fmt.log",
+      "/tmp/sr-fracture-solids-diff.log"
+    ],
+    "limits": [
+      "Ordinary text/clay particle and pyro collider references remain outside the current validator/consumer source paths; broader pre-release geometry parity remains required.",
+      "System-font discovery/decoder and temporary outline-flattening allocations are not covered by a measured total-process bound.",
+      "No production UHD film, throughput/RSS acceptance, or release build is claimed."
+    ],
+    "source_sha256": {
+      "crates/sr-3d/src/clay.rs": "727b3a0674e3c291eaa517c6381526e60466857e3c6a33e98ada1b0178e7f8f0",
+      "crates/sr-eval/src/solid.rs": "55be2771442f66ed19f357d46a94fc2939e6f504817181648891746bfe9fc0fb",
+      "crates/sr-eval/src/fracture/source.rs": "420ae44d7601b357aed311abf9611700c63254caf00c2e8431a2a83cc679b037",
+      "crates/sr-eval/src/sim3d.rs": "9f319e6427741a91d11959f11e2aeda73475f3b8dbd14f37dd068069a4e7ea17",
+      "crates/sr-eval/tests/fracture.rs": "fbb557fda97e1a18b29fa1a0962a932a8cd47dd1ae88586e4ef26a089e764b7e",
+      "crates/sr-text/src/extrusion.rs": "8889e7a7d20c1c18a1025abd25d6d0370c18c7585e6669485f101ef584bcefd9",
+      "crates/sr-gpu/src/render_three.rs": "3801359ce1e3aee133710c11230bcfafc804682638bcc1551368fb4840a4a77c",
+      "crates/sr-gpu/src/text.rs": "4239855271da8bb44dcb3eb15fd85f7d3bfedb5c0925f10f566c65f99747a468",
+      "crates/sr-gpu/tests/fracture.rs": "46ab47a175cf3f4f7347b3092505f5375ee64085807fbe93867e0e8a9ed60cce",
+      "crates/sr-eval/tests/fixtures/solid.ttf": "bb31817072a7fd50cf78dd26e289094e2d7938bf1cd9ba99e4bffc40ed17048b",
+      "tools/fixtures/make_solid_font.py": "56de9cb54d1824e79411742d13718b96be01b0f8fc6faa1b4c3dd29a0c16fe0d",
+      "srep-0000-cinematic-impact.md": "b1d4c2c533e9f3b84278656190393d4b93740146451e3d36304363dfbfb96ab7"
+    }
+  },
+  "procedural_collider_validation": {
+    "checked_at": "2026-10-03T16:51:50.123068+00:00",
+    "status": "static_procedural_collider_integration_passed_full_goal_incomplete",
+    "covered": [
+      "Particle and smoke use text/path/clay surfaces preserving counters and carved holes",
+      "Geometry construction independent of conditions/visibility/windows; runtime participation remains sampled",
+      "Static/kinematic automatic rigid surfaces preserve holes before fracture; dynamic bodies use decomposition",
+      "Conditional rigid discovery retains bodies hidden at startup",
+      "Particle/smoke retired-source removal and moving-fragment replacement for all three procedural kinds with backward replay",
+      "Rust/Schematron P3D5/PYRO7 support and P3D6/PYRO8 changing-geometry guards, including lexical leading plus/whitespace"
+    ],
+    "tdd_red": [
+      "/tmp/sr-solid-colliders-red.log",
+      "/tmp/sr-solid-rigid-red2.log"
+    ],
+    "test_counts": {
+      "full_model_evaluator_tests_including_doctests": 249,
+      "required_gpu_fracture_tests": 4,
+      "corpus_generator_tests": 3,
+      "corpus_documents": 243,
+      "new_evaluator_integration_tests": 4,
+      "new_independent_oracle_fixtures": 3
+    },
+    "checks": {
+      "workspace_all_targets_clippy": "passed -D warnings",
+      "rust_1_90_affected_tests_check": "passed",
+      "formatting": "passed",
+      "diff_check": "passed"
+    },
+    "logs": [
+      "/tmp/sr-solid-colliders-model-eval-full.log",
+      "/tmp/sr-solid-colliders-gpu.log",
+      "/tmp/sr-solid-colliders-clippy-final.log",
+      "/tmp/sr-solid-colliders-msrv.log",
+      "/tmp/sr-solid-colliders-fmt.log",
+      "/tmp/sr-solid-colliders-diff.log",
+      "/tmp/sr-solid-colliders-oracle.json",
+      "/tmp/sr-solid-colliders-corpus-generator.log"
+    ],
+    "limits": [
+      "General animated source geometry still requires collider parity work; current non-crater particle/pyro proxy geometry is static by schema contract.",
+      "Dynamic rigid procedural sources use approximate convex decomposition; static/kinematic sources use triangles.",
+      "Importer/font total-allocation hardening, retained rigid-world RSS, volume advection, particle batching and full native UHD production evidence remain outstanding.",
+      "No commit, push or release build was performed in this milestone."
+    ],
+    "source_sha256": {
+      "crates/sr-eval/src/solid.rs": "95558c34b76af360641ed5da6709708062d56b3c12e36cf0ef6cc985d2fd60e1",
+      "crates/sr-eval/src/particles3d/colliders.rs": "994bb53d8cd9541246c166741651b6d488560ac6f2d7691aafd2f2720b43fd6e",
+      "crates/sr-eval/src/pyro/colliders.rs": "4c25bdd1633d19883de57f89f3ac96c6c35741b01897ccf18d90547f3317d6c1",
+      "crates/sr-eval/src/sim3d.rs": "c352a7c2907dc32a90e21410b65ada63f56875fbfeaea4f3005b2ca334655218",
+      "crates/sr-eval/src/eval.rs": "1e9263376079ebf56afaf9ef80f125347e7207e578a8271220026615db7eea1a",
+      "crates/sr-eval/tests/solid_colliders.rs": "f0bccf56de8bdfabb9e4cdef4da92267eeb19e39a6c4772e064291cd86d926ef",
+      "crates/sr-model/src/rules.rs": "961b536d48aa9bb4d1784c4e77cf4cf6afaae3299ccee0b2a32bb8156d81e7c2",
+      "crates/sr-model/tests/pyro_rules.rs": "2b57052ad0070a0527896de4b46c6c523840a93d37cbd4179f67752f9cc3ff90",
+      "schema/scene-render-1.1.sch": "5706d61f6526025b9aed0bfd3e05b8fe5ed342a87724ecb4203adead03d575bc",
+      "tools/build_corpus.py": "85e8b4fcdf89967bd55dfd9184473d634590b85308367fb1f2929e6df19a7441",
+      "tests/corpus/valid/solid-colliders.scene.xml": "ba4db137f88d28890bec681998fafb01c9f392ae0dc5722f107a754e8777f7bb",
+      "tests/corpus/invalid/solid-colliders-boil.scene.xml": "2171fa4b649a3948e7a7f662d8856597865baf4d9b1a98a30b50212d4e6d0f7a",
+      "tests/corpus/invalid/solid-colliders-blob.scene.xml": "099494158cbe71ee313f9be61b2c30cc28ef9212ff8483733ae4dc5ad80a95bc",
+      "srep-0000-cinematic-impact.md": "5a8f1ca9f1b9ff29ed06c769489053d762ac7a57c0e89ab76a9b5cdeed7eae12"
+    }
+  },
+  "volume_advection_validation": {
+    "updated_at": "2026-10-03T21:27:02.208650+00:00",
+    "status": "in_progress",
+    "verified": {
+      "cpu_model_tests": 125,
+      "independent_schema_corpus_cases": 245,
+      "corpus_generator_tests": 3,
+      "clippy": "sr-volume/sr-model/sr-gpu tests passed with -D warnings",
+      "gpu_scene": "Strict software Vulkan advected-cache scene test passed: pathtrace/raster, reference-frame comparison, replay, object retiming, held frames, selected-channel errors, composition-clock bakes."
+    },
+    "changes": [
+      "Explicit interpolation=advect and velocityGridX/Y/Z; VOL9 with independent XSD/Schematron/Rust rules; mesh interpolation enum stays hold/linear.",
+      "Frozen endpoint midpoint velocity tracing on density/kelvin with inferred bounds expansion and authored clipping.",
+      "Timestamp-aware numbered/baked loading preserving missing-frame source labels and local/composition clocks.",
+      "Packed velocity fields, GPU precision/storage admission, runtime shader loops to limit sparse-lookup inlining.",
+      "SREP contract reconciliation, checked primary research framing, runnable two-frame SRVOL corpus example."
+    ],
+    "evidence": [
+      "/tmp/sr-advection-schema-red.log",
+      "/tmp/sr-advection-schema-green.log",
+      "/tmp/sr-advection-cpu-model.log",
+      "/tmp/sr-advection-volume-cpu-final.log",
+      "/tmp/sr-advection-clippy.log",
+      "/tmp/sr-advection-oracle.log",
+      "/tmp/sr-advection-corpus-tests.log",
+      "/tmp/sr-advection-scene-compact-shader.log",
+      "/tmp/srep-advection-patch-report.json"
+    ],
+    "unresolved": [
+      "Initial GPU transport comparison failed: GPU stepSize .125 versus CPU .5 on sparse thermal edges; reference corrected to use matching per-domain quadrature, rerun pending.",
+      "Identical-content baked frames share an Arc despite distinct timestamps. New regression is running; current same-Arc optimization is suspected to skip required advection.",
+      "Full volume GPU regression, MSRV and full workspace acceptance still required."
+    ],
+    "live_sessions": [
+      {
+        "id": 74844,
+        "log": "/tmp/sr-advection-scene-red.log",
+        "purpose": "Scene test before renderer integration, old shader"
+      },
+      {
+        "id": 67207,
+        "log": "/tmp/sr-advection-scene-green.log",
+        "purpose": "Scene integration with old shader"
+      },
+      {
+        "id": 87897,
+        "log": "/tmp/sr-advection-transport-matched.log",
+        "purpose": "Matched CPU/GPU quadrature with compact shader"
+      },
+      {
+        "id": 68514,
+        "log": "/tmp/sr-advection-volume-final.log",
+        "purpose": "Full volume GPU suite before identical-digest regression"
+      },
+      {
+        "id": 12289,
+        "log": "/tmp/sr-advection-dedup-red.log",
+        "purpose": "TDD identical-content bake timestamp regression"
+      }
+    ],
+    "continuation": "Poll recorded tool handles before restarting tests; all were confirmed running when launched. Logs alone are not liveness evidence. On dedup regression failure, allow frame pairing when advection endpoint elapsed is nonzero even if Arc::ptr_eq; keep held same-label frames frozen. Re-run affected GPU tests and update this ledger. Earlier /tmp evidence paths inherited from prior environment are historical and may be absent."
+  }
+}
