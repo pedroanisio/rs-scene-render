@@ -466,7 +466,6 @@ fn in_the_sea_the_wave_of_the_crater_alone_grows_with_speed_mass_and_angle() {
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the wave is the rock's own bow wave and does not grow with speed"]
 fn in_the_sea_the_wave_grows_with_the_speed() {
     let (speeds, _, _) = sweeps();
     let waves: Vec<f64> = speeds.iter().map(|&h| highest_wave(&sea_variant(h))).collect();
@@ -475,7 +474,7 @@ fn in_the_sea_the_wave_grows_with_the_speed() {
 }
 
 #[test]
-#[ignore = "fails as the engine stands: a rock that arrives straight down makes a wave of a few centimetres"]
+#[ignore = "fails as the engine stands: the ocean sees the rock as a bump that moves, so one that arrives straight down makes a wave of 9 cm and a glancing one 2.4 m"]
 fn in_the_sea_the_wave_grows_with_the_angle() {
     let (_, _, angles) = sweeps();
     let waves: Vec<f64> = angles.iter().map(|&h| highest_wave(&sea_variant(h))).collect();

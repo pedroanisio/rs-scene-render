@@ -242,6 +242,13 @@ impl Sims {
                             sim::Error::Invalid("ocean exchange diverged")
                         })?;
                     }
+                    if let (Some(group), Some(channel), Some((step, _))) = (&group, channel, forcing.exchange) {
+                        let around: Vec<crate::group::Around> = forcing.bodies.iter().map(Into::into).collect();
+                        group.record_around(channel, step, &around).map_err(|message| {
+                            *failure.borrow_mut() = Some(message);
+                            sim::Error::Invalid("ocean exchange diverged")
+                        })?;
+                    }
                     #[cfg(test)]
                     if let Some((step, _)) = forcing.exchange {
                         tests::OFFERS.with(|o| o.borrow_mut().push((step, forcing.bodies.clone())));

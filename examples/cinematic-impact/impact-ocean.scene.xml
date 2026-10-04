@@ -2,8 +2,8 @@
 <!-- Impact in the ocean, in metres and seconds (physics/@pixelsPerMeter is 1: a scene unit is a metre).
      The rock of impact-land.scene.xml (2 m radius, 90 478 kg) arrives at the water at 100 m/s, 60
      degrees above it, falls through 20 m of water that carries it as a floating body would be carried
-     (bodyCoupling="buoyancy": buoyancy and a vertical form drag, no horizontal drag) and hits the seabed,
-     where it makes a crater. The wave is made by the rock moving through the water and by the bed that
+     (bodyCoupling="full": buoyancy, a vertical form drag, and the horizontal momentum it gives the water
+     back) and hits the seabed, where it makes a crater. The wave is made by the rock moving through the water and by the bed that
      the crater lowers, as the second-order ocean sees them: there is no waterImpulse. There is no smoke
      here: the crater is under water and the engine has no smoke inside water, so a smoke source from this
      crater would make a cloud at the bottom of the sea. The numbers are the engine's, not a prediction. -->
@@ -28,7 +28,7 @@
     </object3D>
     <object3D id="farSea" primitive="plane" width="40000" height="40000" y="0.4" rotationX="-90" material="water"/>
     <!-- 192 x 192 m at 1.5 m cells over 20 m of water; the waves cross 60 m in the 6 s and stay inside -->
-    <ocean id="sea" width="192" depth="192" cellSize="1.5" bottomDepth="20" order="2" material="water" dt="0.0416666666666667" boundary="closed" colliders="seabed impactor" bodyCoupling="buoyancy" maxWork="2000000000"/>
+    <ocean id="sea" width="192" depth="192" cellSize="1.5" bottomDepth="20" order="2" material="water" dt="0.0416666666666667" boundary="closed" colliders="seabed impactor" bodyCoupling="full" maxWork="2000000000"/>
   </composition>
   <lights>
     <light id="sky" type="dome" environment="sky.hdr" environmentVisible="true" intensity="1"/>

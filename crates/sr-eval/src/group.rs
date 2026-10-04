@@ -48,6 +48,61 @@ impl Record for Exchange {
     }
 }
 
+/// What the water offered about one body in a canonical step: where the body stands in it, the
+/// plane of the free surface under it, and the horizontal momentum per unit density that the
+/// body gave the water in the step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Around {
+    /// The body's tag in the ocean: its place in the `colliders` list.
+    pub(crate) owner: u32,
+    /// Columns of its footprint that hold water.
+    pub(crate) wet: u32,
+    /// Centre of those columns (x, z) in the ocean's own axes, and the surface there and its slopes
+    /// (`y` down).
+    pub(crate) centroid: [f64; 2],
+    pub(crate) surface: [f64; 3],
+    pub(crate) impulse: [f64; 2],
+}
+
+impl From<&sr_sim::ocean::BodySample> for Around {
+    fn from(s: &sr_sim::ocean::BodySample) -> Around {
+        Around { owner: s.owner, wet: s.wet as u32, centroid: s.centroid, surface: s.surface, impulse: s.impulse }
+    }
+}
+
+impl Record for Around {
+    fn same(&self, other: &Self) -> bool {
+        let bits = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        self.owner == other.owner
+            && self.wet == other.wet
+            && bits(&self.centroid, &other.centroid)
+            && bits(&self.surface, &other.surface)
+            && bits(&self.impulse, &other.impulse)
+    }
+}
+
+/// The plane of the water's free surface under a body, in the ocean's own axes: `level` at
+/// `centroid`, falling away with `slope`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Plane {
+    pub(crate) centroid: [f64; 2],
+    pub(crate) level: f64,
+    pub(crate) slope: [f64; 2],
+}
+
+/// An ocean as the world sees it at an instant.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WaterFrame {
+    /// The water's surface in the world's axes: the `Plane` asked for, or the rest level.
+    pub(crate) surface: Surface,
+    /// Where the ocean's own x and z axes point in the world.
+    pub(crate) axes: [[f64; 3]; 2],
+}
+
+/// What gives an ocean's place in the world at an instant, with the plane of the water under a body if
+/// there is one.
+pub(crate) type WaterAt<'a> = dyn FnMut(&GroupOcean, Option<&Plane>) -> Result<WaterFrame, String> + 'a;
+
 /// What a coupling is asked for the load on one body.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)] // read by the couplings that load bodies
@@ -108,6 +163,11 @@ pub(crate) struct Buoyant {
     water: Water,
     /// The rigid world's step, seconds.
     step: f64,
+    /// Whether the body also gets back the horizontal momentum it gave the water.
+    horizontal: bool,
+    /// Whether the waterline is the plane of the surface under the body, as the ocean offers it, and
+    /// not the rest level.
+    read_surface: bool,
 }
 
 enum Hull {
@@ -130,7 +190,20 @@ impl Buoyant {
             };
             hulls.push((k, hull, body.mass, body.id.clone()));
         }
-        Ok(Buoyant { hulls, water, step })
+        Ok(Buoyant { hulls, water, step, horizontal: false, read_surface: true })
+    }
+
+    /// These bodies also get the momentum they gave the water back, as a horizontal force.
+    pub(crate) fn with_horizontal(mut self, horizontal: bool) -> Buoyant {
+        self.horizontal = horizontal;
+        self
+    }
+
+    /// These bodies float at the water's rest level, whatever the waves do under them.
+    #[cfg(test)]
+    pub(crate) fn at_rest_level(mut self) -> Buoyant {
+        self.read_surface = false;
+        self
     }
 
     /// The load on body `index` of the 3D world at the start of a step, with the water at rest
@@ -168,6 +241,9 @@ pub(crate) struct GroupOcean {
     pub(crate) start: f64,
     /// Indices into the 3D world's bodies of the rigid bodies in its `colliders`.
     pub(crate) bodies: Vec<usize>,
+    /// The tag each of those bodies has in the ocean (its place in the `colliders` list), by index of
+    /// the body in the 3D world.
+    slots: Vec<(usize, u32)>,
     /// The rest level of the water in the ocean's own axes.
     pub(crate) water_level: f64,
     coupling: Coupling,
@@ -177,9 +253,13 @@ pub(crate) struct GroupOcean {
 #[derive(Clone)]
 pub(crate) struct Group {
     log: Arc<Mutex<ExchangeLog<Exchange>>>,
+    /// What the water offered about each body, per ocean and canonical step.
+    around: Arc<Mutex<ExchangeLog<Around>>>,
     oceans: Arc<[GroupOcean]>,
     /// Seconds past a frame's time that something reads the rigid world.
     reach: f64,
+    /// The rigid world's step, seconds.
+    step: f64,
 }
 
 impl std::fmt::Debug for Group {
@@ -200,11 +280,13 @@ impl Group {
         let mut oceans = Vec::new();
         for (index, n) in p.nodes.iter().enumerate() {
             let sr_model::model::Node::Ocean(e) = &*n.elem else { continue };
-            let listed: Vec<usize> = text(e, "colliders")
+            let slots: Vec<(usize, u32)> = text(e, "colliders")
                 .unwrap_or_default()
                 .split_whitespace()
-                .filter_map(|id| bodies.iter().position(|b| &*b.id == id))
+                .enumerate()
+                .filter_map(|(slot, id)| bodies.iter().position(|b| &*b.id == id).map(|body| (body, slot as u32)))
                 .collect();
+            let listed: Vec<usize> = slots.iter().map(|(body, _)| *body).collect();
             if listed.is_empty() {
                 continue;
             }
@@ -216,9 +298,9 @@ impl Group {
             };
             let coupling = match (&injected, text(e, "bodyCoupling").as_deref()) {
                 (Some(c), _) => c.clone(),
-                (None, Some("buoyancy")) => {
-                    Coupling::Buoyancy(Arc::new(Buoyant::new(bodies, &listed, water, rigid_step)?))
-                }
+                (None, Some(mode @ ("buoyancy" | "full"))) => Coupling::Buoyancy(Arc::new(
+                    Buoyant::new(bodies, &listed, water, rigid_step)?.with_horizontal(mode == "full"),
+                )),
                 _ => continue,
             };
             // the exchange is indexed by the ocean's own time: it must be the composition's
@@ -235,6 +317,7 @@ impl Group {
                 dt,
                 start: n.start,
                 bodies: listed,
+                slots,
                 water_level: num(e, "waterLevel", 0.0),
                 coupling,
             });
@@ -257,7 +340,13 @@ impl Group {
                 }
             }
         }
-        Ok(Some(Group { log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))), oceans: oceans.into(), reach }))
+        Ok(Some(Group {
+            log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
+            around: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
+            oceans: oceans.into(),
+            reach,
+            step: rigid_step,
+        }))
     }
 
     /// Seconds past a frame that other solvers may read the rigid bodies.
@@ -277,48 +366,111 @@ impl Group {
         log.put(ocean as u32, step, &[exchange])
     }
 
+    /// Record what the water offered about each body in canonical step `step` of ocean `ocean`.
+    pub(crate) fn record_around(&self, ocean: usize, step: u64, around: &[Around]) -> Result<Put, String> {
+        let mut log = self.around.lock().unwrap_or_else(|e| e.into_inner());
+        log.put(ocean as u32, step, around)
+    }
+
+    /// The canonical step of `ocean` whose outcome a rigid step that starts at composition time `t`
+    /// reads: the one before the last it has completed by then, or none while there is no such step.
+    fn step_read(&self, ocean: &GroupOcean, t: f64) -> Option<u64> {
+        let local = t - ocean.start;
+        if local < 0.0 {
+            return None;
+        }
+        // When the ocean's step is a whole number of rigid steps and a rigid step starts at `local`, count
+        // in whole rigid steps, so that every canonical step is read by exactly that many of them: a load
+        // that is the momentum of a step over its length must be applied for exactly that length, and
+        // rounding the boundary either way gives a window of one step more or less.
+        let (per, nth) = (ocean.dt / self.step, local / self.step);
+        let whole = |x: f64, tolerance: f64| x.round() >= 1.0 && (x - x.round()).abs() < tolerance;
+        let completed = if whole(per, 1e-9) && (nth - nth.round()).abs() < 1e-6 {
+            nth.round() as u64 / per.round() as u64
+        } else {
+            // canonical steps completed at `local`, the same rounding the ocean uses
+            let mut completed = (local / ocean.dt).floor() as u64;
+            while completed > 0 && completed as f64 * ocean.dt > local {
+                completed -= 1;
+            }
+            while (completed + 1) as f64 * ocean.dt <= local {
+                completed += 1;
+            }
+            completed
+        };
+        completed.checked_sub(1)
+    }
+
+    fn not_computed(body: usize, t: f64, step: u64, ocean: &GroupOcean, reached: Option<u64>) -> String {
+        format!(
+            "the water load on body {body} at t = {t} needs step {step} of ocean {}, which has not been \
+             computed (it has reached {})",
+            ocean.id,
+            reached.map_or("no step".to_string(), |k| format!("step {k}"))
+        )
+    }
+
     /// The load on `body` for a rigid step that starts at composition time `t`, in the state
-    /// `state`, from each ocean that carries it. An ocean that couples by its outcomes reads the
-    /// outcome of the canonical step before the last one it has completed by then (none while
-    /// there is no such step); one that couples by buoyancy reads the water's rest surface, which
-    /// `surface` gives.
+    /// `state`, from each ocean that carries it. An ocean reads the outcome of the canonical step
+    /// before the last one it has completed by then (none while there is no such step, when the
+    /// water is at rest). One that couples by buoyancy floats the body on the plane of the free
+    /// surface under it in that outcome, or on the rest level where it offered none, and one that
+    /// couples fully also gives the body back, as a force over the step, the horizontal momentum
+    /// the body gave the water in it. `water` gives the ocean's place in the world and the plane.
     pub(crate) fn load(
         &self,
         t: f64,
         body: usize,
         state: &BodyState,
-        surface: &mut dyn FnMut(&GroupOcean) -> Result<Surface, String>,
+        water: &mut WaterAt<'_>,
     ) -> Result<Option<Load3>, String> {
         let mut total: Option<Load3> = None;
         for (channel, ocean) in self.oceans.iter().enumerate() {
             if !ocean.bodies.contains(&body) {
                 continue;
             }
+            let step = self.step_read(ocean, t);
             let load = match &ocean.coupling {
-                Coupling::Buoyancy(buoyant) => buoyant.load(body, state, &surface(ocean)?)?,
+                Coupling::Buoyancy(buoyant) => {
+                    // what the water offered about this body in that step; a body it does not list
+                    // is in no water
+                    let around = match step {
+                        None => None,
+                        Some(step) => {
+                            let log = self.around.lock().unwrap_or_else(|e| e.into_inner());
+                            let Some(offered) = log.get(channel as u32, step) else {
+                                return Err(Self::not_computed(body, t, step, ocean, log.last_step(channel as u32)));
+                            };
+                            let slot = ocean.slots.iter().find(|(b, _)| *b == body).map(|(_, slot)| *slot);
+                            offered.iter().find(|a| Some(a.owner) == slot).copied()
+                        }
+                    };
+                    let plane = around.filter(|a| buoyant.read_surface && a.wet > 0).map(|a| Plane {
+                        centroid: a.centroid,
+                        level: a.surface[0],
+                        slope: [a.surface[1], a.surface[2]],
+                    });
+                    let frame = water(ocean, plane.as_ref())?;
+                    let mut load = buoyant.load(body, state, &frame.surface)?;
+                    if let (true, Some(around)) = (buoyant.horizontal, around) {
+                        // momentum per unit density in the ocean's units to newtons-in-scene-units: times the
+                        // density, over the scale to the fourth for the momentum and back up by the scale for
+                        // the force, over the step the momentum was given in
+                        let ppm = buoyant.water.pixels_per_meter;
+                        let scale = -buoyant.water.density / (ppm * ppm * ppm * ocean.dt);
+                        let sum = load.get_or_insert_with(Load3::default);
+                        for i in 0..3 {
+                            sum.force[i] +=
+                                scale * (around.impulse[0] * frame.axes[0][i] + around.impulse[1] * frame.axes[1][i]);
+                        }
+                    }
+                    load
+                }
                 Coupling::Reaction(reaction) => {
-                    let local = t - ocean.start;
-                    if local < 0.0 {
-                        continue;
-                    }
-                    // canonical steps completed at `local`, the same rounding the ocean uses
-                    let mut completed = (local / ocean.dt).floor() as u64;
-                    while completed > 0 && completed as f64 * ocean.dt > local {
-                        completed -= 1;
-                    }
-                    while (completed + 1) as f64 * ocean.dt <= local {
-                        completed += 1;
-                    }
-                    let Some(step) = completed.checked_sub(1) else { continue };
+                    let Some(step) = step else { continue };
                     let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
                     let Some([exchange]) = log.get(channel as u32, step) else {
-                        let reached = log.last_step(channel as u32);
-                        return Err(format!(
-                            "the water load on body {body} at t = {t} needs step {step} of ocean {}, which has not been \
-                             computed (it has reached {})",
-                            ocean.id,
-                            reached.map_or("no step".to_string(), |k| format!("step {k}"))
-                        ));
+                        return Err(Self::not_computed(body, t, step, ocean, log.last_step(channel as u32)));
                     };
                     let exchange = *exchange;
                     drop(log);
@@ -524,5 +676,65 @@ mod tests {
         let p = crate::program::build(&doc, &Default::default()).unwrap();
         assert!(Group::detect(&p, &[], 0.01, Some(nothing())).unwrap().is_none());
         assert!(Group::detect(&p, &[barge()], 0.01, None).unwrap().is_none(), "no coupling, no group");
+    }
+
+    /// A ball of radius 1 and 2094 kg dropped from 1.5 m above the rest level into a closed 16 m ocean 20 m
+    /// deep, carried by buoyancy as a coupling that reads the water the way `read` says.
+    fn dropped(read_surface: bool) -> Evaluator {
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="20" duration="4"/><composition>
+              <object3D id="float" primitive="sphere" radius="1" segments="24" y="-1.5">
+                <rigidBody shape="sphere" mass="2094" linearDamping="0" angularDamping="0"/>
+              </object3D>
+              <ocean id="sea" width="16" depth="16" cellSize="1" bottomDepth="20" dt="0.05" boundary="closed" colliders="float"/>
+            </composition>
+            <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#;
+        let hull = BodyHull::new("float".into(), 2094.0, &sr_sim::physics3d::Shape3::Sphere(1.0));
+        let water = Water { density: 1000.0, gravity: 9.81, drag: 1.0, pixels_per_meter: 1.0 };
+        let mut buoyant = Buoyant::new(&[hull], &[0], water, 1.0 / 120.0).unwrap();
+        if !read_surface {
+            buoyant = buoyant.at_rest_level();
+        }
+        evaluator(xml, Some(Coupling::Buoyancy(Arc::new(buoyant))), None)
+    }
+
+    /// The last of the seconds from the start, in quarters, at which the ball's centre is more than 3 cm
+    /// from where its weight holds it, and how far it is from there at 60 s.
+    fn settling(ev: &Evaluator) -> (f64, f64) {
+        let (mut low, mut high) = (-1.0, 1.0);
+        for _ in 0..200 {
+            let mid = 0.5 * (low + high);
+            let volume = submerged_sphere([0.0, mid, 0.0], 1.0, &Surface { offset: 0.0, slope: [0.0, 0.0] }).volume;
+            if volume > 2.094 {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        let want = 0.5 * (low + high);
+        let mut last = 0.0;
+        for k in 1..=240 {
+            let t = 0.25 * k as f64;
+            let frame = ev.evaluate(t);
+            assert!(frame.problems.is_empty() && frame.failures.is_empty(), "t = {t}: {:?}", frame.problems);
+            let y = frame.nodes.iter().find(|n| &*n.id == "float").and_then(|n| n.pose3).unwrap()[13];
+            if (y - want).abs() > 0.03 {
+                last = t;
+            }
+            if k == 240 {
+                return (last, y - want);
+            }
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn reading_the_surface_under_the_ball_settles_it_sooner_than_the_rest_level() {
+        let (with_plane, off_plane) = (settling(&dropped(true)), settling(&dropped(false)));
+        println!(
+            "WATER within 3 cm for good from {} s reading the surface under the ball (off by {:.4} m at 60 s), {} s at the rest level ({:.4} m)",
+            with_plane.0, with_plane.1, off_plane.0, off_plane.1
+        );
+        assert!(with_plane.1.abs() < 0.03 && off_plane.1.abs() < 0.03, "both settle at the draft the weight needs");
+        assert!(with_plane.0 < off_plane.0, "{} s against {} s", with_plane.0, off_plane.0);
     }
 }

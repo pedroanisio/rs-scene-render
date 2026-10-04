@@ -106,12 +106,16 @@ fn a_denser_ball_sinks_even_in_a_coupled_ocean() {
 }
 
 #[test]
-fn without_drag_it_bobs_and_does_not_grow() {
+fn without_drag_it_bobs_and_the_water_carries_the_motion_away() {
+    // the ball reads the surface under it, which its own motion raises and lowers: the water takes the
+    // energy of the bobbing with it, so with no drag of its own the ball settles
     let ev = Scene { ocean: r#"bodyCoupling="buoyancy" bodyDrag="0""#, ..Scene::default() }.evaluator();
     let want = draft(1.0, 2094.0);
     let swing: Vec<f64> = (0..80).map(|k| (height(&ev, 0.25 + 0.25 * k as f64) - want).abs()).collect();
-    assert!(swing.iter().cloned().fold(0.0, f64::max) < 1.6, "{swing:?}");
-    assert!(swing[40..].iter().cloned().fold(0.0, f64::max) > 0.15, "still bobbing at 10 s");
+    let most = |from: usize, to: usize| swing[from..to].iter().cloned().fold(0.0, f64::max);
+    assert!(most(0, 80) < 1.6, "it does not grow: {swing:?}");
+    assert!(most(0, 20) > 0.5, "it bobs at first: {swing:?}");
+    assert!(most(60, 80) < 0.1, "and settles by 15 s: {swing:?}");
 }
 
 #[test]

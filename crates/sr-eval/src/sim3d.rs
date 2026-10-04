@@ -931,7 +931,9 @@ impl Driver3 for Driver<'_, '_> {
             return Ok(None);
         }
         let graphs = &mut *self.graphs;
-        group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean| water_surface(&graphs.at(t), ocean))
+        group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean, plane: Option<&crate::group::Plane>| {
+            water_frame(&graphs.at(t), ocean, plane)
+        })
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {
@@ -978,14 +980,21 @@ fn deformed_surface(
     }))
 }
 
-/// The ocean's rest surface in the world's axes at one instant, as `y = offset + slope x + slope z`.
-fn water_surface(
+/// The ocean's water in the world at one instant: its surface as `y = offset + slope x + slope z`,
+/// the rest level or `plane` (in the ocean's own axes) when one is given, and where the ocean's
+/// own x and z axes point.
+fn water_frame(
     graph: &FrameGraph,
     ocean: &crate::group::GroupOcean,
-) -> Result<sr_sim::hydrostatics::Surface, String> {
+    plane: Option<&crate::group::Plane>,
+) -> Result<crate::group::WaterFrame, String> {
     let i = index_of(graph, &ocean.id).ok_or_else(|| format!("{}: the ocean is not in the frame", ocean.id))?;
     let m = world3(graph, i, 0);
-    let at = |x: f64, z: f64| m.transform_point3(DVec3::new(x, ocean.water_level, z));
+    let level = |x: f64, z: f64| match plane {
+        None => ocean.water_level,
+        Some(p) => p.level + p.slope[0] * (x - p.centroid[0]) + p.slope[1] * (z - p.centroid[1]),
+    };
+    let at = |x: f64, z: f64| m.transform_point3(DVec3::new(x, level(x, z), z));
     let (p0, px, pz) = (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0));
     let (u, v) = (px - p0, pz - p0);
     // y = a + b x + c z through the three points
@@ -995,7 +1004,11 @@ fn water_surface(
     }
     let b = (u.y * v.z - u.z * v.y) / det;
     let c = (u.x * v.y - u.y * v.x) / det;
-    Ok(sr_sim::hydrostatics::Surface { offset: p0.y - b * p0.x - c * p0.z, slope: [b, c] })
+    let axes = [m.transform_vector3(DVec3::X).to_array(), m.transform_vector3(DVec3::Z).to_array()];
+    Ok(crate::group::WaterFrame {
+        surface: sr_sim::hydrostatics::Surface { offset: p0.y - b * p0.x - c * p0.z, slope: [b, c] },
+        axes,
+    })
 }
 
 impl Phys3 {
