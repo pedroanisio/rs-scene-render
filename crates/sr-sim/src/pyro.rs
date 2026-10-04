@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 pub mod mesh;
+mod multigrid;
 
 /// Minimum elements per rayon task. Task boundaries never change a value: every
 /// parallel loop writes each element from the same expression as the serial loop
@@ -28,6 +29,8 @@ const LIGHT: usize = 8192;
 mod atomicity;
 #[cfg(test)]
 mod determinism;
+#[cfg(test)]
+mod pockets;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,6 +48,19 @@ pub enum Error {
 pub enum Boundary {
     Closed,
     Open,
+}
+
+/// Preconditioner of the pressure conjugate-gradient solve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PressureSolver {
+    /// Diagonal (Jacobi) preconditioner with serial, in-order reductions. The
+    /// reference results of every release before `Multigrid`.
+    #[default]
+    Jacobi,
+    /// Algebraic-multigrid V(1,1) preconditioner with fixed-block reductions;
+    /// iteration counts stay roughly independent of resolution. Results are
+    /// deterministic for any thread count but differ from `Jacobi` in the last bits.
+    Multigrid,
 }
 
 #[derive(Clone, Debug)]
@@ -66,9 +82,11 @@ pub struct Spec {
     /// Seeded acceleration amplitude, scene units/second².
     pub turbulence: f64,
     pub seed: u64,
+    /// Maximum conjugate-gradient iterations.
     pub pressure_iterations: usize,
     /// RMS divergence error allowed, in 1/second.
     pub pressure_tolerance: f64,
+    pub solver: PressureSolver,
     /// Conservative resident state plus step workspace budget, before allocation.
     pub max_bytes: usize,
 }
@@ -90,6 +108,7 @@ impl Default for Spec {
             seed: 0,
             pressure_iterations: 200,
             pressure_tolerance: 1e-6,
+            solver: PressureSolver::Jacobi,
             max_bytes: 256 << 20,
         }
     }
@@ -630,7 +649,9 @@ pub struct StepProfile {
     pub project_setup: Duration,
     /// Operator applications inside the conjugate-gradient loop.
     pub project_apply: Duration,
-    /// Inner products and residual norms (serial folds) inside that loop.
+    /// V-cycle preconditioner applications (multigrid solver only).
+    pub project_precondition: Duration,
+    /// Inner products and residual norms inside that loop.
     pub project_reduce: Duration,
     /// Elementwise vector updates inside that loop.
     pub project_update: Duration,
@@ -805,8 +826,7 @@ impl Simulation {
             return Err(Error::Invalid("nonfinite expansion"));
         }
         profile.boundaries_validate += lap(&mut clock);
-        let report =
-            project(&mut state, &target, self.spec.pressure_iterations, self.spec.pressure_tolerance, &mut profile)?;
+        let report = project(&mut state, &target, &self.spec, &mut profile)?;
         clock = Instant::now();
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
@@ -1029,13 +1049,8 @@ fn neighbours(p: [usize; 3], dims: [usize; 3]) -> [Option<usize>; 6] {
     })
 }
 
-fn project(
-    s: &mut State,
-    target: &[f64],
-    iterations: usize,
-    tolerance: f64,
-    profile: &mut StepProfile,
-) -> Result<StepReport, Error> {
+fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile) -> Result<StepReport, Error> {
+    let (iterations, tolerance, solver) = (spec.pressure_iterations, spec.pressure_tolerance, spec.solver);
     let mut clock = Instant::now();
     let count = s.density.len();
     let fluid = s.solid.iter().filter(|&&solid| !solid).count();
@@ -1073,11 +1088,6 @@ fn project(
     }
     let strides = [1, s.cells[0], s.cells[0] * s.cells[1]];
     let from_squares = |squares: f64| (squares / fluid as f64).sqrt() / (s.h * s.h);
-    let rms = |values: &[f64]| from_squares(values.iter().map(|v| v * v).sum::<f64>());
-    let before = rms(&rhs);
-    if !before.is_finite() {
-        return Err(Error::Invalid("nonfinite pressure right hand side"));
-    }
     // Same per-cell arithmetic as the neighbours()-based operator: diagonal term
     // first, then the open neighbours subtracted in -x, +x, -y, +y, -z, +z order.
     // A solid cell has an empty mask, so it keeps only its diagonal term.
@@ -1102,66 +1112,144 @@ fn project(
             }
         });
     };
-    let inner = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
-    let mut pressure = vec![0.0; count];
-    let mut residual = rhs;
-    let mut z: Vec<_> = residual
-        .par_iter()
-        .zip(diagonal.par_iter())
-        .with_min_len(LIGHT)
-        .map(|(r, d)| if *d > 0.0 { r / d } else { *r })
-        .collect();
-    let mut direction = z.clone();
-    let mut applied = vec![0.0; count];
-    let mut rz = inner(&residual, &z);
-    // Both folds below start from `Iterator::sum`'s identity and add in index
-    // order, exactly like `inner`/`rms`; fusing them only shares the pass over
-    // memory, since the two accumulation chains are independent.
-    let identity = std::iter::empty::<f64>().sum::<f64>();
-    let mut current = rms(&residual);
-    let mut used = 0;
-    profile.project_setup = lap(&mut clock);
-    loop {
-        profile.project_reduce += lap(&mut clock);
-        if !(current > tolerance && used < iterations) {
-            break;
+    let (pressure, before, used) = match solver {
+        PressureSolver::Jacobi => {
+            let rms = |values: &[f64]| from_squares(values.iter().map(|v| v * v).sum::<f64>());
+            let before = rms(&rhs);
+            if !before.is_finite() {
+                return Err(Error::Invalid("nonfinite pressure right hand side"));
+            }
+            let inner = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+            let mut pressure = vec![0.0; count];
+            let mut residual = rhs;
+            let mut z: Vec<_> = residual
+                .par_iter()
+                .zip(diagonal.par_iter())
+                .with_min_len(LIGHT)
+                .map(|(r, d)| if *d > 0.0 { r / d } else { *r })
+                .collect();
+            let mut direction = z.clone();
+            let mut applied = vec![0.0; count];
+            let mut rz = inner(&residual, &z);
+            // Both folds below start from `Iterator::sum`'s identity and add in index
+            // order, exactly like `inner`/`rms`; fusing them only shares the pass over
+            // memory, since the two accumulation chains are independent.
+            let identity = std::iter::empty::<f64>().sum::<f64>();
+            let mut current = rms(&residual);
+            let mut used = 0;
+            profile.project_setup = lap(&mut clock);
+            loop {
+                profile.project_reduce += lap(&mut clock);
+                if !(current > tolerance && used < iterations) {
+                    break;
+                }
+                apply(&direction, &mut applied);
+                profile.project_apply += lap(&mut clock);
+                let denom = inner(&direction, &applied);
+                profile.project_reduce += lap(&mut clock);
+                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
+                    return Err(Error::Pressure(current));
+                }
+                let alpha = rz / denom;
+                pressure
+                    .par_iter_mut()
+                    .zip(residual.par_iter_mut())
+                    .zip(z.par_iter_mut())
+                    .enumerate()
+                    .with_min_len(LIGHT)
+                    .for_each(|(k, ((p, r), z))| {
+                        *p += alpha * direction[k];
+                        *r -= alpha * applied[k];
+                        *z = if diagonal[k] > 0.0 { *r / diagonal[k] } else { *r };
+                    });
+                profile.project_update += lap(&mut clock);
+                let (mut next, mut squares) = (identity, identity);
+                for (r, z) in residual.iter().zip(&z) {
+                    next += r * z;
+                    squares += r * r;
+                }
+                current = from_squares(squares);
+                profile.project_reduce += lap(&mut clock);
+                let beta = next / rz;
+                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
+                profile.project_update += lap(&mut clock);
+                rz = next;
+                used += 1;
+            }
+            if current > tolerance {
+                return Err(Error::Pressure(current));
+            }
+            (pressure, before, used)
         }
-        apply(&direction, &mut applied);
-        profile.project_apply += lap(&mut clock);
-        let denom = inner(&direction, &applied);
-        profile.project_reduce += lap(&mut clock);
-        if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-            return Err(Error::Pressure(current));
+        PressureSolver::Multigrid => {
+            let from_values =
+                |values: &[f64]| from_squares(multigrid::blocked_sums(count, |k| [values[k] * values[k]])[0]);
+            let before = from_values(&rhs);
+            if !before.is_finite() {
+                return Err(Error::Invalid("nonfinite pressure right hand side"));
+            }
+            let mut rhs = rhs;
+            let (_, hierarchy) = rayon::join(
+                || multigrid::remove_floating_means(s.cells, &s.solid, &open, &diagonal, &mut rhs),
+                || multigrid::Hierarchy::new(multigrid::Fine { dims: s.cells, open: &open, diagonal: &diagonal }),
+            );
+            let mut scratch = hierarchy.scratch();
+            let mut pressure = vec![0.0; count];
+            let mut residual = rhs;
+            let mut z = vec![0.0; count];
+            let mut applied = vec![0.0; count];
+            profile.project_setup = lap(&mut clock);
+            let [squares] = multigrid::blocked_sums(count, |k| [residual[k] * residual[k]]);
+            let mut current = from_squares(squares);
+            let mut used = 0;
+            profile.project_reduce += lap(&mut clock);
+            // A residual already within tolerance needs no preconditioner pass.
+            let (mut direction, mut rz) = if current > tolerance {
+                hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
+                profile.project_precondition += lap(&mut clock);
+                let [rz] = multigrid::blocked_sums(count, |k| [residual[k] * z[k]]);
+                profile.project_reduce += lap(&mut clock);
+                (z.clone(), rz)
+            } else {
+                (Vec::new(), 0.0)
+            };
+            loop {
+                if !(current > tolerance && used < iterations) {
+                    break;
+                }
+                apply(&direction, &mut applied);
+                profile.project_apply += lap(&mut clock);
+                let [denom] = multigrid::blocked_sums(count, |k| [direction[k] * applied[k]]);
+                profile.project_reduce += lap(&mut clock);
+                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
+                    return Err(Error::Pressure(current));
+                }
+                let alpha = rz / denom;
+                pressure.par_iter_mut().zip(residual.par_iter_mut()).enumerate().with_min_len(LIGHT).for_each(
+                    |(k, (p, r))| {
+                        *p += alpha * direction[k];
+                        *r -= alpha * applied[k];
+                    },
+                );
+                profile.project_update += lap(&mut clock);
+                hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
+                profile.project_precondition += lap(&mut clock);
+                let [next, squares] =
+                    multigrid::blocked_sums(count, |k| [residual[k] * z[k], residual[k] * residual[k]]);
+                current = from_squares(squares);
+                profile.project_reduce += lap(&mut clock);
+                let beta = next / rz;
+                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
+                profile.project_update += lap(&mut clock);
+                rz = next;
+                used += 1;
+            }
+            if current > tolerance {
+                return Err(Error::Pressure(current));
+            }
+            (pressure, before, used)
         }
-        let alpha = rz / denom;
-        pressure
-            .par_iter_mut()
-            .zip(residual.par_iter_mut())
-            .zip(z.par_iter_mut())
-            .enumerate()
-            .with_min_len(LIGHT)
-            .for_each(|(k, ((p, r), z))| {
-                *p += alpha * direction[k];
-                *r -= alpha * applied[k];
-                *z = if diagonal[k] > 0.0 { *r / diagonal[k] } else { *r };
-            });
-        profile.project_update += lap(&mut clock);
-        let (mut next, mut squares) = (identity, identity);
-        for (r, z) in residual.iter().zip(&z) {
-            next += r * z;
-            squares += r * r;
-        }
-        current = from_squares(squares);
-        profile.project_reduce += lap(&mut clock);
-        let beta = next / rz;
-        direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
-        profile.project_update += lap(&mut clock);
-        rz = next;
-        used += 1;
-    }
-    if current > tolerance {
-        return Err(Error::Pressure(current));
-    }
+    };
     let (cells, boundary, h) = (s.cells, s.boundary, s.h);
     for a in 0..3 {
         let dims = face_dims(cells, a);
@@ -1177,16 +1265,31 @@ fn project(
             *velocity -= (right - left) / h;
         });
     }
-    let squares: Vec<f64> = {
-        let state: &State = s;
-        (0..count)
-            .into_par_iter()
-            .with_min_len(HEAVY)
-            .map(|k| (state.divergence_at(coords(k, state.cells)) - target[k]).powi(2))
-            .collect()
+    let after = match solver {
+        PressureSolver::Jacobi => {
+            let squares: Vec<f64> = {
+                let state: &State = s;
+                (0..count)
+                    .into_par_iter()
+                    .with_min_len(HEAVY)
+                    .map(|k| (state.divergence_at(coords(k, state.cells)) - target[k]).powi(2))
+                    .collect()
+            };
+            (squares.iter().enumerate().filter(|(k, _)| !s.solid[*k]).map(|(_, t)| *t).sum::<f64>() / fluid as f64)
+                .sqrt()
+        }
+        PressureSolver::Multigrid => {
+            let state: &State = s;
+            let [sum] = multigrid::blocked_sums(count, |k| {
+                if state.solid[k] {
+                    [0.0]
+                } else {
+                    [(state.divergence_at(coords(k, state.cells)) - target[k]).powi(2)]
+                }
+            });
+            (sum / fluid as f64).sqrt()
+        }
     };
-    let after =
-        (squares.iter().enumerate().filter(|(k, _)| !s.solid[*k]).map(|(_, t)| *t).sum::<f64>() / fluid as f64).sqrt();
     if !after.is_finite() || after > tolerance * 1.01 {
         return Err(Error::Pressure(after));
     }
