@@ -150,6 +150,19 @@ pub trait Driver3 {
     fn collider(&mut self, _t: f64, _which: usize, _revision: Option<u64>) -> Result<Option<ColliderUpdate3>, String> {
         Ok(None)
     }
+    /// The surface of a deforming body, given the first impact the world has noticed on
+    /// it, if any (see [`World3::with_impact_watches`]). The default ignores the impact
+    /// and asks [`Driver3::collider`], so drivers that do not grow anything from impacts
+    /// need not know about them.
+    fn surface(
+        &mut self,
+        t: f64,
+        which: usize,
+        revision: Option<u64>,
+        _impact: Option<&Impact3>,
+    ) -> Result<Option<ColliderUpdate3>, String> {
+        self.collider(t, which, revision)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -200,6 +213,9 @@ pub struct Frame3 {
     pub fractured: Vec<bool>,
     /// Constraints removed by `breakForce` or source fracture.
     pub broken: Vec<bool>,
+    /// The first impact of each watched pair, once a step has resolved it (see
+    /// [`World3::with_impact_watches`]); in the order of the watches.
+    pub impacts: Vec<Option<Impact3>>,
     /// Failed frames contain no poses; consumers must report these diagnostics.
     pub errors: Vec<String>,
 }
@@ -221,6 +237,7 @@ struct State {
     active: Vec<bool>,
     collider_revisions: Vec<Option<u64>>,
     fractured: Vec<bool>,
+    impacts: Vec<Option<Impact3>>,
 }
 
 struct Checkpoint {
@@ -261,9 +278,10 @@ pub struct ContactLogConfig {
     pub max_per_step: usize,
     /// Bytes the retained record may use (`Contact3` storage plus per-step bookkeeping).
     pub max_bytes: usize,
-    /// Contact points whose impulse (as in `Contact3::impulse`) is not greater than this are
-    /// not recorded. Zero keeps every point that pushes; a body at rest has a small
-    /// impulse every step, so a consumer interested in impacts raises it.
+    /// A pair of bodies whose contact points together push with an impulse (as in
+    /// `Contact3::impulse`) not greater than this is not recorded; one that does is
+    /// recorded with all its points. Zero keeps every pair that pushes; a body at rest has
+    /// a small impulse every step, so a consumer interested in impacts raises it.
     pub min_impulse: f64,
 }
 
@@ -274,11 +292,123 @@ impl ContactLogConfig {
     }
 }
 
+/// A pair of bodies whose first impact the world notices: `source` hitting `owner`,
+/// indices into `World3Spec::bodies`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImpactWatch {
+    pub source: usize,
+    pub owner: usize,
+    /// The pair's total normal impulse over one step (as in `Contact3::impulse`) must
+    /// exceed this: a body at rest pushes with about its weight each step.
+    pub min_impulse: f64,
+}
+
+/// The first impact of a watched pair, in the owner's own frame so that it holds wherever
+/// the owner moves afterwards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Impact3 {
+    /// Index of the step that resolved the impact.
+    pub step: u64,
+    /// End of that step, when the impact is reported.
+    pub time: f64,
+    /// Total normal impulse over the pair's contacts in the step.
+    pub impulse: f64,
+    /// Where it hit: the contacts' mean, weighted by impulse, in the owner's frame (scene
+    /// axes, scene units).
+    pub point: [f64; 3],
+    /// Unit normal from the owner toward the source, in the owner's frame.
+    pub normal: [f64; 3],
+    /// Speed of the source's approach along that normal before the step, scene units per
+    /// second; positive.
+    pub closing_speed: f64,
+    /// Velocity of the source relative to the owner before the step, in the world's axes.
+    pub relative_velocity: [f64; 3],
+}
+
+/// Rotates `v` by the inverse of the unit quaternion `q = [x, y, z, w]`.
+fn rotate_back(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+    let (u, w) = ([-q[0], -q[1], -q[2]], q[3]);
+    let cross =
+        |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let t = cross(u, v).map(|c| 2.0 * c);
+    let ut = cross(u, t);
+    std::array::from_fn(|i| v[i] + w * t[i] + ut[i])
+}
+
+/// The impact of `watch` in one step, from that step's `contacts` and the owner's pose at
+/// the start of it, or `None` if the pair did not push hard enough or was not approaching.
+pub fn impact_in_step(watch: &ImpactWatch, contacts: &[Contact3], owner: &Pose3) -> Option<Impact3> {
+    let pair = if watch.source < watch.owner {
+        [Some(watch.source), Some(watch.owner)]
+    } else {
+        [Some(watch.owner), Some(watch.source)]
+    };
+    let mine: Vec<&Contact3> = contacts.iter().filter(|c| c.bodies == pair).collect();
+    let first = mine.first()?;
+    let impulse: f64 = mine.iter().map(|c| c.impulse).sum();
+    if impulse.partial_cmp(&watch.min_impulse.max(0.0)) != Some(std::cmp::Ordering::Greater) {
+        return None;
+    }
+    let mean = |pick: fn(&Contact3) -> [f64; 3]| -> [f64; 3] {
+        let mut sum = [0.0; 3];
+        for c in &mine {
+            for (s, v) in sum.iter_mut().zip(pick(c)) {
+                *s += c.impulse * v;
+            }
+        }
+        sum.map(|s| s / impulse)
+    };
+    // normals and velocities are listed from the first body to the second; face them from
+    // the owner to the source
+    let sign = if watch.owner < watch.source { 1.0 } else { -1.0 };
+    let normal = mean(|c| c.normal).map(|c| sign * c);
+    let relative_velocity = mean(|c| c.relative_velocity).map(|c| sign * c);
+    let length = normal.iter().map(|c| c * c).sum::<f64>().sqrt();
+    if length.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return None;
+    }
+    let normal = normal.map(|c| c / length);
+    let closing_speed = -relative_velocity.iter().zip(&normal).map(|(v, n)| v * n).sum::<f64>();
+    if closing_speed.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return None;
+    }
+    let point = mean(|c| c.point);
+    let from_owner: [f64; 3] = std::array::from_fn(|i| point[i] - owner.pos[i]);
+    Some(Impact3 {
+        step: first.step,
+        time: first.time,
+        impulse,
+        point: rotate_back(owner.rot, from_owner),
+        normal: rotate_back(owner.rot, normal),
+        closing_speed,
+        relative_velocity,
+    })
+}
+
+/// The first impact of `watch` in a record of contacts, in step order, given the owner's
+/// pose at the start of each step. This is what a recorded run, such as a baked cache,
+/// holds, and it finds the impact the world found while it ran.
+pub fn find_impact(watch: &ImpactWatch, contacts: &[Contact3], owner: impl Fn(u64) -> Pose3) -> Option<Impact3> {
+    let mut from = 0;
+    while from < contacts.len() {
+        let step = contacts[from].step;
+        let len = contacts[from..].iter().take_while(|c| c.step == step).count();
+        if let Some(impact) = impact_in_step(watch, &contacts[from..from + len], &owner(step)) {
+            return Some(impact);
+        }
+        from += len;
+    }
+    None
+}
+
 struct ContactLog {
     config: ContactLogConfig,
     steps: BTreeMap<u64, Vec<Contact3>>,
     bytes: usize,
 }
+
+/// Contact points one step may produce while a watched pair is still to be noticed.
+const WATCH_CONTACTS_PER_STEP: usize = 4096;
 
 /// Bookkeeping charged per retained step, on top of its contacts.
 const CONTACT_STEP_BYTES: usize = 64;
@@ -325,6 +455,7 @@ pub struct World3 {
     fragment_owners: Vec<Option<usize>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
+    watches: Vec<ImpactWatch>,
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -374,6 +505,7 @@ impl World3 {
             active: Vec::new(),
             collider_revisions: vec![None; spec.bodies.len()],
             fractured: Vec::new(),
+            impacts: Vec::new(),
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -557,6 +689,7 @@ impl World3 {
             fragment_owners: vec![None; spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
+            watches: Vec::new(),
             fractures: Vec::new(),
             spec,
             params,
@@ -645,6 +778,37 @@ impl World3 {
         self
     }
 
+    /// Notice the first impact of each pair: `source` hitting `owner` with a pair impulse
+    /// above the watch's threshold, while approaching. The impact is part of the world's
+    /// state, so it is the same after any seek and in any fresh world; frames report it
+    /// from the step after the one that resolved it (`Frame3::impacts`), and the owner's
+    /// surface is asked about it (`Driver3::surface`). Watching changes nothing about the
+    /// simulation. Must be set before the first step.
+    pub fn with_impact_watches(mut self, watches: Vec<ImpactWatch>) -> Result<Self, String> {
+        if self.state.step != 0 {
+            return Err("impact watches must be set before the first step".into());
+        }
+        let bodies = self.spec.bodies.len();
+        for w in &watches {
+            if w.source >= bodies || w.owner >= bodies {
+                return Err(format!("impact watch names body {} or {}, and the world has {bodies}", w.source, w.owner));
+            }
+            if w.source == w.owner {
+                return Err(format!("impact watch of body {} against itself", w.source));
+            }
+            if !w.min_impulse.is_finite() {
+                return Err("impact watch threshold must be finite".into());
+            }
+        }
+        self.state.impacts = vec![None; watches.len()];
+        for cp in self.checkpoints.values_mut() {
+            cp.state.impacts = vec![None; watches.len()];
+        }
+        self.watches = watches;
+        let budget = self.frame_log.budget;
+        Ok(self.with_frame_log_budget(budget))
+    }
+
     /// The contacts resolved by step `step`, in a stable order: by body pair, then
     /// point, then impulse. `Some(&[])` for a step without contacts; `None` when
     /// recording is off, the step is not simulated yet in the current timeline (after a
@@ -696,7 +860,8 @@ impl World3 {
         &self,
         step: u64,
         motion: &[Option<Motion>],
-        config: ContactLogConfig,
+        min_impulse: f64,
+        max_per_step: usize,
     ) -> Result<Vec<Contact3>, String> {
         let st = &self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -731,18 +896,18 @@ impl World3 {
             let (pose1, pose2) = (m1.pose * lever(c1), m2.pose * lever(c2));
             // The manifolds the solver saw: contact clusters for composite shapes (meshes,
             // compounds), the plain manifolds otherwise. Only those carry the impulses.
+            let mut points = Vec::new();
             for manifold in pair.solver_manifolds() {
                 for contact in &manifold.points {
-                    let impulse = contact.data.impulse;
-                    let impulse = impulse * ppm;
-                    if impulse.partial_cmp(&config.min_impulse.max(0.0)) != Some(std::cmp::Ordering::Greater) {
+                    let impulse = contact.data.impulse * ppm;
+                    if impulse.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                         continue;
                     }
                     let point = (pose1 * contact.local_p1 + pose2 * contact.local_p2) * 0.5;
                     let speed = |m: &Motion| m.linvel + m.angvel.cross(point - m.centre);
                     let relative = speed(second.1) - speed(first.1);
                     let normal = if swap { -manifold.data.normal } else { manifold.data.normal };
-                    contacts.push(Contact3 {
+                    points.push(Contact3 {
                         step,
                         time,
                         bodies: [first.0, second.0],
@@ -753,11 +918,16 @@ impl World3 {
                     });
                 }
             }
-            if contacts.len() > config.max_per_step {
+            // a pair is recorded whole or not at all: its total impulse decides, not how
+            // many points a mesh or a compound shape happens to split it over
+            let total: f64 = points.iter().map(|c| c.impulse).sum();
+            if total.partial_cmp(&min_impulse.max(0.0)) == Some(std::cmp::Ordering::Greater) {
+                contacts.append(&mut points);
+            }
+            if contacts.len() > max_per_step {
                 return Err(format!(
-                    "{} contacts in one step exceed the contact log limit of {}",
-                    contacts.len(),
-                    config.max_per_step
+                    "{} contacts in one step exceed the contact log limit of {max_per_step}",
+                    contacts.len()
                 ));
             }
         }
@@ -776,6 +946,39 @@ impl World3 {
                 .then_with(|| x.impulse.total_cmp(&y.impulse))
         });
         Ok(contacts)
+    }
+
+    /// Look for the impacts of the watched pairs that have not happened yet, in the step
+    /// just solved.
+    fn notice_impacts(&mut self, step: u64, motion: &[Option<Motion>]) -> Result<(), String> {
+        let threshold = self
+            .watches
+            .iter()
+            .zip(&self.state.impacts)
+            .filter(|(_, found)| found.is_none())
+            .map(|(w, _)| w.min_impulse)
+            .fold(f64::INFINITY, f64::min);
+        let contacts = self.collect_contacts(step, motion, threshold, WATCH_CONTACTS_PER_STEP)?;
+        if contacts.is_empty() {
+            return Ok(());
+        }
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        for k in 0..self.watches.len() {
+            let watch = self.watches[k];
+            if self.state.impacts[k].is_some() {
+                continue;
+            }
+            let handle = self.state.handles[watch.owner];
+            let Some(Some(owner)) = motion.get(handle.into_raw_parts().0 as usize) else { continue };
+            // the owner's pose as a frame reports it: scene axes and units
+            let q = owner.pose.rotation;
+            let pose = Pose3 {
+                pos: flip(owner.pose.translation.to_array()).map(|c| c * ppm),
+                rot: flip_q([q.x, q.y, q.z, q.w]),
+            };
+            self.state.impacts[k] = impact_in_step(&watch, &contacts, &pose);
+        }
+        Ok(())
     }
 
     /// Store a step's contacts, replacing a replayed step's identical record, or
@@ -898,7 +1101,10 @@ impl World3 {
             if !self.fracture_enabled(k) || !driver.enabled(t, k) {
                 continue;
             }
-            let Some(update) = driver.collider(t, k, self.state.collider_revisions[k])? else { continue };
+            let impact = self.watches.iter().position(|w| w.owner == k).and_then(|w| self.state.impacts[w]);
+            let Some(update) = driver.surface(t, k, self.state.collider_revisions[k], impact.as_ref())? else {
+                continue;
+            };
             if self.spec.bodies[k].kind == BodyKind::Dynamic {
                 return Err("deforming colliders require static or kinematic bodies".into());
             }
@@ -984,7 +1190,8 @@ impl World3 {
             let mass = body.mass();
             body.add_force(vec3(flip(a).map(|c| c / ppm * mass)), true);
         }
-        let motion = self.contact_log.is_some().then(|| self.capture_motion());
+        let pending = self.state.impacts.iter().any(Option::is_none);
+        let motion = (self.contact_log.is_some() || pending).then(|| self.capture_motion());
         let st = &mut self.state;
         let g = self.spec.gravity;
         self.pipeline.step(
@@ -1014,11 +1221,19 @@ impl World3 {
                 st.joint_handles[k] = None;
             }
         }
-        if let (Some(motion), Some(log)) = (motion, &self.contact_log) {
+        if let Some(motion) = motion {
             let step = self.state.step;
-            let config = log.config;
-            let stored = self.collect_contacts(step, &motion, config).and_then(|c| self.store_contacts(step, c));
-            if let Err(error) = stored {
+            let mut noticed = Ok(());
+            if let Some(log) = &self.contact_log {
+                let config = log.config;
+                noticed = self
+                    .collect_contacts(step, &motion, config.min_impulse, config.max_per_step)
+                    .and_then(|c| self.store_contacts(step, c));
+            }
+            if noticed.is_ok() && pending {
+                noticed = self.notice_impacts(step, &motion);
+            }
+            if let Err(error) = noticed {
                 // The solver already advanced the world: go back so a retry fails the same way.
                 self.restore_nearest_checkpoint();
                 return Err(error);
@@ -1095,6 +1310,7 @@ impl World3 {
             velocities,
             enabled: st.handles.iter().map(|h| st.bodies[*h].is_enabled()).collect(),
             fractured: st.fractured.clone(),
+            impacts: st.impacts.clone(),
             broken: st.joint_handles.iter().map(|h| h.is_none()).collect(),
             errors: Vec::new(),
         }
@@ -1108,7 +1324,10 @@ impl World3 {
 
 fn frame_bytes(frame: &Frame3) -> usize {
     let per_body = std::mem::size_of::<Pose3>() + std::mem::size_of::<Velocity3>() + 3;
-    std::mem::size_of::<Frame3>() + frame.bodies.len() * per_body + FRAME_ENTRY_BYTES
+    std::mem::size_of::<Frame3>()
+        + frame.bodies.len() * per_body
+        + frame.impacts.len() * std::mem::size_of::<Option<Impact3>>()
+        + FRAME_ENTRY_BYTES
 }
 
 fn contact_bytes(contacts: usize) -> usize {

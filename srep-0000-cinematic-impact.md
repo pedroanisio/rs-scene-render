@@ -1501,9 +1501,10 @@ After the rows come the contacts the 3D rigid bodies resolved, in step order, ea
 fixed 96-byte record: u64 step, two i32 body indices (the first is never a boundary,
 `-1` is a boundary slab), point, normal, normal impulse and the relative velocity of
 the second body before the step. A contact names a step the file holds, bodies it has,
-and finite numbers. Only impacts are recorded: a contact whose impulse does not exceed
-twice the weight impulse of all dynamic bodies in one step is dropped at the source,
-and so is a pair that nothing solved because both bodies were asleep or fixed.
+and finite numbers. Only impacts are recorded: a pair of bodies whose contact points together push with
+no more than twice the weight impulse of all dynamic bodies in one step is dropped at
+the source, and a pair that is recorded keeps all its points. A pair that nothing solved
+because both bodies were asleep or fixed is dropped too.
 
 The identity covers the 2D and 3D world definitions (bodies, shapes, joints, gravity,
 step, fractures; meshes by their numbers) and, for every baked step, what the document

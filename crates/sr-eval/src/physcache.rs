@@ -26,8 +26,8 @@ const CONTACTS_PER_STEP: usize = 1024;
 /// Bytes of memory the recorded contacts may use before recording fails.
 const CONTACT_LOG_BYTES: usize = 64 << 20;
 
-/// Impulses that do not exceed this multiple of the weight impulse of all dynamic bodies in
-/// one step are not recorded: a body at rest or sliding pushes with about its weight, an
+/// Pairs whose contact points together do not exceed this multiple of the weight impulse of
+/// all dynamic bodies in one step are not recorded: a body at rest or sliding pushes with about its weight, an
 /// impact with much more.
 const RESTING_IMPULSE_FACTOR: f64 = 2.0;
 
