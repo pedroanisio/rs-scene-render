@@ -597,6 +597,18 @@ fn advance(
     work: &mut Work,
     scratch: &mut Scratch,
 ) -> Result<(), Error> {
+    if let (true, Bed::Moving { from, to, .. }) = (spec.body_owners > 0, bed) {
+        // the body there at the end of the step, else the one that was; the same in every substep
+        work.take(state.q.len())?;
+        scratch.owner.clear();
+        scratch.owner.extend(to.occupancy.iter().zip(to.owner.iter().zip(&from.owner)).map(|(t, (a, b))| {
+            if *t > 0.0 {
+                *a
+            } else {
+                *b
+            }
+        }));
+    }
     loop {
         while let Some(event) = impulses.get(state.next_impulse).filter(|i| i.time <= state.time) {
             work.take(state.q.len().saturating_mul(8))?;
@@ -651,20 +663,6 @@ fn advance(
                             .zip(&to.velocity)
                             .map(|(a, b)| [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s]),
                     );
-                    if spec.body_owners > 0 {
-                        work.take(state.q.len())?;
-                        // the body there at the end of the step, else the one that was
-                        scratch.owner.clear();
-                        scratch.owner.extend(to.occupancy.iter().zip(to.owner.iter().zip(&from.owner)).map(
-                            |(t, (a, b))| {
-                                if *t > 0.0 {
-                                    *a
-                                } else {
-                                    *b
-                                }
-                            },
-                        ));
-                    }
                     bodies = Some(t1 - t0);
                 }
                 &scratch.bed
