@@ -247,6 +247,13 @@ pub(crate) struct Graphs<'a> {
     cache: Vec<(u64, Arc<FrameGraph>)>,
 }
 
+impl<'a> Graphs<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(base: &'a dyn Fn(f64) -> FrameGraph) -> Self {
+        Graphs { base, cache: Vec::new() }
+    }
+}
+
 impl Graphs<'_> {
     pub(crate) fn at(&mut self, t: f64) -> Arc<FrameGraph> {
         let key = t.to_bits();
@@ -527,6 +534,8 @@ pub(crate) struct PhysicsRt {
     spec_digest: Option<[u8; 32]>,
     /// Per 2D body: whether it is kinematic and when a dynamic one is released.
     follow: Vec<(bool, f64)>,
+    /// The solvers whose outcomes load the 3D bodies, if any are coupled to them.
+    pub(crate) group: Option<crate::group::Group>,
 }
 
 /// What `build_physics` is asked to keep besides the worlds themselves.
@@ -842,7 +851,7 @@ fn build_physics(
     let has2 = !spec.bodies.is_empty() || !spec.softs.is_empty();
     let world = if cached.is_some() || traced.is_some() || stale || !has2 { None } else { Some(World::new(spec)) };
     let three = crate::sim3d::build(p, &g3, plan, problems, failures);
-    let mut ph = PhysicsRt { world, three, cached: None, start, step, bodies, softs, spec_digest, follow };
+    let mut ph = PhysicsRt { world, three, cached: None, start, step, bodies, softs, spec_digest, follow, group: None };
     if let Some((path, c)) = cached {
         // a cache from before contacts were recorded cannot say when a body hit another
         match ph.three.as_ref().and_then(|t| t.links.first()).zip(ph.three.as_ref()) {
@@ -902,7 +911,7 @@ fn identity(
     id.part("world3", ph.three.as_ref().and_then(|t| t.spec_digest));
     id.value("span", &(ph.start, ph.step, steps));
     if let Some(three) = &ph.three {
-        let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics };
+        let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics, group: None };
         three.sample_inputs(&mut drv, ph.start, ph.step, steps, &mut id)?;
     }
     if !ph.bodies.is_empty() {
@@ -1673,13 +1682,17 @@ impl EmitterDriver for EDriver<'_, '_> {
 #[derive(Default)]
 pub struct Runtime {
     built: bool,
-    fields: Option<FieldSrc>,
-    physics: Option<PhysicsRt>,
+    pub(crate) fields: Option<FieldSrc>,
+    pub(crate) physics: Option<PhysicsRt>,
     emitters: HashMap<Arc<str>, EmitterRt>,
     agents: crate::agents::Sims,
     pyro: crate::pyro::Sims,
     particles3d: crate::particles3d::Sims,
     ocean: crate::ocean::Sims,
+    /// How an ocean's outcome loads the bodies in it; none unless something sets one.
+    pub(crate) coupling: Option<crate::group::Coupling>,
+    /// Bytes the rigid world's memory of its frames may use; the world's own default when none.
+    pub(crate) frame_memory: Option<usize>,
     /// Frame graphs without simulation, kept across frames: animated emitters sample them on the frame grid,
     /// so the previous frame's graph is still here when the next frame's steps need it.
     graph_cache: Vec<(u64, Arc<FrameGraph>)>,
@@ -1718,9 +1731,17 @@ pub(crate) fn apply_physics(
             (c.frame(t), c.frame3(t))
         } else {
             let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
+            let group = ph.group.clone();
             let frame3 = match ph.three.as_mut() {
                 Some(three) => {
-                    let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics };
+                    let mut drv = crate::sim3d::Driver {
+                        p,
+                        graphs,
+                        bodies: &three.bodies,
+                        fields,
+                        statics: &statics,
+                        group: group.as_ref(),
+                    };
                     let Some(world) = three.world.as_mut() else { return };
                     let frame = world.frame_at(t, &mut drv);
                     g.problems.extend(frame.errors.clone());
@@ -1769,8 +1790,30 @@ impl Runtime {
             self.physics =
                 build_physics(p, &g0, &fields, &mut graphs, Keep::default(), &mut self.problems, &mut self.failures);
             self.fields = Some(fields);
+            if let (Some(budget), Some(world)) =
+                (self.frame_memory, self.physics.as_mut().and_then(|ph| ph.three.as_mut()))
+            {
+                world.world = world.world.take().map(|w| w.with_frame_log_budget(budget));
+            }
+            if let (Some(ph), Some(coupling)) = (self.physics.as_mut(), self.coupling.clone()) {
+                let ids: Vec<Arc<str>> =
+                    ph.three.iter().flat_map(|three| three.bodies.iter().map(|b| b.id.clone())).collect();
+                match crate::group::Group::detect(p, &ids, Some(coupling)) {
+                    Ok(group) => ph.group = group,
+                    Err(error) => self.failures.push(error),
+                }
+            }
         }
         let fields = self.fields.as_ref().expect("built");
+        // A group runs its ocean first: the ocean's steps pull the rigid world ahead in time order,
+        // each needing only outcomes the ocean has already written.
+        let grouped = self.physics.as_ref().is_some_and(|ph| ph.group.is_some());
+        let mut ocean_seconds = None;
+        if grouped {
+            let clock = std::time::Instant::now();
+            self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut());
+            ocean_seconds = Some(clock.elapsed().as_secs_f64());
+        }
         // ---- physics
         if let Some(ph) = self.physics.as_mut() {
             apply_physics(p, ph, g, &mut graphs, fields, t);
@@ -1811,8 +1854,10 @@ impl Runtime {
         self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
         g.sim_seconds.particles = clock.elapsed().as_secs_f64();
         let clock = std::time::Instant::now();
-        self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut());
-        g.sim_seconds.ocean = clock.elapsed().as_secs_f64();
+        if ocean_seconds.is_none() {
+            self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut());
+        }
+        g.sim_seconds.ocean = ocean_seconds.unwrap_or_else(|| clock.elapsed().as_secs_f64());
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
         // everything the smoke solver reports is a failure of the solver
@@ -2031,7 +2076,8 @@ fn run(
         };
         let f3 = match three.as_mut() {
             Some(th) => {
-                let mut drv = crate::sim3d::Driver { p, graphs, bodies: &th.bodies, fields, statics: &statics };
+                let mut drv =
+                    crate::sim3d::Driver { p, graphs, bodies: &th.bodies, fields, statics: &statics, group: None };
                 let frame = th.world.as_mut().expect("world").frame_at(t, &mut drv);
                 if !frame.errors.is_empty() {
                     return Err(frame.errors.join("; "));

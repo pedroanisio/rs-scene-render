@@ -1457,6 +1457,38 @@ Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) 
 through Holsapple's documents and the papers that cite them. The calculator note's table
 and Holsapple (1993) were read directly.
 
+#### Coupled solvers (rigid world and ocean)
+
+An ocean whose `colliders` list a rigid body forms a group with the rigid world; no attribute
+says so. Each member can be replayed alone, so the members do not ask each other again (that
+would restore the other's checkpoints in turn): the ocean writes the outcome of each of its
+canonical steps, once, into an append-only exchange log of small records, and the rigid world
+reads from it the load for each of its steps. Writing a step again must reproduce its record to
+the last bit, or the write is a divergence error; the log has an internal byte budget (16 MiB)
+whose overflow is an error; nothing is dropped, because a record dropped could not be replayed.
+
+The rigid world's step that starts while the ocean's canonical step `m` is the last completed
+reads the outcome of step `m - 1`: a delay of one whole ocean step. It is what makes the
+exchange causal, because to advance a step the ocean samples the bodies at its start and at the
+next canonical instant (to measure their velocity), so it reads the rigid world a full step
+ahead of the outcomes it has. A group therefore applies its ocean before the rigid world in a
+frame; the ocean's steps pull the rigid world ahead in time order, and the rigid world never
+needs an outcome that does not exist. A load that is not there is an error that names the body,
+the step and how far the ocean has got, never a stand-in: the last known value would make the
+result depend on the order of calls. Smoke and 3D particles may read the rigid world up to one
+of their own steps past a frame, so after answering a frame the group steps the ocean on to the
+outcomes those readers can ask for (the longest `dt` among the smoke volumes and particle
+systems that collide with the group's bodies); a group therefore simulates a little beyond the
+instant asked for. The rigid world takes a `Load3` (force and torque, scene axes and units) per
+dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
+loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
+
+Every member of a group runs on the composition clock (the ocean's local time is the
+composition time less its start, with no remapping), because the exchange is indexed by it. The
+rigid world's frame memory, checkpoints and the log together
+make a backward request cheap: it is answered from the frame memory, or by restoring a
+checkpoint and replaying with the logged loads, and the two agree bit for bit.
+
 #### Fracture (native scene, rendering and cache integration implemented)
 
 Version 1.3 defines an owned `<fracture>` declaration. The generated typed model,

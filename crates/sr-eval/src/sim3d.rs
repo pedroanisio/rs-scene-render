@@ -838,6 +838,8 @@ pub(crate) struct Driver<'a, 'b> {
     pub(crate) bodies: &'a [Body3Node],
     pub(crate) fields: &'a FieldSrc,
     pub(crate) statics: &'a [Field],
+    /// The solvers this world exchanges with, whose outcomes load its bodies.
+    pub(crate) group: Option<&'a crate::group::Group>,
 }
 
 impl Driver3 for Driver<'_, '_> {
@@ -908,6 +910,13 @@ impl Driver3 for Driver<'_, '_> {
             .ok_or("missing crater")?;
         let crater = crate::crater::from_impact(element, &grown)?;
         deformed_surface(body, &crater, revision)
+    }
+
+    fn load(&mut self, _step: u64, t: f64, which: usize) -> Result<Option<sr_sim::physics3d::Load3>, String> {
+        match self.group {
+            Some(group) => group.load(t, which),
+            None => Ok(None),
+        }
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {

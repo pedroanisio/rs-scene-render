@@ -221,7 +221,17 @@ impl Sims {
                 // solver step; a failure in it is reported as the solver's.
                 let failure = std::cell::RefCell::new(None::<String>);
                 let start = node.map_or(0., |node| p.nodes[node as usize].start);
+                // what the bodies in this ocean get back from it, if it exchanges with them
+                let group = physics.as_deref().and_then(|ph| ph.group.clone());
+                let channel = group.as_ref().and_then(|group| group.channel(&id));
                 let mut bed_driver = |time: f64, forcing: &mut sim::Forcing| -> Result<(), sim::Error> {
+                    // a step's outcome is written before anything reads the bodies it loads
+                    if let (Some(group), Some(channel), Some((step, momentum))) = (&group, channel, forcing.exchange) {
+                        group.record(channel, step, crate::group::Exchange { momentum }).map_err(|message| {
+                            *failure.borrow_mut() = Some(message);
+                            sim::Error::Invalid("ocean exchange diverged")
+                        })?;
+                    }
                     let (Some(colliders), Some(node)) = (colliders.as_mut(), node) else {
                         return Err(sim::Error::Invalid("ocean collider without a scene node"));
                     };
@@ -233,7 +243,12 @@ impl Sims {
                             Arc::new(crate::eval::evaluate_with_clocks(p, t, &clocks))
                         };
                         if let Some(physics) = physics.as_deref_mut() {
+                            let before = frame.problems.len();
                             crate::sim::apply_physics(p, physics, Arc::make_mut(&mut frame), graphs, fields, t);
+                            // a rigid world that could not answer must not be read as an empty one
+                            if frame.problems.len() > before {
+                                return Err(frame.problems[before..].join("; "));
+                            }
                         }
                         Ok(frame)
                     };
@@ -284,6 +299,17 @@ impl Sims {
                 };
                 let out = Arc::new(SimOcean { frame, mesh, whitewater: foam, whitewater_mesh, key });
                 *last = Some(out.clone());
+                // Other solvers read the rigid bodies a little past this frame: step on, to the
+                // last canonical step that reach covers, so the loads they need exist.
+                if let Some(group) = &group {
+                    // a reader at `local_time + reach` needs the outcome of the step before the one that
+                    // ends there, which is complete once the solver has stepped to its end
+                    let target = (((local_time + group.reach()) / spec.dt).floor() - 1.0) * spec.dt;
+                    if target > local_time {
+                        let driver: Option<&mut dyn sim::Driver> = if moving { Some(&mut bed_driver) } else { None };
+                        frame_at(solver, target, driver).map_err(reported)?;
+                    }
+                }
                 Ok(out)
             })();
             match result {
