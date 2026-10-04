@@ -2328,6 +2328,32 @@ pre-impact, impact, late settling and reverse replay; production-size execution
 is practical with `cargo test --release -p sr-eval --test cinematic_impact`.
 The full encoded-sequence gate below remains independently required.
 
+Two further examples are written in physical units (`physics/@pixelsPerMeter="1"`, metres and
+seconds, gravity declared) and author no time for any effect:
+[`impact-land.scene.xml`](examples/cinematic-impact/impact-land.scene.xml) (a rock of 2 m radius and 2700
+kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and, once the evaluator reads
+`burst@crater`, its ejecta are consequences of the contact) and
+[`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
+second-order ocean 20 m deep that carries it with `bodyCoupling="buoyancy"` and makes a crater in the
+seabed; there is no `waterImpulse`). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
+no effect has a time attribute, that nothing happens before the contact, that the crater, the dust and the
+heat in the dust grow with speed, mass and angle, that the ocean's water volume is conserved to the last
+cell and the dust is what the law gives, and that any order of instants, a fresh evaluator and a replay
+from the first checkpoint give the same bits. Limits that the scenes show and the engine does not hide:
+
+- The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
+  so a smoke source from that crater would make a cloud on the sea bed.
+- `bodyCoupling="buoyancy"` has no horizontal drag, so the rock keeps its horizontal speed through the water.
+  The highest wave in the scene is then the rock's own bow wave as it crosses 20 m of water, which does not
+  grow with speed and is a few centimetres for a rock that arrives straight down; the wave of the crater
+  alone (the sea with the bed as its only collider) does grow with speed, mass and angle. A body lighter
+  than water floats and makes no crater.
+- The dust is as hot at 30 degrees as at 90: the heat and the dust both fall with the angle, so the
+  temperature does not; the heat held by the dust does grow with the angle.
+- The ground's contact normal is that of a triangle mesh and tilts the crater's axis by a few degrees, so
+  the speed along the normal for an oblique impact is higher than the speed along the ground's normal (91
+  against 87 m/s at 60 degrees and 1 m cells), and the tilt changes with the mesh's resolution.
+
 The accompanying conformance suite must cover all of the following:
 
 - Valid minimal examples for each new element, every enum branch, default
