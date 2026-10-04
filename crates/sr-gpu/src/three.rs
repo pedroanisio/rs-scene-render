@@ -303,6 +303,10 @@ pub struct Stats3 {
     pub splats: u64,
     pub transmissive: usize,
     pub tile_overflow: bool,
+    /// Path tracer CPU seconds: scene assembly, BVH construction and buffer packing.
+    pub pt_assemble_seconds: f64,
+    pub pt_bvh_seconds: f64,
+    pub pt_pack_seconds: f64,
 }
 
 #[repr(C)]
@@ -499,6 +503,10 @@ pub struct ThreeEngine {
     ies_rows: HashMap<usize, usize>,
     /// Statistics of the last render.
     pub stats: Stats3,
+    /// Whether path tracing records timestamp queries around its trace and denoise passes.
+    pub time_gpu: bool,
+    /// Timestamps of the path-traced passes recorded since the caller last cleared them.
+    pub pt_timers: Vec<crate::fx::Timer>,
 }
 
 fn tex_entry(
@@ -1029,6 +1037,8 @@ impl ThreeEngine {
             next_key: 1,
             ies_rows: HashMap::new(),
             stats: Stats3::default(),
+            time_gpu: false,
+            pt_timers: Vec::new(),
         };
         // 1×1 white and the BRDF table
         let white = eng.upload_rgba8(1, 1, &[255, 255, 255, 255], false);
@@ -1455,7 +1465,7 @@ impl ThreeEngine {
                 black: &self.black_env,
                 sampler: &self.repeat_smp,
             };
-            crate::pathtrace::render(
+            let timing = crate::pathtrace::render_timed(
                 self.pt.as_ref().expect("built"),
                 &self.device,
                 enc,
@@ -1464,11 +1474,16 @@ impl ThreeEngine {
                 opts,
                 &inputs,
                 out,
+                self.time_gpu,
             );
+            self.pt_timers.extend(timing.gpu);
             self.stats = Stats3 {
                 draws: scene.draws.len(),
                 triangles: scene.draws.iter().map(Draw3::mesh_triangles).sum::<u64>()
                     + scene.splats.iter().map(|s| u64::from(s.gpu.n)).sum::<u64>(),
+                pt_assemble_seconds: data.timing.assemble_seconds,
+                pt_bvh_seconds: data.timing.bvh_seconds,
+                pt_pack_seconds: timing.pack_seconds,
                 ..Default::default()
             };
             return Ok(());

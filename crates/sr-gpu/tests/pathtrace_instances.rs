@@ -52,6 +52,7 @@ fn repeated_prototypes_fit_without_triangle_expansion_and_match_expanded_pixels(
     assert!(pathtrace::limit_note(&scene, &limits).is_none(), "shared geometry must fit the declared binding budget");
     let packed = pathtrace::build(&scene);
     assert!(packed.tri_mat.len() <= mesh.indices.len() / 3 + 64, "prototype triangles must occur once");
+    assert!(packed.timing.bvh_seconds > 0.0 && packed.timing.assemble_seconds > 0.0, "{:?}", packed.timing);
     let color =
         engine.upload_rgba8(2, 2, &[255, 64, 32, 255, 32, 192, 64, 255, 64, 32, 255, 255, 255, 192, 64, 255], true);
     let normal = engine.upload_rgba8(1, 1, &[160, 112, 248, 255], false);

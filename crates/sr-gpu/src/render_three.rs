@@ -2157,6 +2157,15 @@ impl Renderer {
                 stats.subframes += fs.subframes;
                 stats.decode_wait += fs.decode_wait;
                 stats.vector_seconds += fs.vector_seconds;
+                stats.sim_rigid_seconds += fs.sim_rigid_seconds;
+                stats.sim_ocean_seconds += fs.sim_ocean_seconds;
+                stats.sim_smoke_seconds += fs.sim_smoke_seconds;
+                stats.sim_particles_seconds += fs.sim_particles_seconds;
+                stats.draw_prep_seconds += fs.draw_prep_seconds;
+                stats.volume_prep_seconds += fs.volume_prep_seconds;
+                stats.pt_assemble_seconds += fs.pt_assemble_seconds;
+                stats.pt_bvh_seconds += fs.pt_bvh_seconds;
+                stats.pt_pack_seconds += fs.pt_pack_seconds;
                 for m in fs.unsupported {
                     if !stats.unsupported.contains(&m) {
                         stats.unsupported.push(m);
@@ -2381,13 +2390,18 @@ impl Renderer {
                 continue;
             }
             if g.nodes[j].kind == "particles3D" {
+                let clock = std::time::Instant::now();
                 self.particle_draws3(plan, ctx, j, &cam, opacity.min(1.0), &mut draws);
+                plan.stats.draw_prep_seconds += clock.elapsed().as_secs_f64();
             } else if attrs(&g.nodes[j]).str("primitive").as_deref() == Some("volume") {
                 if volumes.len() >= 64 {
                     plan.stats.errors.push(format!("{}: a 3D pass supports at most 64 volume domains", n.id));
                     return;
                 }
-                match self.volume_draw(ctx, j, opacity.min(1.0)) {
+                let clock = std::time::Instant::now();
+                let drawn = self.volume_draw(ctx, j, opacity.min(1.0));
+                plan.stats.volume_prep_seconds += clock.elapsed().as_secs_f64();
+                match drawn {
                     Ok(Some(volume)) => {
                         let cap = self.gpu.device.limits().max_storage_buffer_binding_size;
                         let bytes =
@@ -2406,7 +2420,9 @@ impl Renderer {
                     Err(error) => plan.stats.errors.push(format!("{}: {error}", g.nodes[j].id)),
                 }
             } else {
+                let clock = std::time::Instant::now();
                 self.object_draws(plan, ctx, j, opacity.min(1.0), &mut draws, &mut splats);
+                plan.stats.draw_prep_seconds += clock.elapsed().as_secs_f64();
             }
         }
         if draws.is_empty()

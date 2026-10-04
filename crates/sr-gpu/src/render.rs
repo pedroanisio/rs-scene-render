@@ -94,6 +94,24 @@ pub struct RenderStats {
     pub triangles: u64,
     /// Gaussian splats drawn.
     pub splats: u64,
+    /// Seconds the rigid-body runtime spent advancing this frame (inclusive of its first-frame build).
+    pub sim_rigid_seconds: f64,
+    /// Seconds the ocean solver spent producing this frame's surface.
+    pub sim_ocean_seconds: f64,
+    /// Seconds the smoke (participating medium) solver spent advancing to this frame.
+    pub sim_smoke_seconds: f64,
+    /// Seconds 2D emitters and native 3D particles spent advancing to this frame.
+    pub sim_particles_seconds: f64,
+    /// CPU seconds building the `Draw3` lists of meshes and particles for 3D passes.
+    pub draw_prep_seconds: f64,
+    /// CPU seconds preparing volume draws (baking, grid upload) for 3D passes.
+    pub volume_prep_seconds: f64,
+    /// Path tracer CPU seconds assembling geometry, materials and lights (BVHs excluded).
+    pub pt_assemble_seconds: f64,
+    /// Path tracer CPU seconds building BVHs.
+    pub pt_bvh_seconds: f64,
+    /// Path tracer CPU seconds packing and uploading scene buffers.
+    pub pt_pack_seconds: f64,
     /// WCAG contrast ratio of burned-in text against the backdrop behind it (authored node or caption burn-in).
     pub contrast: Vec<(ContrastTarget, f64)>,
     /// Text layers drawn inside an isolated group (offscreen), where the inline probe cannot
@@ -931,7 +949,12 @@ impl Renderer {
     /// for that frame's work to complete.
     pub fn gpu_times(&self) -> Option<fx::GpuTimes> {
         let t = self.last_timer.as_ref()?;
-        Some(t.read(&self.gpu.device, self.gpu.queue.get_timestamp_period()))
+        let period = self.gpu.queue.get_timestamp_period();
+        let mut times = t.read(&self.gpu.device, period);
+        for pt in self.three.iter().flat_map(|e| &e.pt_timers) {
+            times.extend(pt.read(&self.gpu.device, period));
+        }
+        Some(times)
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -3129,6 +3152,10 @@ impl Renderer {
         });
         let scale = self.tier.scale;
         let mut plan = Plan::default();
+        plan.stats.sim_rigid_seconds = g.sim_seconds.rigid;
+        plan.stats.sim_ocean_seconds = g.sim_seconds.ocean;
+        plan.stats.sim_smoke_seconds = g.sim_seconds.smoke;
+        plan.stats.sim_particles_seconds = g.sim_seconds.particles;
         self.used.clear();
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];
         let mut roots = Vec::new();
@@ -3570,6 +3597,10 @@ impl Renderer {
         // GPU time: a begin/end pair per effect pass, and for the frame when the device can
         // write timestamps between passes
         self.last_timer = None;
+        if let Some(eng) = self.three.as_mut() {
+            eng.time_gpu = self.time_gpu && self.gpu.timestamps;
+            eng.pt_timers.clear();
+        }
         if self.time_gpu && self.gpu.timestamps {
             let passes: usize = plan
                 .jobs
@@ -3704,9 +3735,13 @@ impl Renderer {
                     Self::copy(&mut enc, &job.target, &pre.snapshot, [0, 0, job.target.size[0], job.target.size[1]]);
                     plan.stats.fx_passes += self.fx.record(&mut enc, &pre.passes);
                     if let (Some(three), Some(eng)) = (&pre.three, self.three.as_mut()) {
+                        eng.stats = Default::default();
                         if let Err(error) = eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view) {
                             plan.stats.errors.push(error);
                         }
+                        plan.stats.pt_assemble_seconds += eng.stats.pt_assemble_seconds;
+                        plan.stats.pt_bvh_seconds += eng.stats.pt_bvh_seconds;
+                        plan.stats.pt_pack_seconds += eng.stats.pt_pack_seconds;
                     }
                 }
                 let j = compositor_batch_end(job.cmds.len(), i, snapshot_at.filter(|_| job.root), |k| {

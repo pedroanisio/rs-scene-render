@@ -75,7 +75,9 @@ pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c s
         .map(|(_, c)| c)
 }
 
-pub use eval::{Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SkinWeights};
+pub use eval::{
+    Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SimSeconds, SkinWeights,
+};
 pub use program::{Analysis, EvalOptions, Program};
 pub use value::Value;
 

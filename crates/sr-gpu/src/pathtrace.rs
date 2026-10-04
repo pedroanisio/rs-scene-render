@@ -94,6 +94,26 @@ pub struct PtScene {
     pub lights: Vec<PtLight>,
     /// What the tracer leaves out, for the render notes.
     pub notes: Vec<String>,
+    /// CPU time `build` spent, for statistics.
+    pub timing: BuildTiming,
+}
+
+/// CPU seconds `build` spent, split so BVH construction shows apart from the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BuildTiming {
+    /// Everything but the BVHs: materials, textures, triangle expansion, prototypes, lights.
+    pub assemble_seconds: f64,
+    /// Construction of the top-level and prototype BVHs (`bvh`).
+    pub bvh_seconds: f64,
+}
+
+/// What recording the tracer's passes cost beyond the scene build.
+#[derive(Default)]
+pub struct RenderTiming {
+    /// CPU seconds packing and uploading the scene buffers before the first tile.
+    pub pack_seconds: f64,
+    /// Timestamps of the trace and denoise passes, when requested and supported.
+    pub gpu: Option<crate::fx::Timer>,
 }
 
 fn srgb_luma(c: [f32; 3]) -> f32 {
@@ -200,6 +220,8 @@ fn triangle(dr: &Draw3, t: &[u32; 3], model: Mat4, nmat: Mat4) -> Triangle {
 
 /// Builds world-space and shared prototype geometry, materials, lights and both BVH levels.
 pub fn build(scene: &Scene3) -> PtScene {
+    let started = std::time::Instant::now();
+    let mut bvh_seconds = 0.0;
     let mut s = PtScene::default();
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
     let mut norms: Vec<[Vec3; 3]> = Vec::new();
@@ -345,7 +367,9 @@ pub fn build(scene: &Scene3) -> PtScene {
         s.pixels.push(u32::MAX);
     }
     // Top-level BVH, then world triangles / splats / instance records in leaf order
+    let clock = std::time::Instant::now();
     let order = bvh(&tris, &mut s.nodes);
+    bvh_seconds += clock.elapsed().as_secs_f64();
     for (new_index, &t) in order.iter().enumerate() {
         if let Some(record) = instance_records.remove(&t) {
             s.instances.insert(new_index, record);
@@ -367,7 +391,9 @@ pub fn build(scene: &Scene3) -> PtScene {
     for prototype in &prototypes {
         let positions: Vec<_> = prototype.iter().map(|t| t.p).collect();
         let mut nodes = Vec::new();
+        let clock = std::time::Instant::now();
         let order = bvh(&positions, &mut nodes);
+        bvh_seconds += clock.elapsed().as_secs_f64();
         let root = s.nodes.len() as u32;
         let first = s.tri_mat.len() as u32;
         for node in &mut nodes {
@@ -449,6 +475,7 @@ pub fn build(scene: &Scene3) -> PtScene {
         s.nrm.extend([[0.0; 4]; 3]);
         s.tri_mat.push(0);
     }
+    s.timing = BuildTiming { assemble_seconds: (started.elapsed().as_secs_f64() - bvh_seconds).max(0.0), bvh_seconds };
     s
 }
 
@@ -899,11 +926,30 @@ pub fn render(
     inputs: &PtInputs,
     out: &wgpu::TextureView,
 ) {
+    render_timed(pt, d, enc, scene, data, opts, inputs, out, false);
+}
+
+/// [`render`], also reporting the CPU packing time and, with `time_gpu`, timestamp queries
+/// around each tile's trace and denoise passes (labels `pathtrace trace` / `pathtrace denoise`).
+#[allow(clippy::too_many_arguments)]
+pub fn render_timed(
+    pt: &PtGpu,
+    d: &wgpu::Device,
+    enc: &mut wgpu::CommandEncoder,
+    scene: &Scene3,
+    data: &PtScene,
+    opts: PathOpts,
+    inputs: &PtInputs,
+    out: &wgpu::TextureView,
+    time_gpu: bool,
+) -> RenderTiming {
+    let started = std::time::Instant::now();
     let size = [scene.size[0].max(1), scene.size[1].max(1)];
     let limits = d.limits();
     let budget = pt.tile_bytes.min(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
     let tiles = tiles(size, budget, opts.denoise);
     let pixels = tiles.iter().map(|t| u64::from(t.size[0]) * u64::from(t.size[1])).max().unwrap_or(1);
+    let mut timer = time_gpu.then(|| crate::fx::Timer::new(d, 2 * tiles.len() as u32));
     let storage = |label: &str, bytes: &[u8]| {
         d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -974,6 +1020,7 @@ pub fn render(
     // independently of frame area. Clear sums and guides before tracing each tile.
     let ping = opts.denoise.then(|| zeroed("pt-denoise-a", pixels * 16));
     let pong = opts.denoise.then(|| zeroed("pt-denoise-b", pixels * 16));
+    let pack_seconds = started.elapsed().as_secs_f64();
     for (tile_index, tile) in tiles.iter().enumerate() {
         enc.clear_buffer(&accum, 0, None);
         enc.clear_buffer(&guide, 0, None);
@@ -1056,8 +1103,15 @@ pub fn render(
         let g_read = group0(&stand_in);
         let groups = [tile.size[0].div_ceil(8), tile.size[1].div_ceil(8)];
         {
-            let mut cp = enc
-                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("pathtrace"), timestamp_writes: None });
+            let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace trace"));
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pathtrace"),
+                timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_of_pass_write_index: Some(a),
+                    end_of_pass_write_index: Some(a + 1),
+                }),
+            });
             cp.set_pipeline(pt.trace_pipeline(d, scene));
             for c in 0..chunks {
                 cp.set_bind_group(0, &g_trace, &[(c as u64 * SLOT) as u32]);
@@ -1066,9 +1120,14 @@ pub fn render(
         }
         let mut fin = &accum;
         if let (Some(ping), Some(pong)) = (&ping, &pong) {
+            let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace denoise"));
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("pathtrace-denoise"),
-                timestamp_writes: None,
+                timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_of_pass_write_index: Some(a),
+                    end_of_pass_write_index: Some(a + 1),
+                }),
             });
             cp.set_pipeline(&pt.atrous);
             for k in 0..PASSES {
@@ -1124,4 +1183,8 @@ pub fn render(
         rp.set_bind_group(1, &gfin, &[]);
         rp.draw(0..3, 0..1);
     }
+    if let Some(t) = &timer {
+        t.resolve(enc);
+    }
+    RenderTiming { pack_seconds, gpu: timer }
 }
