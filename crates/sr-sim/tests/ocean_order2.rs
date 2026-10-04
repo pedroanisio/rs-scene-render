@@ -343,3 +343,39 @@ fn second_order_scratch_counts_against_resident_memory() {
     assert!(make(Order::Second, second).is_ok());
     assert!(matches!(make(Order::Second, second - 1), Err(sr_sim::ocean::Error::Limit(_))));
 }
+
+/// Two cells in different row bands (and different rows) carry a velocity whose
+/// momentum flux overflows. Returns what `at` reports and whether the published
+/// frame survived.
+fn overflow_outcome(cells: [usize; 2], boundary: Boundary, order: Order) -> (String, bool) {
+    let [nx, nz] = cells;
+    let spec = Spec { cells, cell_size: 0.5, dt: 0.05, boundary, order, max_work: 1 << 40, ..Default::default() };
+    let mut initial = vec![Cell { depth: 1.0, velocity: [0.0; 2] }; nx * nz];
+    initial[3 * nx + 7].velocity = [1e155, 0.0];
+    initial[(nz - 4) * nx + nx / 2].velocity = [0.0, -1e155];
+    let mut ocean = Ocean::new(spec, vec![1.0; nx * nz], initial, vec![]).unwrap();
+    let before = ocean.frame().clone();
+    let error = ocean.at(0.2).unwrap_err().to_string();
+    let intact = ocean.frame() == &before && ocean.at(0.0).unwrap() == &before;
+    (error, intact)
+}
+
+/// The same failure reaches the caller, and leaves the published frame and the
+/// canonical state untouched, on the serial path (10,000 cells), and on the
+/// parallel path (19,200 cells) with 1, 2 and 8 threads, in both orders and for
+/// every boundary. The two failing cells sit in different bands of rows, so
+/// several tasks fail at once.
+#[test]
+fn numerical_failure_in_a_parallel_grid_reports_the_same_error_and_keeps_the_state() {
+    let expected = "ocean numerical failure: flux overflow".to_string();
+    for order in ORDERS {
+        for boundary in [Boundary::Closed, Boundary::Open, Boundary::Periodic] {
+            assert_eq!(overflow_outcome([100, 100], boundary, order), (expected.clone(), true), "serial");
+            for threads in [1, 2, 8] {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+                let outcome = pool.install(|| overflow_outcome([160, 120], boundary, order));
+                assert_eq!(outcome, (expected.clone(), true), "{threads} threads, {order:?}, {boundary:?}");
+            }
+        }
+    }
+}
