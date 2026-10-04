@@ -2407,7 +2407,27 @@ impl Builder {
                     )),
                 }
             }
+            // A water impulse that comes from a body names it in the same lexical scope.
+            let mut entries: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "waterImpulse")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        entries.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("water impulse source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
             if parent.is_some()
+                || !entries.is_empty()
                 || !constraints.is_empty()
                 || !colliders.is_empty()
                 || !sources.is_empty()
@@ -2435,6 +2455,11 @@ impl Builder {
                                 input.set_attr("crater", owner).expect("resolved crater owner");
                             }
                         });
+                    }
+                    if child.element_name() == "waterImpulse" {
+                        if let Some(body) = attr_str(child, "source").and_then(|id| entries.get(&id)) {
+                            child.set_attr("source", body).expect("resolved water impulse source");
+                        }
                     }
                     if child.element_name() == "burst" {
                         if let Some(owner) = attr_str(child, "crater").and_then(|id| cause_owners.get(&id)) {

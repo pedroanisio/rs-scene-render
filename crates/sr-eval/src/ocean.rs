@@ -8,6 +8,7 @@ use sr_model::element::children;
 use sr_sim::ocean::{self as sim, Cell, Impulse, ImpulseKind, Spec};
 use std::{collections::HashMap, sync::Arc};
 mod bathymetry;
+mod cavity;
 mod colliders;
 mod surface;
 mod whitewater;
@@ -31,6 +32,8 @@ struct Runtime {
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
+    /// Cavities of bodies that enter the water.
+    entries: Vec<cavity::Entry>,
 }
 #[derive(Default)]
 pub(crate) struct Sims {
@@ -86,6 +89,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     for c in children(e) {
         let v = |k, d| num(c, k, d);
         match c.element_name() {
+            "waterImpulse" if text(c, "source").is_some() => {}
             "waterImpulse" => impulses.push(Impulse {
                 time: v("time", 0.),
                 center: [v("x", 0.), v("z", 0.)],
@@ -122,6 +126,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         spec.body_owners = built.body_count();
         Some(built)
     };
+    let entries = cavity::read(e, &collider_ids)?;
     let solver = sim::Ocean::new(spec.clone(), bed.clone(), cells, impulses).map_err(|e| e.to_string())?;
     let whitewater = e
         .children
@@ -160,6 +165,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         surface_bytes: bytes("surfaceMemoryMiB", 128.)?,
         last: None,
         colliders,
+        entries,
     })
 }
 /// The solver's frame at `time`, over the driven bed when there is a driver.
@@ -219,7 +225,8 @@ impl Sims {
                 if let Some(last) = rt.last.as_ref().filter(|s| s.frame.time == local_time) {
                     return Ok(last.clone());
                 }
-                let Runtime { solver, spec, bed, waves, whitewater, surface_bytes, last, colliders } = rt;
+                let Runtime { solver, spec, bed, waves, whitewater, surface_bytes, last, colliders, entries } = rt;
+                let ppm = p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get());
                 // The bed is a function of ocean-local time, read from the scene at every
                 // solver step; a failure in it is reported as the solver's.
                 let failure = std::cell::RefCell::new(None::<String>);
@@ -262,7 +269,16 @@ impl Sims {
                     colliders.sample(spec, &id, &mut scene_at, time, bed, forcing).map_err(|message| {
                         *failure.borrow_mut() = Some(message);
                         sim::Error::Invalid("ocean bed sampling failed")
-                    })
+                    })?;
+                    for entry in entries.iter_mut() {
+                        let events =
+                            entry.events(colliders, spec, &id, &mut scene_at, time, ppm).map_err(|message| {
+                                *failure.borrow_mut() = Some(message);
+                                sim::Error::Invalid("ocean water entry failed")
+                            })?;
+                        forcing.events.extend(events);
+                    }
+                    Ok(())
                 };
                 let moving = spec.moving_bed;
                 let reported = |error: sim::Error| failure.borrow_mut().take().unwrap_or_else(|| error.to_string());

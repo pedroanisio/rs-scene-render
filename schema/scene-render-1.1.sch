@@ -99,6 +99,11 @@
       <sch:assert id="OCN8" test="not(@bodyCoupling) or @bodyCoupling='none' or @colliders">ocean bodyCoupling needs colliders that list the bodies.</sch:assert>
       <sch:assert id="OCN9" test="not(@bodyDrag) or (@bodyCoupling and @bodyCoupling!='none')">ocean bodyDrag belongs to an ocean with bodyCoupling.</sch:assert>
     </sch:rule>
+    <sch:rule context="ocean/waterImpulse">
+      <sch:assert id="OCN10" test="not(@source and (@time or @x or @z or @radius or @amplitude or @velocityX or @velocityZ or @type))">a water impulse from a body derives its instant, place, size and shape, so time, x, z, radius, amplitude, velocityX, velocityZ and type may not be given.</sch:assert>
+      <sch:assert id="OCN11" test="not(@source) or (contains(concat(' ',normalize-space(../@colliders),' '),concat(' ',@source,' ')) and /scene//object3D[@id=current()/@source and not(crater)]/rigidBody[not(@type) or @type='dynamic'])">the source of a water impulse must be a dynamic rigid body, without a crater, that the ocean lists in colliders.</sch:assert>
+      <sch:assert id="OCN12" test="not(@source) or count(../waterImpulse[@source=current()/@source])=1">a body makes one cavity: at most one water impulse names it.</sch:assert>
+    </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-particles">
     <sch:rule context="particles3D">

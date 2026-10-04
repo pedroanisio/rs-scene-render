@@ -2170,6 +2170,25 @@
     </xs:attribute>
   </xs:complexType>
   <xs:complexType name="waterImpulseType">
+    <xs:annotation><xs:documentation>
+      An impulse at an instant (`time`, `x`, `z`, `radius`, `amplitude`, `velocityX`, `velocityZ`, `type`), or the cavity
+      that a body makes of the water it enters: `source` names a dynamic rigidBody object that the ocean lists in
+      `colliders`, and nothing is authored about when, where or how big (none of the others may be given, and a body has
+      at most one). The entry is the first time the lowest point of the body crosses the ocean's rest level (`waterLevel`)
+      downward, found step by step from the body's poses, with the body moving down at that instant; a body that starts
+      in the water, or never reaches it, makes no cavity. The cavity is the transient crater of the scaling law of
+      Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
+      normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
+      law's own radius and volume give the disc that is emptied, the water going to the ring around it
+      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). A disc smaller than four cells
+      is widened to four, keeping its volume. The cavity is limited by the water layer: it takes at most 90% of the
+      water of its disc, and of any column in it, so it never exposes the bed and is never an error for lack of water; a
+      body that reaches the bed excavates the bed's crater (`crater@source`) instead. The body goes on raising the
+      columns it occupies, as before; the cavity is displacement in addition. Hydrostatic: no jet, no crown of
+      spray, no air; the law is that of a crater in water, not a validated model of water entry. The event is made at
+      the first entry only, for the owner's pose at that instant, and an entry outside the ocean makes nothing.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="source" type="xs:IDREF"/>
     <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="x" type="xs:double" default="0"/>
     <xs:attribute name="z" type="xs:double" default="0"/>

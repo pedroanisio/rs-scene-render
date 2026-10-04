@@ -60,6 +60,8 @@ PYRO_CRATER = CRATER_IMPACT.replace('</composition>', '<object3D id="cloud" prim
 OCEAN_BUOYANCY = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="float" primitive="sphere" radius="0.5" y="-1"><rigidBody shape="sphere" mass="200"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="4" colliders="float" bodyCoupling="buoyancy" bodyDrag="1.5"/></composition><physics pixelsPerMeter="1"/></scene>\n'
 EJECTA_CRATER = CRATER_IMPACT.replace('</composition>', '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit" count="200"/></particles3D></composition>')
 
+OCEAN_ENTRY = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-4"><rigidBody mass="5"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" colliders="rock"><waterImpulse source="rock"/></ocean></composition><physics pixelsPerMeter="1"/></scene>\n'
+
 def sub(old, new, count=1):
     def f(t):
         assert old in t, f"mutation anchor not found: {old!r}"
@@ -130,6 +132,10 @@ CASES = [
     ("p3d8-authored", ["P3D8"], lambda _: EJECTA_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
     ("p3d9-orphan", ["P3D9"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst time="0" count="200" angle="30"/>')),
     ("p3d10-angle", ["P3D10"], lambda _: EJECTA_CRATER.replace('count="200"/>', 'count="200" angle="80"/>')),
+    ("ocn10-derived", ["OCN10"], lambda _: OCEAN_ENTRY.replace('<waterImpulse source="rock"/>', '<waterImpulse source="rock" radius="2"/>')),
+    ("ocn11-unlisted", ["OCN11"], lambda _: OCEAN_ENTRY.replace(' colliders="rock"', '')),
+    ("ocn11-static", ["OCN11"], lambda _: OCEAN_ENTRY.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
+    ("ocn12-twice", ["OCN12"], lambda _: OCEAN_ENTRY.replace('<waterImpulse source="rock"/>', '<waterImpulse source="rock"/><waterImpulse source="rock"/>')),
     ("p3d4", ["P3D4"], lambda _: PARTICLES3D.replace('</particles3D>', '<animate property="lifetime"><key time="0" value="2"/></animate></particles3D>')),
     ("p3d5", ["P3D5"], lambda _: PARTICLES3D.replace('colliders="floor"', 'colliders="dust"')),
     ("p3d6", ["P3D6"], lambda _: PARTICLES3D.replace('depth="64"/>', 'depth="64"><animate property="width"><key time="0" value="64"/><key time="1" value="32"/></animate></object3D>')),
@@ -368,6 +374,7 @@ VALID = {
     "crater-impact": CRATER_IMPACT,
     "pyro-crater": PYRO_CRATER,
     "ejecta-crater": EJECTA_CRATER,
+    "ocean-entry": OCEAN_ENTRY,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,

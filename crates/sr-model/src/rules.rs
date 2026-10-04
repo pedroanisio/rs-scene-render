@@ -887,6 +887,43 @@ impl<'a> Eval<'a> {
                         .into()
                 });
             }
+            "waterImpulse" if n.parent_element().is_some_and(|p| is(p, "ocean")) => {
+                let source = a("source");
+                self.check(
+                    source.is_none()
+                        || !["time", "x", "z", "radius", "amplitude", "velocityX", "velocityZ", "type"]
+                            .iter()
+                            .any(|k| has(k)),
+                    n,
+                    "OCN10",
+                    || "a water impulse from a body derives its instant, place, size and shape, so time, x, z, radius, amplitude, velocityX, velocityZ and type may not be given.".into(),
+                );
+                let ocean = n.parent_element();
+                self.check(
+                    source.is_none_or(|id| {
+                        ocean.and_then(|o| o.attribute("colliders")).is_some_and(|l| l.split_whitespace().any(|c| c == id))
+                            && n.document().descendants().any(|o| {
+                                is(o, "object3D")
+                                    && o.attribute("id") == Some(id)
+                                    && !kids(o, "crater").any(|_| true)
+                                    && kids(o, "rigidBody").any(|b| matches!(b.attribute("type"), None | Some("dynamic")))
+                            })
+                    }),
+                    n,
+                    "OCN11",
+                    || "the source of a water impulse must be a dynamic rigid body, without a crater, that the ocean lists in colliders.".into(),
+                );
+                self.check(
+                    source.is_none_or(|id| {
+                        ocean.is_some_and(|o| {
+                            kids(o, "waterImpulse").filter(|w| w.attribute("source") == Some(id)).count() == 1
+                        })
+                    }),
+                    n,
+                    "OCN12",
+                    || "a body makes one cavity: at most one water impulse names it.".into(),
+                );
+            }
             "pyroSource" | "pyroImpulse" => {
                 let mesh = if a("shape") == Some("mesh") {
                     has("mesh") && contains(&self.sets.mesh_assets, a("mesh"))

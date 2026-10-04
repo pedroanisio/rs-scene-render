@@ -903,6 +903,52 @@ Its local-time and conservation semantics are specified below. Negative amplitud
 is permitted only for displacement. Wave and impulse children are static owned
 data, not independently animated scene nodes.
 
+Water entry. A `<waterImpulse source="body"/>` is the cavity that a body makes of the water it
+enters, and nothing is authored about when, where or how big: `time`, `x`, `z`, `radius`,
+`amplitude`, `velocityX`, `velocityZ` and `type` may not be given (OCN10), the body must be a
+dynamic rigid body without a crater that the ocean lists in `colliders` (OCN11) and at most one
+impulse names it (OCN12). Without `source` nothing changes, so a scene with bodies in
+`colliders` stays as it was until it opts in. The entry is the first canonical step in which the
+lowest point of the body goes from above the rest level (`waterLevel`) to at or below it while its
+centre moves down, found from the body's poses at the two ends of each step, with the instant
+placed by linear interpolation of the lowest point inside the step; a body that starts in the water,
+that never reaches it or that enters outside the ocean makes nothing, and a body that goes down
+through the level again makes no second cavity. The scaling law is the transient crater of
+Holsapple (1993) in the material `water` (the engine's `cratering` law, whose constants are
+those of the calculator note), with the body's mass and density (its mass over the volume of its
+closed surface), the speed of its centre downward over the step (the component normal to the
+surface) and the ocean's gravity, in metres through `physics@pixelsPerMeter`. The law gives the volume `V` and
+the radius `R` of the cavity. The solver's `cavity` impulse is applied at the instant of entry, centred
+under the body's centre: it empties a central disc of radius `R` (the central kernel
+`(1 - 4 (r/a)^2)^2`, with the impulse radius `a = 2R`, whose volume per unit of peak depth removed is
+`pi a^2 / 12`, so the peak removal is `12 V / (pi a^2)`) and puts the water into the ring from `R` to `2R`
+(`sin^2` weight), conserving all of it. A disc that spans fewer than four cells across
+(`a` under four cells) is widened to `a = 4` cells, keeping `V`.
+
+How the limit by the water layer is applied. The impulse removes from each column in proportion to
+the column's water, and takes the wanted volume or `0.9` of the water the central disc holds,
+whichever is less: a column therefore loses at most 90% of its depth and the cavity never exposes the
+bed, and a layer too shallow for the wish gives a shallower cavity, never an error (a negative
+`displace` is an error in that case; this is a separate kind). A body that reaches the bed
+excavates the bed's crater (`crater@source`) instead. The driver gives these events to the solver
+for the canonical step they belong to (`Forcing::events`, the impulses whose instant lies in
+`(T - dt, T]` at the sample that ends the step at `T`), a function of the time and the scene alone, and the
+solver applies them among the substeps in order of time after authored impulses of the same instant,
+so a replay, with or without checkpoints, gives the same water (tested bit for bit against the same
+impulse authored statically). The cavity is a one-way event; the body goes on raising the columns it
+occupies exactly as before, the cavity being displacement in addition, and the water does not act back on
+the body through it.
+
+What it does and does not give. In tests on a 128 x 128 ocean of 2-unit cells, with 2000 kg, 2 m bodies
+entering at 10, 20 and 30 m/s, the far wave (20 to 40 m from the entry) that the cavity alone adds, measured as the
+difference between the water with and without it, is 0.0033, 0.0071 and 0.0170 and grows with the mass
+too (0.0024, 0.0071 and 0.0207 for 500, 2000 and 8000 kg), as the law's volume does. The combined far wave, with the
+occupancy of the body, is not monotone in these runs (0.0326, 0.0390 and 0.0276 at 10, 20 and 30 m/s in 100 m of
+water): the two sources have opposite signs near the entry point and partly cancel, so the cavity does not by
+itself give a wave that grows with the energy of the body; that wants the horizontal reaction on the body, which is
+not here. The model is hydrostatic: no jet, no crown of spray, no air, and the cavity forms at once instead of over the law's
+formation time. The law is that of a crater in water, not a validated model of water entry.
+
 Bathymetry images map the full raster to the domain, using bilinear samples at
 cell centres and clamped edges. Red encoding reads normalized numeric red values
 without color-space or transfer conversion. Packed RGB8 encodings decode upward
@@ -2255,6 +2301,7 @@ Also includes `pyroShape`, inventoried below.
 | `velocityX` | xs:double | Default `0` |
 | `velocityZ` | xs:double | Default `0` |
 | `type` | xs:string; enumeration=displace, enumeration=add-water | Default `displace` |
+| `source` | xs:IDREF | Optional; a body that enters the water (OCN10 to OCN12); excludes the attributes above |
 
 ### `whitewaterType`
 

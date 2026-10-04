@@ -11,7 +11,7 @@ mod flux;
 mod impulse;
 pub mod waves;
 pub mod whitewater;
-pub use impulse::{Impulse, ImpulseKind};
+pub use impulse::{Impulse, ImpulseKind, CAVITY_SHARE};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -137,6 +137,12 @@ pub struct Forcing {
     /// where `occupancy` is zero; the lowest index wins a tie). The vector arrives with `nx*nz`
     /// elements. Empty otherwise.
     pub owner: Vec<u32>,
+    /// Water impulses the driver asks for, in the canonical step that ends at the sample's time
+    /// `T`: those whose `time` lies in `(T - dt, T]`, in any order (they are applied in order of
+    /// time, among the substeps, after authored impulses of the same instant). Like the bed, they
+    /// must be a function of the time and of scene data that does not change, since a replay asks
+    /// again. Nothing may be given at the first sample, which ends no step.
+    pub events: Vec<Impulse>,
     /// With `Spec::body_owners`, set together with `exchange`: what each body that gave the water
     /// momentum in step `k`, or stands in it at the end of the step, gets of the water, by body
     /// index. Empty on every other sample.
@@ -406,6 +412,7 @@ impl Ocean {
     ) -> Result<(), Error> {
         out.exchange = exchange;
         out.bodies = bodies;
+        out.events.clear();
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
         let wanted = if self.spec.bodies { n } else { 0 };
@@ -422,9 +429,18 @@ impl Ocean {
             || out.velocity.iter().flatten().any(|v| !v.is_finite())
             || out.owner.len() != tagged
             || out.owner.iter().zip(&out.occupancy).any(|(o, t)| *t > 0.0 && *o as usize >= self.spec.body_owners)
+            || out.events.len() > 16_384
         {
             return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
         }
+        let from = time - self.spec.dt;
+        for event in &out.events {
+            event.validate()?;
+            if !(event.time > from && event.time <= time) || time < self.spec.dt {
+                return Err(Error::Invalid("driver event outside the step that ends at the sample"));
+            }
+        }
+        out.events.sort_by(|a, b| a.time.total_cmp(&b.time));
         Ok(())
     }
 
@@ -609,16 +625,38 @@ fn advance(
             }
         }));
     }
+    // what the driver asked for in the step that ends at `to`, in order of time
+    let asked: &[Impulse] = match bed {
+        Bed::Moving { to, .. } => &to.events,
+        Bed::Fixed(_) => &[],
+    };
+    let mut next_asked = 0;
     loop {
-        while let Some(event) = impulses.get(state.next_impulse).filter(|i| i.time <= state.time) {
+        // authored impulses first when both are due, then the driver's, each in order of time
+        loop {
+            let authored = impulses.get(state.next_impulse).filter(|i| i.time <= state.time);
+            let driven = asked.get(next_asked).filter(|i| i.time <= state.time);
+            let (event, authored_one) = match (authored, driven) {
+                (Some(a), Some(d)) if d.time < a.time => (d, false),
+                (Some(a), _) => (a, true),
+                (None, Some(d)) => (d, false),
+                (None, None) => break,
+            };
             work.take(state.q.len().saturating_mul(8))?;
             event.apply(spec, &mut state.q)?;
-            state.next_impulse += 1;
+            if authored_one {
+                state.next_impulse += 1;
+            } else {
+                next_asked += 1;
+            }
         }
         if state.time >= target {
             break;
         }
-        let end = impulses.get(state.next_impulse).map_or(target, |i| i.time.min(target));
+        let end = impulses
+            .get(state.next_impulse)
+            .map_or(target, |i| i.time.min(target))
+            .min(asked.get(next_asked).map_or(target, |i| i.time));
         work.take(state.q.len().saturating_mul(step_work(spec)))?;
         // Maxima are exact and associative, so the reduction order is irrelevant.
         let bound = |mut speed: [f64; 2], q: &Q| {
