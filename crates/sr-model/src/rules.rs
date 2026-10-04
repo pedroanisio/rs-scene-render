@@ -216,6 +216,9 @@ struct Sets<'a> {
     sequence_colliders: HashSet<&'a str>,
     volume_assets: HashSet<&'a str>,
     pyro_colliders: HashSet<&'a str>,
+    /// Objects an ocean can use as a deformable bed (a crater on a plane or a mesh)
+    /// or as a closed body (any other supported primitive, without a crater).
+    ocean_colliders: HashSet<&'a str>,
     dynamic_pyro_geometry: HashSet<&'a str>,
     geo_assets: Vec<&'a str>,
     image_assets: HashSet<&'a str>,
@@ -260,6 +263,30 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     let Some(scene) = scene else { return s };
     for object in scene.descendants().filter(|n| is(*n, "object3D")) {
         let Some(id) = object.attribute("id") else { continue };
+        let crater = kids(object, "crater").next().is_some();
+        let primitive = object.attribute("primitive");
+        if if crater {
+            matches!(primitive, Some("plane" | "mesh"))
+        } else {
+            matches!(
+                primitive,
+                Some(
+                    "box"
+                        | "sphere"
+                        | "globe"
+                        | "cylinder"
+                        | "cone"
+                        | "capsule"
+                        | "torus"
+                        | "mesh"
+                        | "text"
+                        | "extrude"
+                        | "clay"
+                )
+            )
+        } {
+            s.ocean_colliders.insert(id);
+        }
         if matches!(
             object.attribute("primitive"),
             Some(
@@ -679,6 +706,15 @@ impl<'a> Eval<'a> {
                 );
                 let sources: Vec<_> =
                     n.children().filter(|c| c.is_element() && c.tag_name().name() == "whitewater").collect();
+                if let Some(list) = a("colliders") {
+                    let ids: Vec<_> = list.split_whitespace().collect();
+                    let unique: HashSet<_> = ids.iter().copied().collect();
+                    let valid = ids.len() <= 4096
+                        && ids.len() == unique.len()
+                        && ids.iter().all(|id| self.sets.ocean_colliders.contains(id));
+                    self.check(valid, n, "OCN6", || "ocean colliders must name at most 4096 distinct objects: a plane or mesh with a crater, or a closed body without one.".into());
+                    self.check(!ids.iter().any(|id| self.sets.dynamic_pyro_geometry.contains(id)), n, "OCN7", || "ocean collider geometry is static; animate its position, rotation or scale instead of shape parameters.".into());
+                }
                 self.check(
                     sources.len() <= 1
                         && sources.iter().all(|s| {

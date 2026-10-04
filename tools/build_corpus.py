@@ -43,6 +43,8 @@ PARTICLES3D = '<scene version="1.3"><project width="64" height="64" fps="24" dur
 
 OCEAN = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2"><waterImpulse time="0.3" radius="2" amplitude="0.1"/><wave wavelength="4" amplitude="0.1" phase="0"/></ocean></composition></scene>\n'
 
+OCEAN_COUPLED = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="seabed" primitive="plane" width="40" height="40" segments="8" y="2" rotationX="-90"><crater radius="3" depth="1" rimHeight="0.2" rimWidth="1" start="0.5" end="1"/></object3D><object3D id="rock" primitive="sphere" radius="1" y="-3"/><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" colliders="seabed rock"/></composition></scene>\n'
+
 GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
 
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
@@ -97,6 +99,8 @@ CASES = [
     ("ocn5", ["OCN5"], lambda _: OCEAN.replace('</ocean>', '<whitewater start="1" end="0.5"/></ocean>')),
     ("pyro-advection", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro advection="rk4" ')),
     ("pyro-solver", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro solver="cg" ')),
+    ("ocn6", ["OCN6"], lambda _: OCEAN_COUPLED.replace('colliders="seabed rock"', 'colliders="seabed rock seabed"')),
+    ("ocn7", ["OCN7"], lambda _: OCEAN_COUPLED.replace('<object3D id="rock" primitive="sphere" radius="1" y="-3"/>', '<object3D id="rock" primitive="sphere" radius="1" y="-3"><animate property="radius"><key time="0" value="1"/><key time="1" value="2"/></animate></object3D>')),
     ("ocean-order", ["S06"], lambda _: OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="3"')),
     ("p3d1", ["P3D1"], lambda _: PARTICLES3D.replace('version="1.3"', 'version="1.2"')),
     ("p3d2", ["P3D2"], lambda _: PARTICLES3D.replace('rate="0"', 'rate="0" emitterShape="mesh"')),
@@ -339,6 +343,7 @@ VALID = {
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,
+    "ocean-colliders": OCEAN_COUPLED,
     "ocean-order2": OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="2"'),
     "ocean": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3"/></ocean>'),
     "pyro": PYRO,

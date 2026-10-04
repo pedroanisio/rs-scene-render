@@ -252,11 +252,13 @@ fn a_body_of_the_rigid_world_moves_the_ocean_like_the_same_animated_body() {
 }
 
 #[test]
-fn colliders_that_are_neither_bed_nor_body_are_errors() {
+fn colliders_that_are_neither_bed_nor_body_are_rejected_when_the_scene_loads() {
     let floor = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
       <object3D id="floor" primitive="plane" width="100" height="100" y="12" rotationX="-90"/>
       <ocean id="sea" width="64" depth="64" cellSize="2" bottomDepth="12" colliders="floor"/>
     </composition></scene>"#;
-    let frame = evaluator(floor).evaluate(0.5);
-    assert!(frame.problems.iter().any(|p| p.contains("plane without a crater")), "{:?}", frame.problems);
+    let Err(error) = sr_model::load_str(floor, &sr_model::LoadOptions::without_assets()) else {
+        panic!("a plane without a crater was accepted");
+    };
+    assert!(format!("{error:?}").contains("OCN6"), "{error:?}");
 }
