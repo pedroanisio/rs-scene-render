@@ -420,6 +420,9 @@ pub struct State {
     solid_velocity_high: Vec<[f64; 3]>,
 }
 
+/// Brick coordinates and the 8x8x8 samples of a brick that holds something other than the background.
+type ExportedBrick = ([i32; 3], Box<[f32; 512]>);
+
 impl State {
     /// Resident state storage and checkpoint-map bookkeeping. Step scratch is
     /// accounted separately by `Spec::max_bytes`.
@@ -547,14 +550,16 @@ impl State {
     }
 
     /// One exported channel: 0 density, 1 temperature, 2..=4 velocity components.
-    /// A cell equal to the background is not stored: a new brick starts as
-    /// background and an absent brick reads as background, so setting it is a no-op.
+    /// Each 8x8x8 brick is filled from the state in parallel and stored whole; a
+    /// brick whose samples all equal the background is not stored, and voxels
+    /// outside the domain keep the background.
     fn export_channel(&self, channel: usize, transform: Transform, bricks: usize) -> Result<SparseGrid, Error> {
         let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
         let mut grid = SparseGrid::new(transform, bg, bricks)?;
+        let per_axis = self.cells.map(|n| n.div_ceil(8));
         let field = self.field();
-        for k in 0..self.density.len() {
-            let value = match channel {
+        let sample = |k: usize| -> f64 {
+            match channel {
                 0 => self.density[k],
                 1 => self.temperature[k],
                 _ => {
@@ -566,13 +571,33 @@ impl State {
                         0.0
                     }
                 }
-            } as f32;
-            if !value.is_finite() {
-                return Err(Error::Invalid("exported field exceeds f32 representation"));
             }
-            if value != bg {
-                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
-            }
+        };
+        let filled: Vec<Option<ExportedBrick>> = (0..bricks)
+            .into_par_iter()
+            .with_min_len(4)
+            .map(|b| -> Result<_, Error> {
+                let brick = coords(b, per_axis);
+                let mut values = Box::new([bg; 512]);
+                let mut stored = false;
+                for z in 0..8usize.min(self.cells[2] - brick[2] * 8) {
+                    for y in 0..8usize.min(self.cells[1] - brick[1] * 8) {
+                        for x in 0..8usize.min(self.cells[0] - brick[0] * 8) {
+                            let k = index([brick[0] * 8 + x, brick[1] * 8 + y, brick[2] * 8 + z], self.cells);
+                            let value = sample(k) as f32;
+                            if !value.is_finite() {
+                                return Err(Error::Invalid("exported field exceeds f32 representation"));
+                            }
+                            values[x + 8 * y + 64 * z] = value;
+                            stored |= value != bg;
+                        }
+                    }
+                }
+                Ok(stored.then(|| (brick.map(|v| v as i32), values)))
+            })
+            .collect::<Result<_, Error>>()?;
+        for (key, values) in filled.into_iter().flatten() {
+            grid.set_brick(key, &values)?;
         }
         Ok(grid)
     }

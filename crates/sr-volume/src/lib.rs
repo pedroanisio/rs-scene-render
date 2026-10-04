@@ -174,6 +174,27 @@ impl SparseGrid {
         Ok(())
     }
 
+    /// Stores a whole brick at once, replacing any brick already at `key` (brick
+    /// coordinates, as yielded by [`SparseGrid::bricks`]). The result equals setting
+    /// each of the 512 voxels in turn: a brick whose samples all equal the background
+    /// is not stored (and removes an existing one). Unlike a run of `set` calls this is
+    /// atomic: on an error the grid is unchanged.
+    pub fn set_brick(&mut self, key: [i32; 3], values: &[f32; BRICK_VOXELS]) -> Result<(), Error> {
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Invalid("voxel values must be finite"));
+        }
+        let active = values.iter().filter(|&&v| v != self.background).count();
+        if active == 0 {
+            self.bricks.remove(&key);
+            return Ok(());
+        }
+        if !self.bricks.contains_key(&key) && self.bricks.len() >= self.max_bricks {
+            return Err(Error::Limit("brick count"));
+        }
+        self.bricks.insert(key, Brick { values: Box::new(*values), active: active as u16 });
+        Ok(())
+    }
+
     /// Trilinear interpolation at continuous index coordinates. Nonfinite/out-of-range
     /// positions sample the background. Interpolation across absent bricks uses background.
     pub fn sample_index(&self, p: [f64; 3]) -> f32 {
