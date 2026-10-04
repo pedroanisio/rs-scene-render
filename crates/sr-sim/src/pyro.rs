@@ -25,6 +25,8 @@ const HEAVY: usize = 256;
 const LIGHT: usize = 8192;
 
 #[cfg(test)]
+mod atomicity;
+#[cfg(test)]
 mod determinism;
 
 #[derive(Debug, thiserror::Error)]
@@ -423,14 +425,43 @@ impl State {
         self.velocity_grid(self.grid(p))
     }
 
-    fn velocity_grid(&self, p: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|axis| self.velocity_axis(p, axis))
+    fn field(&self) -> Field<'_> {
+        Field {
+            cells: self.cells,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: [&self.velocity[0], &self.velocity[1], &self.velocity[2]],
+            solid: &self.solid,
+        }
     }
 
-    /// One component of `velocity_grid`, bit-identical to indexing its result.
-    fn velocity_axis(&self, p: [f64; 3], axis: usize) -> f64 {
-        let q = std::array::from_fn(|a| p[a] - if a == axis { 0.0 } else { 0.5 });
-        sample(&self.velocity[axis], face_dims(self.cells, axis), q, self.boundary, 0.0)
+    fn velocity_grid(&self, p: [f64; 3]) -> [f64; 3] {
+        self.field().velocity_grid(p)
+    }
+
+    /// Working state of a step: the evolving fields copied from `self`, a fresh
+    /// (empty) solid mask and zero solid velocities. The zero arrays are
+    /// allocated lazily, so only pages near colliders are ever touched.
+    fn working_copy(&self) -> State {
+        let copy = |src: &[f64]| {
+            let mut dst = vec![0.0; src.len()];
+            dst.par_chunks_mut(LIGHT).zip(src.par_chunks(LIGHT)).for_each(|(d, s)| d.copy_from_slice(s));
+            dst
+        };
+        let count = self.density.len();
+        State {
+            cells: self.cells,
+            origin: self.origin,
+            h: self.h,
+            ambient: self.ambient,
+            boundary: self.boundary,
+            density: copy(&self.density),
+            temperature: copy(&self.temperature),
+            velocity: std::array::from_fn(|a| copy(&self.velocity[a])),
+            solid: vec![false; count],
+            solid_velocity_low: vec![[0.0; 3]; count],
+            solid_velocity_high: vec![[0.0; 3]; count],
+        }
     }
 
     /// Divergence in 1/second; an out-of-domain cell returns zero.
@@ -446,6 +477,63 @@ impl State {
                 (self.velocity[a][index(next, dims)] - self.velocity[a][index(p, dims)]) / self.h
             })
             .sum()
+    }
+
+    /// Export all five scalar channels in scene units. The bound includes the
+    /// worst-case brick storage before allocating any grid; no field is dropped.
+    pub fn volume(&self, max_bytes: usize) -> Result<Volume, Error> {
+        let bricks = self.cells.iter().map(|n| n.div_ceil(8)).product::<usize>();
+        let needed = bricks
+            .checked_mul(5 * (512 * 4 + 128))
+            .and_then(|v| v.checked_add(4096))
+            .ok_or(Error::Limit("volume export size overflow"))?;
+        if needed > max_bytes {
+            return Err(Error::Limit("volume export memory budget"));
+        }
+        let h = self.h;
+        let o = self.origin.map(|v| v + h * 0.5);
+        let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
+        let mut volume = Volume::new();
+        for (channel, name) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().enumerate() {
+            let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
+            let mut grid = SparseGrid::new(transform, bg, bricks)?;
+            for k in 0..self.density.len() {
+                let value = match channel {
+                    0 => self.density[k],
+                    1 => self.temperature[k],
+                    _ => self.velocity_at(self.cell_world(k))[channel - 2],
+                } as f32;
+                if !value.is_finite() {
+                    return Err(Error::Invalid("exported field exceeds f32 representation"));
+                }
+                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
+            }
+            volume.insert(name, grid)?;
+        }
+        Ok(volume)
+    }
+}
+
+/// Read-only view of the fields semi-Lagrangian tracing needs, so advection can
+/// sample the pre-advection velocity while the new fields are written elsewhere.
+#[derive(Clone, Copy)]
+struct Field<'a> {
+    cells: [usize; 3],
+    h: f64,
+    boundary: Boundary,
+    velocity: [&'a [f64]; 3],
+    solid: &'a [bool],
+}
+
+impl Field<'_> {
+    fn velocity_grid(&self, p: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|axis| self.velocity_axis(p, axis))
+    }
+
+    /// One component of `velocity_grid`, bit-identical to indexing its result.
+    fn velocity_axis(&self, p: [f64; 3], axis: usize) -> f64 {
+        let q = std::array::from_fn(|a| p[a] - if a == axis { 0.0 } else { 0.5 });
+        sample(self.velocity[axis], face_dims(self.cells, axis), q, self.boundary, 0.0)
     }
 
     fn solid_at(&self, p: [f64; 3]) -> bool {
@@ -483,40 +571,6 @@ impl State {
             previous = q;
         }
         Ok(end)
-    }
-
-    /// Export all five scalar channels in scene units. The bound includes the
-    /// worst-case brick storage before allocating any grid; no field is dropped.
-    pub fn volume(&self, max_bytes: usize) -> Result<Volume, Error> {
-        let bricks = self.cells.iter().map(|n| n.div_ceil(8)).product::<usize>();
-        let needed = bricks
-            .checked_mul(5 * (512 * 4 + 128))
-            .and_then(|v| v.checked_add(4096))
-            .ok_or(Error::Limit("volume export size overflow"))?;
-        if needed > max_bytes {
-            return Err(Error::Limit("volume export memory budget"));
-        }
-        let h = self.h;
-        let o = self.origin.map(|v| v + h * 0.5);
-        let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
-        let mut volume = Volume::new();
-        for (channel, name) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().enumerate() {
-            let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
-            let mut grid = SparseGrid::new(transform, bg, bricks)?;
-            for k in 0..self.density.len() {
-                let value = match channel {
-                    0 => self.density[k],
-                    1 => self.temperature[k],
-                    _ => self.velocity_at(self.cell_world(k))[channel - 2],
-                } as f32;
-                if !value.is_finite() {
-                    return Err(Error::Invalid("exported field exceeds f32 representation"));
-                }
-                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
-            }
-            volume.insert(name, grid)?;
-        }
-        Ok(volume)
     }
 }
 
@@ -559,13 +613,13 @@ pub struct StepReport {
 /// all iterations. Timing never feeds back into the solver.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StepProfile {
-    /// Cloning the committed state at the start of the step.
+    /// Copying the committed fields into the working state at the start of the step.
     pub clone: Duration,
     /// Collider voxelization, solid velocities and the cell clearing they imply.
     pub obstacles: Duration,
     /// Face boundary conditions and state validation, summed over the step.
     pub boundaries_validate: Duration,
-    /// Semi-Lagrangian advection, including its private copy of the state.
+    /// Semi-Lagrangian advection, including allocation of the advected fields.
     pub advect: Duration,
     pub advect_clone: Duration,
     /// Sources and impulses.
@@ -685,15 +739,13 @@ impl Simulation {
             return Err(Error::Invalid("fixed-step clock cannot advance"));
         }
         let dt = self.spec.dt;
-        let mut state = self.state.clone();
+        let mut state = self.state.working_copy();
         profile.clone = lap(&mut clock);
         for k in 0..state.density.len() {
             let p = state.cell_world(k);
             let collider = input.obstacles.iter().find(|o| o.shape.contains(p));
-            state.solid[k] = collider.is_some();
-            state.solid_velocity_low[k] = [0.0; 3];
-            state.solid_velocity_high[k] = [0.0; 3];
             if let Some(collider) = collider {
+                state.solid[k] = true;
                 for axis in 0..3 {
                     let mut low = p;
                     let mut high = p;
@@ -823,14 +875,24 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
     results.into_iter().collect()
 }
 
+/// Advects density, temperature and velocity. The pre-advection fields are moved
+/// out of `s` and sampled in place; fresh arrays are written, so no copy of the
+/// state is made. Solid cells keep the cleared values the collider stage set.
+/// On error `s` is left without fields; callers discard it.
 fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut StepProfile) -> Result<(), Error> {
     let started = Instant::now();
-    let old = s.clone();
+    let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
+    let old_density = std::mem::take(&mut s.density);
+    let old_temperature = std::mem::take(&mut s.temperature);
+    let old_velocity = std::mem::take(&mut s.velocity);
+    s.density = vec![0.0; count];
+    s.temperature = vec![ambient; count];
+    s.velocity = std::array::from_fn(|a| vec![0.0; old_velocity[a].len()]);
     profile.advect_clone = started.elapsed();
-    let (cells, boundary, ambient) = (s.cells, s.boundary, s.ambient);
     let (decay, cool) = ((-dissipation * dt).exp(), (-cooling * dt).exp());
     let solid = &s.solid;
-    let old = &old;
+    let old =
+        Field { cells, h: s.h, boundary, velocity: [&old_velocity[0], &old_velocity[1], &old_velocity[2]], solid };
     let results = s
         .density
         .par_chunks_mut(HEAVY)
@@ -844,8 +906,8 @@ fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut 
                 }
                 let p = coords(k, cells).map(|v| v as f64 + 0.5);
                 let q = old.trace(p, dt)?.map(|v| v - 0.5);
-                *d = sample(&old.density, cells, q, boundary, 0.0) * decay;
-                let sampled = sample(&old.temperature, cells, q, boundary, ambient);
+                *d = sample(&old_density, cells, q, boundary, 0.0) * decay;
+                let sampled = sample(&old_temperature, cells, q, boundary, ambient);
                 *t = ambient + (sampled - ambient) * cool;
             }
             Ok(())
