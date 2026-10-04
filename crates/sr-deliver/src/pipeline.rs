@@ -280,8 +280,8 @@ impl Video<'_> {
             _ => ev.evaluate(st),
         };
         let frame = self.renderer.render_with(g, p, Some(&mut sub));
-        if let Some(e) = frame.stats.errors.first() {
-            return Err(DeliverError::Render { time: t, message: e.clone() });
+        if !frame.stats.errors.is_empty() {
+            return Err(DeliverError::Render { time: t, message: crate::overlay::failure_message(&frame.stats) });
         }
         Ok(frame)
     }

@@ -105,6 +105,9 @@ impl Evaluator {
             let mut rt = sim.lock().unwrap_or_else(|e| e.into_inner());
             rt.apply(&self.program, &mut g, t, &|ts| eval::evaluate(&self.program, ts));
             g.problems.extend(rt.problems.iter().cloned());
+            for failure in &rt.failures {
+                g.fail(failure.clone());
+            }
         }
         g
     }

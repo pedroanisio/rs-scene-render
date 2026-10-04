@@ -190,7 +190,12 @@ impl Sims {
             })();
             match result {
                 Ok(out) => n.sim_ocean = Some(out),
-                Err(e) => g.problems.push(format!("{}: {e}", n.id)),
+                Err(e) => {
+                    // a failed solver is a problem and a failure (a disjoint borrow of `g.nodes` is held)
+                    let message = format!("{}: {e}", n.id);
+                    g.problems.push(message.clone());
+                    g.failures.push(message);
+                }
             }
         }
     }

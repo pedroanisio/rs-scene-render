@@ -268,7 +268,7 @@ impl Sims {
             })();
             match result {
                 Ok(f) => g.nodes[i].particles3d = Some(f),
-                Err(e) => g.problems.push(format!("{id}: {e}")),
+                Err(e) => g.fail(format!("{id}: {e}")),
             }
         }
     }
