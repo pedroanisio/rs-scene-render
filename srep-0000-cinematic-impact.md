@@ -422,6 +422,7 @@ The implemented configuration is:
 | `turbulence` | nonnegative acceleration amplitude; 0 | Seeded three-component force, followed by pressure projection |
 | `seed` | unsigned 64-bit integer; 0 | All bits participate; no intermediate floating-point conversion |
 | `pressureIterations` | integer 1–10000; 200 | Maximum pressure-solver iterations |
+| `solver` | `jacobi` or `multigrid`; `jacobi` | Preconditioner of the pressure solve; see the numerical contract. Absent equals `jacobi` and reproduces earlier results bit for bit |
 | `pressureTolerance` | positive 1/second; 0.000001 | Maximum RMS divergence residual |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | integers 1–4096; 256 each | Separate solver/workspace and checkpoint budgets |
 | `meshMemoryMiB` | integer 1–4096; 128 | Aggregate conservative charge for distinct mesh regions in this domain |
@@ -475,6 +476,46 @@ with confinement following
 An unconverged projection returns an error; it does not silently accept a
 divergent field. In particular, a sealed domain cannot sustain net positive
 expansion. Failed steps preserve the previous state and clock.
+
+**Pressure solver (`solver`).** `jacobi`, the default, is the diagonal-
+preconditioned conjugate gradient above, with reductions that add in cell-index
+order; it defines the results of every earlier release. `multigrid` runs the same
+conjugate-gradient iteration with a different preconditioner and different
+reductions, and these choices define its result bits:
+
+- Coarsening is algebraic aggregation of 2×2×2 cell blocks (`ceil(n/2)` per axis;
+  the last block of an odd axis has fewer children) with the Galerkin operator
+  `PᵀAP` for piecewise-constant `P`: the weight between two aggregates is the
+  number of open fluid faces between their children, and the diagonal is the number
+  of open-boundary (zero-pressure) faces plus the incident weights. Solid cells
+  have no unknown. Coarsening stops at 128 cells or fewer, and that level is solved
+  directly by dense Cholesky.
+- One V(1,1) cycle per application: a red-then-black Gauss–Seidel sweep from a zero
+  guess (colour is the parity of `i+j+k`), restriction of the residual by summing
+  children, the coarse correction scaled by 1.5, then black-then-red
+  post-smoothing. The two sweeps are adjoint, so the cycle is a symmetric positive
+  definite operator, as conjugate gradients requires.
+- Reductions add fixed blocks of 2048 consecutive cells in index order, then
+  combine the block sums pairwise (0+1, 2+3, …) in a fixed binary tree, so no value
+  depends on the thread count.
+- In every connected fluid component without a zero-pressure face (a closed domain,
+  or a pocket sealed by solids) the operator is singular, so the mean of the
+  right-hand side over that component is removed and one coarse unknown per such
+  component is pinned to zero. The removed mean stays in the divergence measured
+  after the solve, so a component that genuinely cannot be made divergence-free
+  still fails the tolerance check instead of being absorbed.
+
+For both solvers `pressureIterations` is the maximum number of conjugate-gradient
+iterations, iteration stops when the RMS residual over fluid cells is at most
+`pressureTolerance`, and a step whose recomputed RMS divergence error exceeds 1.01
+times the tolerance is an error. That criterion is a global RMS over all fluid
+cells, so an error confined to a few cells of a large domain can pass. Multigrid
+results are identical for any thread count but differ from `jacobi` in the last
+bits (the evaluator test compares them to within 1e-6 relative on a 16³ domain).
+Iteration counts stay roughly independent of resolution: measured on the impulse
+step at 128³, `jacobi` needed 275 iterations and `multigrid` 14. Baked SRVSEQ
+caches identify a solver only through their frame contents (the digests of the
+exported frames), so two solvers that produce identical bytes share frames.
 
 Checkpoints are thinned before cloning to respect their independent hard budget.
 Backward requests replay the same fixed steps and input samples. Source animation
@@ -1612,6 +1653,7 @@ Also includes `assetProvenance`, inventoried below.
 | `pressureTolerance` | positiveDecimal | Default `0.000001` |
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
+| `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `checkpointMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
