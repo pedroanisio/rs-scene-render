@@ -25,8 +25,24 @@ fn volume_interval(base: u32, origin: vec3<f32>, direction: vec3<f32>, distance:
 fn volume_key_less(a: vec3<i32>, b: vec3<i32>) -> bool {
     return a.x<b.x || (a.x==b.x && (a.y<b.y || (a.y==b.y && a.z<b.z)));
 }
+// Base row of the domain whose density grid is being sampled when it has a brick directory (rows
+// base+23 and base+29 of its record: the lowest brick key, the table offset and the extent), else
+// NO_DIRECTORY, and the voxel is found by searching the sorted brick list.
+const NO_DIRECTORY: u32 = 0xffffffffu;
+var<private> directory_base: u32 = NO_DIRECTORY;
 fn volume_voxel(info: vec4<f32>, index: vec3<i32>) -> f32 {
     let key=vec3<i32>(floor(vec3<f32>(index)/8.0));
+    if (directory_base!=NO_DIRECTORY) {
+        let rel=key-bitcast<vec3<i32>>(tverts[directory_base+23u].xyz);
+        let dims=bitcast<vec3<u32>>(tverts[directory_base+29u].xyz);
+        if (any(rel<vec3<i32>(0)) || any(vec3<u32>(rel)>=dims)) { return info.x; }
+        let entry=u32(rel.x)+dims.x*(u32(rel.y)+dims.y*u32(rel.z));
+        let row=bitcast<u32>(tverts[bitcast<u32>(tverts[directory_base+23u].w)+entry/4u][entry%4u]);
+        if (row==NO_DIRECTORY) { return info.x; }
+        let q=vec3<u32>(index-key*8);
+        let scalar=q.x+q.y*8u+q.z*64u;
+        return tverts[row+1u+scalar/4u][scalar%4u];
+    }
     var lo=0u; var hi=bitcast<u32>(info.y); let offset=bitcast<u32>(info.z);
     loop {
         if (lo>=hi) { break; }
@@ -79,7 +95,11 @@ fn volume_advected_point(base: u32, point: vec3<f32>, endpoint: u32) -> vec3<f32
 fn volume_density(base: u32, point: vec3<f32>) -> f32 {
     let local=(volume_matrix(base)*vec4(point,1.0)).xyz;
     if (any(local<tverts[base+4u].xyz) || any(local>tverts[base+5u].xyz)) { return 0.0; }
-    var density=volume_grid(base+8u,volume_advected_point(base,point,0u));
+    // the advected point is found first: velocity grids have no directory
+    let sampled=volume_advected_point(base,point,0u);
+    if (tverts[base+29u].w>0.5) { directory_base=base; }
+    var density=volume_grid(base+8u,sampled);
+    directory_base=NO_DIRECTORY;
     if (tverts[base+14u].y>0.5) { density=mix(density,volume_grid(base+24u,volume_advected_point(base,point,1u)),tverts[base+14u].x); }
     return density*tverts[base+4u].w;
 }

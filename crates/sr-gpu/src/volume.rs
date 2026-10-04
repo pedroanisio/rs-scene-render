@@ -23,6 +23,27 @@ const MAX_OCCUPANCY_CELLS: u64 = 1 << 22;
 /// 300 times smaller than half a unit in the last place of an f32 near 1, so what is left out is far
 /// below the resolution of the result; it is not zero, and is bounded the same way for any scene.
 const SKIPPED_OPTICAL_DEPTH: f64 = 1e-10;
+/// Largest brick directory, in entries (4 MiB): a dense table of one row index per possible brick
+/// position in the density grid's bounding box, replacing the shader's binary search of the brick
+/// list. A grid whose box needs more keeps the search.
+const MAX_DIRECTORY_ENTRIES: u64 = 1 << 20;
+
+/// Lowest brick key and per-axis extent of the grid's bricks, when a directory fits.
+fn directory_extent(grid: &sr_volume::SparseGrid) -> Option<([i32; 3], [u32; 3])> {
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for (key, _) in grid.bricks() {
+        for a in 0..3 {
+            lo[a] = lo[a].min(key[a]);
+            hi[a] = hi[a].max(key[a]);
+        }
+    }
+    if lo[0] > hi[0] {
+        return None;
+    }
+    let dims: [u32; 3] = std::array::from_fn(|a| (i64::from(hi[a]) - i64::from(lo[a]) + 1) as u32);
+    (dims.iter().map(|d| u64::from(*d)).product::<u64>() <= MAX_DIRECTORY_ENTRIES).then_some((lo, dims))
+}
 
 /// The density at or below which a cell may be skipped, in the units of the grid.
 fn negligible_density(medium: &Medium, diameter: f64) -> f32 {
@@ -276,6 +297,8 @@ pub(crate) fn bytes(volumes: &[VolumeDraw]) -> u64 {
                 .map(|g| g.brick_count())
                 .sum::<usize>()
                 * BRICK_ROWS;
+            let directory = directory_extent(v.medium.density())
+                .map_or(0, |(_, d)| d.iter().map(|x| *x as usize).product::<usize>().div_ceil(4));
             let occupancy = if skips_empty_space(&v.medium) {
                 occupancy_extent(v.medium.density(), negligible_density(&v.medium, v.diameter)).map_or(
                     0,
@@ -287,7 +310,13 @@ pub(crate) fn bytes(volumes: &[VolumeDraw]) -> u64 {
             } else {
                 0
             };
-            (RECORD_ROWS as u64 + density as u64 + thermal as u64 + velocity as u64 + occupancy as u64) * 16
+            (RECORD_ROWS as u64
+                + density as u64
+                + thermal as u64
+                + velocity as u64
+                + occupancy as u64
+                + directory as u64)
+                * 16
         })
         .sum()
 }
@@ -365,6 +394,25 @@ pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] 
                 [rgb.x as f32, rgb.y as f32, rgb.z as f32, 0.0]
             }));
         }
+        if let Some((lo, dims)) = directory_extent(m.density()) {
+            let first = f32::to_bits(out[base + 12][2]) as usize;
+            let entries: usize = dims.iter().map(|d| *d as usize).product();
+            let mut table = vec![u32::MAX; entries.next_multiple_of(4)];
+            for (i, (key, _)) in m.density().bricks().enumerate() {
+                let rel = [(key[0] - lo[0]) as usize, (key[1] - lo[1]) as usize, (key[2] - lo[2]) as usize];
+                table[rel[0] + dims[0] as usize * (rel[1] + dims[1] as usize * rel[2])] =
+                    (first + i * BRICK_ROWS) as u32;
+            }
+            let offset = out.len();
+            out.extend(table.chunks(4).map(|c| std::array::from_fn(|i| f32::from_bits(c[i]))));
+            out[base + 23] = [
+                f32::from_bits(lo[0] as u32),
+                f32::from_bits(lo[1] as u32),
+                f32::from_bits(lo[2] as u32),
+                f32::from_bits(offset as u32),
+            ];
+            out[base + 29] = [f32::from_bits(dims[0]), f32::from_bits(dims[1]), f32::from_bits(dims[2]), 1.0];
+        }
         if skips_empty_space(m) {
             if let Some((min, dims, words)) = occupancy(m.density(), negligible_density(m, volume.diameter)) {
                 let offset = out.len();
@@ -403,6 +451,21 @@ fn pack_grid(out: &mut Vec<[f32; 4]>, grid: &sr_volume::SparseGrid) -> [f32; 4] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brick_directory_covers_the_bricks_and_gives_way_to_the_search_when_too_large() {
+        let mut grid = SparseGrid::new(Transform::identity(), 0.0, 64).unwrap();
+        grid.set([-9, 2, 40], 1.0).unwrap();
+        grid.set([30, 2, 41], 1.0).unwrap();
+        let (lo, dims) = directory_extent(&grid).unwrap();
+        // bricks at keys (-2, 0, 5) and (3, 0, 5)
+        assert_eq!((lo, dims), ([-2, 0, 5], [6, 1, 1]));
+        let mut far = SparseGrid::new(Transform::identity(), 0.0, 64).unwrap();
+        far.set([0, 0, 0], 1.0).unwrap();
+        far.set([8 * 5000, 8 * 5000, 8 * 5000], 1.0).unwrap();
+        assert!(directory_extent(&far).is_none(), "an extent past the table limit keeps the binary search");
+        assert!(directory_extent(&SparseGrid::new(Transform::identity(), 0.0, 4).unwrap()).is_none());
+    }
     use sr_volume::medium::{Bounds, Optical};
     use sr_volume::{SparseGrid, Transform};
 
