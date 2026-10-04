@@ -24,6 +24,29 @@
 //!   order, then combine the partial sums pairwise (0+1, 2+3, ...) in a fixed
 //!   binary tree. No value depends on the thread count.
 
+//!
+//! Parameter experiment behind `OVERCORRECTION = 1.5` and V(1,1). Impact scene
+//! (hero domain, open edges, impulse at step 3), 8 threads, load average ~7 so
+//! times are +-30%. Cells are `iterations of CG / ms of the pressure stage`:
+//!
+//! ```text
+//!                       128^3 impulse  128^3 regime  192^3 impulse  192^3 regime
+//! V(1,1) alpha 1.0        22 / 287       10 / 197      28 / 1187      14 / 699
+//! V(1,1) alpha 1.25       16 / 216        7 / 131      19 / 1014      10 / 629
+//! V(1,1) alpha 1.5        14 / 233        7 / 157      16 /  784       9 / 595  <- chosen
+//! V(1,1) alpha 1.75       13 / 242        7 / 158      15 /  825       9 / 618
+//! V(1,1) alpha 1.9        14 / 261        8 / 151      15 / 1238       9 / 734
+//! V(2,2) alpha 1.5         9 / 287        5 / 192      10 / 1139       5 / 649
+//! W(1,1) alpha 1.5         7 / 187        4 / 143       7 /  802       4 / 568
+//! W(1,1) alpha 1.25        8 / 178        5 / 125       8 /  799       5 / 565
+//! ```
+//!
+//! V(1,1) at 1.5 has the lowest or tied pressure time with margin below 20
+//! iterations (1.25 reaches 19); V(2,2) and W only trade iterations for cost per
+//! iteration. A trilinear-interpolation Galerkin hierarchy was not built: the
+//! criterion is already met, and it needs 27 coefficients per coarse cell and a
+//! triple product every step, because the operator changes with the solids.
+
 use super::{coords, LIGHT};
 use rayon::prelude::*;
 
