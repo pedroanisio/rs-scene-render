@@ -550,7 +550,11 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                     let c = pp.view_proj * vec4(o + d * t, 1.0);
                     let uv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
                     if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
-                        col += thr * textureSampleLevel(backdrop, smp, uv, 0.0).rgb;
+                        // premultiplied: where the layers leave the pixel open, the visible dome shows
+                        let behind = textureSampleLevel(backdrop, smp, uv, 0.0);
+                        var seen = behind.rgb;
+                        if (pp.env.x > 1.5) { seen += (1.0 - behind.a) * env_radiance(d, ambient_diffuse, ambient_specular); }
+                        col += thr * seen;
                         break;
                     }
                 }
