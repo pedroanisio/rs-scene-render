@@ -166,7 +166,7 @@ impl Ocean {
         // Input, initial/canonical/published/candidate/fractional/flux copies,
         // impulse scratch and Vec headers; checkpoint storage is separate.
         let bytes = n
-            .checked_mul(256)
+            .checked_mul(256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 })
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
             .and_then(|v| {
                 // Stable sorting preserves authored equal-time order and may
@@ -300,6 +300,12 @@ fn publish(state: &State, dry: f64) -> Result<Frame, Error> {
 /// each a reconstruction plus a flux sweep; it measured 2.8-3.0x the wall time
 /// of a first-order substep on a 256x256 grid (the CFL halving that doubles the
 /// substep count is charged separately, by counting substeps).
+/// Extra resident bytes per cell of a second-order step: two more copies of the
+/// state (48) and the reconstruction row buffers of the sweeps, at most two rows
+/// of two face states per concurrent task (96, reached by a one-row grid).
+/// Measured peak RSS at 1,048,576 cells: first order 158 B/cell on every shape;
+/// second order 182 on square grids and 278 on a 1,048,576 x 1 grid.
+const ORDER2_EXTRA_BYTES: usize = 144;
 const ORDER2_WORK_FACTOR: usize = 3;
 fn step_work(spec: &Spec) -> usize {
     match spec.order {

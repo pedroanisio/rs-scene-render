@@ -319,3 +319,27 @@ fn parallel_sweeps_are_bit_identical_to_the_serial_solver_with_any_thread_count(
         });
     }
 }
+
+/// Resident bytes charged per cell for the extra second-order state: two more
+/// copies of the state (48) and sweep row buffers (up to 96). Measured peak at
+/// 1,048,576 cells: 158 B/cell for order 1, 182 for order 2, 278 for order 2 on
+/// a one-row grid, against 256 and 400 charged.
+const ORDER2_EXTRA_BYTES_PER_CELL: usize = 144;
+
+#[test]
+fn second_order_scratch_counts_against_resident_memory() {
+    let n = 40 * 40;
+    let cells = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; n];
+    let make = |order, max_bytes| {
+        let mut s = spec([40, 40], order);
+        s.max_bytes = max_bytes;
+        Ocean::new(s, vec![2.0; n], cells.clone(), vec![])
+    };
+    let first = n * 256 + 4096;
+    assert!(make(Order::First, first).is_ok());
+    assert!(matches!(make(Order::First, first - 1), Err(sr_sim::ocean::Error::Limit(_))));
+    assert!(matches!(make(Order::Second, first), Err(sr_sim::ocean::Error::Limit(_))));
+    let second = first + n * ORDER2_EXTRA_BYTES_PER_CELL;
+    assert!(make(Order::Second, second).is_ok());
+    assert!(matches!(make(Order::Second, second - 1), Err(sr_sim::ocean::Error::Limit(_))));
+}

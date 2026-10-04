@@ -948,7 +948,7 @@ zero damping, closed boundaries, canonical `dt=1/60`, dry tolerance `1e-10`,
 256 MiB resident workspace, 64 MiB checkpoints, and 100 million work units per
 seek. Each substep and impulse charges eight units per cell (24 per substep for `order="2"`). At most four
 million cells, 16,384 impulses and 4,096 retained checkpoints are admitted.
-Resident input capacities are included in the memory ceiling. Checkpoint memory
+Resident input capacities are included in the memory ceiling, which is 256 bytes per cell (400 for `order="2"`: two more state copies and sweep row buffers; measured peak 158 and at most 278 bytes per cell at one million cells). Checkpoint memory
 is separately bounded; zero disables retention. Failed seeks leave the published
 frame and caches unchanged. Fractional samples never become canonical state,
 and replay after checkpoint eviction is bit-identical in the conformance tests.
