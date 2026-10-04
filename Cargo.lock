@@ -2504,6 +2504,7 @@ dependencies = [
  "glam 0.30.10",
  "image",
  "libm",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

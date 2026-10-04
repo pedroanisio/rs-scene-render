@@ -12,6 +12,9 @@
     "a04-sequence-frames.scene.xml": [
       "A04"
     ],
+    "bedresponse-value.scene.xml": [
+      "S06"
+    ],
     "c1.scene.xml": [
       "C1"
     ],
@@ -788,8 +791,10 @@
     "minimal.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
+    "ocean-depth-filtered-drag.scene.xml": [],
     "ocean-entry.scene.xml": [],
     "ocean-full.scene.xml": [],
+    "ocean-hydrostatic.scene.xml": [],
     "ocean-order2.scene.xml": [],
     "ocean-splash.scene.xml": [],
     "ocean.scene.xml": [],

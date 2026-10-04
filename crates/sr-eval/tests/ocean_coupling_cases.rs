@@ -37,7 +37,7 @@ fn largest_difference(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max)
 }
 
-const OCEAN: &str = r#"<ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed"/>"#;
+const OCEAN: &str = r#"<ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed"/>"#;
 const CRATER: &str = r#"<crater radius="40" depth="8" rimHeight="3" rimWidth="8" start="0.5" end="1.5"/>"#;
 fn scene(objects: &str, ocean: &str) -> String {
     format!(

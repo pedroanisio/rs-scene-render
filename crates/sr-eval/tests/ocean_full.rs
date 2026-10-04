@@ -29,7 +29,7 @@ impl Basin {
               <object3D id="ball" primitive="sphere" radius="2" segments="24" x="-10" y="0" z="1">
                 <rigidBody shape="sphere" mass="{MASS}" velocityX="{speed}" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" width="160" depth="160" cellSize="2" bottomDepth="10" dt="{dt}" boundary="closed" colliders="ball" bodyCoupling="{coupling}"/>
+              <ocean id="sea" bedResponse="hydrostatic" width="160" depth="160" cellSize="2" bottomDepth="10" dt="{dt}" boundary="closed" colliders="ball" bodyCoupling="{coupling}"/>
             </composition>
             <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"##,
             speed = self.speed,

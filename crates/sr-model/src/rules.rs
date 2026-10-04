@@ -785,8 +785,8 @@ impl<'a> Eval<'a> {
                 self.check(a("bodyCoupling").is_none_or(|c| c == "none") || has("colliders"), n, "OCN8", || {
                     "ocean bodyCoupling needs colliders that list the bodies.".into()
                 });
-                self.check(!has("bodyDrag") || a("bodyCoupling").is_some_and(|c| c != "none"), n, "OCN9", || {
-                    "ocean bodyDrag belongs to an ocean with bodyCoupling.".into()
+                self.check(!has("bodyDrag") || has("colliders"), n, "OCN9", || {
+                    "ocean bodyDrag belongs to an ocean with colliders.".into()
                 });
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "OCN1", || {
                     "ocean requires version=\"1.3\".".into()

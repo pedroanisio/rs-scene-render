@@ -9,6 +9,7 @@
 mod body;
 mod flux;
 mod impulse;
+pub mod lift;
 pub mod waves;
 pub mod whitewater;
 pub use impulse::{Impulse, ImpulseKind, CAVITY_SHARE};
@@ -76,6 +77,11 @@ pub struct Spec {
     /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 12 more
     /// bytes per cell and 16 per body in every checkpoint. Zero: nothing is tagged.
     pub body_owners: usize,
+    /// With `body_owners`: bodies do not relax the water toward their own velocity; the driver gives
+    /// each the momentum it hands the water in every canonical step as a [`Push`] (a form drag, spread
+    /// over columns), and the solver applies it, never past the body's velocity. Charges 32 more
+    /// bytes per cell. The occupancy and the owners still say where the bodies are.
+    pub body_push: bool,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -95,6 +101,7 @@ impl Default for Spec {
             moving_bed: false,
             bodies: false,
             body_owners: 0,
+            body_push: false,
         }
     }
 }
@@ -124,6 +131,11 @@ pub struct Forcing {
     /// With `Spec::bodies`: vertical extent of bodies inside the water column of
     /// every cell, between the rest level and the bed. Empty otherwise.
     pub occupancy: Vec<f64>,
+    /// With `Spec::bodies`: how much the bed was raised, in every cell, by the bodies in `bed` (the
+    /// bed given is already lowered by this, in scene y), when that is not the occupancy: the
+    /// occupancy filtered by depth is wider and lower than the bodies. Empty when it is the
+    /// occupancy. Only the samples of the water around each body read it.
+    pub raise: Vec<f64>,
     /// With `Spec::bodies`: horizontal velocity of the body in every cell
     /// (ignored where `occupancy` is zero). Empty otherwise.
     pub velocity: Vec<[f64; 2]>,
@@ -143,10 +155,52 @@ pub struct Forcing {
     /// must be a function of the time and of scene data that does not change, since a replay asks
     /// again. Nothing may be given at the first sample, which ends no step.
     pub events: Vec<Impulse>,
+    /// With `Spec::body_push`: what the bodies give the water in the canonical step that ends at the
+    /// sample's time `T`, one entry per body that gives any. Like the bed, a function of the time and of
+    /// scene data that does not change.
+    pub pushes: Vec<Push>,
+    /// What fell into the water in the canonical step that ends at the sample's time `T`, by cell,
+    /// sorted by cell with no cell twice, applied when the step reaches `T`, after the impulses
+    /// due then: of each cell's water `volume / cell area` of depth goes (at most
+    /// [`CAVITY_SHARE`] of the cell's water; the rest of the volume is dropped, not an error)
+    /// and is given, all of it, in equal parts to the cell's neighbours (the eight around it, or
+    /// those that exist at the edge of the domain), and `momentum` is added to the cell's momentum
+    /// unless the cell is left with less than `dry_tolerance` of water, in which case it is dropped.
+    /// Water and momentum are conserved except for what is dropped. Applied to the water itself, after
+    /// any lift of a bed, not through it. Costs the entries, not the cells. Empty on every other
+    /// sample.
+    pub splash: Vec<SplashCell>,
     /// With `Spec::body_owners`, set together with `exchange`: what each body that gave the water
     /// momentum in step `k`, or stands in it at the end of the step, gets of the water, by body
     /// index. Empty on every other sample.
     pub bodies: Vec<BodySample>,
+}
+
+/// What something that fell into the water in one canonical step gives it, in one cell: the volume
+/// of solid that entered the cell's water and the horizontal momentum it brought.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SplashCell {
+    /// Index into the `nx * nz` cells, x fastest.
+    pub cell: u32,
+    /// Scene units cubed.
+    pub volume: f64,
+    /// Horizontal momentum per unit water density, scene units^4/second.
+    pub momentum: [f64; 2],
+}
+
+/// Horizontal momentum one body gives the water in a canonical step, per unit water density, spread
+/// over columns, with the velocity it moves at. Applied evenly over the substeps, column by column,
+/// never past `target`: a column's momentum goes toward `target` times its depth and no further.
+/// What is applied is what the body is credited with ([`BodySample::impulse`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Push {
+    pub owner: u32,
+    /// The body's horizontal velocity.
+    pub target: [f64; 2],
+    /// Total momentum per unit density, for the whole step (scene units^4/second).
+    pub momentum: [f64; 2],
+    /// Columns and the share of the momentum each takes; the shares add up to 1.
+    pub columns: Vec<(u32, f64)>,
 }
 
 /// The water around one body at the end of a canonical step, and what the body gave it during
@@ -292,6 +346,9 @@ impl Ocean {
         if spec.bodies && !spec.moving_bed {
             return Err(Error::Invalid("bodies need Spec::moving_bed"));
         }
+        if spec.body_push && spec.body_owners == 0 {
+            return Err(Error::Invalid("pushes need Spec::body_owners"));
+        }
         if spec.body_owners > 4096 || (spec.body_owners > 0 && !spec.bodies) {
             return Err(Error::Invalid("body owners need Spec::bodies and are at most 4096"));
         }
@@ -305,7 +362,8 @@ impl Ocean {
                 256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
                     + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
                     + if spec.bodies { 72 } else { 0 }
-                    + if spec.body_owners > 0 { 12 } else { 0 },
+                    + if spec.body_owners > 0 { 12 } else { 0 }
+                    + if spec.body_push { 32 } else { 0 },
             )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
             .and_then(|v| {
@@ -413,6 +471,9 @@ impl Ocean {
         out.exchange = exchange;
         out.bodies = bodies;
         out.events.clear();
+        out.pushes.clear();
+        out.splash.clear();
+        out.raise.clear();
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
         let wanted = if self.spec.bodies { n } else { 0 };
@@ -430,8 +491,36 @@ impl Ocean {
             || out.owner.len() != tagged
             || out.owner.iter().zip(&out.occupancy).any(|(o, t)| *t > 0.0 && *o as usize >= self.spec.body_owners)
             || out.events.len() > 16_384
+            || !(out.pushes.is_empty() || self.spec.body_push)
+            || !(out.raise.is_empty() || (self.spec.bodies && out.raise.len() == n))
+            || out.raise.iter().any(|r| !r.is_finite() || *r < 0.0)
         {
             return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
+        }
+        if out.splash.len() > n
+            || out.splash.windows(2).any(|w| w[0].cell >= w[1].cell)
+            || out.splash.iter().any(|e| {
+                e.cell as usize >= n
+                    || !e.volume.is_finite()
+                    || e.volume < 0.0
+                    || e.momentum.iter().any(|m| !m.is_finite())
+            })
+        {
+            return Err(Error::Invalid("driver splash cells, volume or momentum"));
+        }
+        let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
+        if columns > 2 * n {
+            return Err(Error::Limit("columns of the pushes of the bodies"));
+        }
+        for push in &out.pushes {
+            let share: f64 = push.columns.iter().map(|(_, w)| w).sum();
+            if push.owner as usize >= self.spec.body_owners
+                || push.target.iter().chain(&push.momentum).any(|v| !v.is_finite())
+                || push.columns.iter().any(|(c, w)| *c as usize >= n || !w.is_finite() || *w < 0.0)
+                || (share - 1.0).abs() > 1e-6
+            {
+                return Err(Error::Invalid("driver push owner, velocity, momentum or columns"));
+            }
         }
         let from = time - self.spec.dt;
         for event in &out.events {
@@ -488,6 +577,7 @@ impl Ocean {
                 _ => {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
+                    now.pushes = Vec::new();
                     let bodies = body::samples(&self.spec, &state, &now);
                     self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
                     (now, next)
@@ -504,6 +594,8 @@ impl Ocean {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
                     advance(&self.spec, bed, &self.impulses, &mut state, end, &mut work, &mut scratch)?;
                     std::mem::swap(now, next);
+                    // the pushes were for the step that ended; nothing reads them again
+                    now.pushes = Vec::new();
                     work.take(if self.spec.body_owners > 0 { state.q.len() } else { 0 })?;
                     let bodies = body::samples(&self.spec, &state, now);
                     self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)), bodies)?;
@@ -613,7 +705,7 @@ fn advance(
     work: &mut Work,
     scratch: &mut Scratch,
 ) -> Result<(), Error> {
-    if let (true, Bed::Moving { from, to, .. }) = (spec.body_owners > 0, bed) {
+    if let (true, Bed::Moving { from, to, .. }) = (spec.body_owners > 0 && !spec.body_push, bed) {
         // the body there at the end of the step, else the one that was; the same in every substep
         work.take(state.q.len())?;
         scratch.owner.clear();
@@ -631,6 +723,16 @@ fn advance(
         Bed::Fixed(_) => &[],
     };
     let mut next_asked = 0;
+    let pushed: &[Push] = match bed {
+        Bed::Moving { to, .. } => &to.pushes,
+        Bed::Fixed(_) => &[],
+    };
+    // what fell in during the step that ends at `t1`, and whether it has been applied
+    let (splash, splash_at): (&[SplashCell], f64) = match bed {
+        Bed::Moving { to, t1, .. } => (&to.splash, t1),
+        Bed::Fixed(_) => (&[], f64::INFINITY),
+    };
+    let mut splashed = false;
     loop {
         // authored impulses first when both are due, then the driver's, each in order of time
         loop {
@@ -649,6 +751,11 @@ fn advance(
             } else {
                 next_asked += 1;
             }
+        }
+        if !splashed && !splash.is_empty() && state.time >= splash_at {
+            work.take(splash.len().saturating_mul(16))?;
+            body::splash(spec, &mut state.q, splash);
+            splashed = true;
         }
         if state.time >= target {
             break;
@@ -690,7 +797,10 @@ fn advance(
                 let s = ((state.time + 0.5 * dt - t0) / (t1 - t0)).clamp(0.0, 1.0);
                 scratch.bed.clear();
                 scratch.bed.extend(from.bed.iter().zip(&to.bed).map(|(a, b)| a + (b - a) * s));
-                if spec.bodies {
+                if spec.body_push {
+                    // the bodies give momentum by the pushes of the driver, not by relaxing it
+                    bodies = Some(t1 - t0);
+                } else if spec.bodies {
                     work.take(state.q.len())?;
                     scratch.occupancy.clear();
                     scratch.occupancy.extend(from.occupancy.iter().zip(&to.occupancy).map(|(a, b)| a + (b - a) * s));
@@ -708,15 +818,19 @@ fn advance(
         };
         flux::step(spec, bed_now, &mut state.q, dt)?;
         if let Some(step) = bodies {
-            let given = body::transfer(
-                spec,
-                &mut state.q,
-                &scratch.occupancy,
-                &scratch.velocity,
-                (&scratch.owner, &mut state.exchange_by),
-                dt,
-                step,
-            );
+            let given = if spec.body_push {
+                body::push(spec, &mut state.q, pushed, &mut state.exchange_by, dt, step)
+            } else {
+                body::transfer(
+                    spec,
+                    &mut state.q,
+                    &scratch.occupancy,
+                    &scratch.velocity,
+                    (&scratch.owner, &mut state.exchange_by),
+                    dt,
+                    step,
+                )
+            };
             state.exchange[0] += given[0];
             state.exchange[1] += given[1];
         }

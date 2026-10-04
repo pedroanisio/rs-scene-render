@@ -71,7 +71,7 @@ fn far_wave(ev: &Evaluator, id: &str) -> f64 {
 fn ocean_colliders_in_a_symbol_belong_to_their_instance() {
     let ev = evaluator(
         r#"<object3D id="impactor" primitive="sphere" radius="7" segments="24"><animate property="y"><key time="0" value="-40"/><key time="1" value="6"/></animate></object3D>
-           <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>"#,
+           <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>"#,
         r#"<override target="impactor" property="radius" value="3"/>"#,
     );
     let (a, b) = (far_wave(&ev, "a/sea"), far_wave(&ev, "b/sea"));
