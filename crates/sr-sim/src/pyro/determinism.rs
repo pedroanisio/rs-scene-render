@@ -1,7 +1,8 @@
 //! Bit-exactness guard for the smoke solver: reference scenarios hashed over the
 //! complete final state and every step report, run on local rayon pools of 1, 2
-//! and 8 threads. The golden hashes were captured at commit 60a458c, before any
-//! performance work; a performance change that alters one of them changes results.
+//! and 8 threads. The Jacobi golden hashes were captured at commit 60a458c, before
+//! any performance work; a performance change that alters one of them changes
+//! results. The multigrid hashes pin the multigrid solver's own contract.
 
 use super::*;
 use sr_volume::Transform;
@@ -13,18 +14,20 @@ struct Case {
     voxel: f64,
     steps: u64,
     boundary: Boundary,
+    solver: PressureSolver,
     /// Moving/deforming colliders, meshes, spatial acceleration and uniform acceleration.
     rich: bool,
     golden: u64,
 }
 
-const CASES: [Case; 3] = [
+const CASES: [Case; 6] = [
     Case {
         name: "open-rich-odd",
         cells: [23, 19, 17],
         voxel: 4.0,
         steps: 8,
         boundary: Boundary::Open,
+        solver: PressureSolver::Jacobi,
         rich: true,
         golden: 0x0c4c2dbcce07af55,
     },
@@ -34,6 +37,7 @@ const CASES: [Case; 3] = [
         voxel: 4.0,
         steps: 8,
         boundary: Boundary::Closed,
+        solver: PressureSolver::Jacobi,
         rich: true,
         golden: 0x36695446882e6a75,
     },
@@ -43,8 +47,39 @@ const CASES: [Case; 3] = [
         voxel: 4.8,
         steps: 6,
         boundary: Boundary::Open,
+        solver: PressureSolver::Jacobi,
         rich: false,
         golden: 0xd0f216a928158341,
+    },
+    Case {
+        name: "open-rich-odd-multigrid",
+        cells: [23, 19, 17],
+        voxel: 4.0,
+        steps: 8,
+        boundary: Boundary::Open,
+        solver: PressureSolver::Multigrid,
+        rich: true,
+        golden: 0xd693c122f462feee,
+    },
+    Case {
+        name: "closed-rich-multigrid",
+        cells: [20, 16, 24],
+        voxel: 4.0,
+        steps: 8,
+        boundary: Boundary::Closed,
+        solver: PressureSolver::Multigrid,
+        rich: true,
+        golden: 0x8d838d7de47098a2,
+    },
+    Case {
+        name: "open-cinematic-multigrid",
+        cells: [40, 32, 40],
+        voxel: 4.8,
+        steps: 6,
+        boundary: Boundary::Open,
+        solver: PressureSolver::Multigrid,
+        rich: false,
+        golden: 0x50dfd08cc0fe0d3e,
     },
 ];
 
@@ -83,6 +118,7 @@ fn spec(c: &Case) -> Spec {
         seed: 20_261_003,
         pressure_iterations: 120,
         pressure_tolerance: 1e-3,
+        solver: c.solver,
         max_bytes: 1 << 30,
         ..Spec::default()
     }
@@ -264,4 +300,28 @@ fn print_hashes() {
         let solid = state.solid.iter().filter(|&&b| b).count();
         println!("{} {hash:#018x} solid={solid} cg={iterations:?}", c.name);
     }
+}
+
+/// The point of the multigrid preconditioner: iteration counts stay low (observed at most 9), and do
+/// not grow with resolution, on the impact-like scene (impulse at step 3).
+#[test]
+fn multigrid_iteration_counts_stay_low_as_resolution_grows() {
+    let mut worst = Vec::new();
+    for (cells, voxel) in [([12, 10, 12], 16.0), ([24, 20, 24], 8.0), ([48, 39, 48], 4.0)] {
+        let case = Case {
+            name: "resolution",
+            cells,
+            voxel,
+            steps: 6,
+            boundary: Boundary::Open,
+            solver: PressureSolver::Multigrid,
+            rich: false,
+            golden: 0,
+        };
+        let (_, _, iterations) = run(&case);
+        let most = *iterations.iter().max().unwrap();
+        assert!(most <= 12, "{cells:?}: {iterations:?}");
+        worst.push(most);
+    }
+    assert!(worst[2] <= worst[0] + 8, "iterations grew with resolution: {worst:?}");
 }

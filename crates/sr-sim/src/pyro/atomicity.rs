@@ -6,13 +6,14 @@
 
 use super::*;
 
-fn spec(boundary: Boundary) -> Spec {
+fn spec(boundary: Boundary, solver: PressureSolver) -> Spec {
     Spec {
         cells: [16, 12, 14],
         voxel_size: 1.0,
         origin: [-8.0, -6.0, -7.0],
         dt: 1.0 / 24.0,
         boundary,
+        solver,
         dissipation: 0.1,
         cooling: 0.3,
         buoyancy: 0.01,
@@ -43,16 +44,16 @@ fn good(open: bool) -> Inputs {
     }
 }
 
-fn warm(boundary: Boundary) -> Simulation {
-    let mut sim = Simulation::new(spec(boundary)).unwrap();
+fn warm(boundary: Boundary, solver: PressureSolver) -> Simulation {
+    let mut sim = Simulation::new(spec(boundary, solver)).unwrap();
     for _ in 0..3 {
         sim.step(&good(boundary == Boundary::Open)).unwrap();
     }
     sim
 }
 
-fn assert_atomic(boundary: Boundary, bad: Inputs, what: &str) {
-    let mut sim = warm(boundary);
+fn assert_atomic(boundary: Boundary, solver: PressureSolver, bad: Inputs, what: &str) {
+    let mut sim = warm(boundary, solver);
     let before = sim.state().clone();
     let time = sim.time();
     let error = sim.step(&bad).expect_err(what);
@@ -60,10 +61,12 @@ fn assert_atomic(boundary: Boundary, bad: Inputs, what: &str) {
     assert_eq!(sim.time(), time, "{what}: clock advanced by a failed step");
     let retry = good(boundary == Boundary::Open);
     sim.step(&retry).unwrap_or_else(|e| panic!("{what}: retry failed: {e}"));
-    let mut fresh = warm(boundary);
+    let mut fresh = warm(boundary, solver);
     fresh.step(&retry).unwrap();
     assert!(sim.state() == fresh.state(), "{what}: retry differs from a fresh replay");
 }
+
+const SOLVERS: [PressureSolver; 2] = [PressureSolver::Jacobi, PressureSolver::Multigrid];
 
 #[test]
 fn collider_stage_failure_is_atomic() {
@@ -75,19 +78,25 @@ fn collider_stage_failure_is_atomic() {
         }],
         ..good(true)
     };
-    assert_atomic(Boundary::Open, bad, "nonfinite collider velocity");
+    for solver in SOLVERS {
+        assert_atomic(Boundary::Open, solver, bad.clone(), "nonfinite collider velocity");
+    }
 }
 
 #[test]
 fn validation_stage_failure_is_atomic() {
     let mut bad = good(true);
     bad.sources[0].temperature_rate = 1e9;
-    assert_atomic(Boundary::Open, bad, "temperature beyond 50000 K");
+    for solver in SOLVERS {
+        assert_atomic(Boundary::Open, solver, bad.clone(), "temperature beyond 50000 K");
+    }
 }
 
 #[test]
 fn pressure_stage_failure_is_atomic() {
     let mut bad = good(false);
     bad.sources[0].expansion = 5.0;
-    assert_atomic(Boundary::Closed, bad, "sealed domain with expansion");
+    for solver in SOLVERS {
+        assert_atomic(Boundary::Closed, solver, bad.clone(), "sealed domain with expansion");
+    }
 }
