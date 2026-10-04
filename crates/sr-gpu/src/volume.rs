@@ -128,6 +128,7 @@ pub struct VolumeDraw {
     cast_shadow: bool,
     receive_shadow: bool,
     thermal_color: DMat3,
+    light_grid: Option<LightGridRequest>,
 }
 
 fn f32_ok(v: f64) -> bool {
@@ -226,8 +227,15 @@ impl VolumeDraw {
         if (diameter / march.step_size).ceil() + 2.0 > f64::from(march.max_steps) {
             return Err("volume domain exceeds maxSteps at this stepSize; increase maxSteps or stepSize".into());
         }
-        let draw =
-            Self { medium, march, diameter, cast_shadow: true, receive_shadow: true, thermal_color: DMat3::IDENTITY };
+        let draw = Self {
+            medium,
+            march,
+            diameter,
+            cast_shadow: true,
+            receive_shadow: true,
+            thermal_color: DMat3::IDENTITY,
+            light_grid: None,
+        };
         draw.validate_thermal()?;
         Ok(draw)
     }
@@ -269,6 +277,19 @@ impl VolumeDraw {
 
     pub fn march(&self) -> March {
         self.march
+    }
+
+    /// Lights this medium's in-scattering from per-light grids built once a frame (`lighting="grid"`):
+    /// `cell` voxels between grid nodes, `dome_directions` fixed dome directions, and the most memory
+    /// in MiB the pass's grids may take.
+    pub fn with_light_grid(mut self, cell: u32, dome_directions: u32, memory_mib: u64) -> Result<Self, String> {
+        if !(1..=64).contains(&cell) || !(8..=512).contains(&dome_directions) || !(1..=4096).contains(&memory_mib) {
+            return Err(
+                "lightGridCell must be 1-64, lightGridDomeDirections 8-512 and lightGridMemoryMiB 1-4096".into()
+            );
+        }
+        self.light_grid = Some(LightGridRequest { cell, dome_directions, memory_bytes: memory_mib << 20 });
+        Ok(self)
     }
 
     pub fn with_shadows(mut self, cast: bool, receive: bool) -> Self {
@@ -359,7 +380,12 @@ pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] 
         out[base + 8..base + 12].copy_from_slice(&(world * index).inverse().as_mat4().to_cols_array_2d());
         out[base + 12] = pack_grid(out, m.density());
         out[base + 12][3] = volume.march.step_size as f32;
-        out[base + 13] = [volume.cast_shadow as u8 as f32, volume.receive_shadow as u8 as f32, 0.0, 0.0];
+        out[base + 13] = [
+            volume.cast_shadow as u8 as f32,
+            volume.receive_shadow as u8 as f32,
+            volume.light_grid.is_some() as u8 as f32,
+            0.0,
+        ];
         if let Some(next) = m.next_density() {
             let index = DMat4::from_cols_array(&next.transform().columns());
             out[base + 24..base + 28].copy_from_slice(&(world * index).inverse().as_mat4().to_cols_array_2d());
@@ -448,9 +474,242 @@ fn pack_grid(out: &mut Vec<[f32; 4]>, grid: &sr_volume::SparseGrid) -> [f32; 4] 
     info
 }
 
+/// What a medium asks for with `lighting="grid"`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightGridRequest {
+    pub cell: u32,
+    pub dome_directions: u32,
+    pub memory_bytes: u64,
+}
+
+/// The world-space lattice and buffer layout of a pass's light grids.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightGridPlan {
+    pub origin: [f32; 3],
+    /// World distance between nodes.
+    pub spacing: f32,
+    pub nodes: [u32; 3],
+    /// Analytic lights, one scalar slot each; the dome's fixed directions follow when `directional`.
+    pub lights: u32,
+    pub dome_directions: u32,
+    /// Dome radiance pre-integrated per node (a medium with isotropic scattering asks for it).
+    pub radiance: bool,
+    /// One scalar slot per dome direction (a medium with anisotropic scattering asks for them).
+    pub directional: bool,
+    pub rows_per_slot: u32,
+    pub scalar_slots: u32,
+    pub bytes: u64,
+}
+
+impl LightGridPlan {
+    pub fn node_count(&self) -> u32 {
+        self.nodes.iter().product()
+    }
+
+    fn radiance_row(&self) -> u32 {
+        4 + self.scalar_slots * self.rows_per_slot
+    }
+}
+
+/// Most nodes a grid may have: the dome kernel runs one thread a node in at most 65535 groups.
+const MAX_GRID_NODES: u64 = 64 * 65535;
+
+/// The grids a pass needs, or none when no medium asks for them. The lattice covers the bounds of
+/// the media that ask; its spacing is the finest of their `lightGridCell` voxels. Memory over the
+/// strictest request is an error.
+pub fn plan_light_grid(volumes: &[VolumeDraw], lights: u32, dome: bool) -> Result<Option<LightGridPlan>, String> {
+    let mut lo = DVec3::splat(f64::INFINITY);
+    let mut hi = DVec3::splat(f64::NEG_INFINITY);
+    let mut spacing = f64::INFINITY;
+    let (mut directions, mut memory) = (0u32, u64::MAX);
+    let (mut radiance, mut directional) = (false, false);
+    let mut any = false;
+    for v in volumes {
+        let Some(request) = v.light_grid else { continue };
+        any = true;
+        let m = v.medium();
+        let object = DMat4::from_cols_array(&m.transform().columns());
+        let bounds = m.bounds().ok_or("lighting=\"grid\" needs a medium with bounds")?;
+        for k in 0..8 {
+            let p = DVec3::from_array(std::array::from_fn(|i| {
+                if k & (1 << i) == 0 {
+                    bounds.min()[i]
+                } else {
+                    bounds.max()[i]
+                }
+            }));
+            let w = object.transform_point3(p);
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        let index = DMat4::from_cols_array(&m.density().transform().columns());
+        let world = object * index;
+        let voxel = (0..3).map(|axis| world.col(axis).truncate().length()).fold(f64::INFINITY, f64::min);
+        if !voxel.is_finite() || voxel <= 0.0 {
+            return Err("lighting=\"grid\" needs a density grid with a valid transform".into());
+        }
+        spacing = spacing.min(voxel * f64::from(request.cell));
+        directions = directions.max(request.dome_directions);
+        memory = memory.min(request.memory_bytes);
+        if m.optical().anisotropy == 0.0 {
+            radiance = true;
+        } else {
+            directional = true;
+        }
+    }
+    if !any {
+        return Ok(None);
+    }
+    let extent = hi - lo;
+    let nodes: [u32; 3] = std::array::from_fn(|a| (extent[a] / spacing).ceil().max(1.0) as u32 + 1);
+    let count = nodes.iter().map(|n| u64::from(*n)).product::<u64>();
+    if count > MAX_GRID_NODES {
+        return Err(format!(
+            "the volume light grid would have {count} nodes (at most {MAX_GRID_NODES}); raise lightGridCell"
+        ));
+    }
+    let (radiance, directional) = (radiance && dome, directional && dome);
+    let scalar_slots = lights + if directional { directions } else { 0 };
+    let rows_per_slot = count.div_ceil(4);
+    let rows = 4 + rows_per_slot * u64::from(scalar_slots) + if radiance { count } else { 0 };
+    let bytes = rows * 16;
+    if bytes > memory {
+        return Err(format!(
+            "the volume light grid needs {:.1} MiB for {count} nodes and lightGridMemoryMiB allows {:.1} MiB; raise it, raise lightGridCell or use lighting=\"exact\"",
+            bytes as f64 / 1048576.0,
+            memory as f64 / 1048576.0
+        ));
+    }
+    Ok(Some(LightGridPlan {
+        origin: lo.as_vec3().to_array(),
+        spacing: spacing as f32,
+        nodes,
+        lights,
+        dome_directions: directions,
+        radiance,
+        directional,
+        rows_per_slot: rows_per_slot as u32,
+        scalar_slots,
+        bytes,
+    }))
+}
+
+/// Checks a pass's grids against the device's binding size, with the memory check of the sizing.
+pub(crate) fn validate_light_grid(
+    volumes: &[VolumeDraw],
+    lights: u32,
+    dome: bool,
+    limits: &wgpu::Limits,
+) -> Result<(), String> {
+    if let Some(plan) = plan_light_grid(volumes, lights, dome)? {
+        let cap = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        if plan.bytes > cap {
+            return Err(format!(
+                "the volume light grid needs {} MiB and this device binds at most {} MiB; raise lightGridCell",
+                plan.bytes.div_ceil(1 << 20),
+                cap >> 20
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The grids' buffer contents: the four header rows, then zeroed data the compute passes fill.
+pub fn light_grid_buffer(plan: &LightGridPlan) -> Vec<[f32; 4]> {
+    let mut rows = vec![[0.0; 4]; (plan.bytes / 16) as usize];
+    rows[0] = [plan.origin[0], plan.origin[1], plan.origin[2], plan.spacing];
+    let flags = u32::from(plan.radiance) | (u32::from(plan.directional) << 1);
+    rows[1] = [
+        f32::from_bits(plan.nodes[0]),
+        f32::from_bits(plan.nodes[1]),
+        f32::from_bits(plan.nodes[2]),
+        f32::from_bits(flags),
+    ];
+    rows[2] = [
+        f32::from_bits(4),
+        f32::from_bits(plan.rows_per_slot),
+        f32::from_bits(plan.dome_directions),
+        f32::from_bits(plan.lights),
+    ];
+    rows[3] = [f32::from_bits(plan.radiance_row()), 0.0, 0.0, 0.0];
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ball(voxel: f64) -> SparseGrid {
+        let scale = Transform::new(DMat4::from_scale(DVec3::splat(voxel)).to_cols_array()).unwrap();
+        let mut grid = SparseGrid::new(scale, 0.0, 64).unwrap();
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    grid.set([x, y, z], 1.0).unwrap();
+                }
+            }
+        }
+        grid
+    }
+
+    fn draw(voxel: f64, anisotropy: f64, grid: Option<(u32, u32, u64)>) -> VolumeDraw {
+        let medium = Medium::new(
+            Arc::new(ball(voxel)),
+            Some(sr_volume::medium::Bounds::new([0.0; 3], [8.0; 3]).unwrap()),
+            Transform::identity(),
+            sr_volume::medium::Optical { extinction: 1.0, anisotropy, ..Default::default() },
+        )
+        .unwrap();
+        let draw = VolumeDraw::new(Arc::new(medium), March { step_size: 0.5, max_steps: 65536 }).unwrap();
+        match grid {
+            Some((cell, directions, mib)) => draw.with_light_grid(cell, directions, mib).unwrap(),
+            None => draw,
+        }
+    }
+
+    #[test]
+    fn light_grid_plan_covers_the_asking_media_with_one_slot_per_light_and_direction() {
+        // no medium asks: no grid
+        assert_eq!(plan_light_grid(&[draw(1.0, 0.0, None)], 2, true).unwrap(), None);
+        // an 8-unit domain at voxel 1 and cell 1: 9 nodes a side
+        let plan = plan_light_grid(&[draw(1.0, 0.0, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        assert_eq!((plan.nodes, plan.spacing, plan.origin), ([9, 9, 9], 1.0, [0.0; 3]));
+        assert!(plan.radiance && !plan.directional);
+        assert_eq!(plan.scalar_slots, 2, "one scalar slot per light, none per direction for isotropic media");
+        assert_eq!(plan.rows_per_slot, 729_u32.div_ceil(4));
+        assert_eq!(plan.bytes, (4 + u64::from(plan.rows_per_slot) * 2 + 729) * 16);
+        assert_eq!(light_grid_buffer(&plan).len() as u64 * 16, plan.bytes);
+        // a coarser cell has fewer nodes; the finest request among the media sets the spacing
+        let coarse = plan_light_grid(&[draw(1.0, 0.0, Some((4, 64, 128)))], 2, true).unwrap().unwrap();
+        assert_eq!((coarse.nodes, coarse.spacing), ([3, 3, 3], 4.0));
+        let fine = plan_light_grid(&[draw(1.0, 0.0, Some((4, 64, 128))), draw(1.0, 0.0, Some((2, 8, 64)))], 2, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!((fine.spacing, fine.dome_directions), (2.0, 64));
+        // anisotropic scattering takes one scalar grid per dome direction instead of the radiance grid
+        let aniso = plan_light_grid(&[draw(1.0, 0.5, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        assert!(!aniso.radiance && aniso.directional);
+        assert_eq!(aniso.scalar_slots, 2 + 64);
+        // no dome, no dome grids
+        let dry = plan_light_grid(&[draw(1.0, 0.5, Some((1, 64, 128)))], 2, false).unwrap().unwrap();
+        assert!(!dry.radiance && !dry.directional);
+        assert_eq!(dry.scalar_slots, 2);
+    }
+
+    #[test]
+    fn light_grid_over_its_memory_is_an_error_naming_the_attribute() {
+        // an 8-unit domain at voxel 0.01 would have 801^3 nodes, more than a grid may
+        let error = plan_light_grid(&[draw(0.01, 0.0, Some((1, 64, 4096)))], 2, true).unwrap_err();
+        assert!(error.contains("raise lightGridCell"), "{error}");
+        // 134^3 nodes fit the limit but not 1 MiB; the strictest request among the media decides
+        let strict = [draw(0.06, 0.0, Some((1, 64, 4096))), draw(0.06, 0.0, Some((1, 64, 1)))];
+        let error = plan_light_grid(&strict, 4, true).unwrap_err();
+        assert!(error.contains("lightGridMemoryMiB allows 1.0 MiB"), "{error}");
+        assert!(plan_light_grid(&strict[..1], 4, true).is_ok());
+        assert!(draw(1.0, 0.0, None).with_light_grid(0, 64, 128).is_err());
+        assert!(draw(1.0, 0.0, None).with_light_grid(1, 4, 128).is_err());
+        assert!(draw(1.0, 0.0, None).with_light_grid(1, 64, 0).is_err());
+    }
 
     #[test]
     fn brick_directory_covers_the_bricks_and_gives_way_to_the_search_when_too_large() {

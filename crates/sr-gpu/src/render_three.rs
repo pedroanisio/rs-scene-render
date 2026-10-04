@@ -1082,6 +1082,7 @@ impl Renderer {
             None
         };
         let mut temperature = None;
+        let mut light_grid = None;
         if let Some(child) = sr_model::element::children(&*n.elem).into_iter().find(|c| c.element_name() == "medium") {
             let key = format!("{}/medium[0]", n.id);
             let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
@@ -1096,6 +1097,13 @@ impl Renderer {
                 anisotropy: a.num("anisotropy", 0.0),
             };
             march = March { step_size: a.num("stepSize", 1.0), max_steps: a.num("maxSteps", 2048.0) as u32 };
+            if a.str("lighting").as_deref() == Some("grid") {
+                light_grid = Some((
+                    a.num("lightGridCell", 1.0) as u32,
+                    a.num("lightGridDomeDirections", 64.0) as u32,
+                    a.num("lightGridMemoryMiB", 128.0) as u64,
+                ));
+            }
             if flag(&a, "blackbody", false) {
                 let (first, second) = temperature_grids.as_ref().ok_or("blackbody requires temperatureGrid")?;
                 temperature =
@@ -1126,9 +1134,11 @@ impl Renderer {
             Vec3::from_array(self.lin_srgb([0.0, 1.0, 0.0])).as_dvec3(),
             Vec3::from_array(self.lin_srgb([0.0, 0.0, 1.0])).as_dvec3(),
         );
-        crate::volume::VolumeDraw::new(Arc::new(medium), march)?.with_thermal_color(thermal_color).map(|draw| {
-            Some(draw.with_shadows(flag(&attrs(n), "castShadow", true), flag(&attrs(n), "receiveShadow", true)))
-        })
+        let mut draw = crate::volume::VolumeDraw::new(Arc::new(medium), march)?.with_thermal_color(thermal_color)?;
+        if let Some((cell, directions, memory)) = light_grid {
+            draw = draw.with_light_grid(cell, directions, memory)?;
+        }
+        Ok(Some(draw.with_shadows(flag(&attrs(n), "castShadow", true), flag(&attrs(n), "receiveShadow", true))))
     }
 
     /// Draws of one 3D object.

@@ -154,6 +154,10 @@ pub fn limit_note(scene: &Scene3, limits: &wgpu::Limits) -> Option<String> {
     if let Err(error) = crate::volume::validate(&scene.volumes) {
         return Some(error);
     }
+    let lights = scene.lights.len().max(1) as u32;
+    if let Err(error) = crate::volume::validate_light_grid(&scene.volumes, lights, scene.env.is_some(), limits) {
+        return Some(error);
+    }
     let triangles = instances::storage_primitives(scene);
     if let Err(note) = fits(scene.size, triangles, limits) {
         return Some(note);
@@ -593,6 +597,19 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_grid_shader_replaces_the_exact_lighting_and_leaves_the_rest() {
+        let source = grid_source();
+        assert_eq!(source.matches("fn volume_incident(").count(), 1, "one volume_incident");
+        assert!(source.contains("fn volume_incident_exact("), "the exact function stays for other media");
+        assert!(source.contains("tverts[base+13u].y>0.5,base)"), "the call that lights a domain passes the domain");
+        assert!(!source.contains("//@exact-incident"), "the markers are removed with the function between them");
+        // everything outside the replaced span is the shader without grids
+        let plain = include_str!("volume.wgsl");
+        assert!(plain.matches("fn volume_incident(").count() == 1 && plain.contains("//@exact-incident-begin"));
+        assert!(source.contains("fn volume_transmittance("), "shared code is kept");
+    }
+
     /// Brute-force nearest hit versus BVH traversal on the CPU.
     fn hit(t: &[Vec3; 3], o: Vec3, d: Vec3) -> Option<f32> {
         let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
@@ -740,6 +757,34 @@ struct Params {
     media: [u32; 4],
 }
 
+/// Compute pipelines of the shader variant with light grids.
+struct GridPipelines {
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    light: wgpu::ComputePipeline,
+    dome: wgpu::ComputePipeline,
+}
+
+/// The shader with light grids: the exact in-scattering function and the call that lights a domain
+/// are replaced, everything else is the shader without grids.
+fn grid_source() -> String {
+    const BEGIN: &str = "//@exact-incident-begin\n";
+    const END: &str = "//@exact-incident-end\n";
+    const CALL: &str = "volume_incident(point,-d,albedo.w,tverts[base+13u].y>0.5)";
+    let volume = include_str!("volume.wgsl");
+    let (a, b) = (volume.find(BEGIN).expect("incident begin marker"), volume.find(END).expect("incident end marker"));
+    assert!(volume.matches(CALL).count() == 1, "one call lights a domain");
+    let shared = format!("{}{}", &volume[..a], &volume[b + END.len()..])
+        .replace(CALL, "volume_incident(point,-d,albedo.w,tverts[base+13u].y>0.5,base)");
+    format!(
+        "{}\n{}\n{}\n{}",
+        include_str!("sampling.wgsl"),
+        include_str!("pathtrace.wgsl"),
+        shared,
+        include_str!("volume_grid.wgsl")
+    )
+}
+
 /// Pipelines of the path tracer (built on first use).
 pub struct PtGpu {
     bgl0: wgpu::BindGroupLayout,
@@ -748,6 +793,10 @@ pub struct PtGpu {
     trace: wgpu::ComputePipeline,
     trace_volume: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
     module: wgpu::ShaderModule,
+    /// The variant of the shader with light grids, its group-1 layout and pipelines (built on first use).
+    bgl_grid: wgpu::BindGroupLayout,
+    grid: std::sync::OnceLock<GridPipelines>,
+    trace_grid: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
     atrous: wgpu::ComputePipeline,
     output: wgpu::RenderPipeline,
     tile_bytes: u64,
@@ -810,6 +859,10 @@ impl PtGpu {
             label: Some("pathtrace-denoise"),
             entries: &[buf(0, ro, false), buf(1, rw, false)],
         });
+        let bgl_grid = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pathtrace-light-grid"),
+            entries: &[buf(0, rw, false)],
+        });
         let bgl_fin = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pathtrace-output"),
             entries: &[buf(0, ro, false)],
@@ -862,17 +915,64 @@ impl PtGpu {
             trace,
             trace_volume: std::array::from_fn(|_| std::sync::OnceLock::new()),
             module,
+            bgl_grid,
+            grid: std::sync::OnceLock::new(),
+            trace_grid: std::array::from_fn(|_| std::sync::OnceLock::new()),
             atrous,
             output,
             tile_bytes: DEFAULT_TILE_BYTES,
         }
     }
 
-    fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3) -> &wgpu::ComputePipeline {
+    /// The pipelines of the shader with light grids, compiled the first time a pass needs them.
+    fn grid_pipelines(&self, d: &wgpu::Device) -> &GridPipelines {
+        self.grid.get_or_init(|| {
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pathtrace-light-grid"),
+                source: wgpu::ShaderSource::Wgsl(grid_source().into()),
+            });
+            let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pathtrace-light-grid"),
+                bind_group_layouts: &[Some(&self.bgl0), Some(&self.bgl_grid)],
+                immediate_size: 0,
+            });
+            let kernel = |entry: &str| {
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            };
+            let light = kernel("cs_light_grid");
+            let dome = kernel("cs_dome_grid");
+            GridPipelines { module, layout, light, dome }
+        })
+    }
+
+    fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
         if scene.volumes.is_empty() {
             return &self.trace;
         }
         let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
+        if grid {
+            return self.trace_grid[lighting as usize].get_or_init(|| {
+                let g = self.grid_pipelines(d);
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pathtrace-volumes-grid"),
+                    layout: Some(&g.layout),
+                    module: &g.module,
+                    entry_point: Some("cs_trace"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("HAS_MEDIA", 1.0), ("MEDIUM_LIGHTING", lighting as u8 as f64)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+            });
+        }
         self.trace_volume[lighting as usize].get_or_init(|| {
             let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("pathtrace-volumes"),
@@ -949,7 +1049,7 @@ pub fn render_timed(
     let budget = pt.tile_bytes.min(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
     let tiles = tiles(size, budget, opts.denoise);
     let pixels = tiles.iter().map(|t| u64::from(t.size[0]) * u64::from(t.size[1])).max().unwrap_or(1);
-    let mut timer = time_gpu.then(|| crate::fx::Timer::new(d, 2 * tiles.len() as u32));
+    let mut timer = time_gpu.then(|| crate::fx::Timer::new(d, 2 * tiles.len() as u32 + 1));
     let storage = |label: &str, bytes: &[u8]| {
         d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -997,6 +1097,31 @@ pub fn render_timed(
         verts.push(std::array::from_fn(|i| f32::from_bits(pixels.get(i).copied().unwrap_or(0))));
     }
     let media = crate::volume::pack(&mut verts, &scene.volumes);
+    // Light grids: callers check `limit_note` first, which reports the grid sizing errors.
+    let grid_plan = crate::volume::plan_light_grid(&scene.volumes, data.lights.len() as u32, scene.env.is_some())
+        .unwrap_or_else(|e| panic!("{e}; check pathtrace::limit_note before rendering"));
+    let grid_buffer = grid_plan.as_ref().map(|plan| {
+        let buffer = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pt-light-grid"),
+            size: plan.bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("mapped at creation")
+            .copy_from_slice(bytemuck::cast_slice(&crate::volume::light_grid_buffer(plan)));
+        buffer.unmap();
+        buffer
+    });
+    let grid_group = grid_buffer.as_ref().map(|buffer| {
+        d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pathtrace-light-grid"),
+            layout: &pt.bgl_grid,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        })
+    });
     let tverts = storage("pt-verts", bytemuck::cast_slice(&verts));
     let mats = storage("pt-mats", bytemuck::cast_slice(&materials));
     let nodes = storage("pt-nodes", bytemuck::cast_slice(&data.nodes));
@@ -1021,29 +1146,98 @@ pub fn render_timed(
     let ping = opts.denoise.then(|| zeroed("pt-denoise-a", pixels * 16));
     let pong = opts.denoise.then(|| zeroed("pt-denoise-b", pixels * 16));
     let pack_seconds = started.elapsed().as_secs_f64();
+    let make_base = |tile: &Tile| Params {
+        cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
+        view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
+        inv_view_proj: (scene.clip_fix * scene.cam.view_proj()).inverse().to_cols_array_2d(),
+        // the dome's full orientation, as the rasteriser applies it
+        env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
+        size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
+        cam: [scene.lens_k1, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
+        env: [
+            scene.env.as_ref().map(|e| if e.visible { 2.0 } else { 1.0 }).unwrap_or(0.0),
+            scene.env.as_ref().map(|e| e.intensity).unwrap_or(0.0),
+            scene.cam.orthographic as u32 as f32,
+            (ambient.max_element() > 0.0) as u32 as f32,
+        ],
+        ambient: [ambient.x, ambient.y, ambient.z, data.lights.len() as f32],
+        misc: [inputs.backdrop.is_some() as u32 as f32, samples as f32, 1.0, scene.exposure],
+        out: [scene.encode_srgb as u32 as f32, 0.0, 0.0, 0.0],
+        tile: [tile.origin[0], tile.origin[1], tile.size[0], tile.size[1]],
+        media,
+    };
+
+    // the grids are built once, before the tiles
+    if let (Some(plan), Some(group)) = (&grid_plan, &grid_group) {
+        let first = make_base(&tiles[0]);
+        let params: Vec<Params> = (0..plan.scalar_slots)
+            .map(|slot| Params { size: [first.size[0], first.size[1], slot as f32, 0.0], ..first })
+            .collect();
+        let mut bytes = vec![0u8; params.len().max(1) * SLOT as usize];
+        for (k, sl) in params.iter().enumerate() {
+            let b = bytemuck::bytes_of(sl);
+            bytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
+        }
+        let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("pt-grid-params"),
+            contents: &bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let entries = |acc: &wgpu::Buffer| {
+            d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pathtrace-grid-build"),
+                layout: &pt.bgl0,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry { binding: 1, resource: tverts.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: mats.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: guide.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
+                    },
+                ],
+            })
+        };
+        let build = entries(&stand_in);
+        let g = pt.grid_pipelines(d);
+        let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace light grid"));
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pathtrace-light-grid"),
+            timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
+                query_set: &t.set,
+                beginning_of_pass_write_index: Some(a),
+                end_of_pass_write_index: Some(a + 1),
+            }),
+        });
+        cp.set_bind_group(1, group, &[]);
+        cp.set_pipeline(&g.light);
+        for slot in 0..plan.scalar_slots {
+            cp.set_bind_group(0, &build, &[(u64::from(slot) * SLOT) as u32]);
+            cp.dispatch_workgroups(plan.rows_per_slot.div_ceil(64), 1, 1);
+        }
+        if plan.radiance {
+            cp.set_pipeline(&g.dome);
+            cp.set_bind_group(0, &build, &[0]);
+            cp.dispatch_workgroups(plan.node_count().div_ceil(64), 1, 1);
+        }
+    }
     for (tile_index, tile) in tiles.iter().enumerate() {
         enc.clear_buffer(&accum, 0, None);
         enc.clear_buffer(&guide, 0, None);
-        let base = Params {
-            cam_to_world: scene.cam.view.inverse().to_cols_array_2d(),
-            view_proj: (scene.clip_fix * scene.cam.view_proj()).to_cols_array_2d(),
-            inv_view_proj: (scene.clip_fix * scene.cam.view_proj()).inverse().to_cols_array_2d(),
-            // the dome's full orientation, as the rasteriser applies it
-            env_rot: scene.env.as_ref().map(|e| e.rotation).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
-            size: [size[0] as f32, size[1] as f32, 0.0, 0.0],
-            cam: [scene.lens_k1, lens, scene.dof.map(|f| f.focus).unwrap_or(1.0), opts.bounces as f32],
-            env: [
-                scene.env.as_ref().map(|e| if e.visible { 2.0 } else { 1.0 }).unwrap_or(0.0),
-                scene.env.as_ref().map(|e| e.intensity).unwrap_or(0.0),
-                scene.cam.orthographic as u32 as f32,
-                (ambient.max_element() > 0.0) as u32 as f32,
-            ],
-            ambient: [ambient.x, ambient.y, ambient.z, data.lights.len() as f32],
-            misc: [inputs.backdrop.is_some() as u32 as f32, samples as f32, 1.0, scene.exposure],
-            out: [scene.encode_srgb as u32 as f32, 0.0, 0.0, 0.0],
-            tile: [tile.origin[0], tile.origin[1], tile.size[0], tile.size[1]],
-            media,
-        };
+        let base = make_base(tile);
         let mut slots: Vec<Params> = Vec::new();
         for c in 0..chunks {
             let start = c * PER_DISPATCH;
@@ -1112,7 +1306,10 @@ pub fn render_timed(
                     end_of_pass_write_index: Some(a + 1),
                 }),
             });
-            cp.set_pipeline(pt.trace_pipeline(d, scene));
+            cp.set_pipeline(pt.trace_pipeline(d, scene, grid_group.is_some()));
+            if let Some(group) = &grid_group {
+                cp.set_bind_group(1, group, &[]);
+            }
             for c in 0..chunks {
                 cp.set_bind_group(0, &g_trace, &[(c as u64 * SLOT) as u32]);
                 cp.dispatch_workgroups(groups[0], groups[1], 1);

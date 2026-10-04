@@ -179,6 +179,7 @@ fn volume_transmittance(o: vec3<f32>, d: vec3<f32>, distance: f32) -> f32 {
     }
     return exp(-optical_depth);
 }
+//@exact-incident-begin
 fn volume_incident(p: vec3<f32>, outgoing: vec3<f32>, g: f32, shadows: bool) -> vec3<f32> {
     var light=vec3(0.0);
     for (var i=0u; i<u32(pp.ambient.w); i++) {
@@ -207,6 +208,7 @@ fn volume_incident(p: vec3<f32>, outgoing: vec3<f32>, g: f32, shadows: bool) -> 
     }
     return light;
 }
+//@exact-incident-end
 // Returns premultiplied radiance and surviving transmittance (not opacity).
 fn volume_transport(o: vec3<f32>, d: vec3<f32>, distance: f32) -> vec4<f32> {
     var color=vec3(0.0); var trans=1.0; var cursor=0.0;
