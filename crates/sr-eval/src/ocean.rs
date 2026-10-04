@@ -57,6 +57,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         max_work: f("maxWork", 100_000_000.) as u64,
+        moving_bed: false,
     };
     let count = spec.cells[0].checked_mul(spec.cells[1]).ok_or("ocean cell count overflow")?;
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
