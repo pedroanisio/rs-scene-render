@@ -706,10 +706,15 @@ impl Simulation {
         }
         let count =
             s.cells.iter().try_fold(1usize, |v, n| v.checked_mul(*n)).ok_or(Error::Limit("cell count overflow"))?;
-        // Includes two states, advection copies, face arrays, PCG vectors, curl,
-        // collider velocities, allocator overhead and transient volume metadata.
+        // Worst-case live bytes per cell during one step, with every page touched:
+        // committed state 89 (density 8, temperature 8, velocity ~24, solid 1, two
+        // solid-velocity arrays 48) + working state 89 + pressure workspace 65 (six
+        // CG vectors, open-face mask, divergence target) + ~26 for the multigrid
+        // hierarchy, level vectors and component labels = ~270, plus ~20% for
+        // allocator overhead and transient volume metadata. Measured peak RSS of the
+        // impact scene without colliders is 155-256 B per cell.
         let bytes =
-            count.checked_mul(512).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
+            count.checked_mul(320).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
             return Err(Error::Limit("grid and step workspace memory budget"));
         }

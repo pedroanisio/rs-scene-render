@@ -421,3 +421,11 @@ fn invalid_inputs_and_exhausted_budgets_fail_before_changing_state() {
         assert_eq!(sim.state(), &old);
     }
 }
+
+#[test]
+fn the_step_workspace_budget_is_320_bytes_per_cell_plus_a_fixed_overhead() {
+    let exact = 16usize.pow(3) * 320 + 8192;
+    let with = |max_bytes| Simulation::new(Spec { cells: [16; 3], max_bytes, ..spec() });
+    assert!(with(exact).is_ok());
+    assert!(with(exact - 1).is_err());
+}
