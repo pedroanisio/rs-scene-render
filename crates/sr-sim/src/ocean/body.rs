@@ -1,5 +1,5 @@
 //! Horizontal momentum that bodies in the water column give to the water.
-use super::{BodySample, Forcing, Push, Spec, State, Q};
+use super::{BodySample, Forcing, Push, Spec, SplashCell, State, CAVITY_SHARE, Q};
 use std::collections::BTreeMap;
 
 /// Relaxes the horizontal velocity of every column a body occupies toward the
@@ -184,4 +184,42 @@ pub(super) fn push(spec: &Spec, q: &mut [Q], pushes: &[Push], by: &mut [[f64; 2]
         }
     }
     given
+}
+
+/// Applies the splash of a step: of each cell's water the depth `volume / area` goes, no more than
+/// [`CAVITY_SHARE`] of what the cell holds, and is given in equal parts to the neighbours the cell has
+/// among the eight around it; the cell's momentum grows by `momentum / area` if it keeps water. The
+/// momenta of the cells and of the neighbours are not touched by the water that moves.
+pub(super) fn splash(spec: &Spec, q: &mut [Q], cells: &[SplashCell]) {
+    let [nx, nz] = spec.cells;
+    let area = spec.cell_size * spec.cell_size;
+    for e in cells {
+        let c = e.cell as usize;
+        if q[c][0] < spec.dry_tolerance {
+            continue;
+        }
+        let (x, z) = ((c % nx) as isize, (c / nx) as isize);
+        let mut neighbours = [0usize; 8];
+        let mut count = 0;
+        for dz in -1..=1isize {
+            for dx in -1..=1isize {
+                let (nxp, nzp) = (x + dx, z + dz);
+                if (dx != 0 || dz != 0) && nxp >= 0 && nzp >= 0 && (nxp as usize) < nx && (nzp as usize) < nz {
+                    neighbours[count] = nzp as usize * nx + nxp as usize;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            let taken = (e.volume / area).min(CAVITY_SHARE * q[c][0]);
+            q[c][0] -= taken;
+            for &n in &neighbours[..count] {
+                q[n][0] += taken / count as f64;
+            }
+        }
+        if q[c][0] >= spec.dry_tolerance {
+            q[c][1] += e.momentum[0] / area;
+            q[c][2] += e.momentum[1] / area;
+        }
+    }
 }

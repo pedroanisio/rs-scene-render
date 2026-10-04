@@ -159,10 +159,33 @@ pub struct Forcing {
     /// sample's time `T`, one entry per body that gives any. Like the bed, a function of the time and of
     /// scene data that does not change.
     pub pushes: Vec<Push>,
+    /// What fell into the water in the canonical step that ends at the sample's time `T`, by cell,
+    /// sorted by cell with no cell twice, applied when the step reaches `T`, after the impulses
+    /// due then: of each cell's water `volume / cell area` of depth goes (at most
+    /// [`CAVITY_SHARE`] of the cell's water; the rest of the volume is dropped, not an error)
+    /// and is given, all of it, in equal parts to the cell's neighbours (the eight around it, or
+    /// those that exist at the edge of the domain), and `momentum` is added to the cell's momentum
+    /// unless the cell is left with less than `dry_tolerance` of water, in which case it is dropped.
+    /// Water and momentum are conserved except for what is dropped. Applied to the water itself, after
+    /// any lift of a bed, not through it. Costs the entries, not the cells. Empty on every other
+    /// sample.
+    pub splash: Vec<SplashCell>,
     /// With `Spec::body_owners`, set together with `exchange`: what each body that gave the water
     /// momentum in step `k`, or stands in it at the end of the step, gets of the water, by body
     /// index. Empty on every other sample.
     pub bodies: Vec<BodySample>,
+}
+
+/// What something that fell into the water in one canonical step gives it, in one cell: the volume
+/// of solid that entered the cell's water and the horizontal momentum it brought.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SplashCell {
+    /// Index into the `nx * nz` cells, x fastest.
+    pub cell: u32,
+    /// Scene units cubed.
+    pub volume: f64,
+    /// Horizontal momentum per unit water density, scene units^4/second.
+    pub momentum: [f64; 2],
 }
 
 /// Horizontal momentum one body gives the water in a canonical step, per unit water density, spread
@@ -449,6 +472,7 @@ impl Ocean {
         out.bodies = bodies;
         out.events.clear();
         out.pushes.clear();
+        out.splash.clear();
         out.raise.clear();
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
@@ -472,6 +496,17 @@ impl Ocean {
             || out.raise.iter().any(|r| !r.is_finite() || *r < 0.0)
         {
             return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
+        }
+        if out.splash.len() > n
+            || out.splash.windows(2).any(|w| w[0].cell >= w[1].cell)
+            || out.splash.iter().any(|e| {
+                e.cell as usize >= n
+                    || !e.volume.is_finite()
+                    || e.volume < 0.0
+                    || e.momentum.iter().any(|m| !m.is_finite())
+            })
+        {
+            return Err(Error::Invalid("driver splash cells, volume or momentum"));
         }
         let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
         if columns > 2 * n {
@@ -692,6 +727,12 @@ fn advance(
         Bed::Moving { to, .. } => &to.pushes,
         Bed::Fixed(_) => &[],
     };
+    // what fell in during the step that ends at `t1`, and whether it has been applied
+    let (splash, splash_at): (&[SplashCell], f64) = match bed {
+        Bed::Moving { to, t1, .. } => (&to.splash, t1),
+        Bed::Fixed(_) => (&[], f64::INFINITY),
+    };
+    let mut splashed = false;
     loop {
         // authored impulses first when both are due, then the driver's, each in order of time
         loop {
@@ -710,6 +751,11 @@ fn advance(
             } else {
                 next_asked += 1;
             }
+        }
+        if !splashed && !splash.is_empty() && state.time >= splash_at {
+            work.take(splash.len().saturating_mul(16))?;
+            body::splash(spec, &mut state.q, splash);
+            splashed = true;
         }
         if state.time >= target {
             break;

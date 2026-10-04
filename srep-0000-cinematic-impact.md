@@ -1163,6 +1163,15 @@ wake; the kernel for the momentum is the one of the volume. The cavity of a wate
 Regions wider than 1024 cells are not filtered. Tests that depend on the long-wave numbers of the first
 version set `bedResponse="hydrostatic"`.
 
+Splash (solver side). The driver can give the water what fell into it in a canonical step as a sparse
+list of cells (`Forcing::splash`: cell, volume of solid, horizontal momentum per unit density), sorted, no
+cell twice, applied when the step reaches its end, after the impulses due then, to the water itself and not
+through the lift of any bed. Of each cell's water the depth `volume / cell area` goes, at most 90% of what the
+cell holds (the rest of the volume is dropped, not an error), and is given, all of it, in equal parts to the
+neighbours the cell has among the eight around it (fewer at an edge or a corner); the momentum is added to the
+cell's own unless the cell is left with less than `dryTolerance` of water, when it is dropped. The cost is the
+entries, not the cells. Water is conserved except for what is dropped, and momentum except for what is dropped.
+
 Bathymetry images map the full raster to the domain, using bilinear samples at
 cell centres and clamped edges. Red encoding reads normalized numeric red values
 without color-space or transfer conversion. Packed RGB8 encodings decode upward
