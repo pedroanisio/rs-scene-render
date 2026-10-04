@@ -30,6 +30,29 @@ pub struct ImpactCrater {
     pub(crate) cause: ImpactCause,
 }
 
+impl ImpactCrater {
+    /// Composition time of the impact, seconds.
+    pub fn impact_time(&self) -> f64 {
+        self.cause.time
+    }
+
+    /// What the scaling law gave for the impact, in metres and seconds.
+    pub fn law(&self) -> &sr_sim::cratering::Crater {
+        &self.cause.law
+    }
+
+    /// The impactor as the law read it: its mass, its density and the speed along the surface
+    /// normal that made the crater.
+    pub fn impactor(&self) -> &Impact {
+        &self.cause.impactor
+    }
+
+    /// Metres per second of the impactor's whole relative speed at the contact.
+    pub fn speed(&self) -> f64 {
+        self.cause.speed
+    }
+}
+
 /// The physical impact behind a crater, in SI units.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImpactCause {
