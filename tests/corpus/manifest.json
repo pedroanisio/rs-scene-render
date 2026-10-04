@@ -779,6 +779,7 @@
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
     "ocean-entry.scene.xml": [],
+    "ocean-full.scene.xml": [],
     "ocean-order2.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],

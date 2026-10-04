@@ -1676,23 +1676,45 @@ rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
-Buoyancy (`ocean@bodyCoupling="buoyancy"`). The group above gets its first physical coupling. Each rigid
-body in the ocean's `colliders` is loaded, every rigid step, with the weight of the water it displaces
-(density 1000 kg/m3 and the ocean's gravity) upward through the centroid of the submerged volume, which
-turns a tilted body, and with a quadratic form drag on its vertical motion, `-(1/2) rho C_d A |v| v`,
-`C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact literature) and `A` the area the
-submerged part presents from above, limited to what stops the body within a step. Horizontal motion has no
-drag of this kind: the water's horizontal reaction on a body is the momentum the body gave the water, which
-the ocean does not yet offer per body. The submerged volume is that of the body's shape (analytic for a
-sphere, a closed mesh for a box, cylinder, cone, capsule, mesh or decomposition) below the water's rest level,
-`waterLevel`, in the ocean's own axes at that time; the surface the waves raise is not yet read, so a body
-rides the rest level and not the swell. The load is held for the whole step and evaluated where the body
-will be halfway through it, because a position-dependent force held from the start of a step adds energy
-(the motion grows) and from the middle adds none. The waterline is a spring of stiffness `rho g A_wl` and
-the explicit step is stable only if its frequency times the step is below 1.8: a body too light for
-`physics/@fixedStep` is an error that names it, not a motion that blows up. Only the vertical motion is
-damped, so a body's roll and its horizontal sliding are not. Such a document cannot be baked into a
-physics cache, since the loads come from the water.
+Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
+first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
+weight of the water it displaces (density 1000 kg/m3 and the ocean's gravity) upward through the centroid of
+the submerged volume, which turns a tilted body, and with a quadratic form drag on its vertical motion,
+`-(1/2) rho C_d A |v| v`, `C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact
+literature) and `A` the area the submerged part presents from above, limited to what stops the body within a
+step. The submerged volume is that of the body's shape (analytic for a sphere, a closed mesh for a box,
+cylinder, cone, capsule, mesh or decomposition) below the water's free surface under the body: the plane of
+the per-body samples below, from the canonical step before the last one the ocean has completed, or the
+rest level, `waterLevel`, in the ocean's own axes while there is no such step or the body holds no wet
+column. The load is held for the whole step and evaluated where the body will be halfway through it, because
+a position-dependent force held from the start of a step adds energy (the motion grows) and from the middle
+adds none. The waterline is a spring of stiffness `rho g A_wl` and the explicit step is stable only if its
+frequency times the step is below 1.8: a body too light for `physics/@fixedStep` is an error that names
+it, not a motion that blows up. Such a document cannot be baked into a physics cache, since the loads come
+from the water.
+
+Reading the surface under the body gives the radiation damping that a rest level lacks: the body's motion
+raises and lowers the water it floats on, and the water takes the energy away. A ball of 2094 kg and 1 m
+radius, dropped 1.5 m into a closed 16 m ocean 20 m deep, is within 3 cm of its draft for good from 8.75 s
+reading the surface and from 24 s at the rest level, and 60 s later is 1.1 cm below the draft the weight
+needs (1.2 cm above at the rest level); with no drag at all it settles from a swing of 1.2 m to under 10 cm
+by 15 s, where at the rest level it kept bobbing. No linear damping term is added: the algebraic
+convergence of the floating ball is the radiation damping, and the surface plane under a body is not
+the undisturbed surface while the body is displacing water (the water it displaces stands above the rest
+level, so the plane is higher than the swell), which the draft at rest does not feel because the surface
+is flat again then.
+
+`full` also gives the body back the horizontal momentum it gave the water. The momentum per unit density
+that the body gave in a canonical step, `p`, becomes a force on the body's centre, in the ocean's horizontal
+axes mapped into the world, `-rho p / (s^3 dt)` (`s` scene units per metre, `dt` the canonical step), held
+for exactly the rigid steps that read that canonical step: a canonical step that is a whole number of
+rigid steps is read by that number of them, counted in integers, since a window of one rigid step more or
+less is a few per cent of the momentum. It is read one canonical step late, by the rule of the group, so
+the momentum of the body and the water is conserved to what is in flight: in a closed basin of 160 m, before
+the waves reach the walls, a ball of 16 755 kg at 3 m/s and a canonical step of 0.1, 0.05 and 0.025 s keeps
+total momentum to within 13 %, 10 % and 4.8 % of its own at the worst of three instants. Roll is not
+damped, there is no added mass, and the force acts at the centre. The water's momentum exceeds what the
+bodies are credited with giving it by a few per cent that the per-body samples do not attribute.
 
 Per-body water samples. With bodies in an ocean the solver tags every occupied column with the body
 that holds most of it (its position in the ocean's `colliders` list, which counts the surfaces
@@ -1707,8 +1729,8 @@ velocity under the footprint, and the mean bed ordinate under it with the body's
 as bed. Under a body the water that it displaces stands above the rest level, since a column keeps
 its depth while the body raises its bed, so the plane there is not the undisturbed surface. A direction
 in which the footprint has no extent (one row of columns, one column) has no slope. A replay of a step
-offers the same samples bit for bit, restored from a checkpoint or not. The bodies are not touched; a
-member of the group that reads these (for the reaction on the body) is the consumer. Without bodies,
+offers the same samples bit for bit, restored from a checkpoint or not. The rigid world reads them, from
+the group's log, for the surface under each body and the reaction on it. Without bodies,
 or without tags, nothing changes, and tagging does not alter the water.
 
 #### Fracture (native scene, rendering and cache integration implemented)
@@ -2343,7 +2365,7 @@ Also includes `pyroShape`, inventoried below.
 | `material` | xs:IDREF | Optional; absent |
 | `bathymetry` | xs:IDREF | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
-| `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy | Default `none` (the water does nothing to the bodies); `buoyancy` needs `colliders` (OCN8) |
+| `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy, enumeration=full | Default `none` (the water does nothing to the bodies); `buoyancy` and `full` need `colliders` (OCN8) |
 | `bodyDrag` | nonNegativeDecimal | Optional, with `bodyCoupling` (OCN9); form-drag coefficient of the vertical motion, default `1.0` |
 
 ### `oceanWaveType`
@@ -2518,7 +2540,7 @@ seconds, gravity declared) and author no time for any effect:
 kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and its ejecta, 4000 particles
 that hold 80 % of the crater's mass, are consequences of the contact) and
 [`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
-second-order ocean 20 m deep that carries it with `bodyCoupling="buoyancy"` and makes a crater in the
+second-order ocean 20 m deep that carries it with `bodyCoupling="full"` and makes a crater in the
 seabed; there is no `waterImpulse`). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
 no effect has a time attribute, that nothing happens before the contact, that the crater, the dust, the
 heat in the dust and the ejecta (their mass, which is 0.8 of the crater's, and their reach) grow with speed,
@@ -2532,11 +2554,13 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   ignore the water.
 - The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
   so a smoke source from that crater would make a cloud on the sea bed.
-- `bodyCoupling="buoyancy"` has no horizontal drag, so the rock keeps its horizontal speed through the water.
-  The highest wave in the scene is then the rock's own bow wave as it crosses 20 m of water, which does not
-  grow with speed and is a few centimetres for a rock that arrives straight down; the wave of the crater
-  alone (the sea with the bed as its only collider) does grow with speed, mass and angle. A body lighter
-  than water floats and makes no crater.
+- In the ocean scene the highest wave grows with the rock's speed (1.29, 1.54 and 2.17 m for 60, 100
+  and 150 m/s) and with its mass (1.23, 1.54 and 2.77 m for 60 000, 90 478 and 270 000 kg) with
+  `bodyCoupling="full"`, but not with the angle: it is 2.41, 1.54 and 0.09 m for 30, 60 and 90 degrees,
+  because the ocean sees the rock as a bump that moves and has no splash from a plunge, so a rock that
+  arrives straight down makes a wave of a few centimetres. The wave of the crater alone (the sea with the bed
+  as its only collider) does grow with speed, mass and angle. A body lighter than water floats and makes no
+  crater.
 - The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
   the speed along the normal to the power 1.7, so the temperature rise barely moves (19.19, 19.07 and 19.08 K
   at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows

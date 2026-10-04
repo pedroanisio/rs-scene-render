@@ -2158,14 +2158,20 @@
         displaces (water density 1000 kg/m3, the ocean's gravity), upward through the centroid of the submerged volume
         so that a tilted body is turned by it, and with a quadratic form drag on its vertical motion, scaled by
         `bodyDrag`. A body floats if it is lighter than the water it displaces. The submerged part is measured against
-        the water's rest level, `waterLevel`, in the ocean's own axes; the surface the waves raise is not yet read.
-        The load is held for one rigid step and evaluated halfway through it. A body so light that the waterline's
-        stiffness times the step reaches 1.8 is an error (lower `physics/@fixedStep` or raise the mass), not a damped
-        motion. The rigid body must be a sphere, box, cylinder, cone, capsule or closed mesh. The ocean and the
-        bodies form a group (see the contract text): the ocean is stepped before the rigid world, and the document
-        cannot be baked into a physics cache. Only the vertical motion is damped, so a body's roll is not.
+        the free surface under the body: the plane that the ocean fits, in the canonical step before the last one it has
+        completed, through the surface of the wet columns of the body's footprint (the water the body displaces stands
+        above the rest level while it is there, and the plane says so), and against the rest level, `waterLevel`, while
+        there is none; the body's own motion therefore moves the water it floats on, and the water carries the energy of
+        a bobbing body away, so a body with no drag settles. `full` adds the horizontal momentum the body gave the water in
+        that step, taken back as a force along the body's centre over one canonical step, so that the body and the water
+        keep their momentum together (to what is in flight, one step late); roll is not damped, there is no added mass,
+        and a body rides the rest level when the ocean has no water under it. The load is held for one rigid step and
+        evaluated halfway through it. A body so light that the waterline's stiffness times the step reaches 1.8 is an
+        error (lower `physics/@fixedStep` or raise the mass), not a damped motion. The rigid body must be a sphere, box,
+        cylinder, cone, capsule or closed mesh. The ocean and the bodies form a group (see the contract text): the ocean
+        is stepped before the rigid world, and the document cannot be baked into a physics cache.
       </xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/></xs:restriction></xs:simpleType>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/><xs:enumeration value="full"/></xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
       <xs:annotation><xs:documentation>
