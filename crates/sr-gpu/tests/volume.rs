@@ -805,3 +805,133 @@ fn advected_cache_documents_move_fields_replay_and_validate_channels() {
         }
     }
 }
+
+/// A ball of smoke hovering over a mirror, written to a cache file; the domain spans
+/// y in [-16, 6], across the mirror's plane (y = 0, up is negative y).
+fn mirror_ball(name: &str) -> std::path::PathBuf {
+    let mut ball = SparseGrid::new(Transform::identity(), 0.0, 16).unwrap();
+    for z in -6..=6 {
+        for y in -15..=-1 {
+            for x in -6..=6 {
+                let (dx, dy, dz) = (x as f32, (y + 8) as f32, z as f32);
+                let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                if r <= 6.5 {
+                    ball.set([x, y, z], (1.0 - r / 6.5).max(0.05)).unwrap();
+                }
+            }
+        }
+    }
+    let mut cache = sr_volume::Volume::new();
+    cache.insert("density", ball).unwrap();
+    let path = common::fixtures().join(name);
+    cache.write(std::fs::File::create(&path).unwrap()).unwrap();
+    path
+}
+
+/// The ball seen by a camera `camera_y` above the plane of a mirror (or none), through a
+/// medium and light rig given as markup.
+fn mirror_view(
+    gpu: &sr_gpu::Gpu,
+    cache: &std::path::Path,
+    camera_y: f64,
+    mirror: bool,
+    half_depth: u32,
+    medium: &str,
+    lights: &str,
+) -> common::Rendered {
+    let xml = mirror_xml(cache, camera_y, mirror, half_depth, medium, lights, 32);
+    let doc =
+        sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(common::fixtures()) })
+            .unwrap();
+    let shot = common::render_times_on(gpu.clone(), &doc, &[0.0]).unwrap();
+    assert!(shot.stats.errors.is_empty(), "{:?}", shot.stats.errors);
+    shot
+}
+
+fn mirror_xml(
+    cache: &std::path::Path,
+    camera_y: f64,
+    mirror: bool,
+    half_depth: u32,
+    medium: &str,
+    lights: &str,
+    samples: u32,
+) -> String {
+    let plane = if mirror {
+        r##"<object3D id="water" primitive="plane" width="400" height="400" rotationX="-90" material="mirror"/>"##
+    } else {
+        ""
+    };
+    format!(
+        r##"<scene version="1.3"><project width="48" height="48" fps="10" duration="1" background="#00000000"/>
+      <assets><volume id="smoke" src="{}" boundsMinX="-9" boundsMinY="-16" boundsMinZ="-{half_depth}" boundsMaxX="9" boundsMaxY="6" boundsMaxZ="{half_depth}"/></assets>
+      <materials><material id="mirror" baseColor="#FFFFFF" metallic="1" roughness="0.02"/></materials>
+      <composition><camera id="camera" x="0" y="{camera_y}" z="-18" fov="90" renderer="pathtrace" pathSamples="{samples}" maxBounces="2" denoise="false"/>
+      {plane}
+      <object3D id="cloud" primitive="volume" volume="smoke">{medium}</object3D>
+      </composition><lights>{lights}</lights></scene>"##,
+        cache.display()
+    )
+}
+
+/// How far the mirror's lower half is from the mirrored camera's view of the same scene (the
+/// mirror fills the frame's lower half; the mirrored camera sees that image upside down), as a
+/// fraction of how much the ball changes that view away from what is behind it, and where the
+/// worst pixel is.
+fn mirror_error(reflected: &common::Rendered, mirrored: &common::Rendered) -> (f32, f32, (u32, u32)) {
+    let h = reflected.size[1];
+    let (mut worst, mut at, mut total, mut effect) = (0.0f32, (0, 0), 0.0f32, 0.0f32);
+    for y in h / 2 + 4..h {
+        // the column at the frame's edge sees only what lies behind the ball
+        let behind = mirrored.at(0, h - 1 - y)[0];
+        for x in 0..reflected.size[0] {
+            let (a, b) = (reflected.at(x, y)[0], mirrored.at(x, h - 1 - y)[0]);
+            total += (a - b).abs();
+            effect += (b - behind).abs();
+            if (a - b).abs() > worst {
+                (worst, at) = ((a - b).abs(), (x, y));
+            }
+        }
+    }
+    assert!(effect > 1.0, "the ball changes the mirrored view: {effect}");
+    (total / effect, worst, at)
+}
+
+/// A smoke ball hovering over a mirror must reflect exactly as it looks from the mirrored
+/// camera, whether the water under it lies in front of the domain (the reflected ray enters
+/// it, half depth 8) or inside it (the reflected ray starts in the medium, half depth 15).
+#[test]
+fn emissive_volume_seen_in_a_mirror_matches_the_mirrored_camera_view() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = mirror_ball("mirror_ball.srvol");
+    let medium = r##"<medium extinction="0.4" albedo="#000000" emissionColor="#FFA040" emissionScale="0.3" stepSize="0.5" maxSteps="512"/>"##;
+    let lights = r##"<light id="dark" type="ambient" color="#000000" intensity="0"/>"##;
+    for half_depth in [8, 15] {
+        let reflected = mirror_view(&gpu, &cache, -3.0, true, half_depth, medium, lights);
+        let mirrored = mirror_view(&gpu, &cache, 3.0, false, half_depth, medium, lights);
+        let (error, worst, at) = mirror_error(&reflected, &mirrored);
+        assert!(
+            error < 0.05,
+            "half depth {half_depth}: mirror differs from the mirrored view by {error} (worst {worst} at {at:?})"
+        );
+    }
+}
+
+/// The same for a medium that only absorbs, against a visible sky: the mirror shows the sky
+/// dimmed as the mirrored camera sees it.
+#[test]
+fn absorbing_volume_seen_in_a_mirror_matches_the_mirrored_camera_view() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = mirror_ball("mirror_ball.srvol");
+    let medium = r##"<medium extinction="0.4" albedo="#000000" stepSize="0.5" maxSteps="512"/>"##;
+    let lights = r##"<light id="sky" type="dome" environment="gray.png" environmentVisible="true" intensity="1"/>"##;
+    for half_depth in [8, 15] {
+        let reflected = mirror_view(&gpu, &cache, -3.0, true, half_depth, medium, lights);
+        let mirrored = mirror_view(&gpu, &cache, 3.0, false, half_depth, medium, lights);
+        let (error, worst, at) = mirror_error(&reflected, &mirrored);
+        assert!(
+            error < 0.05,
+            "half depth {half_depth}: mirror differs from the mirrored view by {error} (worst {worst} at {at:?})"
+        );
+    }
+}
