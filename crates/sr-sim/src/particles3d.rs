@@ -65,6 +65,8 @@ pub struct Spec {
     pub max_events: usize,
     pub max_bytes: usize,
     pub checkpoint_bytes: usize,
+    /// Water that takes the particles that fall into it; none by default.
+    pub water: Option<Water>,
     /// Maximum emission events, accepted births, motion segments and curvature
     /// refinements in one seek.
     pub max_work: u64,
@@ -100,10 +102,33 @@ impl Default for Spec {
             max_events: 16_384,
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
+            water: None,
             max_work: 100_000_000,
         }
     }
 }
+/// A plane of water that takes the particles falling into it: its `normal` points out of the water, and the
+/// rectangle `extent` (minimum and maximum along each of the unit `axes`, from `origin`) is where the water is.
+/// A particle whose centre crosses the plane downward inside the rectangle is removed there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Water {
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub axes: [[f64; 3]; 2],
+    pub extent: [[f64; 2]; 2],
+}
+
+/// A particle that fell into the water: when, where and how fast it crossed, and what it was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Absorbed {
+    pub id: u64,
+    pub time: f64,
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    /// Kilograms; zero for a particle that came from no driver birth.
+    pub mass: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Emission {
     /// Birth points and local velocities use this full affine. Existing
@@ -154,6 +179,12 @@ pub trait Driver {
     /// error. Births at or after `Spec::end` are not made.
     fn births(&mut self, _lo: f64, _hi: f64) -> Result<Vec<Birth>, Error> {
         Ok(Vec::new())
+    }
+    /// The particles that fell into the water in fixed step `step`, in order of their id: told for every
+    /// fixed step the emitter computes (an empty list too), and again, the same, when a seek replays it, so
+    /// a driver that keeps them must compare. An error stops the step.
+    fn absorbed(&mut self, _step: u64, _list: &[Absorbed]) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -213,10 +244,14 @@ struct State {
     frame: Frame,
     carry: f64,
     burst_cursor: Vec<u64>,
+    /// What fell into the water in the step that led to this state.
+    absorbed: Vec<Absorbed>,
 }
 impl State {
     fn bytes(&self) -> usize {
-        256 + self.frame.particles.len() * std::mem::size_of::<Particle>() + self.burst_cursor.len() * 8
+        256 + self.frame.particles.len() * std::mem::size_of::<Particle>()
+            + self.burst_cursor.len() * 8
+            + self.absorbed.len() * std::mem::size_of::<Absorbed>()
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -263,7 +298,8 @@ impl Emitter {
     pub fn new(spec: Spec) -> Result<Self, Error> {
         validate(&spec)?;
         let frame = Frame { time: spec.start, ..Default::default() };
-        let state = State { frame: frame.clone(), carry: 0., burst_cursor: vec![0; spec.bursts.len()] };
+        let state =
+            State { frame: frame.clone(), carry: 0., burst_cursor: vec![0; spec.bursts.len()], absorbed: Vec::new() };
         if state.bytes() > spec.checkpoint_bytes {
             return Err(Error::Limit("initial checkpoint bytes"));
         }
@@ -336,6 +372,7 @@ impl Emitter {
         while self.step < target {
             let hi = self.spec.start + (self.step + 1) as f64 * self.spec.step;
             let next = advance(&self.spec, &self.state, hi, driver, &mut work)?;
+            driver.absorbed(self.step, &next.absorbed)?;
             self.state = next;
             self.step += 1;
             let bytes = self.state.bytes();
@@ -485,6 +522,7 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         },
         carry: state.carry,
         burst_cursor: state.burst_cursor.clone(),
+        absorbed: Vec::new(),
     };
     let mut events = Vec::new();
     let end = hi.min(s.end.unwrap_or(hi));
@@ -542,8 +580,10 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         deaths.push(Reverse(Time(death)));
         if death > hi {
             let mut p = particle.clone();
-            motion(s, &mut p, lo, hi - lo, d, work)?;
-            next.frame.particles.push(p);
+            match motion(s, &mut p, lo, hi - lo, d, work)? {
+                Some(fell) => next.absorbed.push(fell),
+                None => next.frame.particles.push(p),
+            }
         }
     }
     for event in events {
@@ -566,8 +606,10 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
             }
             deaths.push(Reverse(Time(death)));
             if death > hi {
-                motion(s, &mut p, event.time, hi - event.time, d, work)?;
-                next.frame.particles.push(p);
+                match motion(s, &mut p, event.time, hi - event.time, d, work)? {
+                    Some(fell) => next.absorbed.push(fell),
+                    None => next.frame.particles.push(p),
+                }
             }
             continue;
         }
@@ -592,11 +634,14 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
             }
             deaths.push(Reverse(Time(death)));
             if death > hi {
-                motion(s, &mut p, event.time, hi - event.time, d, work)?;
-                next.frame.particles.push(p);
+                match motion(s, &mut p, event.time, hi - event.time, d, work)? {
+                    Some(fell) => next.absorbed.push(fell),
+                    None => next.frame.particles.push(p),
+                }
             }
         }
     }
+    next.absorbed.sort_by_key(|a| a.id);
     Ok(next)
 }
 
@@ -682,7 +727,7 @@ fn motion(
     mut dt: f64,
     d: &mut dyn Driver,
     work: &mut u64,
-) -> Result<(), Error> {
+) -> Result<Option<Absorbed>, Error> {
     let mut contact: Option<([f64; 3], [f64; 3])> = None;
     let mut collisions = 0;
     let mut recoveries = 0;
@@ -754,6 +799,26 @@ fn motion(
             }
             break (to, velocity, hit);
         };
+        // A fall into the water comes before any contact it would otherwise have made later in the segment: the
+        // centre crosses the plane downward inside the rectangle, and the particle is taken out there.
+        if let Some(water) = &s.water {
+            let (above, below) = (water_height(water, p.position), water_height(water, to));
+            if above > 0. && below <= 0. {
+                let fraction = above / (above - below);
+                if hit.as_ref().is_none_or(|h| fraction < h.fraction) {
+                    let (position, velocity) = flight(p.position, p.velocity, a, s.drag, span * fraction);
+                    if water_contains(water, position) {
+                        return Ok(Some(Absorbed {
+                            id: p.id,
+                            time: time + span * fraction,
+                            position,
+                            velocity,
+                            mass: p.mass,
+                        }));
+                    }
+                }
+            }
+        }
         let Some(hit) = hit else {
             p.position = to;
             p.velocity = velocity;
@@ -818,7 +883,21 @@ fn motion(
         time += elapsed;
         dt -= elapsed;
     }
-    Ok(())
+    Ok(None)
+}
+
+/// How far above the water's plane a point is, along the normal that points out of the water.
+fn water_height(w: &Water, p: [f64; 3]) -> f64 {
+    dot(w.normal, add(p, scale(w.origin, -1.)))
+}
+
+/// Whether a point is over the water's rectangle.
+fn water_contains(w: &Water, p: [f64; 3]) -> bool {
+    let offset = add(p, scale(w.origin, -1.));
+    (0..2).all(|a| {
+        let along = dot(w.axes[a], offset);
+        (w.extent[a][0]..=w.extent[a][1]).contains(&along)
+    })
 }
 fn flight(p: [f64; 3], v: [f64; 3], a: [f64; 3], drag: f64, dt: f64) -> ([f64; 3], [f64; 3]) {
     let z = drag * dt;

@@ -149,6 +149,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
         max_events: number("maxEvents", 16384.) as usize,
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
+        water: None,
         max_work: number("maxWork", 100000000.) as u64,
     };
     let crater_bursts = children(e)
