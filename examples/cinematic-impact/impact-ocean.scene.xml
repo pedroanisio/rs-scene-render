@@ -24,7 +24,7 @@
       <rigidBody shape="sphere" mass="90478" velocityX="50" velocityY="72" restitution="0" linearDamping="0" angularDamping="0"/>
     </object3D>
     <object3D id="seabed" primitive="plane" width="160" height="160" segments="160" y="20" rotationX="-90" material="bed">
-      <crater id="pit" source="impactor" targetMaterial="softRock"/>
+      <crater id="pit" source="impactor" targetMaterial="softRock" capture="true"/>
       <rigidBody type="static" shape="auto"/>
     </object3D>
     <object3D id="farSea" primitive="plane" width="40000" height="40000" y="0.4" rotationX="-90" material="water"/>

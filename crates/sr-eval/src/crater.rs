@@ -91,6 +91,8 @@ pub(crate) struct CraterSource {
     pub(crate) scale: f64,
     /// The owner's collision shape, whose surface gives the axis of the crater.
     pub(crate) surface: Arc<Shape3>,
+    /// Whether the crater arrests the body that makes it (`crater@capture`).
+    pub(crate) capture: bool,
     pub(crate) influence_depth: Option<f64>,
     pub(crate) curve: Option<String>,
     pub(crate) max_bytes: usize,
@@ -128,6 +130,7 @@ impl CraterSource {
             pixels_per_meter,
             scale,
             surface,
+            capture: text(element, "capture").as_deref() == Some("true"),
             influence_depth: element_number(element, "influenceDepth"),
             curve: text(element, "curve"),
             max_bytes: (num(element, "maxMemoryMiB", 128.) as usize)

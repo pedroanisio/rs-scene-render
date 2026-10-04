@@ -20,7 +20,7 @@
       <rigidBody shape="sphere" mass="90478" velocityX="50" velocityY="72" restitution="0" linearDamping="0" angularDamping="0"/>
     </object3D>
     <object3D id="ground" primitive="plane" width="160" height="160" segments="160" y="0" rotationX="-90" material="soil">
-      <crater id="pit" source="impactor" targetMaterial="softRock"/>
+      <crater id="pit" source="impactor" targetMaterial="softRock" capture="true"/>
       <rigidBody type="static" shape="auto"/>
     </object3D>
     <!-- 4000 particles stand for the 80 % of the crater's mass that is thrown out: each is born when and where

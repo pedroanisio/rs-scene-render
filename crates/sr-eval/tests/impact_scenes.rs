@@ -493,6 +493,26 @@ fn in_the_sea_a_vertical_plunge_makes_a_wave_that_grows_with_speed_and_mass() {
 }
 
 #[test]
+fn in_the_sea_the_rock_that_reaches_the_bed_rests_in_its_crater() {
+    let xml = with_hit(OCEAN, AUTHORED);
+    let (kept, free) = (evaluator(&xml), evaluator(&xml.replace(r#"capture="true""#, r#"capture="false""#)));
+    let late = |ev: &Evaluator| (0..9).map(|k| sea(ev, 4.0 + 0.25 * k as f64).crest).fold(f64::MIN, f64::max);
+    let (held, rolling) = (sea(&kept, 6.0), sea(&free, 6.0));
+    let from_crater = |s: &Sea| ((s.pose[12] - s.spec[3]).powi(2) + (s.pose[14] - s.spec[5]).powi(2)).sqrt();
+    println!(
+        "IMPACT sea rock at 6 s: {:.1} m from the crater's centre arrested, {:.1} m free; highest wave from 4 s on {:.3} m against {:.3} m",
+        from_crater(&held),
+        from_crater(&rolling),
+        late(&kept),
+        late(&free)
+    );
+    assert!(from_crater(&held) < 3.0, "it stopped in the crater: {}", from_crater(&held));
+    // the water already takes the rock's horizontal momentum with `full`, so arresting it changes the late wave
+    // by next to nothing: that is recorded here, not asserted to be anything else
+    assert!((late(&kept) - late(&free)).abs() < 0.1 * late(&free), "{} against {}", late(&kept), late(&free));
+}
+
+#[test]
 fn in_the_sea_the_same_answers_in_any_order_from_a_fresh_evaluator_and_after_replay_from_the_start() {
     let times = [3.5, 1.0, 6.0, 2.2, 4.5, 3.5, 0.5];
     let xml = coarse_sea(&with_hit(OCEAN, AUTHORED));

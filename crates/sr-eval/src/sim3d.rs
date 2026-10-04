@@ -937,6 +937,37 @@ impl Driver3 for Driver<'_, '_> {
         })
     }
 
+    fn capture(
+        &mut self,
+        _step: u64,
+        t: f64,
+        _source: usize,
+        owner: usize,
+        centre: [f64; 3],
+        impact: &sr_sim::physics3d::Impact3,
+    ) -> Result<Option<f64>, String> {
+        let Some(crater) = self.bodies[owner].crater.as_ref().filter(|c| c.capture) else { return Ok(None) };
+        let grown = crate::crater::impact_crater(crater, impact, 0.0)?;
+        let law = grown.law();
+        // The window in which the body is arrested: the time that stops a body moving at the impact speed,
+        // 2 d / U, which stops any slower one sooner, and a step. After it the body is the ground's: held
+        // for good it would hover over the pit the ground opens under it, and a latch would be a state
+        // of its own that a replay must restore, so the window is a function of the impact's instant.
+        let speed = grown.speed();
+        let step = self.p.scene.physics.as_ref().map_or(1.0 / 120.0, |ph| ph.fixed_step.get());
+        if t >= impact.time + 2.0 * law.depth / speed + step {
+            return Ok(None);
+        }
+        // only inside the rim radius of the crater, in the owner's frame, scene units
+        let from = centre.iter().zip(&impact.point).map(|(c, p)| (c - p) * (c - p)).sum::<f64>().sqrt();
+        if from >= law.rim_radius * crater.pixels_per_meter {
+            return Ok(None);
+        }
+        // the mean force of a penetration as deep as the crater: the kinetic energy over the depth, as a
+        // deceleration U^2 / (2 d), here in scene units a second squared
+        Ok(Some(speed * speed / (2.0 * law.depth) * crater.pixels_per_meter))
+    }
+
     fn enabled(&mut self, t: f64, which: usize) -> bool {
         enabled(&self.bodies[which], t)
     }
