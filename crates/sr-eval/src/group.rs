@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use sr_model::element::children;
 use sr_sim::exchange::{ExchangeLog, Put, Record};
-use sr_sim::physics3d::Load3;
+use sr_sim::hydrostatics::{buoyant_load, halfway, place, submerged_mesh, submerged_sphere, Surface, Water};
+use sr_sim::physics3d::{BodyState, Load3};
 
 use crate::program::Program;
 use crate::sim::{num, text};
@@ -62,9 +63,96 @@ pub(crate) struct Reaction {
     pub(crate) dt: f64,
 }
 
-/// How an ocean's outcome loads a body. The default group has none: bodies are carried by
-/// nothing and the group changes no result.
-pub(crate) type Coupling = Arc<dyn Fn(&Reaction) -> Option<Load3> + Send + Sync>;
+/// A rigid body's mass and shape, for the loads that depend on them.
+#[derive(Clone, Debug)]
+pub(crate) struct BodyHull {
+    pub(crate) id: Arc<str>,
+    /// Kilograms.
+    pub(crate) mass: f64,
+    shape: sr_sim::physics3d::Shape3,
+}
+
+impl BodyHull {
+    pub(crate) fn new(id: Arc<str>, mass: f64, shape: &sr_sim::physics3d::Shape3) -> BodyHull {
+        BodyHull { id, mass, shape: shape.clone() }
+    }
+}
+
+/// A coupling that reads an ocean's outcome for a canonical step.
+pub(crate) type ReactionFn = Arc<dyn Fn(&Reaction) -> Option<Load3> + Send + Sync>;
+
+/// How the water loads a body.
+#[derive(Clone)]
+pub(crate) enum Coupling {
+    /// By the outcome an ocean wrote for a canonical step (the momentum bodies gave it). Nothing in a
+    /// document builds one yet: the ocean offers the momentum in total, not per body.
+    #[allow(dead_code)]
+    Reaction(ReactionFn),
+    /// By the weight of the water the body displaces below the ocean's rest surface.
+    Buoyancy(Arc<Buoyant>),
+}
+
+impl std::fmt::Debug for Coupling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Coupling::Reaction(_) => f.write_str("Reaction"),
+            Coupling::Buoyancy(_) => f.write_str("Buoyancy"),
+        }
+    }
+}
+
+/// The buoyancy of the bodies one ocean carries.
+pub(crate) struct Buoyant {
+    /// By index of the body in the 3D world.
+    hulls: Vec<(usize, Hull, f64, Arc<str>)>,
+    water: Water,
+    /// The rigid world's step, seconds.
+    step: f64,
+}
+
+enum Hull {
+    Sphere(f64),
+    Mesh(Vec<[f64; 3]>, Vec<[u32; 3]>),
+}
+
+impl Buoyant {
+    fn new(bodies: &[BodyHull], listed: &[usize], water: Water, step: f64) -> Result<Buoyant, String> {
+        let mut hulls = Vec::new();
+        for &k in listed {
+            let body = &bodies[k];
+            let hull = match &body.shape {
+                sr_sim::physics3d::Shape3::Sphere(r) => Hull::Sphere(*r),
+                other => {
+                    let (points, triangles) = sr_sim::hydrostatics::hull_mesh(other)
+                        .map_err(|e| format!("{}: buoyancy of the body {e}", body.id))?;
+                    Hull::Mesh(points, triangles)
+                }
+            };
+            hulls.push((k, hull, body.mass, body.id.clone()));
+        }
+        Ok(Buoyant { hulls, water, step })
+    }
+
+    /// The load on body `index` of the 3D world at the start of a step, with the water at rest
+    /// at `surface`; none for a body this ocean does not carry.
+    fn load(&self, index: usize, state: &BodyState, surface: &Surface) -> Result<Option<Load3>, String> {
+        let Some((_, hull, mass, id)) = self.hulls.iter().find(|(k, ..)| *k == index) else { return Ok(None) };
+        // the load is held for the step, so it is the load where the body will be halfway through it
+        let velocity = state.velocity.linear;
+        let centre = halfway(state.centre, velocity, self.step);
+        let origin = halfway(state.pose.pos, velocity, self.step);
+        let submerged = match hull {
+            Hull::Sphere(r) => submerged_sphere(origin, *r, surface),
+            Hull::Mesh(points, triangles) => {
+                let world = place(points, origin, state.pose.rot);
+                submerged_mesh(&world, triangles, surface).map_err(|e| format!("{id}: {e}"))?
+            }
+        };
+        let made = buoyant_load(&submerged, centre, *mass, velocity[1], &self.water, self.step)
+            .map_err(|e| format!("{id}: {e}"))?;
+        Ok(Some(made.load))
+    }
+}
 
 /// Bytes the exchange log of a group may use: records are 16 bytes and an ocean writes one a
 /// canonical step, so this is hours of simulated time; exceeding it is an error.
@@ -80,6 +168,9 @@ pub(crate) struct GroupOcean {
     pub(crate) start: f64,
     /// Indices into the 3D world's bodies of the rigid bodies in its `colliders`.
     pub(crate) bodies: Vec<usize>,
+    /// The rest level of the water in the ocean's own axes.
+    pub(crate) water_level: f64,
+    coupling: Coupling,
 }
 
 /// The rigid world and the oceans it exchanges with.
@@ -87,7 +178,6 @@ pub(crate) struct GroupOcean {
 pub(crate) struct Group {
     log: Arc<Mutex<ExchangeLog<Exchange>>>,
     oceans: Arc<[GroupOcean]>,
-    coupling: Coupling,
     /// Seconds past a frame's time that something reads the rigid world.
     reach: f64,
 }
@@ -103,21 +193,34 @@ impl Group {
     /// coupling to run. `bodies` are the effective ids of the 3D world's bodies in order.
     pub(crate) fn detect(
         p: &Program,
-        bodies: &[Arc<str>],
-        coupling: Option<Coupling>,
+        bodies: &[BodyHull],
+        rigid_step: f64,
+        injected: Option<Coupling>,
     ) -> Result<Option<Group>, String> {
-        let Some(coupling) = coupling else { return Ok(None) };
         let mut oceans = Vec::new();
         for (index, n) in p.nodes.iter().enumerate() {
             let sr_model::model::Node::Ocean(e) = &*n.elem else { continue };
             let listed: Vec<usize> = text(e, "colliders")
                 .unwrap_or_default()
                 .split_whitespace()
-                .filter_map(|id| bodies.iter().position(|b| &**b == id))
+                .filter_map(|id| bodies.iter().position(|b| &*b.id == id))
                 .collect();
             if listed.is_empty() {
                 continue;
             }
+            let water = Water {
+                density: 1000.0,
+                gravity: num(e, "gravity", 9.81),
+                drag: num(e, "bodyDrag", 1.0),
+                pixels_per_meter: p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()),
+            };
+            let coupling = match (&injected, text(e, "bodyCoupling").as_deref()) {
+                (Some(c), _) => c.clone(),
+                (None, Some("buoyancy")) => {
+                    Coupling::Buoyancy(Arc::new(Buoyant::new(bodies, &listed, water, rigid_step)?))
+                }
+                _ => continue,
+            };
             // the exchange is indexed by the ocean's own time: it must be the composition's
             let composition = |x: f64| crate::sim::source_sample(p, index as u32, x, x).0;
             if [0.0, 1.0, 7.5].iter().any(|&x| composition(x + n.start) != x + n.start) {
@@ -127,13 +230,20 @@ impl Group {
             if !(dt.is_finite() && dt > 0.0) {
                 return Err(format!("{}: an ocean that exchanges with rigid bodies needs a positive dt", n.id));
             }
-            oceans.push(GroupOcean { id: n.id.clone(), dt, start: n.start, bodies: listed });
+            oceans.push(GroupOcean {
+                id: n.id.clone(),
+                dt,
+                start: n.start,
+                bodies: listed,
+                water_level: num(e, "waterLevel", 0.0),
+                coupling,
+            });
         }
         if oceans.is_empty() {
             return Ok(None);
         }
         let listed = |colliders: Option<String>| {
-            colliders.unwrap_or_default().split_whitespace().any(|id| bodies.iter().any(|b| &**b == id))
+            colliders.unwrap_or_default().split_whitespace().any(|id| bodies.iter().any(|b| &*b.id == id))
         };
         // everything else that reads the rigid bodies reads them at most one of its own steps ahead
         let mut reach = 0.0f64;
@@ -147,12 +257,7 @@ impl Group {
                 }
             }
         }
-        Ok(Some(Group {
-            log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
-            oceans: oceans.into(),
-            coupling,
-            reach,
-        }))
+        Ok(Some(Group { log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))), oceans: oceans.into(), reach }))
     }
 
     /// Seconds past a frame that other solvers may read the rigid bodies.
@@ -172,41 +277,55 @@ impl Group {
         log.put(ocean as u32, step, &[exchange])
     }
 
-    /// The load on `body` for a rigid step that starts at composition time `t`: through the
-    /// coupling, the outcome of the canonical step before the last one each ocean has completed
-    /// by then, none while there is no such step.
-    pub(crate) fn load(&self, t: f64, body: usize) -> Result<Option<Load3>, String> {
+    /// The load on `body` for a rigid step that starts at composition time `t`, in the state
+    /// `state`, from each ocean that carries it. An ocean that couples by its outcomes reads the
+    /// outcome of the canonical step before the last one it has completed by then (none while
+    /// there is no such step); one that couples by buoyancy reads the water's rest surface, which
+    /// `surface` gives.
+    pub(crate) fn load(
+        &self,
+        t: f64,
+        body: usize,
+        state: &BodyState,
+        surface: &mut dyn FnMut(&GroupOcean) -> Result<Surface, String>,
+    ) -> Result<Option<Load3>, String> {
         let mut total: Option<Load3> = None;
         for (channel, ocean) in self.oceans.iter().enumerate() {
             if !ocean.bodies.contains(&body) {
                 continue;
             }
-            let local = t - ocean.start;
-            if local < 0.0 {
-                continue;
-            }
-            // canonical steps completed at `local`, the same rounding the ocean uses
-            let mut completed = (local / ocean.dt).floor() as u64;
-            while completed > 0 && completed as f64 * ocean.dt > local {
-                completed -= 1;
-            }
-            while (completed + 1) as f64 * ocean.dt <= local {
-                completed += 1;
-            }
-            let Some(step) = completed.checked_sub(1) else { continue };
-            let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
-            let Some([exchange]) = log.get(channel as u32, step) else {
-                let reached = log.last_step(channel as u32);
-                return Err(format!(
-                    "the water load on body {body} at t = {t} needs step {step} of ocean {}, which has not been \
-                     computed (it has reached {})",
-                    ocean.id,
-                    reached.map_or("no step".to_string(), |k| format!("step {k}"))
-                ));
+            let load = match &ocean.coupling {
+                Coupling::Buoyancy(buoyant) => buoyant.load(body, state, &surface(ocean)?)?,
+                Coupling::Reaction(reaction) => {
+                    let local = t - ocean.start;
+                    if local < 0.0 {
+                        continue;
+                    }
+                    // canonical steps completed at `local`, the same rounding the ocean uses
+                    let mut completed = (local / ocean.dt).floor() as u64;
+                    while completed > 0 && completed as f64 * ocean.dt > local {
+                        completed -= 1;
+                    }
+                    while (completed + 1) as f64 * ocean.dt <= local {
+                        completed += 1;
+                    }
+                    let Some(step) = completed.checked_sub(1) else { continue };
+                    let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some([exchange]) = log.get(channel as u32, step) else {
+                        let reached = log.last_step(channel as u32);
+                        return Err(format!(
+                            "the water load on body {body} at t = {t} needs step {step} of ocean {}, which has not been \
+                             computed (it has reached {})",
+                            ocean.id,
+                            reached.map_or("no step".to_string(), |k| format!("step {k}"))
+                        ));
+                    };
+                    let exchange = *exchange;
+                    drop(log);
+                    (reaction)(&Reaction { ocean: channel, step, body, exchange, dt: ocean.dt })
+                }
             };
-            let exchange = *exchange;
-            drop(log);
-            if let Some(load) = (self.coupling)(&Reaction { ocean: channel, step, body, exchange, dt: ocean.dt }) {
+            if let Some(load) = load {
                 let sum = total.get_or_insert_with(Load3::default);
                 for i in 0..3 {
                     sum.force[i] += load.force[i];
@@ -251,16 +370,21 @@ mod tests {
 
     /// The water slows the barge in proportion to the momentum it gave the water.
     fn drag(sign: f64) -> Coupling {
-        Arc::new(move |r: &Reaction| {
+        Coupling::Reaction(Arc::new(move |r: &Reaction| {
             Some(Load3 {
                 force: [-4.0 * sign * r.exchange.momentum[0] / r.dt, 0.0, -4.0 * sign * r.exchange.momentum[1] / r.dt],
                 torque: [0.0; 3],
             })
-        })
+        }))
+    }
+
+    /// The barge as the rigid world holds it.
+    fn barge() -> BodyHull {
+        BodyHull::new("barge".into(), 500.0, &sr_sim::physics3d::Shape3::Sphere(3.0))
     }
 
     fn nothing() -> Coupling {
-        Arc::new(|_: &Reaction| None)
+        Coupling::Reaction(Arc::new(|_: &Reaction| None))
     }
 
     /// What a frame holds of the two members, bit for bit.
@@ -383,11 +507,11 @@ mod tests {
             <particles3D id="elsewhere" rate="0" speed="0" lifetime="2" dt="0.9"><burst time="0.5" count="4"/></particles3D>"#;
         let doc = sr_model::load_str(&scene(extra), &sr_model::LoadOptions::without_assets()).unwrap();
         let p = crate::program::build(&doc, &Default::default()).unwrap();
-        let group = Group::detect(&p, &["barge".into()], Some(nothing())).unwrap().unwrap();
+        let group = Group::detect(&p, &[barge()], 0.01, Some(nothing())).unwrap().unwrap();
         assert!((group.reach() - 0.2).abs() < 1e-12, "{}", group.reach());
         let plain = sr_model::load_str(&scene(""), &sr_model::LoadOptions::without_assets()).unwrap();
         let p = crate::program::build(&plain, &Default::default()).unwrap();
-        assert_eq!(Group::detect(&p, &["barge".into()], Some(nothing())).unwrap().unwrap().reach(), 0.0);
+        assert_eq!(Group::detect(&p, &[barge()], 0.01, Some(nothing())).unwrap().unwrap().reach(), 0.0);
     }
 
     #[test]
@@ -398,7 +522,7 @@ mod tests {
         );
         let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
         let p = crate::program::build(&doc, &Default::default()).unwrap();
-        assert!(Group::detect(&p, &[], Some(nothing())).unwrap().is_none());
-        assert!(Group::detect(&p, &["barge".into()], None).unwrap().is_none(), "no coupling, no group");
+        assert!(Group::detect(&p, &[], 0.01, Some(nothing())).unwrap().is_none());
+        assert!(Group::detect(&p, &[barge()], 0.01, None).unwrap().is_none(), "no coupling, no group");
     }
 }

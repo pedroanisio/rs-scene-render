@@ -248,3 +248,90 @@ pub fn place(points: &[[f64; 3]], position: [f64; 3], rotation: [f64; 4]) -> Vec
         })
         .collect()
 }
+
+/// Points and triangles of a closed mesh.
+pub type Mesh = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+
+/// A body's shape as a closed triangle mesh in its own axes, for the shapes that have no closed
+/// form here: a box exactly, a cylinder, cone or capsule tessellated, a mesh or decomposition as
+/// it is. A sphere is measured in closed form instead, and a convex hull is not supported.
+pub fn hull_mesh(shape: &crate::physics3d::Shape3) -> Result<Mesh, String> {
+    use crate::physics3d::Shape3;
+    const AROUND: usize = 48;
+    match shape {
+        Shape3::Box(h) => {
+            let points: Vec<[f64; 3]> =
+                (0..8).map(|k| [0, 1, 2].map(|a| if (k >> a) & 1 == 1 { h[a] } else { -h[a] })).collect();
+            let faces: [[u32; 3]; 12] = [
+                [0, 2, 1],
+                [1, 2, 3],
+                [4, 5, 6],
+                [5, 7, 6],
+                [0, 1, 4],
+                [1, 5, 4],
+                [2, 6, 3],
+                [3, 6, 7],
+                [0, 4, 2],
+                [2, 4, 6],
+                [1, 3, 5],
+                [3, 7, 5],
+            ];
+            Ok((points, faces.to_vec()))
+        }
+        Shape3::TriMesh(points, triangles) | Shape3::Decomposition(points, triangles) => {
+            Ok((points.clone(), triangles.clone()))
+        }
+        Shape3::Cylinder(half, r) => Ok(revolved(&[[-half, 0.0], [-half, *r], [*half, *r], [*half, 0.0]], AROUND)),
+        Shape3::Cone(half, r) => Ok(revolved(&[[-half, 0.0], [*half, *r], [*half, 0.0]], AROUND)),
+        Shape3::Capsule(half, r) => {
+            const RINGS: usize = 12;
+            let mut profile = vec![[-half - r, 0.0]];
+            for i in 1..RINGS {
+                let a = std::f64::consts::FRAC_PI_2 * i as f64 / RINGS as f64;
+                profile.push([-half - r * a.cos(), r * a.sin()]);
+            }
+            for i in 0..RINGS {
+                let a = std::f64::consts::FRAC_PI_2 * i as f64 / RINGS as f64;
+                profile.push([half + r * a.sin(), r * a.cos()]);
+            }
+            profile.push([half + r, 0.0]);
+            Ok(revolved(&profile, AROUND))
+        }
+        Shape3::Sphere(_) => Err("a sphere is measured in closed form".into()),
+        Shape3::Convex(_) => {
+            Err("buoyancy of a convex hull is not supported: give the body a primitive or a closed mesh".into())
+        }
+    }
+}
+
+/// The closed surface made by revolving a profile of `[y, radius]` points about the y axis; the
+/// first and last points are on the axis.
+fn revolved(profile: &[[f64; 2]], around: usize) -> Mesh {
+    let mut points = vec![[0.0, profile[0][0], 0.0]];
+    for p in &profile[1..profile.len() - 1] {
+        for j in 0..around {
+            let a = 2.0 * std::f64::consts::PI * j as f64 / around as f64;
+            points.push([p[1] * a.cos(), p[0], p[1] * a.sin()]);
+        }
+    }
+    let last = profile[profile.len() - 1];
+    points.push([0.0, last[0], 0.0]);
+    let rings = profile.len() - 2;
+    let ring = |i: usize, j: usize| (1 + i * around + j % around) as u32;
+    let mut triangles = Vec::new();
+    for j in 0..around {
+        triangles.push([0, ring(0, j + 1), ring(0, j)]);
+    }
+    for i in 0..rings - 1 {
+        for j in 0..around {
+            let (a, b, c, d) = (ring(i, j), ring(i, j + 1), ring(i + 1, j), ring(i + 1, j + 1));
+            triangles.push([a, b, c]);
+            triangles.push([b, d, c]);
+        }
+    }
+    let end = (points.len() - 1) as u32;
+    for j in 0..around {
+        triangles.push([end, ring(rings - 1, j), ring(rings - 1, j + 1)]);
+    }
+    (points, triangles)
+}

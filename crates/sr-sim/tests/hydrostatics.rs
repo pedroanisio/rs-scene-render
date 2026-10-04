@@ -235,3 +235,23 @@ fn the_waterline_and_the_area_seen_from_above_follow_the_shape() {
     // dry, it presents nothing
     assert_eq!(mesh(&b, &level(30.0)).projected, 0.0);
 }
+
+#[test]
+fn the_primitive_shapes_tessellate_into_closed_hulls_of_the_right_volume() {
+    use sr_sim::hydrostatics::hull_mesh;
+    use sr_sim::physics3d::{shape_volume, Shape3};
+    for shape in
+        [Shape3::Box([1.0, 2.0, 3.0]), Shape3::Cylinder(1.5, 0.8), Shape3::Cone(1.2, 1.0), Shape3::Capsule(1.0, 0.6)]
+    {
+        let (points, triangles) = hull_mesh(&shape).unwrap();
+        // far below the surface the whole hull is submerged, and that is its volume
+        let whole = submerged_mesh(&points, &triangles, &level(-1.0e6)).unwrap();
+        let want = shape_volume(&shape).unwrap();
+        assert!(close(whole.volume, want, 2e-2), "{shape:?}: {} against {want}", whole.volume);
+        // and cut at its middle, about half (a cone is not symmetric)
+        let half = submerged_mesh(&points, &triangles, &level(0.0)).unwrap();
+        assert!(half.volume > 0.0 && half.volume < whole.volume, "{shape:?}");
+    }
+    assert!(hull_mesh(&Shape3::Sphere(1.0)).is_err());
+    assert!(hull_mesh(&Shape3::Convex(vec![[0.0; 3]; 4])).is_err());
+}

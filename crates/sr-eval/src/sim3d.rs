@@ -51,6 +51,8 @@ pub(crate) struct Phys3 {
     pub(crate) fractures: Vec<FractureNode>,
     /// Identity of the world's definition, when the caller asked for it.
     pub(crate) spec_digest: Option<[u8; 32]>,
+    /// Each body's mass and shape, for loads that depend on them (the water's).
+    pub(crate) hulls: Vec<crate::group::BodyHull>,
     /// The impacts the world watches for and the craters that grow from them.
     pub(crate) watches: Vec<sr_sim::physics3d::ImpactWatch>,
     pub(crate) links: Vec<CraterLink>,
@@ -711,6 +713,11 @@ pub(crate) fn build(
         }
     }
     let follow: Vec<(bool, f64)> = specs.iter().map(|b| (b.kind == BodyKind::Kinematic, b.activate_at)).collect();
+    let hulls: Vec<crate::group::BodyHull> = bodies
+        .iter()
+        .zip(&specs)
+        .map(|(node, spec)| crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape))
+        .collect();
     let start = ph.map(|p| p.start).unwrap_or(0.0);
     let step = ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
     let gravity = [
@@ -730,7 +737,7 @@ pub(crate) fn build(
         }
     };
     if matches!(plan, Plan3::Placeholder) {
-        return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, watches, links, follow });
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, hulls, watches, links, follow });
     }
     let [fw, fh] = p.size;
     let bounds = match ph.map(|p| p.bounds.to_string()).as_deref() {
@@ -755,7 +762,7 @@ pub(crate) fn build(
         _ => None,
     };
     let Plan3::Simulate { record, .. } = plan else {
-        return Some(Phys3 { world: None, bodies, fractures, spec_digest, watches, links, follow });
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest, hulls, watches, links, follow });
     };
     let log = record.then(|| crate::physcache::contact_config(&spec, &watches));
     let world = World3::new(spec)
@@ -772,7 +779,7 @@ pub(crate) fn build(
             None
         }
     };
-    Some(Phys3 { world, bodies, fractures, spec_digest, watches, links, follow })
+    Some(Phys3 { world, bodies, fractures, spec_digest, hulls, watches, links, follow })
 }
 
 /// The craters that grow from impacts: for each `crater` element with a `source`, the watch
@@ -917,12 +924,14 @@ impl Driver3 for Driver<'_, '_> {
         _step: u64,
         t: f64,
         which: usize,
-        _state: &sr_sim::physics3d::BodyState,
+        state: &sr_sim::physics3d::BodyState,
     ) -> Result<Option<sr_sim::physics3d::Load3>, String> {
-        match self.group {
-            Some(group) => group.load(t, which),
-            None => Ok(None),
+        let Some(group) = self.group else { return Ok(None) };
+        if !state.enabled {
+            return Ok(None);
         }
+        let graphs = &mut *self.graphs;
+        group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean| water_surface(&graphs.at(t), ocean))
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {
@@ -967,6 +976,26 @@ fn deformed_surface(
         triangles: triangles.clone(),
         max_bytes: crater.max_bytes,
     }))
+}
+
+/// The ocean's rest surface in the world's axes at one instant, as `y = offset + slope x + slope z`.
+fn water_surface(
+    graph: &FrameGraph,
+    ocean: &crate::group::GroupOcean,
+) -> Result<sr_sim::hydrostatics::Surface, String> {
+    let i = index_of(graph, &ocean.id).ok_or_else(|| format!("{}: the ocean is not in the frame", ocean.id))?;
+    let m = world3(graph, i, 0);
+    let at = |x: f64, z: f64| m.transform_point3(DVec3::new(x, ocean.water_level, z));
+    let (p0, px, pz) = (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0));
+    let (u, v) = (px - p0, pz - p0);
+    // y = a + b x + c z through the three points
+    let det = u.x * v.z - u.z * v.x;
+    if det.abs() < 1e-9 || !det.is_finite() {
+        return Err(format!("{}: a vertical ocean has no surface to float on", ocean.id));
+    }
+    let b = (u.y * v.z - u.z * v.y) / det;
+    let c = (u.x * v.y - u.y * v.x) / det;
+    Ok(sr_sim::hydrostatics::Surface { offset: p0.y - b * p0.x - c * p0.z, slope: [b, c] })
 }
 
 impl Phys3 {

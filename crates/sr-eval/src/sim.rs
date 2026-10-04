@@ -1795,10 +1795,14 @@ impl Runtime {
             {
                 world.world = world.world.take().map(|w| w.with_frame_log_budget(budget));
             }
-            if let (Some(ph), Some(coupling)) = (self.physics.as_mut(), self.coupling.clone()) {
-                let ids: Vec<Arc<str>> =
-                    ph.three.iter().flat_map(|three| three.bodies.iter().map(|b| b.id.clone())).collect();
-                match crate::group::Group::detect(p, &ids, Some(coupling)) {
+            if let Some(ph) = self.physics.as_mut() {
+                let hulls: Vec<crate::group::BodyHull> =
+                    ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
+                match crate::group::Group::detect(p, &hulls, ph.step, self.coupling.clone()) {
+                    Ok(Some(_)) if ph.cached.is_some() => self.failures.push(
+                        "a physics cache cannot be combined with an ocean that loads the bodies in it: the loads come from the water"
+                            .into(),
+                    ),
                     Ok(group) => ph.group = group,
                     Err(error) => self.failures.push(error),
                 }
@@ -1965,6 +1969,10 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
     let mut ph = built(p, &fields, &mut graphs, Keep { contacts: true, identity: true })?;
     if ph.cached.is_some() {
         return Err("already cached".into());
+    }
+    let hulls: Vec<crate::group::BodyHull> = ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
+    if crate::group::Group::detect(p, &hulls, ph.step, None)?.is_some() {
+        return Err("this document cannot be baked into a physics cache: an ocean loads the bodies in it, and the loads come from the water".into());
     }
     let steps = (((end - ph.start) / ph.step).ceil().max(0.0) as u64) + 1;
     let digest = identity(p, &mut ph, &mut graphs, &fields, steps)?;
