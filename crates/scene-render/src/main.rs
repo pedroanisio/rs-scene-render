@@ -1047,7 +1047,7 @@ fn render(
     let mut r = match kept {
         Some(r) => r,
         None => {
-            let gpu = match sr_gpu::Gpu::new() {
+            let gpu = match sr_gpu::Gpu::new_for(ev.program().uses_3d()) {
                 Ok(g) => g,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -1413,7 +1413,22 @@ fn encode(
         eprintln!("error: {} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
         return Ok(ExitCode::from(2));
     }
-    let gpu = outputs.iter().any(|o| o.codec.as_str() != "audio-only").then(sr_gpu::Gpu::new).transpose();
+    // the adapter is chosen from the document: one that cannot run the 3D pass is skipped when an output draws in 3D
+    let needs_3d = outputs
+        .iter()
+        .filter(|o| o.codec.as_str() != "audio-only")
+        .map(|o| sr_deliver::output_uses_3d(&doc, o, &opts))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|v| v.contains(&true));
+    let gpu = match needs_3d {
+        Ok(needs_3d) => {
+            outputs.iter().any(|o| o.codec.as_str() != "audio-only").then(|| sr_gpu::Gpu::new_for(needs_3d)).transpose()
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::from(2));
+        }
+    };
     let gpu = match gpu {
         Ok(g) => g,
         Err(e) => {

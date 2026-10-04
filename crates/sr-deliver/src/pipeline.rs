@@ -595,6 +595,24 @@ impl Drop for Scratch {
     }
 }
 
+/// The evaluation options an output is rendered with.
+fn eval_options(output: &m::Output, opts: &Options) -> EvalOptions {
+    EvalOptions {
+        variant: output.variant.clone(),
+        layout: output.layout.clone(),
+        params: opts.params.clone(),
+        row: opts.row.clone(),
+        ..Default::default()
+    }
+}
+
+/// Whether rendering `output` draws anything in 3D, so a caller that makes the GPU can ask for one
+/// that can run the 3D pass (`deliver` makes its own for a caller that passes none).
+pub fn output_uses_3d(doc: &sr_model::Document, output: &m::Output, opts: &Options) -> Result<bool, DeliverError> {
+    let ev = Evaluator::new(doc, &eval_options(output, opts)).map_err(DeliverError::Document)?;
+    Ok(ev.program().uses_3d())
+}
+
 /// Renders one output of `doc` and delivers it.
 pub fn deliver(
     doc: &sr_model::Document,
@@ -609,13 +627,7 @@ pub fn deliver(
     let base =
         opts.out_dir.clone().or_else(|| Some(doc.base_dir().to_path_buf())).unwrap_or_else(|| PathBuf::from("."));
     let representation = opts.representation.clone().or_else(|| output.representation.clone());
-    let mut eo = EvalOptions {
-        variant: output.variant.clone(),
-        layout: output.layout.clone(),
-        params: opts.params.clone(),
-        row: opts.row.clone(),
-        ..Default::default()
-    };
+    let mut eo = eval_options(output, opts);
     let ev0 = Evaluator::new(doc, &eo).map_err(DeliverError::Document)?;
     let p0 = ev0.program();
     let frame_rate = output.fps.unwrap_or(p0.fps);
@@ -758,9 +770,16 @@ pub fn deliver(
             report.passes = 1;
         }
     } else {
+        // a document with 3D objects needs an adapter that can run the 3D pass; the one asked for or handed in
+        // that cannot is an error, not frames without the objects
         let gpu = match gpu {
-            Some(g) => g.clone(),
-            None => Gpu::new()?,
+            Some(g) => {
+                if p.uses_3d() {
+                    sr_gpu::gpu::require_3d(&g.info)?;
+                }
+                g.clone()
+            }
+            None => Gpu::new_for(p.uses_3d())?,
         };
         report.render_adapter = Some(RenderAdapter {
             name: gpu.info.name.clone(),

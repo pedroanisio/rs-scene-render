@@ -508,11 +508,26 @@ pub struct Program {
     pub skins: HashMap<Arc<str>, Arc<crate::eval::SkinWeights>>,
 }
 
+/// The element names the 3D pass draws. The renderer's 3D pass and the choice of GPU adapter both read this one list,
+/// so a kind added here is drawn and is also asked for an adapter that can run the pass.
+pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean"];
+
+/// True when the 3D pass draws elements named `name` (see [`THREE_D_DRAWN`]).
+pub fn draws_in_3d(name: &str) -> bool {
+    THREE_D_DRAWN.contains(&name)
+}
+
 impl Program {
     /// Identity of this compiled document. Caches can retain a clone and compare with
     /// `Arc::ptr_eq`; retaining it prevents reuse of the identity after the program is dropped.
     pub fn identity(&self) -> &Arc<()> {
         &self.identity
+    }
+
+    /// True when the document has an element the 3D pass draws (`object3D`, `particles3D`, `ocean`),
+    /// so the adapter must be one that can run that pass.
+    pub fn uses_3d(&self) -> bool {
+        self.nodes.iter().any(|n| draws_in_3d(n.name))
     }
 }
 

@@ -76,7 +76,7 @@ pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c s
 }
 
 pub use eval::{Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SkinWeights};
-pub use program::{Analysis, EvalOptions, Program};
+pub use program::{draws_in_3d, Analysis, EvalOptions, Program, THREE_D_DRAWN};
 pub use value::Value;
 
 /// A compiled document, ready to evaluate any frame.

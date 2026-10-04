@@ -1681,7 +1681,7 @@ impl Renderer {
         // Baked volumes use composition time even when a parent's local clock is
         // frozen. Other 3D clips use local time; include both clocks so isolated
         // ancestors cannot retain a previous cache frame.
-        if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+        if sr_eval::draws_in_3d(n.kind) {
             h(&[hf(n.local_time), hf(ctx.g.time)])
         } else {
             n.source_time.map(hf).unwrap_or(1)
@@ -1708,7 +1708,7 @@ impl Renderer {
             n.three_d.map(|t| h(&t.map(hf))).unwrap_or(2),
             // the camera projects 3D objects and 2.5D layers: a still one looks different when it moves,
             // and a cached isolated group (mask, clip, matte, effects) holding it must redraw
-            if matches!(n.kind, "object3D" | "particles3D" | "ocean") || n.three_d.is_some() { ctx.cam } else { 0 },
+            if sr_eval::draws_in_3d(n.kind) || n.three_d.is_some() { ctx.cam } else { 0 },
             n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             props,
@@ -1829,7 +1829,7 @@ impl Renderer {
         let mut words = Vec::new();
         while let Some(k) = stack.pop() {
             let n = &ctx.g.nodes[k];
-            if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+            if sr_eval::draws_in_3d(n.kind) {
                 if let Some(AttrValue::Str(id)) = n.elem.get_attr("material") {
                     ids.insert(Arc::from(id));
                 }
@@ -2353,7 +2353,7 @@ impl Renderer {
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
             "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
-            "object3D" | "particles3D" | "ocean" => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
+            kind if sr_eval::draws_in_3d(kind) => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}
         }

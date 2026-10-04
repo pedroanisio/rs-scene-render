@@ -262,7 +262,7 @@ impl Renderer {
         if let Some(j) = g.nodes.iter().position(|m| &*m.id == id) {
             let n = &g.nodes[j];
             return Some(match n.kind {
-                "object3D" | "particles3D" | "ocean" => Self::world3(g, lights, j, depth),
+                kind if sr_eval::draws_in_3d(kind) => Self::world3(g, lights, j, depth),
                 // the camera as it looks: its pose, look-at target and shake
                 "camera" => {
                     let cp = Self::cam_params(g, lights, j, depth);
@@ -292,7 +292,7 @@ impl Renderer {
             .nodes
             .iter()
             .find(|m| &*m.id == id)
-            .filter(|n| !matches!(n.kind, "object3D" | "particles3D" | "ocean" | "camera"))
+            .filter(|n| !(sr_eval::draws_in_3d(n.kind) || n.kind == "camera"))
         {
             let p = n.world.apply(n.anchor);
             return Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32));
@@ -2299,7 +2299,7 @@ impl Renderer {
         let mut run = Vec::new();
         let mut found = false;
         for (j, m) in g.nodes.iter().enumerate().filter(|(_, m)| m.parent == parent) {
-            let three = matches!(m.kind, "object3D" | "particles3D" | "ocean" | "camera") || m.three_d.is_some();
+            let three = sr_eval::draws_in_3d(m.kind) || m.kind == "camera" || m.three_d.is_some();
             if !three && m.draw {
                 // a drawn 2D sibling ends the block
                 if found {
@@ -2308,7 +2308,7 @@ impl Renderer {
                 run.clear();
                 continue;
             }
-            if matches!(m.kind, "object3D" | "particles3D" | "ocean") && visible3(g, j) {
+            if sr_eval::draws_in_3d(m.kind) && visible3(g, j) {
                 run.push(j);
             }
             found |= j == i;

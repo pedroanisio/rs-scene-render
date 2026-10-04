@@ -1215,3 +1215,113 @@ fn plain_exports_keep_the_final_partial_frame() {
         assert_eq!(centre(dir.join(format!("{name}_002.png"))), BLUE);
     }
 }
+
+fn three_d_fixture(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sr-cli-3d-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = r##"<scene version="1.3"><project width="64" height="48" fps="10" duration="1" background="#102030"/>
+<composition><object3D id="ball" primitive="sphere" radius="10" x="32" y="24"/></composition></scene>"##;
+    std::fs::write(dir.join("r.scene.xml"), xml).unwrap();
+    dir
+}
+
+/// True when the machine exposes an OpenGL adapter (the test needs one to select).
+fn has_gl_adapter() -> bool {
+    let o = run_env(&["gpus", "--json"], &[("SR_GPU_BACKEND", "gl")]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return false };
+    r["adapters"].as_array().is_some_and(|a| !a.is_empty())
+}
+
+#[test]
+fn a_3d_document_is_not_rendered_without_its_3d_on_an_opengl_adapter() {
+    // asking for OpenGL only, a document with a 3D object cannot be drawn: that is an error by default,
+    // not a frame without the object and exit 0
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("render-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_BACKEND", "gl")]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(2), "{out}{err}");
+    assert!(err.contains("3D") && err.contains("Vulkan") && err.contains("scene-render gpus"), "{err}");
+}
+
+#[test]
+fn encoding_a_3d_document_on_an_opengl_adapter_fails_and_writes_nothing() {
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("encode-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let pattern = dir.join("gl_%03d.png");
+    let o = run_env(&["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2"], &[("SR_GPU_BACKEND", "gl")]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    // the same exit code as render: scripts test one number for "this adapter cannot draw the document"
+    assert_eq!(o.status.code(), Some(2), "{out}{err}");
+    assert!(format!("{out}{err}").contains("3D"), "{out}{err}");
+    assert!(!dir.join("gl_000.png").exists(), "no frame without the 3D object is written");
+}
+
+#[test]
+fn a_flat_document_still_renders_on_opengl() {
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = render_fixture("flat-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_BACKEND", "gl")]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+fn a_3d_document_takes_an_adapter_that_can_draw_it_by_default() {
+    // on a machine that offers OpenGL only for the GPU and Vulkan for lavapipe (WSL2), the default
+    // adapter would drop the 3D object; the choice now moves to the Vulkan one
+    let o = run(&["gpus", "--json"]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return };
+    let list = r["adapters"].as_array().cloned().unwrap_or_default();
+    if !list.iter().any(|a| a["backend"] != "Gl") {
+        eprintln!("skipping: no non-OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("default");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run(&["render", &scene, "--bench", "--frames", "0..1"]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{out}{err}");
+    assert!(!out.contains("3D objects are not drawn"), "{out}");
+    assert!(!out.contains("(Gl,"), "the render adapter must not be an OpenGL one: {out}");
+}
+
+#[test]
+fn encoding_a_3d_document_by_default_takes_an_adapter_that_can_draw_it() {
+    // encode builds its own adapter, so it needs the same document-driven choice as render
+    let o = run(&["gpus", "--json"]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return };
+    let list = r["adapters"].as_array().cloned().unwrap_or_default();
+    if !list.iter().any(|a| a["backend"] != "Gl") {
+        eprintln!("skipping: no non-OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("encode-default");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let pattern = dir.join("d_%03d.png");
+    let o = run(&["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2"]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{out}{err}");
+    assert!(
+        err.contains("rendering on") && !err.contains("(Gl,"),
+        "the encode adapter must not be an OpenGL one: {err}"
+    );
+    assert!(dir.join("d_000.png").is_file(), "{out}{err}");
+}
