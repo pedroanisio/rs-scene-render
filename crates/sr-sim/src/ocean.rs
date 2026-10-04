@@ -32,6 +32,16 @@ pub enum Boundary {
     Periodic,
 }
 
+/// Spatial/temporal accuracy of the finite-volume update.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    /// Piecewise-constant states, forward Euler.
+    #[default]
+    First,
+    /// MUSCL reconstruction with the minmod limiter and SSP-RK2.
+    Second,
+}
+
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub cells: [usize; 2],
@@ -45,6 +55,7 @@ pub struct Spec {
     /// Exponential horizontal velocity decay per second.
     pub damping: f64,
     pub boundary: Boundary,
+    pub order: Order,
     /// Momentum is zeroed below this depth; water is never discarded.
     pub dry_tolerance: f64,
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
@@ -63,6 +74,7 @@ impl Default for Spec {
             gravity: 9.81,
             damping: 0.0,
             boundary: Boundary::Closed,
+            order: Order::First,
             dry_tolerance: 1e-10,
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
@@ -84,6 +96,7 @@ pub struct Frame {
 
 /// Conserved depth and two horizontal momenta.
 type Q = [f64; 3];
+
 #[derive(Clone)]
 struct State {
     time: f64,
@@ -283,6 +296,18 @@ fn publish(state: &State, dry: f64) -> Result<Frame, Error> {
     Ok(Frame { time: state.time, cells: cells? })
 }
 
+/// Work units per cell and substep. A second-order substep runs two stages,
+/// each a reconstruction plus a flux sweep; it measured 2.8-3.0x the wall time
+/// of a first-order substep on a 256x256 grid (the CFL halving that doubles the
+/// substep count is charged separately, by counting substeps).
+const ORDER2_WORK_FACTOR: usize = 3;
+fn step_work(spec: &Spec) -> usize {
+    match spec.order {
+        Order::First => 8,
+        Order::Second => 8 * ORDER2_WORK_FACTOR,
+    }
+}
+
 fn advance(
     spec: &Spec,
     bed: &[f64],
@@ -301,7 +326,7 @@ fn advance(
             break;
         }
         let end = impulses.get(state.next_impulse).map_or(target, |i| i.time.min(target));
-        work.take(state.q.len().saturating_mul(8))?;
+        work.take(state.q.len().saturating_mul(step_work(spec)))?;
         let mut speed = [0.0_f64; 2];
         for q in &state.q {
             let c = (spec.gravity * q[0]).sqrt();
@@ -314,7 +339,7 @@ fn advance(
         if !rate.is_finite() {
             return Err(Error::Numerical("wave speed overflow"));
         }
-        let dt = if rate == 0.0 { end - state.time } else { (end - state.time).min(0.45 / rate) };
+        let dt = if rate == 0.0 { end - state.time } else { (end - state.time).min(flux::cfl(spec) / rate) };
         if dt <= 0.0 || state.time + dt == state.time {
             return Err(Error::Numerical("timestep precision"));
         }
