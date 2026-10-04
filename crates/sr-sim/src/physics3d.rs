@@ -354,6 +354,8 @@ pub struct Impact3 {
     pub closing_speed: f64,
     /// Velocity of the source relative to the owner before the step, in the world's axes.
     pub relative_velocity: [f64; 3],
+    /// The same velocity in the owner's frame, where `point` and `normal` are.
+    pub owner_velocity: [f64; 3],
 }
 
 /// Rotates `v` by the inverse of the unit quaternion `q = [x, y, z, w]`.
@@ -413,6 +415,7 @@ pub fn impact_in_step(watch: &ImpactWatch, contacts: &[Contact3], owner: &Pose3)
         normal: rotate_back(owner.rot, normal),
         closing_speed,
         relative_velocity,
+        owner_velocity: rotate_back(owner.rot, relative_velocity),
     })
 }
 

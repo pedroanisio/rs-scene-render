@@ -33,6 +33,7 @@ pub mod pyro;
 pub mod rng;
 pub mod slime;
 pub mod soft;
+pub mod surface;
 pub mod timeline;
 
 pub use fields::{Field, FieldKind};
