@@ -9,6 +9,7 @@
 mod body;
 mod flux;
 mod impulse;
+pub mod lift;
 pub mod waves;
 pub mod whitewater;
 pub use impulse::{Impulse, ImpulseKind, CAVITY_SHARE};
@@ -124,6 +125,11 @@ pub struct Forcing {
     /// With `Spec::bodies`: vertical extent of bodies inside the water column of
     /// every cell, between the rest level and the bed. Empty otherwise.
     pub occupancy: Vec<f64>,
+    /// With `Spec::bodies`: how much the bed was raised, in every cell, by the bodies in `bed` (the
+    /// bed given is already lowered by this, in scene y), when that is not the occupancy: the
+    /// occupancy filtered by depth is wider and lower than the bodies. Empty when it is the
+    /// occupancy. Only the samples of the water around each body read it.
+    pub raise: Vec<f64>,
     /// With `Spec::bodies`: horizontal velocity of the body in every cell
     /// (ignored where `occupancy` is zero). Empty otherwise.
     pub velocity: Vec<[f64; 2]>,
@@ -413,6 +419,7 @@ impl Ocean {
         out.exchange = exchange;
         out.bodies = bodies;
         out.events.clear();
+        out.raise.clear();
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
         let wanted = if self.spec.bodies { n } else { 0 };
@@ -430,6 +437,8 @@ impl Ocean {
             || out.owner.len() != tagged
             || out.owner.iter().zip(&out.occupancy).any(|(o, t)| *t > 0.0 && *o as usize >= self.spec.body_owners)
             || out.events.len() > 16_384
+            || !(out.raise.is_empty() || (self.spec.bodies && out.raise.len() == n))
+            || out.raise.iter().any(|r| !r.is_finite() || *r < 0.0)
         {
             return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
         }

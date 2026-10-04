@@ -33,7 +33,7 @@ impl Scene {
               <object3D id="float" {body} y="{y}">
                 <rigidBody shape="{shape}" mass="{mass}" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" width="16" depth="16" cellSize="1" bottomDepth="20" dt="0.05" boundary="closed" colliders="float" {ocean}/>
+              <ocean id="sea" bedResponse="hydrostatic" width="16" depth="16" cellSize="1" bottomDepth="20" dt="0.05" boundary="closed" colliders="float" {ocean}/>
             </composition>
             <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="{step}" bounds="none"/></scene>"##,
             body = self.body,

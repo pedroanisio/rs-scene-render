@@ -9,7 +9,7 @@ fn scene(crater_depth: f64, extra: &str) -> String {
           <object3D id="seabed" primitive="plane" width="400" height="400" segments="80" y="12" rotationX="-90">
             <crater radius="40" depth="{crater_depth}" rimHeight="3" rimWidth="8" start="0.5" end="1.5"/>
           </object3D>
-          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed">{extra}</ocean>
+          <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed">{extra}</ocean>
         </composition></scene>"#
     )
 }
@@ -92,7 +92,7 @@ fn bed_sampling_cost_per_canonical_step_at_720_by_720() {
               <object3D id="seabed" primitive="plane" width="1000" height="1000" segments="96" y="12" rotationX="-90">
                 <crater radius="52" depth="25" rimHeight="7" rimWidth="10" start="1" end="2.5"/>
               </object3D>
-              <ocean id="sea" width="1440" depth="1440" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="open" order="2" maxMemoryMiB="512" surfaceMemoryMiB="256" maxWork="100000000000" {colliders}/>
+              <ocean id="sea" bedResponse="hydrostatic" width="1440" depth="1440" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="open" order="2" maxMemoryMiB="512" surfaceMemoryMiB="256" maxWork="100000000000" {colliders}/>
             </composition></scene>"#
         )
     };
@@ -121,7 +121,7 @@ fn falling_sphere(radius: f64, speed_scale: f64) -> String {
           <object3D id="impactor" primitive="sphere" radius="{radius}" segments="24">
             <animate property="y"><key time="0" value="{y0}"/><key time="{fall}" value="{y1}"/></animate>
           </object3D>
-          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
+          <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
         </composition></scene>"#
     )
 }
@@ -191,7 +191,7 @@ fn sliding_sphere(speed: f64) -> String {
           <object3D id="barge" primitive="sphere" radius="6" segments="24" x="-40" y="4">
             <animate property="x"><key time="0" value="-40"/><key time="2" value="{}"/></animate>
           </object3D>
-          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="barge"/>
+          <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="barge"/>
         </composition></scene>"#,
         -40.0 + 2.0 * speed
     )
@@ -223,7 +223,7 @@ fn falling_rigid_sphere() -> String {
       <object3D id="impactor" primitive="sphere" radius="7" segments="24" y="-40">
         <rigidBody velocityY="46" linearDamping="0" angularDamping="0"/>
       </object3D>
-      <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
+      <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
     </composition><physics gravityY="0" bounds="none"/></scene>"#
         .to_string()
 }
@@ -255,7 +255,7 @@ fn a_body_of_the_rigid_world_moves_the_ocean_like_the_same_animated_body() {
 fn colliders_that_are_neither_bed_nor_body_are_rejected_when_the_scene_loads() {
     let floor = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
       <object3D id="floor" primitive="plane" width="100" height="100" y="12" rotationX="-90"/>
-      <ocean id="sea" width="64" depth="64" cellSize="2" bottomDepth="12" colliders="floor"/>
+      <ocean id="sea" bedResponse="hydrostatic" width="64" depth="64" cellSize="2" bottomDepth="12" colliders="floor"/>
     </composition></scene>"#;
     let Err(error) = sr_model::load_str(floor, &sr_model::LoadOptions::without_assets()) else {
         panic!("a plane without a crater was accepted");
@@ -309,7 +309,7 @@ fn whitewater_checkpoint_budget_never_changes_the_result_of_a_replay() {
     let scene = |budget: &str| {
         format!(
             r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
-              <ocean id="sea" width="64" depth="64" cellSize="1" bottomDepth="6" dt="0.0416666666666667">
+              <ocean id="sea" bedResponse="hydrostatic" width="64" depth="64" cellSize="1" bottomDepth="6" dt="0.0416666666666667">
                 <waterImpulse time="0.2" radius="8" amplitude="-4"/>
                 <whitewater emissionRate="20" threshold="0.05" maxParticles="100000" lifetime="2" {budget}/>
               </ocean></composition></scene>"#

@@ -2173,6 +2173,19 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/><xs:enumeration value="full"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="bedResponse" default="depthFiltered">
+      <xs:annotation><xs:documentation>
+        How the free surface answers what the objects in `colliders` do to the water: the bed that a crater moves and
+        the volume a body occupies. `depthFiltered` (the default) attenuates it by the depth of the water: a
+        displacement much narrower than the depth does little to the surface, as in linear water-wave theory, where an
+        instantaneous displacement of wavenumber k is carried to the surface by 1/cosh(k h) for the bed (Kajiura 1963;
+        read here only as quoted by the tsunami literature) and by cosh(k z0)/cosh(k h) for a volume at height z0 above the bed
+        (derived by the engine). The displaced volume is conserved. `hydrostatic` lifts the whole column by the
+        displacement, which is the long-wave answer, right when the displacement is much wider than the depth: the
+        behaviour of the first version, kept for comparison. It has no effect without `colliders`.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
       <xs:annotation><xs:documentation>
         Coefficient of form drag for the vertical motion of a body through the water, with `bodyCoupling`: the force is

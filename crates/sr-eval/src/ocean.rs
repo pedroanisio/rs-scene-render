@@ -119,8 +119,14 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     let colliders = if collider_ids.is_empty() {
         None
     } else {
-        let built =
-            colliders::Colliders::build(p, &collider_ids, &spec, f("waterLevel", 0.), bytes("meshMemoryMiB", 128.)?)?;
+        let built = colliders::Colliders::build(
+            p,
+            &collider_ids,
+            &spec,
+            f("waterLevel", 0.),
+            bytes("meshMemoryMiB", 128.)?,
+            text(e, "bedResponse").as_deref() != Some("hydrostatic"),
+        )?;
         spec.moving_bed = true;
         spec.bodies = built.has_bodies();
         spec.body_owners = built.body_count();
@@ -373,7 +379,7 @@ mod tests {
           </object3D>
           <object3D id="left" primitive="sphere" radius="6" x="-30" y="0"/>
           <object3D id="right" primitive="sphere" radius="6" x="30" y="2"/>
-          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed right left"/>
+          <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed right left"/>
         </composition></scene>"#;
         let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
         let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();

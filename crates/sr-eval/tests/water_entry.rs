@@ -23,7 +23,7 @@ impl Setup {
               <object3D id="rock" primitive="sphere" radius="{radius}" y="-8">
                 <rigidBody shape="sphere" mass="{mass}" velocityY="{speed}" restitution="0" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="{depth}" dt="0.0416666666666667" boundary="closed" colliders="rock">{source}</ocean>
+              <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="{depth}" dt="0.0416666666666667" boundary="closed" colliders="rock">{source}</ocean>
             </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#,
             radius = self.radius,
             mass = self.mass,

@@ -5,6 +5,8 @@ use super::*;
 use glam::{DMat4, DVec3};
 
 pub(super) struct Colliders {
+    /// Whether what the objects do to the water is attenuated by its depth (`bedResponse`).
+    filtered: bool,
     beds: Vec<Bed>,
     bodies: Vec<Body>,
     /// Entries of the `colliders` list, which bound the tags.
@@ -72,6 +74,7 @@ impl Colliders {
         spec: &Spec,
         water_level: f64,
         budget: usize,
+        filtered: bool,
     ) -> Result<Colliders, String> {
         if ids.len() > 4096 {
             return Err("at most 4096 ocean colliders".into());
@@ -129,7 +132,16 @@ impl Colliders {
             }
         }
         remaining.checked_sub(count.saturating_mul(24)).ok_or("ocean collider geometry exceeds memory budget")?;
+        if filtered {
+            // three more vectors of the grid (the displacement, one body's thickness, the raise) and the
+            // largest window of a transform
+            let window = count.min(sr_sim::ocean::lift::MAX_WINDOW.pow(2));
+            remaining
+                .checked_sub(count.saturating_mul(24).saturating_add(window.saturating_mul(40)))
+                .ok_or("ocean collider geometry and depth filter exceed the memory budget")?;
+        }
         Ok(Colliders {
+            filtered,
             beds,
             bodies,
             slots: ids.len(),
@@ -186,15 +198,47 @@ impl Colliders {
             forcing.velocity.fill([0.; 2]);
             return Ok(());
         };
+        let level = self.water_level;
+        // the water over a column, at rest: what the bathymetry leaves above the rest level
+        let wet = |c: usize| base[c] - level > spec.dry_tolerance;
+        let mut moved = vec![0.; if self.filtered { base.len() } else { 0 }];
         for i in 0..self.beds.len() {
             let mut top = std::mem::take(&mut self.top);
             self.beds[i].top(spec, inverse, &frame, &mut top)?;
-            for ((bed, now), rest) in forcing.bed.iter_mut().zip(&top).zip(&self.beds[i].rest) {
+            let into: &mut [f64] = if self.filtered { &mut moved } else { &mut forcing.bed };
+            for ((bed, now), rest) in into.iter_mut().zip(&top).zip(&self.beds[i].rest) {
                 if now.is_finite() && rest.is_finite() {
                     *bed += now - rest;
                 }
             }
             self.top = top;
+        }
+        if self.filtered && moved.iter().any(|v| *v != 0.) {
+            // a displacement of the bed itself: the response of a source at height 0, over the depth the
+            // bed was moved under, weighted by how much it moved
+            let (mut weight, mut deep) = (0., 0.);
+            for (c, v) in moved.iter().enumerate() {
+                weight += v.abs();
+                deep += v.abs() * (base[c] - level).max(0.);
+            }
+            let depth = deep / weight;
+            if depth > 0. {
+                sr_sim::ocean::lift::depth_response(
+                    spec.cells,
+                    spec.cell_size,
+                    depth,
+                    0.,
+                    &moved,
+                    &mut forcing.bed,
+                    &wet,
+                )
+                .map_err(|e| e.to_string())?;
+                // the part of the bed that lay on dry columns (unfiltered)
+            } else {
+                for (bed, v) in forcing.bed.iter_mut().zip(&moved) {
+                    *bed += v;
+                }
+            }
         }
         if self.bodies.is_empty() {
             return Ok(());
@@ -203,18 +247,64 @@ impl Colliders {
         forcing.occupancy.clear();
         forcing.occupancy.resize(n, 0.);
         let mut momentum = vec![[0.; 2]; n];
+        // with the depth filter: what each body raises, filtered, and the sum of those
+        let mut raise = vec![0.; if self.filtered { n } else { 0 }];
+        let mut thickness = vec![0.; if self.filtered { n } else { 0 }];
+        let mut heights = vec![0.; if self.filtered { n } else { 0 }];
         // the body that holds most of a column owns it; bodies come in index order, so the lowest wins a tie
         let mut held_most = vec![0.; if spec.body_owners > 0 { n } else { 0 }];
         forcing.owner.clear();
         forcing.owner.resize(if spec.body_owners > 0 { n } else { 0 }, 0);
         for i in 0..self.bodies.len() {
-            self.occupy(i, spec, ocean, frame_at, time, &frame, inverse, forcing, &mut momentum, &mut held_most)?;
+            thickness.fill(0.);
+            heights.fill(0.);
+            self.occupy(
+                i,
+                spec,
+                ocean,
+                frame_at,
+                time,
+                &frame,
+                inverse,
+                forcing,
+                &mut momentum,
+                &mut held_most,
+                (&mut thickness, &mut heights),
+            )?;
+            if self.filtered {
+                // the volume the body displaces, at the height of its middle above the bed, over the depth
+                // of the water under it
+                let (mut volume, mut up, mut deep) = (0., 0., 0.);
+                for (c, t) in thickness.iter().enumerate().filter(|(_, t)| **t > 0.) {
+                    volume += t;
+                    up += heights[c];
+                    deep += t * (forcing.bed[c] - level).max(0.);
+                }
+                if volume > 0. {
+                    let depth = deep / volume;
+                    let filtered = depth > 0.
+                        && sr_sim::ocean::lift::depth_response(
+                            spec.cells,
+                            spec.cell_size,
+                            depth,
+                            up / volume,
+                            &thickness,
+                            &mut raise,
+                            &|c| forcing.bed[c] - level > spec.dry_tolerance,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    if !filtered && depth <= 0. {
+                        for (r, t) in raise.iter_mut().zip(&thickness) {
+                            *r += t;
+                        }
+                    }
+                }
+            }
         }
         forcing.velocity.clear();
         forcing.velocity.resize(n, [0.; 2]);
-        let level = self.water_level;
-        for (((bed, occupancy), velocity), momentum) in
-            forcing.bed.iter_mut().zip(&mut forcing.occupancy).zip(&mut forcing.velocity).zip(&momentum)
+        for (c, (((bed, occupancy), velocity), momentum)) in
+            forcing.bed.iter_mut().zip(&mut forcing.occupancy).zip(&mut forcing.velocity).zip(&momentum).enumerate()
         {
             // A column cannot hold more body than it holds water.
             let held = occupancy.min((*bed - level).max(0.));
@@ -223,7 +313,15 @@ impl Colliders {
                 *velocity = [momentum[0] * scale, momentum[1] * scale];
             }
             *occupancy = held;
-            *bed -= held;
+            if self.filtered {
+                raise[c] = raise[c].min((*bed - level).max(0.));
+                *bed -= raise[c];
+            } else {
+                *bed -= held;
+            }
+        }
+        if self.filtered {
+            forcing.raise = raise;
         }
         Ok(())
     }
@@ -315,6 +413,7 @@ impl Colliders {
         forcing: &mut sim::Forcing,
         momentum: &mut [[f64; 2]],
         held_most: &mut [f64],
+        (thickness_of_body, heights): (&mut [f64], &mut [f64]),
     ) -> Result<(), String> {
         let body = &self.bodies[index];
         let Some(j) = frame.nodes.iter().position(|n| n.id == body.id) else { return Ok(()) };
@@ -365,12 +464,16 @@ impl Colliders {
             let (low, high) = (self.water_level, forcing.bed[c]);
             let mut thickness = 0.;
             let mut entry = None;
+            let mut up = 0.;
             for pair in self.hits[start..end].chunks(2) {
-                let held = (pair[1].y.min(high) - pair[0].y.max(low)).max(0.);
+                let (top, bottom) = (pair[0].y.max(low), pair[1].y.min(high));
+                let held = (bottom - top).max(0.);
                 if held > 0. && entry.is_none() {
                     entry = Some(&pair[0]);
                 }
                 thickness += held;
+                // how high above the bed the middle of this part lies, times its thickness
+                up += held * (high - 0.5 * (top + bottom));
             }
             if let Some(hit) = entry {
                 let [a, b, c3] = body.triangles[hit.triangle as usize].map(|i| body.points[i as usize]);
@@ -379,6 +482,10 @@ impl Colliders {
                 let rest: DVec3 = DVec3::from_array(a) * u + DVec3::from_array(b) * v + DVec3::from_array(c3) * w;
                 let velocity = (to.transform_point3(rest) - from.transform_point3(rest)) / dt;
                 forcing.occupancy[c] += thickness;
+                if let Some(of_body) = thickness_of_body.get_mut(c) {
+                    *of_body += thickness;
+                    heights[c] += up;
+                }
                 if let Some(most) = held_most.get_mut(c).filter(|most| thickness > **most) {
                     *most = thickness;
                     forcing.owner[c] = body.slot as u32;

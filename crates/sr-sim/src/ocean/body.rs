@@ -81,7 +81,7 @@ pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing) -> Vec<BodySampl
             let mut wet = Vec::new();
             for &c in &cells {
                 let c = c as usize;
-                bed += to.bed[c] + to.occupancy[c];
+                bed += to.bed[c] + to.raise.get(c).copied().unwrap_or(to.occupancy[c]);
                 if state.q[c][0] >= spec.dry_tolerance {
                     wet.push(c);
                     depth += state.q[c][0];

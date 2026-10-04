@@ -14,7 +14,7 @@ fn scene(speed: f64, extra: &str) -> String {
             <crater source="rock" targetMaterial="softRock"/>
             <rigidBody type="static" shape="auto"/>
           </object3D>
-          <ocean id="sea" width="256" depth="256" cellSize="2" bottomDepth="30" dt="0.0416666666666667" boundary="closed" colliders="seabed">{extra}</ocean>
+          <ocean id="sea" bedResponse="hydrostatic" width="256" depth="256" cellSize="2" bottomDepth="30" dt="0.0416666666666667" boundary="closed" colliders="seabed">{extra}</ocean>
         </composition>
         <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#
     )

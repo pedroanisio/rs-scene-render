@@ -502,7 +502,7 @@ mod tests {
               <object3D id="barge" primitive="sphere" radius="3" segments="16" x="-30" y="1">
                 <rigidBody shape="sphere" mass="500" velocityX="8" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="10" dt="0.05" boundary="closed" colliders="barge"/>
+              <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="10" dt="0.05" boundary="closed" colliders="barge"/>
               {extra}
             </composition>
             <physics gravityY="0" pixelsPerMeter="1" fixedStep="0.01" bounds="none"/></scene>"#
@@ -685,7 +685,7 @@ mod tests {
               <object3D id="float" primitive="sphere" radius="1" segments="24" y="-1.5">
                 <rigidBody shape="sphere" mass="2094" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" width="16" depth="16" cellSize="1" bottomDepth="20" dt="0.05" boundary="closed" colliders="float"/>
+              <ocean id="sea" bedResponse="hydrostatic" width="16" depth="16" cellSize="1" bottomDepth="20" dt="0.05" boundary="closed" colliders="float"/>
             </composition>
             <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#;
         let hull = BodyHull::new("float".into(), 2094.0, &sr_sim::physics3d::Shape3::Sphere(1.0));
