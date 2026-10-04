@@ -495,3 +495,23 @@ fn a_live_smoke_before_its_source_starts_is_lit_from_the_grid_without_error() {
     let psnr = common::psnr(&exact.px, &gridded.px);
     assert!(psnr >= 40.0, "grid differs from exact: {psnr:.1} dB");
 }
+
+/// Grid lighting of a medium whose cells are optically thick is reported, not refused: the frame
+/// renders, and `stats.unsupported` says how thick and what to do.
+#[test]
+fn grid_lighting_of_thick_smoke_says_it_bands() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = ball_cache("grid_ball.srvol", [0.0; 3], 6.0, 1.0);
+    let medium = |extinction: f64| {
+        grid(&format!(r##"<medium extinction="{extinction}" albedo="#FFFFFF" stepSize="0.5" maxSteps="2048"/>"##))
+    };
+    let thin = render(&gpu, &cache, &Setup { medium: &medium(0.6), samples: 1, ..Default::default() });
+    assert!(thin.stats.unsupported.is_empty(), "{:?}", thin.stats.unsupported);
+    let thick = render(&gpu, &cache, &Setup { medium: &medium(30.0), samples: 1, ..Default::default() });
+    let notes = thick.stats.unsupported.join("\n");
+    assert!(
+        notes.contains("optical depth across one cell reaches 30.0") && notes.contains("lighting=\"exact\""),
+        "{notes}"
+    );
+    assert!(mean(&thick) > 0.0, "the frame is still rendered");
+}

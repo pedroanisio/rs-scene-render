@@ -431,6 +431,15 @@ the asking media is a render error that names the attribute to change; it never
 falls back to exact lighting or a coarser lattice. `VOL10` rejects `lightGrid*`
 attributes without `lighting="grid"`.
 
+Dust derived from solids is thick. A dust density that is a volume fraction of
+solids (about 1e-3 per cell) has an extinction coefficient of roughly
+3Q/(2d) per unit of solid fraction, with Q about 2 and d the grain diameter in
+scene units, so `medium@extinction` is of the order of 1.5 divided by the grain
+diameter. Measured on the impact smoke at 1 m cells (100 micrometre grains, so
+30000): 300 is faint but visible, 3000 reads as smoke and 30000 is an almost
+opaque dome with a hard edge. Such a medium is thick across a cell for grid
+lighting (see the known limits below).
+
 Tiled and whole-frame renders of a grid frame are identical. Surface shading of
 volume shadows (a surface lit through the medium) still uses the exact march.
 
@@ -456,6 +465,15 @@ frame, over the region above the horizon (PSNR and CIEDE2000 ΔE):
   rectangle light at 60, 14 and 9 scene units from the medium: 65, 53 and 43 dB;
   sphere light: 66, 56 and 50 dB. Use `lighting="exact"` for lights within about
   ten times their own size of the medium.
+- Optically thick cells band. The grid interpolates transmittance linearly
+  between nodes, which is wrong where transmittance falls from 1 to near 0
+  inside one cell. The renderer measures the optical depth across one cell
+  (extinction × `densityScale` × the peak density × the node spacing) and, above 4,
+  reports it in the frame's unsupported notes with the value and the advice to use
+  `lighting="exact"` or a smaller `lightGridCell`; the frame still renders. Seen on
+  the impact smoke at 1 unit cells: depth 40 shows strong horizontal bands, 13 faint
+  ones, 6.6 barely visible ones, and 4 none (one frame, judged by eye, not measured
+  against a reference).
 - A medium with `anisotropy` ≠ 0 costs one scalar grid per fixed dome direction;
   the lattice, `lightGridDomeDirections` and the number of lights must fit in
   `lightGridMemoryMiB`.
