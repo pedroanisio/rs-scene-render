@@ -144,6 +144,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
                 max_particles: f("maxParticles", 10_000.) as usize,
                 max_bytes: (f("maxMemoryMiB", 64.) as usize).saturating_mul(1 << 20),
                 max_work: f("maxWork", 100_000_000.) as u64,
+                checkpoint_bytes: (f("checkpointMemoryMiB", 64.) as usize).saturating_mul(1 << 20),
             };
             sim::whitewater::Whitewater::new(spec.clone(), bed.clone(), cfg).map_err(|e| e.to_string())
         })

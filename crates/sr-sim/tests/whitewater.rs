@@ -141,3 +141,91 @@ fn foam_follows_the_bed_each_water_sample_carries() {
     let mut sim = Whitewater::new(grid(), vec![2.; 32], settings()).unwrap();
     assert!(sim.at(0.1, |t| Ok(Frame { bed: vec![2.; 5], ..water(t, [2., 0.])? })).is_err());
 }
+
+fn with_checkpoints(bytes: usize) -> Settings {
+    Settings {
+        checkpoint_bytes: bytes,
+        rate: 20.,
+        threshold: 0.1,
+        lifetime: 1.5,
+        spray_fraction: 0.5,
+        ..Default::default()
+    }
+}
+/// Moving water whose speed changes with time, so that history matters.
+fn varying(t: f64) -> Result<Frame, Error> {
+    water(t, [2. + (3. * t).sin(), 0.5 * (2. * t).cos()])
+}
+
+#[test]
+fn replay_is_bit_identical_with_and_without_checkpoints_in_any_seek_order() {
+    let mut reference = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(0)).unwrap();
+    let times = [3.37, 0.2, 2.0, 5.51, 1.04, 4.4, 0.0, 2.95, 5.0];
+    let expected: Vec<_> = times.iter().map(|&t| reference.at(t, varying).unwrap().clone()).collect();
+    for budget in [0, 2_000, 6_000, 64 << 20] {
+        let mut sim = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(budget)).unwrap();
+        // Forward to lay checkpoints, then seek in the scrambled order twice.
+        sim.at(6.0, varying).unwrap();
+        for round in 0..2 {
+            for (t, want) in times.iter().zip(&expected) {
+                assert_eq!(sim.at(*t, varying).unwrap(), want, "budget {budget}, round {round}, t={t}");
+                assert!(sim.checkpoint_bytes() <= budget, "budget {budget}: {} bytes held", sim.checkpoint_bytes());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_backward_seek_restarts_from_the_nearest_checkpoint_and_not_from_zero() {
+    let calls = std::cell::Cell::new(0_u32);
+    let source = |t: f64| {
+        calls.set(calls.get() + 1);
+        varying(t)
+    };
+    let mut sim = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(64 << 20)).unwrap();
+    sim.at(5.0, source).unwrap();
+    // The step is 0.1 s and a checkpoint is kept every second: ticks 10, 20, ...
+    calls.set(0);
+    sim.at(3.35, source).unwrap();
+    // From tick 30 to tick 33, then the fractional 0.05 s: four samples, not 34.
+    assert_eq!(calls.get(), 4, "{} source samples", calls.get());
+    calls.set(0);
+    let mut cold = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(0)).unwrap();
+    cold.at(5.0, source).unwrap();
+    calls.set(0);
+    cold.at(3.35, source).unwrap();
+    assert_eq!(calls.get(), 34, "without checkpoints the replay starts from zero");
+}
+
+#[test]
+fn a_full_budget_thins_checkpoints_instead_of_failing_and_never_exceeds_it() {
+    let one = {
+        let mut probe = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(64 << 20)).unwrap();
+        probe.at(1.0, varying).unwrap();
+        probe.checkpoint_bytes()
+    };
+    assert!(one > 0);
+    // Room for about two states while the run needs sixteen seconds of them.
+    let budget = 2 * one + one / 2;
+    let mut sim = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(budget)).unwrap();
+    sim.at(16.0, varying).unwrap();
+    assert!(sim.checkpoint_bytes() <= budget);
+    assert!(!sim.checkpoint_ticks().is_empty(), "thinning must keep some checkpoint");
+    let ticks = sim.checkpoint_ticks();
+    assert!(ticks.windows(2).all(|w| w[1] > w[0]));
+    // Kept ticks are evenly spaced after thinning.
+    let gap = ticks[1] - ticks[0];
+    assert!(ticks.windows(2).all(|w| w[1] - w[0] == gap), "{ticks:?}");
+}
+
+#[test]
+fn a_failed_request_leaves_the_published_frame_and_the_canonical_state_alone() {
+    let mut sim = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(64 << 20)).unwrap();
+    let before = sim.at(2.0, varying).unwrap().clone();
+    let failing = |t: f64| if t > 3.0 { Err(Error::Invalid("source refused")) } else { varying(t) };
+    assert!(sim.at(5.0, failing).is_err());
+    assert_eq!(sim.frame(), &before);
+    // The retry from the retained state matches a clean run.
+    let mut clean = Whitewater::new(grid(), vec![2.; 32], with_checkpoints(0)).unwrap();
+    assert_eq!(sim.at(4.0, varying).unwrap(), clean.at(4.0, varying).unwrap());
+}

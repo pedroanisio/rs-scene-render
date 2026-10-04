@@ -20,6 +20,9 @@ pub struct Settings {
     pub max_particles: usize,
     pub max_bytes: usize,
     pub max_work: u64,
+    /// Ceiling for the retained checkpoints, separate from `max_bytes`; zero
+    /// keeps none and every backward seek replays from zero.
+    pub checkpoint_bytes: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -37,6 +40,7 @@ impl Default for Settings {
             max_particles: 10_000,
             max_bytes: 64 << 20,
             max_work: 100_000_000,
+            checkpoint_bytes: 64 << 20,
         }
     }
 }
@@ -65,8 +69,16 @@ struct State {
     frame: Frame,
     next_id: u64,
 }
-/// Only the last canonical state is retained; backward seeks replay from zero.
-/// Failed requests do not publish particles or alter the canonical state.
+impl State {
+    fn bytes(&self) -> usize {
+        256 + self.frame.particles.len() * std::mem::size_of::<Particle>()
+    }
+}
+/// The last canonical state is retained, and checkpoints of earlier ticks within
+/// their own byte budget: one per second of simulated time to begin with, and
+/// every second, fourth, eighth... when the budget fills, so a backward seek
+/// restarts from the nearest checkpoint at or before its tick. Failed requests do
+/// not publish particles or alter the canonical state.
 pub struct Whitewater {
     grid: Spec,
     bed: Vec<f64>,
@@ -74,6 +86,10 @@ pub struct Whitewater {
     canonical: State,
     step: u64,
     frame: Frame,
+    checkpoints: Vec<(u64, State)>,
+    /// Ticks between checkpoints; doubles whenever the budget fills.
+    every: u64,
+    held: usize,
 }
 impl Whitewater {
     pub fn new(grid: Spec, bed: Vec<f64>, cfg: Settings) -> Result<Self, Error> {
@@ -128,10 +144,53 @@ impl Whitewater {
         if cfg.max_particles == 0 || cfg.max_particles > 1_000_000 || cfg.max_work == 0 || bytes > cfg.max_bytes {
             return Err(Error::Limit("whitewater memory, particle or work budget"));
         }
-        Ok(Self { grid, bed, cfg, canonical: State::default(), step: 0, frame: Frame::default() })
+        let every = (1.0 / grid.dt).ceil().clamp(1.0, 1e12) as u64;
+        Ok(Self {
+            grid,
+            bed,
+            cfg,
+            canonical: State::default(),
+            step: 0,
+            frame: Frame::default(),
+            checkpoints: Vec::new(),
+            every,
+            held: 0,
+        })
     }
     pub fn frame(&self) -> &Frame {
         &self.frame
+    }
+    /// Bytes of the retained checkpoints.
+    pub fn checkpoint_bytes(&self) -> usize {
+        self.held
+    }
+    /// Ticks of the retained checkpoints, ascending.
+    pub fn checkpoint_ticks(&self) -> Vec<u64> {
+        self.checkpoints.iter().map(|(tick, _)| *tick).collect()
+    }
+    /// Keeps `state` as the checkpoint of `tick` when the cadence asks for it,
+    /// thinning the older ones when the budget is full.
+    fn remember(&mut self, tick: u64, state: &State) {
+        let bytes = state.bytes();
+        if self.cfg.checkpoint_bytes == 0
+            || bytes > self.cfg.checkpoint_bytes
+            || tick % self.every != 0
+            || self.checkpoints.iter().any(|(t, _)| *t == tick)
+        {
+            return;
+        }
+        while self.held + bytes > self.cfg.checkpoint_bytes {
+            self.every = self.every.saturating_mul(2);
+            let every = self.every;
+            self.checkpoints.retain(|(t, _)| t % every == 0);
+            self.held = self.checkpoints.iter().map(|(_, s)| s.bytes()).sum();
+            if tick % every != 0 {
+                return;
+            }
+        }
+        self.held += bytes;
+        let at = self.checkpoints.partition_point(|(t, _)| *t < tick);
+        self.checkpoints.insert(at, (tick, state.clone()));
     }
     /// Source samples must return the requested time and exactly nx*nz cells.
     /// Births occur at canonical tick endpoints; fractional requests move
@@ -149,6 +208,11 @@ impl Whitewater {
         }
         let (mut step, mut state) =
             if target >= self.step { (self.step, self.canonical.clone()) } else { (0, State::default()) };
+        if let Some((tick, saved)) =
+            self.checkpoints.iter().filter(|(tick, _)| *tick <= target && *tick > step).max_by_key(|(tick, _)| *tick)
+        {
+            (step, state) = (*tick, saved.clone());
+        }
         let mut work = self.cfg.max_work;
         while step < target {
             let end = (step + 1) as f64 * self.grid.dt;
@@ -158,6 +222,7 @@ impl Whitewater {
             self.move_particles(&mut state.frame, &water, end)?;
             self.emit(&mut state, &water, step + 1, &mut work)?;
             step += 1;
+            self.remember(step, &state);
         }
         let mut frame = state.frame.clone();
         if time > frame.time {
