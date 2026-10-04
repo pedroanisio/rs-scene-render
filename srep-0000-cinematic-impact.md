@@ -902,7 +902,7 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `seed` | 0 | Independent full unsigned 64-bit seed |
 | `maxParticles` | 10000 | Live count ceiling, at most 1,000,000; overflow is an error |
 | `maxMemoryMiB` | 64 | Independent state/workspace ceiling, at most 4096 MiB |
-| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000 |
+| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth), and tracers keep no checkpoints, so every request that goes back in time replays from zero: a cold seek to 6 s on 518,400 cells with a 1/24 s step costs about 600 million units |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
@@ -1900,7 +1900,7 @@ Also includes `pyroShape`, inventoried below.
 | `end` | nonNegativeDecimal | Optional; absent |
 | `maxParticles` | xs:positiveInteger; maxInclusive=1000000 | Default `10000` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `64` |
-| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000000 | Default `100000000` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
 

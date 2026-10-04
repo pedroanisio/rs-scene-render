@@ -241,3 +241,17 @@ fn work_allowance_above_one_billion_reaches_the_solver_without_loss() {
     assert!(frame.problems.is_empty(), "{:?}", frame.problems);
     assert!(frame.nodes[0].sim_ocean.is_some());
 }
+
+/// Whitewater charges 8 units per cell per step. On 64 x 64 cells with a 0.0005 s
+/// step, a cold seek to 20 s costs 40000 steps x 32768 units = 1.31e9 units, more
+/// than the old ceiling of 1e9. It runs about twenty seconds in release, so it
+/// runs on request: `cargo test --release -p sr-eval --test ocean -- --ignored`.
+#[test]
+#[ignore = "about twenty seconds of solver work in release"]
+fn whitewater_work_allowance_above_one_billion_reaches_the_tracers_without_loss() {
+    let xml = r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="21"/><composition><ocean id="sea" width="64" depth="64" bottomDepth="1" dt="0.0005" maxWork="1000000000000"><waterImpulse time="0.1" radius="4" amplitude="0.2"/><whitewater maxWork="1000000000000" maxParticles="100"/></ocean></composition></scene>"#;
+    let d = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let frame = sr_eval::Evaluator::new(&d, &Default::default()).unwrap().evaluate(20.0);
+    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+    assert!(frame.nodes[0].sim_ocean.as_ref().unwrap().whitewater.is_some());
+}

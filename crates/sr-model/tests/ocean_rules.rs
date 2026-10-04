@@ -38,9 +38,18 @@ fn ocean_work_allowance_is_a_positive_integer_up_to_one_trillion() {
         let node = format!(r#"<ocean id="o" maxWork="{work}"/>"#);
         assert!(codes(&node, "1.3").contains(&"S06".into()), "{work}: {:?}", codes(&node, "1.3"));
     }
-    // Other budgets keep their own ceilings.
-    let node = r#"<ocean id="o"><whitewater maxWork="1000000000001"/></ocean>"#;
-    assert!(codes(node, "1.3").contains(&"S06".into()));
+}
+
+#[test]
+fn whitewater_work_allowance_has_the_same_trillion_ceiling() {
+    for work in ["1", "1000000000", "1000000000000"] {
+        let node = format!(r#"<ocean id="o"><whitewater maxWork="{work}"/></ocean>"#);
+        assert!(codes(&node, "1.3").is_empty(), "{work}: {:?}", codes(&node, "1.3"));
+    }
+    for work in ["0", "-1", "1000000000001", "1e12", "1.5"] {
+        let node = format!(r#"<ocean id="o"><whitewater maxWork="{work}"/></ocean>"#);
+        assert!(codes(&node, "1.3").contains(&"S06".into()), "{work}: {:?}", codes(&node, "1.3"));
+    }
 }
 
 #[test]
