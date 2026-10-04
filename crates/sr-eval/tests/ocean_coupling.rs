@@ -110,3 +110,153 @@ fn bed_sampling_cost_per_canonical_step_at_720_by_720() {
     let moving = run(r#"colliders="seabed""#);
     println!("BEDCOST per canonical step: static {still:.4} s, with the crater driving the bed {moving:.4} s; sampling adds {:.4} s", moving - still);
 }
+
+/// A sphere that falls into the ocean, with no authored impulse and no crater.
+fn falling_sphere(radius: f64, speed_scale: f64) -> String {
+    let (y0, y1) = (-40.0, 6.0);
+    // The fall takes 1 s at scale 1; a larger scale is a faster body.
+    let fall = 1.0 / speed_scale;
+    format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="impactor" primitive="sphere" radius="{radius}" segments="24">
+            <animate property="y"><key time="0" value="{y0}"/><key time="{fall}" value="{y1}"/></animate>
+          </object3D>
+          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
+        </composition></scene>"#
+    )
+}
+
+#[test]
+fn a_body_falling_into_the_water_makes_a_wave_with_no_impulse_and_conserves_the_water() {
+    let ev = evaluator(&falling_sphere(7.0, 1.0));
+    let before = ev.evaluate(0.3);
+    assert!(before.problems.is_empty(), "{:?}", before.problems);
+    // The sphere is still in the air: the water has not been touched.
+    assert!(sea(&before).frame.cells.iter().all(|c| c.depth == 12.0 && c.velocity == [0.0; 2]));
+    assert!(sea(&before).frame.bed.iter().all(|&y| y == 12.0));
+    let after = ev.evaluate(2.0);
+    assert!(after.problems.is_empty(), "{:?}", after.problems);
+    assert!(peak(&after) > 0.02, "no wave: {}", peak(&after));
+    let volume: f64 = sea(&after).frame.cells.iter().map(|c| c.depth).sum();
+    assert!((volume - 12.0 * 4096.0).abs() < 1e-8 * volume, "water volume {volume}");
+}
+
+/// Largest change of water depth between 20 and 30 units from the centre, outside
+/// the footprint of any body in these tests, over 1 s to 4.5 s (before a reflection
+/// from the walls can return): only the radiated wave is there.
+fn far_wave(ev: &Evaluator) -> f64 {
+    (4..=18)
+        .map(|k| {
+            let frame = ev.evaluate(k as f64 * 0.25);
+            assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+            let cells = &sea(&frame).frame.cells;
+            (0..cells.len())
+                .filter(|&i| {
+                    let (x, z) = ((i % 64) as f64 * 2.0 + 1.0 - 64.0, (i / 64) as f64 * 2.0 + 1.0 - 64.0);
+                    (20.0..30.0).contains(&x.hypot(z))
+                })
+                .map(|i| (cells[i].depth - 12.0).abs())
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn a_larger_body_makes_a_larger_wave() {
+    let heights: Vec<f64> =
+        [4.0, 7.0, 10.0].iter().map(|&radius| far_wave(&evaluator(&falling_sphere(radius, 1.0)))).collect();
+    println!("BODY far-field wave for sphere radii 4, 7, 10: {heights:?}");
+    assert!(heights[0] > 1e-3, "the wave never reached the ring: {heights:?}");
+    assert!(heights[0] < heights[1] && heights[1] < heights[2], "{heights:?}");
+}
+
+/// The wave a body raises is set by the water it displaces, so it grows with the
+/// entry speed only until the entry is quicker than the wave takes to cross the
+/// body (about 1.3 s for this sphere). Measured 0.637, 0.661 and 0.660 for entry
+/// speeds x0.5, x1 and x2: a slower entry gives a smaller wave, and a faster one
+/// gives no more than the displaced volume allows.
+#[test]
+fn entry_speed_helps_the_wave_until_the_entry_is_faster_than_the_water_responds() {
+    let heights: Vec<f64> =
+        [0.5, 1.0, 2.0].iter().map(|&scale| far_wave(&evaluator(&falling_sphere(7.0, scale)))).collect();
+    println!("BODY far-field wave for entry speeds x0.5, x1, x2: {heights:?}");
+    assert!(heights[1] > 1.02 * heights[0], "{heights:?}");
+    assert!(heights[2] > 0.97 * heights[1], "{heights:?}");
+}
+
+/// A half-submerged sphere sliding sideways drags the water with it.
+fn sliding_sphere(speed: f64) -> String {
+    format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="barge" primitive="sphere" radius="6" segments="24" x="-40" y="4">
+            <animate property="x"><key time="0" value="-40"/><key time="2" value="{}"/></animate>
+          </object3D>
+          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="barge"/>
+        </composition></scene>"#,
+        -40.0 + 2.0 * speed
+    )
+}
+
+#[test]
+fn a_body_sliding_through_the_water_gives_it_momentum_along_its_motion() {
+    let momentum: Vec<[f64; 2]> = [10.0, 20.0]
+        .iter()
+        .map(|&speed| {
+            let frame = evaluator(&sliding_sphere(speed)).evaluate(1.5);
+            assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+            let cells = &sea(&frame).frame.cells;
+            [
+                cells.iter().map(|c| c.depth * c.velocity[0]).sum::<f64>(),
+                cells.iter().map(|c| c.depth * c.velocity[1]).sum::<f64>(),
+            ]
+        })
+        .collect();
+    println!("SLIDE water momentum for speeds 10 and 20: {momentum:?}");
+    assert!(momentum[0][0] > 0.0 && momentum[1][0] > 1.3 * momentum[0][0], "{momentum:?}");
+    // The body moves along x, so the sideways momentum is a small fraction of the forward one.
+    assert!(momentum[1][1].abs() < 0.05 * momentum[1][0], "{momentum:?}");
+}
+
+/// The same fall driven by the rigid-body world instead of an animation.
+fn falling_rigid_sphere() -> String {
+    r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+      <object3D id="impactor" primitive="sphere" radius="7" segments="24" y="-40">
+        <rigidBody velocityY="46" linearDamping="0" angularDamping="0"/>
+      </object3D>
+      <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="impactor"/>
+    </composition><physics gravityY="0" bounds="none"/></scene>"#
+        .to_string()
+}
+
+#[test]
+fn a_body_of_the_rigid_world_moves_the_ocean_like_the_same_animated_body() {
+    let rigid = evaluator(&falling_rigid_sphere());
+    let before = rigid.evaluate(0.3);
+    assert!(before.problems.is_empty(), "{:?}", before.problems);
+    assert!(sea(&before).frame.cells.iter().all(|c| c.depth == 12.0));
+    // The same straight fall at 46 units per second, through the bed and out of the water.
+    let animated_xml = falling_rigid_sphere()
+        .replace(
+            r#"<rigidBody velocityY="46" linearDamping="0" angularDamping="0"/>"#,
+            r#"<animate property="y"><key time="0" value="-40"/><key time="2" value="52"/></animate>"#,
+        )
+        .replace(r#"<physics gravityY="0" bounds="none"/>"#, "");
+    let (animated, simulated) = (far_wave(&evaluator(&animated_xml)), far_wave(&rigid));
+    println!("RIGID far-field wave: animated {animated:.4}, rigid world {simulated:.4}");
+    assert!(simulated > 0.0 && (simulated - animated).abs() < 0.02 * animated, "{animated} vs {simulated}");
+    // A backward seek replays the world and the water.
+    let first = rigid.evaluate(2.0);
+    rigid.evaluate(0.5);
+    let again = rigid.evaluate(2.0);
+    assert_eq!(sea(&first).frame, sea(&again).frame);
+}
+
+#[test]
+fn colliders_that_are_neither_bed_nor_body_are_errors() {
+    let floor = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+      <object3D id="floor" primitive="plane" width="100" height="100" y="12" rotationX="-90"/>
+      <ocean id="sea" width="64" depth="64" cellSize="2" bottomDepth="12" colliders="floor"/>
+    </composition></scene>"#;
+    let frame = evaluator(floor).evaluate(0.5);
+    assert!(frame.problems.iter().any(|p| p.contains("plane without a crater")), "{:?}", frame.problems);
+}

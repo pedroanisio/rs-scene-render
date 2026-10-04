@@ -44,7 +44,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     let depth = f("depth", 64.);
     let dx = f("cellSize", 1.);
     let collider_ids = colliders::ids(e);
-    let spec = Spec {
+    let mut spec = Spec {
         cells: [(width / dx).round() as usize, (depth / dx).round() as usize],
         origin: [-width / 2., -depth / 2.],
         cell_size: dx,
@@ -61,7 +61,8 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         max_work: f("maxWork", 100_000_000.) as u64,
-        moving_bed: !collider_ids.is_empty(),
+        moving_bed: false,
+        bodies: false,
     };
     let count = spec.cells[0].checked_mul(spec.cells[1]).ok_or("ocean cell count overflow")?;
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
@@ -113,7 +114,11 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     let colliders = if collider_ids.is_empty() {
         None
     } else {
-        Some(colliders::Colliders::build(p, &collider_ids, &spec, bytes("meshMemoryMiB", 128.)?)?)
+        let built =
+            colliders::Colliders::build(p, &collider_ids, &spec, f("waterLevel", 0.), bytes("meshMemoryMiB", 128.)?)?;
+        spec.moving_bed = true;
+        spec.bodies = built.has_bodies();
+        Some(built)
     };
     let solver = sim::Ocean::new(spec.clone(), bed.clone(), cells, impulses).map_err(|e| e.to_string())?;
     let whitewater = e
@@ -232,7 +237,7 @@ impl Sims {
                         }
                         Ok(frame)
                     };
-                    colliders.bed(spec, &id, &mut scene_at, time, bed, &mut forcing.bed).map_err(|message| {
+                    colliders.sample(spec, &id, &mut scene_at, time, bed, forcing).map_err(|message| {
                         *failure.borrow_mut() = Some(message);
                         sim::Error::Invalid("ocean bed sampling failed")
                     })

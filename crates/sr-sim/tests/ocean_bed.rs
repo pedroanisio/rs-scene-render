@@ -415,3 +415,182 @@ fn a_crater_deeper_than_the_water_conserves_volume_and_never_goes_negative() {
         assert!(least_depth >= 0.0);
     }
 }
+
+fn body_spec(cells: [usize; 2], order: Order) -> Spec {
+    Spec { bodies: true, ..spec(cells, order) }
+}
+
+/// A uniform patch of body: thickness `t` moving at `u`, over a flat bed.
+fn uniform_body(thickness: f64, u: [f64; 2], bed: f64) -> impl FnMut(f64, &mut Forcing) -> Result<(), Error> {
+    move |_, f| {
+        f.bed.fill(bed - thickness);
+        f.occupancy.fill(thickness);
+        f.velocity.fill(u);
+        Ok(())
+    }
+}
+
+/// The momentum a body gives over one canonical step is the same whether the CFL
+/// bound splits the step in two or in many.
+#[test]
+fn momentum_transfer_does_not_depend_on_how_many_substeps_the_cfl_chose() {
+    let (h, t, u) = (4.0, 2.0, [1.5, -0.5]);
+    let mut seen = Vec::new();
+    for order in ORDERS {
+        for gravity in [2.0, 10.0, 40.0, 160.0, 640.0] {
+            let cells = [8, 8];
+            // Periodic edges keep the uniform flow uniform; a wall would brake it.
+            let s = Spec {
+                gravity,
+                dt: 0.1,
+                cell_size: 1.0,
+                origin: [0.0, 0.0],
+                boundary: Boundary::Periodic,
+                ..body_spec(cells, order)
+            };
+            let initial = vec![Cell { depth: h, velocity: [0.0; 2] }; 64];
+            let mut ocean = Ocean::new(s, vec![h; 64], initial, vec![]).unwrap();
+            let mut driver = uniform_body(t, u, h);
+            ocean.at_driven(0.1, &mut driver).unwrap();
+            let substeps = ocean.last_seek_substeps();
+            let given = ocean.exchanged_impulse();
+            // After one step the water has closed the fraction f = t / (h + t) of the gap.
+            let f = t / (h + t);
+            let expected = [64.0 * h * f * u[0], 64.0 * h * f * u[1]];
+            println!("TRANSFER {order:?} g={gravity}: {substeps} substeps, impulse {given:?}");
+            for a in 0..2 {
+                assert!(
+                    (given[a] - expected[a]).abs() < 1e-12 * expected[a].abs(),
+                    "{order:?} g={gravity}: {given:?} vs {expected:?}"
+                );
+            }
+            seen.push(substeps);
+        }
+    }
+    assert!(
+        seen.iter().any(|&n| n <= 3) && seen.iter().any(|&n| n >= 6),
+        "the cases should span few and many substeps: {seen:?}"
+    );
+}
+
+#[test]
+fn a_body_moving_through_still_water_drags_it_along_and_water_is_conserved() {
+    for order in ORDERS {
+        let cells = [48, 32];
+        let s = Spec { origin: [-12.0, -8.0], ..body_spec(cells, order) };
+        let initial = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 48 * 32];
+        let before = volume(&initial, 0.5);
+        let mut ocean = Ocean::new(s, vec![2.0; 48 * 32], initial, vec![]).unwrap();
+        // A 3-unit square body, 1 unit thick, moves in +x at 4 units/s from x = -6.
+        let mut driver = |t: f64, f: &mut Forcing| {
+            let centre = -6.0 + 4.0 * t;
+            for iz in 0..32 {
+                for ix in 0..48 {
+                    let (x, z) = ((ix as f64 + 0.5) * 0.5 - 12.0, (iz as f64 + 0.5) * 0.5 - 8.0);
+                    let inside = (x - centre).abs() < 1.5 && z.abs() < 1.5;
+                    let i = iz * 48 + ix;
+                    f.occupancy[i] = if inside { 1.0 } else { 0.0 };
+                    f.velocity[i] = [4.0, 0.0];
+                    f.bed[i] = 2.0 - f.occupancy[i];
+                }
+            }
+            Ok(())
+        };
+        let mut impulse = [0.0; 2];
+        for k in 1..=20 {
+            let frame = ocean.at_driven(k as f64 * 0.05, &mut driver).unwrap();
+            assert!(frame.cells.iter().all(|c| c.depth >= 0.0 && c.depth.is_finite()), "{order:?}");
+            let given = ocean.exchanged_impulse();
+            impulse[0] += given[0];
+            impulse[1] += given[1];
+        }
+        let frame = ocean.frame();
+        assert!((volume(&frame.cells, 0.5) - before).abs() / before < 1e-12, "{order:?}");
+        // Water where the body went moves with it, and the sideways impulse cancels by symmetry.
+        let momentum_x: f64 = frame.cells.iter().map(|c| c.depth * c.velocity[0]).sum();
+        let momentum_z: f64 = frame.cells.iter().map(|c| c.depth * c.velocity[1]).sum();
+        println!("DRAG {order:?}: impulse given {impulse:?}, water momentum x {momentum_x:.3}, z {momentum_z:.3e}");
+        assert!(impulse[0] > 0.0 && momentum_x > 0.0, "{order:?}");
+        assert!(impulse[1].abs() < 1e-9 * impulse[0] && momentum_z.abs() < 1e-9 * momentum_x.abs(), "{order:?}");
+    }
+}
+
+#[test]
+fn bodies_without_occupancy_give_no_momentum() {
+    let cells = [8, 8];
+    let s = Spec { origin: [0.0, 0.0], ..body_spec(cells, Order::First) };
+    let initial = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 64];
+    let mut ocean = Ocean::new(s, vec![2.0; 64], initial, vec![]).unwrap();
+    let mut driver = uniform_body(0.0, [5.0, 5.0], 2.0);
+    let frame = ocean.at_driven(0.3, &mut driver).unwrap();
+    assert!(frame.cells.iter().all(|c| c.velocity == [0.0; 2]));
+    assert_eq!(ocean.exchanged_impulse(), [0.0; 2]);
+}
+
+#[test]
+fn replay_with_bodies_is_bit_identical_and_misuse_is_an_error() {
+    for order in ORDERS {
+        let cells = [16, 16];
+        let mut s = Spec { origin: [-4.0, -4.0], ..body_spec(cells, order) };
+        s.checkpoint_bytes = 6000;
+        let initial = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 256];
+        let make = || Ocean::new(s.clone(), vec![2.0; 256], initial.clone(), vec![]).unwrap();
+        let mut driver = |t: f64, f: &mut Forcing| {
+            for i in 0..256 {
+                let (x, z) = ((i % 16) as f64 * 0.5 - 4.0, (i / 16) as f64 * 0.5 - 4.0);
+                let inside = (x - 3.0 * t + 2.0).abs() < 1.0 && z.abs() < 1.0;
+                f.occupancy[i] = if inside { 0.8 } else { 0.0 };
+                f.velocity[i] = [3.0, 0.0];
+                f.bed[i] = 2.0 - f.occupancy[i];
+            }
+            Ok(())
+        };
+        let mut reference = make();
+        let expected = reference.at_driven(0.63, &mut driver).unwrap().clone();
+        let impulse = reference.exchanged_impulse();
+        let mut ocean = make();
+        for t in [0.2, 0.4, 0.8, 1.0, 0.1, 0.3, 0.5] {
+            ocean.at_driven(t, &mut driver).unwrap();
+        }
+        assert_eq!(ocean.at_driven(0.63, &mut driver).unwrap(), &expected, "{order:?}");
+        assert_eq!(ocean.exchanged_impulse(), impulse, "{order:?}");
+    }
+    // Bodies need a moving bed; a driver that forgets the body vectors is an error.
+    let no_bed = Spec { moving_bed: false, ..body_spec([8, 8], Order::First) };
+    assert!(matches!(
+        Ocean::new(no_bed, vec![2.0; 64], vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 64], vec![]),
+        Err(Error::Invalid(_))
+    ));
+    let mut ocean = Ocean::new(
+        body_spec([8, 8], Order::First),
+        vec![2.0; 64],
+        vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 64],
+        vec![],
+    )
+    .unwrap();
+    let mut forgetful = |_: f64, f: &mut Forcing| {
+        f.occupancy.clear();
+        Ok(())
+    };
+    assert!(ocean.at_driven(0.2, &mut forgetful).is_err());
+    let mut negative = |_: f64, f: &mut Forcing| {
+        f.occupancy[3] = -1.0;
+        Ok(())
+    };
+    assert!(ocean.at_driven(0.2, &mut negative).is_err());
+}
+
+#[test]
+fn body_vectors_are_charged_to_resident_memory() {
+    let n = 40 * 40;
+    let cells = vec![Cell { depth: 1.0, velocity: [0.0; 2] }; n];
+    let make = |bodies, max_bytes| {
+        let s = Spec { cells: [40, 40], moving_bed: true, bodies, max_bytes, ..Default::default() };
+        Ocean::new(s, vec![1.0; n], cells.clone(), vec![])
+    };
+    let moving = n * (256 + 24) + 4096;
+    assert!(make(false, moving).is_ok());
+    assert!(matches!(make(true, moving), Err(Error::Limit(_))));
+    assert!(make(true, moving + 72 * n).is_ok());
+    assert!(matches!(make(true, moving + 72 * n - 1), Err(Error::Limit(_))));
+}

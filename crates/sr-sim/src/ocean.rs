@@ -6,6 +6,7 @@
 //! CFL bound controls internal substeps. This depth-averaged model cannot
 //! represent overturning sheets, compressible impact physics or vertical jets.
 
+mod body;
 mod flux;
 mod impulse;
 pub mod waves;
@@ -66,6 +67,10 @@ pub struct Spec {
     /// The bed is supplied by a [`Driver`] at every canonical step and the solver
     /// is sampled with [`Ocean::at_driven`]. Charges three more bed vectors per cell.
     pub moving_bed: bool,
+    /// The driver also fills the thickness and horizontal velocity of bodies in
+    /// the water column, and the water's momentum relaxes toward theirs. Needs
+    /// `moving_bed`; charges 72 more bytes per cell.
+    pub bodies: bool,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -83,6 +88,7 @@ impl Default for Spec {
             checkpoint_bytes: 64 << 20,
             max_work: 100_000_000,
             moving_bed: false,
+            bodies: false,
         }
     }
 }
@@ -105,9 +111,16 @@ pub struct Frame {
 /// What a [`Driver`] fills for one instant.
 #[derive(Clone, Debug, Default)]
 pub struct Forcing {
-    /// Effective bed ordinate of every cell centre, scene y downward. The vector
-    /// arrives with `nx*nz` elements; the driver overwrites every one.
+    /// Effective bed ordinate of every cell centre, scene y downward, with any
+    /// body's thickness already subtracted. The vector arrives with `nx*nz`
+    /// elements; the driver overwrites every one.
     pub bed: Vec<f64>,
+    /// With `Spec::bodies`: vertical extent of bodies inside the water column of
+    /// every cell, between the rest level and the bed. Empty otherwise.
+    pub occupancy: Vec<f64>,
+    /// With `Spec::bodies`: horizontal velocity of the body in every cell
+    /// (ignored where `occupancy` is zero). Empty otherwise.
+    pub velocity: Vec<[f64; 2]>,
 }
 
 /// Supplies the bed at an instant. The result must depend only on `time` and on
@@ -121,25 +134,33 @@ impl<F: FnMut(f64, &mut Forcing) -> Result<(), Error>> Driver for F {
     }
 }
 
-/// The bed a stretch of substeps sees.
+/// What a stretch of substeps sees of the bed and the bodies.
 #[derive(Clone, Copy)]
 enum Bed<'a> {
     Fixed(&'a [f64]),
     /// Linear in time between the canonical step's endpoints; each substep uses
     /// its midpoint value.
     Moving {
-        from: &'a [f64],
-        to: &'a [f64],
+        from: &'a Forcing,
+        to: &'a Forcing,
         t0: f64,
         t1: f64,
     },
 }
 
-/// Beds at the two ends of the canonical step the solver last stopped in.
+/// Samples at the two ends of the canonical step the solver last stopped in.
 struct Ends {
     step: u64,
-    now: Vec<f64>,
-    next: Vec<f64>,
+    now: Forcing,
+    next: Forcing,
+}
+
+/// Interpolated bed and body arrays of the current substep.
+#[derive(Default)]
+struct Scratch {
+    bed: Vec<f64>,
+    occupancy: Vec<f64>,
+    velocity: Vec<[f64; 2]>,
 }
 
 /// Conserved depth and two horizontal momenta.
@@ -150,6 +171,8 @@ struct State {
     time: f64,
     next_impulse: usize,
     q: Vec<Q>,
+    /// Momentum bodies gave the water during the canonical step that ended here.
+    exchange: [f64; 2],
 }
 struct Work {
     remaining: u64,
@@ -211,6 +234,9 @@ impl Ocean {
         if !(spec.cell_size * spec.cell_size).is_finite() || spec.cell_size * spec.cell_size == 0.0 {
             return Err(Error::Invalid("cell area"));
         }
+        if spec.bodies && !spec.moving_bed {
+            return Err(Error::Invalid("bodies need Spec::moving_bed"));
+        }
         if bed_y.len() != n || cells.len() != n || impulses.len() > 16_384 {
             return Err(Error::Invalid("grid lengths or impulse count"));
         }
@@ -219,7 +245,8 @@ impl Ocean {
         let bytes = n
             .checked_mul(
                 256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
-                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 },
+                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
+                    + if spec.bodies { 72 } else { 0 },
             )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
             .and_then(|v| {
@@ -252,9 +279,10 @@ impl Ocean {
             time: 0.0,
             next_impulse: 0,
             q: cells.iter().map(|c| [c.depth, c.depth * c.velocity[0], c.depth * c.velocity[1]]).collect(),
+            exchange: [0.0; 2],
         };
         let mut work = Work { remaining: spec.max_work, substeps: 0 };
-        advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Vec::new())?;
+        advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let checkpoint_capacity = (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128)).min(4096);
         Ok(Self {
@@ -293,15 +321,22 @@ impl Ocean {
         self.seek(time, Some(driver))
     }
 
-    fn sample_bed(&self, driver: &mut dyn Driver, time: f64, out: &mut Vec<f64>) -> Result<(), Error> {
+    fn sample(&self, driver: &mut dyn Driver, time: f64, out: &mut Forcing) -> Result<(), Error> {
         let n = self.initial.q.len();
-        let mut forcing = Forcing { bed: std::mem::take(out) };
-        forcing.bed.resize(n, 0.0);
-        driver.sample(time, &mut forcing)?;
-        if forcing.bed.len() != n || forcing.bed.iter().any(|y| !y.is_finite()) {
-            return Err(Error::Invalid("driver bed length or nonfinite ordinate"));
+        out.bed.resize(n, 0.0);
+        let wanted = if self.spec.bodies { n } else { 0 };
+        out.occupancy.resize(wanted, 0.0);
+        out.velocity.resize(wanted, [0.0; 2]);
+        driver.sample(time, out)?;
+        if out.bed.len() != n
+            || out.occupancy.len() != wanted
+            || out.velocity.len() != wanted
+            || out.bed.iter().any(|y| !y.is_finite())
+            || out.occupancy.iter().any(|t| !t.is_finite() || *t < 0.0)
+            || out.velocity.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
         }
-        *out = forcing.bed;
         Ok(())
     }
 
@@ -341,15 +376,15 @@ impl Ocean {
             return Err(Error::Limit("seek work"));
         }
         let dt = self.spec.dt;
-        let mut scratch = Vec::new();
+        let mut scratch = Scratch::default();
         let mut ends = match driver.as_deref_mut() {
             None => None,
             Some(driver) => Some(match &self.ends {
                 Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
                 _ => {
-                    let (mut now, mut next) = (Vec::new(), Vec::new());
-                    self.sample_bed(driver, k as f64 * dt, &mut now)?;
-                    self.sample_bed(driver, (k + 1) as f64 * dt, &mut next)?;
+                    let (mut now, mut next) = (Forcing::default(), Forcing::default());
+                    self.sample(driver, k as f64 * dt, &mut now)?;
+                    self.sample(driver, (k + 1) as f64 * dt, &mut next)?;
                     (now, next)
                 }
             }),
@@ -357,12 +392,13 @@ impl Ocean {
         while k < target {
             k += 1;
             let end = k as f64 * dt;
+            state.exchange = [0.0; 2];
             match (&mut ends, driver.as_deref_mut()) {
                 (Some((now, next)), Some(driver)) => {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
                     advance(&self.spec, bed, &self.impulses, &mut state, end, &mut work, &mut scratch)?;
                     std::mem::swap(now, next);
-                    self.sample_bed(driver, (k + 1) as f64 * dt, next)?;
+                    self.sample(driver, (k + 1) as f64 * dt, next)?;
                 }
                 _ => advance(
                     &self.spec,
@@ -383,7 +419,7 @@ impl Ocean {
                 let bed = Bed::Moving { from: now, to: next, t0, t1 };
                 advance(&self.spec, bed, &self.impulses, &mut sampled, time, &mut work, &mut scratch)?;
                 let s = ((time - t0) / (t1 - t0)).clamp(0.0, 1.0);
-                frame_bed = now.iter().zip(next).map(|(a, b)| a + (b - a) * s).collect();
+                frame_bed = now.bed.iter().zip(&next.bed).map(|(a, b)| a + (b - a) * s).collect();
             }
             None => advance(
                 &self.spec,
@@ -414,6 +450,12 @@ impl Ocean {
     /// and the fractional sample.
     pub fn last_seek_substeps(&self) -> u64 {
         self.last_substeps
+    }
+    /// Horizontal momentum, per unit water density, that bodies gave the water
+    /// during the last whole canonical step this solver reached. It is the input
+    /// for a reaction on the bodies; the bodies themselves are not touched.
+    pub fn exchanged_impulse(&self) -> [f64; 2] {
+        self.canonical.exchange
     }
     pub fn frame(&self) -> &Frame {
         &self.frame
@@ -466,7 +508,7 @@ fn advance(
     state: &mut State,
     target: f64,
     work: &mut Work,
-    scratch: &mut Vec<f64>,
+    scratch: &mut Scratch,
 ) -> Result<(), Error> {
     loop {
         while let Some(event) = impulses.get(state.next_impulse).filter(|i| i.time <= state.time) {
@@ -503,17 +545,36 @@ fn advance(
             return Err(Error::Numerical("timestep precision"));
         }
         work.substeps += 1;
+        let mut bodies = None;
         let bed_now: &[f64] = match bed {
             Bed::Fixed(bed) => bed,
             Bed::Moving { from, to, t0, t1 } => {
                 work.take(state.q.len())?;
                 let s = ((state.time + 0.5 * dt - t0) / (t1 - t0)).clamp(0.0, 1.0);
-                scratch.clear();
-                scratch.extend(from.iter().zip(to).map(|(a, b)| a + (b - a) * s));
-                scratch
+                scratch.bed.clear();
+                scratch.bed.extend(from.bed.iter().zip(&to.bed).map(|(a, b)| a + (b - a) * s));
+                if spec.bodies {
+                    work.take(state.q.len())?;
+                    scratch.occupancy.clear();
+                    scratch.occupancy.extend(from.occupancy.iter().zip(&to.occupancy).map(|(a, b)| a + (b - a) * s));
+                    scratch.velocity.clear();
+                    scratch.velocity.extend(
+                        from.velocity
+                            .iter()
+                            .zip(&to.velocity)
+                            .map(|(a, b)| [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s]),
+                    );
+                    bodies = Some(t1 - t0);
+                }
+                &scratch.bed
             }
         };
         flux::step(spec, bed_now, &mut state.q, dt)?;
+        if let Some(step) = bodies {
+            let given = body::transfer(spec, &mut state.q, &scratch.occupancy, &scratch.velocity, dt, step);
+            state.exchange[0] += given[0];
+            state.exchange[1] += given[1];
+        }
         state.time = if dt == end - state.time { end } else { state.time + dt };
     }
     Ok(())
