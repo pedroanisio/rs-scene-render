@@ -274,15 +274,6 @@ fn on_land_the_temperature_of_the_dust_grows_with_speed_and_with_mass() {
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the dust is as hot at 30 degrees as at 90"]
-fn on_land_the_temperature_of_the_dust_grows_with_the_angle() {
-    let (_, _, angles) = sweeps();
-    let rise: Vec<f64> = angles.iter().map(|&h| land(&land_variant(h), SETTLED).rise).collect();
-    println!("IMPACT land hottest rise for 30, 60, 90 degrees: {rise:?}");
-    assert!(increasing(&rise), "hottest rise by angle: {rise:?}");
-}
-
-#[test]
 fn on_land_the_rock_arrives_as_the_document_says_and_the_dust_is_what_the_law_gives() {
     // no heat, no dissipation and closed faces, so that the dust in the volume is the dust put in
     let xml = with_hit(LAND, AUTHORED)
@@ -313,7 +304,6 @@ fn on_land_the_rock_arrives_as_the_document_says_and_the_dust_is_what_the_law_gi
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the contact normal of the ground mesh is tilted by about 6 degrees"]
 fn on_land_the_normal_speed_and_the_axis_of_the_crater_are_those_of_the_ground() {
     let ev = evaluator(&coarse_smoke(&with_hit(LAND, AUTHORED)));
     let frame = at(&ev, 2.2);

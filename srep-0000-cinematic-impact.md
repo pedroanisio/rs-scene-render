@@ -1385,7 +1385,10 @@ A crater whose size and timing are the consequence of an impact rather than auth
 `crater` belongs to. Nothing in the document says when or how big: the crater begins at
 the first step in which the source, approaching the owner, pushes on it with more than
 twice its own weight in one step (so a body resting on the surface never starts one), is
-centred on the impulse-weighted contact point with its axis along the contact normal, and
+centred on the impulse-weighted contact point with its axis along the normal of the owner's surface
+there (a mesh's corner normals interpolated across the triangle the point is on, so that finer or coarser
+triangles of the same surface give the same axis; a sphere's radius; a box's face; the contact's normal only
+chooses the side and is used as it is for shapes that give none), and
 grows in composition time over the law's formation time. Radius, depth, rim, start, end,
 centre and axis are derived, so giving any of them is **CRT6**; `targetMaterial` is
 required with a source and the other target attributes belong only to one (**CRT7**); the
@@ -1402,7 +1405,7 @@ The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:3
                 + [K2 pi3 (rho/delta)^((6nu - 2)/(3 mu))]^((2 + mu)/2) }^(-3 mu/(2 + mu))
 
 where `m`, `a` and `delta` are the source's mass, equivalent radius and density (mass over
-the volume its shape encloses), `U` is its speed along the contact normal before the step
+the volume its shape encloses), `U` is its speed along that normal before the step
 (the normal component of the relative velocity, so the crater shrinks as the approach
 turns glancing), `rho`, `Y` the target's density and cratering strength, `g` gravity and
 `nu = 0.33`. The strength term's exponent is `(2 + mu)/2`; the 1993 table prints
@@ -2398,11 +2401,11 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   grow with speed and is a few centimetres for a rock that arrives straight down; the wave of the crater
   alone (the sea with the bed as its only collider) does grow with speed, mass and angle. A body lighter
   than water floats and makes no crater.
-- The dust is as hot at 30 degrees as at 90: the heat and the dust both fall with the angle, so the
-  temperature does not; the heat held by the dust does grow with the angle.
-- The ground's contact normal is that of a triangle mesh and tilts the crater's axis by a few degrees, so
-  the speed along the normal for an oblique impact is higher than the speed along the ground's normal (91
-  against 87 m/s at 60 degrees and 1 m cells), and the tilt changes with the mesh's resolution.
+- The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
+  the speed along the normal to the power 1.7, so the temperature rise barely moves (19.09, 19.07 and 19.08 K
+  at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows
+  with the angle (9.1, 14.8 and 16.7 cubic metres of dust times kelvin), and the temperature grows with speed
+  and with mass. A slow impact in physical units is a cold cloud.
 
 The accompanying conformance suite must cover all of the following:
 
