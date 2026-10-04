@@ -526,10 +526,12 @@ pub fn plan_light_grid(volumes: &[VolumeDraw], lights: u32, dome: bool) -> Resul
     let mut any = false;
     for v in volumes {
         let Some(request) = v.light_grid else { continue };
-        any = true;
         let m = v.medium();
+        // A medium without bounds holds no density (a smoke that has not been born yet): nothing
+        // in it scatters, so it needs no lattice.
+        let Some(bounds) = m.bounds() else { continue };
+        any = true;
         let object = DMat4::from_cols_array(&m.transform().columns());
-        let bounds = m.bounds().ok_or("lighting=\"grid\" needs a medium with bounds")?;
         for k in 0..8 {
             let p = DVec3::from_array(std::array::from_fn(|i| {
                 if k & (1 << i) == 0 {
@@ -694,6 +696,28 @@ mod tests {
         let dry = plan_light_grid(&[draw(1.0, 0.5, Some((1, 64, 128)))], 2, false).unwrap().unwrap();
         assert!(!dry.radiance && !dry.directional);
         assert_eq!(dry.scalar_slots, 2);
+    }
+
+    #[test]
+    fn an_empty_medium_asking_for_the_grid_needs_no_lattice() {
+        // a smoke that has not been born yet has no bricks and so no bounds
+        let scale = Transform::new(DMat4::from_scale(DVec3::splat(1.0)).to_cols_array()).unwrap();
+        let empty = Medium::new(
+            Arc::new(SparseGrid::new(scale, 0.0, 64).unwrap()),
+            None,
+            Transform::identity(),
+            sr_volume::medium::Optical { extinction: 1.0, ..Default::default() },
+        )
+        .unwrap();
+        assert!(empty.bounds().is_none());
+        let drawn = VolumeDraw::new(Arc::new(empty), March { step_size: 0.5, max_steps: 64 })
+            .unwrap()
+            .with_light_grid(1, 64, 128)
+            .unwrap();
+        assert_eq!(plan_light_grid(std::slice::from_ref(&drawn), 2, true).unwrap(), None);
+        // beside a medium with density, only that one is covered
+        let plan = plan_light_grid(&[drawn, draw(1.0, 0.0, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        assert_eq!(plan.nodes, [9, 9, 9]);
     }
 
     #[test]
