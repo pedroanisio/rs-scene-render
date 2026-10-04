@@ -30,6 +30,10 @@ pub enum Boundary {
     Open,
     /// Wrap both horizontal axes, including bathymetry.
     Periodic,
+    /// Zero-gradient edge faces plus a relaxation layer of `Spec::sponge_cells`
+    /// cells that drives the state toward its initial rest state. It does not
+    /// conserve water.
+    Absorbing,
 }
 
 /// Spatial/temporal accuracy of the finite-volume update.
@@ -56,6 +60,8 @@ pub struct Spec {
     pub damping: f64,
     pub boundary: Boundary,
     pub order: Order,
+    /// Sponge layer width in cells; read only for `Boundary::Absorbing`.
+    pub sponge_cells: usize,
     /// Momentum is zeroed below this depth; water is never discarded.
     pub dry_tolerance: f64,
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
@@ -75,6 +81,7 @@ impl Default for Spec {
             damping: 0.0,
             boundary: Boundary::Closed,
             order: Order::First,
+            sponge_cells: 16,
             dry_tolerance: 1e-10,
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
@@ -97,6 +104,54 @@ pub struct Frame {
 /// Conserved depth and two horizontal momenta.
 type Q = [f64; 3];
 
+/// Relaxation layer of `Boundary::Absorbing`. The target is the initial rest
+/// surface elevation and velocity, so the target depth follows the current bed.
+struct Sponge {
+    /// Per cell: surface ordinate (depth minus downward bed) and velocity.
+    rest: Vec<Q>,
+    /// Longest rest-state wave speed; scales the relaxation rate.
+    c_ref: f64,
+}
+/// Relaxation per layer crossing: one pass attenuates by `exp(-STRENGTH)`.
+const SPONGE_STRENGTH: f64 = 2.0;
+impl Sponge {
+    /// Relaxes a quadratic ramp of `spec.sponge_cells` cells along every edge
+    /// toward the rest state with the exact exponential, which is stable for
+    /// any step and keeps depth non-negative. Momentum of dry cells is zeroed.
+    fn relax(&self, spec: &Spec, bed: &[f64], q: &mut [Q], dt: f64) {
+        let [nx, nz] = spec.cells;
+        let w = spec.sponge_cells;
+        for iz in 0..nz {
+            let edge_z = iz.min(nz - 1 - iz);
+            let mut visit = |ix: usize| {
+                let d = edge_z.min(ix.min(nx - 1 - ix));
+                if d >= w {
+                    return;
+                }
+                let ramp = (w as f64 - (d as f64 + 0.5)) / w as f64;
+                let rate = 3.0 * SPONGE_STRENGTH * self.c_ref * ramp * ramp / (w as f64 * spec.cell_size);
+                let keep = (-rate * dt).exp();
+                let i = iz * nx + ix;
+                let rest = self.rest[i];
+                let depth = (rest[0] + bed[i]).max(0.0);
+                let cell = &mut q[i];
+                for (a, v) in cell.iter_mut().enumerate() {
+                    let target = if a == 0 { depth } else { depth * rest[a] };
+                    *v = target + (*v - target) * keep;
+                }
+                if cell[0] < spec.dry_tolerance {
+                    cell[1] = 0.0;
+                    cell[2] = 0.0;
+                }
+            };
+            if edge_z < w {
+                (0..nx).for_each(&mut visit);
+            } else {
+                (0..w).chain(nx - w..nx).for_each(&mut visit);
+            }
+        }
+    }
+}
 #[derive(Clone)]
 struct State {
     time: f64,
@@ -123,6 +178,7 @@ pub struct Ocean {
     checkpoints: Vec<(u64, State)>,
     checkpoint_capacity: usize,
     frame: Frame,
+    sponge: Option<Sponge>,
 }
 impl Ocean {
     /// Bed ordinates and initial cells have exactly nx*nz samples. Inputs are
@@ -157,6 +213,12 @@ impl Ocean {
                 return Err(Error::Invalid("domain extent or spatial precision"));
             }
         }
+        let absorbing = spec.boundary == Boundary::Absorbing;
+        if absorbing
+            && (spec.sponge_cells < 4 || spec.sponge_cells.saturating_mul(2) >= spec.cells[0].min(spec.cells[1]))
+        {
+            return Err(Error::Invalid("sponge width (at least 4 cells, under half of each dimension)"));
+        }
         if !(spec.cell_size * spec.cell_size).is_finite() || spec.cell_size * spec.cell_size == 0.0 {
             return Err(Error::Invalid("cell area"));
         }
@@ -172,6 +234,13 @@ impl Ocean {
                 // Stable sorting preserves authored equal-time order and may
                 // allocate a temporary event array in addition to the input.
                 impulses.capacity().checked_mul(2 * std::mem::size_of::<Impulse>()).and_then(|b| v.checked_add(b))
+            })
+            .and_then(|v| {
+                if absorbing {
+                    n.checked_mul(std::mem::size_of::<Q>()).and_then(|b| v.checked_add(b))
+                } else {
+                    Some(v)
+                }
             })
             .and_then(|v| v.checked_add(4096))
             .ok_or(Error::Limit("resident bytes"))?;
@@ -194,13 +263,17 @@ impl Ocean {
             impulse.validate()?;
         }
         impulses.sort_by(|a, b| a.time.total_cmp(&b.time));
+        let sponge = absorbing.then(|| Sponge {
+            rest: bed_y.iter().zip(&cells).map(|(&bed, c)| [c.depth - bed, c.velocity[0], c.velocity[1]]).collect(),
+            c_ref: (spec.gravity * cells.iter().fold(0.0_f64, |m, c| m.max(c.depth))).sqrt(),
+        });
         let mut initial = State {
             time: 0.0,
             next_impulse: 0,
             q: cells.iter().map(|c| [c.depth, c.depth * c.velocity[0], c.depth * c.velocity[1]]).collect(),
         };
         let mut work = Work { remaining: spec.max_work };
-        advance(&spec, &bed_y, &impulses, &mut initial, 0.0, &mut work)?;
+        advance(&spec, &bed_y, sponge.as_ref(), &impulses, &mut initial, 0.0, &mut work)?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let checkpoint_capacity = (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128)).min(4096);
         Ok(Self {
@@ -213,6 +286,7 @@ impl Ocean {
             checkpoints: Vec::new(),
             checkpoint_capacity,
             frame,
+            sponge,
         })
     }
 
@@ -254,10 +328,18 @@ impl Ocean {
         }
         while k < target {
             k += 1;
-            advance(&self.spec, &self.bed_y, &self.impulses, &mut state, k as f64 * self.spec.dt, &mut work)?;
+            advance(
+                &self.spec,
+                &self.bed_y,
+                self.sponge.as_ref(),
+                &self.impulses,
+                &mut state,
+                k as f64 * self.spec.dt,
+                &mut work,
+            )?;
         }
         let mut sampled = state.clone();
-        advance(&self.spec, &self.bed_y, &self.impulses, &mut sampled, time, &mut work)?;
+        advance(&self.spec, &self.bed_y, self.sponge.as_ref(), &self.impulses, &mut sampled, time, &mut work)?;
         let frame = publish(&sampled, self.spec.dry_tolerance)?;
         if self.checkpoint_capacity > 0 && target > 0 && !self.checkpoints.iter().any(|(k, _)| *k == target) {
             if self.checkpoints.len() == self.checkpoint_capacity {
@@ -311,6 +393,7 @@ fn step_work(spec: &Spec) -> usize {
 fn advance(
     spec: &Spec,
     bed: &[f64],
+    sponge: Option<&Sponge>,
     impulses: &[Impulse],
     state: &mut State,
     target: f64,
@@ -343,7 +426,7 @@ fn advance(
         if dt <= 0.0 || state.time + dt == state.time {
             return Err(Error::Numerical("timestep precision"));
         }
-        flux::step(spec, bed, &mut state.q, dt)?;
+        flux::step(spec, bed, sponge, &mut state.q, dt)?;
         state.time = if dt == end - state.time { end } else { state.time + dt };
     }
     Ok(())

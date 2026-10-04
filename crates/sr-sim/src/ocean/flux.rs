@@ -1,4 +1,4 @@
-use super::{Boundary, Error, Order, Spec, Q};
+use super::{Boundary, Error, Order, Spec, Sponge, Q};
 
 fn velocity(q: Q, dry: f64) -> [f64; 2] {
     if q[0] < dry {
@@ -175,16 +175,22 @@ fn drag(spec: &Spec, q: &mut [Q], decay: f64) {
     }
 }
 
-pub(super) fn step(spec: &Spec, bed: &[f64], q: &mut Vec<Q>, dt: f64) -> Result<(), Error> {
+pub(super) fn step(spec: &Spec, bed: &[f64], sponge: Option<&Sponge>, q: &mut Vec<Q>, dt: f64) -> Result<(), Error> {
     debug_assert_eq!(q.len(), spec.cells[0] * spec.cells[1]);
     match spec.order {
         Order::First => {
             *q = euler(spec, bed, q, dt, (-spec.damping * dt).exp())?;
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, q, dt);
+            }
         }
         Order::Second => {
-            // Strang splitting of drag around SSP-RK2 (Heun).
+            // Strang splitting of drag and sponge around SSP-RK2 (Heun).
             let half = (-0.5 * spec.damping * dt).exp();
             let mut next = q.clone();
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, &mut next, 0.5 * dt);
+            }
             drag(spec, &mut next, half);
             let stage = euler(spec, bed, &next, dt, 1.0)?;
             let stage = euler(spec, bed, &stage, dt, 1.0)?;
@@ -196,6 +202,9 @@ pub(super) fn step(spec: &Spec, bed: &[f64], q: &mut Vec<Q>, dt: f64) -> Result<
                 }
             }
             drag(spec, q, half);
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, q, 0.5 * dt);
+            }
         }
     }
     Ok(())
