@@ -1557,6 +1557,23 @@ rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
+Per-body water samples. With bodies in an ocean the solver tags every occupied column with the body
+that holds most of it (its position in the ocean's `colliders` list, which counts the surfaces
+of craters; the lowest position wins a tie) and, together with the exchange of each completed canonical
+step, offers the driver for every body that holds a column at the end of the step or gave the water
+momentum during it: the horizontal momentum, per unit water density, that this body gave the water
+in the step (the part of the total exchange that its columns gave; the sum over bodies is the total
+to rounding, since a column's momentum is credited whole to its owner); and, from the state at the end
+of the step, the least-squares plane through the free surface of the wet columns of the body's
+footprint (its ordinate at their centre and its two slopes), the depth-weighted mean horizontal water
+velocity under the footprint, and the mean bed ordinate under it with the body's thickness counted
+as bed. Under a body the water that it displaces stands above the rest level, since a column keeps
+its depth while the body raises its bed, so the plane there is not the undisturbed surface. A direction
+in which the footprint has no extent (one row of columns, one column) has no slope. A replay of a step
+offers the same samples bit for bit, restored from a checkpoint or not. The bodies are not touched; a
+member of the group that reads these (for the reaction on the body) is the consumer. Without bodies,
+or without tags, nothing changes, and tagging does not alter the water.
+
 #### Fracture (native scene, rendering and cache integration implemented)
 
 Version 1.3 defines an owned `<fracture>` declaration. The generated typed model,

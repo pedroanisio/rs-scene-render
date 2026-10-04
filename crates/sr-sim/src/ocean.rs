@@ -71,6 +71,11 @@ pub struct Spec {
     /// the water column, and the water's momentum relaxes toward theirs. Needs
     /// `moving_bed`; charges 72 more bytes per cell.
     pub bodies: bool,
+    /// With `bodies`: the driver also tags every occupied cell with the index of the body that
+    /// holds most of it (`Forcing::owner`, below this count, at most 4096), and what each body
+    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 12 more
+    /// bytes per cell and 16 per body in every checkpoint. Zero: nothing is tagged.
+    pub body_owners: usize,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -89,6 +94,7 @@ impl Default for Spec {
             max_work: 100_000_000,
             moving_bed: false,
             bodies: false,
+            body_owners: 0,
         }
     }
 }
@@ -127,6 +133,37 @@ pub struct Forcing {
     /// value of [`Ocean::exchanged_impulse`] then). A replay of the step offers the same
     /// value again. `None` on every other sample.
     pub exchange: Option<(u64, [f64; 2])>,
+    /// With `Spec::body_owners`: the body that holds most of the occupancy of every cell (ignored
+    /// where `occupancy` is zero; the lowest index wins a tie). The vector arrives with `nx*nz`
+    /// elements. Empty otherwise.
+    pub owner: Vec<u32>,
+    /// With `Spec::body_owners`, set together with `exchange`: what each body that gave the water
+    /// momentum in step `k`, or stands in it at the end of the step, gets of the water, by body
+    /// index. Empty on every other sample.
+    pub bodies: Vec<BodySample>,
+}
+
+/// The water around one body at the end of a canonical step, and what the body gave it during
+/// the step. The footprint is the cells the body holds most of at the end of the step; only
+/// wet cells enter the surface and the velocity.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BodySample {
+    /// Index of the body, as the driver tagged it.
+    pub owner: u32,
+    /// Cells of the footprint, and those of them with water.
+    pub columns: usize,
+    pub wet: usize,
+    /// Centre of the wet cells (x, z), in the domain's coordinates.
+    pub centroid: [f64; 2],
+    /// Least-squares plane through the free surface of the wet cells (y downward): its ordinate
+    /// at `centroid` and its slopes `dy/dx` and `dy/dz`. Without water, the bed level and no slope.
+    pub surface: [f64; 3],
+    /// Mean horizontal velocity of the water under the footprint, weighted by depth.
+    pub velocity: [f64; 2],
+    /// Mean ordinate of the bed under the footprint, with the bodies' thickness counted as bed.
+    pub bed: f64,
+    /// Horizontal momentum per unit water density that this body gave the water during the step.
+    pub impulse: [f64; 2],
 }
 
 /// Supplies the bed at an instant. The result must depend only on `time` and on
@@ -167,6 +204,7 @@ struct Scratch {
     bed: Vec<f64>,
     occupancy: Vec<f64>,
     velocity: Vec<[f64; 2]>,
+    owner: Vec<u32>,
 }
 
 /// Conserved depth and two horizontal momenta.
@@ -179,6 +217,8 @@ struct State {
     q: Vec<Q>,
     /// Momentum bodies gave the water during the canonical step that ended here.
     exchange: [f64; 2],
+    /// The part of `exchange` that each body gave (`Spec::body_owners` elements, or none).
+    exchange_by: Vec<[f64; 2]>,
 }
 struct Work {
     remaining: u64,
@@ -246,6 +286,9 @@ impl Ocean {
         if spec.bodies && !spec.moving_bed {
             return Err(Error::Invalid("bodies need Spec::moving_bed"));
         }
+        if spec.body_owners > 4096 || (spec.body_owners > 0 && !spec.bodies) {
+            return Err(Error::Invalid("body owners need Spec::bodies and are at most 4096"));
+        }
         if bed_y.len() != n || cells.len() != n || impulses.len() > 16_384 {
             return Err(Error::Invalid("grid lengths or impulse count"));
         }
@@ -255,7 +298,8 @@ impl Ocean {
             .checked_mul(
                 256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
                     + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
-                    + if spec.bodies { 72 } else { 0 },
+                    + if spec.bodies { 72 } else { 0 }
+                    + if spec.body_owners > 0 { 12 } else { 0 },
             )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
             .and_then(|v| {
@@ -289,12 +333,14 @@ impl Ocean {
             next_impulse: 0,
             q: cells.iter().map(|c| [c.depth, c.depth * c.velocity[0], c.depth * c.velocity[1]]).collect(),
             exchange: [0.0; 2],
+            exchange_by: vec![[0.0; 2]; spec.body_owners],
         };
         let mut work = Work { remaining: spec.max_work, substeps: 0 };
         advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let spec_dt = spec.dt;
-        let checkpoint_capacity = (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128)).min(4096);
+        let checkpoint_capacity =
+            (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 16 * spec.body_owners)).min(4096);
         Ok(Self {
             spec,
             bed_y,
@@ -356,13 +402,17 @@ impl Ocean {
         time: f64,
         out: &mut Forcing,
         exchange: Option<(u64, [f64; 2])>,
+        bodies: Vec<BodySample>,
     ) -> Result<(), Error> {
         out.exchange = exchange;
+        out.bodies = bodies;
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
         let wanted = if self.spec.bodies { n } else { 0 };
         out.occupancy.resize(wanted, 0.0);
         out.velocity.resize(wanted, [0.0; 2]);
+        let tagged = if self.spec.body_owners > 0 { n } else { 0 };
+        out.owner.resize(tagged, 0);
         driver.sample(time, out)?;
         if out.bed.len() != n
             || out.occupancy.len() != wanted
@@ -370,6 +420,8 @@ impl Ocean {
             || out.bed.iter().any(|y| !y.is_finite())
             || out.occupancy.iter().any(|t| !t.is_finite() || *t < 0.0)
             || out.velocity.iter().flatten().any(|v| !v.is_finite())
+            || out.owner.len() != tagged
+            || out.owner.iter().zip(&out.occupancy).any(|(o, t)| *t > 0.0 && *o as usize >= self.spec.body_owners)
         {
             return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
         }
@@ -419,8 +471,9 @@ impl Ocean {
                 Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
                 _ => {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
-                    self.sample(driver, k as f64 * dt, &mut now, None)?;
-                    self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)))?;
+                    self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
+                    let bodies = body::samples(&self.spec, &state, &now);
+                    self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
                     (now, next)
                 }
             }),
@@ -429,12 +482,15 @@ impl Ocean {
             k += 1;
             let end = k as f64 * dt;
             state.exchange = [0.0; 2];
+            state.exchange_by.iter_mut().for_each(|e| *e = [0.0; 2]);
             match (&mut ends, driver.as_deref_mut()) {
                 (Some((now, next)), Some(driver)) => {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
                     advance(&self.spec, bed, &self.impulses, &mut state, end, &mut work, &mut scratch)?;
                     std::mem::swap(now, next);
-                    self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)))?;
+                    work.take(if self.spec.body_owners > 0 { state.q.len() } else { 0 })?;
+                    let bodies = body::samples(&self.spec, &state, now);
+                    self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)), bodies)?;
                 }
                 _ => advance(
                     &self.spec,
@@ -492,7 +548,7 @@ impl Ocean {
         &self.frame
     }
     pub fn checkpoint_bytes(&self) -> usize {
-        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128)
+        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128 + 16 * self.spec.body_owners)
     }
 }
 
@@ -595,6 +651,20 @@ fn advance(
                             .zip(&to.velocity)
                             .map(|(a, b)| [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s]),
                     );
+                    if spec.body_owners > 0 {
+                        work.take(state.q.len())?;
+                        // the body there at the end of the step, else the one that was
+                        scratch.owner.clear();
+                        scratch.owner.extend(to.occupancy.iter().zip(to.owner.iter().zip(&from.owner)).map(
+                            |(t, (a, b))| {
+                                if *t > 0.0 {
+                                    *a
+                                } else {
+                                    *b
+                                }
+                            },
+                        ));
+                    }
                     bodies = Some(t1 - t0);
                 }
                 &scratch.bed
@@ -602,7 +672,15 @@ fn advance(
         };
         flux::step(spec, bed_now, &mut state.q, dt)?;
         if let Some(step) = bodies {
-            let given = body::transfer(spec, &mut state.q, &scratch.occupancy, &scratch.velocity, dt, step);
+            let given = body::transfer(
+                spec,
+                &mut state.q,
+                &scratch.occupancy,
+                &scratch.velocity,
+                (&scratch.owner, &mut state.exchange_by),
+                dt,
+                step,
+            );
             state.exchange[0] += given[0];
             state.exchange[1] += given[1];
         }
