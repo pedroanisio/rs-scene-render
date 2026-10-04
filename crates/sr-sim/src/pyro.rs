@@ -16,9 +16,12 @@ use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod key;
 mod maccormack;
 pub mod mesh;
 mod multigrid;
+
+pub use key::volume_key;
 
 /// Minimum elements per rayon task. Task boundaries never change a value: every
 /// parallel loop writes each element from the same expression as the serial loop

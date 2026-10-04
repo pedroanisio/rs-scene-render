@@ -204,25 +204,6 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
     Ok(result)
 }
 
-fn key(volume: &sr_volume::Volume) -> u64 {
-    let mut h = 0;
-    for (name, grid) in volume.grids() {
-        h = crate::rng::hash(&[h, crate::rng::hash_str(name), u64::from(grid.background().to_bits())]);
-        for v in grid.transform().columns() {
-            h = crate::rng::hash(&[h, v.to_bits(), 0]);
-        }
-        for (coord, values) in grid.bricks() {
-            for v in coord {
-                h = crate::rng::hash(&[h, v as u64, 1]);
-            }
-            for v in values {
-                h = crate::rng::hash(&[h, u64::from(v.to_bits()), 2]);
-            }
-        }
-    }
-    h
-}
-
 impl Sims {
     pub(crate) fn apply(
         &mut self,
@@ -297,7 +278,7 @@ impl Sims {
                 }
                 EXPORTS.with(|count| count.set(count.get() + 1));
                 let volume = state.volume(runtime.max_bytes).map_err(|e| e.to_string())?;
-                let key = key(&volume);
+                let key = pyro::volume_key(&volume);
                 runtime.last_revision = Some(revision);
                 if let Some(last) = runtime.last.as_ref().filter(|last| last.key == key) {
                     return Ok(last.clone());
