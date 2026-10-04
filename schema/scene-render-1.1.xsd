@@ -3457,6 +3457,16 @@
     </xs:attribute>
     <xs:attribute name="pixelsPerMeter" type="positiveDecimal" default="100"/>
     <xs:attribute name="solverIterations" type="xs:positiveInteger" default="8"/>
+    <xs:attribute name="fixInternalEdges" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        For 3D bodies: fix the contacts that the edges between the triangles of a mesh make. A body that meets
+        a flat mesh gets the mesh's normal whatever its tessellation (without it the normal of the triangle
+        edge or corner the body met, which tilts by several degrees and kicks a sliding body sideways), and
+        a crater from an impact on such a mesh has its axis and speed from the surface either way. The meshes
+        are taken as two-sided. It changes the motion of every body that slides or lands on a mesh, so it
+        is off by default, which is the behaviour there always was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="bounds" default="none">
       <xs:simpleType><xs:restriction base="xs:string">

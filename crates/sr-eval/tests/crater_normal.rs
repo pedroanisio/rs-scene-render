@@ -76,3 +76,24 @@ fn a_curved_ground_gives_the_normal_that_is_local_to_where_the_rock_hit() {
     println!("NORMAL planet: axis {axis:?}, radial {radial:?}, {tilt:.2} degrees apart");
     assert!(tilt < 1.5, "the axis is the planet's local normal: {tilt} degrees");
 }
+
+#[test]
+fn with_the_internal_edges_fixed_the_impacts_are_still_found_and_the_axis_is_the_same() {
+    let planet = r#"<object3D id="planet" primitive="sphere" radius="60" segments="96">
+             <crater source="rock" targetMaterial="softRock"/>
+             <rigidBody type="static" shape="trimesh"/>
+           </object3D>"#;
+    let fixed = |xml: String| xml.replace("<physics ", r#"<physics fixInternalEdges="true" "#);
+    // a curved ground hit on its flank
+    let (_, axis, _, centre) = impact(&fixed(scene(100.0, 90.0, 25.0, planet)));
+    let length = centre.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let tilt = axis.iter().zip(&centre).map(|(a, c)| a * c / length).sum::<f64>().abs().min(1.0).acos().to_degrees();
+    assert!(tilt < 1.5, "the planet's local normal: {tilt} degrees");
+    // a flat one, in different triangles: the authored normal speed and the ground's axis
+    let authored = 100.0 * 60f64.to_radians().sin();
+    for segments in [8, 64] {
+        let (speeds, axis, _, _) = impact(&fixed(scene(100.0, 60.0, 0.0, &plane(segments))));
+        assert!(axis[2] < -1.0 + 1e-9, "{segments} segments: {axis:?}");
+        assert!((speeds[0] - authored).abs() < 0.005 * authored, "{segments} segments: {}", speeds[0]);
+    }
+}

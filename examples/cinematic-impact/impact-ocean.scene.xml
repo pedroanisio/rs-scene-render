@@ -37,5 +37,6 @@
     <light id="sky" type="dome" environment="sky.hdr" environmentVisible="true" intensity="1"/>
     <light id="sun" type="directional" color="#FFE7C9" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>
   </lights>
-  <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/>
+  <!-- the contacts of the ground's triangle edges are fixed, so a body that slides over it is not pushed sideways -->
+  <physics fixInternalEdges="true" gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/>
 </scene>

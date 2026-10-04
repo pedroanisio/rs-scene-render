@@ -385,6 +385,7 @@ VALID = {
     "particles3d": PARTICLES3D,
     "ocean-colliders": OCEAN_COUPLED,
     "ocean-buoyancy": OCEAN_BUOYANCY,
+    "physics-internal-edges": OCEAN_BUOYANCY.replace('<physics pixelsPerMeter="1"/>', '<physics pixelsPerMeter="1" fixInternalEdges="true"/>'),
     "ocean-full": OCEAN_BUOYANCY.replace('bodyCoupling="buoyancy"', 'bodyCoupling="full"'),
     "ocean-order2": OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="2"'),
     "ocean": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3"/></ocean>'),

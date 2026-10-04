@@ -1676,6 +1676,20 @@ rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
+Internal edges of meshes (`physics@fixInternalEdges`, default false). The contact of a body with a mesh of
+triangles is reported against the triangle edge or corner it meets, and the normal there tilts with the
+tessellation: on the 1 m ground of the land scene a rock arriving at 60 degrees got a contact normal
+(-0.103, -0.045, -0.994), a normal speed of 91.2 m/s for the authored 86.6, and was pushed 7.35 m across its
+line of travel in 4 s (0.42 m with the edges fixed). With the attribute true the world builds its meshes with
+the parry flag that takes adjacent triangles into account (`FIX_INTERNAL_EDGES_TWO_SIDED`, the mesh taken
+as two-sided: the one-sided flag discards the contacts of a mesh wound the other way, which lost the
+impacts on a sphere's mesh), and a flat mesh gives its own normal in every tessellation (sr-sim test: grounds
+of 8, 13 and 40 cells with moved corners and alternating diagonals, normal (0, 1, 0) to 1e-9 and no sideways
+kick; without it the normals tilt by up to 0.15). The attribute changes the motion of every 3D body that
+lands or slides on a mesh, which is why it is off, and a physics cache baked with it carries it in its
+identity (a world without it hashes as it did). Crater impacts take their axis and speed from the owner's
+surface either way. The impact scenes set it; their sweeps are the same orderings with it on and off.
+
 Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
 first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
 weight of the water it displaces (density 1000 kg/m3 and the ocean's gravity) upward through the centroid of

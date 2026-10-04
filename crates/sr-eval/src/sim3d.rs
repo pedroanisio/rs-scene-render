@@ -746,6 +746,7 @@ pub(crate) fn build(
         _ => Bounds3::None,
     };
     let spec = World3Spec {
+        fix_internal_edges: ph.is_some_and(|p| p.fix_internal_edges),
         start,
         step,
         gravity,

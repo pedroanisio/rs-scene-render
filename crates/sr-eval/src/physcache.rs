@@ -202,9 +202,14 @@ pub(crate) fn digest_world3(
     watches: &[ImpactWatch],
     links: &[crate::sim3d::CraterLink],
 ) -> [u8; 32] {
-    let World3Spec { start, step, gravity, pixels_per_meter, iterations, bounds, bodies, joints } = spec;
+    let World3Spec { start, step, gravity, pixels_per_meter, iterations, bounds, bodies, joints, fix_internal_edges } =
+        spec;
     let mut id = Identity::new();
     id.value("world", &(start, step, gravity, pixels_per_meter, iterations, bounds, bodies.len(), joints.len()));
+    // only when on, so that the identity of every world without it is what it was
+    if *fix_internal_edges {
+        id.value("internalEdges", &true);
+    }
     for body in bodies {
         let Body3Spec {
             kind,
