@@ -672,6 +672,9 @@ fn spawn(s: &Spec, e: &Emission, id: u64, birth: f64) -> Result<Particle, Error>
     }
     Ok(p)
 }
+/// Most contacts that advance no time a particle may spend in one step moving clear of a surface.
+const MAX_RECOVERIES: u32 = 64;
+
 fn motion(
     s: &Spec,
     p: &mut Particle,
@@ -682,6 +685,7 @@ fn motion(
 ) -> Result<(), Error> {
     let mut contact: Option<([f64; 3], [f64; 3])> = None;
     let mut collisions = 0;
+    let mut recoveries = 0;
     while dt > 0. {
         charge(work)?;
         let a0 = add(s.gravity, d.acceleration(time, p.position, p.velocity)?);
@@ -757,9 +761,21 @@ fn motion(
             dt -= span;
             continue;
         };
-        collisions += 1;
-        if collisions > 16 {
-            return Err(Error::Limit("more than 16 collisions in one particle step"));
+        // A contact at fraction 0 advances no time: the particle starts inside the surface, or has
+        // been pushed into a neighbouring facet, and is being moved clear of it. Pushing out of two
+        // facets of a crease in turn converges by a fixed factor per push, so it can take dozens of
+        // them to reach the contact tolerance; those have a limit of their own, and only the contacts
+        // that carry the particle forward in time count toward the 16 of a step.
+        if hit.fraction == 0. {
+            recoveries += 1;
+            if recoveries > MAX_RECOVERIES {
+                return Err(Error::Limit("more than 64 penetration recoveries in one particle step"));
+            }
+        } else {
+            collisions += 1;
+            if collisions > 16 {
+                return Err(Error::Limit("more than 16 collisions in one particle step"));
+            }
         }
         let n = normalize(hit.normal);
         let elapsed = span * hit.fraction;

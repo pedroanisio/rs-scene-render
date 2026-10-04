@@ -33,6 +33,8 @@ struct CraterBurst {
 
 struct Runtime {
     seed: u64,
+    /// How far above the surface the ejecta of a crater are born: the largest collision radius.
+    lift: f64,
     crater_bursts: Vec<CraterBurst>,
     colliders: colliders::Colliders,
     emitter: sim::Emitter,
@@ -129,8 +131,12 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
             })
         })
         .collect();
+    let lift = (number("collisionRadius", 0.5) * (1. + number("scaleVariance", 0.))
+        + number("collisionTolerance", 0.001))
+    .max(0.);
     Ok(Runtime {
         seed: e.seed,
+        lift,
         crater_bursts,
         colliders: colliders::build(p, n, bytes("meshMemoryMiB", 128.)?)?,
         emitter: sim::Emitter::new(spec).map_err(|e| e.to_string())?,
@@ -155,6 +161,7 @@ struct SceneDriver<'a, 'b> {
     step_origin: f64,
     step: f64,
     seed: u64,
+    lift: f64,
     bursts: &'a mut [CraterBurst],
 }
 impl SceneDriver<'_, '_> {
@@ -209,8 +216,10 @@ impl SceneDriver<'_, '_> {
             })?;
         // the crater is the owner's: where it hit and its axis follow the owner's pose at the impact
         let world = crate::sim3d::world3(&frame, i, 0);
-        let point = world.transform_point3(DVec3::from(grown.spec.center));
         let normal = world.transform_vector3(DVec3::from(grown.spec.outward));
+        // The contact point of the impact lies a little inside the surface, where a particle would be
+        // buried under it; they are born clear of the surface by the radius they collide with.
+        let point = world.transform_point3(DVec3::from(grown.spec.center)) + normal.normalize_or_zero() * self.lift;
         let metres = cause.pixels_per_meter;
         let list = sr_sim::cratering::ejecta::ejecta(&sr_sim::cratering::ejecta::Spec {
             material: cause.material,
@@ -367,6 +376,7 @@ impl Sims {
                     step_origin: num(&*n.elem, "emissionStart", 0.),
                     step: num(&*n.elem, "dt", 1. / 60.),
                     seed: rt.seed,
+                    lift: rt.lift,
                     bursts: &mut rt.crater_bursts,
                 };
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
