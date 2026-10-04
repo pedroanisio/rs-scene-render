@@ -118,7 +118,7 @@
         "Crater-driven closed midpoint solids, domain-relative material motion at MAC faces, shared geometry admission, authored plane slabs, indexed rotational primitives and deterministic replay.",
         "Opt-in multigrid-preconditioned pressure solve and MacCormack advection (pyro@solver, pyro@advection), parallel per-cell loops with pinned reference hashes, brick-wise volume export with a content-hashed cache key, a lower step memory estimate and a 41-byte resident state"
       ],
-      "remaining": "Bounded importer dependencies and production visual/performance validation; persistent render bakes are implemented, while exact solver-state resumption is not claimed. Solver speed at 128x104x128 and 192x156x192 was measured only under load on x86_64 Linux and is not certified; the multigrid and MacCormack modes are opt-in and have no visual review on the impact film."
+      "remaining": "Bounded importer dependencies and production visual/performance validation; persistent render bakes are implemented, while exact solver-state resumption is not claimed. Solver speed at 128x104x128 and 192x156x192 was measured under load and then once on a quiet machine (quiet_machine_timing_validation), on x86_64 Linux only and not certified; the multigrid and MacCormack modes are opt-in and have no visual review on the impact film."
     },
     {
       "id": "particles",
@@ -192,7 +192,7 @@
         "Strict native 36-frame render/encode preview and one-sample 3840x2160 render probe",
         "Opt-in second-order MUSCL/SSP-RK2 scheme with the monotonized-central limiter (ocean@order), parallel sweeps identical to serial, second-order memory accounting and work allowance ceilings of 1e12"
       ],
-      "remaining": "Production visual/temporal validation in the full UHD impact film; shared importer dependency allocation hardening. Water is depth-averaged and whitewater is a cinematic read-only tracer effect, not overturning-sheet or compressible impact simulation. Second-order water needs at least 20 cells per wavelength and keeps a first-order bed term; absorbing edges were evaluated and not adopted; whitewater tracers keep no checkpoints, so every backward seek replays from zero; parallel timings were measured only under load and are not certified."
+      "remaining": "Production visual/temporal validation in the full UHD impact film; shared importer dependency allocation hardening. Water is depth-averaged and whitewater is a cinematic read-only tracer effect, not overturning-sheet or compressible impact simulation. Second-order water needs at least 20 cells per wavelength and keeps a first-order bed term; absorbing edges were evaluated and not adopted; whitewater tracers keep no checkpoints, so every backward seek replays from zero; parallel timings were measured under load and on a quiet machine (quiet_machine_timing_validation), and second order at 1.05 million cells takes about 0.5 s per 1/24 s step with eight threads."
     },
     {
       "id": "geometry",
@@ -2353,6 +2353,274 @@
       "srep-0000-cinematic-impact.md": "88631516dbf726e336bba9ef45f05aec3a1106b0c0d3af095e746b060a273a29"
     }
   },
+  "quiet_machine_timing_validation": {
+    "checked_at": "2026-10-04T07:26:32.851736+00:00",
+    "status": "quiet_machine_timings_recorded_single_run_not_certified",
+    "commit": "02a99d0",
+    "host": "8 cores (Intel Xeon Gold 6548Y+, one thread per core), x86_64 Linux",
+    "adapter": "NVIDIA RTX 6000 Ada Generation (Vulkan)",
+    "machine_state": "load average 0.3 to 0.9 at the start of the ocean, evaluator and render runs; other work stopped and the GPU queue empty; 1.3 to 4.4 during the smoke series",
+    "commands": {
+      "smoke": "cargo run --release -p sr-sim --example pyro_profile -- N 8 3000 0 SOLVER ADVECTION export",
+      "ocean": "cargo run --release -p sr-sim --example ocean_profile -- ORDER THREADS SIDE",
+      "evaluator": "cargo test --release -p sr-eval --test hero_hires -- --ignored --nocapture",
+      "render": "python3 tools/probe_render.py (8 samples, one frame per process)"
+    },
+    "smoke": {
+      "domain": "impact-scene domain of 192x156x192 scene units at the three grid resolutions below",
+      "unit": "milliseconds per step; conjugate-gradient iterations in parentheses",
+      "impulse": "worst of steps 2-3",
+      "regime": "median of steps 4-7",
+      "threads_8": {
+        "64x52x64": {
+          "jacobi+semilagrangian": {
+            "impulse": "233 (135)",
+            "regime": "126 (48)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "93 (11)",
+            "regime": "79 (5)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "137 (11)",
+            "regime": "127 (5)"
+          }
+        },
+        "128x104x128": {
+          "jacobi+semilagrangian": {
+            "impulse": "1978 (274)",
+            "regime": "968 (107)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "544 (14)",
+            "regime": "485 (7)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "888 (14)",
+            "regime": "777 (7)"
+          }
+        },
+        "192x156x192": {
+          "jacobi+semilagrangian": {
+            "impulse": "10260 (417)",
+            "regime": "5001 (174)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "1961 (16)",
+            "regime": "1630 (9)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "3060 (16)",
+            "regime": "2646 (9)"
+          }
+        }
+      },
+      "threads_1": {
+        "64x52x64": {
+          "jacobi+semilagrangian": {
+            "impulse": 592,
+            "regime": 407
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 424,
+            "regime": 370
+          },
+          "multigrid+maccormack": {
+            "impulse": 701,
+            "regime": 641
+          }
+        },
+        "128x104x128": {
+          "jacobi+semilagrangian": {
+            "impulse": 6567,
+            "regime": 4016
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 3425,
+            "regime": 2984
+          },
+          "multigrid+maccormack": {
+            "impulse": 5771,
+            "regime": 5131
+          }
+        },
+        "192x156x192": {
+          "jacobi+semilagrangian": {
+            "impulse": 31617,
+            "regime": 18301
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 12159,
+            "regime": 10501
+          },
+          "multigrid+maccormack": {
+            "impulse": 20568,
+            "regime": 18142
+          }
+        }
+      },
+      "state_volume_export_best_of_3_ms": {
+        "threads_8": {
+          "64x52x64": 5,
+          "128x104x128": "28-34",
+          "192x156x192": "105-116"
+        },
+        "threads_1": {
+          "64x52x64": 24,
+          "128x104x128": 195,
+          "192x156x192": 660
+        }
+      },
+      "peak_rss_192x156x192_mb": {
+        "jacobi": 724,
+        "multigrid": "897-919"
+      },
+      "reference_at_base_commit_60a458c": "measured earlier under load and in series, not repeated: 128x104x128 6.1 s in regime and 11.5 s at the impulse; 192x156x192 28 s and 54 s"
+    },
+    "ocean": {
+      "conditions": "g 9.81, depth 10, 0.5-unit cells, closed edges, Gaussian hump 0.3 high, canonical step 1/24 s, no checkpoints; one process per run; the first step runs from the initial state and the second from the first",
+      "runs": [
+        {
+          "order": 1,
+          "threads": 1,
+          "cells": 1048576,
+          "load_average_at_start": 0.45,
+          "first_step_s": 0.378,
+          "second_step_s": 0.363,
+          "best_s": 0.363,
+          "peak_rss_mib": 160
+        },
+        {
+          "order": 1,
+          "threads": 8,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 0.101,
+          "second_step_s": 0.086,
+          "best_s": 0.086,
+          "peak_rss_mib": 161
+        },
+        {
+          "order": 2,
+          "threads": 1,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 1.935,
+          "second_step_s": 1.934,
+          "best_s": 1.934,
+          "peak_rss_mib": 185
+        },
+        {
+          "order": 2,
+          "threads": 8,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 0.565,
+          "second_step_s": 0.516,
+          "best_s": 0.516,
+          "peak_rss_mib": 185
+        },
+        {
+          "order": 1,
+          "threads": 1,
+          "cells": 4000000,
+          "load_average_at_start": 0.86,
+          "first_step_s": 1.568,
+          "second_step_s": 1.557,
+          "best_s": 1.557,
+          "peak_rss_mib": 582
+        },
+        {
+          "order": 1,
+          "threads": 8,
+          "cells": 4000000,
+          "load_average_at_start": 0.86,
+          "first_step_s": 0.499,
+          "second_step_s": 0.505,
+          "best_s": 0.499,
+          "peak_rss_mib": 582
+        },
+        {
+          "order": 2,
+          "threads": 1,
+          "cells": 4000000,
+          "load_average_at_start": 0.83,
+          "first_step_s": 7.511,
+          "second_step_s": 7.561,
+          "best_s": 7.511,
+          "peak_rss_mib": 674
+        },
+        {
+          "order": 2,
+          "threads": 8,
+          "cells": 4000000,
+          "load_average_at_start": 0.83,
+          "first_step_s": 2.175,
+          "second_step_s": 2.202,
+          "best_s": 2.175,
+          "peak_rss_mib": 675
+        }
+      ],
+      "second_order_1m_cells_repeats": {
+        "threads_8_best_s": [
+          0.525,
+          0.508,
+          0.501,
+          0.502
+        ],
+        "threads_4_best_s": 0.715,
+        "threads_6_best_s": 0.576,
+        "load_average_at_start": "0.71 to 0.89"
+      },
+      "reading": "second order at 1.05 million cells with 8 threads took 0.50 to 0.53 s per 1/24 s step in eight runs, so the 0.5 s target is not met on this machine; an earlier run under load had measured 0.37 s, which these quiet-machine runs do not reproduce"
+    },
+    "evaluator": {
+      "scene": "examples/cinematic-impact/hero-hires.scene.xml",
+      "seconds": {
+        "t=0.5": 10.7,
+        "t=1.0": 10.7,
+        "t=1.5": 12.3,
+        "t=3.0": 35.7,
+        "back to t=1.5": 15.5,
+        "t=6.0": 82.1,
+        "whole test": 167
+      },
+      "peak_rss_gib": 1.74
+    },
+    "render": {
+      "unit": "process wall seconds / smoke seconds / GPU trace seconds / peak RSS",
+      "samples": 8,
+      "frames": {
+        "hero.scene.xml 1280x720 t=0.8": "8.9 s / 1.2 s / 0.1 s / 659 MiB",
+        "hero.scene.xml 1280x720 t=1.5": "7.8 s / 3.2 s / 2.8 s / 610 MiB",
+        "hero.scene.xml 1280x720 t=3.0": "20.5 s / 7.6 s / 10.2 s / 643 MiB",
+        "hero.scene.xml 3840x2160 t=3.0": "132.4 s / 7.5 s / 120.8 s / 706 MiB",
+        "hero-hires.scene.xml 1280x720 t=3.0": "103.3 s / 55.8 s / 31.7 s / 2805 MiB (ocean 9.5 s, particles 3.4 s, CPU render preparation 1.7 s, 4.66 million triangles)",
+        "hero-hires.scene.xml 3840x2160 t=3.0": "426.6 s / 54.5 s / 354.9 s / 2323 MiB"
+      },
+      "reference_at_base_commit_60a458c": "hero.scene.xml 1280x720 t=3.0, measured earlier under load: 74.9 s wall, 35.2 s smoke, 37.0 s trace"
+    },
+    "limits": [
+      "One run of each measurement, without repetition or confidence interval, except the eight second-order ocean runs at 1.05 million cells.",
+      "x86_64 Linux and this adapter only.",
+      "The reference at the base commit was measured under load and was not repeated.",
+      "Path-traced 3840x2160 takes 121 s (base scene) and 355 s (target-resolution scene) per frame at 8 samples, dominated by marched shadows inside the volume; a 144-frame sequence at that cost is not practical and remains open.",
+      "GPU memory was not measured.",
+      "No frame was reviewed for appearance in this measurement.",
+      "Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed."
+    ],
+    "remaining": [
+      "Repeated runs with a confidence interval and a second platform, if the timings are to be certified."
+    ],
+    "source_sha256": {
+      "crates/sr-sim/examples/ocean_profile.rs": "1656d3bea7e046bb808aa51874c41cdc16077a2af46e1e58fe1cc0bf1ded4d95",
+      "crates/sr-sim/examples/pyro_profile.rs": "083be643d357e982766bac50b47acb0358d4e3bea7c36f5471a27c65c0eb0eff",
+      "crates/sr-eval/tests/hero_hires.rs": "fb12a708441e733547404827b0e4212a65316b70826168ca1b25c7b55ce7c8bb",
+      "tools/probe_render.py": "787e55b23bf2909ff4a33e373585888c984bfe4feb4dfb9ab567a3d52dd10d6a",
+      "examples/cinematic-impact/hero.scene.xml": "d827c4fac1683716f675b97f4f69393ec72616b79933c21d6d7f42499f258651",
+      "examples/cinematic-impact/hero-hires.scene.xml": "abdf988d9bc567f7ba703fe8a914a8196ee01cbd88d7f3f42ec2bd7df028cc8a"
+    }
+  },
   "milestones": [
     {
       "name": "Path-traced shared prototype BVHs",
@@ -2406,7 +2674,7 @@
         "crates/sr-sim/examples/pyro_profile.rs"
       ],
       "validation": "Per-cell loops (advection, boundary conditions, forces, pressure operator, vector updates, gradient subtraction, divergence check, field validation, source injection) run on rayon with every element written by the same expression as before; reductions stay serial and in index order. Final-state hashes of reference scenarios recorded before the change still match, and are equal on 1, 2 and 8 rayon threads. The pressure operator reads a precomputed open-face mask, two reductions share one pass, the step copies only the evolving fields (density, temperature, velocity), and trilinear sampling has an exact in-range path compared bit for bit with the original on about 240,000 points. A failed step leaves the committed state and clock untouched: injected failures in the collider stage, field validation and the pressure solve, then a corrected retry equals a fresh replay. Advection at 128^3 on one thread, impact scene: 1650-1770 ms before the sampling change, 1423 ms after (measured under load).",
-      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The reference hashes hold only on that platform. The Jacobi mode keeps serial in-order reductions, so its pressure solve does not scale with threads like the other loops. No GPU render of the faster solver was run for this entry."
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The reference hashes hold only on that platform. The Jacobi mode keeps serial in-order reductions, so its pressure solve does not scale with threads like the other loops. No GPU render of the faster solver was run for this entry. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Multigrid-preconditioned pressure solve",
@@ -2427,7 +2695,7 @@
         "crates/sr-sim/src/pyro/determinism.rs"
       ],
       "validation": "Backward-forward error correction (Selle et al., 2008) for density, temperature and the three velocity components, clamped to the minimum and maximum of the eight old values around the backward-trace origin and falling back to the semi-Lagrangian value where a collider cuts a trace. Free vortex (32^3 closed box, 60 force-free steps, multigrid): kinetic energy kept 96.6% against 68.8% and enstrophy 95.7% against 61.6% for semi-Lagrangian advection; the test requires 1.25x and 1.3x of the semi-Lagrangian values and energy that never grows. A swirling blob against a wall creates no new density or temperature extrema and leaves solid cells clean; results are equal on 1, 2 and 8 threads, with pinned hashes. The impact scene ran 144 steps at 64^3 and 128^3 without error.",
-      "limits": "The advection stage measured 2.5x (64^3) and 2.4x (128^3) the semi-Lagrangian time on one thread, measured on a loaded machine and only on x86_64 Linux, not certified. Velocity uses the scheme on the strength of one vortex test; no visual comparison on the impact film was made. Hashes hold only on x86_64 Linux."
+      "limits": "The advection stage measured 2.5x (64^3) and 2.4x (128^3) the semi-Lagrangian time on one thread, measured on a loaded machine and only on x86_64 Linux, not certified. Velocity uses the scheme on the strength of one vortex test; no visual comparison on the impact film was made. Hashes hold only on x86_64 Linux. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Smoke memory estimate and resident state size",
@@ -2437,7 +2705,7 @@
         "crates/sr-sim/src/pyro/determinism.rs"
       ],
       "validation": "The step memory estimate fell from 512 to 320 and then to 288 bytes per cell plus 8192, from a count of the live arrays (committed state 41, working state 41, solid-face list 56 if every cell were solid, pressure workspace 65, multigrid about 26), and a test pins the figure. Prescribed solid face velocities left the state, which now holds about 41 bytes per cell independent of colliders (a test checks 40-43 bytes per cell and that a step with a collider does not grow it); 30, 3 and 1 states fit 256 MiB at 64x52x64, 128x104x128 and 192x156x192 (14, 1 and none before). Reference hashes of both pressure solvers and both advection schemes pass unchanged. The least budgets the constructor accepts at those three resolutions were found by running it and are tabulated in the SREP. Peak resident memory on the impact scene (6 steps, multigrid, no colliders): 326 MB at 128x104x128 and 928 MB at 192x156x192.",
-      "limits": "Peak resident memory depends on the allocator and on untouched pages, and was measured on a loaded machine and only on x86_64 Linux, not certified. The 25% headroom over the counted bytes is an estimate: collider-heavy scenes and other allocators were not measured."
+      "limits": "Peak resident memory depends on the allocator and on untouched pages, and was measured on a loaded machine and only on x86_64 Linux, not certified. The 25% headroom over the counted bytes is an estimate: collider-heavy scenes and other allocators were not measured. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Cheaper smoke volume export, cache key and checkpoints",
@@ -2451,7 +2719,7 @@
         "crates/sr-eval/tests/pyro.rs"
       ],
       "validation": "The five volume channels build in parallel and store whole 8x8x8 bricks (SparseGrid::set_brick, equivalent to 512 single sets and atomic on failure); the exported volume is identical to the previous implementation, compared bit for bit on five reference cases (colliders, odd and closed domains) and two temperature backgrounds. A volume is neither exported nor hashed when the simulation state did not change: four samples inside a fixed step return the same volume, a new step exports once, and a backward seek exports again and reproduces the first visit's key. The cache key hashes each brick on its own and combines the hashes in key order, so it is the same for any thread count; a flipped mantissa bit, swapped samples, another name or background, and 3000 single-voxel variations change it. Impact scene after 8 steps on a busy machine: export 610 to 77-100 ms at 128^3 and 2.2 s to 150-165 ms at 192^3; hashing 70 to 3 ms at 128^3 and 254 to 21 ms at 192^3; cloning a 192^3 state for a checkpoint took 102 ms.",
-      "limits": "Timings were measured under load (load average about 12-14) on x86_64 Linux and are not certified. The key is an in-memory cache token whose values changed; no stored key and no test compares it with a fixed value. The dense velocity channels still dominate export time."
+      "limits": "Timings were measured under load (load average about 12-14) on x86_64 Linux and are not certified. The key is an in-memory cache token whose values changed; no stored key and no test compares it with a fixed value. The dense velocity channels still dominate export time. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Second-order ocean with a monotonized-central limiter",
@@ -2472,7 +2740,7 @@
         "crates/sr-sim/tests/ocean_order2.rs"
       ],
       "validation": "Rows (x sweep) and bands of 16 rows (z sweep) run on rayon with the same floating-point operations per cell as the serial sweep. Digests of the full state recorded from the serial solver on a 160x120 grid (both orders, closed/open/periodic edges) match with 1, 2 and 8 threads. Momentum-flux overflow in two cells of different bands reports the same error and preserves the published frame on the serial path and with 1, 2 and 8 threads. A second-order step is charged 400 bytes per cell against 256 for first order: peak resident memory at 1,048,576 cells was 158 B/cell in first order on every grid shape tried and 182-278 B/cell in second order, the largest on a one-row grid; a test pins the admission thresholds. Wall time per 1/24 s step, second order: 1.85 s on one thread, 0.52 s on four and 0.37 s on eight at 1.0 million cells (first order 0.365, 0.106, 0.074 s); 7.69, 3.00 and 2.31 s at 4.0 million cells (first order 1.59, 0.69, 0.54 s).",
-      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified; the gain at 4 million cells is limited by memory bandwidth and serial state copies. Only the non-finite failure path is tested in parallel: negative depth beyond round-off could not be provoked, and both failing cells report the same message, so the lowest-cell-index rule cannot be told apart by that test. Digests hold only on x86_64 Linux."
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified; the gain at 4 million cells is limited by memory bandwidth and serial state copies. Only the non-finite failure path is tested in parallel: negative depth beyond round-off could not be provoked, and both failing cells report the same message, so the lowest-cell-index rule cannot be told apart by that test. Digests hold only on x86_64 Linux. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Work allowance ceilings for the ocean and its whitewater",
@@ -2516,7 +2784,7 @@
         "crates/sr-gpu/tests/volume.rs"
       ],
       "validation": "Render statistics report seconds per stage (rigid, ocean, smoke and particle simulation, draw and volume preparation, path-tracer assembly, BVH and packing), and the trace and denoise passes are timed with GPU timestamp queries; the additions change no pixel. tools/probe_render.py renders single frames through the GPU queue and writes stage seconds, GPU pass milliseconds, wall seconds, peak resident memory and a frame hash as JSON; its report logic has unit tests that pass. Two volume tests show that the dark patch under the plume at 3.0 s in the hero scene is the plume's reflection in the ocean and not a volume-domain defect: reflected emissive and absorbing media match the mirrored-camera view with the reflection point in front of and inside the domain, and both tests fail if volumes are ignored after the first surface.",
-      "limits": "No certified frame time exists: the probe has been exercised only under load. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. The explanation of the dark patch rests on those two tests and on visual comparison; no render code was changed for it."
+      "limits": "No certified frame time exists: the probe has been exercised only under load. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. The explanation of the dark patch rests on those two tests and on visual comparison; no render code was changed for it. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     },
     {
       "name": "Target-resolution impact scene and evaluator test",
@@ -2526,7 +2794,7 @@
         "crates/sr-eval/tests/hero_hires.rs"
       ],
       "validation": "hero-hires.scene.xml changes only resolution, solver and budget attributes of hero.scene.xml: a 128x104x128 plume (multigrid, MacCormack, half-voxel march step), a 720x720 second-order ocean and 100000 ejecta; scene-render validate reports no errors or warnings for both. Evaluated without a GPU at 0.5, 1.0, 1.5 and 3.0 s: no problem reported, plume density non-zero after the impact, ocean and 100000 particles present, and a backward seek from 3.0 s to 1.5 s reproduces the ocean, particles and volume key of the first visit; a seek to 6.0 s completes, and a cold seek to 6.0 s completed without problems. Measured under load: 16.0, 16.7, 24.7 and 62.8 s for the four instants advanced in order, 22.8 s for the backward seek, 170.7 s from there to 6.0 s, 278.8 s for the cold seek; peak resident memory 2302 MiB. The run exposed three budget needs now declared in the scene (ocean surface memory and the work allowances of the ocean and its whitewater).",
-      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The test is ignored by default because it takes minutes and gigabytes. No GPU render of the scene was run for this entry, so image quality, render time and GPU memory at this resolution are unmeasured. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed."
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The test is ignored by default because it takes minutes and gigabytes. No GPU render of the scene was run for this entry, so image quality, render time and GPU memory at this resolution are unmeasured. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. Timings measured on a quiet machine are in quiet_machine_timing_validation."
     }
   ]
 }
