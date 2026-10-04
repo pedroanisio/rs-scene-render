@@ -1988,6 +1988,30 @@
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
   </xs:complexType>
+  <xs:complexType name="burst3DType">
+    <xs:annotation><xs:documentation>
+      A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
+      throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
+      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
+      (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
+      launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
+      render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed
+      and mass follow the ejecta scaling of Housen and Holsapple (2011) as the engine reads it, which has not been
+      checked against the paper; the launch angle, its spread, the launch time and the lopsidedness of an oblique
+      impact are the engine's own. `angle` is the launch angle above the tangent plane of the contact and
+      `angleSpread` the half-width of the uniform spread around it, in degrees; both stay within 0 to 90 together.
+      The ejecta of regolith and ice have no table row and are an error. Positions and velocities are in scene units
+      through `physics/@pixelsPerMeter`, and gravity, drag and colliders are those of the emitter. The crater's
+      pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="time" type="xs:double"/>
+    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
+    <xs:attribute name="interval" type="positiveDecimal" default="1"/>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
   <xs:complexType name="particleEmitterType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="nodeBehaviour"/>
@@ -2159,7 +2183,7 @@
   </xs:complexType>
 
   <xs:complexType name="particles3DType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burstType"/></xs:choice>
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burst3DType"/></xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="x" type="xs:double" default="0"/>

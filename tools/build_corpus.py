@@ -57,6 +57,8 @@ CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" d
 
 PYRO_CRATER = CRATER_IMPACT.replace('</composition>', '<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource crater="pit"/><pyroImpulse crater="pit" heatFraction="0.2"/></pyro></object3D></composition>')
 
+EJECTA_CRATER = CRATER_IMPACT.replace('</composition>', '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit" count="200"/></particles3D></composition>')
+
 def sub(old, new, count=1):
     def f(t):
         assert old in t, f"mutation anchor not found: {old!r}"
@@ -120,6 +122,11 @@ CASES = [
     ("p3d1", ["P3D1"], lambda _: PARTICLES3D.replace('version="1.3"', 'version="1.2"')),
     ("p3d2", ["P3D2"], lambda _: PARTICLES3D.replace('rate="0"', 'rate="0" emitterShape="mesh"')),
     ("p3d3", ["P3D3"], lambda _: PARTICLES3D.replace('lifetime="2"', 'lifetime="2" lifetimeVariance="2"')),
+    ("p3d7-derived", ["P3D7"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst crater="pit" time="1" count="200"/>')),
+    ("p3d7-time", ["P3D3", "P3D7"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst count="200"/>')),
+    ("p3d8-authored", ["P3D8"], lambda _: EJECTA_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("p3d9-orphan", ["P3D9"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst time="0" count="200" angle="30"/>')),
+    ("p3d10-angle", ["P3D10"], lambda _: EJECTA_CRATER.replace('count="200"/>', 'count="200" angle="80"/>')),
     ("p3d4", ["P3D4"], lambda _: PARTICLES3D.replace('</particles3D>', '<animate property="lifetime"><key time="0" value="2"/></animate></particles3D>')),
     ("p3d5", ["P3D5"], lambda _: PARTICLES3D.replace('colliders="floor"', 'colliders="dust"')),
     ("p3d6", ["P3D6"], lambda _: PARTICLES3D.replace('depth="64"/>', 'depth="64"><animate property="width"><key time="0" value="64"/><key time="1" value="32"/></animate></object3D>')),
@@ -357,6 +364,7 @@ VALID = {
     "crater": CRATER,
     "crater-impact": CRATER_IMPACT,
     "pyro-crater": PYRO_CRATER,
+    "ejecta-crater": EJECTA_CRATER,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,

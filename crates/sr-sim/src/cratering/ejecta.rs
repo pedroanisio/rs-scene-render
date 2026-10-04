@@ -30,6 +30,7 @@
 //! `nu = 0.4` here against `0.33` in the cratering law, and `n1`, are parametrisations
 //! without a checked mapping to each other.
 
+use super::Material;
 use rayon::prelude::*;
 
 const NU: f64 = 0.4;
@@ -41,46 +42,17 @@ const MAX_PARTICLES: usize = 1_000_000;
 /// pure function of its index, so the result does not depend on it.
 const PARALLEL: usize = 16_384;
 
-/// A target material, with the names a document uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Material {
-    Water,
-    DrySand,
-    DrySoil,
-    WetSoil,
-    SoftRock,
-    HardRock,
-    Regolith,
-    Ice,
-}
-
-impl Material {
-    pub fn parse(name: &str) -> Option<Material> {
-        Some(match name {
-            "water" => Material::Water,
-            "drySand" => Material::DrySand,
-            "drySoil" => Material::DrySoil,
-            "wetSoil" => Material::WetSoil,
-            "softRock" => Material::SoftRock,
-            "hardRock" => Material::HardRock,
-            "regolith" => Material::Regolith,
-            "ice" => Material::Ice,
-            _ => return None,
-        })
-    }
-
-    /// `(mu, C1, k, n2, p)`: water; dry sand (also dry soil); hard rock; weakly cemented
-    /// basalt (also wet soil and soft rock). Regolith and ice have no row.
-    fn row(self) -> Result<(f64, f64, f64, f64, f64), String> {
-        Ok(match self {
-            Material::Water => (0.55, 1.5, 0.2, 1.5, 0.5),
-            Material::DrySand | Material::DrySoil => (0.41, 0.55, 0.3, 1.3, 0.3),
-            Material::HardRock => (0.55, 1.5, 0.3, 1.0, 0.5),
-            Material::WetSoil | Material::SoftRock => (0.46, 0.18, 0.3, 1.0, 0.3),
-            Material::Regolith => return Err("no ejecta table row for regolith".into()),
-            Material::Ice => return Err("no ejecta table row for ice".into()),
-        })
-    }
+/// `(mu, C1, k, n2, p)` of a material: water; dry sand (also dry soil); hard rock; weakly
+/// cemented basalt (also wet soil and soft rock). Regolith and ice have no row.
+fn row(material: Material) -> Result<(f64, f64, f64, f64, f64), String> {
+    Ok(match material {
+        Material::Water => (0.55, 1.5, 0.2, 1.5, 0.5),
+        Material::DrySand | Material::DrySoil => (0.41, 0.55, 0.3, 1.3, 0.3),
+        Material::HardRock => (0.55, 1.5, 0.3, 1.0, 0.5),
+        Material::WetSoil | Material::SoftRock => (0.46, 0.18, 0.3, 1.0, 0.3),
+        Material::Regolith => return Err("no ejecta table row for regolith".into()),
+        Material::ColdIce => return Err("no ejecta table row for ice".into()),
+    })
 }
 
 /// The impact and the crater it made.
@@ -161,7 +133,7 @@ fn azimuth(u: f64, b: f64) -> f64 {
 
 /// The particles of an impact, in order of increasing launch distance.
 pub fn ejecta(spec: &Spec) -> Result<Vec<Ejecta>, String> {
-    let (mu, c1, _k, n2, p) = spec.material.row()?;
+    let (mu, c1, _k, n2, p) = row(spec.material)?;
     let a = finite_positive("body radius", spec.body_radius)?;
     let delta = finite_positive("body density", spec.body_density)?;
     let rho = finite_positive("target density", spec.target_density)?;

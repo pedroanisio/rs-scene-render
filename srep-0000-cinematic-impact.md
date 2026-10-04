@@ -673,6 +673,14 @@ unverified. The CPU API's verified contract is:
   angular velocity. A live cap uses deterministic drop-new behavior, with
   checked emitted/dropped counters; a large burst does not allocate or loop
   once for every rejected birth.
+- A driver can also supply births: per fixed step `(lo, hi]` (and `time == lo` on the first step)
+  particles with their own instant, position, velocity and mass, which join the rate and burst
+  births in time order with consecutive ids. The mass is kept in the particle (zero for rate and
+  burst births); the render size still comes from `size`. The driver must answer a window as a
+  pure function of the window, since a seek asks again. A birth outside its window, with nonfinite
+  state or a negative mass is a driver error; more births than `maxParticles` leaves room for is
+  a limit error and, unlike a rate or burst quota, never a truncation. Frames, replays and checkpoints
+  of emitters without driver births are bit-identical to those before this was added.
 - Each particle retains the emitter's full birth affine, including scale and
   shear. Local velocity passes through that affine's linear part, then adds
   explicit inherited world velocity. Gravity and driver accelerations act in
@@ -1482,6 +1490,36 @@ with the crater and the crater grows more slowly than the energy: a scene needs 
 impact speeds, or a smaller `dustFraction`, for a fireball. This is the engine saying what the
 numbers say.
 
+Ejecta from an impact. A `burst` of a `particles3D` with `crater` naming such a crater is what the
+impact throws out, and nothing is authored about when, where, how fast or how heavy: `count`
+particles are born at the instants of their launches, each at its launch distance from the impact
+point in the tangent plane of the contact, with its own velocity and mass, and the instant, `repeat`
+and `interval` are not given (P3D7); the crater must exist and grow from an impact (P3D8); `angle`
+and `angleSpread`, the launch angle above the tangent plane and the half-width of its uniform
+spread in degrees (default 45 and 15), belong to such a burst (P3D9) and stay together within
+0 to 90 (P3D10). The speed of the ejecta launched from distance `x` follows Housen and Holsapple
+(2011), `v/U = C1 [(x/a)(rho/delta)^nu]^(-1/mu) (1 - x/(n2 R))^p` between `1.2 a` and `n2 R`, `a` the
+body's radius, `U` its speed, `rho` and `delta` the densities of the target and the body, `R` the radius
+of the crater and `nu = 0.4`, with the constants `mu, C1, n2, p` of water, dry sand (also dry soil), hard
+rock and weakly cemented basalt (also wet soil and soft rock); regolith and ice have no row and
+are an error. The mass launched from within `x` grows as `x^3 - (1.2 a)^3`, and the particles
+together hold 80% of the crater's mass (`0.8 rho V`); each stands for the same share, at a launch
+distance that is the corresponding quantile, so the count changes the resolution and not the total.
+The paper could not be consulted: the equations and constants are those of the specification this
+was written from and are **to be checked against it**. Where the paper is silent the engine decides:
+the launch angle and its spread, the time of launch (`T (x/R)^3` after the impact, `T` the
+formation time, so the fastest material leaves first), and the lopsidedness of an oblique impact,
+whose density of mass over the azimuth from downrange is `1 + b cos(az)` with
+`b = clamp((45 - theta)/20, 0, 1)` for the angle `theta` of the velocity with the surface, resting on
+the published thresholds of 45 and 25 degrees (Herrick and Forsberg-Taylor 2003,
+doi 10.1111/j.1945-5100.2003.tb00001.x) and no published formula. Each particle is a pure
+function of its index and the seed, so the particles do not depend on the thread count or on a
+seek. The crater's place and axis are the owner's at the impact (a moving owner does not carry the
+launches along), the speed is the whole relative speed of the body, and the positions and
+velocities are in scene units through `physics@pixelsPerMeter`; gravity, drag and colliders are
+those of the emitter, and ejecta born before `emissionStart` or at or after `emissionEnd` are not
+made. More particles than `maxParticles` is an error, not a truncation.
+
 Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
 Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
 through Holsapple's documents and the papers that cite them. The calculator note's table
@@ -2085,6 +2123,18 @@ Also includes `pyroShape`, inventoried below.
 | `opacityEnd` | unitDecimal | Optional; absent |
 | `sizeCurve` | curveType | Default `linear` |
 | `colorCurve` | curveType | Default `linear` |
+
+### `burst3DType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | xs:double | Required unless `crater` is given (P3D7) |
+| `count` | xs:positiveInteger | Required |
+| `repeat` | xs:nonNegativeInteger | Default `0` |
+| `interval` | positiveDecimal | Default `1` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
+| `angle` | nonNegativeDecimal; maxInclusive=90 | Optional, with `crater`; engine default `45` degrees |
+| `angleSpread` | nonNegativeDecimal; maxInclusive=90 | Optional, with `crater`; engine default `15` degrees |
 
 ### `oceanType`
 

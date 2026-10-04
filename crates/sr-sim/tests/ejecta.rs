@@ -1,4 +1,5 @@
-use sr_sim::ejecta::{ejecta, Ejecta, Material, Spec};
+use sr_sim::cratering::ejecta::{ejecta, Ejecta, Spec};
+use sr_sim::cratering::Material;
 
 /// A crater from an impact at `speed`, standing in for the cratering law: volume grows
 /// as speed^1.2 and the radius is that of a bowl of that volume.
@@ -206,7 +207,7 @@ fn results_do_not_depend_on_the_thread_count_and_the_seed_selects_them() {
 
 #[test]
 fn materials_without_a_table_row_and_bad_inputs_are_errors() {
-    for material in [Material::Regolith, Material::Ice] {
+    for material in [Material::Regolith, Material::ColdIce] {
         let error = ejecta(&spec(material, 3000.0, 90.0, 10)).unwrap_err();
         assert!(error.contains("no ejecta table row"), "{error}");
     }
@@ -236,7 +237,7 @@ fn material_names_follow_the_document_vocabulary() {
         ("softRock", Material::SoftRock),
         ("hardRock", Material::HardRock),
         ("regolith", Material::Regolith),
-        ("ice", Material::Ice),
+        ("ice", Material::ColdIce),
     ] {
         assert_eq!(Material::parse(name), Some(material));
     }
