@@ -38,6 +38,20 @@ struct GasRt {
     window: Vec<(u64, Arc<sr_sim::pyro::Gas>)>,
 }
 
+/// Everything the gas queries of one canonical particle step need, built once for all the particles that ask
+/// in it: the volume's matrix at the step's start, the smoke's clock there and the smoke steps that cover the
+/// step.
+struct GasAt {
+    /// Emitter time of the step's start, and the smoke's source time there and how fast it runs.
+    t0: f64,
+    source0: f64,
+    rate: f64,
+    dt: f64,
+    world: glam::DMat4,
+    inverse: glam::DMat4,
+    snapshots: Vec<(u64, Arc<sr_sim::pyro::Gas>)>,
+}
+
 struct Runtime {
     gas: Option<GasRt>,
     seed: u64,
@@ -174,6 +188,9 @@ struct SceneDriver<'a, 'b> {
     bursts: &'a mut [CraterBurst],
     /// The smoke that drags the particles, with the emitter's drag as the coupling.
     gas: Option<(&'a mut GasRt, &'a mut crate::pyro::Sims, f64)>,
+    /// The gas context of the last few canonical steps asked about, by step index; none where the volume is
+    /// not in the frame.
+    gas_at: Vec<(i64, Option<GasAt>)>,
 }
 impl SceneDriver<'_, '_> {
     fn frame(&mut self, time: f64) -> Arc<FrameGraph> {
@@ -231,42 +248,88 @@ impl SceneDriver<'_, '_> {
         Ok(fresh)
     }
 
+    /// The context of the canonical step that emitter time `time` belongs to, as an index into `gas_at`. It is a
+    /// function of the time alone: the volume's matrix and the smoke's clock are read at the step's start, so
+    /// the answer does not depend on which particle asks or in what order.
+    fn gas_context(&mut self, time: f64) -> Result<usize, Error> {
+        let index = ((time - self.step_origin) / self.step + 1e-9).floor() as i64;
+        if let Some(found) = self.gas_at.iter().position(|(k, _)| *k == index) {
+            return Ok(found);
+        }
+        let Some(id) = self.gas.as_ref().map(|(gas, _, _)| gas.id.clone()) else {
+            return Err(Error::Driver("no gas".into()));
+        };
+        let t0 = self.step_origin + index as f64 * self.step;
+        let frame = self.frame(t0);
+        let built = match frame.nodes.iter().position(|n| n.id == id) {
+            None => None,
+            Some(i) => {
+                let n = &frame.nodes[i];
+                let clock = crate::pyro::gas_clock(n).map_err(Error::Driver)?;
+                let rate = crate::pyro::value(&*n.elem, Some(&n.props), "animationSpeed", 1.0);
+                let source0 =
+                    n.local_time * rate + crate::pyro::value(&*n.elem, Some(&n.props), "animationOffset", 0.0);
+                let world = crate::sim3d::world3(&frame, i, 0);
+                let inverse = world.inverse();
+                if !(source0.is_finite() && world.is_finite() && inverse.is_finite()) {
+                    return Err(Error::Driver(format!("gas {id}: the volume's time or transform is not usable")));
+                }
+                // the smoke steps that cover the particle step, from the one at or before its start to the one
+                // after its end
+                let first = (source0.max(0.0) / clock.dt + 1e-9).floor() as u64;
+                let last = ((source0 + rate * self.step).max(0.0) / clock.dt + 1e-9).floor() as u64 + 1;
+                let keep = (last - first + 1) as usize + 2;
+                let mut snapshots = Vec::new();
+                for k in first..=last.max(first) {
+                    snapshots.push((k, self.gas_step(&frame, i, k, keep)?));
+                }
+                Some(GasAt { t0, source0, rate, dt: clock.dt, world, inverse, snapshots })
+            }
+        };
+        if self.gas_at.len() >= 4 {
+            self.gas_at.remove(0);
+        }
+        self.gas_at.push((index, built));
+        Ok(self.gas_at.len() - 1)
+    }
+
     /// The velocity, in the world's axes, of the gas at a world position at emitter time `time`: the linear
     /// interpolation in time of the two smoke steps around the instant, each sampled in the volume's own axes.
     /// A volume that is not in the frame is no gas.
     fn gas_velocity(&mut self, time: f64, position: [f64; 3]) -> Result<[f64; 3], Error> {
-        let Some((id, step)) = self.gas.as_ref().map(|(gas, _, _)| (gas.id.clone(), self.step)) else {
-            return Ok([0.0; 3]);
-        };
-        let frame = self.frame(time);
-        let Some(i) = frame.nodes.iter().position(|n| n.id == id) else { return Ok([0.0; 3]) };
-        let n = &frame.nodes[i];
-        let clock = crate::pyro::gas_clock(n).map_err(Error::Driver)?;
-        let source = n.local_time * crate::pyro::value(&*n.elem, Some(&n.props), "animationSpeed", 1.0)
-            + crate::pyro::value(&*n.elem, Some(&n.props), "animationOffset", 0.0);
-        let ratio = source.max(0.0) / clock.dt;
-        if !ratio.is_finite() {
-            return Err(Error::Driver(format!("gas {id}: the smoke's time is not a number")));
-        }
-        // the step at or before the instant, with the rounding the smoke's own timeline uses at a boundary
+        let slot = self.gas_context(time)?;
+        let Some(at) = self.gas_at[slot].1.as_ref() else { return Ok([0.0; 3]) };
+        let ratio = (at.source0 + at.rate * (time - at.t0)).max(0.0) / at.dt;
         let nearest = ratio.round();
         let first =
             if (ratio - nearest).abs() <= f64::EPSILON * 4.0 * ratio.max(1.0) { nearest } else { ratio.floor() };
         let weight = (ratio - first).clamp(0.0, 1.0);
-        let keep = (step / clock.dt).ceil() as usize + 3;
-        let world = crate::sim3d::world3(&frame, i, 0);
-        let inverse = world.inverse();
-        if !(world.is_finite() && inverse.is_finite()) {
-            return Err(Error::Driver(format!("gas {id}: the volume's transform is not invertible")));
+        let k = first as u64;
+        let found = |k: u64| at.snapshots.iter().find(|(s, _)| *s == k).map(|(_, g)| g.clone());
+        // a time a rounding past the step the snapshots were taken for asks for its own
+        let (a, b) = match (found(k), found(k + 1)) {
+            (Some(a), Some(b)) => (a, Some(b)),
+            (Some(a), None) if weight <= 1e-12 => (a, None),
+            _ => {
+                let frame = self.frame(at.t0);
+                let id = self.gas.as_ref().map(|(g, _, _)| g.id.clone()).expect("a gas");
+                let i = frame
+                    .nodes
+                    .iter()
+                    .position(|n| n.id == id)
+                    .ok_or_else(|| Error::Driver("the smoke is gone".into()))?;
+                let a = self.gas_step(&frame, i, k, 8)?;
+                (a, if weight > 1e-12 { Some(self.gas_step(&frame, i, k + 1, 8)?) } else { None })
+            }
+        };
+        let at = self.gas_at[slot].1.as_ref().expect("the context is still there");
+        let point = at.inverse.transform_point3(DVec3::from(position)).to_array();
+        let mut u = a.velocity_at(point);
+        if let Some(next) = b {
+            let later = next.velocity_at(point);
+            u = std::array::from_fn(|c| (1.0 - weight) * u[c] + weight * later[c]);
         }
-        let point = inverse.transform_point3(DVec3::from(position)).to_array();
-        let first = first as u64;
-        let mut u = self.gas_step(&frame, i, first, keep)?.velocity_at(point);
-        if weight > 1e-12 {
-            let next = self.gas_step(&frame, i, first + 1, keep)?.velocity_at(point);
-            u = std::array::from_fn(|a| (1.0 - weight) * u[a] + weight * next[a]);
-        }
-        Ok(world.transform_vector3(DVec3::from(u)).to_array())
+        Ok(at.world.transform_vector3(DVec3::from(u)).to_array())
     }
 
     /// The emitter's time at which the source clock reads `t`, for the clocks an emitter can
@@ -472,6 +535,7 @@ impl Sims {
                     lift: rt.lift,
                     bursts: &mut rt.crater_bursts,
                     gas: rt.gas.as_mut().map(|gas| (gas, &mut *pyro, rt.emitter.spec().drag)),
+                    gas_at: Vec::new(),
                 };
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
                 let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);

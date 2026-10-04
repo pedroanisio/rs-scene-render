@@ -929,9 +929,12 @@ evaluator and a smoke that kept no checkpoint but the first give the same bits. 
 (the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) are charged to the volume's
 `maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
 smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
-the target must hold a native pyro volume. Estimated cost: about 250 ns per query and two queries per particle
-per canonical step, so 100 000 particles over a 6 s film at 24 steps a second take about 7 s of one core, which
-was not measured. The coupling is linear in the relative velocity and one way: the particles do not push the gas, and for
+the target must hold a native pyro volume. Measured cost (release, one core, 20 000 particles over 25 canonical steps of 0.1 s in a 32-cell smoke):
+0.77 s more than naming the gas with no drag, that is 1.5 microseconds per particle step (about five gas queries
+of 300 ns, since the integrator asks at several points of a step), so 100 000 particles over a 6 s film at 24
+steps a second would take about 22 s, serial because the driver is asked one particle at a time. The context of a
+canonical step (the volume's matrix and the smoke's clock at its start, the smoke steps that cover it) is built
+once per step. The coupling is linear in the relative velocity and one way: the particles do not push the gas, and for
 0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic drag is a rate of about 0.03 per second, so it
 moves dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
 

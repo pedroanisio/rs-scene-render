@@ -191,3 +191,28 @@ fn a_smoke_that_fails_fails_the_particles_by_name_and_does_not_leave_them_in_sti
     let said = frame.failures.iter().chain(&frame.problems).any(|m| m.contains("dust") && m.contains("cloud"));
     assert!(said, "{:?} {:?}", frame.failures, frame.problems);
 }
+
+/// Time to evaluate 20 000 particles to 3 s with and without the gas: `cargo test --release -p sr-eval --test
+/// particles_gas cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement"]
+fn cost_of_the_gas_per_particle_step() {
+    let run = |emitter: &'static str, drag: f64| {
+        let xml = Setup { emitter, drag, ..Setup::default() }
+            .xml()
+            .replace(r#"maxParticles="10""#, r#"maxParticles="30000""#)
+            .replace(r#"<burst time="0.5" count="1"/>"#, r#"<burst time="0.5" count="20000"/>"#);
+        let ev = evaluator(&xml.replace(r#"speed="0""#, r#"speed="2" spread="360""#));
+        let started = std::time::Instant::now();
+        let frame = ev.evaluate(3.0);
+        assert!(frame.problems.is_empty() && frame.failures.is_empty(), "{:?} {:?}", frame.problems, frame.failures);
+        started.elapsed().as_secs_f64()
+    };
+    let (without, idle, with) = (run("", 2.0), run(r#"gas="cloud""#, 0.0), run(r#"gas="cloud""#, 2.0));
+    // 20 000 particles, 25 canonical steps of 0.1 s after the burst, two queries each (and one more per hit)
+    let queries = 20_000.0 * 25.0 * 2.0;
+    println!(
+        "GAS cost: {without:.2} s without, {idle:.2} s naming it with no drag, {with:.2} s with the gas (the smoke included); about {:.0} ns a query beyond the smoke",
+        1e9 * (with - idle).max(0.0) / queries
+    );
+}
