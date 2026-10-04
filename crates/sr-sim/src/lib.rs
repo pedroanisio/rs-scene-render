@@ -17,6 +17,7 @@
 
 #![allow(clippy::manual_is_multiple_of)]
 
+pub mod cratering;
 pub mod erosion;
 pub mod fields;
 pub mod flock;
