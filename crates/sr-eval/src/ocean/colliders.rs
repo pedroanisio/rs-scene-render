@@ -7,6 +7,8 @@ use glam::{DMat4, DVec3};
 pub(super) struct Colliders {
     /// Whether what the objects do to the water is attenuated by its depth (`bedResponse`).
     filtered: bool,
+    /// Form-drag coefficient of the horizontal exchange with the water (`bodyDrag`).
+    drag: f64,
     beds: Vec<Bed>,
     bodies: Vec<Body>,
     /// Entries of the `colliders` list, which bound the tags.
@@ -50,6 +52,15 @@ pub(super) struct Crossing {
 /// unit and its mass.
 type Posed = ([f64; 3], f64, f64, f64, f64);
 
+/// How a body moves through the water it is in, as its columns show it.
+#[derive(Clone, Copy, Debug)]
+struct Motion {
+    /// Thickness-weighted horizontal velocity (x, z), ocean-local units per second.
+    velocity: [f64; 2],
+    /// Area of the part below the rest level that it presents to a flow along its motion through the water.
+    area: f64,
+}
+
 /// Where a vertical line through a column meets a body's surface.
 struct Hit {
     column: u32,
@@ -75,6 +86,7 @@ impl Colliders {
         water_level: f64,
         budget: usize,
         filtered: bool,
+        drag: f64,
     ) -> Result<Colliders, String> {
         if ids.len() > 4096 {
             return Err("at most 4096 ocean colliders".into());
@@ -142,6 +154,7 @@ impl Colliders {
         }
         Ok(Colliders {
             filtered,
+            drag,
             beds,
             bodies,
             slots: ids.len(),
@@ -154,6 +167,12 @@ impl Colliders {
 
     pub(super) fn has_bodies(&self) -> bool {
         !self.bodies.is_empty()
+    }
+
+    /// Whether bodies give the water momentum by a drag the driver states (with the depth filter),
+    /// instead of relaxing it toward their velocity.
+    pub(super) fn pushes(&self) -> bool {
+        self.filtered && !self.bodies.is_empty()
     }
 
     /// The bound of the tags the solver is given: a body tags its columns with its position in the
@@ -258,7 +277,10 @@ impl Colliders {
         for i in 0..self.bodies.len() {
             thickness.fill(0.);
             heights.fill(0.);
-            self.occupy(
+            // the water the body goes through, as it stood at the end of the last step
+            let water =
+                forcing.bodies.iter().find(|b| b.owner == self.bodies[i].slot as u32).map_or([0.; 2], |b| b.velocity);
+            let motion = self.occupy(
                 i,
                 spec,
                 ocean,
@@ -270,6 +292,7 @@ impl Colliders {
                 &mut momentum,
                 &mut held_most,
                 (&mut thickness, &mut heights),
+                water,
             )?;
             if self.filtered {
                 // the volume the body displaces, at the height of its middle above the bed, over the depth
@@ -282,20 +305,35 @@ impl Colliders {
                 }
                 if volume > 0. {
                     let depth = deep / volume;
-                    let filtered = depth > 0.
-                        && sr_sim::ocean::lift::depth_response(
+                    let (placed, _) = if depth > 0. {
+                        sr_sim::ocean::lift::depth_response_sparse(
                             spec.cells,
                             spec.cell_size,
                             depth,
                             up / volume,
                             &thickness,
-                            &mut raise,
                             &|c| forcing.bed[c] - level > spec.dry_tolerance,
                         )
-                        .map_err(|e| e.to_string())?;
-                    if !filtered && depth <= 0. {
-                        for (r, t) in raise.iter_mut().zip(&thickness) {
-                            *r += t;
+                        .map_err(|e| e.to_string())?
+                    } else {
+                        (thickness.iter().enumerate().filter(|(_, t)| **t > 0.).map(|(c, t)| (c, *t)).collect(), true)
+                    };
+                    for &(c, v) in &placed {
+                        raise[c] += v;
+                    }
+                    if let Some(motion) = motion.filter(|_| self.pushes()) {
+                        // the form drag of the body on the water it goes through, spread as its volume is
+                        let relative = [motion.velocity[0] - water[0], motion.velocity[1] - water[1]];
+                        let speed = relative[0].hypot(relative[1]);
+                        let total: f64 = placed.iter().map(|(_, v)| v).sum();
+                        if speed > 0. && motion.area > 0. && total > 0. {
+                            let scale = 0.5 * self.drag * motion.area * speed * spec.dt;
+                            forcing.pushes.push(sim::Push {
+                                owner: self.bodies[i].slot as u32,
+                                target: motion.velocity,
+                                momentum: [scale * relative[0], scale * relative[1]],
+                                columns: placed.iter().map(|&(c, v)| (c as u32, v / total)).collect(),
+                            });
                         }
                     }
                 }
@@ -414,9 +452,10 @@ impl Colliders {
         momentum: &mut [[f64; 2]],
         held_most: &mut [f64],
         (thickness_of_body, heights): (&mut [f64], &mut [f64]),
-    ) -> Result<(), String> {
+        water: [f64; 2],
+    ) -> Result<Option<Motion>, String> {
         let body = &self.bodies[index];
-        let Some(j) = frame.nodes.iter().position(|n| n.id == body.id) else { return Ok(()) };
+        let Some(j) = frame.nodes.iter().position(|n| n.id == body.id) else { return Ok(None) };
         let now = inverse * crate::sim3d::world3(frame, j, 0);
         // The body's velocity is the displacement of a material point over one
         // canonical step, forward when the body is still there, otherwise backward.
@@ -450,6 +489,7 @@ impl Colliders {
         self.hits.sort_unstable_by(|a, b| {
             a.column.cmp(&b.column).then(a.y.total_cmp(&b.y)).then(a.triangle.cmp(&b.triangle))
         });
+        let (mut total, mut moving, mut deepest) = (0., [0.; 2], f64::MIN);
         let mut start = 0;
         while start < self.hits.len() {
             let column = self.hits[start].column;
@@ -492,10 +532,26 @@ impl Colliders {
                 }
                 momentum[c][0] += thickness * velocity.x;
                 momentum[c][1] += thickness * velocity.z;
+                total += thickness;
+                moving[0] += thickness * velocity.x;
+                moving[1] += thickness * velocity.z;
+                deepest = deepest.max(high);
             }
             start = end;
         }
-        Ok(())
+        if total <= 0. {
+            return Ok(None);
+        }
+        let velocity = [moving[0] / total, moving[1] / total];
+        // the area its wet part presents to the flow it goes through, from the way it moves through the water
+        let relative = [velocity[0] - water[0], velocity[1] - water[1]];
+        let speed = relative[0].hypot(relative[1]);
+        let area = if speed > 0. && self.filtered {
+            frontal_area(&moved, &body.triangles, [relative[0] / speed, relative[1] / speed], self.water_level, deepest)
+        } else {
+            0.
+        };
+        Ok(Some(Motion { velocity, area }))
     }
 }
 
@@ -579,4 +635,50 @@ impl Bed {
         }
         Ok(())
     }
+}
+
+/// Area that the part of a closed surface between the heights `low` and `high` (scene y) presents to
+/// a horizontal flow along the unit `direction` (x, z): half the sum, over its triangles cut to that
+/// slab, of the area of their projection on the plane the flow is normal to (each point of the
+/// outline is covered twice, front and back). The caps that the cuts leave are horizontal and add no
+/// area seen from the side.
+pub(super) fn frontal_area(
+    points: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    direction: [f64; 2],
+    low: f64,
+    high: f64,
+) -> f64 {
+    let flow = DVec3::new(direction[0], 0., direction[1]);
+    let mut total = 0.;
+    for t in triangles {
+        let mut polygon: Vec<DVec3> = t.iter().map(|&i| DVec3::from_array(points[i as usize])).collect();
+        // keep y >= low, then y <= high
+        for (above, limit) in [(true, low), (false, high)] {
+            let inside = |p: &DVec3| if above { p.y >= limit } else { p.y <= limit };
+            let mut out = Vec::with_capacity(polygon.len() + 2);
+            for k in 0..polygon.len() {
+                let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+                if inside(&a) {
+                    out.push(a);
+                }
+                if inside(&a) != inside(&b) {
+                    out.push(a + (b - a) * ((limit - a.y) / (b.y - a.y)));
+                }
+            }
+            polygon = out;
+            if polygon.len() < 3 {
+                break;
+            }
+        }
+        if polygon.len() < 3 {
+            continue;
+        }
+        let mut vector_area = DVec3::ZERO;
+        for k in 0..polygon.len() {
+            vector_area += polygon[k].cross(polygon[(k + 1) % polygon.len()]);
+        }
+        total += 0.5 * vector_area.dot(flow).abs() * 0.5;
+    }
+    total
 }

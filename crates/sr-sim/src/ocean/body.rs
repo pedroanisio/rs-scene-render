@@ -1,5 +1,5 @@
 //! Horizontal momentum that bodies in the water column give to the water.
-use super::{BodySample, Forcing, Spec, State, Q};
+use super::{BodySample, Forcing, Push, Spec, State, Q};
 use std::collections::BTreeMap;
 
 /// Relaxes the horizontal velocity of every column a body occupies toward the
@@ -153,4 +153,35 @@ pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing) -> Vec<BodySampl
             sample
         })
         .collect()
+}
+
+/// Applies, over a substep of `dt` in a canonical step of `step`, the share `dt / step` of every
+/// push: each column takes its share of the momentum, toward the body's velocity times the column's
+/// depth and never past it, and nothing goes to a dry column. Returns the momentum given in all,
+/// and adds each body's part to `by`: what was applied is what the body is credited with.
+pub(super) fn push(spec: &Spec, q: &mut [Q], pushes: &[Push], by: &mut [[f64; 2]], dt: f64, step: f64) -> [f64; 2] {
+    let area = spec.cell_size * spec.cell_size;
+    let share = dt / step;
+    let mut given = [0.0; 2];
+    for push in pushes {
+        for &(c, weight) in &push.columns {
+            let cell = &mut q[c as usize];
+            if cell[0] < spec.dry_tolerance {
+                continue;
+            }
+            for a in 0..2 {
+                let wanted = push.momentum[a] * weight / area * share;
+                let room = push.target[a] * cell[0] - cell[a + 1];
+                if wanted * room > 0.0 {
+                    let amount = wanted.abs().min(room.abs()).copysign(wanted);
+                    cell[a + 1] += amount;
+                    given[a] += amount * area;
+                    if let Some(by) = by.get_mut(push.owner as usize) {
+                        by[a] += amount * area;
+                    }
+                }
+            }
+        }
+    }
+    given
 }

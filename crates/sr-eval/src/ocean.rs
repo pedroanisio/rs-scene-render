@@ -67,6 +67,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         moving_bed: false,
         bodies: false,
         body_owners: 0,
+        body_push: false,
     };
     let count = spec.cells[0].checked_mul(spec.cells[1]).ok_or("ocean cell count overflow")?;
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
@@ -126,10 +127,12 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             f("waterLevel", 0.),
             bytes("meshMemoryMiB", 128.)?,
             text(e, "bedResponse").as_deref() != Some("hydrostatic"),
+            f("bodyDrag", 1.),
         )?;
         spec.moving_bed = true;
         spec.bodies = built.has_bodies();
         spec.body_owners = built.body_count();
+        spec.body_push = built.pushes();
         Some(built)
     };
     let entries = cavity::read(e, &collider_ids)?;
@@ -256,8 +259,8 @@ impl Sims {
                         })?;
                     }
                     #[cfg(test)]
-                    if let Some((step, _)) = forcing.exchange {
-                        tests::OFFERS.with(|o| o.borrow_mut().push((step, forcing.bodies.clone())));
+                    if let Some((step, momentum)) = forcing.exchange {
+                        tests::OFFERS.with(|o| o.borrow_mut().push((step, momentum, forcing.bodies.clone())));
                     }
                     let (Some(colliders), Some(node)) = (colliders.as_mut(), node) else {
                         return Err(sim::Error::Invalid("ocean collider without a scene node"));
@@ -366,9 +369,13 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// What a bed driver was offered with a completed step: its number, the momentum all the bodies gave
+    /// the water in it, and the water around each body.
+    pub(super) type Offer = (u64, [f64; 2], Vec<sim::BodySample>);
+
     thread_local! {
         /// What the bed driver was offered per body with each completed step.
-        pub(super) static OFFERS: RefCell<Vec<(u64, Vec<sim::BodySample>)>> = const { RefCell::new(Vec::new()) };
+        pub(super) static OFFERS: RefCell<Vec<Offer>> = const { RefCell::new(Vec::new()) };
     }
 
     #[test]
@@ -387,7 +394,7 @@ mod tests {
         let frame = ev.evaluate(0.5);
         assert!(frame.problems.is_empty(), "{:?}", frame.problems);
         let offers = OFFERS.with(|o| o.borrow().clone());
-        let (_, bodies) = offers.iter().find(|(step, _)| *step == 3).expect("an offer for step 3");
+        let (_, _, bodies) = offers.iter().find(|(step, ..)| *step == 3).expect("an offer for step 3");
         // the surface is entry 0 of the list; `right` is 1 and `left` is 2
         assert_eq!(bodies.iter().map(|b| b.owner).collect::<Vec<_>>(), [1, 2]);
         for b in bodies {
@@ -427,5 +434,130 @@ mod tests {
             ]);
         }
         assert_eq!(frame_key(&fixed, 24), expected);
+    }
+
+    /// A sphere of `radius` at depth `y`, moving at (`vx`, `vz`), in water 20 deep that fills 128 x 128.
+    fn moving(response: &str, radius: f64, y: f64, vx: f64, drag: f64) -> String {
+        format!(
+            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="rock" primitive="sphere" radius="{radius}" y="{y}" segments="32"><rigidBody shape="sphere" mass="1000" velocityX="{vx}" restitution="0" linearDamping="0" angularDamping="0"/></object3D>
+          <ocean id="sea" bedResponse="{response}" bodyDrag="{drag}" width="128" depth="128" cellSize="1" bottomDepth="20" dt="0.0416666666666667" boundary="closed" colliders="rock" maxWork="100000000000"/>
+        </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#
+        )
+    }
+
+    fn offers_of(xml: &str, until: f64) -> Vec<Offer> {
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        OFFERS.with(|o| o.borrow_mut().clear());
+        let frame = ev.evaluate(until);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        OFFERS.with(|o| o.borrow().clone())
+    }
+
+    #[test]
+    fn the_form_drag_on_the_water_is_that_of_a_sphere_through_still_water() {
+        // 2 m radius, 20 m/s through water at rest: F / rho = (1/2) Cd A U^2 with A = pi a^2 and Cd = 1
+        let offers = offers_of(&moving("depthFiltered", 2., 10., 20., 1.), 0.2);
+        let (_, _, bodies) = offers.iter().find(|(step, ..)| *step == 1).expect("the first step");
+        let wanted = 0.5 * 1. * std::f64::consts::PI * 4. * 400. * 0.0416666666666667;
+        let given = bodies[0].impulse[0];
+        println!("DRAG first step gave {given:.2}, (1/2) Cd A U^2 dt is {wanted:.2}");
+        assert!((given - wanted).abs() < 0.04 * wanted, "{given} against {wanted}");
+        assert!(bodies[0].impulse[1].abs() < 1e-9 * given, "along the motion only: {:?}", bodies[0].impulse);
+        // a smaller Cd gives proportionally less, and none gives none
+        let half = offers_of(&moving("depthFiltered", 2., 10., 20., 0.5), 0.2);
+        let (_, _, half) = half.iter().find(|(step, ..)| *step == 1).unwrap();
+        assert!((half[0].impulse[0] - 0.5 * given).abs() < 1e-6 * given);
+        let none = offers_of(&moving("depthFiltered", 2., 10., 20., 0.), 0.2);
+        let (_, _, none) = none.iter().find(|(step, ..)| *step == 1).unwrap();
+        assert_eq!(none[0].impulse, [0.; 2]);
+    }
+
+    #[test]
+    fn the_water_is_pushed_less_as_it_comes_to_move_with_the_body() {
+        let offers = offers_of(&moving("depthFiltered", 2., 10., 20., 1.), 2.0);
+        let each: Vec<f64> = offers.iter().filter(|(step, ..)| *step >= 1).map(|(_, _, b)| b[0].impulse[0]).collect();
+        assert!(each.len() > 20 && each.iter().all(|v| *v > 0.), "{each:?}");
+        // the drag is on the velocity of the body relative to the water under it, which the push raises
+        assert!(each[10] < each[0], "{} against {}", each[10], each[0]);
+    }
+
+    #[test]
+    fn what_all_the_bodies_gave_is_what_the_water_received_with_the_credit_for_each() {
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="a" primitive="sphere" radius="2" x="-40" y="10" segments="24"><rigidBody shape="sphere" mass="1000" velocityX="15" restitution="0" linearDamping="0" angularDamping="0"/></object3D>
+          <object3D id="b" primitive="sphere" radius="3" x="40" z="30" y="10" segments="24"><rigidBody shape="sphere" mass="1000" velocityX="-10" velocityZ="-5" restitution="0" linearDamping="0" angularDamping="0"/></object3D>
+          <ocean id="sea" width="128" depth="128" cellSize="1" bottomDepth="20" dt="0.0416666666666667" boundary="closed" colliders="a b" maxWork="100000000000"/>
+        </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#;
+        let offers = offers_of(xml, 1.5);
+        for (step, total, bodies) in offers.iter().filter(|(step, ..)| *step >= 1) {
+            let sum = bodies.iter().fold([0.; 2], |s, b| [s[0] + b.impulse[0], s[1] + b.impulse[1]]);
+            for axis in 0..2 {
+                assert!(
+                    (sum[axis] - total[axis]).abs() <= 1e-9 * total[axis].abs().max(1e-9),
+                    "step {step}: {sum:?} against {total:?}"
+                );
+            }
+            assert_eq!(bodies.len(), 2, "step {step}");
+        }
+        let (_, _, last) = offers.last().unwrap();
+        assert!(last[0].impulse[0] > 0. && last[1].impulse[0] < 0. && last[1].impulse[1] < 0., "{last:?}");
+    }
+
+    #[test]
+    fn the_frontal_area_of_a_closed_surface_is_what_the_flow_sees_of_it() {
+        // a box 2 (x) by 3 (y) by 4 (z) across y in 0..3: flow along x sees 3 x 4, along z sees 2 x 3, and cut at y = 1 and 2 sees one third
+        let (x, y, z) = (1., 3., 2.);
+        let corners: Vec<[f64; 3]> = (0..8)
+            .map(|i| {
+                [if i & 1 == 0 { -x } else { x }, if i & 2 == 0 { 0. } else { y }, if i & 4 == 0 { -z } else { z }]
+            })
+            .collect();
+        let faces: [[u32; 3]; 12] = [
+            [0, 1, 3],
+            [0, 3, 2],
+            [4, 6, 7],
+            [4, 7, 5],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+        ];
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9 * b.max(1.);
+        assert!(close(colliders::frontal_area(&corners, &faces, [1., 0.], -10., 10.), 12.));
+        assert!(close(colliders::frontal_area(&corners, &faces, [0., 1.], -10., 10.), 6.));
+        assert!(close(colliders::frontal_area(&corners, &faces, [1., 0.], 1., 2.), 4.));
+        // at 45 degrees it sees both faces: (3 x 4 + 3 x 2) / sqrt(2)
+        assert!(close(
+            colliders::frontal_area(&corners, &faces, [0.5f64.sqrt(), 0.5f64.sqrt()], -10., 10.),
+            18. * 0.5f64.sqrt()
+        ));
+        // a sphere of radius 2, tessellated, sees close to pi a^2
+        let (rings, around) = (32usize, 48usize);
+        let mut points = vec![[0., -2., 0.], [0., 2., 0.]];
+        for r in 1..rings {
+            let phi = std::f64::consts::PI * r as f64 / rings as f64;
+            for a in 0..around {
+                let theta = std::f64::consts::TAU * a as f64 / around as f64;
+                points.push([2. * phi.sin() * theta.cos(), -2. * phi.cos(), 2. * phi.sin() * theta.sin()]);
+            }
+        }
+        let at = |r: usize, a: usize| (2 + (r - 1) * around + a % around) as u32;
+        let mut triangles = Vec::new();
+        for a in 0..around {
+            triangles.push([0, at(1, a), at(1, a + 1)]);
+            triangles.push([1, at(rings - 1, a + 1), at(rings - 1, a)]);
+            for r in 1..rings - 1 {
+                triangles.push([at(r, a), at(r + 1, a), at(r + 1, a + 1)]);
+                triangles.push([at(r, a), at(r + 1, a + 1), at(r, a + 1)]);
+            }
+        }
+        let area = colliders::frontal_area(&points, &triangles, [1., 0.], -10., 10.);
+        assert!((area - std::f64::consts::PI * 4.).abs() < 0.01 * std::f64::consts::PI * 4., "{area}");
     }
 }

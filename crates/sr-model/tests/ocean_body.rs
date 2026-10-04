@@ -26,8 +26,10 @@ fn the_water_can_act_on_the_bodies_it_carries() {
 }
 
 #[test]
-fn coupling_needs_bodies_to_couple_and_drag_needs_coupling() {
+fn coupling_needs_bodies_to_couple_and_drag_needs_colliders() {
     assert!(codes(&xml(r#"bodyCoupling="buoyancy""#)).contains(&"OCN8".into()));
-    assert!(codes(&xml(r#"colliders="float" bodyDrag="1""#)).contains(&"OCN9".into()));
-    assert!(codes(&xml(r#"colliders="float" bodyCoupling="none" bodyDrag="1""#)).contains(&"OCN9".into()));
+    // the drag also acts, without any coupling, on the momentum bodies give the water
+    assert!(codes(&xml(r#"colliders="float" bodyDrag="1""#)).is_empty());
+    assert!(codes(&xml(r#"colliders="float" bodyCoupling="none" bodyDrag="1""#)).is_empty());
+    assert!(codes(&xml(r#"bodyDrag="1""#)).contains(&"OCN9".into()));
 }

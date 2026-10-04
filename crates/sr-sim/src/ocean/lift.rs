@@ -81,18 +81,18 @@ fn response(k: f64, depth: f64, height: f64) -> f64 {
     (a + b) / (1.0 + c)
 }
 
-/// Filters the non-negative `part` over the grid `cells` of square cells of side `cell`, adding the
-/// result to `out`. `wet` says which cells may receive water. Returns false, adding the part
-/// unfiltered, when its extent is too wide for one transform.
-fn filter_part(
+/// Filters the non-negative `part` over the grid `cells` of square cells of side `cell` and returns
+/// the columns that receive water, with the amounts, in order of column. `wet` says which cells may
+/// receive water. The flag is false, and the amounts are the part itself, when its extent is too
+/// wide for one transform.
+fn filter_sparse(
     cells: [usize; 2],
     cell: f64,
     depth: f64,
     height: f64,
     part: &[f64],
-    out: &mut [f64],
     wet: &dyn Fn(usize) -> bool,
-) -> bool {
+) -> (Vec<(usize, f64)>, bool) {
     let [nx, nz] = cells;
     let mut low = [usize::MAX; 2];
     let mut high = [0usize; 2];
@@ -106,14 +106,11 @@ fn filter_part(
         }
     }
     if total == 0.0 || low[0] == usize::MAX {
-        return true;
+        return (Vec::new(), true);
     }
     let extent = [high[0] - low[0] + 1, high[1] - low[1] + 1];
     if extent[0] > MAX_WINDOW || extent[1] > MAX_WINDOW {
-        for (o, v) in out.iter_mut().zip(part) {
-            *o += v;
-        }
-        return false;
+        return (part.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(c, v)| (c, *v)).collect(), false);
     }
     let reach = (REACH * depth / cell).ceil().max(1.0) as usize;
     // room for the margin when it fits in a window, else as much as does
@@ -145,7 +142,7 @@ fn filter_part(
     let scale = 1.0 / (size[0] * size[1]) as f64;
     // what falls inside the domain, on wet cells, is renormalised to the whole
     let mut kept = 0.0;
-    let mut placed = Vec::new();
+    let mut placed: Vec<(usize, f64)> = Vec::new();
     for iz in 0..size[1] {
         for ix in 0..size[0] {
             let (x, z) = ((low[0] + ix) as isize - margin[0] as isize, (low[1] + iz) as isize - margin[1] as isize);
@@ -161,16 +158,48 @@ fn filter_part(
         }
     }
     if kept <= 0.0 {
-        for (o, v) in out.iter_mut().zip(part) {
-            *o += v;
-        }
-        return true;
+        return (part.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(c, v)| (c, *v)).collect(), true);
     }
     let renormalise = total / kept;
-    for (c, v) in placed {
-        out[c] += v * renormalise;
+    for (_, v) in placed.iter_mut() {
+        *v *= renormalise;
     }
-    true
+    (placed, true)
+}
+
+/// As [`depth_response`] for a non-negative `field`, giving the columns and amounts instead of
+/// adding them to a vector the size of the grid, in order of column.
+pub fn depth_response_sparse(
+    cells: [usize; 2],
+    cell: f64,
+    depth: f64,
+    height: f64,
+    field: &[f64],
+    wet: &dyn Fn(usize) -> bool,
+) -> Result<(Vec<(usize, f64)>, bool), Error> {
+    if !(depth.is_finite() && depth > 0.0 && cell.is_finite() && cell > 0.0 && height.is_finite())
+        || field.len() != cells[0] * cells[1]
+        || field.iter().any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(Error::Invalid("depth response depth, cell size, grid or displacement"));
+    }
+    Ok(filter_sparse(cells, cell, depth, height.clamp(0.0, depth), field, wet))
+}
+
+fn filter_part(
+    cells: [usize; 2],
+    cell: f64,
+    depth: f64,
+    height: f64,
+    part: &[f64],
+    out: &mut [f64],
+    wet: &dyn Fn(usize) -> bool,
+) -> bool {
+    let (placed, whole) = filter_sparse(cells, cell, depth, height, part, wet);
+    for (c, v) in placed {
+        out[c] += v;
+    }
+    whole
 }
 
 /// Adds to `out` the surface response, at depth `depth` and for a displacement at height `height`

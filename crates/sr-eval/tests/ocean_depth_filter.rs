@@ -134,3 +134,47 @@ fn the_filtered_water_replays_identically_and_does_not_depend_on_the_threads() {
         assert_eq!(sea(&first).key, sea(&other).key, "{threads} threads");
     }
 }
+
+/// A sphere of radius 2 at depth `y` moving at `speed` along x through water 20 deep.
+fn pass(response: &str, speed: f64, drag: f64) -> String {
+    format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="rock" primitive="sphere" radius="2" x="-60" y="10" segments="24"><rigidBody shape="sphere" mass="1000" velocityX="{speed}" restitution="0" linearDamping="0" angularDamping="0"/></object3D>
+          <ocean id="sea" bedResponse="{response}" bodyDrag="{drag}" width="192" depth="192" cellSize="1.5" bottomDepth="20" order="2" dt="0.0416666666666667" boundary="closed" colliders="rock" maxWork="100000000000"/>
+        </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#
+    )
+}
+
+#[test]
+fn a_sphere_crossing_deep_water_raises_a_crest_far_below_the_hydrostatic_one() {
+    let highest = |response: &str, speed: f64| {
+        let ev = evaluator(&pass(response, speed, 1.0));
+        (1..=10).map(|k| peak(&at(&ev, 0.25 * k as f64))).fold(f64::MIN, f64::max)
+    };
+    // a sphere 4 m across crossing 20 m of water, at 10 m below the surface: the long-wave answer lifts
+    // the surface by its thickness and its bow wave, the filtered one by a few centimetres to decimetres
+    // (linear theory for the same sphere at rest on the bed gives 0.024 m; the moving case was not solved)
+    for speed in [20.0, 50.0] {
+        let (filtered, hydrostatic) = (highest("depthFiltered", speed), highest("hydrostatic", speed));
+        println!("PASS at {speed} m/s: filtered {filtered:.3} m, hydrostatic {hydrostatic:.3} m");
+        assert!(hydrostatic > 3.0, "{hydrostatic}");
+        assert!(filtered < 0.5 && filtered * 10.0 < hydrostatic, "{filtered} against {hydrostatic}");
+    }
+}
+
+#[test]
+fn the_pushed_water_replays_identically_and_does_not_depend_on_the_threads() {
+    let xml = pass("depthFiltered", 30.0, 1.0);
+    let ev = evaluator(&xml);
+    let first = at(&ev, 1.5);
+    at(&ev, 0.3);
+    at(&ev, 0.9);
+    let again = at(&ev, 1.5);
+    assert_eq!(sea(&first).key, sea(&again).key);
+    assert_eq!(sea(&first).frame, sea(&again).frame);
+    for threads in [1, 2, 8] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let other = pool.install(|| at(&evaluator(&xml), 1.5));
+        assert_eq!(sea(&first).key, sea(&other).key, "{threads} threads");
+    }
+}
