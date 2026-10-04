@@ -11,7 +11,9 @@
 use std::fmt::{Debug, Write};
 
 use sha2::{Digest, Sha256};
-use sr_sim::physics3d::{Body3Spec, BodyKind, Contact3, ContactLogConfig, Fracture3, Shape3, Velocity3, World3Spec};
+use sr_sim::physics3d::{
+    Body3Spec, BodyKind, Contact3, ContactLogConfig, Fracture3, ImpactWatch, Shape3, Velocity3, World3Spec,
+};
 
 /// First eight bytes of a cache that carries velocities, contacts and an identity.
 pub(crate) const MAGIC: &[u8; 8] = b"SRPHYS04";
@@ -46,13 +48,20 @@ pub struct PhysicsTrace {
     pub velocities: Vec<Vec<Velocity3>>,
 }
 
-/// What recording asks of the world for `spec`.
-pub(crate) fn contact_config(spec: &World3Spec) -> ContactLogConfig {
+/// The impulse a body of `mass` pushes with in one step while it rests: its weight in one
+/// step, in scene units, times the factor above. An impact has to push harder.
+pub(crate) fn rest_threshold(mass: f64, gravity: [f64; 3], pixels_per_meter: f64, step: f64) -> f64 {
+    let g = gravity.iter().map(|c| c * c).sum::<f64>().sqrt();
+    RESTING_IMPULSE_FACTOR * mass * g * pixels_per_meter * step
+}
+
+/// What recording asks of the world for `spec`: the threshold for all dynamic bodies, or for
+/// the lightest watched source if that is lower, so that every watched impact is in the record.
+pub(crate) fn contact_config(spec: &World3Spec, watches: &[ImpactWatch]) -> ContactLogConfig {
     let mass: f64 = spec.bodies.iter().filter(|b| b.kind == BodyKind::Dynamic).map(|b| b.mass).sum();
-    let g = spec.gravity.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let weight_impulse = mass * g * spec.pixels_per_meter * spec.step;
+    let all = rest_threshold(mass, spec.gravity, spec.pixels_per_meter, spec.step);
     ContactLogConfig {
-        min_impulse: RESTING_IMPULSE_FACTOR * weight_impulse,
+        min_impulse: watches.iter().map(|w| w.min_impulse).fold(all, f64::min),
         ..ContactLogConfig::new(CONTACTS_PER_STEP, CONTACT_LOG_BYTES)
     }
 }
@@ -187,7 +196,12 @@ fn absorb_shape(id: &mut Identity, shape: &Shape3) {
 
 /// The identity of a 3D world's definition. Destructuring without `..` makes a new field a
 /// compile error here, so it cannot be left out of the identity.
-pub(crate) fn digest_world3(spec: &World3Spec, events: &[Fracture3]) -> [u8; 32] {
+pub(crate) fn digest_world3(
+    spec: &World3Spec,
+    events: &[Fracture3],
+    watches: &[ImpactWatch],
+    links: &[crate::sim3d::CraterLink],
+) -> [u8; 32] {
     let World3Spec { start, step, gravity, pixels_per_meter, iterations, bounds, bodies, joints } = spec;
     let mut id = Identity::new();
     id.value("world", &(start, step, gravity, pixels_per_meter, iterations, bounds, bodies.len(), joints.len()));
@@ -220,6 +234,10 @@ pub(crate) fn digest_world3(spec: &World3Spec, events: &[Fracture3]) -> [u8; 32]
     }
     for event in events {
         id.value("fracture", event);
+    }
+    id.value("impacts", &watches);
+    for link in links {
+        id.value("crater", &(link.watch, link.owner, &*link.source));
     }
     id.finish()
 }

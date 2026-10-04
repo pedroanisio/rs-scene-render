@@ -64,7 +64,7 @@ fn the_target_belongs_to_a_crater_with_a_source_and_is_required_there() {
     for attr in [r#"targetMaterial="softRock""#, r#"targetDensity="2000""#, r#"strength="1""#, r#"gravity="9.8""#] {
         assert!(codes(&impact_xml(&format!("<crater {attr}/>"))).contains(&"CRT7".into()), "{attr}");
     }
-    assert!(codes(&impact_xml(r#"<crater source="rock" targetMaterial="softRock" targetDensity="0"/>"#)).len() > 0);
+    assert!(!codes(&impact_xml(r#"<crater source="rock" targetMaterial="softRock" targetDensity="0"/>"#)).is_empty());
 }
 
 #[test]

@@ -1364,9 +1364,98 @@ and production validation are finished.
 
 Rust and Schematron share **CRT1** (version), **CRT2** (single surface owner),
 **CRT3** (ordered timing), **CRT4** (finite direction/profile/envelope) and
-**CRT5** (rigid-body compatibility). `tests/corpus/valid/crater.scene.xml` and
-`tests/corpus/invalid/crt1.scene.xml` through `crt5.scene.xml` independently
+**CRT5** (rigid-body compatibility), with **CRT6** to **CRT8** for a crater from an
+impact. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
+`tests/corpus/invalid/crt1.scene.xml` through `crt8-self.scene.xml` independently
 exercise the XSD/Schematron and Rust validators.
+
+#### Crater from an impact (`crater@source`)
+
+A crater whose size and timing are the consequence of an impact rather than authored.
+`source` names the dynamic rigid-body object that makes it; the owner is the surface the
+`crater` belongs to. Nothing in the document says when or how big: the crater begins at
+the first step in which the source, approaching the owner, pushes on it with more than
+twice its own weight in one step (so a body resting on the surface never starts one), is
+centred on the impulse-weighted contact point with its axis along the contact normal, and
+grows in composition time over the law's formation time. Radius, depth, rim, start, end,
+centre and axis are derived, so giving any of them is **CRT6**; `targetMaterial` is
+required with a source and the other target attributes belong only to one (**CRT7**); the
+source must be another object3D with a dynamic rigidBody (**CRT8**). `curve`,
+`influenceDepth` and `maxMemoryMiB` keep their meaning. The impact is part of the rigid
+world's state: the same after any seek, with or without the frame memory, in a fresh world
+and from a baked SRPHYS04 cache, which carries the contacts it is found in.
+
+The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
+1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
+`pi2 = g a / U^2` (no factor of 3.22) and `pi3 = Y / (rho U^2)`,
+
+    pi_V = K1 { pi2 (rho/delta)^((6nu - 2 - mu)/(3 mu))
+                + [K2 pi3 (rho/delta)^((6nu - 2)/(3 mu))]^((2 + mu)/2) }^(-3 mu/(2 + mu))
+
+where `m`, `a` and `delta` are the source's mass, equivalent radius and density (mass over
+the volume its shape encloses), `U` is its speed along the contact normal before the step
+(the normal component of the relative velocity, so the crater shrinks as the approach
+turns glancing), `rho`, `Y` the target's density and cratering strength, `g` gravity and
+`nu = 0.33`. The strength term's exponent is `(2 + mu)/2`; the 1993 table prints
+`(2 + mu)/mu`, which Holsapple later corrected. Constants, in SI units (the source gives
+`Y` in dyne/cm2 and `rho` in g/cm3), are those of the author's calculator note,
+"Theory and equations for Craters from Impacts and Explosions"
+(lpi.usra.edu/lunar/tools/lunarcratercalc/theory.pdf), which holds both regimes for every
+material in one table:
+
+| `targetMaterial` | K1 | K2 | mu | Y (Pa) | rho (kg/m3) | Kr / Kd |
+|---|---|---|---|---|---|---|
+| `water` | 0.98 | 0 | 0.55 | 0 | 1000 | 0.8 / 0.75 |
+| `drySand` | 0.132 | 0 | 0.41 | 0 | 1700 | 1.4 / 0.35 |
+| `drySoil` | 0.132 | 0.26 | 0.41 | 2e5 | 1700 | 1.1 / 0.6 |
+| `wetSoil` | 0.095 | 0.35 | 0.55 | 5e5 | 2100 | 1.1 / 0.6 |
+| `softRock` | 0.095 | 0.215 | 0.55 | 1e6 | 2100 | 1.1 / 0.6 |
+| `hardRock` | 0.095 | 0.257 | 0.55 | 1e7 | 3200 | 1.1 / 0.6 |
+| `regolith` | 0.132 | 0.26 | 0.41 | 1e4 | 1500 | 1.1 / 0.6 |
+| `ice` | 0.095 | 0.351 | 0.55 | 1.5e4 | 930 | 1.1 / 0.6 |
+
+The excavated volume is `V = pi_V m / rho`; the crater's radius at the original surface is
+`R = Kr V^(1/3)` and its depth `Kd V^(1/3)` (calculator note); the rim crest is at `1.3 R`
+and `0.036` of the rim diameter high (Housen et al. 1983 profiles; Pike 1977, as quoted
+there); the rim spans from `R` to its crest. In the crater element's kernel, whose profile
+is centred on the crest, `radius` is the crest radius and `rimWidth` is `0.3 R`. The
+formation time is `0.8 sqrt(V^(1/3) / g)` (Schmidt and Housen 1987, via the note; other
+sources give 0.5 to 1, so it is good to a factor of two). The ejected volume, `0.8 V`, and
+the thickness of an inverse-cube blanket at the crest that holds it are computed and
+exposed for the ejecta, but nothing is deposited on the terrain.
+
+Units: `physics@pixelsPerMeter` converts scene units to metres for everything the law reads
+and gives. `targetDensity` is kilograms per cubic metre, `strength` pascals, `gravity`
+metres per second squared; gravity defaults to the magnitude of the physics gravity and is
+an error when that is zero and none is given. Housen and Holsapple (2011, Icarus 211:856-875,
+doi 10.1016/j.icarus.2010.09.017) say the dependences on strength and porosity are "only
+poorly constrained", so the table's strength and density can be overridden; they should
+be read as calibration inputs, not measurements.
+
+Limits of this first version. One crater per element: the first qualifying contact of the
+source with the owner defines it, and later contacts neither start another nor change it.
+The crater is circular, with no elongation or downrange shift for an oblique impact; real
+ones elongate only at grazing angles (Bottke et al. 2000, doi 10.1006/icar.1999.6323;
+Gault and Wedekind 1978), and the asymmetry of an oblique impact is expected to show in
+the ejecta. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law
+is still applied to the normal component, which keeps the size monotone in the angle, and
+no ricochet is modelled. For large, fast craters angle matters less than the normal
+component says above 45 degrees (Davison and Collins 2022, doi 10.1029/2022GL101117). A
+water layer above the owner is not treated: the crater is the seabed's. The `ice` and
+`regolith` rows are the least certain: the author's later table (arXiv:2203.07476) gives
+other constants for every material, for example `hardRock` K1 0.06 against 0.095 here,
+and an ice strength three orders of magnitude higher, so the two tables are not mixed.
+Housen and Holsapple (2011) use `nu = 0.4` where this law uses 0.33, and no verified
+mapping connects their constants to these; ejecta built from the later paper take only the
+shape of their distribution from it. A 40 m iron body at 20 km/s and 45 degrees into hard
+rock gives an apparent crater 0.8 km across here, against a transient crater of 1.3 km in
+the Earth Impact Effects calculator (Collins, Melosh and Marcus 2005,
+doi 10.1111/j.1945-5100.2005.tb00157.x), a difference within what the two laws disagree by.
+
+Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
+Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
+through Holsapple's documents and the papers that cite them. The calculator note's table
+and Holsapple (1993) were read directly.
 
 #### Fracture (native scene, rendering and cache integration implemented)
 

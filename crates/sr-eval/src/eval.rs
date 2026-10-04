@@ -222,6 +222,9 @@ pub struct FrameNode {
     /// Native participating-medium simulation, in the object's local 3D frame.
     #[serde(skip)]
     pub sim_volume: Option<Arc<crate::pyro::SimVolume>>,
+    /// A crater that grows from an impact, once the impact has happened (`crater@source`).
+    #[serde(skip)]
+    pub crater_impact: Option<Arc<crate::crater::ImpactCrater>>,
     /// A 3D rigid body's pose: the object's world matrix (column-major, scene space), replacing
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1126,6 +1129,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             fracture: None,
             sim_image: None,
             sim_volume: None,
+            crater_impact: None,
             pose3: None,
             elem: node.elem.clone(),
         });

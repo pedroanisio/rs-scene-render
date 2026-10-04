@@ -18,7 +18,7 @@ use sr_model::values::{Color, Paint};
 use sr_sim::fields::{Field, FieldKind};
 use sr_sim::particles::{Burst, EmitShape, Emitter, EmitterDriver, EmitterSpec, Walls};
 use sr_sim::physics::{BodyKind, BodySpec, Bounds, Driver, JointKind, JointSpec, PxPose, Shape, World, WorldSpec};
-use sr_sim::physics3d::{Contact3, Pose3, Velocity3};
+use sr_sim::physics3d::{find_impact, Contact3, Impact3, ImpactWatch, Pose3, Velocity3};
 
 use crate::physcache::{self, PhysicsTrace};
 use sr_sim::soft::{SoftKind, SoftSpec};
@@ -413,13 +413,33 @@ struct Cached {
     traced: bool,
     digest: Option<[u8; 32]>,
     contacts: Vec<Contact3>,
+    /// The first impact of each watched pair, found in `contacts`.
+    impacts: Vec<Option<Impact3>>,
     frames: Vec<Vec<f64>>,
 }
 
 impl Cached {
-    fn row(&self, t: f64) -> &[f64] {
+    fn index(&self, t: f64) -> usize {
         let k = if t <= self.start { 0 } else { (((t - self.start) / self.step) + 1e-9).floor() as usize };
-        &self.frames[k.min(self.frames.len().saturating_sub(1))]
+        k.min(self.frames.len().saturating_sub(1))
+    }
+
+    fn row(&self, t: f64) -> &[f64] {
+        &self.frames[self.index(t)]
+    }
+
+    /// The pose of 3D body `body` at the start of step `step`.
+    fn pose3(&self, step: u64, body: usize) -> Pose3 {
+        let row = &self.frames[(step as usize).min(self.frames.len() - 1)];
+        let o = self.bodies * 3 + self.soft_points.iter().sum::<usize>() * 2 + 7 * body;
+        Pose3 { pos: [row[o], row[o + 1], row[o + 2]], rot: [row[o + 3], row[o + 4], row[o + 5], row[o + 6]] }
+    }
+
+    /// Find the first impact of each watched pair in the recorded contacts, as the live
+    /// world does while it runs.
+    fn notice(&mut self, watches: &[ImpactWatch]) {
+        self.impacts =
+            watches.iter().map(|w| find_impact(w, &self.contacts, |step| self.pose3(step, w.owner))).collect();
     }
 
     /// 3D body poses: position then quaternion, after the 2D bodies and soft lattices.
@@ -444,7 +464,9 @@ impl Cached {
             vec![]
         };
         let velocities = self.velocities(f, flags + self.bodies3 + self.fractures);
-        sr_sim::physics3d::Frame3 { bodies, enabled, fractured, velocities, ..Default::default() }
+        let step = self.index(t) as u64;
+        let impacts = self.impacts.iter().map(|i| i.filter(|impact| impact.step < step)).collect();
+        sr_sim::physics3d::Frame3 { bodies, enabled, fractured, velocities, impacts, ..Default::default() }
     }
 
     /// The 3D bodies' velocities from a row, from offset `o`; none in a cache that has none.
@@ -795,7 +817,7 @@ fn build_physics(
                         plan = crate::sim3d::Plan3::Verify;
                     }
                     Ok(c) if counts(&c) => {
-                        cached = Some(c);
+                        cached = Some((path.clone(), c));
                         plan = crate::sim3d::Plan3::Placeholder;
                     }
                     Ok(_) => problems.push(format!(
@@ -820,7 +842,18 @@ fn build_physics(
     let has2 = !spec.bodies.is_empty() || !spec.softs.is_empty();
     let world = if cached.is_some() || traced.is_some() || stale || !has2 { None } else { Some(World::new(spec)) };
     let three = crate::sim3d::build(p, &g3, plan, problems, failures);
-    let mut ph = PhysicsRt { world, three, cached, start, step, bodies, softs, spec_digest, follow };
+    let mut ph = PhysicsRt { world, three, cached: None, start, step, bodies, softs, spec_digest, follow };
+    if let Some((path, c)) = cached {
+        // a cache from before contacts were recorded cannot say when a body hit another
+        match ph.three.as_ref().and_then(|t| t.links.first()).zip(ph.three.as_ref()) {
+            Some((link, three)) => failures.push(format!(
+                "physics cache {}: it predates contact recording, which the crater of {} needs; bake it again",
+                path.display(),
+                three.bodies[link.owner].id
+            )),
+            None => ph.cached = Some(c),
+        }
+    }
     if let Some((path, c)) = traced {
         // the file is only of use if it was baked from this document
         let steps = c.frames.len() as u64;
@@ -831,6 +864,8 @@ fn build_physics(
                     && c.fractures == fracture_counts.len()
                     && c.soft_points == ph.softs.iter().map(|s| s.rows * s.cols).collect::<Vec<_>>();
                 if counts {
+                    let mut c = c;
+                    c.notice(ph.three.as_ref().map_or(&[], |t| &t.watches));
                     ph.cached = Some(c);
                 } else {
                     failures.push(format!("physics cache {}: does not match the document's bodies", path.display()));
@@ -1021,6 +1056,7 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
         traced: v4,
         digest,
         contacts,
+        impacts: Vec::new(),
         frames,
     })
 }

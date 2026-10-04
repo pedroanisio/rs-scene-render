@@ -1322,6 +1322,40 @@ impl World3 {
     }
 }
 
+/// The volume a shape encloses, in the cube of the shape's own length unit. A mesh counts as
+/// closed: its volume is the absolute sum of the signed volumes of the tetrahedra its
+/// triangles make with the origin.
+pub fn shape_volume(shape: &Shape3) -> Result<f64, String> {
+    use std::f64::consts::PI;
+    let volume = match shape {
+        Shape3::Box(h) => 8.0 * h[0] * h[1] * h[2],
+        Shape3::Sphere(r) => 4.0 / 3.0 * PI * r.powi(3),
+        Shape3::Capsule(hh, r) => PI * r * r * 2.0 * hh + 4.0 / 3.0 * PI * r.powi(3),
+        Shape3::Cylinder(hh, r) => PI * r * r * 2.0 * hh,
+        Shape3::Cone(hh, r) => PI * r * r * 2.0 * hh / 3.0,
+        Shape3::Convex(points) => {
+            let points: Vec<_> = points.iter().map(|p| vec3(*p)).collect();
+            let hull = SharedShape::convex_hull(&points).ok_or("the points have no convex hull")?;
+            hull.mass_properties(1.0).mass()
+        }
+        Shape3::TriMesh(points, triangles) | Shape3::Decomposition(points, triangles) => {
+            let at = |i: u32| points.get(i as usize).copied().ok_or("a triangle names a missing vertex");
+            let mut signed = 0.0;
+            for t in triangles {
+                let (a, b, c) = (at(t[0])?, at(t[1])?, at(t[2])?);
+                let cross = [b[1] * c[2] - b[2] * c[1], b[2] * c[0] - b[0] * c[2], b[0] * c[1] - b[1] * c[0]];
+                signed += (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+            }
+            signed.abs()
+        }
+    };
+    if volume.is_finite() && volume > 0.0 {
+        Ok(volume)
+    } else {
+        Err("the shape encloses no volume".into())
+    }
+}
+
 fn frame_bytes(frame: &Frame3) -> usize {
     let per_body = std::mem::size_of::<Pose3>() + std::mem::size_of::<Velocity3>() + 3;
     std::mem::size_of::<Frame3>()

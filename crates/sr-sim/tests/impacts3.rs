@@ -244,3 +244,35 @@ fn watches_must_name_two_different_bodies() {
         assert!(error.is_err(), "{source} -> {owner}");
     }
 }
+
+#[test]
+fn shapes_report_the_volume_they_enclose() {
+    use std::f64::consts::PI;
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b;
+    assert!(close(shape_volume(&Shape3::Box([1.0, 2.0, 3.0])).unwrap(), 48.0));
+    assert!(close(shape_volume(&Shape3::Sphere(2.0)).unwrap(), 4.0 / 3.0 * PI * 8.0));
+    assert!(close(shape_volume(&Shape3::Cylinder(1.5, 2.0)).unwrap(), PI * 4.0 * 3.0));
+    assert!(close(shape_volume(&Shape3::Cone(1.5, 2.0)).unwrap(), PI * 4.0 * 3.0 / 3.0));
+    assert!(close(shape_volume(&Shape3::Capsule(1.0, 1.0)).unwrap(), PI * 2.0 + 4.0 / 3.0 * PI));
+    // a unit cube as a closed mesh and as points, wherever it sits
+    let corners: Vec<[f64; 3]> =
+        (0..8).map(|k| [(k & 1) as f64 + 5.0, ((k >> 1) & 1) as f64 - 2.0, ((k >> 2) & 1) as f64]).collect();
+    let faces = [
+        [0, 2, 1],
+        [1, 2, 3],
+        [4, 5, 6],
+        [5, 7, 6],
+        [0, 1, 4],
+        [1, 5, 4],
+        [2, 6, 3],
+        [3, 6, 7],
+        [0, 4, 2],
+        [2, 4, 6],
+        [1, 3, 5],
+        [3, 7, 5],
+    ];
+    assert!(close(shape_volume(&Shape3::TriMesh(corners.clone(), faces.to_vec())).unwrap(), 1.0));
+    assert!(close(shape_volume(&Shape3::Convex(corners)).unwrap(), 1.0));
+    assert!(shape_volume(&Shape3::Sphere(0.0)).is_err());
+    assert!(shape_volume(&Shape3::TriMesh(vec![[0.0; 3]], vec![[0, 1, 2]])).is_err());
+}
