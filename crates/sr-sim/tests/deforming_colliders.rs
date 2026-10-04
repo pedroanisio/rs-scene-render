@@ -28,6 +28,7 @@ impl Driver3 for Surface {
 }
 fn world(kind: BodyKind) -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.,
         step: 0.01,
         gravity: [0.; 3],

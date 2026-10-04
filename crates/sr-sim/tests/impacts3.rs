@@ -64,6 +64,7 @@ fn upright(at: [f64; 3]) -> Pose3 {
 
 fn world(bodies: Vec<Body3Spec>, gravity: f64) -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step: STEP,
         gravity: [0.0, -gravity, 0.0],

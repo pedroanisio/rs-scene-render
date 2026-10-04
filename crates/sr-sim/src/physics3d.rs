@@ -140,6 +140,10 @@ pub struct World3Spec {
     pub bounds: Bounds3,
     pub bodies: Vec<Body3Spec>,
     pub joints: Vec<Joint3Spec>,
+    /// Fix the contacts that the edges between the triangles of a mesh make: the contact normal of a
+    /// body on a flat mesh is the mesh's, whatever its tessellation, and a body that slides on it is not
+    /// kicked sideways. The mesh is taken as two-sided. Off, a mesh is as it always was.
+    pub fix_internal_edges: bool,
 }
 
 /// Animated inputs, asked for at simulation-step times.
@@ -577,6 +581,12 @@ impl World3 {
                 // the scene's cone points up the screen (−y), which is +y in physics axes, as Rapier's
                 Shape3::Cone(hh, r) => Some(ColliderBuilder::cone((hh / ppm).max(small), (r / ppm).max(small))),
                 Shape3::Convex(ps) => ColliderBuilder::convex_hull(&pts(ps)),
+                Shape3::TriMesh(ps, idx) if spec.fix_internal_edges => ColliderBuilder::trimesh_with_flags(
+                    pts(ps),
+                    flip_winding(idx),
+                    TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED,
+                )
+                .ok(),
                 Shape3::TriMesh(ps, idx) => ColliderBuilder::trimesh(pts(ps), flip_winding(idx)).ok(),
                 Shape3::Decomposition(ps, idx) => {
                     Some(ColliderBuilder::convex_decomposition(&pts(ps), &flip_winding(idx)))
@@ -1155,7 +1165,12 @@ impl World3 {
                 return Err("invalid deforming collider vertices or triangles".into());
             }
             let vertices = update.vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
-            let shape = SharedShape::trimesh(vertices, update.triangles)
+            let flags = if self.spec.fix_internal_edges {
+                TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED
+            } else {
+                TriMeshFlags::empty()
+            };
+            let shape = SharedShape::trimesh_with_flags(vertices, update.triangles, flags)
                 .map_err(|e| format!("invalid deforming collider: {e}"))?;
             replacements.push((k, update.revision, shape));
         }
@@ -1499,6 +1514,7 @@ mod tests {
 
     fn spec(bodies: Vec<Body3Spec>, bounds: Bounds3) -> World3Spec {
         World3Spec {
+            fix_internal_edges: false,
             start: 0.0,
             step: 1.0 / 240.0,
             gravity: [0.0, -9.80665, 0.0],

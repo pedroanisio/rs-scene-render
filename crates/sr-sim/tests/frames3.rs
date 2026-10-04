@@ -66,6 +66,7 @@ fn body(kind: BodyKind, shape: Shape3, mass: f64, at: [f64; 3], velocity: [f64; 
 
 fn spec() -> World3Spec {
     World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step: STEP,
         gravity: [0.0, -200.0, 0.0],

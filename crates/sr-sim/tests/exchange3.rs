@@ -131,6 +131,7 @@ fn body() -> Body3Spec {
 
 fn world() -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step: STEP,
         gravity: [0.0; 3],
@@ -200,6 +201,7 @@ fn a_driver_without_loads_gives_exactly_the_world_there_was() {
     moving.velocity = [5.0, 0.0, 1.0];
     let with_motion = || {
         World3::new(World3Spec {
+            fix_internal_edges: false,
             start: 0.0,
             step: STEP,
             gravity: [0.0, -9.8, 0.0],

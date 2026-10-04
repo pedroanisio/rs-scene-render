@@ -96,6 +96,7 @@ fn body(hull: &Hull, mass: f64, at: [f64; 3]) -> Body3Spec {
 
 fn world(hull: &Hull, mass: f64, at: [f64; 3], step: f64) -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step,
         // scene axes: gravity is toward +y, and the world takes it as physics y-up
@@ -272,6 +273,7 @@ fn a_box_floats_at_the_draft_its_weight_needs_and_rights_itself() {
     let mut spec = body(&hull, mass, [0.0, -0.1, 0.0]);
     spec.start.rot = q(0.4);
     let mut w = World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step,
         gravity: [0.0, -G, 0.0],

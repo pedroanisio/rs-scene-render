@@ -39,6 +39,7 @@ fn sphere(at: [f64; 3], velocity: [f64; 3], mass: f64) -> Body3Spec {
 /// Scene axes: y points down, so a floor at y = 100 is below a sphere at y = 0.
 fn world(bodies: Vec<Body3Spec>, gravity: f64, bounds: Bounds3) -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.0,
         step: STEP,
         gravity: [0.0, -gravity, 0.0],
