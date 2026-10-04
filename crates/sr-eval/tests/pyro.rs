@@ -388,3 +388,48 @@ fn advection_selects_the_transport_scheme_and_enters_the_published_key() {
     };
     assert!(density_max(r#"advection="maccormack""#) >= density_max(""), "less diffusion keeps a higher peak");
 }
+
+fn plain_cloud() -> sr_eval::Evaluator {
+    let xml = r#"<scene version="1.3"><project width="32" height="32" fps="10" duration="4"/>
+      <composition><object3D id="cloud" primitive="volume">
+        <pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" turbulence="0.4" seed="3">
+          <pyroSource shape="sphere" radius="2" densityRate="10" temperatureRate="500" start="0.05"/>
+        </pyro><medium blackbody="true"/></object3D></composition></scene>"#;
+    let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    sr_eval::Evaluator::new(&doc, &Default::default()).unwrap()
+}
+
+#[test]
+fn fractional_samples_inside_one_step_export_once_and_changes_of_state_export_again() {
+    let ev = plain_cloud();
+    let volume = |t: f64| {
+        let frame = ev.evaluate(t);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        frame.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.as_ref().unwrap().clone()
+    };
+    let exports = sr_eval::pyro::exports_on_this_thread;
+    let start = exports();
+    let a = volume(0.31);
+    assert_eq!(exports() - start, 1);
+    // Four more samples inside the same 0.1 s step: the very same volume, no export.
+    for t in [0.32, 0.35, 0.39, 0.3] {
+        assert!(std::sync::Arc::ptr_eq(&a, &volume(t)), "t={t}");
+    }
+    assert_eq!(exports() - start, 1);
+    // A new step exports once more and differs.
+    let b = volume(0.41);
+    assert_eq!(exports() - start, 2);
+    assert_ne!(a.key, b.key);
+    assert!(std::sync::Arc::ptr_eq(&b, &volume(0.45)));
+    assert_eq!(exports() - start, 2);
+    // Going back replays from a checkpoint: a different state object, so it exports
+    // again, and the replayed content equals the first visit.
+    let earlier = volume(0.11);
+    assert_eq!(exports() - start, 3);
+    assert_ne!(earlier.key, a.key);
+    let a_again = volume(0.33);
+    assert_eq!(exports() - start, 4);
+    assert_eq!(a_again.key, a.key);
+    // The index 0.4 is revisited after a replay: still the state of the first visit.
+    assert_eq!(volume(0.4).key, b.key);
+}

@@ -1422,6 +1422,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
 /// history. Recreate this timeline when the authored scene changes.
 pub struct Timeline {
     simulation: Simulation,
+    revision: u64,
     checkpoints: BTreeMap<u64, State>,
     every: u64,
     checkpoint_budget: usize,
@@ -1437,7 +1438,7 @@ impl Timeline {
         }
         let every = (1.0 / simulation.spec.dt).ceil().clamp(1.0, 10_000_000.0) as u64;
         let checkpoints = BTreeMap::from([(0, simulation.state.clone())]);
-        Ok(Self { simulation, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
+        Ok(Self { simulation, revision: 0, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
     }
 
     pub fn checkpoint_bytes(&self) -> usize {
@@ -1463,6 +1464,29 @@ impl Timeline {
         time: f64,
         input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
     ) -> Result<&State, Error> {
+        self.seek(time, input)?;
+        Ok(self.simulation.state())
+    }
+
+    /// Like `at_with_state`, also returning the state's revision. The revision
+    /// changes whenever the timeline replaces its state, by a step or by a restore
+    /// from a checkpoint, even when the replacement lands on the same step index as
+    /// before. Two calls that return equal revisions therefore returned the very
+    /// same state, and anything derived from it can be reused.
+    pub fn at_with_revision(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(&State, u64), Error> {
+        self.seek(time, input)?;
+        Ok((self.simulation.state(), self.revision))
+    }
+
+    fn seek(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(), Error> {
         if !time.is_finite() {
             return Err(Error::Invalid("seek time must be finite"));
         }
@@ -1476,15 +1500,18 @@ impl Timeline {
             let (&step, state) = self.checkpoints.range(..=target).next_back().expect("initial checkpoint is retained");
             self.simulation.state = state.clone();
             self.simulation.step = step;
+            self.revision += 1;
         } else if let Some((&step, state)) = self.checkpoints.range(self.simulation.step..=target).next_back() {
             if step > self.simulation.step {
                 self.simulation.state = state.clone();
                 self.simulation.step = step;
+                self.revision += 1;
             }
         }
         while self.simulation.step < target {
             let value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
             self.simulation.step(&value)?;
+            self.revision += 1;
             let step = self.simulation.step;
             if step % self.every == 0 && !self.checkpoints.contains_key(&step) {
                 // Thin before cloning: transient insertion never exceeds budget.
@@ -1499,7 +1526,7 @@ impl Timeline {
                 }
             }
         }
-        Ok(self.simulation.state())
+        Ok(())
     }
 }
 

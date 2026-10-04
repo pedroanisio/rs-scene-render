@@ -429,3 +429,39 @@ fn the_step_workspace_budget_is_320_bytes_per_cell_plus_a_fixed_overhead() {
     assert!(with(exact).is_ok());
     assert!(with(exact - 1).is_err());
 }
+
+#[test]
+fn timeline_revision_changes_exactly_when_the_state_is_replaced() {
+    use sr_sim::pyro::Timeline;
+    let mut s = spec();
+    s.turbulence = 0.3;
+    s.seed = 5;
+    let mut input = |_: u64, _: f64, _: &sr_sim::pyro::State| Ok(Inputs::default());
+    let mut timeline = Timeline::new(s, 1 << 30).unwrap();
+    let mut at = |time: f64| {
+        let (state, revision) = timeline.at_with_revision(time, &mut input).unwrap();
+        (state.clone(), revision)
+    };
+    let (initial, r0) = at(0.0);
+    // Within one fixed step (0.1 s) nothing is replaced.
+    assert_eq!(at(0.0).1, r0);
+    let (three, r3) = at(0.3);
+    assert!(r3 > r0);
+    assert_eq!(at(0.31).1, r3);
+    assert_eq!(at(0.399).1, r3);
+    let (four, r4) = at(0.4);
+    assert!(r4 > r3 && four != three);
+    // Going back restores a checkpoint and replays: a new revision, an equal state,
+    // even though the step index was visited before.
+    let (back, rb) = at(0.1);
+    assert!(rb > r4 && back != three);
+    let (again, ra) = at(0.4);
+    assert!(ra > rb && ra != r4, "a replay of the same index is a different revision");
+    assert!(again == four, "determinism: the replayed state equals the first visit");
+    assert!(initial != four);
+    // A failed step leaves the revision alone.
+    let mut failing = |_: u64, _: f64, _: &sr_sim::pyro::State| Err(sr_sim::pyro::Error::Invalid("injected"));
+    assert!(timeline.at_with_revision(0.9, &mut failing).is_err());
+    let (_, after_failure) = timeline.at_with_revision(0.4, &mut input).unwrap();
+    assert_eq!(after_failure, ra);
+}
