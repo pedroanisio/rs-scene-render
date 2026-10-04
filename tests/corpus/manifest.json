@@ -284,6 +284,9 @@
     "ocn12-twice.scene.xml": [
       "OCN12"
     ],
+    "ocn13-splash.scene.xml": [
+      "OCN13"
+    ],
     "ocn2.scene.xml": [
       "OCN2"
     ],
@@ -788,6 +791,7 @@
     "ocean-entry.scene.xml": [],
     "ocean-full.scene.xml": [],
     "ocean-order2.scene.xml": [],
+    "ocean-splash.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],

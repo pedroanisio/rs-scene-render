@@ -2151,6 +2151,21 @@
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="bathymetry" type="xs:IDREF"/>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="splash" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The particles3D emitters whose particles fall into this ocean: each must throw out the ejecta of a crater (a
+        `burst` with `crater`), whose particles have a mass (OCN13). Absent (the default) is the behaviour there always was.
+        A particle of a listed emitter whose centre crosses the ocean's rest level (`waterLevel`) downward inside its
+        domain is removed there, and what it brings is given to the water in the canonical step of the crossing, summed
+        by cell: the volume of the particle (its mass over the density of the crater's target) is taken out of the
+        cell's water and given equally to its eight neighbours, never more than 90 % of the cell's water, and its
+        horizontal momentum, divided by the density of the water, is added to the cell's. The water volume and the
+        horizontal momentum that is applied are conserved; the vertical momentum and the energy of the particle are not
+        (the shallow-water model has no vertical momentum), and a particle that has fallen in is gone, it does not sink.
+        The surface is the water's rest level, not the swell, and the ocean is taken at its pose when the emitter
+        starts. The deposit does not go through the depth filter of `bedResponse`. An emitter belongs to one ocean.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="bodyCoupling" default="none">
       <xs:annotation><xs:documentation>
         What the water does to the rigid bodies in `colliders`. `none` (the default) is the existing behaviour: a body
