@@ -31,6 +31,7 @@ pub mod mesh_sequence;
 pub mod ocean;
 pub mod particles3d;
 pub mod path;
+mod physcache;
 pub mod program;
 pub mod pyro;
 pub mod rig;
@@ -78,6 +79,7 @@ pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c s
 pub use eval::{
     Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SimSeconds, SkinWeights,
 };
+pub use physcache::PhysicsTrace;
 pub use program::{Analysis, EvalOptions, Program};
 pub use value::Value;
 
@@ -124,6 +126,13 @@ impl Evaluator {
     /// (`physics@cache`; its SHA-256 goes in `cacheSha256`).
     pub fn physics_cache(&self) -> Result<Vec<u8>, String> {
         sim::write_cache(&self.program, self.program.duration, &|ts| eval::evaluate(&self.program, ts))
+    }
+
+    /// The velocities and contacts of the 3D rigid bodies over the document's duration:
+    /// those of the verified `physics@cache` when there is one, otherwise simulated.
+    /// A cache baked from other physics is an error.
+    pub fn physics_trace(&self) -> Result<PhysicsTrace, String> {
+        sim::physics_trace(&self.program, &|ts| eval::evaluate(&self.program, ts))
     }
 
     /// State at frame `n` of the project frame rate.

@@ -149,6 +149,82 @@ fn a_sphere_landing_on_a_triangle_mesh_is_recorded_through_the_solver_clusters()
     assert!(contacts.iter().all(|c| close(c.normal[1], 1.0, 1e-6) && (c.point[1] - 100.0).abs() < 1.5));
 }
 
+/// A closed L-shaped prism (not convex), 40 wide and 20 deep, whose broad side faces +y.
+fn l_prism() -> Shape3 {
+    let outline = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [0.0, 2.0]];
+    let (scale, depth) = (20.0, 10.0);
+    let mut points: Vec<[f64; 3]> = Vec::new();
+    for z in [-depth, depth] {
+        points.extend(outline.iter().map(|p| [p[0] * scale - scale, p[1] * scale - scale, z]));
+    }
+    let mut triangles = Vec::new();
+    // the caps, as four triangles of the outline; counter-clockwise seen from outside
+    for t in [[0, 1, 2], [0, 2, 5], [2, 3, 4], [2, 4, 5]] {
+        triangles.push([t[0] + 6, t[1] + 6, t[2] + 6]);
+        triangles.push([t[0], t[2], t[1]]);
+    }
+    for i in 0..6u32 {
+        let j = (i + 1) % 6;
+        triangles.push([i, j, 6 + j]);
+        triangles.push([i, 6 + j, 6 + i]);
+    }
+    Shape3::Decomposition(points, triangles)
+}
+
+#[test]
+fn a_body_made_of_several_convex_parts_is_recorded_through_its_compound_shape() {
+    // Mass 3, an L-shaped prism that V-HACD splits into convex parts, landing flat at 200 px/s.
+    let mut body = sphere([0.0, 0.0, 0.0], [0.0, 200.0, 0.0], 3.0);
+    body.shape = l_prism();
+    let mut w = world(vec![body], 9.81, Bounds3::Floor { y: 100.0 }).with_contact_log(limits());
+    let frame = w.frame_at(0.8, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let first = first_contact_step(&w, w.progress().0);
+    let contacts = w.contacts_at(first).unwrap();
+    assert!(contacts.len() >= 2, "several points under a flat landing: {contacts:?}");
+    assert!(contacts.iter().all(|c| c.bodies == [Some(0), None]), "{contacts:?}");
+    assert!(contacts.iter().all(|c| close(c.normal[1], 1.0, 1e-6) && c.impulse > 0.0));
+    let closing = -contacts[0].relative_velocity[1];
+    assert!(close(closing, 200.0 + 9.81 * first as f64 * STEP, 0.01), "{closing}");
+    let total: f64 = contacts.iter().map(|c| c.impulse).sum();
+    assert!(close(total, 3.0 * closing, 0.08), "total impulse {total} vs {}", 3.0 * closing);
+}
+
+#[test]
+fn a_sleeping_body_is_woken_and_recorded_when_something_lands_on_it() {
+    // A heavy sphere (body 0) settles on the floor and falls asleep: a sleeping island has no
+    // contacts solved, so nothing is recorded for it. A light sphere (body 1), dropped from
+    // above, lands on it much later.
+    let rest = sphere([0.0, 89.0, 0.0], [0.0; 3], 5.0);
+    let drop = sphere([0.0, -400.0, 0.0], [0.0; 3], 1.0);
+    let mut w = world(vec![rest, drop], 9.81, Bounds3::Floor { y: 100.0 })
+        .with_contact_log(ContactLogConfig { min_impulse: 0.0, ..limits() });
+    let frame = w.frame_at(11.0, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let steps = w.progress().0;
+    let landing = (0..steps)
+        .find(|&s| w.contacts_at(s).unwrap().iter().any(|c| c.bodies == [Some(0), Some(1)]))
+        .expect("the light sphere reaches the heavy one");
+    // before the landing, from well after the heavy sphere settled, nothing is solved
+    let asleep = (800..landing - 1).all(|s| w.contacts_at(s).unwrap().is_empty());
+    assert!(asleep, "the resting sphere was still being solved");
+    let hit = w.contacts_at(landing).unwrap().iter().find(|c| c.bodies == [Some(0), Some(1)]).copied().unwrap();
+    // the normal runs from the heavy sphere up to the light one: scene -y
+    assert!(hit.normal[1] < -0.99, "{:?}", hit.normal);
+    let closing: f64 = -hit.relative_velocity.iter().zip(&hit.normal).map(|(v, n)| v * n).sum::<f64>();
+    assert!(closing > 50.0, "{closing}");
+    // a body supported by the floor takes the whole momentum of the lighter one (restitution 0),
+    // spread over the few steps the soft contact takes to stop it
+    let pushed: f64 = (landing..landing + 12)
+        .flat_map(|s| w.contacts_at(s).unwrap().iter().filter(|c| c.bodies == [Some(0), Some(1)]))
+        .map(|c| c.impulse)
+        .sum();
+    assert!(close(pushed, 1.0 * closing, 0.1), "impulse {pushed} vs {closing}");
+    // and the heavy sphere is solved again against the floor right after
+    let woken = (landing..landing + 3).any(|s| w.contacts_at(s).unwrap().iter().any(|c| c.bodies == [Some(0), None]));
+    assert!(woken, "the heavy sphere woke up and pushed on the floor");
+}
+
 #[test]
 fn an_oblique_impact_reports_the_relative_velocity_direction() {
     let v = [120.0, 160.0, 0.0];

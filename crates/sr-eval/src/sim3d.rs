@@ -39,6 +39,24 @@ pub(crate) struct Phys3 {
     pub(crate) world: Option<World3>,
     pub(crate) bodies: Vec<Body3Node>,
     pub(crate) fractures: Vec<FractureNode>,
+    /// Identity of the world's definition, when the caller asked for it.
+    pub(crate) spec_digest: Option<[u8; 32]>,
+    /// Per body: whether it is kinematic and when a dynamic one is released, so that the
+    /// animation the world follows can be sampled without a world.
+    follow: Vec<(bool, f64)>,
+}
+
+/// What `build` makes of the document's 3D bodies.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Plan3 {
+    /// A world that will be stepped. `record` keeps the contacts it resolves; `digest` also
+    /// hashes its definition (a baked cache stores that identity).
+    Simulate { record: bool, digest: bool },
+    /// No world: an old cache supplies the poses and shapes are not needed.
+    Placeholder,
+    /// No world either, but real shapes and the definition's identity, to check a cache that
+    /// carries one.
+    Verify,
 }
 
 fn attr(n: &FrameNode, name: &str, d: f64) -> f64 {
@@ -446,7 +464,7 @@ pub(crate) fn body_ids(g0: &FrameGraph) -> Vec<Arc<str>> {
 pub(crate) fn build(
     p: &Program,
     g0: &FrameGraph,
-    cached: bool,
+    plan: Plan3,
     problems: &mut Vec<String>,
     failures: &mut Vec<String>,
 ) -> Option<Phys3> {
@@ -482,7 +500,7 @@ pub(crate) fn build(
                 })
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
-        let shape = if cached || sequence_budget.is_some() {
+        let shape = if matches!(plan, Plan3::Placeholder) || sequence_budget.is_some() {
             Shape3::Sphere(1.0)
         } else {
             shape_for(p, n, c, scale, problems, failures)
@@ -670,8 +688,9 @@ pub(crate) fn build(
             problems.push(format!("{}: constraint joins a 2D body to a 3D one", k.id));
         }
     }
-    if cached {
-        return Some(Phys3 { world: None, bodies, fractures });
+    let follow: Vec<(bool, f64)> = specs.iter().map(|b| (b.kind == BodyKind::Kinematic, b.activate_at)).collect();
+    if matches!(plan, Plan3::Placeholder) {
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, follow });
     }
     let [fw, fh] = p.size;
     let bounds = match ph.map(|p| p.bounds.to_string()).as_deref() {
@@ -693,14 +712,25 @@ pub(crate) fn build(
         bodies: specs,
         joints,
     };
+    let spec_digest = match plan {
+        Plan3::Verify | Plan3::Simulate { digest: true, .. } => Some(crate::physcache::digest_world3(&spec, &events)),
+        _ => None,
+    };
+    let Plan3::Simulate { record, .. } = plan else {
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest, follow });
+    };
+    let log = record.then(|| crate::physcache::contact_config(&spec));
     let world = match World3::new(spec).with_fractures(events) {
-        Ok(world) => Some(world),
+        Ok(world) => Some(match log {
+            Some(config) => world.with_contact_log(config),
+            None => world,
+        }),
         Err(e) => {
             failures.push(e.to_string());
             None
         }
     };
-    Some(Phys3 { world, bodies, fractures })
+    Some(Phys3 { world, bodies, fractures, spec_digest, follow })
 }
 
 // ------------------------------------------------------------------ stepping
@@ -791,6 +821,53 @@ impl Driver3 for Driver<'_, '_> {
     }
     fn fields(&mut self, t: f64) -> Vec<Field> {
         self.fields.at_step(t, self.graphs, self.statics)
+    }
+}
+
+impl Phys3 {
+    /// Feeds `id` what the document gives the world at each of `steps` steps: which bodies
+    /// take part, the poses of those that follow animation, the force fields and the
+    /// revision of every deforming surface. This is the world's input, sampled on a
+    /// schedule that does not depend on the world's own state.
+    pub(crate) fn sample_inputs(
+        &self,
+        drv: &mut Driver<'_, '_>,
+        start: f64,
+        step: f64,
+        steps: u64,
+        id: &mut crate::physcache::Identity,
+    ) -> Result<(), String> {
+        let deforming: Vec<usize> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.sequence_budget.is_some() || b.crater_surface.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let mut revisions = vec![None; self.bodies.len()];
+        for k in 0..steps {
+            let t = start + k as f64 * step;
+            let visible: Vec<bool> = (0..self.bodies.len()).map(|i| drv.enabled(t, i)).collect();
+            id.value("enabled", &visible);
+            let follow: Vec<usize> = self
+                .follow
+                .iter()
+                .enumerate()
+                .filter(|(_, (kinematic, release))| *kinematic || t < release + step)
+                .map(|(i, _)| i)
+                .collect();
+            if !follow.is_empty() {
+                id.value("poses", &drv.kinematic(t + step, &follow));
+            }
+            id.value("fields", &drv.fields(t));
+            for &i in &deforming {
+                if let Some(update) = drv.collider(t + step, i, revisions[i])? {
+                    revisions[i] = Some(update.revision);
+                    id.value("surface", &(k, i, update.revision, update.vertices.len(), update.triangles.len()));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
