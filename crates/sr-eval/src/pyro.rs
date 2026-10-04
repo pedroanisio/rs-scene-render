@@ -21,6 +21,17 @@ pub struct SimVolume {
     pub key: u64,
 }
 
+thread_local! {
+    static EXPORTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Volume exports made by native smoke evaluation on the calling thread so far.
+/// A frame whose simulation state did not change since the last export makes none.
+#[doc(hidden)]
+pub fn exports_on_this_thread() -> u64 {
+    EXPORTS.with(std::cell::Cell::get)
+}
+
 struct Runtime {
     timeline: Timeline,
     max_bytes: usize,
@@ -28,6 +39,9 @@ struct Runtime {
     colliders: colliders::Colliders,
     dt: f64,
     last: Option<Arc<SimVolume>>,
+    /// Timeline revision of the state `last` was exported from. Equal revisions
+    /// are the same state, so nothing is exported or hashed again.
+    last_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -99,7 +113,15 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
         meshes.insert(id, load_mesh(p, &MeshRef::Asset(key), &mut remaining, &mut assets)?);
     }
     let colliders = colliders::build(p, e, &mut remaining, &mut assets)?;
-    Ok(Runtime { timeline, max_bytes: bytes, meshes, colliders, dt: num(e, "dt", 1.0 / 60.0), last: None })
+    Ok(Runtime {
+        timeline,
+        max_bytes: bytes,
+        meshes,
+        colliders,
+        dt: num(e, "dt", 1.0 / 60.0),
+        last: None,
+        last_revision: None,
+    })
 }
 
 fn load_mesh(
@@ -182,25 +204,6 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
     Ok(result)
 }
 
-fn key(volume: &sr_volume::Volume) -> u64 {
-    let mut h = 0;
-    for (name, grid) in volume.grids() {
-        h = crate::rng::hash(&[h, crate::rng::hash_str(name), u64::from(grid.background().to_bits())]);
-        for v in grid.transform().columns() {
-            h = crate::rng::hash(&[h, v.to_bits(), 0]);
-        }
-        for (coord, values) in grid.bricks() {
-            for v in coord {
-                h = crate::rng::hash(&[h, v as u64, 1]);
-            }
-            for v in values {
-                h = crate::rng::hash(&[h, u64::from(v.to_bits()), 2]);
-            }
-        }
-    }
-    h
-}
-
 impl Sims {
     pub(crate) fn apply(
         &mut self,
@@ -227,9 +230,9 @@ impl Sims {
                 let meshes = &runtime.meshes;
                 let colliders = &mut runtime.colliders;
                 let dt = runtime.dt;
-                let state = runtime
+                let (state, revision) = runtime
                     .timeline
-                    .at_with_state(source_time, &mut |_, time, state| {
+                    .at_with_revision(source_time, &mut |_, time, state| {
                         let (t, clocks) =
                             crate::sim::source_sample(p, node, time + p.nodes[node as usize].start, g.time);
                         let mut frame = if clocks.is_empty() {
@@ -268,8 +271,15 @@ impl Sims {
                         }
                     })
                     .map_err(|e| e.to_string())?;
+                if runtime.last_revision == Some(revision) {
+                    if let Some(last) = &runtime.last {
+                        return Ok(last.clone());
+                    }
+                }
+                EXPORTS.with(|count| count.set(count.get() + 1));
                 let volume = state.volume(runtime.max_bytes).map_err(|e| e.to_string())?;
-                let key = key(&volume);
+                let key = pyro::volume_key(&volume);
+                runtime.last_revision = Some(revision);
                 if let Some(last) = runtime.last.as_ref().filter(|last| last.key == key) {
                     return Ok(last.clone());
                 }

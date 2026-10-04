@@ -16,9 +16,12 @@ use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod key;
 mod maccormack;
 pub mod mesh;
 mod multigrid;
+
+pub use key::volume_key;
 
 /// Minimum elements per rayon task. Task boundaries never change a value: every
 /// parallel loop writes each element from the same expression as the serial loop
@@ -32,6 +35,8 @@ mod atomicity;
 mod detail;
 #[cfg(test)]
 mod determinism;
+#[cfg(test)]
+mod export;
 #[cfg(test)]
 mod pockets;
 #[cfg(test)]
@@ -412,11 +417,51 @@ pub struct State {
     temperature: Vec<f64>,
     velocity: [Vec<f64>; 3],
     solid: Vec<bool>,
-    solid_velocity_low: Vec<[f64; 3]>,
-    // Prescribed velocities at the low/high MAC faces, including nonlinear
-    // deforming boundaries. Uses the same storage as the former affine samples.
-    solid_velocity_high: Vec<[f64; 3]>,
 }
+
+/// Prescribed velocities at the low and high MAC faces of one solid cell,
+/// including nonlinear deforming boundaries. They are recomputed from the
+/// colliders at the start of every step and used only during it, so they are
+/// kept sparsely for the step and not stored in the state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SolidFaces {
+    cell: usize,
+    low: [f64; 3],
+    high: [f64; 3],
+}
+
+/// The solid-cell mask of `obstacles` (the first listed collider that contains a
+/// cell centre wins) and each solid cell's face velocities, in cell order.
+fn voxelize(
+    cells: [usize; 3],
+    origin: [f64; 3],
+    h: f64,
+    obstacles: &[Obstacle],
+) -> Result<(Vec<bool>, Vec<SolidFaces>), Error> {
+    let count = cells.iter().product();
+    let mut solid = vec![false; count];
+    let mut faces = Vec::new();
+    for (k, is_solid) in solid.iter_mut().enumerate() {
+        let p = world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
+        let Some(collider) = obstacles.iter().find(|o| o.shape.contains(p)) else { continue };
+        *is_solid = true;
+        let (mut low_velocity, mut high_velocity) = ([0.0; 3], [0.0; 3]);
+        for (axis, (low_v, high_v)) in low_velocity.iter_mut().zip(&mut high_velocity).enumerate() {
+            let mut low = p;
+            let mut high = p;
+            low[axis] -= 0.5 * h;
+            high[axis] += 0.5 * h;
+            *low_v = collider.velocity_at(low)?[axis];
+            *high_v = collider.velocity_at(high)?[axis];
+        }
+        faces.push(SolidFaces { cell: k, low: low_velocity, high: high_velocity });
+    }
+    faces.shrink_to_fit();
+    Ok((solid, faces))
+}
+
+/// Brick coordinates and the 8x8x8 samples of a brick that holds something other than the background.
+type ExportedBrick = ([i32; 3], Box<[f32; 512]>);
 
 impl State {
     /// Resident state storage and checkpoint-map bookkeeping. Step scratch is
@@ -426,8 +471,6 @@ impl State {
             + self.temperature.capacity() * 8
             + self.velocity.iter().map(|v| v.capacity() * 8).sum::<usize>()
             + self.solid.capacity()
-            + self.solid_velocity_low.capacity() * 24
-            + self.solid_velocity_high.capacity() * 24
             + std::mem::size_of::<Self>()
             + 256
     }
@@ -479,9 +522,8 @@ impl State {
         self.field().velocity_grid(p)
     }
 
-    /// Working state of a step: the evolving fields copied from `self`, a fresh
-    /// (empty) solid mask and zero solid velocities. The zero arrays are
-    /// allocated lazily, so only pages near colliders are ever touched.
+    /// Working state of a step: the evolving fields copied from `self` and a fresh
+    /// (empty) solid mask.
     fn working_copy(&self) -> State {
         let copy = |src: &[f64]| {
             let mut dst = vec![0.0; src.len()];
@@ -499,8 +541,6 @@ impl State {
             temperature: copy(&self.temperature),
             velocity: std::array::from_fn(|a| copy(&self.velocity[a])),
             solid: vec![false; count],
-            solid_velocity_low: vec![[0.0; 3]; count],
-            solid_velocity_high: vec![[0.0; 3]; count],
         }
     }
 
@@ -533,24 +573,68 @@ impl State {
         let h = self.h;
         let o = self.origin.map(|v| v + h * 0.5);
         let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
+        // The five channels are independent; results are inserted in channel order,
+        // so the first error is the one a serial export would report.
+        let grids: Vec<Result<SparseGrid, Error>> =
+            (0..5).into_par_iter().map(|channel| self.export_channel(channel, transform, bricks)).collect();
         let mut volume = Volume::new();
-        for (channel, name) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().enumerate() {
-            let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
-            let mut grid = SparseGrid::new(transform, bg, bricks)?;
-            for k in 0..self.density.len() {
-                let value = match channel {
-                    0 => self.density[k],
-                    1 => self.temperature[k],
-                    _ => self.velocity_at(self.cell_world(k))[channel - 2],
-                } as f32;
-                if !value.is_finite() {
-                    return Err(Error::Invalid("exported field exceeds f32 representation"));
-                }
-                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
-            }
-            volume.insert(name, grid)?;
+        for (name, grid) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().zip(grids) {
+            volume.insert(name, grid?)?;
         }
         Ok(volume)
+    }
+
+    /// One exported channel: 0 density, 1 temperature, 2..=4 velocity components.
+    /// Each 8x8x8 brick is filled from the state in parallel and stored whole; a
+    /// brick whose samples all equal the background is not stored, and voxels
+    /// outside the domain keep the background.
+    fn export_channel(&self, channel: usize, transform: Transform, bricks: usize) -> Result<SparseGrid, Error> {
+        let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
+        let mut grid = SparseGrid::new(transform, bg, bricks)?;
+        let per_axis = self.cells.map(|n| n.div_ceil(8));
+        let field = self.field();
+        let sample = |k: usize| -> f64 {
+            match channel {
+                0 => self.density[k],
+                1 => self.temperature[k],
+                _ => {
+                    // `velocity_at(cell_world(k))[axis]` without the two unused components.
+                    let p = self.cell_world(k);
+                    if finite3(p) {
+                        field.velocity_axis(self.grid(p), channel - 2)
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        };
+        let filled: Vec<Option<ExportedBrick>> = (0..bricks)
+            .into_par_iter()
+            .with_min_len(4)
+            .map(|b| -> Result<_, Error> {
+                let brick = coords(b, per_axis);
+                let mut values = Box::new([bg; 512]);
+                let mut stored = false;
+                for z in 0..8usize.min(self.cells[2] - brick[2] * 8) {
+                    for y in 0..8usize.min(self.cells[1] - brick[1] * 8) {
+                        for x in 0..8usize.min(self.cells[0] - brick[0] * 8) {
+                            let k = index([brick[0] * 8 + x, brick[1] * 8 + y, brick[2] * 8 + z], self.cells);
+                            let value = sample(k) as f32;
+                            if !value.is_finite() {
+                                return Err(Error::Invalid("exported field exceeds f32 representation"));
+                            }
+                            values[x + 8 * y + 64 * z] = value;
+                            stored |= value != bg;
+                        }
+                    }
+                }
+                Ok(stored.then(|| (brick.map(|v| v as i32), values)))
+            })
+            .collect::<Result<_, Error>>()?;
+        for (key, values) in filled.into_iter().flatten() {
+            grid.set_brick(key, &values)?;
+        }
+        Ok(grid)
     }
 }
 
@@ -764,14 +848,14 @@ impl Simulation {
         let count =
             s.cells.iter().try_fold(1usize, |v, n| v.checked_mul(*n)).ok_or(Error::Limit("cell count overflow"))?;
         // Worst-case live bytes per cell during one step, with every page touched:
-        // committed state 89 (density 8, temperature 8, velocity ~24, solid 1, two
-        // solid-velocity arrays 48) + working state 89 + pressure workspace 65 (six
-        // CG vectors, open-face mask, divergence target) + ~26 for the multigrid
-        // hierarchy, level vectors and component labels = ~270, plus ~20% for
-        // allocator overhead and transient volume metadata. Measured peak RSS of the
-        // impact scene without colliders is 155-256 B per cell.
+        // committed state 41 (density 8, temperature 8, velocity ~24, solid 1) +
+        // working state 41 + solid-face list 56 (only if every cell were solid; it
+        // is built before the pressure workspace exists) + pressure workspace 65
+        // (six CG vectors, open-face mask, divergence target) + ~26 for the
+        // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
+        // for allocator overhead and transient volume metadata.
         let bytes =
-            count.checked_mul(320).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
+            count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
             return Err(Error::Limit("grid and step workspace memory budget"));
         }
@@ -785,8 +869,6 @@ impl Simulation {
             temperature: vec![s.ambient_temperature; count],
             velocity: std::array::from_fn(|a| vec![0.0; face_dims(s.cells, a).iter().product()]),
             solid: vec![false; count],
-            solid_velocity_low: vec![[0.0; 3]; count],
-            solid_velocity_high: vec![[0.0; 3]; count],
         };
         Ok(Self { spec, state, step: 0 })
     }
@@ -824,30 +906,17 @@ impl Simulation {
         let dt = self.spec.dt;
         let mut state = self.state.working_copy();
         profile.clone = lap(&mut clock);
-        for k in 0..state.density.len() {
-            let p = state.cell_world(k);
-            let collider = input.obstacles.iter().find(|o| o.shape.contains(p));
-            if let Some(collider) = collider {
-                state.solid[k] = true;
-                for axis in 0..3 {
-                    let mut low = p;
-                    let mut high = p;
-                    low[axis] -= 0.5 * state.h;
-                    high[axis] += 0.5 * state.h;
-                    state.solid_velocity_low[k][axis] = collider.velocity_at(low)?[axis];
-                    state.solid_velocity_high[k][axis] = collider.velocity_at(high)?[axis];
-                }
-            }
-            if state.solid[k] {
-                state.density[k] = 0.0;
-                state.temperature[k] = state.ambient;
-            }
+        let (solid, solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
+        state.solid = solid;
+        for cell in &solids {
+            state.density[cell.cell] = 0.0;
+            state.temperature[cell.cell] = state.ambient;
         }
         profile.obstacles = lap(&mut clock);
-        boundaries(&mut state);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
-        advect(&mut state, dt, &self.spec, &mut profile)?;
+        advect(&mut state, dt, &self.spec, &solids, &mut profile)?;
         profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
@@ -882,7 +951,7 @@ impl Simulation {
         profile.inject = lap(&mut clock);
         forces(&mut state, &self.spec, input, self.step);
         profile.forces = lap(&mut clock);
-        boundaries(&mut state);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
         if target.iter().any(|v| !v.is_finite()) {
             return Err(Error::Invalid("nonfinite expansion"));
@@ -924,9 +993,11 @@ fn face_cells(p: [usize; 3], axis: usize, dims: [usize; 3]) -> [Option<usize>; 2
     [left, right]
 }
 
-fn boundaries(s: &mut State) {
+fn boundaries(s: &mut State, solids: &[SolidFaces]) {
     let (cells, boundary) = (s.cells, s.boundary);
-    let (solid, high, low) = (&s.solid, &s.solid_velocity_high, &s.solid_velocity_low);
+    let solid = &s.solid;
+    let faces_of =
+        |c: usize| &solids[solids.binary_search_by_key(&c, |f| f.cell).expect("a solid cell has face velocities")];
     for a in 0..3 {
         let dims = face_dims(cells, a);
         s.velocity[a].par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, velocity)| {
@@ -939,7 +1010,8 @@ fn boundaries(s: &mut State) {
                 let mut count = 0;
                 for (side, cell) in faces.into_iter().enumerate() {
                     if let Some(c) = cell.filter(|&c| solid[c]) {
-                        value += if side == 0 { high[c][a] } else { low[c][a] };
+                        let faces = faces_of(c);
+                        value += if side == 0 { faces.high[a] } else { faces.low[a] };
                         count += 1;
                     }
                 }
@@ -961,7 +1033,7 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
 /// out of `s` and sampled in place; fresh arrays are written, so no copy of the
 /// state is made. Solid cells keep the cleared values the collider stage set.
 /// On error `s` is left without fields; callers discard it.
-fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Result<(), Error> {
+fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &mut StepProfile) -> Result<(), Error> {
     let (dissipation, cooling) = (spec.dissipation, spec.cooling);
     let started = Instant::now();
     let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
@@ -980,7 +1052,7 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Res
         let scalars =
             maccormack::Scalars { density: &old_density, temperature: &old_temperature, ambient, decay, cool };
         maccormack::advect(&old, scalars, (&mut s.density, &mut s.temperature, &mut s.velocity), dt)?;
-        boundaries(s);
+        boundaries(s, solids);
         return Ok(());
     }
     let results = s
@@ -1021,7 +1093,7 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Res
             .collect();
         first_error(results)?;
     }
-    boundaries(s);
+    boundaries(s, solids);
     Ok(())
 }
 
@@ -1373,6 +1445,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
 /// history. Recreate this timeline when the authored scene changes.
 pub struct Timeline {
     simulation: Simulation,
+    revision: u64,
     checkpoints: BTreeMap<u64, State>,
     every: u64,
     checkpoint_budget: usize,
@@ -1388,7 +1461,7 @@ impl Timeline {
         }
         let every = (1.0 / simulation.spec.dt).ceil().clamp(1.0, 10_000_000.0) as u64;
         let checkpoints = BTreeMap::from([(0, simulation.state.clone())]);
-        Ok(Self { simulation, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
+        Ok(Self { simulation, revision: 0, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
     }
 
     pub fn checkpoint_bytes(&self) -> usize {
@@ -1414,6 +1487,29 @@ impl Timeline {
         time: f64,
         input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
     ) -> Result<&State, Error> {
+        self.seek(time, input)?;
+        Ok(self.simulation.state())
+    }
+
+    /// Like `at_with_state`, also returning the state's revision. The revision
+    /// changes whenever the timeline replaces its state, by a step or by a restore
+    /// from a checkpoint, even when the replacement lands on the same step index as
+    /// before. Two calls that return equal revisions therefore returned the very
+    /// same state, and anything derived from it can be reused.
+    pub fn at_with_revision(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(&State, u64), Error> {
+        self.seek(time, input)?;
+        Ok((self.simulation.state(), self.revision))
+    }
+
+    fn seek(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(), Error> {
         if !time.is_finite() {
             return Err(Error::Invalid("seek time must be finite"));
         }
@@ -1427,15 +1523,18 @@ impl Timeline {
             let (&step, state) = self.checkpoints.range(..=target).next_back().expect("initial checkpoint is retained");
             self.simulation.state = state.clone();
             self.simulation.step = step;
+            self.revision += 1;
         } else if let Some((&step, state)) = self.checkpoints.range(self.simulation.step..=target).next_back() {
             if step > self.simulation.step {
                 self.simulation.state = state.clone();
                 self.simulation.step = step;
+                self.revision += 1;
             }
         }
         while self.simulation.step < target {
             let value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
             self.simulation.step(&value)?;
+            self.revision += 1;
             let step = self.simulation.step;
             if step % self.every == 0 && !self.checkpoints.contains_key(&step) {
                 // Thin before cloning: transient insertion never exceeds budget.
@@ -1450,7 +1549,7 @@ impl Timeline {
                 }
             }
         }
-        Ok(self.simulation.state())
+        Ok(())
     }
 }
 

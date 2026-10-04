@@ -299,9 +299,32 @@ fn run(c: &Case) -> (u64, State, Vec<usize>) {
     hash.f64s(&s.temperature);
     s.velocity.iter().for_each(|v| hash.f64s(v));
     hash.bytes(&s.solid.iter().map(|&b| u8::from(b)).collect::<Vec<_>>());
-    hash.vec3s(&s.solid_velocity_low);
-    hash.vec3s(&s.solid_velocity_high);
+    // Face velocities of the solid cells, expanded to the dense arrays earlier
+    // releases stored in the state (zero outside solid cells), so the pinned hashes
+    // keep covering them.
+    let (_, solids) = voxelize(s.cells, s.origin, s.h, &input.obstacles).unwrap();
+    let (mut low, mut high) = (vec![[0.0; 3]; s.density.len()], vec![[0.0; 3]; s.density.len()]);
+    for faces in solids {
+        low[faces.cell] = faces.low;
+        high[faces.cell] = faces.high;
+    }
+    hash.vec3s(&low);
+    hash.vec3s(&high);
     (hash.0, s.clone(), iterations)
+}
+
+/// A simulation of reference case `index` advanced `steps` steps, with the given
+/// ambient temperature (the background of the exported temperature channel).
+pub(super) fn simulate(index: usize, steps: u64, ambient: f64) -> Simulation {
+    let c = &CASES[index];
+    let mut spec = spec(c);
+    spec.ambient_temperature = ambient;
+    let input = inputs(c, &spec);
+    let mut sim = Simulation::new(spec).unwrap();
+    for _ in 0..steps {
+        sim.step(&input).unwrap();
+    }
+    sim
 }
 
 fn on_pool<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
@@ -334,7 +357,7 @@ fn final_state_matches_the_reference_hashes() {
 
 /// `cargo test --release -p sr-sim --lib -- --ignored --nocapture print_hashes`
 #[test]
-#[ignore = "prints the hashes used to pin the reference"]
+#[ignore = "prints the hashes that pin the reference"]
 fn print_hashes() {
     for c in &CASES {
         let (hash, state, iterations) = run(c);

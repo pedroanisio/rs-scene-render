@@ -1,6 +1,9 @@
 //! Per-stage timing of the smoke solver on a cinematic-impact-like plume.
 //!
-//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid] [semilagrangian|maccormack]`
+//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid] [semilagrangian|maccormack] [export]`
+//!
+//! With a final `export` argument it also times `State::volume` (all five channels) after the
+//! last step, three times.
 //!
 //! The domain is 192 x 156 x 192 scene units like `examples/cinematic-impact`
 //! (open edges, impulse + expanding source, buoyancy, vorticity, turbulence);
@@ -29,6 +32,7 @@ fn main() {
         Some("maccormack") => Advection::MacCormack,
         Some(other) => panic!("advection must be semilagrangian or maccormack, not {other}"),
     };
+    let export = args.next().is_some_and(|v| v == "export");
     let (extent, height) = (192.0, 156.0);
     let voxel = extent / nx as f64;
     let ny = (height / voxel).round() as usize;
@@ -81,7 +85,13 @@ fn main() {
         ..Inputs::default()
     };
     let mut sim = Simulation::new(spec).expect("spec");
-    println!("{nx}x{ny}x{nx} cells, voxel {voxel:.3}, {} rayon threads", rayon::current_num_threads());
+    let state_bytes = sim.state().bytes();
+    println!(
+        "{nx}x{ny}x{nx} cells, voxel {voxel:.3}, {} rayon threads, state {:.1} MiB ({:.1} B/cell)",
+        rayon::current_num_threads(),
+        state_bytes as f64 / 1048576.0,
+        state_bytes as f64 / (nx * ny * nx) as f64
+    );
     println!("step  cg   total  clone  obst   bnd  advect(copy)  inject forces  p.setup  p.apply p.precond p.reduce p.update p.finish  project   (ms)");
     let mut sum = StepProfile::default();
     let mut counted = 0;
@@ -131,6 +141,29 @@ fn main() {
             sum.project_finish += p.project_finish;
         }
     }
+    if export {
+        for round in 0..3 {
+            let started = std::time::Instant::now();
+            let copy = sim.state().clone();
+            println!(
+                "state clone {round}: {:.1} ms ({:.1} MiB)",
+                started.elapsed().as_secs_f64() * 1e3,
+                copy.bytes() as f64 / 1048576.0
+            );
+        }
+        for round in 0..3 {
+            let started = std::time::Instant::now();
+            let volume = sim.state().volume(usize::MAX / 2).expect("export");
+            let bricks: usize = volume.grids().map(|(_, g)| g.brick_count()).sum();
+            println!("export {round}: {:.1} ms ({bricks} bricks)", started.elapsed().as_secs_f64() * 1e3);
+            let started = std::time::Instant::now();
+            let key = sr_sim::pyro::volume_key(&volume);
+            println!("key {round}: {:.1} ms ({key:016x})", started.elapsed().as_secs_f64() * 1e3);
+            let started = std::time::Instant::now();
+            let legacy = legacy_key(&volume);
+            println!("legacy key {round}: {:.1} ms ({legacy:016x})", started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
     if counted > 0 {
         let n = counted as f64;
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3 / n;
@@ -159,4 +192,33 @@ fn main() {
             ms(sum.project_finish),
         );
     }
+}
+
+/// The per-value chained hash that cache keys used before `volume_key`, kept to compare timings.
+fn legacy_key(volume: &sr_volume::Volume) -> u64 {
+    fn mix64(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn hash(words: &[u64]) -> u64 {
+        let mut h = 0x9e37_79b9_7f4a_7c15u64;
+        for &w in words {
+            h = mix64(h ^ mix64(w.wrapping_add(0x9e37_79b9_7f4a_7c15)));
+        }
+        h
+    }
+    let mut h = 0;
+    for (_, grid) in volume.grids() {
+        h = hash(&[h, 0, u64::from(grid.background().to_bits())]);
+        for (coord, values) in grid.bricks() {
+            for v in coord {
+                h = hash(&[h, v as u64, 1]);
+            }
+            for v in values {
+                h = hash(&[h, u64::from(v.to_bits()), 2]);
+            }
+        }
+    }
+    h
 }
