@@ -292,9 +292,9 @@ impl VolumeDraw {
         Ok(self)
     }
 
-    /// A note for `stats.unsupported` when grid lighting would band: the grid interpolates
-    /// transmittance between nodes, which is wrong where a cell's optical depth is well above 1.
-    /// None for exact lighting or a medium thin enough for its cells.
+    /// A note for `stats.unsupported` when grid lighting is least accurate: the grid interpolates
+    /// transmittance between nodes, which is a poor model where a cell's optical depth is well
+    /// above 1. None for exact lighting or a medium thin enough for its cells.
     pub fn light_grid_note(&self) -> Option<String> {
         let request = self.light_grid?;
         let m = &self.medium;
@@ -313,7 +313,7 @@ impl VolumeDraw {
         let depth = optical.extinction * optical.density_scale * f64::from(peak) * spacing;
         (depth.is_finite() && depth > LIGHT_GRID_CELL_OPTICAL_DEPTH).then(|| {
             format!(
-                "lighting=\"grid\" interpolates transmittance between nodes {spacing:.2} units apart and the optical depth across one cell reaches {depth:.1}; thick smoke bands, use lighting=\"exact\" or a smaller lightGridCell"
+                "lighting=\"grid\" lights this medium from nodes {spacing:.2} units apart and the optical depth across one cell reaches {depth:.1}; the grid is less accurate where cells are that thick, use lighting=\"exact\" or a smaller lightGridCell"
             )
         })
     }
