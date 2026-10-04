@@ -2267,9 +2267,31 @@
     <xs:attribute name="scaleZ" type="xs:double" default="1"/>
     <xs:attribute name="mesh" type="xs:IDREF"/>
   </xs:attributeGroup>
+  <xs:attributeGroup name="pyroCrater">
+    <xs:annotation><xs:documentation>
+      A source or impulse that the impact of a crater causes. `crater` names a crater that grows from an impact
+      (`crater@source`); the smoke is derived from that impact and nothing is authored about when, where or how much:
+      the source is a sphere of the crater's radius at the impact point, active from the impact over the crater's
+      formation time (an impulse: at the impact), so shape, position, timing, density, temperature and expansion are
+      not given. The dust is `dustFraction` of the volume thrown out of the crater, injected as a volume fraction of
+      solids (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
+      `heatFraction` of (1/2) m U^2 sin(theta)^(3/2) for the body's mass m, speed U and angle theta from the surface;
+      it warms the dust by heat / (dust mass x `specificHeat`, J/(kg K)), at most `maxTemperature` kelvin, and the
+      expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
+      share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
+      that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
+      `physics/@pixelsPerMeter`.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="dustFraction"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="specificHeat" type="positiveDecimal"/>
+    <xs:attribute name="maxTemperature"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:attributeGroup>
   <xs:complexType name="pyroSourceType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
     <xs:attributeGroup ref="pyroShape"/>
+    <xs:attributeGroup ref="pyroCrater"/>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="densityRate" type="nonNegativeDecimal" default="0"/>
@@ -2281,7 +2303,8 @@
   </xs:complexType>
   <xs:complexType name="pyroImpulseType">
     <xs:attributeGroup ref="pyroShape"/>
-    <xs:attribute name="time" type="nonNegativeDecimal" use="required"/>
+    <xs:attributeGroup ref="pyroCrater"/>
+    <xs:attribute name="time" type="nonNegativeDecimal"/>
     <xs:attribute name="density" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="temperature" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="velocityX" type="xs:double" default="0"/>
@@ -2378,6 +2401,12 @@
       seabed's. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law is still applied to the
       normal component, which keeps the size monotone in the angle, and no ricochet is modelled.
     </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID">
+      <xs:annotation><xs:documentation>
+        Names the crater so that what its impact causes can refer to it: with `source`, the consequences of the
+        impact (ejecta, smoke) name this crater instead of repeating its body and material.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="source" type="xs:IDREF"/>
     <xs:attribute name="targetMaterial">
       <xs:simpleType><xs:restriction base="xs:string">

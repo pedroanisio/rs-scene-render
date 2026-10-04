@@ -26,6 +26,7 @@ pub mod eval;
 pub mod expr;
 pub mod fracture;
 pub mod geo;
+mod group;
 pub mod layout;
 pub mod mesh_sequence;
 pub mod ocean;

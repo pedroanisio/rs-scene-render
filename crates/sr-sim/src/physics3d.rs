@@ -163,6 +163,15 @@ pub trait Driver3 {
     ) -> Result<Option<ColliderUpdate3>, String> {
         self.collider(t, which, revision)
     }
+    /// The load on a dynamic body for the step that starts at `step`, at time `t`, in scene
+    /// axes and units, or `None` for none. It must depend only on `step` and `body` and on records
+    /// that no longer change, so that a replay applies the same load: a world restored to a
+    /// checkpoint asks again for every step it re-takes. An error stops the step, which
+    /// is then not taken; the default is no load, and a world that is never loaded is
+    /// unchanged by this call.
+    fn load(&mut self, _step: u64, _t: f64, _body: usize) -> Result<Option<Load3>, String> {
+        Ok(None)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -191,6 +200,15 @@ impl ColliderUpdate3 {
             .and_then(|v| triangles.checked_mul(524).and_then(|i| v.checked_add(i)))
             .and_then(|v| v.checked_add(4096))
     }
+}
+
+/// A force and torque on a body, held for one step.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Load3 {
+    /// Mass times scene units per second squared, scene axes, acting at the centre of mass.
+    pub force: [f64; 3],
+    /// Mass times scene units squared per second squared, scene axes, about the centre of mass.
+    pub torque: [f64; 3],
 }
 
 /// Rigid motion in scene axes.
@@ -1145,7 +1163,16 @@ impl World3 {
     }
 
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
+        // the loads first: a step that cannot get one is not taken, and nothing has changed
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
+        let mut loads = Vec::new();
+        for (k, b) in self.spec.bodies.iter().enumerate() {
+            if b.kind == BodyKind::Dynamic {
+                if let Some(load) = driver.load(self.state.step, t, k)? {
+                    loads.push((k, load));
+                }
+            }
+        }
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
@@ -1181,6 +1208,7 @@ impl World3 {
         for k in 0..self.spec.bodies.len() {
             let body = &mut st.bodies[st.handles[k]];
             body.reset_forces(false);
+            body.reset_torques(false);
             if !body.is_enabled() || !body.is_dynamic() || fields.is_empty() {
                 continue;
             }
@@ -1189,6 +1217,15 @@ impl World3 {
             let a = fields::total3(&fields, p, lv, t);
             let mass = body.mass();
             body.add_force(vec3(flip(a).map(|c| c / ppm * mass)), true);
+        }
+        for (k, load) in loads {
+            let body = &mut st.bodies[st.handles[k]];
+            let nothing = load.force.iter().chain(&load.torque).all(|c| *c == 0.0);
+            if nothing || !body.is_enabled() || !body.is_dynamic() {
+                continue;
+            }
+            body.add_force(vec3(flip(load.force).map(|c| c / ppm)), true);
+            body.add_torque(vec3(flip(load.torque).map(|c| c / (ppm * ppm))), true);
         }
         let pending = self.state.impacts.iter().any(Option::is_none);
         let motion = (self.contact_log.is_some() || pending).then(|| self.capture_motion());

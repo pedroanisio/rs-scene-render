@@ -42,6 +42,8 @@ struct Runtime {
     /// Timeline revision of the state `last` was exported from. Equal revisions
     /// are the same state, so nothing is exported or hashed again.
     last_revision: Option<u64>,
+    /// Whether a source or impulse comes from a crater, whose impact the rigid world finds.
+    craters: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -113,6 +115,15 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
         meshes.insert(id, load_mesh(p, &MeshRef::Asset(key), &mut remaining, &mut assets)?);
     }
     let colliders = colliders::build(p, e, &mut remaining, &mut assets)?;
+    let craters = children(e).iter().any(|c| c.get_attr("crater").is_some());
+    if craters {
+        // the impact is on the composition clock, and so must the smoke be
+        let start = p.nodes[node as usize].start;
+        let composition = |x: f64| crate::sim::source_sample(p, node, x + start, x + start).0;
+        if [0.0, 1.0, 7.5].iter().any(|&x| composition(x) != x + start) {
+            return Err("smoke from a crater needs the composition clock".into());
+        }
+    }
     Ok(Runtime {
         timeline,
         max_bytes: bytes,
@@ -121,6 +132,7 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
         dt: num(e, "dt", 1.0 / 60.0),
         last: None,
         last_revision: None,
+        craters,
     })
 }
 
@@ -162,6 +174,10 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
         *count += 1;
         let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
         let v = |name: &str, default: f64| value(child, props, name, default);
+        if child.get_attr("crater").is_some() {
+            // what a crater causes comes from its impact, not from the source's own attributes
+            continue;
+        }
         let shape = if text(child, "shape").as_deref() == Some("mesh") {
             let id = text(child, "mesh").ok_or(pyro::Error::Invalid("mesh source requires @mesh"))?;
             Shape::Mesh(meshes.get(&id).cloned().ok_or(pyro::Error::Invalid("mesh source asset was not loaded"))?)
@@ -204,6 +220,98 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
     Ok(result)
 }
 
+/// The sources and impulses that craters cause, from the impacts the rigid world has found: for
+/// each `pyroSource` or `pyroImpulse` with a crater whose impact has happened, a sphere of
+/// the crater's radius at the impact point, with the dust and heat the engine makes of the
+/// impact. `start` is the composition time at which the volume's clock begins. Nothing is
+/// emitted for a crater that has not been hit.
+fn crater_inputs(frame: &FrameGraph, node: usize, start: f64, dt: f64, input: &mut Inputs) -> Result<(), pyro::Error> {
+    let Some(e) = config(&frame.nodes[node]) else { return Ok(()) };
+    let domain = inverse_transform(crate::sim3d::world3(frame, node, 0))?;
+    for child in children(e) {
+        let Some(owner) = text(child, "crater") else { continue };
+        let Some(j) = frame.nodes.iter().position(|n| *n.id == *owner) else { continue };
+        let Some(grown) = frame.nodes[j].crater_impact.as_deref() else { continue };
+        let cause = grown.cause;
+        let number = |name: &str, default: f64| num(child, name, default);
+        let params = sr_sim::cratering::SmokeParams {
+            heat_fraction: number("heatFraction", 0.1),
+            dust_fraction: number("dustFraction", 0.01),
+            specific_heat: number("specificHeat", 1000.0),
+            max_temperature: number("maxTemperature", 5000.0),
+        };
+        let made = sr_sim::cratering::smoke(&cause.impactor, cause.speed, &cause.law, cause.target_density, &params)
+            .map_err(|_| pyro::Error::Invalid("the smoke of a crater has invalid parameters"))?;
+        // the sphere of the crater's radius at the impact point, in the volume's own axes
+        let owner_world = crate::sim3d::world3(frame, j, 0);
+        let centre = domain.transform_point3(owner_world.transform_point3(DVec3::from(grown.spec.center)));
+        let radius_world = cause.law.radius * cause.pixels_per_meter;
+        let along = domain.transform_vector3(DVec3::new(radius_world, 0.0, 0.0)).length();
+        let across = domain.transform_vector3(DVec3::new(0.0, radius_world, 0.0)).length();
+        if !centre.is_finite()
+            || (along - across).abs() > 1e-6 * along.max(across)
+            || along.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        {
+            return Err(pyro::Error::Invalid("smoke from a crater needs a uniformly scaled volume"));
+        }
+        // a sphere smaller than a voxel would cover no cell centre: it is never smaller than one
+        let h = num(e, "voxelSize", 1.0);
+        let used = along.max(0.9 * h);
+        let shape = Shape::Sphere { center: centre.to_array(), radius: used };
+        // The dust is spread, as a volume fraction of solids, over the cells whose centres the
+        // sphere covers, so that what is injected is the dust and not what the grid happens to cover.
+        let size = ["width", "height", "depth"].map(|k| num(e, k, 0.0));
+        let covered = (0..3)
+            .map(|axis| {
+                let cells = (size[axis] / h).round() as usize;
+                (0..cells).map(move |c| -0.5 * size[axis] + (c as f64 + 0.5) * h)
+            })
+            .collect::<Vec<_>>();
+        let reach = used * used;
+        let mut cells = 0usize;
+        for x in covered[0].clone() {
+            for y in covered[1].clone() {
+                for z in covered[2].clone() {
+                    let d = [x - centre.x, y - centre.y, z - centre.z];
+                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= reach {
+                        cells += 1;
+                    }
+                }
+            }
+        }
+        if cells == 0 {
+            // the impact is outside the volume: there is nothing of it to put in the smoke
+            continue;
+        }
+        let voxel = (h * (cause.law.radius / along)).powi(3);
+        let density = made.dust_volume / (cells as f64 * voxel);
+        // the impact is known from the first step that starts after it, so that is where it begins
+        let at = ((cause.time - start) / dt).ceil() * dt;
+        let velocity = |names: [&str; 3]| names.map(|name| number(name, 0.0));
+        match child.element_name() {
+            "pyroSource" => input.heated.push(Source {
+                shape,
+                start: at,
+                end: Some(at + made.duration),
+                density_rate: density / made.duration,
+                temperature_rate: made.temperature_rise / made.duration,
+                velocity_rate: velocity(["velocityRateX", "velocityRateY", "velocityRateZ"]),
+                expansion: 0.0,
+            }),
+            "pyroImpulse" => input.heated_impulses.push(Impulse {
+                shape,
+                time: at,
+                density,
+                temperature: made.temperature_rise,
+                velocity: velocity(["velocityX", "velocityY", "velocityZ"]),
+                expansion: 0.0,
+            }),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 impl Sims {
     pub(crate) fn apply(
         &mut self,
@@ -230,6 +338,8 @@ impl Sims {
                 let meshes = &runtime.meshes;
                 let colliders = &mut runtime.colliders;
                 let dt = runtime.dt;
+                let craters = runtime.craters;
+                let volume_start = p.nodes[node as usize].start;
                 let (state, revision) = runtime
                     .timeline
                     .at_with_revision(source_time, &mut |_, time, state| {
@@ -240,7 +350,7 @@ impl Sims {
                         } else {
                             Arc::new(crate::eval::evaluate_with_clocks(p, t, &clocks))
                         };
-                        if !fields.is_empty() || !colliders.is_empty() {
+                        if !fields.is_empty() || !colliders.is_empty() || craters {
                             if let Some(physics) = physics.as_deref_mut() {
                                 crate::sim::apply_physics(p, physics, Arc::make_mut(&mut frame), graphs, fields, t);
                             }
@@ -251,6 +361,7 @@ impl Sims {
                         match frame.nodes.iter().position(|n| n.id == id) {
                             Some(i) => {
                                 let mut input = inputs(&frame.nodes[i], meshes)?;
+                                crater_inputs(&frame, i, volume_start, dt, &mut input)?;
                                 field_inputs(&mut input, state, &frame, i, fields)?;
                                 if !colliders.is_empty() {
                                     let (next_t, next_clocks) = crate::sim::source_sample(

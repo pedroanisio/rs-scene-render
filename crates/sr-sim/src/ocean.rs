@@ -121,6 +121,12 @@ pub struct Forcing {
     /// With `Spec::bodies`: horizontal velocity of the body in every cell
     /// (ignored where `occupancy` is zero). Empty otherwise.
     pub velocity: Vec<[f64; 2]>,
+    /// Set on the sample taken just after canonical step `k` completes, which is the first
+    /// instant the step's outcome is known: `Some((k, momentum))`, with the horizontal
+    /// momentum per unit water density that bodies gave the water during step `k` (the
+    /// value of [`Ocean::exchanged_impulse`] then). A replay of the step offers the same
+    /// value again. `None` on every other sample.
+    pub exchange: Option<(u64, [f64; 2])>,
 }
 
 /// Supplies the bed at an instant. The result must depend only on `time` and on
@@ -344,7 +350,14 @@ impl Ocean {
         self.checkpoints.insert(at, (step, state.clone()));
     }
 
-    fn sample(&self, driver: &mut dyn Driver, time: f64, out: &mut Forcing) -> Result<(), Error> {
+    fn sample(
+        &self,
+        driver: &mut dyn Driver,
+        time: f64,
+        out: &mut Forcing,
+        exchange: Option<(u64, [f64; 2])>,
+    ) -> Result<(), Error> {
+        out.exchange = exchange;
         let n = self.initial.q.len();
         out.bed.resize(n, 0.0);
         let wanted = if self.spec.bodies { n } else { 0 };
@@ -406,8 +419,8 @@ impl Ocean {
                 Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
                 _ => {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
-                    self.sample(driver, k as f64 * dt, &mut now)?;
-                    self.sample(driver, (k + 1) as f64 * dt, &mut next)?;
+                    self.sample(driver, k as f64 * dt, &mut now, None)?;
+                    self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)))?;
                     (now, next)
                 }
             }),
@@ -421,7 +434,7 @@ impl Ocean {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
                     advance(&self.spec, bed, &self.impulses, &mut state, end, &mut work, &mut scratch)?;
                     std::mem::swap(now, next);
-                    self.sample(driver, (k + 1) as f64 * dt, next)?;
+                    self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)))?;
                 }
                 _ => advance(
                     &self.spec,

@@ -327,6 +327,12 @@ pub struct Impulse {
 pub struct Inputs {
     pub sources: Vec<Source>,
     pub impulses: Vec<Impulse>,
+    /// Sources whose expansion follows from their heat rather than being given: smoke heated at
+    /// constant pressure, as an ideal gas, expands at `(dT/dt) / T` in every cell it heats, so
+    /// `expansion` must be zero. Otherwise they are `sources`.
+    pub heated: Vec<Source>,
+    /// One-shot totals with the same derived expansion; `expansion` must be zero.
+    pub heated_impulses: Vec<Impulse>,
     pub obstacles: Vec<Obstacle>,
     pub acceleration: [f64; 3],
     /// Optional per-cell acceleration, x-fastest. Empty means no spatial field;
@@ -336,13 +342,19 @@ pub struct Inputs {
 
 impl Inputs {
     fn validate(&self) -> Result<(), Error> {
-        if self.sources.len().saturating_add(self.impulses.len()) > 4096 || self.obstacles.len() > 4096 {
+        let heated = self.heated.len().saturating_add(self.heated_impulses.len());
+        if self.sources.len().saturating_add(self.impulses.len()).saturating_add(heated) > 4096
+            || self.obstacles.len() > 4096
+        {
             return Err(Error::Limit("at most 4096 sources/colliders per step"));
         }
         if !finite3(self.acceleration) {
             return Err(Error::Invalid("nonfinite acceleration"));
         }
-        for s in &self.sources {
+        if self.heated.iter().any(|s| s.expansion != 0.0) || self.heated_impulses.iter().any(|i| i.expansion != 0.0) {
+            return Err(Error::Invalid("the expansion of a heated source is derived from its heat"));
+        }
+        for s in self.sources.iter().chain(&self.heated) {
             s.shape.validate()?;
             if !s.start.is_finite()
                 || s.end.is_some_and(|e| !e.is_finite() || e <= s.start)
@@ -360,7 +372,7 @@ impl Inputs {
                 return Err(Error::Invalid("nonfinite collider velocity"));
             }
         }
-        for impulse in &self.impulses {
+        for impulse in self.impulses.iter().chain(&self.heated_impulses) {
             impulse.shape.validate()?;
             if !nonnegative(impulse.time)
                 || !nonnegative(impulse.density)
@@ -928,23 +940,49 @@ impl Simulation {
                 &mut state,
                 &mut target,
                 &source.shape,
-                source.density_rate * overlap,
-                source.temperature_rate * overlap,
-                source.velocity_rate.map(|v| v * overlap),
-                source.expansion * (overlap / dt),
+                Injection {
+                    density: source.density_rate * overlap,
+                    temperature: source.temperature_rate * overlap,
+                    velocity: source.velocity_rate.map(|v| v * overlap),
+                    expansion: source.expansion * (overlap / dt),
+                    heated: None,
+                },
             );
         }
-        for impulse in &input.impulses {
+        for source in &input.heated {
+            let overlap = (end.min(source.end.unwrap_or(end)) - start.max(source.start)).max(0.0);
+            if overlap == 0.0 {
+                continue;
+            }
+            inject(
+                &mut state,
+                &mut target,
+                &source.shape,
+                Injection {
+                    density: source.density_rate * overlap,
+                    temperature: source.temperature_rate * overlap,
+                    velocity: source.velocity_rate.map(|v| v * overlap),
+                    expansion: 0.0,
+                    heated: Some(dt),
+                },
+            );
+        }
+        for (impulse, heated) in
+            input.impulses.iter().map(|i| (i, None)).chain(input.heated_impulses.iter().map(|i| (i, Some(dt))))
+        {
             let ratio = impulse.time / dt;
             if ratio.is_finite() && fixed_step_index(ratio) == self.step {
                 inject(
                     &mut state,
                     &mut target,
                     &impulse.shape,
-                    impulse.density,
-                    impulse.temperature,
-                    impulse.velocity,
-                    impulse.expansion / dt,
+                    Injection {
+                        density: impulse.density,
+                        temperature: impulse.temperature,
+                        velocity: impulse.velocity,
+                        expansion: impulse.expansion / dt,
+                        heated,
+                    },
                 );
             }
         }
@@ -1558,15 +1596,19 @@ fn fixed_step_index(ratio: f64) -> u64 {
     (if (ratio - nearest).abs() <= f64::EPSILON * 4.0 * ratio.max(1.0) { nearest } else { ratio.floor() }) as u64
 }
 
-fn inject(
-    state: &mut State,
-    target: &mut [f64],
-    shape: &Shape,
+/// What a source or impulse adds to the cells it covers in one step.
+struct Injection {
     density: f64,
     temperature: f64,
     velocity: [f64; 3],
+    /// Divergence to project to, 1/second.
     expansion: f64,
-) {
+    /// For a source whose expansion follows from its heat: the step, seconds.
+    heated: Option<f64>,
+}
+
+fn inject(state: &mut State, target: &mut [f64], shape: &Shape, add: Injection) {
+    let Injection { density, temperature, velocity, expansion, heated } = add;
     let (cells, origin, h) = (state.cells, state.origin, state.h);
     let State { density: cell_density, temperature: cell_temperature, velocity: faces, solid, .. } = state;
     let solid = &*solid;
@@ -1581,6 +1623,12 @@ fn inject(
                 *d += density;
                 *t += temperature;
                 *target_value += expansion;
+                // an ideal gas heated at constant pressure: dT over a step of dt is a divergence of dT / (T dt)
+                if let Some(dt) = heated {
+                    if temperature > 0.0 && *t > 0.0 {
+                        *target_value += temperature / (*t * dt);
+                    }
+                }
             }
         });
     for (a, amount) in velocity.into_iter().enumerate() {

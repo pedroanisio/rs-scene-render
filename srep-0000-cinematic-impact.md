@@ -1453,10 +1453,71 @@ rock gives an apparent crater 0.8 km across here, against a transient crater of 
 the Earth Impact Effects calculator (Collins, Melosh and Marcus 2005,
 doi 10.1111/j.1945-5100.2005.tb00157.x), a difference within what the two laws disagree by.
 
+Smoke from an impact. A `pyroSource` or `pyroImpulse` with `crater` naming such a crater is the
+smoke the impact causes, and nothing is authored about it: its shape, place, timing, density,
+temperature and expansion are derived (PYC1), the crater must exist and grow from an impact
+(PYC4), and the engine's parameters belong only to such a source (PYC2). The source is a
+sphere of the crater's radius at the impact point, active from the impact over the crater's
+formation time (an impulse: at the impact), both starting at the first smoke step that begins after the impact, which is when the impact is known. The dust is `dustFraction` of the volume thrown
+out of the crater (`0.8 V`), injected as a volume fraction of solids spread over the cells whose centres the
+sphere covers (a sphere smaller than a voxel is widened to cover one; an impact outside the volume puts
+nothing in it), so that the dust injected is the dust and not what the grid happens to cover, it depends
+on no unit of mass and `medium@extinction` is, in these sources, extinction per unit volume fraction. The
+heat is `heatFraction` of `(1/2) m U^2 sin(theta)^(3/2)` for the body's mass, speed and angle
+from the surface; the exponent is the scaling of shock energy with the angle in the 3D
+hydrocode runs of Pierazzo and Melosh (2000, doi 10.1146/annurev.earth.28.1.141), while the
+crater uses the normal component. It warms the dust by `heat / (dust mass x specificHeat)`
+(dust mass: its volume times the target density), at most `maxTemperature` kelvin: a declared
+physical cap (vaporisation), not a fallback, below the solver's limit of 50000 K. The solver
+derives the expansion from the heating, as an ideal gas at constant pressure, `(dT/dt)/T` in
+every cell heated, so there is no authored `expansion`; a sealed domain cannot sustain it, as
+for any expansion. The literature gives ranges, not values, for the share of an impact's
+energy that goes into a plume (internal energy of target and body 0.70 to 0.91 of it at 5 to
+45 km/s in strong rock, O'Keefe and Ahrens 1977; ejecta kinetic energy 0.07 to 0.5 of it), and
+none for the part that rises in smoke, so `heatFraction` 0.1, `dustFraction` 0.01 and
+`specificHeat` 1000 J/(kg K) are the engine's, with no published value, to be calibrated. In
+physical units a slow impact barely heats anything, and even a 20 km/s impact of a body of
+1500 kg heats its dust by only a few hundred kelvin at these defaults, because the dust grows
+with the crater and the crater grows more slowly than the energy: a scene needs physical
+impact speeds, or a smaller `dustFraction`, for a fireball. This is the engine saying what the
+numbers say.
+
 Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
 Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
 through Holsapple's documents and the papers that cite them. The calculator note's table
 and Holsapple (1993) were read directly.
+
+#### Coupled solvers (rigid world and ocean)
+
+An ocean whose `colliders` list a rigid body forms a group with the rigid world; no attribute
+says so. Each member can be replayed alone, so the members do not ask each other again (that
+would restore the other's checkpoints in turn): the ocean writes the outcome of each of its
+canonical steps, once, into an append-only exchange log of small records, and the rigid world
+reads from it the load for each of its steps. Writing a step again must reproduce its record to
+the last bit, or the write is a divergence error; the log has an internal byte budget (16 MiB)
+whose overflow is an error; nothing is dropped, because a record dropped could not be replayed.
+
+The rigid world's step that starts while the ocean's canonical step `m` is the last completed
+reads the outcome of step `m - 1`: a delay of one whole ocean step. It is what makes the
+exchange causal, because to advance a step the ocean samples the bodies at its start and at the
+next canonical instant (to measure their velocity), so it reads the rigid world a full step
+ahead of the outcomes it has. A group therefore applies its ocean before the rigid world in a
+frame; the ocean's steps pull the rigid world ahead in time order, and the rigid world never
+needs an outcome that does not exist. A load that is not there is an error that names the body,
+the step and how far the ocean has got, never a stand-in: the last known value would make the
+result depend on the order of calls. Smoke and 3D particles may read the rigid world up to one
+of their own steps past a frame, so after answering a frame the group steps the ocean on to the
+outcomes those readers can ask for (the longest `dt` among the smoke volumes and particle
+systems that collide with the group's bodies); a group therefore simulates a little beyond the
+instant asked for (in the cases tried, smoke with a `dt` of 0.2 s read the rigid world no further than the ocean had already reached, so the extension is a tested safeguard that no scene has needed). The rigid world takes a `Load3` (force and torque, scene axes and units) per
+dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
+loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
+
+Every member of a group runs on the composition clock (the ocean's local time is the
+composition time less its start, with no remapping), because the exchange is indexed by it. The
+rigid world's frame memory, checkpoints and the log together
+make a backward request cheap: it is answered from the frame memory, or by restoring a
+checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
 #### Fracture (native scene, rendering and cache integration implemented)
 
@@ -1907,6 +1968,11 @@ Also includes `pyroShape`, inventoried below.
 | `velocityRateY` | xs:double | Default `0` |
 | `velocityRateZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `pyroImpulseType`
 
@@ -1914,13 +1980,18 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
-| `time` | nonNegativeDecimal | Required |
+| `time` | nonNegativeDecimal | Required unless `crater` is given (PYC3) |
 | `density` | nonNegativeDecimal | Default `0` |
 | `temperature` | nonNegativeDecimal | Default `0` |
 | `velocityX` | xs:double | Default `0` |
 | `velocityY` | xs:double | Default `0` |
 | `velocityZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `particles3DType`
 
@@ -2113,6 +2184,12 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
+| `id` | xs:ID | Optional; names the crater so that what its impact causes can refer to it |
+| `source` | xs:IDREF | Optional; the dynamic rigid body that makes the crater (CRT6 to CRT8) |
+| `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
+| `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
+| `strength` | nonNegativeDecimal | Optional with `source`: Pa |
+| `gravity` | positiveDecimal | Optional with `source`: m/s2; default the physics gravity |
 | `centerX` | xs:double | Default `0` |
 | `centerY` | xs:double | Default `0` |
 | `centerZ` | xs:double | Default `0` |

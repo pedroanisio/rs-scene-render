@@ -19,6 +19,7 @@
 
 pub mod cratering;
 pub mod erosion;
+pub mod exchange;
 pub mod fields;
 pub mod flock;
 pub mod fluid;

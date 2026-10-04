@@ -1148,6 +1148,29 @@ impl Builder {
         }
     }
 
+    /// The node that owns the crater `id`, found from `scope` outward like any id.
+    fn resolve_crater(&self, scope: &str, id: &str) -> Option<u32> {
+        let mut s = scope.to_string();
+        loop {
+            let found = self.nodes.iter().position(|n| {
+                n.scope.as_ref() == s.as_str()
+                    && children(&*n.elem)
+                        .into_iter()
+                        .any(|c| c.element_name() == "crater" && attr_str(c, "id").as_deref() == Some(id))
+            });
+            if let Some(k) = found {
+                return Some(k as u32);
+            }
+            if s.is_empty() {
+                return None;
+            }
+            s = match s.rfind('/') {
+                Some(i) => s[..i].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
     fn media_len(&self, doc: u16, asset: &str) -> Option<f64> {
         let a = self.doc(doc).scene.assets.as_ref()?.children.iter().find(|c| c.id() == Some(asset))?;
         match a {
@@ -2339,6 +2362,28 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
+            // What a crater causes (smoke) names the crater by its id, in the same lexical scope; the
+            // reference becomes the effective id of the object that owns the crater.
+            let mut cause_owners: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "pyro")
+                .flat_map(|pyro| sr_model::element::children(pyro))
+                .filter(|e| matches!(e.element_name(), "pyroSource" | "pyroImpulse"))
+                .filter_map(|e| attr_str(e, "crater"))
+            {
+                match self.resolve_crater(&scope, &id) {
+                    Some(owner) => {
+                        cause_owners.insert(id, self.nodes[owner as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
             // A crater that grows from an impact names its source body, in the same lexical
             // scope: inside a symbol instance it is that instance's body.
             let mut sources: HashMap<String, Arc<str>> = HashMap::new();
@@ -2359,7 +2404,12 @@ impl Builder {
                     )),
                 }
             }
-            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() || !sources.is_empty() {
+            if parent.is_some()
+                || !constraints.is_empty()
+                || !colliders.is_empty()
+                || !sources.is_empty()
+                || !cause_owners.is_empty()
+            {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
                 if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
                     elem.set_attr("colliders", list).expect("resolved particle colliders");
@@ -2377,6 +2427,11 @@ impl Builder {
                         if let Some(list) = attr_str(child, "colliders").and_then(|list| colliders.get(&list)) {
                             child.set_attr("colliders", list).expect("resolved collider token list");
                         }
+                        child.visit_mut(&mut |input| {
+                            if let Some(owner) = attr_str(input, "crater").and_then(|id| cause_owners.get(&id)) {
+                                input.set_attr("crater", owner).expect("resolved crater owner");
+                            }
+                        });
                     }
                     if child.element_name() == "crater" {
                         if let Some(source) = attr_str(child, "source").and_then(|id| sources.get(&id)) {
