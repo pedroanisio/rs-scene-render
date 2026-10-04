@@ -270,6 +270,13 @@ impl Timer {
         })
     }
 
+    /// A free begin/end pair labelled `label`, for a pass outside the effect chain.
+    pub(crate) fn labelled_pair(&mut self, label: &str) -> Option<u32> {
+        let a = self.pair()?;
+        self.labels.push((label.to_string(), a));
+        Some(a)
+    }
+
     /// Copies the queries written so far where `read` can map them.
     pub fn resolve(&self, enc: &mut wgpu::CommandEncoder) {
         if self.used > 0 {
@@ -298,6 +305,13 @@ impl Timer {
             frame_ms: self.frame.map(ms),
             passes: self.labels.iter().map(|(label, a)| PassTime { label: label.clone(), ms: ms(*a) }).collect(),
         }
+    }
+}
+
+impl GpuTimes {
+    /// Appends the passes of another timer (such as the path tracer's) to this frame's.
+    pub(crate) fn extend(&mut self, other: GpuTimes) {
+        self.passes.extend(other.passes);
     }
 }
 

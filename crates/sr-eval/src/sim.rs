@@ -1524,6 +1524,7 @@ impl Runtime {
     /// Applies simulation to `g` (evaluated at `t`); `base` evaluates without simulation.
     pub fn apply(&mut self, p: &Program, g: &mut FrameGraph, t: f64, base: &dyn Fn(f64) -> FrameGraph) {
         let mut graphs = Graphs { base, cache: std::mem::take(&mut self.graph_cache) };
+        let clock = std::time::Instant::now();
         if !self.built {
             self.built = true;
             let fields = build_fields(p);
@@ -1537,6 +1538,8 @@ impl Runtime {
         if let Some(ph) = self.physics.as_mut() {
             apply_physics(p, ph, g, &mut graphs, fields, t);
         }
+        g.sim_seconds.rigid = clock.elapsed().as_secs_f64();
+        let clock = std::time::Instant::now();
         // ---- particles
         let ids: Vec<usize> =
             g.nodes.iter().enumerate().filter(|(_, n)| n.kind == "particleEmitter").map(|(i, _)| i).collect();
@@ -1569,11 +1572,16 @@ impl Runtime {
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
         self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
+        g.sim_seconds.particles = clock.elapsed().as_secs_f64();
+        let clock = std::time::Instant::now();
         self.ocean.apply(p, g);
+        g.sim_seconds.ocean = clock.elapsed().as_secs_f64();
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
         let mut pyro_problems = Vec::new();
+        let clock = std::time::Instant::now();
         self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_problems);
+        g.sim_seconds.smoke = clock.elapsed().as_secs_f64();
         g.problems.extend(pyro_problems);
         self.graph_cache = graphs.cache;
     }
