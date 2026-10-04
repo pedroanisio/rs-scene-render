@@ -912,6 +912,29 @@ XSD/Schematron fixtures are `valid/particles3d.scene.xml` and `invalid/p3d1` thr
 `p3d6.scene.xml`. Budgets, finite transformed values, importer failures and device
 precision limits remain runtime checks with explicit diagnostics.
 
+Particles dragged by smoke (`particles3D@gas`). A reference to the object3D whose native pyro volume drags
+the particles of an emitter; absent is the behaviour there always was. The integrator already solves
+`p'' = a - k v` in closed form with `k` the emitter's `drag`, and the driver adds `k u` to `a`, `u` the gas's
+velocity at the particle's place and time, so a particle obeys `p'' = k (u - v)` plus gravity and fields:
+dragged by the gas inside the volume's domain and by still air outside it with the same coefficient (the
+gas fades linearly to rest across one cell outside the domain, so what the particle feels has no jump at the
+boundary, for an open volume and for a closed one), and not at all with `drag` zero. The position is taken to
+the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
+time the gas is the linear interpolation of the two smoke steps around the instant (the particle's canonical steps
+are the only ones that ask, so motion-blur samples read nothing new). The smoke is simulated as far as the
+particles need, and first in the frame when a document names a gas (the others keep their order), so that the
+particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
+past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
+evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
+(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) are charged to the volume's
+`maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
+smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
+the target must hold a native pyro volume. Estimated cost: about 250 ns per query and two queries per particle
+per canonical step, so 100 000 particles over a 6 s film at 24 steps a second take about 7 s of one core, which
+was not measured. The coupling is linear in the relative velocity and one way: the particles do not push the gas, and for
+0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic drag is a rate of about 0.03 per second, so it
+moves dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
+
 ### Ocean surfaces and impulses
 
 **Implementation status:** The CPU solver, version-1.3 `<ocean>` node, owned

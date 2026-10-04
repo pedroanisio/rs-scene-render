@@ -31,7 +31,15 @@ struct CraterBurst {
     ejecta: Option<Arc<Vec<Birth>>>,
 }
 
+/// The smoke that drags an emitter's particles, and the gas of the steps it has asked for lately.
+struct GasRt {
+    /// Effective id of the smoke volume's object.
+    id: Arc<str>,
+    window: Vec<(u64, Arc<sr_sim::pyro::Gas>)>,
+}
+
 struct Runtime {
+    gas: Option<GasRt>,
     seed: u64,
     /// How far above the surface the ejecta of a crater are born: the largest collision radius.
     lift: f64,
@@ -135,6 +143,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
         + number("collisionTolerance", 0.001))
     .max(0.);
     Ok(Runtime {
+        gas: text(e, "gas").map(|id| GasRt { id: id.as_str().into(), window: Vec::new() }),
         seed: e.seed,
         lift,
         crater_bursts,
@@ -163,6 +172,8 @@ struct SceneDriver<'a, 'b> {
     seed: u64,
     lift: f64,
     bursts: &'a mut [CraterBurst],
+    /// The smoke that drags the particles, with the emitter's drag as the coupling.
+    gas: Option<(&'a mut GasRt, &'a mut crate::pyro::Sims, f64)>,
 }
 impl SceneDriver<'_, '_> {
     fn frame(&mut self, time: f64) -> Arc<FrameGraph> {
@@ -185,6 +196,77 @@ impl SceneDriver<'_, '_> {
         }
         self.frames.push((key, f.clone()));
         f
+    }
+
+    /// The gas of the smoke's step `step`: from the window of those asked for lately, or simulated now.
+    fn gas_step(
+        &mut self,
+        frame: &Arc<FrameGraph>,
+        i: usize,
+        step: u64,
+        keep: usize,
+    ) -> Result<Arc<sr_sim::pyro::Gas>, Error> {
+        let Some((gas, pyro, _)) = self.gas.as_mut() else { return Err(Error::Driver("no gas".into())) };
+        if let Some((_, found)) = gas.window.iter().find(|(k, _)| *k == step) {
+            return Ok(found.clone());
+        }
+        let fresh = pyro
+            .gas(self.p, frame, i, step, &mut *self.graphs, self.fields, self.physics.as_deref_mut())
+            .map_err(|e| Error::Driver(format!("gas {}: {e}", gas.id)))?;
+        // the fields in use are charged to the smoke's memory allowance, and exceeding it is an error
+        let clock = crate::pyro::gas_clock(&frame.nodes[i]).map_err(Error::Driver)?;
+        if (gas.window.len() + 1).saturating_mul(fresh.bytes()) > clock.max_bytes {
+            return Err(Error::Driver(format!(
+                "gas {}: {} velocity fields of {} bytes exceed its maxMemoryMiB",
+                gas.id,
+                gas.window.len() + 1,
+                fresh.bytes()
+            )));
+        }
+        gas.window.push((step, fresh.clone()));
+        while gas.window.len() > keep {
+            let oldest = (0..gas.window.len()).min_by_key(|&k| gas.window[k].0).expect("a window");
+            gas.window.remove(oldest);
+        }
+        Ok(fresh)
+    }
+
+    /// The velocity, in the world's axes, of the gas at a world position at emitter time `time`: the linear
+    /// interpolation in time of the two smoke steps around the instant, each sampled in the volume's own axes.
+    /// A volume that is not in the frame is no gas.
+    fn gas_velocity(&mut self, time: f64, position: [f64; 3]) -> Result<[f64; 3], Error> {
+        let Some((id, step)) = self.gas.as_ref().map(|(gas, _, _)| (gas.id.clone(), self.step)) else {
+            return Ok([0.0; 3]);
+        };
+        let frame = self.frame(time);
+        let Some(i) = frame.nodes.iter().position(|n| n.id == id) else { return Ok([0.0; 3]) };
+        let n = &frame.nodes[i];
+        let clock = crate::pyro::gas_clock(n).map_err(Error::Driver)?;
+        let source = n.local_time * crate::pyro::value(&*n.elem, Some(&n.props), "animationSpeed", 1.0)
+            + crate::pyro::value(&*n.elem, Some(&n.props), "animationOffset", 0.0);
+        let ratio = source.max(0.0) / clock.dt;
+        if !ratio.is_finite() {
+            return Err(Error::Driver(format!("gas {id}: the smoke's time is not a number")));
+        }
+        // the step at or before the instant, with the rounding the smoke's own timeline uses at a boundary
+        let nearest = ratio.round();
+        let first =
+            if (ratio - nearest).abs() <= f64::EPSILON * 4.0 * ratio.max(1.0) { nearest } else { ratio.floor() };
+        let weight = (ratio - first).clamp(0.0, 1.0);
+        let keep = (step / clock.dt).ceil() as usize + 3;
+        let world = crate::sim3d::world3(&frame, i, 0);
+        let inverse = world.inverse();
+        if !(world.is_finite() && inverse.is_finite()) {
+            return Err(Error::Driver(format!("gas {id}: the volume's transform is not invertible")));
+        }
+        let point = inverse.transform_point3(DVec3::from(position)).to_array();
+        let first = first as u64;
+        let mut u = self.gas_step(&frame, i, first, keep)?.velocity_at(point);
+        if weight > 1e-12 {
+            let next = self.gas_step(&frame, i, first + 1, keep)?.velocity_at(point);
+            u = std::array::from_fn(|a| (1.0 - weight) * u[a] + weight * next[a]);
+        }
+        Ok(world.transform_vector3(DVec3::from(u)).to_array())
     }
 
     /// The emitter's time at which the source clock reads `t`, for the clocks an emitter can
@@ -268,15 +350,25 @@ impl Driver for SceneDriver<'_, '_> {
         })
     }
     fn acceleration(&mut self, time: f64, position: [f64; 3], velocity: [f64; 3]) -> Result<[f64; 3], Error> {
-        if self.fields.is_empty() || self.names.is_some_and(|n| n.is_empty()) {
-            return Ok([0.; 3]);
+        let mut a = [0.; 3];
+        if !(self.fields.is_empty() || self.names.is_some_and(|n| n.is_empty())) {
+            let frame = self.frame(time);
+            let fields = match self.names {
+                Some(n) => self.fields.named(n, frame.time, Some(&frame)),
+                None => self.fields.at(frame.time, Some(&frame)),
+            };
+            a = sr_sim::fields::total3_for(&fields, position, velocity, frame.time, true);
         }
-        let frame = self.frame(time);
-        let fields = match self.names {
-            Some(n) => self.fields.named(n, frame.time, Some(&frame)),
-            None => self.fields.at(frame.time, Some(&frame)),
-        };
-        Ok(sr_sim::fields::total3_for(&fields, position, velocity, frame.time, true))
+        // the gas drags the particle with the emitter's own coefficient: with the drag on the particle's
+        // velocity the integrator already has, an acceleration of k u makes p'' = k (u - v)
+        let drag = self.gas.as_ref().map_or(0., |(_, _, drag)| *drag);
+        if drag > 0. {
+            let u = self.gas_velocity(time, position)?;
+            for k in 0..3 {
+                a[k] += drag * u[k];
+            }
+        }
+        Ok(a)
     }
     fn births(&mut self, lo: f64, hi: f64) -> Result<Vec<Birth>, Error> {
         let mut born = Vec::new();
@@ -345,6 +437,7 @@ impl Sims {
         graphs: &mut Graphs<'_>,
         fields: &FieldSrc,
         mut physics: Option<&mut PhysicsRt>,
+        pyro: &mut crate::pyro::Sims,
     ) {
         for i in 0..g.nodes.len() {
             let n = &g.nodes[i];
@@ -378,6 +471,7 @@ impl Sims {
                     seed: rt.seed,
                     lift: rt.lift,
                     bursts: &mut rt.crater_bursts,
+                    gas: rt.gas.as_mut().map(|gas| (gas, &mut *pyro, rt.emitter.spec().drag)),
                 };
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
                 let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);

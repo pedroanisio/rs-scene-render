@@ -2362,6 +2362,22 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
+            // The smoke that drags the particles of an emitter is named in the same lexical scope.
+            let gas: Option<(String, String)> = (self.nodes[n].name == "particles3D")
+                .then(|| attr_str(&*self.nodes[n].elem, "gas"))
+                .flatten()
+                .and_then(|id| match self.resolve(&scope, &id) {
+                    Some(i) => Some((id, self.nodes[i as usize].id.to_string())),
+                    None => {
+                        self.diags.push(err(
+                            "E11",
+                            format!("gas {id:?} is not instantiated in this scope"),
+                            self.nodes[n].elem.loc(),
+                            &*self.nodes[n].id,
+                        ));
+                        None
+                    }
+                });
             // What a crater causes (smoke, ejecta) names the crater by its id, in the same lexical
             // scope; the reference becomes the effective id of the object that owns the crater.
             let mut cause_owners: HashMap<String, Arc<str>> = HashMap::new();
@@ -2432,8 +2448,12 @@ impl Builder {
                 || !colliders.is_empty()
                 || !sources.is_empty()
                 || !cause_owners.is_empty()
+                || gas.is_some()
             {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
+                if let Some((_, effective)) = &gas {
+                    elem.set_attr("gas", effective).expect("resolved particle gas");
+                }
                 if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
                     elem.set_attr("colliders", list).expect("resolved particle colliders");
                 }

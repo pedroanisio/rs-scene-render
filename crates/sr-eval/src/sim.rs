@@ -1855,8 +1855,18 @@ impl Runtime {
             rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
-        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
-        g.sim_seconds.particles = clock.elapsed().as_secs_f64();
+        // A smoke that drags particles is simulated first, so that the particles ask it for steps it is
+        // already at and the frame's own volume is not asked for one it has gone past; documents with no
+        // gas keep the order they had.
+        let gas = p.nodes.iter().any(|n| n.name == "particles3D" && text(&*n.elem, "gas").is_some());
+        let mut pyro_failures = Vec::new();
+        let smoke_clock = std::time::Instant::now();
+        if gas {
+            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
+        }
+        let smoke_early = smoke_clock.elapsed().as_secs_f64();
+        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut self.pyro);
+        g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
         let clock = std::time::Instant::now();
         if ocean_seconds.is_none() {
             self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut());
@@ -1865,10 +1875,11 @@ impl Runtime {
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
         // everything the smoke solver reports is a failure of the solver
-        let mut pyro_failures = Vec::new();
         let clock = std::time::Instant::now();
-        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
-        g.sim_seconds.smoke = clock.elapsed().as_secs_f64();
+        if !gas {
+            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
+        }
+        g.sim_seconds.smoke = smoke_early + clock.elapsed().as_secs_f64();
         for failure in pyro_failures {
             g.fail(failure);
         }

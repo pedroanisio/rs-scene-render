@@ -159,7 +159,7 @@ fn load_mesh(
     Ok(mesh)
 }
 
-fn value(e: &dyn Element, props: Option<&Props>, key: &str, default: f64) -> f64 {
+pub(crate) fn value(e: &dyn Element, props: Option<&Props>, key: &str, default: f64) -> f64 {
     props.and_then(|p| p.get(key)).and_then(crate::Value::as_num).unwrap_or_else(|| num(e, key, default))
 }
 
@@ -290,7 +290,123 @@ fn crater_inputs(frame: &FrameGraph, node: usize, start: f64, dt: f64, input: &m
     Ok(())
 }
 
+/// The smoke of `id` at its source time `source_time`, simulated from the nearest checkpoint, and the revision
+/// of that state. `at` is the composition time the request belongs to, for clocks that depend on it.
+#[allow(clippy::too_many_arguments)]
+fn state_at<'r>(
+    timeline: &'r mut Timeline,
+    meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>,
+    colliders: &mut colliders::Colliders,
+    dt: f64,
+    craters: bool,
+    p: &Program,
+    node: u32,
+    id: &Arc<str>,
+    at: f64,
+    source_time: f64,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+    mut physics: Option<&mut crate::sim::PhysicsRt>,
+) -> Result<(&'r pyro::State, u64), String> {
+    let volume_start = p.nodes[node as usize].start;
+    timeline
+        .at_with_revision(source_time, &mut |_, time, state| {
+            let (t, clocks) = crate::sim::source_sample(p, node, time + p.nodes[node as usize].start, at);
+            let mut frame = if clocks.is_empty() {
+                graphs.at(t)
+            } else {
+                Arc::new(crate::eval::evaluate_with_clocks(p, t, &clocks))
+            };
+            if !fields.is_empty() || !colliders.is_empty() || craters {
+                if let Some(physics) = physics.as_deref_mut() {
+                    crate::sim::apply_physics(p, physics, Arc::make_mut(&mut frame), graphs, fields, t);
+                }
+            }
+            // Conditions can omit the owner during part of its
+            // history. Existing smoke still advances and cools,
+            // while an absent owner injects no new source material.
+            match frame.nodes.iter().position(|n| n.id == *id) {
+                Some(i) => {
+                    let mut input = inputs(&frame.nodes[i], meshes)?;
+                    crater_inputs(&frame, i, volume_start, dt, &mut input)?;
+                    field_inputs(&mut input, state, &frame, i, fields)?;
+                    if !colliders.is_empty() {
+                        let (next_t, next_clocks) =
+                            crate::sim::source_sample(p, node, time + dt + p.nodes[node as usize].start, at);
+                        let mut next = crate::eval::evaluate_pose_with_clocks(p, next_t, &next_clocks);
+                        if let Some(physics) = physics.as_deref_mut() {
+                            crate::sim::apply_physics(p, physics, &mut next, graphs, fields, next_t);
+                        }
+                        colliders::apply(&mut input, colliders, &frame, &next, id, dt)?;
+                    }
+                    Ok(input)
+                }
+                None => Ok(Inputs::default()),
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// What a reader of a smoke's gas needs to know of it before asking: the step of its clock and what the
+/// velocity fields it holds may use together.
+pub(crate) struct GasClock {
+    /// The smoke's fixed step, seconds.
+    pub(crate) dt: f64,
+    /// Bytes the smoke may use (`maxMemoryMiB`), which the fields held for a reader are charged to.
+    pub(crate) max_bytes: usize,
+}
+
+/// The clock of the smoke volume `node` as a reader of its gas sees it.
+pub(crate) fn gas_clock(node: &FrameNode) -> Result<GasClock, String> {
+    let e = config(node).ok_or("a gas must be an object3D that holds a native pyro volume")?;
+    let max_bytes = (num(e, "maxMemoryMiB", 256.0) as usize).checked_mul(1 << 20).ok_or("pyro memory overflow")?;
+    let dt = num(e, "dt", 1.0 / 60.0);
+    if !(dt.is_finite() && dt > 0.0) {
+        return Err("the smoke has no positive step".into());
+    }
+    Ok(GasClock { dt, max_bytes })
+}
+
 impl Sims {
+    /// The gas of the smoke volume `frame.nodes[i]` at its fixed step `step`, simulating the smoke as far
+    /// as that step needs. A step is a pure function of the document, so the copy can be kept as long as
+    /// it is wanted.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn gas(
+        &mut self,
+        p: &Program,
+        frame: &FrameGraph,
+        i: usize,
+        step: u64,
+        graphs: &mut Graphs<'_>,
+        fields: &FieldSrc,
+        physics: Option<&mut crate::sim::PhysicsRt>,
+    ) -> Result<Arc<pyro::Gas>, String> {
+        let n = &frame.nodes[i];
+        let e = config(n).ok_or("a gas must be an object3D that holds a native pyro volume")?;
+        let id = n.id.clone();
+        let node = p.nodes.iter().position(|n| n.id == id).map(|v| v as u32).ok_or("the smoke is not instantiated")?;
+        let runtime = self.runtimes.entry(id.clone()).or_insert_with(|| build(p, node, e));
+        let runtime = runtime.as_mut().map_err(|e| e.clone())?;
+        let source_time = step as f64 * runtime.dt;
+        let (state, _) = state_at(
+            &mut runtime.timeline,
+            &runtime.meshes,
+            &mut runtime.colliders,
+            runtime.dt,
+            runtime.craters,
+            p,
+            node,
+            &id,
+            frame.time,
+            source_time,
+            graphs,
+            fields,
+            physics,
+        )?;
+        Ok(Arc::new(state.gas()))
+    }
+
     pub(crate) fn apply(
         &mut self,
         p: &Program,
@@ -313,53 +429,21 @@ impl Sims {
             let runtime = self.runtimes.entry(id.clone()).or_insert_with(|| build(p, node, e));
             let result = (|| -> Result<Arc<SimVolume>, String> {
                 let runtime = runtime.as_mut().map_err(|e| e.clone())?;
-                let meshes = &runtime.meshes;
-                let colliders = &mut runtime.colliders;
-                let dt = runtime.dt;
-                let craters = runtime.craters;
-                let volume_start = p.nodes[node as usize].start;
-                let (state, revision) = runtime
-                    .timeline
-                    .at_with_revision(source_time, &mut |_, time, state| {
-                        let (t, clocks) =
-                            crate::sim::source_sample(p, node, time + p.nodes[node as usize].start, g.time);
-                        let mut frame = if clocks.is_empty() {
-                            graphs.at(t)
-                        } else {
-                            Arc::new(crate::eval::evaluate_with_clocks(p, t, &clocks))
-                        };
-                        if !fields.is_empty() || !colliders.is_empty() || craters {
-                            if let Some(physics) = physics.as_deref_mut() {
-                                crate::sim::apply_physics(p, physics, Arc::make_mut(&mut frame), graphs, fields, t);
-                            }
-                        }
-                        // Conditions can omit the owner during part of its
-                        // history. Existing smoke still advances and cools,
-                        // while an absent owner injects no new source material.
-                        match frame.nodes.iter().position(|n| n.id == id) {
-                            Some(i) => {
-                                let mut input = inputs(&frame.nodes[i], meshes)?;
-                                crater_inputs(&frame, i, volume_start, dt, &mut input)?;
-                                field_inputs(&mut input, state, &frame, i, fields)?;
-                                if !colliders.is_empty() {
-                                    let (next_t, next_clocks) = crate::sim::source_sample(
-                                        p,
-                                        node,
-                                        time + dt + p.nodes[node as usize].start,
-                                        g.time,
-                                    );
-                                    let mut next = crate::eval::evaluate_pose_with_clocks(p, next_t, &next_clocks);
-                                    if let Some(physics) = physics.as_deref_mut() {
-                                        crate::sim::apply_physics(p, physics, &mut next, graphs, fields, next_t);
-                                    }
-                                    colliders::apply(&mut input, colliders, &frame, &next, &id, dt)?;
-                                }
-                                Ok(input)
-                            }
-                            None => Ok(Inputs::default()),
-                        }
-                    })
-                    .map_err(|e| e.to_string())?;
+                let (state, revision) = state_at(
+                    &mut runtime.timeline,
+                    &runtime.meshes,
+                    &mut runtime.colliders,
+                    runtime.dt,
+                    runtime.craters,
+                    p,
+                    node,
+                    &id,
+                    g.time,
+                    source_time,
+                    graphs,
+                    fields,
+                    physics.as_deref_mut(),
+                )?;
                 if runtime.last_revision == Some(revision) {
                     if let Some(last) = &runtime.last {
                         return Ok(last.clone());
