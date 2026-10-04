@@ -960,6 +960,9 @@ travel grows from 90 to 60 to 30 degrees. What the ocean does with the entries (
 out of the cell into its eight neighbours, at most 90 % of its water; the momentum into the cell, when it keeps
 a depth) is the ocean's side. A particle that fell in is gone: it does not sink, its vertical momentum and its
 energy are not given to the water, and a particle that has no mass is refused by the rule.
+Until the ocean's side lands, which is an intermediate state of this branch and not one the phase closes in, a
+document that declares `ocean@splash` loses the particles that fall into the water and the ocean is not changed by
+them.
 
 ### Ocean surfaces and impulses
 
