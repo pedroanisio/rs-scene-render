@@ -23,6 +23,7 @@ pub mod exchange;
 pub mod fields;
 pub mod flock;
 pub mod fluid;
+pub mod hydrostatics;
 pub mod ocean;
 pub mod particles;
 pub mod particles3d;

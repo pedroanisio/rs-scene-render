@@ -1480,7 +1480,14 @@ physical units a slow impact barely heats anything, and even a 20 km/s impact of
 1500 kg heats its dust by only a few hundred kelvin at these defaults, because the dust grows
 with the crater and the crater grows more slowly than the energy: a scene needs physical
 impact speeds, or a smaller `dustFraction`, for a fireball. This is the engine saying what the
-numbers say.
+numbers say. What the model represents is dust heated by the impact, spread through the crater's
+volume; what it does not represent is the vapour and melt produced near the point of impact and the
+shock wave, which are what a real fireball is made of and belong to later work, so the defaults are not
+to be tuned to make fire. Because the density of these sources is a volume fraction of solids, the
+medium's `extinction` for them is an extinction per unit volume fraction: for grains of diameter `d`
+(in scene units) the geometric-optics value is about `1.5 / d` (3/2 over the grain diameter), so a
+smoke of 2 mm grains in a scene in metres has an extinction near 750 per unit fraction, and the
+author sets `medium@extinction` to about that for the smoke to be seen.
 
 Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
 Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
