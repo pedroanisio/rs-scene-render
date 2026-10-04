@@ -833,7 +833,7 @@ replays from local time zero.
 | `material` | absent | Material reference; default is white, roughness .05, transmission 1, IOR 1.333, double-sided |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
 | `meshMemoryMiB`, `surfaceMemoryMiB` | 128, 128 | Bathymetry decoding/sampling and generated surface geometry ceilings |
-| `maxWork` | 100000000 | Work allowance per solver seek; also bounds bathymetry sampling and swell evaluation separately |
+| `maxWork` | 100000000 | Work allowance per solver seek, at most 1,000,000,000,000; also bounds bathymetry sampling and swell evaluation separately |
 
 Memory attributes are at most 4096 MiB; all except checkpoint memory are positive.
 Admission budgets cover the named operation, not aggregate GPU use or copies
@@ -1018,7 +1018,7 @@ not an energy-conserving impact coupling.
 Default core settings are 64×64 cells, unit spacing, gravity 9.81 scene units/s²,
 zero damping, closed boundaries, canonical `dt=1/60`, dry tolerance `1e-10`,
 256 MiB resident workspace, 64 MiB checkpoints, and 100 million work units per
-seek. Each substep and impulse charges eight units per cell (24 per substep for `order="2"`). At most four
+seek. Each substep and impulse charges eight units per cell (24 per substep for `order="2"`). A cold seek to time `t` therefore costs (canonical steps up to `t`) × (substeps per step) × (8 or 24) × (cells), plus the impulses. For example, a 720 × 720 cell second-order ocean with a 1/24 s step costs about 12.4 million units per substep, so a cold seek to 6 s (144 steps of two or three substeps) needs between 3.6 and 5.4 billion units, which is why the ceiling is a trillion while the default of 100 million stays a guard against accidental work. At most four
 million cells, 16,384 impulses and 4,096 retained checkpoints are admitted.
 Resident input capacities are included in the memory ceiling, which is 256 bytes per cell (400 for `order="2"`: two more state copies and sweep row buffers; measured peak 158 and at most 278 bytes per cell at one million cells). Checkpoint memory
 is separately bounded; zero disables retention. Failed seeks leave the published
@@ -1854,7 +1854,7 @@ Also includes `pyroShape`, inventoried below.
 | `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
 | `surfaceMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
-| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000000 | Default `100000000` |
 | `boundary` | xs:string; enumeration=closed, enumeration=open, enumeration=periodic | Default `closed` |
 | `bathymetryEncoding` | xs:string; enumeration=red, enumeration=terrarium, enumeration=mapbox | Default `red` |
 | `order` | xs:string; enumeration=1, enumeration=2 | Default `1` |
