@@ -17,6 +17,18 @@ fn ocean_has_typed_versioned_schema_and_owned_impulses_and_waves() {
 }
 
 #[test]
+fn ocean_order_is_a_one_or_two_enumeration() {
+    for order in ["1", "2"] {
+        let node = format!(r#"<ocean id="o" order="{order}"/>"#);
+        assert!(codes(&node, "1.3").is_empty(), "{:?}", codes(&node, "1.3"));
+    }
+    for order in ["0", "3", "second", "2.0", ""] {
+        let node = format!(r#"<ocean id="o" order="{order}"/>"#);
+        assert!(codes(&node, "1.3").contains(&"S06".into()), "{order:?}: {:?}", codes(&node, "1.3"));
+    }
+}
+
+#[test]
 fn ocean_references_dimensions_and_static_inputs_are_checked() {
     for node in [
         r#"<ocean id="o" bathymetry="sound"/>"#,

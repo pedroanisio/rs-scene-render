@@ -756,6 +756,7 @@ replays from local time zero.
 | `seed` | 0 | Full unsigned 64-bit seed for unspecified wave phases |
 | `bathymetry` | absent | Scoped image or mesh asset reference |
 | `bathymetryEncoding` | red | `red`, `terrarium` or `mapbox`; packed encodings require an image |
+| `order` | 1 | `1` or `2`; `2` selects the second-order scheme in the numerical contract below. Order 1 reproduces earlier results bit for bit |
 | `bathymetryScale`, `bathymetryOffset` | 1, 0 | Multiply and then offset decoded scene-y bed ordinates |
 | `material` | absent | Material reference; default is white, roughness .05, transmission 1, IOR 1.333, double-sided |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
@@ -894,6 +895,40 @@ zero; a larger negative or nonfinite result is a numerical error. Closed edges
 reflect normal momentum; periodic edges wrap both axes; open edges use
 zero-gradient extrapolation and are **not** an absorbing boundary.
 
+**Second order (`order="2"`).** Each row is reconstructed from the surface
+elevation (depth minus the downward bed ordinate) and the velocity, limited with
+the monotonized-central limiter (van Leer, 1977): the difference across a cell is
+`sign * min(2|a|, 2|b|, |a+b|/2)` for backward and forward differences `a` and
+`b` of equal sign, and zero otherwise. The elevation difference is also capped at
+twice the cell depth so that face depths stay non-negative. Cells with a
+neighbour or themselves below `dryTolerance`, and cells at non-periodic edges,
+keep their cell value, so wet/dry fronts and edges are first order. The face
+states enter the same hydrostatic reconstruction and local Lax–Friedrichs flux.
+The bed stays constant per cell: **order 2 holds for waves over a smooth bed; the
+bed-source term remains first order.** Time stepping is the strong-stability-
+preserving two-stage Runge–Kutta method (Heun) with the time-step bound halved to
+`0.225`; drag is split symmetrically (half a decay before and after). Non-negative
+depth at this bound follows the reasoning of Audusse et al. (2004) for MUSCL
+schemes; it is verified by the wet/dry conformance tests, not proven for the
+unsplit two-dimensional scheme. A negative result beyond round-off remains an
+error. Because the flux is unchanged, strong currents keep the first-order
+dissipation `|u|+sqrt(g*h)`.
+
+Amplitude lost by a `1e-3` periodic wave after five wavelengths (the conformance
+test), by cells per wavelength:
+
+| Cells per wavelength | Order 1 | Order 2 |
+|---|---|---|
+| 10 | 99.96% | 77.2% |
+| 20 | 97.9% | 17.9% |
+| 40 | 85.3% | 2.6% |
+| 80 | 61.7% | 0.34% |
+
+Resolve waves with at least 20 cells per wavelength when using order 2. A
+second-order substep costs about three times a first-order substep (measured
+2.8–3.0 on a 256×256 grid) and the halved bound doubles the substep count when
+it limits the step; seek work is charged accordingly.
+
 Timed impulses subdivide the canonical step at their exact timestamps. Events
 at zero belong to the initial state. Equal-time events retain authored order.
 An add-water impulse adds `amplitude * max(0,1-r*r)^2`, where `r` is distance
@@ -911,7 +946,7 @@ not an energy-conserving impact coupling.
 Default core settings are 64×64 cells, unit spacing, gravity 9.81 scene units/s²,
 zero damping, closed boundaries, canonical `dt=1/60`, dry tolerance `1e-10`,
 256 MiB resident workspace, 64 MiB checkpoints, and 100 million work units per
-seek. Each substep and impulse charges eight units per cell. At most four
+seek. Each substep and impulse charges eight units per cell (24 per substep for `order="2"`). At most four
 million cells, 16,384 impulses and 4,096 retained checkpoints are admitted.
 Resident input capacities are included in the memory ceiling. Checkpoint memory
 is separately bounded; zero disables retention. Failed seeks leave the published
@@ -1748,6 +1783,7 @@ Also includes `pyroShape`, inventoried below.
 | `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
 | `boundary` | xs:string; enumeration=closed, enumeration=open, enumeration=periodic | Default `closed` |
 | `bathymetryEncoding` | xs:string; enumeration=red, enumeration=terrarium, enumeration=mapbox | Default `red` |
+| `order` | xs:string; enumeration=1, enumeration=2 | Default `1` |
 | `material` | xs:IDREF | Optional; absent |
 | `bathymetry` | xs:IDREF | Optional; absent |
 

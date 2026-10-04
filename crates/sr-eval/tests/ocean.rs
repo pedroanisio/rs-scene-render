@@ -202,3 +202,23 @@ fn bathymetry_rejects_large_decoded_rasters_and_uncovered_meshes() {
     let f = dir.evaluate(r#"<mesh id="bed" src="bed.obj"/>"#, "");
     assert!(f.problems.iter().any(|e| e.contains("does not cover")), "{:?}", f.problems);
 }
+
+#[test]
+fn order_selects_the_solver_and_changes_the_published_frame_and_its_cache_key() {
+    let at_one_second = |order: &str| {
+        let ev = evaluator(&format!(
+            r#"<ocean id="sea" width="16" depth="16" cellSize="0.5" bottomDepth="2" dt="0.05" {order}><waterImpulse time="0.2" radius="2" amplitude="0.3"/></ocean>"#
+        ));
+        let f = ev.evaluate(1.0);
+        assert!(f.problems.is_empty(), "{:?}", f.problems);
+        f.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().clone()
+    };
+    let (absent, first, second) = (at_one_second(""), at_one_second(r#"order="1""#), at_one_second(r#"order="2""#));
+    assert_eq!((&absent.frame, absent.key), (&first.frame, first.key));
+    assert_ne!(first.frame, second.frame);
+    assert_ne!(first.key, second.key);
+    // Both conserve water; only the numerical scheme differs.
+    for s in [&first, &second] {
+        assert!((s.frame.cells.iter().map(|c| c.depth).sum::<f64>() - 32.0 * 32.0 * 2.0).abs() < 1e-9);
+    }
+}

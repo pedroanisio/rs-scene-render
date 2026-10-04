@@ -2116,6 +2116,7 @@
     <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="periodic"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="bathymetryEncoding" default="red"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="order" default="1"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="bathymetry" type="xs:IDREF"/>
   </xs:complexType>

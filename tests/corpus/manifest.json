@@ -248,6 +248,9 @@
     "msq4.scene.xml": [
       "MSQ4"
     ],
+    "ocean-order.scene.xml": [
+      "S06"
+    ],
     "ocn1.scene.xml": [
       "OCN1"
     ],
@@ -677,6 +680,7 @@
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "ocean-order2.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],

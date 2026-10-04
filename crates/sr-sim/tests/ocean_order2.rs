@@ -190,6 +190,11 @@ fn closed_and_periodic_boundaries_conserve_water_in_both_orders() {
     }
 }
 
+/// Dam break onto a rough beach, depth profile of one row at t = 1 s and 2 s,
+/// count of sign changes of the depth slope, order 2 with minmod / van Leer / MC:
+/// 4 / 6 / 6 and 18 / 18 / 18. They follow the bed roughness (depth, not surface
+/// elevation); the flat-bed profile has none and no limiter exceeds the initial
+/// depth or goes negative.
 #[test]
 fn wet_dry_fronts_over_irregular_bathymetry_stay_positive_in_both_orders() {
     for order in ORDERS {
