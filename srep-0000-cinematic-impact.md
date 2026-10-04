@@ -1528,7 +1528,8 @@ second after it has crossed the rim. With `capture` the body is arrested from th
 bodies stop sooner) and only while its centre is inside the crater's rim radius in the owner's frame: its
 velocity relative to the owner loses `U^2 / (2 d)` a second along its direction, never more than stops it in
 the step, and its spin loses the same share. All of its kinetic energy can leave it and none can be added. After
-the window it is the ground's: it sinks with the floor of the pit and rocks on it. This is a model of the engine, the
+the window it is the ground's: it sinks with the floor of the pit and rocks on it (nothing resists rolling, so a body that sinks to the floor of the bowl swings on it
+about 0.3 m either way and settles very slowly: a limit of the rigid model). This is a model of the engine, the
 mean force of a penetration of depth `d` (kinetic energy over depth), not a published law; the projectile neither
 breaks up nor buries itself. The deceleration is a function of the impact the world noticed and the body's
 state, so any order of requests and a fresh evaluator give the same bits, and without it the world is what
