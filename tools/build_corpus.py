@@ -53,6 +53,8 @@ FRACTURE = '<scene version="1.3"><project width="64" height="64" fps="24" durati
 
 CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="ground" primitive="plane" width="20" height="20" segments="40"><crater radius="4" depth="3" rimWidth="1" rimHeight="0.5" start="1" end="2"/><rigidBody type="static"/></object3D></composition></scene>\n'
 
+CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="20" height="20" segments="40" y="2"><crater source="rock" targetMaterial="softRock"/><rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>\n'
+
 def sub(old, new, count=1):
     def f(t):
         assert old in t, f"mutation anchor not found: {old!r}"
@@ -85,6 +87,11 @@ CASES = [
     ("crt3", ["CRT3"], lambda _: CRATER.replace('end="2"', 'end="0"')),
     ("crt4", ["CRT4"], lambda _: CRATER.replace('rimWidth="1"', 'rimWidth="5"')),
     ("crt5", ["CRT5"], lambda _: CRATER.replace('type="static"', 'type="dynamic"')),
+    ("crt6", ["CRT6"], lambda _: CRATER_IMPACT.replace('<crater ', '<crater depth="3" ')),
+    ("crt7-material", ["CRT7"], lambda _: CRATER_IMPACT.replace(' targetMaterial="softRock"', '')),
+    ("crt7-orphan", ["CRT7"], lambda _: CRATER.replace('<crater ', '<crater strength="1000" ')),
+    ("crt8-static", ["CRT8"], lambda _: CRATER_IMPACT.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
+    ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
     ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
     ("msq3", ["MSQ3"], lambda _: MESH_SEQUENCE.replace('first="0"', 'sha256="' + '0' * 64 + '" first="0"')),
@@ -340,6 +347,7 @@ VALID = {
     "openvdb": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-0.vdb" format="openvdb" temperatureGrid="temperature"').replace('<medium ', '<medium blackbody="true" '),
     "openvdb-sequence": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-%d.vdb" format="openvdb" first="0" last="1" interpolation="linear"'),
     "crater": CRATER,
+    "crater-impact": CRATER_IMPACT,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,

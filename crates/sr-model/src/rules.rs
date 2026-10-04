@@ -575,11 +575,48 @@ impl<'a> Eval<'a> {
                 self.check(number("end", 1.) > number("start", 0.), n, "CRT3", || {
                     "crater end must be greater than start in the object's local clock.".into()
                 });
-                let finite = n.attributes().filter(|a| a.name() != "curve").all(|a| number(a.name(), 0.).is_finite());
+                let finite = n
+                    .attributes()
+                    .filter(|a| !matches!(a.name(), "curve" | "source" | "targetMaterial"))
+                    .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")
                     || (number("influenceDepth", 0.) * 0.5 >= number("depth", 10.).max(number("rimHeight", 2.)));
                 self.check(finite && direction.iter().any(|&x|x!=0.) && number("rimWidth",10.)<=number("radius",50.) && envelope,n,"CRT4",||"crater values must be finite, its normal nonzero, rimWidth <= radius and influenceDepth >= twice max(depth,rimHeight).".into());
+                let derived = ["radius", "depth", "rimHeight", "rimWidth", "start", "end"]
+                    .iter()
+                    .chain(["centerX", "centerY", "centerZ", "normalX", "normalY", "normalZ"].iter());
+                self.check(a("source").is_none() || !derived.into_iter().any(|k| a(k).is_some()), n, "CRT6", || {
+                    "a crater that grows from a source derives its size, timing, centre and axis, so none of them may be given."
+                        .into()
+                });
+                let target = ["targetMaterial", "targetDensity", "strength", "gravity"];
+                self.check(
+                    if a("source").is_some() {
+                        a("targetMaterial").is_some()
+                    } else {
+                        !target.iter().any(|k| a(k).is_some())
+                    },
+                    n,
+                    "CRT7",
+                    || {
+                        "crater source requires targetMaterial, and targetMaterial, targetDensity, strength and gravity belong to a crater with a source."
+                            .into()
+                    },
+                );
+                self.check(
+                    a("source").is_none_or(|id| {
+                        n.document().descendants().any(|o| {
+                            is(o, "object3D")
+                                && o.attribute("id") == Some(id)
+                                && Some(o) != owner
+                                && kids(o, "rigidBody").any(|b| matches!(b.attribute("type"), None | Some("dynamic")))
+                        })
+                    }),
+                    n,
+                    "CRT8",
+                    || "crater source must name another object3D whose rigidBody is dynamic.".into(),
+                );
                 self.check(
                     owner.is_none_or(|o| {
                         kids(o, "rigidBody").all(|b| {

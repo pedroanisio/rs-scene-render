@@ -30,3 +30,56 @@ fn crater_rejects_invalid_direction_envelope_and_rim() {
     }
     assert!(codes(&xml(r#"<crater/><rigidBody type="static"/>"#)).is_empty());
 }
+
+fn impact_xml(crater: &str) -> String {
+    format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="100" height="100" segments="32" y="2">{crater}<rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>"#
+    )
+}
+
+#[test]
+fn a_crater_can_grow_from_the_impact_of_a_body() {
+    let valid = impact_xml(
+        r#"<crater source="rock" targetMaterial="softRock" targetDensity="2100" strength="1000000" gravity="9.8" curve="linear"/>"#,
+    );
+    assert!(codes(&valid).is_empty(), "{:?}", codes(&valid));
+    for material in ["water", "drySand", "drySoil", "wetSoil", "softRock", "hardRock", "regolith", "ice"] {
+        let xml = impact_xml(&format!(r#"<crater source="rock" targetMaterial="{material}"/>"#));
+        assert!(codes(&xml).is_empty(), "{material}: {:?}", codes(&xml));
+    }
+    assert!(!codes(&impact_xml(r#"<crater source="rock" targetMaterial="granite"/>"#)).is_empty());
+}
+
+#[test]
+fn a_crater_from_a_source_derives_what_it_would_otherwise_be_given() {
+    for attr in ["radius", "depth", "rimHeight", "rimWidth", "start", "end", "centerX", "normalY"] {
+        let xml = impact_xml(&format!(r#"<crater source="rock" targetMaterial="softRock" {attr}="1"/>"#));
+        assert!(codes(&xml).contains(&"CRT6".into()), "{attr}: {:?}", codes(&xml));
+    }
+}
+
+#[test]
+fn the_target_belongs_to_a_crater_with_a_source_and_is_required_there() {
+    assert!(codes(&impact_xml(r#"<crater source="rock"/>"#)).contains(&"CRT7".into()));
+    for attr in [r#"targetMaterial="softRock""#, r#"targetDensity="2000""#, r#"strength="1""#, r#"gravity="9.8""#] {
+        assert!(codes(&impact_xml(&format!("<crater {attr}/>"))).contains(&"CRT7".into()), "{attr}");
+    }
+    assert!(codes(&impact_xml(r#"<crater source="rock" targetMaterial="softRock" targetDensity="0"/>"#)).len() > 0);
+}
+
+#[test]
+fn the_source_is_another_object_with_a_dynamic_rigid_body() {
+    let crater = r#"<crater source="rock" targetMaterial="softRock"/>"#;
+    for (xml, why) in [
+        (impact_xml(crater).replace(r#"<rigidBody mass="5"/>"#, r#"<rigidBody type="static"/>"#), "static source"),
+        (
+            impact_xml(crater).replace(r#"<rigidBody mass="5"/>"#, r#"<rigidBody type="kinematic"/>"#),
+            "kinematic source",
+        ),
+        (impact_xml(crater).replace(r#"<rigidBody mass="5"/>"#, ""), "no rigid body"),
+        (impact_xml(r#"<crater source="ground" targetMaterial="softRock"/>"#), "the owner itself"),
+    ] {
+        assert!(codes(&xml).contains(&"CRT8".into()), "{why}: {:?}", codes(&xml));
+    }
+    assert!(!codes(&impact_xml(r#"<crater source="nobody" targetMaterial="softRock"/>"#)).is_empty());
+}

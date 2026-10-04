@@ -213,6 +213,21 @@
     "crt5.scene.xml": [
       "CRT5"
     ],
+    "crt6.scene.xml": [
+      "CRT6"
+    ],
+    "crt7-material.scene.xml": [
+      "CRT7"
+    ],
+    "crt7-orphan.scene.xml": [
+      "CRT7"
+    ],
+    "crt8-self.scene.xml": [
+      "CRT8"
+    ],
+    "crt8-static.scene.xml": [
+      "CRT8"
+    ],
     "frx1.scene.xml": [
       "FRX1"
     ],
@@ -686,6 +701,7 @@
   "valid": {
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
+    "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
