@@ -307,6 +307,8 @@ struct Motion {
     linvel: Vector,
     angvel: Vector,
     centre: Vector,
+    /// Fixed or asleep: nothing was solved for it.
+    idle: bool,
 }
 
 /// A deterministic 3D world.
@@ -683,6 +685,7 @@ impl World3 {
                 linvel: body.linvel(),
                 angvel: body.angvel(),
                 centre: body.center_of_mass(),
+                idle: body.is_fixed() || body.is_sleeping(),
             });
         }
         motion
@@ -714,6 +717,12 @@ impl World3 {
             let (Some(h1), Some(h2)) = (c1.parent(), c2.parent()) else { continue };
             let (slot1, slot2) = (h1.into_raw_parts().0 as usize, h2.into_raw_parts().0 as usize);
             let (Some(Some(m1)), Some(Some(m2))) = (motion.get(slot1), motion.get(slot2)) else { continue };
+            // A pair that was idle before the step and still is after it was not solved: its
+            // manifolds keep the impulses of the last step it was.
+            let idle = |h: RigidBodyHandle| st.bodies.get(h).is_none_or(|b| b.is_fixed() || b.is_sleeping());
+            if m1.idle && m2.idle && idle(h1) && idle(h2) {
+                continue;
+            }
             let (a1, a2) = (index_of.get(slot1).copied().flatten(), index_of.get(slot2).copied().flatten());
             // Order the pair by body index, boundary slabs last; flip the normal with it.
             let swap = a1.unwrap_or(usize::MAX) > a2.unwrap_or(usize::MAX);
