@@ -71,3 +71,29 @@ fn bake_identity_distinguishes_the_pressure_solvers() {
     assert_eq!(absent, jacobi);
     assert_ne!(jacobi, multigrid);
 }
+
+#[test]
+fn bake_identity_distinguishes_the_advection_schemes() {
+    let receipt = |extra: &str, name: &str| {
+        let xml = format!(
+            r#"<scene version="1.3"><project width="16" height="16" fps="10" duration="2"/>
+          <composition><object3D id="cloud" primitive="volume">
+          <pyro width="12" height="12" depth="12" voxelSize="1" dt="0.05" pressureTolerance="1e-9" pressureIterations="400" buoyancy="0.02" vorticity="1" {extra}>
+            <pyroSource radius="2" densityRate="1" temperatureRate="100" velocityRateY="-2"/></pyro>
+          </object3D></composition></scene>"#
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let dir = Temp(std::env::temp_dir().join(format!("sr-eval-bake-adv-{}-{name}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir(&dir.0).unwrap();
+        ev.bake_pyro("cloud", &dir.0.join("take"), 0, 8, BakeLimits::default()).unwrap().sha256
+    };
+    let absent = receipt("", "absent");
+    let semi = receipt(r#"advection="semilagrangian""#, "semi");
+    let mac = receipt(r#"advection="maccormack""#, "mac");
+    let both = receipt(r#"solver="multigrid" advection="maccormack""#, "both");
+    assert_eq!(absent, semi);
+    assert_ne!(semi, mac);
+    assert_ne!(mac, both);
+}

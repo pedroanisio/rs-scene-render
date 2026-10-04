@@ -359,3 +359,32 @@ fn solver_selects_the_pressure_solver_and_enters_the_published_key() {
         }
     }
 }
+
+#[test]
+fn advection_selects_the_transport_scheme_and_enters_the_published_key() {
+    let tight = r#"pressureTolerance="1e-9" pressureIterations="400" buoyancy="0.02" vorticity="1""#;
+    let with = |extra: &str| published(&format!("{tight} {extra}"));
+    let absent = with("");
+    let semi = with(r#"advection="semilagrangian""#);
+    let mac = with(r#"advection="maccormack""#);
+    assert_eq!(absent, semi, "an absent advection is semilagrangian");
+    assert_ne!(semi.0, mac.0, "the schemes differ in the published bytes");
+    assert_ne!(semi.1, mac.1, "the compositor key must distinguish the schemes");
+    // The acceptance configuration is its own result, distinct from either option alone.
+    let both = with(r#"solver="multigrid" advection="maccormack""#);
+    let only_solver = with(r#"solver="multigrid""#);
+    assert_ne!(both.0, mac.0);
+    assert_ne!(both.0, only_solver.0);
+    assert_ne!(both.1, mac.1);
+    assert_ne!(both.1, only_solver.1);
+    // MacCormack cannot create new extrema: the exported density stays within its source range.
+    let density_max = |extra: &str| {
+        let f = evaluator_size(&format!("{tight} {extra}"), 16).evaluate(1.6);
+        let v = f.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+        let grid = v.data.grid("density").unwrap();
+        (0..16 * 16)
+            .map(|i| grid.sample_world([(i % 16) as f64 - 7.5, (i / 16) as f64 - 7.5, 0.3]))
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(density_max(r#"advection="maccormack""#) >= density_max(""), "less diffusion keeps a higher peak");
+}

@@ -151,3 +151,18 @@ fn pyro_solver_is_a_jacobi_or_multigrid_enumeration() {
         assert!(c.contains(&"S06".into()), "{solver:?}: {c:?}");
     }
 }
+
+#[test]
+fn pyro_advection_is_a_semilagrangian_or_maccormack_enumeration() {
+    let object = format!(r#"<object3D id="cloud" primitive="volume">{PYRO}</object3D>"#);
+    for advection in ["semilagrangian", "maccormack"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro advection="{advection}" "#)));
+        assert!(c.is_empty(), "{advection}: {c:?}");
+    }
+    let both = object.replace("<pyro ", r#"<pyro solver="multigrid" advection="maccormack" "#);
+    assert!(codes(&both).is_empty(), "{:?}", codes(&both));
+    for advection in ["", "MacCormack", "semi-lagrangian", "rk4"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro advection="{advection}" "#)));
+        assert!(c.contains(&"S06".into()), "{advection:?}: {c:?}");
+    }
+}

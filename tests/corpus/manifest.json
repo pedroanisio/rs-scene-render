@@ -287,6 +287,9 @@
     "p3d6.scene.xml": [
       "P3D6"
     ],
+    "pyro-advection.scene.xml": [
+      "S06"
+    ],
     "pyro-solver.scene.xml": [
       "S06"
     ],
@@ -690,6 +693,7 @@
     "particles3d.scene.xml": [],
     "pyro-colliders.scene.xml": [],
     "pyro-fields.scene.xml": [],
+    "pyro-maccormack.scene.xml": [],
     "pyro-mesh.scene.xml": [],
     "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],

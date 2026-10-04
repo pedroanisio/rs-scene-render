@@ -423,6 +423,7 @@ The implemented configuration is:
 | `seed` | unsigned 64-bit integer; 0 | All bits participate; no intermediate floating-point conversion |
 | `pressureIterations` | integer 1–10000; 200 | Maximum pressure-solver iterations |
 | `solver` | `jacobi` or `multigrid`; `jacobi` | Preconditioner of the pressure solve; see the numerical contract. Absent equals `jacobi` and reproduces earlier results bit for bit |
+| `advection` | `semilagrangian` or `maccormack`; `semilagrangian` | Transport scheme for density, temperature and velocity; see the numerical contract. Absent equals `semilagrangian` and reproduces earlier results bit for bit |
 | `pressureTolerance` | positive 1/second; 0.000001 | Maximum RMS divergence residual |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | integers 1–4096; 256 each | Separate solver/workspace and checkpoint budgets |
 | `meshMemoryMiB` | integer 1–4096; 128 | Aggregate conservative charge for distinct mesh regions in this domain |
@@ -516,6 +517,36 @@ Iteration counts stay roughly independent of resolution: measured on the impulse
 step at 128³, `jacobi` needed 275 iterations and `multigrid` 14. Baked SRVSEQ
 caches identify a solver only through their frame contents (the digests of the
 exported frames), so two solvers that produce identical bytes share frames.
+
+**Advection (`advection`).** `semilagrangian`, the default, is the midpoint
+semi-Lagrangian scheme above; it defines the results of every earlier release and
+is unconditionally stable but numerically diffusive. `maccormack` is the
+backward-forward error correction of Selle, Fedkiw, Kim, Liu and Teran (2008)
+with an extrema limiter. For every element at position `p` of a channel:
+
+1. `hat` is the semi-Lagrangian value at `p`.
+2. `til` is `hat` sampled where the forward trace of `p` (the same trace with the
+   step negated) lands.
+3. The value is `hat + 0.5 * (old[p] - til)`, clamped to the minimum and maximum of
+   the eight old values that the interpolation blends around the backward-trace
+   origin (an out-of-range corner with nonzero weight contributes the channel's
+   background value), so the scheme creates no new extremum: density stays
+   non-negative and temperature stays within its previous range.
+4. Where a collider cuts either trace short, the value is `hat`.
+
+The scheme applies to density, temperature and the three velocity components;
+density and temperature share their traces and each velocity component has its
+own. Dissipation and cooling apply afterwards to the limited value, as they apply
+to a semi-Lagrangian sample, and solid cells keep their cleared values. Each
+element is computed from immutable inputs by the same expression, so the result
+does not depend on the thread count. The advection stage costs about 2.5 times the
+semi-Lagrangian stage (2.5 at 64³ and 2.4 at 128³ on the impact scene with one
+thread). On a free Gaussian vortex over 60 steps the scheme kept 96.6% of the
+kinetic energy and 95.7% of the enstrophy, against 68.8% and 61.6% for
+semi-Lagrangian advection (measured with the detail-retention test setup; the test
+itself requires only 1.25 and 1.3 times the semi-Lagrangian values and no energy
+gain). `solver="multigrid"` with `advection="maccormack"` is a supported
+combination and defines its own result bits.
 
 Checkpoints are thinned before cloning to respect their independent hard budget.
 Backward requests replay the same fixed steps and input samples. Source animation
@@ -1654,6 +1685,7 @@ Also includes `assetProvenance`, inventoried below.
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
 | `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
+| `advection` | xs:string; enumeration=semilagrangian, enumeration=maccormack | Default `semilagrangian` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `checkpointMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |

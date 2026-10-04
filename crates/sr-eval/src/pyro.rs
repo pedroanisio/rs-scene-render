@@ -74,7 +74,10 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
             Some("multigrid") => pyro::PressureSolver::Multigrid,
             _ => pyro::PressureSolver::Jacobi,
         },
-        advection: pyro::Advection::default(),
+        advection: match text(e, "advection").as_deref() {
+            Some("maccormack") => pyro::Advection::MacCormack,
+            _ => pyro::Advection::SemiLagrangian,
+        },
         max_bytes: bytes,
     };
     let timeline = Timeline::new(spec, checkpoint).map_err(|e| e.to_string())?;

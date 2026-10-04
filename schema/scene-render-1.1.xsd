@@ -2309,6 +2309,7 @@
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="checkpointMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
