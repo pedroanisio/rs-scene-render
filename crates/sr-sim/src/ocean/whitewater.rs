@@ -171,10 +171,20 @@ impl Whitewater {
         self.frame = frame;
         Ok(&self.frame)
     }
+    /// The bed a water sample sits over: its own when the solver has a driver,
+    /// otherwise the one this simulation was built with.
+    fn bed_of<'a>(&'a self, water: &'a Water) -> &'a [f64] {
+        if water.bed.is_empty() {
+            &self.bed
+        } else {
+            &water.bed
+        }
+    }
     fn validate_water(&self, water: &Water, time: f64) -> Result<(), Error> {
         if water.time != time
             || water.cells.len() != self.bed.len()
-            || water.cells.iter().zip(&self.bed).any(|(c, b)| {
+            || (!water.bed.is_empty() && water.bed.len() != self.bed.len())
+            || water.cells.iter().zip(self.bed_of(water)).any(|(c, b)| {
                 !c.depth.is_finite()
                     || c.depth < 0.
                     || !(*b - c.depth).is_finite()
@@ -212,7 +222,7 @@ impl Whitewater {
                 }
                 let w = wx * wz;
                 total += w;
-                y += (self.bed[i] - water.cells[i].depth) * w;
+                y += (self.bed_of(water)[i] - water.cells[i].depth) * w;
                 for (a, v) in vel.iter_mut().enumerate() {
                     *v += water.cells[i].velocity[a] * w;
                 }
@@ -317,7 +327,7 @@ impl Whitewater {
                 continue;
             }
             let (x, z) = (i % nx, i / nx);
-            let y = self.bed[i] - cell.depth;
+            let y = self.bed_of(water)[i] - cell.depth;
             let at = |xx: isize, zz: isize| {
                 let index = |p: isize, n: usize| {
                     if self.grid.boundary == Boundary::Periodic {
@@ -330,7 +340,7 @@ impl Whitewater {
                 if water.cells[j].depth < self.grid.dry_tolerance {
                     y
                 } else {
-                    self.bed[j] - water.cells[j].depth
+                    self.bed_of(water)[j] - water.cells[j].depth
                 }
             };
             let sx = (at(x as isize + 1, z as isize) - at(x as isize - 1, z as isize)) / (2. * self.grid.cell_size);

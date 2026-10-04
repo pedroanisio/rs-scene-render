@@ -1582,7 +1582,7 @@ impl Runtime {
         self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
         g.sim_seconds.particles = clock.elapsed().as_secs_f64();
         let clock = std::time::Instant::now();
-        self.ocean.apply(p, g);
+        self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut());
         g.sim_seconds.ocean = clock.elapsed().as_secs_f64();
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);

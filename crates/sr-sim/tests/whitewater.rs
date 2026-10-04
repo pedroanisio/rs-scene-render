@@ -122,3 +122,22 @@ fn activity_overflow_is_reported_and_retained_bed_capacity_is_budgeted() {
     bed.extend([2.; 32]);
     assert!(Whitewater::new(grid(), bed, Settings { max_particles: 1, max_bytes: 10_000, ..settings() }).is_err());
 }
+
+/// Foam is born on the surface, which sits at the bed minus the depth: a water
+/// sample that carries its own bed moves the surface with it.
+#[test]
+fn foam_follows_the_bed_each_water_sample_carries() {
+    let born_at = |shift: f64| {
+        let mut sim = Whitewater::new(grid(), vec![2.; 32], settings()).unwrap();
+        let frame = sim.at(0.1, |t| Ok(Frame { bed: vec![2. + shift; 32], ..water(t, [2., 0.])? })).unwrap();
+        frame.particles.iter().map(|p| p.position[1]).collect::<Vec<_>>()
+    };
+    let (level, lowered) = (born_at(0.), born_at(3.));
+    assert!(!level.is_empty() && level.len() == lowered.len());
+    for (a, b) in level.iter().zip(&lowered) {
+        assert!((b - a - 3.).abs() < 1e-12, "surface at {a} moved to {b}");
+    }
+    // A sample whose bed has the wrong length is rejected.
+    let mut sim = Whitewater::new(grid(), vec![2.; 32], settings()).unwrap();
+    assert!(sim.at(0.1, |t| Ok(Frame { bed: vec![2.; 5], ..water(t, [2., 0.])? })).is_err());
+}

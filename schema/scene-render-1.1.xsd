@@ -2119,6 +2119,7 @@
     <xs:attribute name="order" default="1"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="bathymetry" type="xs:IDREF"/>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
   </xs:complexType>
   <xs:complexType name="waterImpulseType">
     <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
