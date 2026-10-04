@@ -2377,6 +2377,12 @@
       seabed's. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law is still applied to the
       normal component, which keeps the size monotone in the angle, and no ricochet is modelled.
     </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID">
+      <xs:annotation><xs:documentation>
+        Names the crater so that what its impact causes can refer to it: with `source`, the consequences of the
+        impact (ejecta, smoke) name this crater instead of repeating its body and material.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="source" type="xs:IDREF"/>
     <xs:attribute name="targetMaterial">
       <xs:simpleType><xs:restriction base="xs:string">

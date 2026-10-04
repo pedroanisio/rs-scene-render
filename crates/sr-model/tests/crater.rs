@@ -83,3 +83,13 @@ fn the_source_is_another_object_with_a_dynamic_rigid_body() {
     }
     assert!(!codes(&impact_xml(r#"<crater source="nobody" targetMaterial="softRock"/>"#)).is_empty());
 }
+
+#[test]
+fn a_crater_can_be_named_and_its_name_is_an_id_like_any_other() {
+    let named = impact_xml(r#"<crater id="pit" source="rock" targetMaterial="softRock"/>"#);
+    assert!(codes(&named).is_empty(), "{:?}", codes(&named));
+    assert!(codes(&xml(r#"<crater id="pit" radius="4" rimWidth="1"/>"#)).is_empty());
+    // the same id twice is the duplicate-id error, whatever the element
+    let twice = impact_xml(r#"<crater id="rock" source="rock" targetMaterial="softRock"/>"#);
+    assert!(codes(&twice).iter().any(|c| c == "S09"), "{:?}", codes(&twice));
+}

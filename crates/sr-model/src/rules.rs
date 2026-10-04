@@ -577,7 +577,7 @@ impl<'a> Eval<'a> {
                 });
                 let finite = n
                     .attributes()
-                    .filter(|a| !matches!(a.name(), "curve" | "source" | "targetMaterial"))
+                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "targetMaterial"))
                     .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")

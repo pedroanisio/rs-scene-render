@@ -2143,6 +2143,12 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
+| `id` | xs:ID | Optional; names the crater so that what its impact causes can refer to it |
+| `source` | xs:IDREF | Optional; the dynamic rigid body that makes the crater (CRT6 to CRT8) |
+| `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
+| `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
+| `strength` | nonNegativeDecimal | Optional with `source`: Pa |
+| `gravity` | positiveDecimal | Optional with `source`: m/s2; default the physics gravity |
 | `centerX` | xs:double | Default `0` |
 | `centerY` | xs:double | Default `0` |
 | `centerZ` | xs:double | Default `0` |
