@@ -6,7 +6,7 @@ pub use crate::particles::Burst;
 use crate::rng;
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, VecDeque},
 };
 pub mod collider;
 pub mod mesh;
@@ -252,7 +252,13 @@ pub struct Emitter {
     frame: Frame,
     checkpoints: BTreeMap<u64, State>,
     every: u64,
+    /// The latest fixed steps this emitter computed, by step, so a request a few steps back (a
+    /// shutter's samples, a scrub) restarts from one of them and not from a checkpoint up to a
+    /// second earlier. Together with the checkpoints it stays within `checkpoint_bytes`.
+    recent: VecDeque<(u64, State)>,
 }
+/// Fewest states the recent steps must be able to hold for keeping them to be worth a share of the budget.
+const RECENT_MIN: usize = 3;
 impl Emitter {
     pub fn new(spec: Spec) -> Result<Self, Error> {
         validate(&spec)?;
@@ -263,7 +269,7 @@ impl Emitter {
         }
         let checkpoints = BTreeMap::from([(0, state.clone())]);
         let every = (1. / spec.step).round().max(1.) as u64;
-        Ok(Self { spec, state, step: 0, frame, checkpoints, every })
+        Ok(Self { spec, state, step: 0, frame, checkpoints, every, recent: VecDeque::new() })
     }
     pub fn spec(&self) -> &Spec {
         &self.spec
@@ -271,8 +277,26 @@ impl Emitter {
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
+    /// Bytes held for replay: the checkpoints and the recent steps.
     pub fn checkpoint_bytes(&self) -> usize {
-        self.checkpoints.values().map(State::bytes).sum()
+        self.checkpoints.values().map(State::bytes).sum::<usize>() + self.recent_bytes()
+    }
+    fn recent_bytes(&self) -> usize {
+        self.recent.iter().map(|(_, s)| s.bytes()).sum()
+    }
+    /// The share of the budget the recent steps may take given states of `bytes`: a quarter, and
+    /// nothing unless it holds at least [`RECENT_MIN`] of them.
+    fn recent_share(&self, bytes: usize) -> usize {
+        let quarter = self.spec.checkpoint_bytes / 4;
+        if quarter / RECENT_MIN.max(1) >= bytes {
+            quarter
+        } else {
+            0
+        }
+    }
+    /// How many recent steps a state of `bytes` can have kept.
+    fn recent_capacity(&self, bytes: usize) -> usize {
+        self.recent_share(bytes) / bytes.max(1)
     }
     /// Each successful fixed step is committed atomically. A failed request keeps
     /// the previously published frame; already completed checkpoints remain usable.
@@ -295,8 +319,13 @@ impl Emitter {
             offset
         };
         let target = offset.floor() as u64;
-        if self.step > target {
-            let (&step, state) = self.checkpoints.range(..=target).next_back().expect("initial checkpoint");
+        // Start from the latest state computed or kept at or before the target: the one this
+        // emitter is at, a recent step, or a checkpoint. They are all the same states, so the
+        // frame does not depend on which one is used.
+        let kept = self.recent.iter().rev().find(|(step, _)| *step <= target).map(|(step, state)| (*step, state));
+        let checkpoint = self.checkpoints.range(..=target).next_back().map(|(step, state)| (*step, state));
+        let best = [kept, checkpoint].into_iter().flatten().max_by_key(|(step, _)| *step);
+        if let Some((step, state)) = best.filter(|(step, _)| *step > self.step || self.step > target) {
             self.state = state.clone();
             self.step = step;
         }
@@ -309,8 +338,14 @@ impl Emitter {
             let next = advance(&self.spec, &self.state, hi, driver, &mut work)?;
             self.state = next;
             self.step += 1;
+            let bytes = self.state.bytes();
             if self.step % self.every == 0 && !self.checkpoints.contains_key(&self.step) {
-                let bytes = self.state.bytes();
+                // the recent steps give way to checkpoints, which are kept longer
+                while self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes
+                    && !self.recent.is_empty()
+                {
+                    self.recent.pop_front();
+                }
                 while self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes
                     && self.checkpoints.len() > 1
                 {
@@ -319,6 +354,26 @@ impl Emitter {
                 }
                 if self.checkpoint_bytes().saturating_add(bytes) <= self.spec.checkpoint_bytes {
                     self.checkpoints.insert(self.step, self.state.clone());
+                }
+            }
+            // Only the last few steps of a request are worth keeping: a long seek would copy them all.
+            let capacity = self.recent_capacity(bytes);
+            if capacity == 0 {
+                self.recent.clear();
+            } else if target - self.step < capacity as u64
+                && !self.checkpoints.contains_key(&self.step)
+                && !self.recent.iter().any(|(step, _)| *step == self.step)
+            {
+                let share = self.recent_share(bytes);
+                while !self.recent.is_empty()
+                    && (self.recent_bytes() + bytes > share
+                        || self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes)
+                {
+                    self.recent.pop_front();
+                }
+                if self.checkpoint_bytes().saturating_add(bytes) <= self.spec.checkpoint_bytes {
+                    let at = self.recent.partition_point(|(step, _)| *step < self.step);
+                    self.recent.insert(at, (self.step, self.state.clone()));
                 }
             }
         }
