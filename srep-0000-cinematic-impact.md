@@ -1431,15 +1431,34 @@ the numbered source geometry before release; its fragments freeze the selected
 geometry at release and become dynamic. **MSQ4** continues to reject dynamic
 mesh-sequence source bodies and direct pyro/particle references to sequence objects.
 
-Fracture bakes use **SRPHYS03**. Its little-endian header contains the eight-byte
+Physics bakes use **SRPHYS04**. Its little-endian header contains the eight-byte
 magic, f64 step/start, u64 2D-body and soft-body counts, each soft point count,
-u64 3D-body count (including fragments), u64 fracture-event count, and u64 frame
-count. Each row retains the version-2 2D/soft/3D pose fields, followed by one f64
-participation flag per 3D body and one f64 fired flag per event. Flags must be
-exactly zero or one. Counts must match the compiled scene. Geometry is reconstructed
-from immutable scene assets; the cache stores state, not meshes. Documents without
-fracture still write SRPHYS02; SRPHYS01/02 remain readable. Baking samples exact
-physics boundaries without an added timestamp epsilon.
+u64 3D-body count (including fragments), u64 fracture-event count, u64 frame count,
+a 32-byte SHA-256 identity of the document's physics, and a u64 contact count. Each
+row holds the 2D poses, the soft lattices, seven f64 per 3D body (position and
+quaternion), one f64 participation flag per 3D body and one f64 fired flag per
+fracture event (flags must be exactly zero or one), and six f64 per 3D body for its
+linear velocity (scene units per second) and angular velocity (degrees per second).
+After the rows come the contacts the 3D rigid bodies resolved, in step order, each a
+fixed 96-byte record: u64 step, two i32 body indices (the first is never a boundary,
+`-1` is a boundary slab), point, normal, normal impulse and the relative velocity of
+the second body before the step. A contact names a step the file holds, bodies it has,
+and finite numbers. Only impacts are recorded: a contact whose impulse does not exceed
+twice the weight impulse of all dynamic bodies in one step is dropped at the source,
+and so is a pair that nothing solved because both bodies were asleep or fixed.
+
+The identity covers the 2D and 3D world definitions (bodies, shapes, joints, gravity,
+step, fractures; meshes by their numbers) and, for every baked step, what the document
+feeds the world: which bodies take part, the poses of those that follow animation, the
+force fields and the revision of every deforming surface. A version 4 cache whose
+identity is not the document's, whose pinned `cacheSha256` does not match, or that
+cannot be read is a document error: nothing is simulated in its place. Counts must match the compiled
+scene. Geometry is reconstructed from immutable scene assets; the cache stores state,
+not meshes. SRPHYS01 to SRPHYS03 remain readable and keep their behaviour: they carry
+no identity, only the counts and the optional file hash are checked, and a mismatch
+reports a problem and simulates. `Evaluator::physics_trace` returns the velocities and
+contacts, from the verified cache or from a simulation, and the two agree exactly.
+Baking samples exact physics boundaries without an added timestamp epsilon.
 
 Particle and pyro collider references expand a released object into its enabled
 pieces and stop using the retired source surface. The closed, centroid-relative
@@ -1447,7 +1466,7 @@ partition meshes already include object scale; world-space piece poses therefore
 replace the original object's transform. Particle sweeps use the displacement and
 quaternion difference between sampled poses. Smoke obstacles transform each piece
 into domain coordinates and prescribe its translation/rotation boundary velocity,
-including reflected or rotated domains. Both paths work with live and SRPHYS03
+including reflected or rotated domains. Both paths work with live and SRPHYS04
 physics and deterministic backward seeks. Collider state is sampled on each
 consumer's existing fixed-step clock; a release inside a consumer step is observed
 at its next sampled boundary, so authors should align physics and consumer steps
