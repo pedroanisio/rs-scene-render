@@ -2320,6 +2320,22 @@
     <xs:attribute name="sprite" type="xs:IDREF"/>
     <xs:attribute name="forceFields" type="xs:IDREFS"/>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="gas" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        The object3D whose native pyro volume drags the particles along. Absent (the default) is the behaviour there
+        always was. The acceleration of a particle gains `drag` times the gas's velocity at its place and time, so
+        with the emitter's `drag` k the particle obeys p'' = k (u - v) plus gravity and fields: it is dragged by the gas
+        inside the volume's domain and by still air outside it, with the same coefficient (the gas fades to rest across
+        one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
+        is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
+        linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
+        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
+        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
+        and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
+        velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
+        so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="emitterShape" default="point"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="point"/><xs:enumeration value="box"/><xs:enumeration value="sphere"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="billboard"/><xs:enumeration value="streak"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="sizeEnd" type="nonNegativeDecimal"/>

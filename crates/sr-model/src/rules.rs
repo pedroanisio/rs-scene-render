@@ -216,6 +216,8 @@ struct Sets<'a> {
     sequence_colliders: HashSet<&'a str>,
     volume_assets: HashSet<&'a str>,
     pyro_colliders: HashSet<&'a str>,
+    /// Objects that hold a native pyro volume.
+    pyro_volumes: HashSet<&'a str>,
     /// Objects an ocean can use as a deformable bed (a crater on a plane or a mesh)
     /// or as a closed body (any other supported primitive, without a crater).
     ocean_colliders: HashSet<&'a str>,
@@ -305,6 +307,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             )
         ) {
             s.pyro_colliders.insert(id);
+        }
+        if object.children().any(|child| is(child, "pyro")) {
+            s.pyro_volumes.insert(id);
         }
         let procedural_motion = object.children().any(|child| match object.attribute("primitive") {
             Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel")),
@@ -900,6 +905,10 @@ impl<'a> Eval<'a> {
                     "P3D4",
                     || "particles3D solver configuration is static; animate pose, rate or appearance instead.".into(),
                 );
+                self.check(a("gas").is_none_or(|id| self.sets.pyro_volumes.contains(id)), n, "P3D11", || {
+                    "particles3D gas must name an object3D that holds a native pyro volume; a baked or asset volume has no velocity grid."
+                        .into()
+                });
                 if let Some(list) = a("colliders") {
                     let ids: Vec<_> = list.split_whitespace().collect();
                     let unique: HashSet<_> = ids.iter().copied().collect();

@@ -317,6 +317,9 @@
     "p3d10-angle.scene.xml": [
       "P3D10"
     ],
+    "p3d11-gas.scene.xml": [
+      "P3D11"
+    ],
     "p3d2.scene.xml": [
       "P3D2"
     ],
@@ -788,6 +791,7 @@
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],
+    "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
     "pyro-colliders.scene.xml": [],
