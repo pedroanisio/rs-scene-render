@@ -329,9 +329,12 @@ pub struct Inputs {
     pub impulses: Vec<Impulse>,
     /// Sources whose expansion follows from their heat rather than being given: smoke heated at
     /// constant pressure, as an ideal gas, expands at `(dT/dt) / T` in every cell it heats, so
-    /// `expansion` must be zero. Otherwise they are `sources`.
+    /// `expansion` must be zero. Their `density_rate` is a total: the sum of the volume fractions
+    /// they add, per second, spread evenly over the cells their shape covers that are not solid.
+    /// Otherwise they are `sources`.
     pub heated: Vec<Source>,
-    /// One-shot totals with the same derived expansion; `expansion` must be zero.
+    /// One-shot totals with the same derived expansion; `expansion` must be zero. Their `density`
+    /// is the sum of the volume fractions they add, spread evenly over the free cells they cover.
     pub heated_impulses: Vec<Impulse>,
     pub obstacles: Vec<Obstacle>,
     pub acceleration: [f64; 3],
@@ -1612,6 +1615,21 @@ fn inject(state: &mut State, target: &mut [f64], shape: &Shape, add: Injection) 
     let (cells, origin, h) = (state.cells, state.origin, state.h);
     let State { density: cell_density, temperature: cell_temperature, velocity: faces, solid, .. } = state;
     let solid = &*solid;
+    // what a heated source gives is a total, so that a solid in its way does not take any of it
+    let density = if heated.is_some() {
+        let free = (0..solid.len())
+            .into_par_iter()
+            .with_min_len(HEAVY)
+            .filter(|&k| !solid[k] && shape.contains(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))))
+            .count();
+        if free == 0 {
+            0.0
+        } else {
+            density / free as f64
+        }
+    } else {
+        density
+    };
     cell_density
         .par_iter_mut()
         .zip(cell_temperature.par_iter_mut())

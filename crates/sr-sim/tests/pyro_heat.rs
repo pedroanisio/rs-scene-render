@@ -99,3 +99,37 @@ fn sources_that_do_not_ask_for_it_are_unchanged() {
     b.step(&Inputs { heated: vec![], heated_impulses: vec![], ..plain.clone() }).unwrap();
     assert_eq!(a.state(), b.state());
 }
+
+#[test]
+fn the_dust_of_a_heated_impulse_is_the_total_spread_over_the_cells_that_are_free() {
+    use sr_sim::pyro::Obstacle;
+    // a solid slab fills the lower half of the box that the impulse covers: 256 of its 512 cells
+    let slab = Obstacle::stationary(Shape::Box { min: [0.0; 3], max: [8.0, 4.0, 8.0] });
+    let impulse =
+        Impulse { shape: whole(), time: 0.0, density: 256.0, temperature: 0.0, velocity: [0.0; 3], expansion: 0.0 };
+    for (obstacles, per_cell) in [(vec![slab], 1.0), (vec![], 0.5)] {
+        let covered = if obstacles.is_empty() { 512 } else { 256 };
+        let mut sim = Simulation::new(spec()).unwrap();
+        sim.step(&Inputs { heated_impulses: vec![impulse.clone()], obstacles, ..Inputs::default() }).unwrap();
+        let density = sim.state().density();
+        let total: f64 = density.iter().sum();
+        assert!((total - 256.0).abs() < 1e-9, "{covered} free cells: the total is what was given: {total}");
+        assert_eq!(density.iter().filter(|d| **d > 0.0).count(), covered);
+        assert!(
+            density.iter().all(|d| *d == 0.0 || (d - per_cell).abs() < 1e-12),
+            "{covered} free cells, each {per_cell}"
+        );
+    }
+}
+
+#[test]
+fn the_dust_of_a_heated_source_is_a_total_rate_over_the_free_cells() {
+    use sr_sim::pyro::Obstacle;
+    let slab = Obstacle::stationary(Shape::Box { min: [0.0; 3], max: [8.0, 4.0, 8.0] });
+    // 2560 per second for one step of 0.1 s, over 256 free cells: 1 each
+    let source = Source { density_rate: 2560.0, temperature_rate: 0.0, ..heated_source(0.0) };
+    let mut sim = Simulation::new(spec()).unwrap();
+    sim.step(&Inputs { heated: vec![source], obstacles: vec![slab], ..Inputs::default() }).unwrap();
+    let total: f64 = sim.state().density().iter().sum();
+    assert!((total - 256.0).abs() < 1e-9, "{total}");
+}
