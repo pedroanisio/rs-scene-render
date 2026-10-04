@@ -16,6 +16,7 @@ use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod maccormack;
 pub mod mesh;
 mod multigrid;
 
@@ -27,6 +28,8 @@ const LIGHT: usize = 8192;
 
 #[cfg(test)]
 mod atomicity;
+#[cfg(test)]
+mod detail;
 #[cfg(test)]
 mod determinism;
 #[cfg(test)]
@@ -50,6 +53,20 @@ pub enum Error {
 pub enum Boundary {
     Closed,
     Open,
+}
+
+/// Transport scheme for density, temperature and velocity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Advection {
+    /// Midpoint semi-Lagrangian: unconditionally stable, numerically diffusive.
+    /// The reference results of every release before `MacCormack`.
+    #[default]
+    SemiLagrangian,
+    /// Semi-Lagrangian with a backward-forward error correction (Selle et al.,
+    /// 2008), limited to the local extrema of the interpolation stencil, and
+    /// plain semi-Lagrangian where a collider cuts a trace short. It keeps
+    /// finer detail at the same resolution and cannot create new extrema.
+    MacCormack,
 }
 
 /// Preconditioner of the pressure conjugate-gradient solve.
@@ -89,6 +106,7 @@ pub struct Spec {
     /// RMS divergence error allowed, in 1/second.
     pub pressure_tolerance: f64,
     pub solver: PressureSolver,
+    pub advection: Advection,
     /// Conservative resident state plus step workspace budget, before allocation.
     pub max_bytes: usize,
 }
@@ -111,6 +129,7 @@ impl Default for Spec {
             pressure_iterations: 200,
             pressure_tolerance: 1e-6,
             solver: PressureSolver::Jacobi,
+            advection: Advection::SemiLagrangian,
             max_bytes: 256 << 20,
         }
     }
@@ -566,7 +585,12 @@ impl Field<'_> {
     }
 
     fn trace(&self, p: [f64; 3], dt: f64) -> Result<[f64; 3], Error> {
-        let v = self.velocity_grid(p);
+        self.trace_from(p, self.velocity_grid(p), dt).map(|(end, _)| end)
+    }
+
+    /// Midpoint trace of `p` back by `dt` (forward when negative), given the
+    /// velocity `v` at `p`. The flag reports a trace cut short by a collider.
+    fn trace_from(&self, p: [f64; 3], v: [f64; 3], dt: f64) -> Result<([f64; 3], bool), Error> {
         let mid = std::array::from_fn(|a| p[a] - 0.5 * dt * v[a] / self.h);
         let v = self.velocity_grid(mid);
         let mut end = std::array::from_fn(|a| p[a] - dt * v[a] / self.h);
@@ -588,11 +612,11 @@ impl Field<'_> {
         for i in 1..=steps as usize {
             let q = std::array::from_fn(|a| p[a] + (end[a] - p[a]) * i as f64 / steps);
             if self.solid_at(q) {
-                return Ok(previous);
+                return Ok((previous, true));
             }
             previous = q;
         }
-        Ok(end)
+        Ok((end, false))
     }
 }
 
@@ -823,7 +847,7 @@ impl Simulation {
         boundaries(&mut state);
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
-        advect(&mut state, dt, self.spec.dissipation, self.spec.cooling, &mut profile)?;
+        advect(&mut state, dt, &self.spec, &mut profile)?;
         profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
@@ -937,7 +961,8 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
 /// out of `s` and sampled in place; fresh arrays are written, so no copy of the
 /// state is made. Solid cells keep the cleared values the collider stage set.
 /// On error `s` is left without fields; callers discard it.
-fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut StepProfile) -> Result<(), Error> {
+fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Result<(), Error> {
+    let (dissipation, cooling) = (spec.dissipation, spec.cooling);
     let started = Instant::now();
     let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
     let old_density = std::mem::take(&mut s.density);
@@ -951,6 +976,13 @@ fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut 
     let solid = &s.solid;
     let old =
         Field { cells, h: s.h, boundary, velocity: [&old_velocity[0], &old_velocity[1], &old_velocity[2]], solid };
+    if spec.advection == Advection::MacCormack {
+        let scalars =
+            maccormack::Scalars { density: &old_density, temperature: &old_temperature, ambient, decay, cool };
+        maccormack::advect(&old, scalars, (&mut s.density, &mut s.temperature, &mut s.velocity), dt)?;
+        boundaries(s);
+        return Ok(());
+    }
     let results = s
         .density
         .par_chunks_mut(HEAVY)

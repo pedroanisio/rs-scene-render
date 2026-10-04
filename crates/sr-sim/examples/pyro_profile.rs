@@ -1,6 +1,6 @@
 //! Per-stage timing of the smoke solver on a cinematic-impact-like plume.
 //!
-//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid]`
+//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid] [semilagrangian|maccormack]`
 //!
 //! The domain is 192 x 156 x 192 scene units like `examples/cinematic-impact`
 //! (open edges, impulse + expanding source, buoyancy, vorticity, turbulence);
@@ -9,7 +9,9 @@
 //! The impulse lands at step 2 so the short run is dominated by the pressure solve.
 //! Control threads with `RAYON_NUM_THREADS`.
 
-use sr_sim::pyro::{Boundary, Impulse, Inputs, Obstacle, PressureSolver, Shape, Simulation, Source, Spec, StepProfile};
+use sr_sim::pyro::{
+    Advection, Boundary, Impulse, Inputs, Obstacle, PressureSolver, Shape, Simulation, Source, Spec, StepProfile,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -21,6 +23,11 @@ fn main() {
         None | Some("jacobi") => PressureSolver::Jacobi,
         Some("multigrid") => PressureSolver::Multigrid,
         Some(other) => panic!("solver must be jacobi or multigrid, not {other}"),
+    };
+    let advection = match args.next().as_deref() {
+        None | Some("semilagrangian") => Advection::SemiLagrangian,
+        Some("maccormack") => Advection::MacCormack,
+        Some(other) => panic!("advection must be semilagrangian or maccormack, not {other}"),
     };
     let (extent, height) = (192.0, 156.0);
     let voxel = extent / nx as f64;
@@ -41,6 +48,7 @@ fn main() {
         pressure_iterations: iterations,
         pressure_tolerance: 1e-3,
         solver,
+        advection,
         max_bytes: 16 << 30,
         ..Spec::default()
     };

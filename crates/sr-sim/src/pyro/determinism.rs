@@ -15,12 +15,13 @@ struct Case {
     steps: u64,
     boundary: Boundary,
     solver: PressureSolver,
+    advection: Advection,
     /// Moving/deforming colliders, meshes, spatial acceleration and uniform acceleration.
     rich: bool,
     golden: u64,
 }
 
-const CASES: [Case; 6] = [
+const CASES: [Case; 9] = [
     Case {
         name: "open-rich-odd",
         cells: [23, 19, 17],
@@ -28,6 +29,7 @@ const CASES: [Case; 6] = [
         steps: 8,
         boundary: Boundary::Open,
         solver: PressureSolver::Jacobi,
+        advection: Advection::SemiLagrangian,
         rich: true,
         golden: 0x0c4c2dbcce07af55,
     },
@@ -38,6 +40,7 @@ const CASES: [Case; 6] = [
         steps: 8,
         boundary: Boundary::Closed,
         solver: PressureSolver::Jacobi,
+        advection: Advection::SemiLagrangian,
         rich: true,
         golden: 0x36695446882e6a75,
     },
@@ -48,6 +51,7 @@ const CASES: [Case; 6] = [
         steps: 6,
         boundary: Boundary::Open,
         solver: PressureSolver::Jacobi,
+        advection: Advection::SemiLagrangian,
         rich: false,
         golden: 0xd0f216a928158341,
     },
@@ -58,6 +62,7 @@ const CASES: [Case; 6] = [
         steps: 8,
         boundary: Boundary::Open,
         solver: PressureSolver::Multigrid,
+        advection: Advection::SemiLagrangian,
         rich: true,
         golden: 0xd693c122f462feee,
     },
@@ -68,6 +73,7 @@ const CASES: [Case; 6] = [
         steps: 8,
         boundary: Boundary::Closed,
         solver: PressureSolver::Multigrid,
+        advection: Advection::SemiLagrangian,
         rich: true,
         golden: 0x8d838d7de47098a2,
     },
@@ -78,8 +84,42 @@ const CASES: [Case; 6] = [
         steps: 6,
         boundary: Boundary::Open,
         solver: PressureSolver::Multigrid,
+        advection: Advection::SemiLagrangian,
         rich: false,
         golden: 0x50dfd08cc0fe0d3e,
+    },
+    Case {
+        name: "open-rich-odd-maccormack",
+        cells: [23, 19, 17],
+        voxel: 4.0,
+        steps: 8,
+        boundary: Boundary::Open,
+        solver: PressureSolver::Multigrid,
+        advection: Advection::MacCormack,
+        rich: true,
+        golden: 0xc752dc72d5cfea14,
+    },
+    Case {
+        name: "closed-rich-maccormack",
+        cells: [20, 16, 24],
+        voxel: 4.0,
+        steps: 8,
+        boundary: Boundary::Closed,
+        solver: PressureSolver::Multigrid,
+        advection: Advection::MacCormack,
+        rich: true,
+        golden: 0x1fe7c8116f91ef7f,
+    },
+    Case {
+        name: "open-cinematic-maccormack",
+        cells: [40, 32, 40],
+        voxel: 4.8,
+        steps: 6,
+        boundary: Boundary::Open,
+        solver: PressureSolver::Jacobi,
+        advection: Advection::MacCormack,
+        rich: false,
+        golden: 0x4335e75738f10306,
     },
 ];
 
@@ -119,6 +159,7 @@ fn spec(c: &Case) -> Spec {
         pressure_iterations: 120,
         pressure_tolerance: 1e-3,
         solver: c.solver,
+        advection: c.advection,
         max_bytes: 1 << 30,
         ..Spec::default()
     }
@@ -315,6 +356,7 @@ fn multigrid_iteration_counts_stay_low_as_resolution_grows() {
             steps: 6,
             boundary: Boundary::Open,
             solver: PressureSolver::Multigrid,
+            advection: Advection::SemiLagrangian,
             rich: false,
             golden: 0,
         };
