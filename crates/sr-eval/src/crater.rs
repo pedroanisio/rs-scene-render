@@ -10,7 +10,8 @@ use crate::{
 };
 use sr_model::element::{children, Element};
 use sr_sim::cratering::{Impact, Material, Target};
-use sr_sim::physics3d::Impact3;
+use sr_sim::physics3d::{Impact3, Shape3};
+use std::sync::Arc;
 
 pub struct Deformation {
     pub kernel: sr_3d::crater::Crater,
@@ -88,6 +89,8 @@ pub(crate) struct CraterSource {
     pub(crate) pixels_per_meter: f64,
     /// The owner's scale, which is uniform.
     pub(crate) scale: f64,
+    /// The owner's collision shape, whose surface gives the axis of the crater.
+    pub(crate) surface: Arc<Shape3>,
     pub(crate) influence_depth: Option<f64>,
     pub(crate) curve: Option<String>,
     pub(crate) max_bytes: usize,
@@ -101,9 +104,9 @@ impl CraterSource {
         owner: &str,
         gravity: f64,
         pixels_per_meter: f64,
-        mass: f64,
-        source_volume: f64,
+        (mass, source_volume): (f64, f64),
         scale: f64,
+        surface: Arc<Shape3>,
     ) -> Result<CraterSource, String> {
         let material = text(element, "targetMaterial")
             .and_then(|name| Material::parse(&name))
@@ -124,6 +127,7 @@ impl CraterSource {
             source_density: mass / metres,
             pixels_per_meter,
             scale,
+            surface,
             influence_depth: element_number(element, "influenceDepth"),
             curve: text(element, "curve"),
             max_bytes: (num(element, "maxMemoryMiB", 128.) as usize)
@@ -137,13 +141,31 @@ fn element_number(e: &dyn Element, name: &str) -> Option<f64> {
     text(e, name).and_then(|s| s.trim().parse().ok())
 }
 
+/// The axis of a crater and the speed of the approach along it: the normal of the owner's
+/// `surface` where the body hit, on the side the contact came from, and the body's velocity
+/// along it. A contact's own normal is that of the triangle's edge or corner it met, which
+/// tilts with the tessellation, so it only tells the side; a surface that gives no normal
+/// keeps the contact's.
+fn axis_and_closing_speed(impact: &Impact3, surface: &Shape3) -> Result<([f64; 3], f64), String> {
+    let Some(mut axis) = sr_sim::surface::normal(surface, impact.point) else {
+        return Ok((impact.normal, impact.closing_speed));
+    };
+    let along = |a: [f64; 3], b: [f64; 3]| a.iter().zip(&b).map(|(x, y)| x * y).sum::<f64>();
+    if along(axis, impact.normal) < 0.0 {
+        axis = axis.map(|c| -c);
+    }
+    let closing = -along(impact.owner_velocity, axis);
+    if closing.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return Err("the body that makes the crater does not approach the surface it hit".into());
+    }
+    Ok((axis, closing))
+}
+
 /// The crater `impact` makes, `age` seconds after it.
 pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -> Result<ImpactCrater, String> {
-    let impactor = Impact {
-        mass: source.mass,
-        density: source.source_density,
-        normal_speed: impact.closing_speed / source.pixels_per_meter,
-    };
+    let (axis, closing) = axis_and_closing_speed(impact, &source.surface)?;
+    let impactor =
+        Impact { mass: source.mass, density: source.source_density, normal_speed: closing / source.pixels_per_meter };
     let law = sr_sim::cratering::crater(
         &impactor,
         &Target {
@@ -158,7 +180,7 @@ pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -
     let (radius, depth, rim_height) = (law.rim_radius * units, law.depth * units, law.rim_height * units);
     let spec = sr_3d::crater::Spec {
         center: impact.point.map(|c| c / source.scale),
-        outward: impact.normal,
+        outward: axis,
         radius,
         depth,
         rim_height,
@@ -166,7 +188,9 @@ pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -
         rim_width: (law.rim_radius - law.radius) * units,
         influence_depth: source.influence_depth.unwrap_or(2. * radius.max(depth).max(rim_height)),
     };
-    let speed = impact.relative_velocity.iter().map(|c| c * c).sum::<f64>().sqrt() / source.pixels_per_meter;
+    // the whole speed is at least its component along the axis; rounding must not say otherwise
+    let speed = (impact.relative_velocity.iter().map(|c| c * c).sum::<f64>().sqrt() / source.pixels_per_meter)
+        .max(impactor.normal_speed);
     let cause = ImpactCause {
         time: impact.time,
         law,

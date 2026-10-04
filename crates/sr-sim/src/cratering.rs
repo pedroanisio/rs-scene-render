@@ -36,7 +36,7 @@ pub struct Impact {
     /// Kilograms per cubic metre.
     pub density: f64,
     /// Metres per second of the approach along the surface normal: the component of the
-    /// relative velocity along the contact normal.
+    /// relative velocity along the surface's normal at the impact point.
     pub normal_speed: f64,
 }
 

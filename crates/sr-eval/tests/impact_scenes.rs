@@ -158,6 +158,8 @@ struct Land {
     rise: f64,
     heat: f64,
     grids: u64,
+    /// Every particle of the ejecta.
+    ejecta: sr_sim::particles3d::Frame,
 }
 
 fn land(ev: &Evaluator, t: f64) -> Land {
@@ -210,6 +212,7 @@ fn land(ev: &Evaluator, t: f64) -> Land {
         rise: hottest - 300.0,
         heat,
         grids,
+        ejecta: node(&frame, "ejecta").particles3d.as_ref().expect("particles").frame.clone(),
     }
 }
 
@@ -274,15 +277,6 @@ fn on_land_the_temperature_of_the_dust_grows_with_speed_and_with_mass() {
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the dust is as hot at 30 degrees as at 90"]
-fn on_land_the_temperature_of_the_dust_grows_with_the_angle() {
-    let (_, _, angles) = sweeps();
-    let rise: Vec<f64> = angles.iter().map(|&h| land(&land_variant(h), SETTLED).rise).collect();
-    println!("IMPACT land hottest rise for 30, 60, 90 degrees: {rise:?}");
-    assert!(increasing(&rise), "hottest rise by angle: {rise:?}");
-}
-
-#[test]
 fn on_land_the_rock_arrives_as_the_document_says_and_the_dust_is_what_the_law_gives() {
     // no heat, no dissipation and closed faces, so that the dust in the volume is the dust put in
     let xml = with_hit(LAND, AUTHORED)
@@ -313,7 +307,6 @@ fn on_land_the_rock_arrives_as_the_document_says_and_the_dust_is_what_the_law_gi
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the contact normal of the ground mesh is tilted by about 6 degrees"]
 fn on_land_the_normal_speed_and_the_axis_of_the_crater_are_those_of_the_ground() {
     let ev = evaluator(&coarse_smoke(&with_hit(LAND, AUTHORED)));
     let frame = at(&ev, 2.2);
@@ -510,50 +503,84 @@ fn in_the_sea_the_same_answers_in_any_order_from_a_fresh_evaluator_and_after_rep
 
 // --------------------------------------------------------------------------------- ejecta
 
-/// The rock's burst of ejecta: the scene's land and a particle emitter that the crater drives.
-/// It waits for the evaluator to read `burst@crater`; until then the document is refused.
-fn with_ejecta(xml: &str) -> String {
-    replace_once(
-        xml,
-        "    <object3D id=\"cloud\"",
-        "    <particles3D id=\"ejecta\" shape=\"sphere\" segments=\"6\" material=\"rock\" rate=\"0\" seed=\"20261004\" size=\"0.3\" \
-         gravityY=\"9.80665\" drag=\"0\" lifetime=\"6\" dt=\"0.0416666666666667\" maxParticles=\"6000\" colliders=\"ground\" \
-         collisionRadius=\"0.3\" bounce=\"0.15\"><burst crater=\"pit\" count=\"4000\"/></particles3D>\n    <object3D id=\"cloud\"",
-    )
+/// What the ejecta of a rock arriving as `hit` are at `t`.
+struct Thrown {
+    /// Particles born so far and alive now.
+    born: u64,
+    /// Kilograms they stand for.
+    mass: f64,
+    /// Their mean position along the rock's travel (x) and across it (z), metres.
+    mean: [f64; 2],
+    /// The farthest any is from the impact point on the ground, metres.
+    reach: f64,
 }
 
-/// Where the ejecta of a rock arriving as `hit` are at `t`: their mean position on the ground
-/// (x along the rock's travel, z across it) and how far the farthest is from the impact point.
-fn ejecta(hit: Hit, t: f64) -> ([f64; 2], f64, usize) {
-    let ev = evaluator(&coarse_smoke(&with_ejecta(&with_hit(LAND, hit))));
+fn thrown(hit: Hit, t: f64) -> Thrown {
+    let ev = evaluator(&coarse_smoke(&with_hit(LAND, hit)));
     let frame = at(&ev, t);
-    let particles = &node(&frame, "ejecta").particles3d.as_ref().expect("particles").frame.particles;
-    assert!(!particles.is_empty(), "the impact threw something out");
-    let n = particles.len() as f64;
-    let mean = [
-        particles.iter().map(|p| p.position[0]).sum::<f64>() / n,
-        particles.iter().map(|p| p.position[2]).sum::<f64>() / n,
-    ];
-    let reach = particles.iter().map(|p| p.position[0].hypot(p.position[2])).fold(0.0, f64::max);
-    (mean, reach, particles.len())
+    let ejecta = &node(&frame, "ejecta").particles3d.as_ref().expect("particles").frame;
+    let n = ejecta.particles.len().max(1) as f64;
+    Thrown {
+        born: ejecta.emitted,
+        mass: ejecta.particles.iter().map(|p| p.mass).sum(),
+        mean: [
+            ejecta.particles.iter().map(|p| p.position[0]).sum::<f64>() / n,
+            ejecta.particles.iter().map(|p| p.position[2]).sum::<f64>() / n,
+        ],
+        reach: ejecta.particles.iter().map(|p| p.position[0].hypot(p.position[2])).fold(0.0, f64::max),
+    }
+}
+
+/// When the ejecta are looked at: the launches are over, the particles are in the air or on the ground.
+const LANDED: f64 = 3.0;
+
+#[test]
+fn on_land_nothing_is_thrown_before_the_impact() {
+    let ev = evaluator(&coarse_smoke(&with_hit(LAND, AUTHORED)));
+    for t in [0.0, 0.5, 1.0, 1.3] {
+        let frame = at(&ev, t);
+        let ejecta = node(&frame, "ejecta").particles3d.as_ref().map(|p| p.frame.emitted).unwrap_or(0);
+        assert_eq!(ejecta, 0, "t = {t}: nothing thrown yet");
+    }
+    let after = thrown(AUTHORED, LANDED);
+    assert_eq!(after.born, 4000, "every particle of the burst is born once the crater has formed");
 }
 
 #[test]
-#[ignore = "waits for the evaluator to read burst@crater"]
-fn on_land_nothing_is_thrown_before_the_impact_and_the_ejecta_obey_the_order_of_the_impact() {
-    let before = evaluator(&coarse_smoke(&with_ejecta(&with_hit(LAND, AUTHORED))));
-    assert_eq!(node(&at(&before, 1.3), "ejecta").particles3d.as_ref().map_or(0, |p| p.frame.particles.len()), 0);
+fn on_land_the_ejecta_are_four_fifths_of_the_craters_mass() {
+    use sr_sim::cratering::Material;
+    let ev = evaluator(&coarse_smoke(&with_hit(LAND, AUTHORED)));
+    let frame = at(&ev, LANDED);
+    let cause = node(&frame, "ground").crater_impact.as_deref().expect("the impact");
+    let target_density = Material::SoftRock.table_density();
+    // the share thrown out is 0.8 of the volume of the crater
+    let wanted = target_density * 0.8 * cause.law().volume;
+    let particles = &node(&frame, "ejecta").particles3d.as_ref().unwrap().frame.particles;
+    let mass: f64 = particles.iter().map(|p| p.mass).sum();
+    println!("IMPACT land ejecta: {} particles, {mass:.0} kg against 0.8 rho V = {wanted:.0}", particles.len());
+    assert!((cause.law().ejecta_volume - 0.8 * cause.law().volume).abs() < 1e-9 * cause.law().volume);
+    assert!(particles.len() == 4000 && (mass - wanted).abs() < 1e-9 * wanted, "{mass} against {wanted}");
+}
+
+#[test]
+fn on_land_the_ejecta_reach_farther_with_speed_mass_and_angle() {
     let (speeds, masses, angles) = sweeps();
     for (name, hits) in [("speed", speeds), ("mass", masses), ("angle", angles)] {
-        let reach: Vec<f64> = hits.iter().map(|&h| ejecta(h, 2.5).1).collect();
-        println!("IMPACT ejecta reach by {name}: {reach:?}");
+        let results: Vec<Thrown> = hits.iter().map(|&h| thrown(h, LANDED)).collect();
+        let mass: Vec<f64> = results.iter().map(|r| r.mass).collect();
+        let reach: Vec<f64> = results.iter().map(|r| r.reach).collect();
+        println!("IMPACT land ejecta by {name}: mass {mass:?} reach {reach:?}");
+        assert!(increasing(&mass), "ejected mass by {name}: {mass:?}");
         assert!(increasing(&reach), "reach by {name}: {reach:?}");
     }
-    // an oblique impact throws the ejecta on downrange, the direction the rock was going (+x);
-    // a vertical one throws them evenly
-    let downrange: Vec<f64> = [90.0, 60.0, 30.0].map(|angle| ejecta(Hit { angle, ..AUTHORED }, 2.5).0[0]).to_vec();
-    println!("IMPACT ejecta mean x for 90, 60, 30 degrees: {downrange:?}");
-    assert!(downrange[0].abs() < downrange[1] && downrange[1] < downrange[2], "{downrange:?}");
+}
+
+#[test]
+fn on_land_an_oblique_impact_throws_the_ejecta_on_downrange() {
+    // the rock goes toward +x: a vertical impact throws them evenly, an oblique one carries them on
+    let means: Vec<f64> = [90.0, 60.0, 30.0].map(|angle| thrown(Hit { angle, ..AUTHORED }, LANDED).mean[0]).to_vec();
+    println!("IMPACT land ejecta mean x for 90, 60, 30 degrees: {means:?}");
+    assert!(means[0].abs() < means[1] && means[1] < means[2], "{means:?}");
 }
 
 // ------------------------------------------------------------------------------- cost

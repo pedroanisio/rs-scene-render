@@ -2434,12 +2434,15 @@
 
       A crater may instead grow from an impact: `source` names the dynamic rigidBody object that makes it. The crater
       begins at the first step in which that body, approaching the owner, pushes on it with more than twice its own
-      weight in one step, and centres on the impulse-weighted contact point with its axis along the contact normal
-      (centerX/Y/Z and normalX/Y/Z are then not read). Radius, depth, rimHeight, rimWidth, start and end are derived and
+      weight in one step, and centres on the impulse-weighted contact point with its axis along the normal of the owner's
+      surface at that point (centerX/Y/Z and normalX/Y/Z are then not read). The normal is the owner's own geometry: for
+      a mesh the corner normals of the triangle the point is on, interpolated, so that the same surface in finer or
+      coarser triangles gives the same axis; a sphere's radius direction; a box's face. The contact's normal only
+      chooses the side, and is used as it is for shapes that give no normal (capsule, cylinder, cone, convex). Radius, depth, rimHeight, rimWidth, start and end are derived and
       so cannot be given; `curve` and `influenceDepth` and `maxMemoryMiB` keep their meaning. The crater is
       Holsapple's scaling law (Annu. Rev. Earth Planet. Sci. 21:333, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18) with
       the constants of the author's calculator note, applied to the body's mass and density, the speed of its approach
-      along the contact normal, `targetMaterial`, and gravity. The dependence of those constants on strength and
+      along that normal, `targetMaterial`, and gravity. The dependence of those constants on strength and
       porosity is poorly constrained by the source, so `targetDensity` and `strength` override the table. A crater grows in
       composition time from the impact over the law's formation time, and nothing is simulated before the impact.
       Units: `physics/@pixelsPerMeter` converts scene units to metres for everything the law reads and gives;

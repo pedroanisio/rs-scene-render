@@ -824,9 +824,9 @@ fn link_craters(
             id,
             world_gravity,
             pixels_per_meter,
-            specs[source].mass,
-            volume,
+            (specs[source].mass, volume),
             scale[0],
+            Arc::new(specs[owner].shape.clone()),
         )?;
         let cfg = Arc::new(cfg);
         let min_impulse = crate::physcache::rest_threshold(specs[source].mass, gravity, pixels_per_meter, step);
