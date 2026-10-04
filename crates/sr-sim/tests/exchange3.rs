@@ -98,7 +98,7 @@ impl Driver3 for Loaded {
     fn fields(&mut self, _: f64) -> Vec<Field> {
         vec![]
     }
-    fn load(&mut self, step: u64, _t: f64, body: usize) -> Result<Option<Load3>, String> {
+    fn load(&mut self, step: u64, _t: f64, body: usize, _: &BodyState) -> Result<Option<Load3>, String> {
         self.asked.push((step, body));
         match self.log.get(body as u32, step) {
             Some([record]) => Ok(Some(record.0)),
@@ -192,7 +192,7 @@ fn a_driver_without_loads_gives_exactly_the_world_there_was() {
         fn fields(&mut self, t: f64) -> Vec<Field> {
             self.0.fields(t)
         }
-        fn load(&mut self, _: u64, _: f64, _: usize) -> Result<Option<Load3>, String> {
+        fn load(&mut self, _: u64, _: f64, _: usize, _: &BodyState) -> Result<Option<Load3>, String> {
             Ok(None)
         }
     }

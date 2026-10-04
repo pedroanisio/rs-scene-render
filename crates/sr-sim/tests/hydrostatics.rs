@@ -204,3 +204,34 @@ fn a_mesh_that_is_not_closed_enough_to_measure_is_an_error() {
     assert!(submerged_mesh(&[[0.0, f64::NAN, 0.0], [1.0; 3], [2.0; 3]], &[[0, 1, 2]], &level(0.0)).is_err());
     assert!(submerged_mesh(&[[0.0; 3]; 3], &[[0, 1, 2]], &Surface { offset: f64::NAN, slope: [0.0; 2] }).is_err());
 }
+
+#[test]
+fn the_waterline_and_the_area_seen_from_above_follow_the_shape() {
+    // a box 4 x 6 in plan, half under: the waterline is the whole plan and so is what it presents from above
+    let b = cuboid([1.0, 10.0, -2.0], [2.0, 1.0, 3.0]);
+    let half = mesh(&b, &level(10.0));
+    assert!(close(half.waterline, 24.0, 1e-12) && close(half.projected, 24.0, 1e-12), "{half:?}");
+    // wholly under the surface there is no waterline, and it still presents its plan
+    let under = mesh(&b, &level(0.0));
+    assert!(under.waterline < 1e-12 && close(under.projected, 24.0, 1e-12), "{under:?}");
+    // a ball, against the closed forms: a disc of the waterline's circle when shallow, the ball's disc when deep
+    let m = ball([0.0, 10.0, 0.0], 2.0, 48, 64);
+    for surface in [11.5, 10.0, 8.5] {
+        let analytic = submerged_sphere([0.0, 10.0, 0.0], 2.0, &level(surface));
+        let found = mesh(&m, &level(surface));
+        assert!(
+            close(found.waterline, analytic.waterline, 2e-2),
+            "{surface}: {} vs {}",
+            found.waterline,
+            analytic.waterline
+        );
+        assert!(
+            close(found.projected, analytic.projected, 2e-2),
+            "{surface}: {} vs {}",
+            found.projected,
+            analytic.projected
+        );
+    }
+    // dry, it presents nothing
+    assert_eq!(mesh(&b, &level(30.0)).projected, 0.0);
+}

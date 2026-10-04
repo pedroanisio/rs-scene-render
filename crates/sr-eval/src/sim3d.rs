@@ -912,7 +912,13 @@ impl Driver3 for Driver<'_, '_> {
         deformed_surface(body, &crater, revision)
     }
 
-    fn load(&mut self, _step: u64, t: f64, which: usize) -> Result<Option<sr_sim::physics3d::Load3>, String> {
+    fn load(
+        &mut self,
+        _step: u64,
+        t: f64,
+        which: usize,
+        _state: &sr_sim::physics3d::BodyState,
+    ) -> Result<Option<sr_sim::physics3d::Load3>, String> {
         match self.group {
             Some(group) => group.load(t, which),
             None => Ok(None),

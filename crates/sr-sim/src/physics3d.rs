@@ -164,12 +164,13 @@ pub trait Driver3 {
         self.collider(t, which, revision)
     }
     /// The load on a dynamic body for the step that starts at `step`, at time `t`, in scene
-    /// axes and units, or `None` for none. It must depend only on `step` and `body` and on records
+    /// axes and units, or `None` for none. It may read the body's state at the start of the step,
+    /// and must otherwise depend only on `step` and `body` and on records
     /// that no longer change, so that a replay applies the same load: a world restored to a
     /// checkpoint asks again for every step it re-takes. An error stops the step, which
     /// is then not taken; the default is no load, and a world that is never loaded is
     /// unchanged by this call.
-    fn load(&mut self, _step: u64, _t: f64, _body: usize) -> Result<Option<Load3>, String> {
+    fn load(&mut self, _step: u64, _t: f64, _body: usize, _state: &BodyState) -> Result<Option<Load3>, String> {
         Ok(None)
     }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
@@ -200,6 +201,18 @@ impl ColliderUpdate3 {
             .and_then(|v| triangles.checked_mul(524).and_then(|i| v.checked_add(i)))
             .and_then(|v| v.checked_add(4096))
     }
+}
+
+/// A body at the start of a step, as a load may need it: scene axes and units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyState {
+    /// Pose of the body's origin.
+    pub pose: Pose3,
+    pub velocity: Velocity3,
+    /// World position of the centre of mass.
+    pub centre: [f64; 3],
+    /// Whether the body takes part: a load on one that does not is ignored.
+    pub enabled: bool,
 }
 
 /// A force and torque on a body, held for one step.
@@ -1168,7 +1181,7 @@ impl World3 {
         let mut loads = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {
             if b.kind == BodyKind::Dynamic {
-                if let Some(load) = driver.load(self.state.step, t, k)? {
+                if let Some(load) = driver.load(self.state.step, t, k, &self.body_state(k))? {
                     loads.push((k, load));
                 }
             }
@@ -1317,6 +1330,22 @@ impl World3 {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
         self.snapshot()
+    }
+
+    /// Body `k` as it is now.
+    fn body_state(&self, k: usize) -> BodyState {
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let b = &self.state.bodies[self.state.handles[k]];
+        let q = b.rotation();
+        BodyState {
+            pose: Pose3 { pos: flip(b.translation().to_array()).map(|c| c * ppm), rot: flip_q([q.x, q.y, q.z, q.w]) },
+            velocity: Velocity3 {
+                linear: flip(b.linvel().to_array()).map(|v| v * ppm),
+                angular: flip(b.angvel().to_array()).map(f64::to_degrees),
+            },
+            centre: flip(b.center_of_mass().to_array()).map(|c| c * ppm),
+            enabled: b.is_enabled(),
+        }
     }
 
     fn snapshot(&self) -> Frame3 {
