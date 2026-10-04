@@ -432,6 +432,34 @@ The implemented configuration is:
 | `colliders` | optional IDREFS | Up to 4096 distinct rigid collision proxies; absent selects none (PYRO7) |
 | `colliderThickness` | optional positive length; twice `voxelSize` | Thickness of referenced planes, in each plane's local units |
 
+**Memory budget by resolution.** The two budgets are checked before any grid is
+allocated. `maxMemoryMiB` must be at least `ceil((cells × 288 + 8192) / 2^20)`: 288
+bytes per cell is the worst-case live memory of one step (the committed state, the
+working state, the list of solid-face velocities if every cell were solid, the
+pressure workspace and the multigrid hierarchy, about 229 bytes) plus headroom for
+allocator overhead. `checkpointMemoryMiB` must be at least
+`ceil(state bytes / 2^20)`, where the state (density, temperature, three face
+velocity arrays and the solid mask) takes about 41.2 bytes per cell plus a few
+hundred bytes of bookkeeping, independent of colliders. A checkpoint is taken every
+second of simulation time; when the budget fills, the spacing doubles and the
+checkpoints between are dropped. Below these minimums the errors are
+`grid and step workspace memory budget` and
+`checkpoint budget cannot hold the initial state`. When only the initial state
+fits, a backward seek replays from the start.
+
+| Grid (cells) | Cells | Minimum `maxMemoryMiB` | Minimum `checkpointMemoryMiB` (one state) | States in 256 MiB |
+|---|---|---|---|---|
+| 64×52×64 | 212,992 | 59 | 9 | 30 |
+| 128×104×128 | 1,703,936 | 469 | 67 | 3 |
+| 192×156×192 | 5,750,784 | 1580 | 226 | 1 |
+
+The minimums are the least values the constructor accepts, found by running the
+solver, and they match the formulas above. Peak resident memory measured on the
+impact scene (6 steps, multigrid, no colliders) was 326 MB at 128×104×128 and 928 MB
+at 192×156×192, below the estimate because untouched pages of zeroed arrays are not
+resident; those figures were measured on a loaded machine and depend on the
+allocator.
+
 `<pyroSource>` accepts `shape="sphere|box|mesh"`, with radius (default 1),
 required positive width/height/depth for boxes (PYRO3), or a mesh asset IDREF
 in `mesh` (PYRO5). Its x/y/z, rotation,
@@ -839,6 +867,13 @@ Memory attributes are at most 4096 MiB; all except checkpoint memory are positiv
 Admission budgets cover the named operation, not aggregate GPU use or copies
 retained by external API callers. Mesh importer internal dependency allocations
 still need hardening; the flattened geometry is checked against its budget.
+
+The generated surface is charged 256 bytes per vertex plus 48 bytes per cell
+against `surfaceMemoryMiB`: 721 × 721 vertices of a 720 × 720 cell ocean cost 151
+MiB, above the default of 128, so the target-resolution example declares 256. That
+example also declares `maxMemoryMiB="512"` (a second-order solver on 518,400 cells
+is charged 400 bytes per cell, 198 MiB) and `checkpointMemoryMiB="256"` (each
+checkpoint holds about 12.4 MB).
 
 `<wave>` has `wavelength=16`, `amplitude=1`, `direction=0` (degrees from +x toward
 +z), optional phase in degrees and optional nonnegative speed. Missing phase is
