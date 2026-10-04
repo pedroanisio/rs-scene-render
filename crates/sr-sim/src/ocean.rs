@@ -38,7 +38,7 @@ pub enum Order {
     /// Piecewise-constant states, forward Euler.
     #[default]
     First,
-    /// MUSCL reconstruction with the minmod limiter and SSP-RK2.
+    /// MUSCL reconstruction with the monotonized-central limiter and SSP-RK2.
     Second,
 }
 

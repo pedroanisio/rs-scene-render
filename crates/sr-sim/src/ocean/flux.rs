@@ -41,11 +41,14 @@ pub(super) fn cfl(spec: &Spec) -> f64 {
     }
 }
 
-fn minmod(a: f64, b: f64) -> f64 {
+/// Monotonized-central limiter (van Leer 1977) for the difference across a
+/// cell, from the one-sided differences `a` (backward) and `b` (forward):
+/// `sign * min(2|a|, 2|b|, |a+b|/2)` when they agree in sign, otherwise zero.
+fn limit(a: f64, b: f64) -> f64 {
     if a > 0.0 && b > 0.0 {
-        a.min(b)
+        (2.0 * a).min(2.0 * b).min(0.5 * (a + b))
     } else if a < 0.0 && b < 0.0 {
-        a.max(b)
+        (2.0 * a).max(2.0 * b).max(0.5 * (a + b))
     } else {
         0.0
     }
@@ -53,7 +56,7 @@ fn minmod(a: f64, b: f64) -> f64 {
 
 /// Reconstructs conserved states at both faces of every cell of one row.
 /// `faces[k] = [left face, right face]`. Surface elevation (depth minus the
-/// downward bed ordinate) and velocity are limited, depths are capped so that
+/// downward bed ordinate) and velocity are limited with `limit`, depths are capped so that
 /// face depths stay non-negative, and the bed stays constant per cell. Cells
 /// without two wet neighbours along the row, and every cell of a non-periodic
 /// row end, keep their cell value, so wet/dry fronts and edges are first order.
@@ -75,9 +78,9 @@ fn reconstruct(spec: &Spec, bed: &[f64], q: &[Q], index: impl Fn(usize) -> usize
             continue;
         }
         let eta = |c: Q, k: usize| c[0] - bed[index(k)];
-        let slope = (minmod(eta(cell, k) - eta(m, km), eta(p, kp) - eta(cell, k))).clamp(-2.0 * cell[0], 2.0 * cell[0]);
+        let slope = (limit(eta(cell, k) - eta(m, km), eta(p, kp) - eta(cell, k))).clamp(-2.0 * cell[0], 2.0 * cell[0]);
         let u = |c: Q, a: usize| c[a + 1] / c[0];
-        let su: [f64; 2] = std::array::from_fn(|a| minmod(u(cell, a) - u(m, a), u(p, a) - u(cell, a)));
+        let su: [f64; 2] = std::array::from_fn(|a| limit(u(cell, a) - u(m, a), u(p, a) - u(cell, a)));
         if slope == 0.0 && su == [0.0; 2] {
             continue;
         }

@@ -103,25 +103,36 @@ fn travelling_wave_error(order: Order, cells_per_wavelength: usize, waves: usize
     (amplitude(&ocean.at(time).unwrap().cells, k, dx, h) / a0 - 1.0).abs()
 }
 
-/// Declared improvements in amplitude error after five wavelengths. Minmod
-/// clips smooth extrema, so the gain grows with resolution: measured 3.8x at 40
-/// cells per wavelength and 13.6x at 80 (first order: 85% and 62% lost).
-const FACTOR_40_CELLS: f64 = 3.0;
-const FACTOR_80_CELLS: f64 = 10.0;
+/// Amplitude lost after five wavelengths of a 1e-3 wave, by cells per wavelength.
+/// Measured with the monotonized-central limiter (minmod and van Leer, same run,
+/// in parentheses):
+///
+/// | cells | order 1 | order 2: MC (minmod, van Leer) |
+/// |---|---|---|
+/// | 10 | 99.96% | 77.2% (97.4%, 88.2%) |
+/// | 20 | 97.9% | 17.9% (64.1%, 31.1%) |
+/// | 40 | 85.3% | 2.6% (22.2%, 4.8%) |
+/// | 80 | 61.7% | 0.34% (4.5%, 0.59%) |
+///
+/// Declared bounds sit below the measured gain: 5.5x at 20 cells, 33x at 40
+/// and 181x at 80.
+fn loss(order: Order, cells: usize) -> f64 {
+    travelling_wave_error(order, cells, 5)
+}
 
 #[test]
 fn second_order_loses_less_wave_amplitude_than_first_order() {
-    let (first40, second40) = (travelling_wave_error(Order::First, 40, 5), travelling_wave_error(Order::Second, 40, 5));
-    let (first80, second80) = (travelling_wave_error(Order::First, 80, 5), travelling_wave_error(Order::Second, 80, 5));
     println!(
-        "AMPLITUDE 40/wavelength order1={first40:e} order2={second40:e} ratio={:.2}; 80/wavelength order1={first80:e} order2={second80:e} ratio={:.2}",
-        first40 / second40,
-        first80 / second80
+        "AMPLITUDE loss order1/order2: {:?}",
+        [10, 20, 40, 80].map(|c| (c, loss(Order::First, c), loss(Order::Second, c)))
     );
-    assert!(second40 * FACTOR_40_CELLS < first40, "40 cells: order 1 {first40:e}, order 2 {second40:e}");
-    assert!(second80 * FACTOR_80_CELLS < first80, "80 cells: order 1 {first80:e}, order 2 {second80:e}");
-    // Refinement keeps paying off: better than first-order convergence (2x).
-    assert!(second80 * 3.0 < second40, "order 2 did not converge: {second40:e} -> {second80:e}");
+    assert!(loss(Order::Second, 10) < 0.85, "10 cells keep at least 15% of the wave");
+    for (cells, factor) in [(20, 4.0), (40, 20.0), (80, 100.0)] {
+        let (first, second) = (loss(Order::First, cells), loss(Order::Second, cells));
+        assert!(second * factor < first, "{cells} cells: order 1 {first:e}, order 2 {second:e}");
+    }
+    // Refinement keeps paying off, better than first-order convergence (2x).
+    assert!(loss(Order::Second, 80) * 5.0 < loss(Order::Second, 40), "order 2 did not converge");
 }
 
 fn spec(cells: [usize; 2], order: Order) -> Spec {
