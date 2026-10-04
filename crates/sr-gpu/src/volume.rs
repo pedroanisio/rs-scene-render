@@ -11,6 +11,93 @@ use sr_volume::thermal::{blackbody_table, TABLE_INTERVALS};
 const RECORD_ROWS: usize = 64;
 const BRICK_ROWS: usize = 129;
 const MAX_MEDIA: usize = 64;
+/// Voxels along a side of the cells of the shadow march's skip map.
+const OCCUPANCY_CELL: i32 = 4;
+/// Largest skip map, in cells (512 KiB of bits); a grid whose extent needs more is marched without
+/// skipping.
+const MAX_OCCUPANCY_CELLS: u64 = 1 << 22;
+/// A cell is skipped by the shadow march only when the optical depth its samples could add along
+/// any ray through the domain is below this: the largest |density| a sample in the cell can read,
+/// times the density scale (which already includes the object's opacity) and the extinction, times
+/// the longest path inside the domain. Transmittance is `exp(-optical depth)`, and 1e-10 is about
+/// 300 times smaller than half a unit in the last place of an f32 near 1, so what is left out is far
+/// below the resolution of the result; it is not zero, and is bounded the same way for any scene.
+const SKIPPED_OPTICAL_DEPTH: f64 = 1e-10;
+
+/// The density at or below which a cell may be skipped, in the units of the grid.
+fn negligible_density(medium: &Medium, diameter: f64) -> f32 {
+    let optical = medium.optical();
+    let factor = (optical.density_scale * optical.extinction).abs() * diameter;
+    if factor > 0.0 {
+        (SKIPPED_OPTICAL_DEPTH / factor) as f32
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Cell range, in `OCCUPANCY_CELL`-voxel cells, that can hold density: the first cell and the extent
+/// of the bounding box of the bricks, widened by the one cell an interpolated sample reaches into.
+fn occupancy_extent(grid: &sr_volume::SparseGrid, negligible: f32) -> Option<([i32; 3], [u32; 3])> {
+    // outside the bricks the density is the background, which must be negligible too
+    let background = grid.background().abs();
+    if background.is_nan() || background > negligible {
+        return None;
+    }
+    let per_brick = 8 / OCCUPANCY_CELL;
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for (key, _) in grid.bricks() {
+        for a in 0..3 {
+            lo[a] = lo[a].min(key[a]);
+            hi[a] = hi[a].max(key[a]);
+        }
+    }
+    if lo[0] > hi[0] {
+        return None;
+    }
+    let min: [i32; 3] = std::array::from_fn(|a| lo[a] * per_brick - 1);
+    let dims: [u32; 3] = std::array::from_fn(|a| ((hi[a] - lo[a]) * per_brick + 3) as u32);
+    let cells = dims.iter().map(|d| u64::from(*d)).product::<u64>();
+    (cells <= MAX_OCCUPANCY_CELLS).then_some((min, dims))
+}
+
+/// Bit per cell of `occupancy_extent`: set when any voxel that a sample inside the cell can read
+/// (the cell's voxels and the next one on each side) is above `negligible`. Cells outside the
+/// extent and cells with the bit clear hold only negligible density.
+fn occupancy(grid: &sr_volume::SparseGrid, negligible: f32) -> Option<([i32; 3], [u32; 3], Vec<u32>)> {
+    let (min, dims) = occupancy_extent(grid, negligible)?;
+    let cells = dims.iter().map(|d| *d as usize).product::<usize>();
+    let mut words = vec![0u32; cells.div_ceil(32)];
+    let cell = OCCUPANCY_CELL;
+    // cells c with cell*c <= v <= cell*c + cell
+    let range = |v: i32| ((v - cell).div_euclid(cell) + ((v - cell).rem_euclid(cell) != 0) as i32, v.div_euclid(cell));
+    for (key, values) in grid.bricks() {
+        for (i, &value) in values.iter().enumerate() {
+            if value.abs() <= negligible {
+                continue;
+            }
+            let voxel = [8 * key[0] + (i & 7) as i32, 8 * key[1] + ((i >> 3) & 7) as i32, 8 * key[2] + (i >> 6) as i32];
+            let r = voxel.map(range);
+            for z in r[2].0..=r[2].1 {
+                for y in r[1].0..=r[1].1 {
+                    for x in r[0].0..=r[0].1 {
+                        let rel = [x - min[0], y - min[1], z - min[2]];
+                        let index =
+                            rel[0] as usize + dims[0] as usize * (rel[1] as usize + dims[1] as usize * rel[2] as usize);
+                        words[index / 32] |= 1 << (index % 32);
+                    }
+                }
+            }
+        }
+    }
+    Some((min, dims, words))
+}
+
+/// Whether the shadow march may skip empty cells of this medium: the density must be a single
+/// still frame (no second frame to blend, no advection) so a sample reads only the grid it is in.
+fn skips_empty_space(medium: &Medium) -> bool {
+    medium.next_density().is_none() && medium.advection().is_none()
+}
 
 #[derive(Clone, Debug)]
 pub struct VolumeDraw {
@@ -189,7 +276,18 @@ pub(crate) fn bytes(volumes: &[VolumeDraw]) -> u64 {
                 .map(|g| g.brick_count())
                 .sum::<usize>()
                 * BRICK_ROWS;
-            (RECORD_ROWS as u64 + density as u64 + thermal as u64 + velocity as u64) * 16
+            let occupancy = if skips_empty_space(&v.medium) {
+                occupancy_extent(v.medium.density(), negligible_density(&v.medium, v.diameter)).map_or(
+                    0,
+                    |(_, dims)| {
+                        let cells = dims.iter().map(|d| *d as usize).product::<usize>();
+                        cells.div_ceil(32).div_ceil(4)
+                    },
+                )
+            } else {
+                0
+            };
+            (RECORD_ROWS as u64 + density as u64 + thermal as u64 + velocity as u64 + occupancy as u64) * 16
         })
         .sum()
 }
@@ -267,6 +365,21 @@ pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] 
                 [rgb.x as f32, rgb.y as f32, rgb.z as f32, 0.0]
             }));
         }
+        if skips_empty_space(m) {
+            if let Some((min, dims, words)) = occupancy(m.density(), negligible_density(m, volume.diameter)) {
+                let offset = out.len();
+                out.extend(
+                    words.chunks(4).map(|c| std::array::from_fn(|i| f32::from_bits(c.get(i).copied().unwrap_or(0)))),
+                );
+                out[base + 15] = [
+                    f32::from_bits(min[0] as u32),
+                    f32::from_bits(min[1] as u32),
+                    f32::from_bits(min[2] as u32),
+                    f32::from_bits(offset as u32),
+                ];
+                out[base + 22] = [f32::from_bits(dims[0]), f32::from_bits(dims[1]), f32::from_bits(dims[2]), 1.0];
+            }
+        }
     }
     [offset as u32, volumes.len() as u32, volumes.iter().map(|v| v.march.max_steps).min().unwrap_or(0), 0]
 }
@@ -285,4 +398,104 @@ fn pack_grid(out: &mut Vec<[f32; 4]>, grid: &sr_volume::SparseGrid) -> [f32; 4] 
         out.extend(values.as_chunks::<4>().0.iter().copied());
     }
     info
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sr_volume::medium::{Bounds, Optical};
+    use sr_volume::{SparseGrid, Transform};
+
+    fn grid() -> SparseGrid {
+        let mut grid = SparseGrid::new(Transform::identity(), 0.0, 64).unwrap();
+        // a dense core, a faint skirt around it and a far brick holding only a negligible tail
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    grid.set([x, y, z], 1.0).unwrap();
+                }
+            }
+        }
+        grid.set([9, 1, 1], 1e-3).unwrap();
+        for z in 24..32 {
+            for y in 24..32 {
+                for x in 24..32 {
+                    grid.set([x, y, z], 1e-15).unwrap();
+                }
+            }
+        }
+        grid
+    }
+
+    fn medium(grid: SparseGrid, extinction: f64, density_scale: f64) -> Medium {
+        Medium::new(
+            Arc::new(grid),
+            Some(Bounds::new([0.0; 3], [32.0; 3]).unwrap()),
+            Transform::identity(),
+            Optical { extinction, density_scale, ..Default::default() },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn skip_map_clears_only_cells_whose_readable_voxels_are_negligible() {
+        let grid = grid();
+        let negligible = 1e-10;
+        let (min, dims, words) = occupancy(&grid, negligible).unwrap();
+        let bit = |c: [i32; 3]| {
+            let rel = [c[0] - min[0], c[1] - min[1], c[2] - min[2]];
+            if rel.iter().any(|r| *r < 0) || rel.iter().zip(dims).any(|(r, d)| *r as u32 >= d) {
+                return false;
+            }
+            let index = rel[0] as usize + dims[0] as usize * (rel[1] as usize + dims[1] as usize * rel[2] as usize);
+            words[index / 32] >> (index % 32) & 1 == 1
+        };
+        let (mut kept, mut cleared) = (0, 0);
+        for z in min[2] - 2..min[2] + dims[2] as i32 + 2 {
+            for y in min[1] - 2..min[1] + dims[1] as i32 + 2 {
+                for x in min[0] - 2..min[0] + dims[0] as i32 + 2 {
+                    // the voxels a sample inside cell c reads lie in [4c, 4c + 4] on each axis
+                    let readable_max = (0..=4)
+                        .flat_map(|k| (0..=4).flat_map(move |j| (0..=4).map(move |i| [i, j, k])))
+                        .map(|[i, j, k]| grid.value([4 * x + i, 4 * y + j, 4 * z + k]).abs())
+                        .fold(0.0f32, f32::max);
+                    if readable_max > negligible {
+                        assert!(bit([x, y, z]), "cell {x},{y},{z} can read {readable_max} but is skipped");
+                        kept += 1;
+                    } else {
+                        // clearing is an optimisation, not a duty, but the map should find the empty space
+                        if !bit([x, y, z]) {
+                            cleared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(kept > 0 && cleared > kept, "kept {kept}, cleared {cleared}");
+        // the negligible tail's own cells are clear
+        assert!(!bit([6, 6, 6]) && !bit([7, 7, 7]));
+    }
+
+    #[test]
+    fn the_skipped_density_shrinks_with_extinction_density_scale_and_domain() {
+        let diameter = 100.0;
+        let base = negligible_density(&medium(grid(), 1.0, 1.0), diameter);
+        assert!((f64::from(base) * diameter - SKIPPED_OPTICAL_DEPTH).abs() < 1e-3 * SKIPPED_OPTICAL_DEPTH);
+        // a thin, very dense medium: a density of 1e-6 is not negligible
+        assert!(negligible_density(&medium(grid(), 1e6, 1.0), diameter) < 1e-6);
+        assert!(negligible_density(&medium(grid(), 1.0, 1e6), diameter) < 1e-6);
+        assert!(negligible_density(&medium(grid(), 1.0, 1.0), 10.0 * diameter) < base);
+        // no extinction: every cell is negligible
+        assert_eq!(negligible_density(&medium(grid(), 0.0, 1.0), diameter), f32::INFINITY);
+    }
+
+    #[test]
+    fn media_with_a_second_frame_or_a_nonzero_background_are_not_skipped() {
+        assert!(skips_empty_space(&medium(grid(), 1.0, 1.0)));
+        let second = medium(grid(), 1.0, 1.0).with_next_frame(Arc::new(grid()), None, 0.5).unwrap();
+        assert!(!skips_empty_space(&second));
+        let mut foggy = SparseGrid::new(Transform::identity(), 0.02, 16).unwrap();
+        foggy.set([1, 1, 1], 1.0).unwrap();
+        assert!(occupancy_extent(&foggy, 1e-10).is_none(), "a nonzero background fills the space between bricks");
+    }
 }
