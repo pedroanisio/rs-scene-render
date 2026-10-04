@@ -96,11 +96,13 @@ pub struct RenderStats {
     pub splats: u64,
     /// Seconds the rigid-body runtime spent advancing this frame (inclusive of its first-frame build).
     pub sim_rigid_seconds: f64,
-    /// Seconds the ocean solver spent producing this frame's surface.
+    /// Seconds the ocean solver spent producing this frame's surface (inclusive, like all four `sim_*` fields).
     pub sim_ocean_seconds: f64,
-    /// Seconds the smoke (participating medium) solver spent advancing to this frame.
+    /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
+    /// rigid-body stepping its colliders trigger.
     pub sim_smoke_seconds: f64,
-    /// Seconds 2D emitters and native 3D particles spent advancing to this frame.
+    /// Seconds 2D emitters and native 3D particles spent advancing to this frame, including any
+    /// rigid-body reads they trigger.
     pub sim_particles_seconds: f64,
     /// CPU seconds building the `Draw3` lists of meshes and particles for 3D passes.
     pub draw_prep_seconds: f64,
