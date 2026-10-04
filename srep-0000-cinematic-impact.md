@@ -2624,10 +2624,16 @@ mass and angle, that an oblique impact carries the ejecta downrange, that the oc
 cell and the dust is what the law gives, and that any order of instants, a fresh evaluator and a replay
 from the first checkpoint give the same bits. Limits that the scenes show and the engine does not hide:
 
-- The ejecta of the land scene have no collider. With the ground as one the particle solver stops with "more
-  than 16 collisions in one particle step" while the crater is still growing under them, so they fall through
-  the ground, which hides them. The ocean scene has no ejecta: they would be launched from the sea bed and
-  ignore the water.
+- The ejecta of the land scene land on the ground, which is their collider, with the solver's friction of zero, so
+  only 7 of the 4000 are under 0.2 m/s at 5.9 s: they slide about the pit. A friction of 0.7 with a restitution
+  of 0.15 (about tan 35 degrees, the angle of repose of coarse rock debris, inside the 0.6 to 0.85 that Byerlee's
+  law gives for rock on rock; the engine's choice, not a measurement of this ejecta, and the literature ranges are
+  from memory and not checked in the session that wrote them) settles them: 94 under 0.2 m/s at 3 s, 550 at 4.5 s and
+  3513 at 5.9 s, none through the ground. It is not in the scene because it stops the particle solver, with "more than
+  16 collisions in one particle step", at 2 s for the heaviest rock of the sweeps (270 000 kg, the biggest crater), and
+  with any friction tried (0.3, 0.5, 0.7, 0.85); an ignored test keeps the case. The contact radius is the solver's default
+  of 0.5 m, bigger than the 0.17 m of the rocks they stand for: with 0.17 m 754 of them end under the pit, through the
+  ground. The ocean scene has no ejecta: they would be launched from the sea bed and ignore the water.
 - The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
   so a smoke source from that crater would make a cloud on the sea bed.
 - In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`),

@@ -591,6 +591,41 @@ fn on_land_the_ejecta_are_four_fifths_of_the_craters_mass() {
     assert!(particles.len() == 4000 && (mass - wanted).abs() < 1e-9 * wanted, "{mass} against {wanted}");
 }
 
+/// The land scene with the contact of the ejecta declared: a restitution of 0.15 and a friction of 0.7.
+fn with_friction(xml: &str) -> String {
+    replace_once(xml, r#"colliders="ground">"#, r#"colliders="ground" bounce="0.15" friction="0.7">"#)
+}
+
+#[test]
+fn on_land_the_ejecta_settle_on_the_ground_and_none_goes_through_it_when_they_have_friction() {
+    // with a friction of 0.7 and a restitution of 0.15 most of the 4000 are at rest by 5.9 s: 94 were under 0.2 m/s at
+    // 3 s, 550 at 4.5 s and 3513 at 5.9 s, against 7 with the default friction of zero; the contact radius of 0.5 m is
+    // the particle solver's default, and a smaller one lets some go through the ground
+    let ev = evaluator(&with_friction(&coarse_smoke(&with_hit(LAND, AUTHORED))));
+    let frame = at(&ev, 5.9);
+    let particles = &node(&frame, "ejecta").particles3d.as_ref().unwrap().frame.particles;
+    let speed = |p: &sr_sim::particles3d::Particle| p.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let at_rest = particles.iter().filter(|p| speed(p) < 0.2).count();
+    // scene y points down: the pit is 3 m deep, so anything deeper than 3.3 m has gone through the ground
+    let through = particles.iter().filter(|p| p.position[1] > 3.3).count();
+    println!(
+        "IMPACT land ejecta at 5.9 s: {at_rest} of {} under 0.2 m/s, {through} through the ground",
+        particles.len()
+    );
+    assert_eq!(particles.len(), 4000);
+    assert_eq!(through, 0);
+    assert!(at_rest > 3000, "{at_rest} at rest");
+}
+
+#[test]
+#[ignore = "fails as the particle solver stands: with any friction the ejecta of the biggest crater stop it at 2 s with more than 16 collisions in one step"]
+fn on_land_the_ejecta_of_the_heaviest_rock_can_have_friction_too() {
+    let hit = Hit { mass: 270000.0, ..AUTHORED };
+    let ev = evaluator(&with_friction(&coarse_smoke(&with_hit(LAND, hit))));
+    let frame = ev.evaluate(2.0);
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+}
+
 #[test]
 fn on_land_the_ejecta_reach_farther_with_speed_mass_and_angle() {
     let (speeds, masses, angles) = sweeps();
