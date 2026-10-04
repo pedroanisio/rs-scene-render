@@ -177,6 +177,24 @@ pub trait Driver3 {
     fn load(&mut self, _step: u64, _t: f64, _body: usize, _state: &BodyState) -> Result<Option<Load3>, String> {
         Ok(None)
     }
+    /// Whether the body that made the impact of a watch (`source` against `owner`, see
+    /// [`World3::with_impact_watches`]) is arrested at the start of step `step`, and if so at what
+    /// deceleration, in scene units a second squared. `centre` is the body's centre of mass in the
+    /// owner's frame, `impact` the first impact the world noticed. The world takes that much off the
+    /// body's velocity relative to the owner along its direction, never more than stops it in the
+    /// step, and takes the same share off its spin: it can only take energy out. It must depend only
+    /// on its arguments and on records that no longer change. The default arrests nothing.
+    fn capture(
+        &mut self,
+        _step: u64,
+        _t: f64,
+        _source: usize,
+        _owner: usize,
+        _centre: [f64; 3],
+        _impact: &Impact3,
+    ) -> Result<Option<f64>, String> {
+        Ok(None)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -1204,6 +1222,23 @@ impl World3 {
                 }
             }
         }
+        // the bodies that the driver arrests after their impact: a step it cannot answer is not taken
+        let mut arrests = Vec::new();
+        for w in 0..self.watches.len() {
+            let watch = self.watches[w];
+            let Some(impact) = self.state.impacts.get(w).copied().flatten() else { continue };
+            let (source, owner) = (self.body_state(watch.source), self.body_state(watch.owner));
+            let from_owner: [f64; 3] = std::array::from_fn(|i| source.centre[i] - owner.pose.pos[i]);
+            let centre = rotate_back(owner.pose.rot, from_owner);
+            if let Some(deceleration) =
+                driver.capture(self.state.step, t, watch.source, watch.owner, centre, &impact)?
+            {
+                if !(deceleration.is_finite() && deceleration >= 0.0) {
+                    return Err("a body is arrested with a deceleration that is not a number".into());
+                }
+                arrests.push((watch.source, watch.owner, deceleration));
+            }
+        }
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
@@ -1257,6 +1292,20 @@ impl World3 {
             }
             body.add_force(vec3(flip(load.force).map(|c| c / ppm)), true);
             body.add_torque(vec3(flip(load.torque).map(|c| c / (ppm * ppm))), true);
+        }
+        for (source, owner, deceleration) in arrests {
+            let (v, w, v_owner) = {
+                let (body, other) = (&st.bodies[st.handles[source]], &st.bodies[st.handles[owner]]);
+                (body.linvel(), body.angvel(), other.linvel())
+            };
+            let relative = v - v_owner;
+            let speed = relative.length();
+            // the share of the relative velocity that this step takes off: all of it if that stops the body
+            let gone = deceleration / ppm * self.spec.step;
+            let share = if speed > 0.0 { (gone / speed).min(1.0) } else { 1.0 };
+            let body = &mut st.bodies[st.handles[source]];
+            body.set_linvel(v - relative * share, true);
+            body.set_angvel(w * (1.0 - share), true);
         }
         let pending = self.state.impacts.iter().any(Option::is_none);
         let motion = (self.contact_log.is_some() || pending).then(|| self.capture_motion());
