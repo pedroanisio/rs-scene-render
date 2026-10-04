@@ -228,6 +228,70 @@ struct Checkpoint {
     charge: usize,
 }
 
+/// One contact point resolved by the solver during a fixed step.
+///
+/// Units follow the rest of the world's output: positions in scene units, velocities
+/// in scene units per second, scene axes, and the impulse in mass x scene units per
+/// second (`pixels_per_meter` times the SI impulse), so that for a body of mass `m` the
+/// impulse is `m` times the change of its velocity along the normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Contact3 {
+    /// Index of the step that resolved the contact (the step starting at `start + step * dt`).
+    pub step: u64,
+    /// End of that step, the instant at which the resolved state is reported.
+    pub time: f64,
+    /// Indices into `World3Spec::bodies`, in ascending order; `None` is a world
+    /// boundary slab (`Bounds3`), ordered after every body.
+    pub bodies: [Option<usize>; 2],
+    /// World-space contact point, halfway between the two surfaces at the start of the step.
+    pub point: [f64; 3],
+    /// Unit normal pointing from `bodies[0]` toward `bodies[1]`.
+    pub normal: [f64; 3],
+    /// Total impulse along the normal over the step; positive when the bodies push apart.
+    pub impulse: f64,
+    /// Velocity of `bodies[1]` relative to `bodies[0]` at the point, before the step.
+    /// A negative component along `normal` means the bodies are approaching.
+    pub relative_velocity: [f64; 3],
+}
+
+/// What the contact record keeps and how much of it: exceeding either limit is an error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactLogConfig {
+    /// Contact points one step may produce.
+    pub max_per_step: usize,
+    /// Bytes the retained record may use (`Contact3` storage plus per-step bookkeeping).
+    pub max_bytes: usize,
+    /// Contact points whose impulse (as in `Contact3::impulse`) is not greater than this are
+    /// not recorded. Zero keeps every point that pushes; a body at rest has a small
+    /// impulse every step, so a consumer interested in impacts raises it.
+    pub min_impulse: f64,
+}
+
+impl ContactLogConfig {
+    /// A record of every pushing contact, within the given limits.
+    pub fn new(max_per_step: usize, max_bytes: usize) -> Self {
+        Self { max_per_step, max_bytes, min_impulse: 0.0 }
+    }
+}
+
+struct ContactLog {
+    config: ContactLogConfig,
+    steps: BTreeMap<u64, Vec<Contact3>>,
+    bytes: usize,
+}
+
+/// Bookkeeping charged per retained step, on top of its contacts.
+const CONTACT_STEP_BYTES: usize = 64;
+
+/// A body's motion at the start of a step, for relative velocities and contact points.
+#[derive(Clone, Copy)]
+struct Motion {
+    pose: Pose,
+    linvel: Vector,
+    angvel: Vector,
+    centre: Vector,
+}
+
 /// A deterministic 3D world.
 pub struct World3 {
     spec: World3Spec,
@@ -240,6 +304,7 @@ pub struct World3 {
     fractures: Vec<Fracture3>,
     fracture_sources: Vec<Option<usize>>,
     fragment_owners: Vec<Option<usize>>,
+    contact_log: Option<ContactLog>,
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -470,6 +535,7 @@ impl World3 {
         let mut w = World3 {
             fracture_sources: vec![None; spec.bodies.len()],
             fragment_owners: vec![None; spec.bodies.len()],
+            contact_log: None,
             fractures: Vec::new(),
             spec,
             params,
@@ -497,6 +563,162 @@ impl World3 {
     /// Sum of admission charges for optional retained replay checkpoints.
     pub fn checkpoint_bytes(&self) -> usize {
         self.checkpoints.values().fold(0usize, |sum, cp| sum.saturating_add(cp.charge))
+    }
+
+    /// Record the contacts of every step from now on, as `config` says. Recording is
+    /// off by default and changes nothing about the simulation. Discards any
+    /// record held so far.
+    pub fn with_contact_log(mut self, config: ContactLogConfig) -> Self {
+        self.contact_log = Some(ContactLog { config, steps: BTreeMap::new(), bytes: 0 });
+        self
+    }
+
+    /// The contacts resolved by step `step`, in a stable order: by body pair, then
+    /// point, then impulse. `Some(&[])` for a step without contacts; `None` when
+    /// recording is off, the step is not simulated yet in the current timeline (after a
+    /// backward seek, steps are reported again as they are replayed), or the record
+    /// was discarded.
+    pub fn contacts_at(&self, step: u64) -> Option<&[Contact3]> {
+        if step >= self.state.step {
+            return None;
+        }
+        self.contact_log.as_ref()?.steps.get(&step).map(Vec::as_slice)
+    }
+
+    /// Bytes charged for the retained record.
+    pub fn contact_log_bytes(&self) -> usize {
+        self.contact_log.as_ref().map_or(0, |log| log.bytes)
+    }
+
+    /// Release the record of every step before `step`.
+    pub fn discard_contacts_before(&mut self, step: u64) {
+        if let Some(log) = &mut self.contact_log {
+            let kept = log.steps.split_off(&step);
+            log.steps = kept;
+            log.bytes = log.steps.values().map(|v| contact_bytes(v.len())).sum();
+        }
+    }
+
+    /// The motion of every body at the start of a step, indexed by arena slot.
+    fn capture_motion(&self) -> Vec<Option<Motion>> {
+        let st = &self.state;
+        let mut motion = Vec::new();
+        for (handle, body) in st.bodies.iter() {
+            let slot = handle.into_raw_parts().0 as usize;
+            if motion.len() <= slot {
+                motion.resize(slot + 1, None);
+            }
+            motion[slot] = Some(Motion {
+                pose: *body.position(),
+                linvel: body.linvel(),
+                angvel: body.angvel(),
+                centre: body.center_of_mass(),
+            });
+        }
+        motion
+    }
+
+    /// The contacts the step `step` resolved, in the documented order.
+    fn collect_contacts(
+        &self,
+        step: u64,
+        motion: &[Option<Motion>],
+        config: ContactLogConfig,
+    ) -> Result<Vec<Contact3>, String> {
+        let st = &self.state;
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let mut index_of = vec![None; motion.len()];
+        for (k, handle) in st.handles.iter().enumerate() {
+            let slot = handle.into_raw_parts().0 as usize;
+            if let Some(entry) = index_of.get_mut(slot) {
+                *entry = Some(k);
+            }
+        }
+        let time = self.spec.start + (step + 1) as f64 * self.spec.step;
+        let mut contacts = Vec::new();
+        for pair in st.narrow.contact_pairs() {
+            let (c1, c2) = (&st.colliders[pair.collider1], &st.colliders[pair.collider2]);
+            if c1.is_sensor() || c2.is_sensor() {
+                continue;
+            }
+            let (Some(h1), Some(h2)) = (c1.parent(), c2.parent()) else { continue };
+            let (slot1, slot2) = (h1.into_raw_parts().0 as usize, h2.into_raw_parts().0 as usize);
+            let (Some(Some(m1)), Some(Some(m2))) = (motion.get(slot1), motion.get(slot2)) else { continue };
+            let (a1, a2) = (index_of.get(slot1).copied().flatten(), index_of.get(slot2).copied().flatten());
+            // Order the pair by body index, boundary slabs last; flip the normal with it.
+            let swap = a1.unwrap_or(usize::MAX) > a2.unwrap_or(usize::MAX);
+            let (first, second) = if swap { ((a2, m2), (a1, m1)) } else { ((a1, m1), (a2, m2)) };
+            let lever = |c: &Collider| c.position_wrt_parent().copied().unwrap_or(Pose::IDENTITY);
+            let (pose1, pose2) = (m1.pose * lever(c1), m2.pose * lever(c2));
+            // The manifolds the solver saw: contact clusters for composite shapes (meshes,
+            // compounds), the plain manifolds otherwise. Only those carry the impulses.
+            for manifold in pair.solver_manifolds() {
+                for contact in &manifold.points {
+                    let impulse = contact.data.impulse;
+                    let impulse = impulse * ppm;
+                    if impulse.partial_cmp(&config.min_impulse.max(0.0)) != Some(std::cmp::Ordering::Greater) {
+                        continue;
+                    }
+                    let point = (pose1 * contact.local_p1 + pose2 * contact.local_p2) * 0.5;
+                    let speed = |m: &Motion| m.linvel + m.angvel.cross(point - m.centre);
+                    let relative = speed(second.1) - speed(first.1);
+                    let normal = if swap { -manifold.data.normal } else { manifold.data.normal };
+                    contacts.push(Contact3 {
+                        step,
+                        time,
+                        bodies: [first.0, second.0],
+                        point: flip(point.to_array()).map(|c| c * ppm),
+                        normal: flip(normal.to_array()),
+                        impulse,
+                        relative_velocity: flip(relative.to_array()).map(|c| c * ppm),
+                    });
+                }
+            }
+            if contacts.len() > config.max_per_step {
+                return Err(format!(
+                    "{} contacts in one step exceed the contact log limit of {}",
+                    contacts.len(),
+                    config.max_per_step
+                ));
+            }
+        }
+        let key = |b: Option<usize>| b.unwrap_or(usize::MAX);
+        contacts.sort_by(|x, y| {
+            (key(x.bodies[0]), key(x.bodies[1]))
+                .cmp(&(key(y.bodies[0]), key(y.bodies[1])))
+                .then_with(|| {
+                    x.point
+                        .iter()
+                        .zip(&y.point)
+                        .map(|(p, q)| p.total_cmp(q))
+                        .find(|o| o.is_ne())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| x.impulse.total_cmp(&y.impulse))
+        });
+        Ok(contacts)
+    }
+
+    /// Store a step's contacts, replacing a replayed step's identical record, or
+    /// fail without storing when the memory limit would be exceeded.
+    fn store_contacts(&mut self, step: u64, contacts: Vec<Contact3>) -> Result<(), String> {
+        let Some(log) = &mut self.contact_log else { return Ok(()) };
+        let old = log.steps.get(&step).map_or(0, |v| contact_bytes(v.len()));
+        let total = log.bytes - old + contact_bytes(contacts.len());
+        if total > log.config.max_bytes {
+            return Err(format!("contact log memory of {total} bytes exceeds the limit of {}", log.config.max_bytes));
+        }
+        log.bytes = total;
+        log.steps.insert(step, contacts);
+        Ok(())
+    }
+
+    /// Return to the nearest retained checkpoint at or before the current step
+    /// (used when a step fails after the solver already ran).
+    fn restore_nearest_checkpoint(&mut self) {
+        if let Some((_, cp)) = self.checkpoints.range(..=self.state.step).next_back() {
+            self.state = cp.state.clone();
+        }
     }
 
     fn checkpoint_charge(&self) -> usize {
@@ -681,6 +903,8 @@ impl World3 {
             let mass = body.mass();
             body.add_force(vec3(flip(a).map(|c| c / ppm * mass)), true);
         }
+        let motion = self.contact_log.is_some().then(|| self.capture_motion());
+        let st = &mut self.state;
         let g = self.spec.gravity;
         self.pipeline.step(
             Vector::new(g[0], g[1], g[2]),
@@ -709,7 +933,17 @@ impl World3 {
                 st.joint_handles[k] = None;
             }
         }
-        st.step += 1;
+        if let (Some(motion), Some(log)) = (motion, &self.contact_log) {
+            let step = self.state.step;
+            let config = log.config;
+            let stored = self.collect_contacts(step, &motion, config).and_then(|c| self.store_contacts(step, c));
+            if let Err(error) = stored {
+                // The solver already advanced the world: go back so a retry fails the same way.
+                self.restore_nearest_checkpoint();
+                return Err(error);
+            }
+        }
+        self.state.step += 1;
         self.save_checkpoint();
         Ok(())
     }
@@ -785,6 +1019,10 @@ impl World3 {
     pub fn progress(&self) -> (u64, usize) {
         (self.state.step, self.checkpoints.len())
     }
+}
+
+fn contact_bytes(contacts: usize) -> usize {
+    contacts.saturating_mul(std::mem::size_of::<Contact3>()).saturating_add(CONTACT_STEP_BYTES)
 }
 
 fn shape_charge(shape: &dyn rapier3d_f64::parry::shape::Shape) -> usize {
