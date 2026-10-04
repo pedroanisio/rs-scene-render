@@ -196,3 +196,31 @@ fn a_version_3_cache_is_still_read_and_its_flags_are_still_checked() {
     let frame = bad.evaluate(0.011);
     assert!(frame.problems.iter().any(|p| p.contains("state flag")), "{:?}", frame.problems);
 }
+
+#[test]
+fn the_identity_of_a_document_with_only_2d_bodies_covers_their_inputs_too() {
+    let flat = |keys: &str, gravity: &str| {
+        format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2"/><composition>
+              <shape id="box" shape="rect" width="10" height="10" fill="#FF0000" x="20" y="0"><rigidBody velocityX="12"/></shape>
+              <shape id="bar" shape="rect" width="40" height="4" fill="#00FF00" x="10" y="30">
+                <animate property="y" timeBase="composition">{keys}</animate><rigidBody type="kinematic"/></shape>
+            </composition><physics gravityY="{gravity}" pixelsPerMeter="20" fixedStep="0.01"/></scene>"##
+        )
+    };
+    let original = flat(r#"<key time="0" value="30"/><key time="2" value="20"/>"#, "-9.8");
+    let bytes = evaluator(&original).physics_cache().unwrap();
+    let (same, _a) = baked(&original, &bytes, "flat-same");
+    assert!(same.physics_trace().is_ok(), "{:?}", same.physics_trace());
+    for (k, xml) in [
+        flat(r#"<key time="0" value="30"/><key time="2" value="25"/>"#, "-9.8"),
+        flat(r#"<key time="0" value="30"/><key time="2" value="20"/>"#, "-9.0"),
+        original.replace("velocityX=\"12\"", "velocityX=\"13\""),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (other, _file) = baked(xml, &bytes, &format!("flat-{k}"));
+        assert!(other.physics_trace().unwrap_err().contains("digest"), "variant {k}");
+    }
+}
