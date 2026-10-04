@@ -16,17 +16,22 @@ fn digest(cells: &[Cell]) -> u64 {
 }
 
 /// Irregular bathymetry, a dry shore, damping, two impulses and every boundary kind.
-fn baseline(boundary: Boundary) -> u64 {
+fn baseline_on(cells: [usize; 2], boundary: Boundary, order: Order) -> u64 {
+    let [nx, nz] = cells;
     let spec = Spec {
-        cells: [37, 23],
-        origin: [-9.25, -5.75],
+        cells,
+        origin: [-(nx as f64) * 0.25, -(nz as f64) * 0.25],
         cell_size: 0.5,
         dt: 0.05,
         damping: 0.1,
         boundary,
+        order,
+        max_work: 1 << 40,
         ..Default::default()
     };
-    let bed: Vec<_> = (0..37 * 23).map(|i| 1.5 - ((i % 37) as f64 * 0.07) + ((i / 37) % 5) as f64 * 0.11).collect();
+    // The slope keeps the exact 0.07 of the recorded 37-column digest.
+    let slope = if nx == 37 { 0.07 } else { 0.07 * 37.0 / nx as f64 };
+    let bed: Vec<_> = (0..nx * nz).map(|i| 1.5 - (i % nx) as f64 * slope + ((i / nx) % 5) as f64 * 0.11).collect();
     let cells: Vec<_> = bed
         .iter()
         .map(|&y| Cell { depth: y.max(0.0), velocity: if y > 0.0 { [0.3, -0.2] } else { [0.0; 2] } })
@@ -51,6 +56,9 @@ fn baseline(boundary: Boundary) -> u64 {
     ];
     let mut ocean = Ocean::new(spec, bed, cells, impulses).unwrap();
     digest(&ocean.at(1.37).unwrap().cells)
+}
+fn baseline(boundary: Boundary) -> u64 {
+    baseline_on([37, 23], boundary, Order::First)
 }
 
 /// Recorded from the solver at commit 60a458c, before `Spec::order` existed.
@@ -283,4 +291,31 @@ fn second_order_work_is_charged_for_its_extra_cost() {
     println!("WORK order1={first} order2={second} ratio={}", second as f64 / first as f64);
     // Half the CFL number doubles the substeps, and each substep has two stages.
     assert!(second >= 4 * first, "order 2 charged {second} against {first}");
+}
+
+/// Recorded from the serial solver (commit e02d3cc) on a 160 x 120 grid, which is
+/// large enough to take the parallel path.
+const SERIAL_DIGESTS: [(Order, Boundary, u64); 6] = [
+    (Order::First, Boundary::Closed, 0xc3611757c805c84d),
+    (Order::First, Boundary::Open, 0xf5951ad9ff27f134),
+    (Order::First, Boundary::Periodic, 0xae3d3aae47d9b52c),
+    (Order::Second, Boundary::Closed, 0xf159be5ab69ffa63),
+    (Order::Second, Boundary::Open, 0x3f649806920d0449),
+    (Order::Second, Boundary::Periodic, 0x16d8e9e6c3b45e04),
+];
+
+#[test]
+fn parallel_sweeps_are_bit_identical_to_the_serial_solver_with_any_thread_count() {
+    for threads in [1, 2, 8] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            for (order, boundary, expected) in SERIAL_DIGESTS {
+                assert_eq!(
+                    baseline_on([160, 120], boundary, order),
+                    expected,
+                    "{threads} threads, {order:?}, {boundary:?}"
+                );
+            }
+        });
+    }
 }

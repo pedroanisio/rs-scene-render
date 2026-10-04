@@ -327,14 +327,21 @@ fn advance(
         }
         let end = impulses.get(state.next_impulse).map_or(target, |i| i.time.min(target));
         work.take(state.q.len().saturating_mul(step_work(spec)))?;
-        let mut speed = [0.0_f64; 2];
-        for q in &state.q {
+        // Maxima are exact and associative, so the reduction order is irrelevant.
+        let bound = |mut speed: [f64; 2], q: &Q| {
             let c = (spec.gravity * q[0]).sqrt();
             for a in 0..2 {
                 let u = if q[0] >= spec.dry_tolerance { (q[a + 1] / q[0]).abs() } else { 0.0 };
                 speed[a] = speed[a].max(u + c);
             }
-        }
+            speed
+        };
+        let speed = if state.q.len() >= flux::PARALLEL_CELLS {
+            use rayon::prelude::*;
+            state.q.par_iter().fold(|| [0.0_f64; 2], bound).reduce(|| [0.0; 2], |a, b| [a[0].max(b[0]), a[1].max(b[1])])
+        } else {
+            state.q.iter().fold([0.0_f64; 2], bound)
+        };
         let rate = (speed[0] + speed[1]) / spec.cell_size;
         if !rate.is_finite() {
             return Err(Error::Numerical("wave speed overflow"));
