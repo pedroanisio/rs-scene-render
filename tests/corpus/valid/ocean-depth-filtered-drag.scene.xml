@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: valid -->
+<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="seabed" primitive="plane" width="40" height="40" segments="8" y="2" rotationX="-90"><crater radius="3" depth="1" rimHeight="0.2" rimWidth="1" start="0.5" end="1"/></object3D><object3D id="rock" primitive="sphere" radius="1" y="-3"/><ocean bedResponse="depthFiltered" bodyDrag="2" id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" colliders="seabed rock"/></composition></scene>

@@ -2182,15 +2182,20 @@
         read here only as quoted by the tsunami literature) and by cosh(k z0)/cosh(k h) for a volume at height z0 above the bed
         (derived by the engine). The displaced volume is conserved. `hydrostatic` lifts the whole column by the
         displacement, which is the long-wave answer, right when the displacement is much wider than the depth: the
-        behaviour of the first version, kept for comparison. It has no effect without `colliders`.
+        behaviour of the first version, kept for comparison. With `depthFiltered` the horizontal momentum that a
+        body gives the water is also not the relaxation toward its velocity but the form drag of the body through
+        it, (1/2) C_d A |U - u| (U - u) per unit density (C_d is `bodyDrag`, U the body's velocity, u the mean
+        velocity of the water under it, A the area its wet part presents to that flow), spread as the lift of the
+        body is and never past its velocity. It has no effect without `colliders`.
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
       <xs:annotation><xs:documentation>
-        Coefficient of form drag for the vertical motion of a body through the water, with `bodyCoupling`: the force is
-        -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what stops the body
-        within a step. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
+        the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
+        stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
+        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
         undamped bobbing.
       </xs:documentation></xs:annotation>
     </xs:attribute>

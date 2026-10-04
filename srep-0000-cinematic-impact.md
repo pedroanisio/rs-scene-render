@@ -1082,6 +1082,87 @@ itself give a wave that grows with the energy of the body; that wants the horizo
 not here. The model is hydrostatic: no jet, no crown of spray, no air, and the cavity forms at once instead of over the law's
 formation time. The law is that of a crater in water, not a validated model of water entry.
 
+Depth response of the surface (`ocean@bedResponse`). A shallow-water solver lifts a whole column by
+what raises its bed, which is right for a displacement much wider than the water is deep and wrong for a
+compact one in deep water: a sphere of 2 m radius resting on the bed of 20 m of water raised the surface
+by 3.00 m the instant it appeared, where linear water-wave theory gives 0.024 m (about 125 times less). The
+ocean therefore has `bedResponse`, `depthFiltered` (the default) or `hydrostatic`. `hydrostatic` is the
+long-wave response exactly as it was (the occupancy of a body lifts the column by its thickness, and the
+water relaxes toward the body's velocity in the columns it occupies), kept for comparison and as the mode
+of the tests of the first version; `depthFiltered` attenuates what craters and bodies do to the water by
+its depth. Without `colliders` the attribute has no effect.
+
+The filter. In linear potential flow an instantaneous displacement `zeta` of the bed of water of depth `h`
+raises the free surface by `zeta(k) / cosh(k h)` in Fourier space: the filter that tsunami models apply to a
+seafloor displacement to start a simulation (Kajiura 1963, "The leading wave of a tsunami", Bull. Earthq.
+Res. Inst. Univ. Tokyo 41:535-571; read here only as quoted by the tsunami literature, for example the
+NHESS 24:2773 (2024) article on tsunami initial conditions from seafloor displacement, Geist and Dmowska
+(1999, Pure Appl. Geophys. 154:485) and the comparison of methods for coupled earthquake and tsunami
+modelling (Geophys. J. Int. 234:404, 2023), and not the original paper). The generalisation to a displaced volume at height `z0` above the bed, which the
+engine needs for bodies, is the engine's own derivation, not a citation: for a unit volume source at height
+`z0` in water of depth `h`, with a rigid bed and, for an impulse, zero pressure at the surface, the potential
+of each wavenumber is `A cosh(k z)` below the source and `B sinh(k (h - z))` above it; continuity at the
+source and a jump of `-q` in the vertical derivative give `B = q cosh(k z0) / (k cosh(k h))`, so the vertical
+velocity of the surface, and with it the response, is `cosh(k z0) / cosh(k h)`. The two limits that check it:
+`z0 = 0` is Kajiura's `1/cosh(k h)`, and `z0 = h` (a source at the surface) is 1, no attenuation.
+
+How it is applied. For a crater, the displacement of the bed (the deformed surface less where it lay at time
+zero) is filtered as a source at `z0 = 0` over the depth, `h`, that the bed was moved under, weighted by how
+much it moved. For a body, one kernel per body: the thickness of the body in each column (the part of it
+between the rest level and the bed) is filtered with `z0` the height above the bed of the middle of the
+displaced volume (the volume-weighted mean of the middle of its part in every column) and `h` the rest depth
+under it (weighted by thickness). The result is the lift of the bed, in place of the thickness; the thickness
+itself still marks where the body is (owners, the samples of the water around each body). The transform is a
+radix-2 FFT over a window of the footprint and four depths on each side, where the kernel has fallen to 0.2%
+(`exp(-pi r / (2 h))`), at most 1024 cells wide; a displacement wider than a window is left as it is, its
+response being long-wave there. What is displaced is what is lifted: the part that falls on wet columns of
+the domain is renormalised to the whole, the positive and negative parts of a crater's displacement each
+keeping their total, and the lift is cut to the water the column holds, so the volume is kept to
+rounding except where a cut-off column loses some. A lake at rest is untouched (nothing is displaced, and
+the result is identical to the hydrostatic one); a body at rest sits on a static bed, over which the
+scheme is well balanced; the filtered bed is a function of the time and of the scene, interpolated in time
+over a canonical step as before, nothing new is stored in a checkpoint, a replay is identical and the
+result is the same with 1, 2 and 8 threads. On a 720 x 720 ocean a step takes 0.14 s with one body and
+0.14 to 0.16 s with ten, filtered or not, and a crater 0.123 s and 0.128 s (load 8 to 12; the filter is
+within the noise of the measurement).
+
+Momentum, in `depthFiltered`. Giving the water the velocity of a body in its columns (the relaxation above)
+is the same long-wave hypothesis: it spreads the momentum of the displaced volume over the whole depth at
+once, a bow wave of a few metres where a small body deep in the water makes none at the surface. In this
+mode the water receives, per canonical step, the form drag of the body through it,
+`(1/2) rho C_d A |U - u| (U - u)` per unit water density, as a push: `U` is the body's horizontal velocity
+(thickness-weighted over its columns), `u` the mean horizontal velocity of the water under its footprint at
+the end of the last step (the sample of the water around the body), `A` the area its part below the rest
+level (and above the deepest bed under it) presents to a flow along `U - u`, from the surface of the body
+itself (half the projected area of the cut triangles), and `C_d` is `ocean@bodyDrag` (default 1.0, an engine
+parameter and not from the impact literature, now also the coefficient of the exchange with the water, as it
+already was of the vertical motion). The push is spread over the same columns and shares as the body's lift,
+a stated approximation: the transfer function of a horizontal impulse at a height was not derived, and the
+vertical-source kernel stands in for it. The solver applies it evenly over the substeps, column by column,
+never past the body's velocity (a column's momentum goes toward `U` times its depth and no further), and
+credits the body with exactly what it applied, so what the water receives is what each body is credited with
+and the reaction of `bodyCoupling="full"` is consistent. A sphere through still water gives its first step
+`(1/2) C_d (pi a^2) U^2` of impulse to within 1% (104.05 against 104.72 at 2 m radius and 20 m/s), the order
+of the drag of a sphere (`C_d` 1 against about 0.47 for a real sphere), where the relaxation gave about four
+times that; the water is pushed less as it comes to move with the body.
+
+What the sphere crossing deep water now makes. A sphere of 2 m radius at 10 m below the surface of 20 m of
+water raises the highest surface of 8.69 m (at 20 m/s) and 5.52 m (at 50 m/s) in the hydrostatic mode and
+0.177 m and 0.198 m in the filtered one. On the impact-ocean scene without the cavity of the rock's entry, as
+it was first rendered, the highest surface at 2.5 s goes from 10.62 m at (42.8, 0.8), travelling with the
+rock, to 0.16 m at (41.2, 0.8); with the cavity and `bodyCoupling="full"` it is 9.92 m and 9.48 m, the ring of
+the cavity, which is a displacement at the surface and is not filtered. A crater 40 m across in 6 m of water
+makes a trough 5% below its hydrostatic one, and one 6 m across in 40 m of water a trough 6.7 times smaller.
+
+Limits. The filter is the response to an impulse; what comes after, in a shallow-water solver, is not
+dispersive (short waves travel at the speed of long ones). For a body that moves it is applied at each
+canonical step, an approximation and not the solution for a moving source, which was not computed (the
+stationary sphere of the reference matches linear theory; the moving ones are checked only to be far below
+the hydrostatic crest). The momentum is a form drag with a single coefficient, with no added mass and no
+wake; the kernel for the momentum is the one of the volume. The cavity of a water entry is not filtered.
+Regions wider than 1024 cells are not filtered. Tests that depend on the long-wave numbers of the first
+version set `bedResponse="hydrostatic"`.
+
 Bathymetry images map the full raster to the domain, using bilinear samples at
 cell centres and clamped edges. Red encoding reads normalized numeric red values
 without color-space or transfer conversion. Packed RGB8 encodings decode upward
@@ -2473,7 +2554,8 @@ Also includes `pyroShape`, inventoried below.
 | `bathymetry` | xs:IDREF | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
 | `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy, enumeration=full | Default `none` (the water does nothing to the bodies); `buoyancy` and `full` need `colliders` (OCN8) |
-| `bodyDrag` | nonNegativeDecimal | Optional, with `bodyCoupling` (OCN9); form-drag coefficient of the vertical motion, default `1.0` |
+| `bodyDrag` | nonNegativeDecimal | Optional, with `colliders` (OCN9); form-drag coefficient of the vertical motion of a body in the water (with `bodyCoupling`) and of its horizontal exchange with it (`bedResponse="depthFiltered"`), default `1.0` |
+| `bedResponse` | xs:string; enumeration=depthFiltered, enumeration=hydrostatic | Default `depthFiltered`; no effect without `colliders` |
 
 ### `oceanWaveType`
 
