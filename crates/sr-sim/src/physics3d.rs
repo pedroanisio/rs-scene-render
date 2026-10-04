@@ -283,6 +283,23 @@ struct ContactLog {
 /// Bookkeeping charged per retained step, on top of its contacts.
 const CONTACT_STEP_BYTES: usize = 64;
 
+/// Bytes the frame memory and the contact record may use together unless a caller says
+/// otherwise. A frame costs about 110 bytes per body, so this holds a hundred bodies for
+/// twelve and a half seconds at 240 steps a second, an order of magnitude below the
+/// checkpoint budget.
+const FRAME_LOG_BYTES: usize = 32 << 20;
+
+/// Bookkeeping charged per retained frame, on top of its poses and flags.
+const FRAME_ENTRY_BYTES: usize = 64;
+
+/// The frames already simulated, by step: a request for one of them needs no checkpoint
+/// restore and no replay.
+struct FrameLog {
+    budget: usize,
+    frames: BTreeMap<u64, Frame3>,
+    bytes: usize,
+}
+
 /// A body's motion at the start of a step, for relative velocities and contact points.
 #[derive(Clone, Copy)]
 struct Motion {
@@ -305,6 +322,7 @@ pub struct World3 {
     fracture_sources: Vec<Option<usize>>,
     fragment_owners: Vec<Option<usize>>,
     contact_log: Option<ContactLog>,
+    frame_log: FrameLog,
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -536,6 +554,7 @@ impl World3 {
             fracture_sources: vec![None; spec.bodies.len()],
             fragment_owners: vec![None; spec.bodies.len()],
             contact_log: None,
+            frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             fractures: Vec::new(),
             spec,
             params,
@@ -563,6 +582,57 @@ impl World3 {
     /// Sum of admission charges for optional retained replay checkpoints.
     pub fn checkpoint_bytes(&self) -> usize {
         self.checkpoints.values().fold(0usize, |sum, cp| sum.saturating_add(cp.charge))
+    }
+
+    /// Set the bytes the frame memory may use together with the contact record, and
+    /// discard the frames held. The contact record has priority: frames are a cache and
+    /// give way when contacts grow, oldest first. Zero turns the memory off, and every
+    /// request for an earlier time then restores a checkpoint and replays.
+    pub fn with_frame_log_budget(mut self, bytes: usize) -> Self {
+        self.frame_log = FrameLog { budget: bytes, frames: BTreeMap::new(), bytes: 0 };
+        self
+    }
+
+    /// Bytes charged for the frames held.
+    pub fn frame_log_bytes(&self) -> usize {
+        self.frame_log.bytes
+    }
+
+    /// Frames held.
+    pub fn frame_log_len(&self) -> usize {
+        self.frame_log.frames.len()
+    }
+
+    /// The budget the frame memory shares with the contact record.
+    pub fn frame_log_budget(&self) -> usize {
+        self.frame_log.budget
+    }
+
+    /// Keep the frame memory within what the contact record leaves of the budget,
+    /// discarding the oldest steps first.
+    fn trim_frames(&mut self) {
+        let allowed = self.frame_log.budget.saturating_sub(self.contact_log_bytes());
+        let log = &mut self.frame_log;
+        while log.bytes > allowed {
+            let Some((_, frame)) = log.frames.pop_first() else { break };
+            log.bytes -= frame_bytes(&frame);
+        }
+    }
+
+    /// Remember the frame of the current step, as `frame_at` reports it: after
+    /// visibility and fracture activation and before the step starts.
+    fn record_frame(&mut self) {
+        if self.frame_log.budget == 0 {
+            return;
+        }
+        let frame = self.snapshot();
+        let bytes = frame_bytes(&frame);
+        let log = &mut self.frame_log;
+        if let Some(old) = log.frames.insert(self.state.step, frame) {
+            log.bytes -= frame_bytes(&old);
+        }
+        log.bytes += bytes;
+        self.trim_frames();
     }
 
     /// Record the contacts of every step from now on, as `config` says. Recording is
@@ -710,6 +780,7 @@ impl World3 {
         }
         log.bytes = total;
         log.steps.insert(step, contacts);
+        self.trim_frames();
         Ok(())
     }
 
@@ -863,6 +934,7 @@ impl World3 {
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
+        self.record_frame();
         let st = &mut self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         let mut follow = Vec::new();
@@ -957,9 +1029,13 @@ impl World3 {
         }
     }
 
-    /// The simulated state at `t`, replaying from the nearest checkpoint at or before it.
+    /// The simulated state at `t`: the remembered frame when the step has been simulated
+    /// and kept, otherwise replayed from the nearest checkpoint at or before it.
     pub fn frame_at(&mut self, t: f64, driver: &mut dyn Driver3) -> Frame3 {
         let target = self.step_index(t);
+        if let Some(frame) = self.frame_log.frames.get(&target) {
+            return frame.clone();
+        }
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
                 if cp.state.step > self.state.step || self.state.step > target {
@@ -1019,6 +1095,11 @@ impl World3 {
     pub fn progress(&self) -> (u64, usize) {
         (self.state.step, self.checkpoints.len())
     }
+}
+
+fn frame_bytes(frame: &Frame3) -> usize {
+    let per_body = std::mem::size_of::<Pose3>() + std::mem::size_of::<Velocity3>() + 3;
+    std::mem::size_of::<Frame3>() + frame.bodies.len() * per_body + FRAME_ENTRY_BYTES
 }
 
 fn contact_bytes(contacts: usize) -> usize {

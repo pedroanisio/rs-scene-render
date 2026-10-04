@@ -210,7 +210,9 @@ fn contacts_are_listed_in_a_stable_order() {
 #[test]
 fn the_record_is_identical_after_a_backward_seek_and_in_a_fresh_world() {
     let bodies = vec![sphere([0.0; 3], [30.0, 200.0, 10.0], 2.0), sphere([40.0, -60.0, 0.0], [-20.0, 150.0, 0.0], 1.0)];
-    let make = || world(bodies.clone(), 9.81, Bounds3::Floor { y: 100.0 }).with_contact_log(limits());
+    // Without the frame memory a backward request restores a checkpoint and replays.
+    let make =
+        || world(bodies.clone(), 9.81, Bounds3::Floor { y: 100.0 }).with_contact_log(limits()).with_frame_log_budget(0);
     let mut w = make();
     w.frame_at(1.5, &mut Still);
     let steps = w.progress().0;
@@ -229,6 +231,19 @@ fn the_record_is_identical_after_a_backward_seek_and_in_a_fresh_world() {
     assert!(w.contact_log_bytes() > 0 && w.contact_log_bytes() <= limits().max_bytes);
     w.discard_contacts_before(steps / 2);
     assert!(w.contacts_at(0).is_none() && w.contacts_at(steps - 1).is_some());
+}
+
+#[test]
+fn a_backward_request_answered_from_the_frame_memory_leaves_the_record_in_place() {
+    let bodies = vec![sphere([0.0; 3], [30.0, 200.0, 10.0], 2.0), sphere([40.0, -60.0, 0.0], [-20.0, 150.0, 0.0], 1.0)];
+    let mut w = world(bodies, 9.81, Bounds3::Floor { y: 100.0 }).with_contact_log(limits());
+    w.frame_at(1.5, &mut Still);
+    let steps = w.progress().0;
+    let forward = all_contacts(&w, steps);
+    assert!(!forward.is_empty());
+    w.frame_at(0.2, &mut Still);
+    assert_eq!(w.progress().0, steps);
+    assert_eq!(all_contacts(&w, steps), forward);
 }
 
 #[test]
