@@ -1519,6 +1519,28 @@ source must be another object3D with a dynamic rigidBody (**CRT8**). `curve`,
 world's state: the same after any seek, with or without the frame memory, in a fresh world
 and from a baked SRPHYS04 cache, which carries the contacts it is found in.
 
+`crater@capture` (boolean, default false, only with `source`: **CRT9**). The rigid contact kills the normal
+velocity of the body that makes the crater and nothing takes the rest: the impact scene's rock (2 m radius,
+90 478 kg, 100 m/s at 60 degrees) keeps 17 % of its kinetic energy as a sliding that friction turns into rolling
+(35 m/s, five sevenths of its 50 m/s along the ground, omega r = v) and leaves the crater, which opens over half a
+second after it has crossed the rim. With `capture` the body is arrested from the impact, for a window of
+`2 d / U` plus one step (the time that stops a body at the impact speed `U` in the law's crater depth `d`; slower
+bodies stop sooner) and only while its centre is inside the crater's rim radius in the owner's frame: its
+velocity relative to the owner loses `U^2 / (2 d)` a second along its direction, never more than stops it in
+the step, and its spin loses the same share. All of its kinetic energy can leave it and none can be added. After
+the window it is the ground's: it sinks with the floor of the pit and rocks on it. This is a model of the engine, the
+mean force of a penetration of depth `d` (kinetic energy over depth), not a published law; the projectile neither
+breaks up nor buries itself. The deceleration is a function of the impact the world noticed and the body's
+state, so any order of requests and a fresh evaluator give the same bits, and without it the world is what
+it was. Measured on the impact scene's rock arriving at 100 m/s (rim 7.16, 6.66, 5.04 m; depth 3.00, 2.79, 2.12 m
+for 90, 60 and 30 degrees): at 4 s it is 0.04, 0.49 and 1.22 m from the impact point, sunk into the pit (y 0.97,
+0.68, -0.39 m, the 2 m radius resting on flat ground is y = -2), at 0.7, 0.4 and 1.3 m/s, and its kinetic energy is
+3e4, 8e3 and 1e5 J against 4.5e8 at the impact (the free rock at 60 and 30 degrees keeps 7.8e7 and 2.4e8 J). The
+mechanical energy never grows after the impact by more than a ten-thousandth of the impact's, and the free rock's
+energy does not grow either. In the ocean scene `full` already gives the water the rock's horizontal momentum, so
+the rock stops on the bed with or without it (0.7 and 0.8 m from the crater's centre at 6 s; the highest wave after 4 s
+is 1.958 and 1.950 m).
+
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
 `pi2 = g a / U^2` (no factor of 3.22) and `pi3 = Y / (rho U^2)`,

@@ -653,7 +653,7 @@ impl<'a> Eval<'a> {
                 });
                 let finite = n
                     .attributes()
-                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "targetMaterial"))
+                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "capture" | "targetMaterial"))
                     .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")
@@ -693,6 +693,9 @@ impl<'a> Eval<'a> {
                     "CRT8",
                     || "crater source must name another object3D whose rigidBody is dynamic.".into(),
                 );
+                self.check(!has("capture") || has("source"), n, "CRT9", || {
+                    "crater capture belongs to a crater that grows from a source.".into()
+                });
                 self.check(
                     owner.is_none_or(|o| {
                         kids(o, "rigidBody").all(|b| {

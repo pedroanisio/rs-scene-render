@@ -228,6 +228,9 @@
     "crt8-static.scene.xml": [
       "CRT8"
     ],
+    "crt9-capture-without-source.scene.xml": [
+      "CRT9"
+    ],
     "frx1.scene.xml": [
       "FRX1"
     ],
@@ -768,6 +771,7 @@
   "valid": {
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
+    "crater-capture.scene.xml": [],
     "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],

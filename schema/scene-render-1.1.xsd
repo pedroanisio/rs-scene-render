@@ -2491,6 +2491,20 @@
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="capture" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        With `source`: the body that makes the crater is arrested by it. From the impact until its velocity relative to
+        the owner is zero, and only while its centre is inside the crater's rim radius (the law's, in the owner's frame
+        at the point of impact), the body loses velocity at a constant rate of U^2 / (2 d), `U` the body's speed at the
+        impact and `d` the crater's depth by the law, never more than stops it in the step, along minus its velocity
+        relative to the owner; its spin loses the same share. All of its kinetic energy leaves the body, which is what
+        the law spends digging the crater, and none can be added. It is a model of the engine, the mean force of a
+        penetration of depth `d` (kinetic energy over depth), not a published law: the projectile neither breaks up
+        nor buries itself, it stops and follows the floor of the pit. Without it (the default, the behaviour there
+        always was) the body keeps what the contact leaves it, which for a glancing impact is a body that rolls out
+        of the crater it made.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="targetMaterial">
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="water"/><xs:enumeration value="drySand"/><xs:enumeration value="drySoil"/>
