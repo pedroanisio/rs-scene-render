@@ -287,6 +287,9 @@
     "p3d6.scene.xml": [
       "P3D6"
     ],
+    "pyro-solver.scene.xml": [
+      "S06"
+    ],
     "pyro1.scene.xml": [
       "PYRO1"
     ],
@@ -688,6 +691,7 @@
     "pyro-colliders.scene.xml": [],
     "pyro-fields.scene.xml": [],
     "pyro-mesh.scene.xml": [],
+    "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
     "thermal-volume.scene.xml": [],

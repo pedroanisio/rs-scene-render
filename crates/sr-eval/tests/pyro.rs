@@ -317,3 +317,45 @@ fn included_mesh_source_uses_its_document_and_animated_transform_on_replay() {
         assert_eq!(density.sample_world([0.5, 0.5, 0.5]), 0.0);
     }
 }
+
+/// Density and temperature of the cloud at 1.6 s, as exported bytes, plus the
+/// compositor cache key.
+fn published(extra: &str) -> (Vec<u8>, u64) {
+    let ev = evaluator_size(extra, 16);
+    let frame = ev.evaluate(1.6);
+    assert!(frame.problems.is_empty(), "{extra}: {:?}", frame.problems);
+    let volume = frame.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+    let mut bytes = Vec::new();
+    volume.data.write(&mut bytes).unwrap();
+    (bytes, volume.key)
+}
+
+#[test]
+fn solver_selects_the_pressure_solver_and_enters_the_published_key() {
+    // A tight tolerance makes both solvers converge, so an unconverged
+    // projection (a problem) cannot hide a difference.
+    let tight = r#"pressureTolerance="1e-9" pressureIterations="400" buoyancy="0.02""#;
+    let absent = published(tight);
+    let jacobi = published(&format!(r#"{tight} solver="jacobi""#));
+    let multigrid = published(&format!(r#"{tight} solver="multigrid""#));
+    assert_eq!(absent, jacobi, "an absent solver is jacobi");
+    assert_ne!(jacobi.0, multigrid.0, "the solvers differ in the last bits");
+    assert_ne!(jacobi.1, multigrid.1, "the compositor key must distinguish the solvers");
+    // Both solve the same projection: the fields agree far inside the tolerance of a render.
+    let ev = |solver: &str| {
+        let f = evaluator_size(&format!(r#"{tight} solver="{solver}""#), 16).evaluate(1.6);
+        let v = f.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+        v.data.clone()
+    };
+    let (a, b) = (ev("jacobi"), ev("multigrid"));
+    for name in ["density", "temperature"] {
+        let (a, b) = (a.grid(name).unwrap(), b.grid(name).unwrap());
+        for k in 0..16 {
+            for j in 0..16 {
+                let p = [(k as f64 - 7.5) * 0.99, (j as f64 - 7.5) * 0.99, 0.37];
+                let (x, y) = (a.sample_world(p), b.sample_world(p));
+                assert!((x - y).abs() <= 1e-6 * x.abs().max(1.0), "{name} at {p:?}: {x} vs {y}");
+            }
+        }
+    }
+}

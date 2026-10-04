@@ -70,7 +70,10 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
         seed: e.seed,
         pressure_iterations: num(e, "pressureIterations", 200.0) as usize,
         pressure_tolerance: num(e, "pressureTolerance", 1e-6),
-        solver: pyro::PressureSolver::default(),
+        solver: match text(e, "solver").as_deref() {
+            Some("multigrid") => pyro::PressureSolver::Multigrid,
+            _ => pyro::PressureSolver::Jacobi,
+        },
         max_bytes: bytes,
     };
     let timeline = Timeline::new(spec, checkpoint).map_err(|e| e.to_string())?;
