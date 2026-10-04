@@ -1398,6 +1398,13 @@
     <xs:attribute name="temperatureScale" type="positiveDecimal" default="1"/>
     <xs:attribute name="stepSize" type="positiveDecimal" default="1"/>
     <xs:attribute name="maxSteps" default="2048"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lighting" default="exact">
+      <xs:annotation><xs:documentation>Version 1.3. How the medium's in-scattering is lit by the path tracer: exact marches a shadow ray from every sample; grid reads transmittance and surface visibility from per-light grids built once per frame (see the cinematic impact SREP). The lightGrid* attributes apply only with grid (VOL10).</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="exact"/><xs:enumeration value="grid"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="lightGridCell" default="1"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridDomeDirections" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="512"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="assetsType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">

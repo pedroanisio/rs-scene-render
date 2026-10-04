@@ -1043,6 +1043,15 @@ impl<'a> Eval<'a> {
                     "VOL3",
                     || "one medium child and @volume are permitted only on a volume primitive.".into(),
                 );
+                let grid_only = kids(n, "medium").all(|m| {
+                    m.attribute("lighting") == Some("grid")
+                        || ["lightGridCell", "lightGridDomeDirections", "lightGridMemoryMiB"]
+                            .iter()
+                            .all(|k| m.attribute(*k).is_none())
+                });
+                self.check(grid_only, n, "VOL10", || {
+                    "the lightGrid* attributes of a medium apply only with lighting=\"grid\".".into()
+                });
                 self.check(a("primitive") != Some("mesh") || has("mesh"), n, "C6", || {
                     "object3D primitive=\"mesh\" requires @mesh.".into()
                 });

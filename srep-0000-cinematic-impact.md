@@ -334,6 +334,10 @@ Add one optional owned `<medium>` child to volume and pyro objects:
 | `temperatureScale` | finite real > 0; 1 | Multiplies kelvin values before shading |
 | `stepSize` | finite positive length; 1 | Maximum world-space integration step |
 | `maxSteps` | integer 1–65536; 2048 | Ray integration budget |
+| `lighting` | `exact` or `grid`; `exact` | How the path tracer lights in-scattering (see Light grids) |
+| `lightGridCell` | integer 1–64; 1 | Grid node spacing, in voxels of the finest density grid |
+| `lightGridDomeDirections` | integer 8–512; 64 | Fixed environment directions of an anisotropic medium's grid |
+| `lightGridMemoryMiB` | integer 1–4096; 128 | Largest memory the grids of the pass may take |
 
 Extinction integrates over world distance, including nonuniform object scale.
 Overlapping media contribute to total extinction and source terms; reversing
@@ -398,6 +402,65 @@ transforms, coefficients or large voxel index coordinates produce actionable
 errors. The cache decoder and renderer both bound file bytes, brick counts and
 cached storage; schema validation alone cannot establish these data-dependent
 limits.
+
+#### Light grids
+
+`lighting="exact"` (the default) marches a shadow ray from every in-scattering
+sample to every analytic light and one environment direction. It is the reference:
+its pixels do not depend on whether grids exist. `lighting="grid"` replaces those
+rays, for the path tracer only, with lookups into grids built once per frame:
+
+- one world-space regular lattice per path-traced 3D pass, covering the union of
+  the bounds of the media that ask for it, with spacing equal to the finest density
+  voxel among them times `lightGridCell` (the finest request wins);
+- per analytic light, one scalar per node: the medium's transmittance toward the
+  light's centre times the visibility of opaque and alpha-blended surfaces. Surface
+  visibility is the mean of eight points jittered within one cell around the node,
+  so a surface thinner than a cell shadows smoothly instead of aliasing;
+- for the environment, radiance pre-integrated over `lightGridDomeDirections`
+  fixed directions when every asking medium has `anisotropy` 0; otherwise one
+  scalar grid per fixed direction, weighted by the medium's phase function;
+- trilinear lookup. A scattering point outside the lattice (including all
+  points of media that did not ask) is lit by the exact march, so a scene can mix
+  both modes.
+
+Grids are rebuilt every frame and every motion-blur sub-frame, because media and
+colliders move. A frame whose lattice needs more nodes than one dispatch can hold
+(about 4.19 million) or more memory than the smallest `lightGridMemoryMiB` among
+the asking media is a render error that names the attribute to change; it never
+falls back to exact lighting or a coarser lattice. `VOL10` rejects `lightGrid*`
+attributes without `lighting="grid"`.
+
+Tiled and whole-frame renders of a grid frame are identical. Surface shading of
+volume shadows (a surface lit through the medium) still uses the exact march.
+
+Known limits, measured against `lighting="exact"` at 512 samples per pixel with
+the default `lightGridCell` 1 and 64 dome directions, on the plume of a 1280×720
+frame, over the region above the horizon (PSNR and CIEDE2000 ΔE):
+
+| Case | PSNR | max ΔE | mean ΔE |
+|---|---|---|---|
+| Plume, sun and anisotropic dome, no ejecta | 56.4 dB | 1.50 | 0.25 |
+| The same plume with 100,000 ejecta fragments in and around it | 47.8 dB | 3.89 | 0.48 |
+
+- Surfaces much thinner than a cell are not resolved: the grid sees them as a
+  smoothed shadow. Eight-point visibility sampling raised the ejecta case from
+  45.7 dB (ΔE max 4.89, one centred sample) to 47.8 dB; finer cells help little
+  once sampling is smooth (cell 2 and 3 measured 45.4 and 44.3 dB against 46.2 dB at
+  cell 1 on the sun-only variant), so the ejecta case stays under the 50 dB and
+  ΔE 2 figure that holds without thin occluders. Part of the measured difference
+  is the two renders' independent sampling noise at 512 samples; it was not
+  separated out.
+- An area light (rectangle, disc or sphere) close to the volume has a penumbra
+  the grid replaces with the visibility toward the light's centre. Measured on a
+  rectangle light at 60, 14 and 9 scene units from the medium: 65, 53 and 43 dB;
+  sphere light: 66, 56 and 50 dB. Use `lighting="exact"` for lights within about
+  ten times their own size of the medium.
+- A medium with `anisotropy` ≠ 0 costs one scalar grid per fixed dome direction;
+  the lattice, `lightGridDomeDirections` and the number of lights must fit in
+  `lightGridMemoryMiB`.
+- Spherical harmonics, per-tile grids and multiple scattering are not part of the
+  grid.
 
 ### Pyro simulation
 
@@ -2007,6 +2070,10 @@ Also includes `assetProvenance`, inventoried below.
 | `temperatureScale` | positiveDecimal | Default `1` |
 | `stepSize` | positiveDecimal | Default `1` |
 | `maxSteps` | xs:positiveInteger; maxInclusive=65536 | Default `2048` |
+| `lighting` | xs:string; enumeration `exact`, `grid` | Default `exact` |
+| `lightGridCell` | xs:positiveInteger; maxInclusive=64 | Default `1` |
+| `lightGridDomeDirections` | xs:positiveInteger; minInclusive=8, maxInclusive=512 | Default `64` |
+| `lightGridMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
 
 ### `pyroType`
 
@@ -2439,6 +2506,11 @@ The accompanying conformance suite must cover all of the following:
 - Uniform-density transmittance against Beer–Lambert, transformed media,
   overlapping media in reversed order, inside-volume cameras, mesh occlusion,
   emission, colored scattering and shadowed smoke at changing viewpoints.
+- Light grids: default exact lighting unchanged by their existence; grid lighting
+  against the exact march for each light type, environment (isotropic and
+  anisotropic), cameras inside the volume, surfaces inside the domain, overlapping
+  media, advected and multi-frame media, tiled against whole frames, determinism,
+  memory and node-count errors, and the measured limits above (VOL10 included).
 - Pyro divergence reduction, source timing, cooling/dissipation, obstacles,
   forward/backward seeking and cache/live equivalence.
 - 3D particles' z motion, distribution, lifetime/cap behavior, delayed birth,

@@ -707,8 +707,23 @@
     "v8-volumes.scene.xml": [
       "V8"
     ],
+    "vol-light-grid-cell.scene.xml": [
+      "S06"
+    ],
+    "vol-light-grid-directions.scene.xml": [
+      "S06"
+    ],
+    "vol-light-grid-memory.scene.xml": [
+      "S06"
+    ],
+    "vol-lighting-enum.scene.xml": [
+      "S06"
+    ],
     "vol1.scene.xml": [
       "VOL1"
+    ],
+    "vol10.scene.xml": [
+      "VOL10"
     ],
     "vol2.scene.xml": [
       "VOL2"
@@ -766,6 +781,7 @@
     "solid-colliders.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
+    "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
     "whitewater-checkpoint.scene.xml": []

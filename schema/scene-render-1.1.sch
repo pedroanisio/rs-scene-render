@@ -131,6 +131,7 @@
       <sch:assert id="VOL2" test="not(@volume) or /scene/assets/volume[@id=current()/@volume]">object3D/@volume must name a volume asset.</sch:assert>
       <sch:assert id="VOL3" test="count(medium)&lt;=1 and (@primitive='volume' or (not(medium) and not(@volume) and not(pyro)))">one medium child and @volume are permitted only on a volume primitive.</sch:assert>
       <sch:assert id="VOL5" test="not(medium[@blackbody='true' or @blackbody='1']) or pyro or /scene/assets/volume[@id=current()/@volume]/@temperatureGrid">blackbody emission requires a declared temperatureGrid on the volume asset.</sch:assert>
+      <sch:assert id="VOL10" test="not(medium[@lightGridCell or @lightGridDomeDirections or @lightGridMemoryMiB]) or medium/@lighting='grid'">the lightGrid* attributes of a medium apply only with lighting="grid".</sch:assert>
     </sch:rule>
     <sch:rule context="pyro">
       <sch:let name="nx" value="number(@width) div number(@voxelSize)"/>
