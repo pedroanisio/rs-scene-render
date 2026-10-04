@@ -1325,3 +1325,67 @@ fn encoding_a_3d_document_by_default_takes_an_adapter_that_can_draw_it() {
     );
     assert!(dir.join("d_000.png").is_file(), "{out}{err}");
 }
+
+fn safe_area_fixture(name: &str, enforce: &str) -> (PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("sr-cli-safe-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="360" height="640" fps="10" duration="1" background="#000000" safeArea="sa"/>
+<safeAreas><safeArea id="sa" preset="youtube-shorts" {enforce}/></safeAreas>
+<composition><shape id="cta1" shape="rect" x="0" y="600" width="80" height="30" fill="#FF0000" tags="cta"/></composition></scene>"##
+    );
+    let file = dir.join("s.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    let f = file.display().to_string();
+    (dir, f)
+}
+
+#[test]
+fn validate_reports_a_cta_outside_the_safe_area_at_the_level_enforce_asks() {
+    let (_, f) = safe_area_fixture("validate-error", r#"enforce="error""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.contains("error[SA01]") && out.contains("cta1"), "{out}");
+
+    let (_, f) = safe_area_fixture("validate-warn", r#"enforce="warn""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.contains("warning[SA01]"), "{out}");
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
+
+    let (_, f) = safe_area_fixture("validate-off", r#"enforce="off""#);
+    let out = String::from_utf8_lossy(&run(&["validate", &f]).stdout).to_string();
+    assert!(!out.contains("SA01"), "{out}");
+}
+
+#[test]
+fn render_and_encode_stop_on_enforce_error_and_say_so_on_warn() {
+    let (dir, f) = safe_area_fixture("deliver-error", r#"enforce="error""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    if no_gpu(&o) {
+        return;
+    }
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(1), "{all}");
+    assert!(all.contains("SA01") && all.contains("cta1"), "{all}");
+    let png = dir.join("e_%03d.png");
+    let o = run(&["encode", &f, "-o", png.to_str().unwrap(), "--end", "0.2"]);
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(1), "{all}");
+    assert!(all.contains("SA01"), "{all}");
+    assert!(!dir.join("e_000.png").exists(), "an enforce=error failure writes nothing");
+
+    let (dir, f) = safe_area_fixture("deliver-warn", r#"enforce="warn""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{all}");
+    assert!(all.contains("SA01"), "{all}");
+    let png = dir.join("w_%03d.png");
+    let o = run(&["encode", &f, "-o", png.to_str().unwrap(), "--end", "0.2", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("SA01")), "{r}");
+    assert!(dir.join("w_000.png").is_file());
+}

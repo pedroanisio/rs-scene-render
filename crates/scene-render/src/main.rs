@@ -464,6 +464,20 @@ struct FileReport<'a> {
     diagnostics: &'a [Diagnostic],
 }
 
+/// `SA01` findings of a valid document: content that `safeArea@enforce` holds to its region, over the timeline
+/// (sampled at no more than 4800 frames).
+fn safe_area_findings(text: &str, opts: &LoadOptions) -> Vec<Diagnostic> {
+    let Ok(doc) = sr_model::load_str(text, opts) else { return Vec::new() };
+    let Ok(ev) = sr_eval::Evaluator::new(&doc, &Default::default()) else { return Vec::new() };
+    if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
+        return Vec::new();
+    }
+    let n = ev.frame_count().max(1);
+    let step = n.div_ceil(4800);
+    let times: Vec<f64> = (0..n).step_by(step as usize).map(|f| ev.program().fps.frame_time(f)).collect();
+    sr_gpu::safe_audit::diagnostics(&ev, &times)
+}
+
 fn validate(
     files: &[PathBuf],
     format: Format,
@@ -496,7 +510,10 @@ fn validate(
                 _ => PathBuf::from("."),
             });
         }
-        let report = sr_model::validate_str(&text, &o);
+        let mut report = sr_model::validate_str(&text, &o);
+        if !report.has_errors() {
+            report.diagnostics.extend(safe_area_findings(&text, &o));
+        }
         reports.push((file, Some((text, report)), None));
     }
     for (file, result, io) in &reports {
@@ -1039,6 +1056,20 @@ fn render(
         out.diagnostic(file, &lines, w)?;
     }
     let eval_warnings = ev.warnings().len();
+    // content a safe area holds to its region, over the frames being rendered
+    let audited: Vec<f64> = match (time, frames.is_empty()) {
+        (Some(t), _) => vec![t],
+        (None, true) if bench => (0..ev.frame_count().max(1)).map(|f| ev.program().fps.frame_time(f)).collect(),
+        (None, true) => vec![0.0],
+        (None, false) => frames.iter().map(|&f| ev.program().fps.frame_time(f)).collect(),
+    };
+    let safe = sr_gpu::safe_audit::diagnostics(&ev, &audited);
+    if safe.iter().any(|d| d.is_error()) {
+        return report_errors(out, &Report { diagnostics: safe });
+    }
+    for d in &safe {
+        out.diagnostic(file, &lines, d)?;
+    }
     // a renderer kept from an earlier render of this document (watch), while it still fits
     let inputs = changes::effective_files(file, &doc, ev.program())?;
     let setup = changes::setup_key(&text, &inputs);

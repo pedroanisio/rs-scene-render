@@ -498,6 +498,10 @@ pub struct Program {
     pub assets: HashMap<Arc<str>, (u16, String)>,
     /// Safe-area insets (top, right, bottom, left) as fractions of the frame.
     pub safe_area: [f64; 4],
+    /// What `safeArea@enforce` asks of content outside that region.
+    pub safe_enforce: crate::safe_area::SafeEnforce,
+    /// Id of the safe area `safe_area` and `safe_enforce` come from.
+    pub safe_area_id: Option<String>,
     /// Base directory of each document (0 = main, then includes).
     pub base_dirs: Vec<PathBuf>,
     /// Warnings.
@@ -2865,7 +2869,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let mut roots = roots;
     roots.sort_by_key(|&k| zs[k as usize]);
     let includes = b.docs.iter().skip(1).map(|d| (d.ns.clone(), (*d.scene).clone())).collect();
-    let safe_area = {
+    let resolved_safe_area = {
         let sid = opts
             .layout
             .as_ref()
@@ -2877,27 +2881,19 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
                     .and_then(|x| x.safe_area.clone())
             })
             .or_else(|| scene.project.safe_area.clone());
-        match sid
-            .and_then(|id| scene.safe_areas.as_ref().and_then(|s| s.safe_areas.iter().find(|a| a.id == id)).cloned())
-        {
-            Some(a) => {
-                let p = crate::layout::preset_insets(a.preset);
-                [
-                    a.top.map(|v| v.get()).unwrap_or(p[0]),
-                    a.right.map(|v| v.get()).unwrap_or(p[1]),
-                    a.bottom.map(|v| v.get()).unwrap_or(p[2]),
-                    a.left.map(|v| v.get()).unwrap_or(p[3]),
-                ]
-            }
-            None => [0.0; 4],
-        }
+        sid.and_then(|id| scene.safe_areas.as_ref().and_then(|s| s.safe_areas.iter().find(|a| a.id == id)).cloned())
     };
+    let safe_area = resolved_safe_area.as_ref().map(crate::safe_area::insets_of).unwrap_or([0.0; 4]);
+    let safe_enforce =
+        resolved_safe_area.as_ref().map(|a| crate::safe_area::SafeEnforce::of(a.enforce)).unwrap_or_default();
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
         base_dirs,
         safe_area,
+        safe_enforce,
+        safe_area_id: resolved_safe_area.as_ref().map(|a| a.id.clone()),
         scene: (*scene).clone(),
         includes,
         fps: scene.project.fps,

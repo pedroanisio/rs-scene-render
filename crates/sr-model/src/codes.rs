@@ -46,6 +46,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("P03", "rules", "A symbol contains an instance of itself, directly or through other symbols."),
     ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 62 levels, the depth the evaluator compiles."),
     ("P05", "rules", "Matte dependencies form a cycle through mattes or contained children, including after composition expansion."),
+    ("SA01", "rules", "Text, a burned caption, or a node tagged cta or logo reaches outside the safe region its safeArea leaves, at some time of the timeline. A warning when safeArea@enforce is warn, an error when it is error. Move the content inside the region or lower enforce. Validation samples at most 4800 frames."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 

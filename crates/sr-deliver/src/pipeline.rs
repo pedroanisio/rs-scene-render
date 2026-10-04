@@ -839,6 +839,12 @@ pub fn deliver(
                 (0..n).map(|k| start + frame_rate.frame_time(k)).collect()
             }
         };
+        // content a safe area holds to its region: findings are warnings, or fail before anything is rendered
+        let safe = sr_gpu::safe_audit::diagnostics(&ev, &times);
+        if safe.iter().any(|d| d.is_error()) {
+            return Err(DeliverError::Document(sr_model::Report { diagnostics: safe }));
+        }
+        report.warnings.extend(safe.iter().map(|d| format!("{}: {}", d.code, d.message)));
         let n = times.len() as u64;
         let mut video = Video {
             ev: &ev,
