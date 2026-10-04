@@ -29,6 +29,9 @@ struct CraterBurst {
     spread: f64,
     /// The particles of the impact, once it is known, in order of birth in emitter time.
     ejecta: Option<Arc<Vec<Birth>>>,
+    /// Kilograms per cubic metre of the target whose crater it is, once the impact is known: what a
+    /// particle's mass is the volume of.
+    density: f64,
 }
 
 thread_local! {
@@ -64,6 +67,8 @@ struct GasAt {
 }
 
 struct Runtime {
+    /// The ocean the particles fall into, if one lists the emitter.
+    splash: Option<crate::splash::Emitter>,
     gas: Option<GasRt>,
     seed: u64,
     /// How far above the surface the ejecta of a crater are born: the largest collision radius.
@@ -84,7 +89,87 @@ fn config(n: &FrameNode) -> &sr_model::model::Particles3D {
     let sr_model::model::Node::Particles3D(e) = &*n.elem else { unreachable!("particles3D node") };
     e
 }
-fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
+/// The water the particles of emitter `id` fall into and how they are told to the ocean, if an ocean lists it: the
+/// ocean's rest level and domain at its pose when the emitter starts, which is a function of the document.
+fn fall_setup(
+    p: &Program,
+    graphs: &mut Graphs<'_>,
+    id: &Arc<str>,
+    node: u32,
+) -> Result<Option<(sim::Water, crate::splash::Emitter)>, String> {
+    let listed: Vec<usize> = p
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| {
+            o.name == "ocean" && text(&*o.elem, "splash").is_some_and(|l| l.split_whitespace().any(|s| s == &**id))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let [ocean] = listed.as_slice() else {
+        return if listed.is_empty() {
+            Ok(None)
+        } else {
+            Err(format!("{id} falls into {} oceans: it belongs to one", listed.len()))
+        };
+    };
+    let ocean_index = *ocean;
+    let ocean = &p.nodes[ocean_index];
+    let own = &p.nodes[node as usize];
+    let identity = |index: u32| {
+        let start = p.nodes[index as usize].start;
+        let composition = |x: f64| crate::sim::source_sample(p, index, x + start, x + start).0;
+        [0.0, 1.0, 7.5].iter().all(|&x| composition(x) == x + start)
+    };
+    if !identity(node) || !identity(ocean_index as u32) {
+        return Err(format!("{id} and the ocean it falls into need the composition clock"));
+    }
+    let start = own.start + num(&*own.elem, "emissionStart", 0.);
+    let frame = graphs.at(start);
+    let i = frame
+        .nodes
+        .iter()
+        .position(|o| o.id == ocean.id)
+        .ok_or("the ocean it falls into is not in the frame when it starts")?;
+    let world = crate::sim3d::world3(&frame, i, 0);
+    let columns = [world.x_axis, world.y_axis, world.z_axis].map(|c| c.truncate());
+    if columns.iter().any(|c| (c.length() - 1.).abs() > 1e-9) || !world.is_finite() {
+        return Err("an ocean that takes particles must have no scale".into());
+    }
+    let e = &*ocean.elem;
+    let (width, depth, cell) = (num(e, "width", 64.), num(e, "depth", 64.), num(e, "cellSize", 1.));
+    let level = num(e, "waterLevel", 0.);
+    let origin = world.transform_point3(glam::DVec3::new(0., level, 0.));
+    let water = sim::Water {
+        origin: origin.to_array(),
+        // scene y points down in the ocean's own axes: the water is where y is greater, so out of it is up
+        normal: (-columns[1]).to_array(),
+        axes: [columns[0].to_array(), columns[2].to_array()],
+        extent: [[-width / 2., width / 2.], [-depth / 2., depth / 2.]],
+    };
+    let emitter = crate::splash::Emitter {
+        channel: node,
+        start,
+        dt: num(&*own.elem, "dt", 1. / 60.),
+        ocean: crate::splash::Ocean {
+            id: ocean.id.clone(),
+            origin: [-width / 2., -depth / 2.],
+            cell_size: cell,
+            cells: [(width / cell).round() as usize, (depth / cell).round() as usize],
+            dt: num(e, "dt", 1. / 60.),
+            start: ocean.start,
+            to_local: world.inverse(),
+        },
+    };
+    Ok(Some((water, emitter)))
+}
+
+fn build(
+    p: &Program,
+    node: u32,
+    n: &FrameNode,
+    fall: Option<(sim::Water, crate::splash::Emitter)>,
+) -> Result<Runtime, String> {
     let e = config(n);
     let number = |k: &str, d: f64| num(e, k, d);
     let vec = |k: &str| ["X", "Y", "Z"].map(|a| number(&format!("{k}{a}"), 0.));
@@ -149,7 +234,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
         max_events: number("maxEvents", 16384.) as usize,
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
-        water: None,
+        water: fall.as_ref().map(|(water, _)| *water),
         max_work: number("maxWork", 100000000.) as u64,
     };
     let crater_bursts = children(e)
@@ -162,6 +247,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
                 angle: num(c, "angle", 45.),
                 spread: num(c, "angleSpread", 15.),
                 ejecta: None,
+                density: 0.,
             })
         })
         .collect();
@@ -169,6 +255,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
         + number("collisionTolerance", 0.001))
     .max(0.);
     Ok(Runtime {
+        splash: fall.map(|(_, emitter)| emitter),
         gas: text(e, "gas").map(|id| GasRt { id: id.as_str().into(), window: Vec::new() }),
         seed: e.seed,
         lift,
@@ -203,6 +290,8 @@ struct SceneDriver<'a, 'b> {
     /// The gas context of the last few canonical steps asked about, by step index; none where the volume is
     /// not in the frame.
     gas_at: Vec<(i64, Option<GasAt>)>,
+    /// The ocean the particles fall into, the log that tells it, and the scene units a metre.
+    splash: Option<(&'a crate::splash::Emitter, &'a crate::splash::Log, f64)>,
 }
 impl SceneDriver<'_, '_> {
     fn frame(&mut self, time: f64) -> Arc<FrameGraph> {
@@ -366,6 +455,7 @@ impl SceneDriver<'_, '_> {
     /// The particles that the impact `grown` throws out for burst `k`, in order of birth.
     fn ejecta(&mut self, k: usize, grown: &crate::crater::ImpactCrater) -> Result<Vec<Birth>, Error> {
         let cause = grown.cause;
+        self.bursts[k].density = cause.target_density;
         let (owner, count, angle, spread) = {
             let b = &self.bursts[k];
             (b.crater.clone(), b.count, b.angle, b.spread)
@@ -449,6 +539,20 @@ impl Driver for SceneDriver<'_, '_> {
         }
         Ok(a)
     }
+    fn absorbed(&mut self, step: u64, list: &[sim::Absorbed]) -> Result<(), Error> {
+        let Some((emitter, log, pixels_per_meter)) = self.splash else { return Ok(()) };
+        // what they are made of: the target of the crater that threw them
+        let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
+        let entries = match (list.is_empty(), density) {
+            (true, _) => Vec::new(),
+            (false, Some(solid)) => crate::splash::aggregate(list, emitter, pixels_per_meter, solid, 1000.),
+            (false, None) => {
+                return Err(Error::Driver("particles fell into the water before their crater was known".into()))
+            }
+        };
+        log.put(emitter.channel, step, &entries).map_err(Error::Driver)?;
+        Ok(())
+    }
     fn births(&mut self, lo: f64, hi: f64) -> Result<Vec<Birth>, Error> {
         let mut born = Vec::new();
         for k in 0..self.bursts.len() {
@@ -509,6 +613,7 @@ impl Driver for SceneDriver<'_, '_> {
     }
 }
 impl Sims {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
         &mut self,
         p: &Program,
@@ -517,6 +622,7 @@ impl Sims {
         fields: &FieldSrc,
         mut physics: Option<&mut PhysicsRt>,
         pyro: &mut crate::pyro::Sims,
+        splash: &crate::splash::Log,
     ) {
         for i in 0..g.nodes.len() {
             let n = &g.nodes[i];
@@ -530,7 +636,15 @@ impl Sims {
             if !crate::sim::linear_emitter_clock(p, node) {
                 self.runtimes.remove(&id);
             }
-            let rt = self.runtimes.entry(id.clone()).or_insert_with(|| build(p, node, n));
+            // the ocean the particles fall into is taken at its pose when the emitter starts, once, with the
+            // runtime
+            let fall = if self.runtimes.contains_key(&id) { Ok(None) } else { fall_setup(p, graphs, &id, node) };
+            let rt = self.runtimes.entry(id.clone()).or_insert_with(|| fall.and_then(|fall| build(p, node, n, fall)));
+            if let Ok(rt) = rt {
+                if let Some(emitter) = &rt.splash {
+                    splash.register(emitter);
+                }
+            }
             let result = (|| -> Result<Arc<SimParticles3D>, String> {
                 let rt = rt.as_mut().map_err(|e| e.clone())?;
                 let mut d = SceneDriver {
@@ -552,6 +666,10 @@ impl Sims {
                     bursts: &mut rt.crater_bursts,
                     gas: rt.gas.as_mut().map(|gas| (gas, &mut *pyro, rt.emitter.spec().drag)),
                     gas_at: Vec::new(),
+                    splash: rt
+                        .splash
+                        .as_ref()
+                        .map(|e| (e, splash, p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()))),
                 };
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
                 let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);

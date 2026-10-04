@@ -940,6 +940,27 @@ once per step. The coupling is linear in the relative velocity and one way: the 
 0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic drag is a rate of about 0.03 per second, so it
 moves dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
 
+Ejecta falling into an ocean (`ocean@splash`, particles side). An ocean lists the emitters whose particles
+fall into it (OCN13: each throws out the ejecta of a crater, so its particles have a mass). The particle solver
+takes a plane of water (a point, the normal out of the water, the rectangle it covers): a particle whose centre
+crosses it downward inside the rectangle, before any contact it would make later in the segment, is removed there,
+and the driver is told which (instant, place, velocity, mass), for every fixed step, an empty list too, and again
+the same when a seek replays the step. The evaluator takes the plane from the ocean at its pose when the emitter
+starts (a function of the document; the ocean must have no scale and both must be on the composition clock, and
+an emitter belongs to one ocean), sums what fell by cell and by canonical step of the ocean (the volume is the
+mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
+velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
+and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
+entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
+overlap it, and a step the particles have not reached is an error that names it. Measured on the impact scene's
+rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no ground collider for the ejecta): all
+4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share to the last
+digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume along the rock's
+travel grows from 90 to 60 to 30 degrees. What the ocean does with the entries (the sparse deposit: the volume
+out of the cell into its eight neighbours, at most 90 % of its water; the momentum into the cell, when it keeps
+a depth) is the ocean's side. A particle that fell in is gone: it does not sink, its vertical momentum and its
+energy are not given to the water, and a particle that has no mass is refused by the rule.
+
 ### Ocean surfaces and impulses
 
 **Implementation status:** The CPU solver, version-1.3 `<ocean>` node, owned
