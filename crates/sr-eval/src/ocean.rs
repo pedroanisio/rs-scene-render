@@ -63,6 +63,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         max_work: f("maxWork", 100_000_000.) as u64,
         moving_bed: false,
         bodies: false,
+        body_owners: 0,
     };
     let count = spec.cells[0].checked_mul(spec.cells[1]).ok_or("ocean cell count overflow")?;
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
@@ -118,6 +119,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             colliders::Colliders::build(p, &collider_ids, &spec, f("waterLevel", 0.), bytes("meshMemoryMiB", 128.)?)?;
         spec.moving_bed = true;
         spec.bodies = built.has_bodies();
+        spec.body_owners = built.body_count();
         Some(built)
     };
     let solver = sim::Ocean::new(spec.clone(), bed.clone(), cells, impulses).map_err(|e| e.to_string())?;
@@ -233,6 +235,10 @@ impl Sims {
                             sim::Error::Invalid("ocean exchange diverged")
                         })?;
                     }
+                    #[cfg(test)]
+                    if let Some((step, _)) = forcing.exchange {
+                        tests::OFFERS.with(|o| o.borrow_mut().push((step, forcing.bodies.clone())));
+                    }
                     let (Some(colliders), Some(node)) = (colliders.as_mut(), node) else {
                         return Err(sim::Error::Invalid("ocean collider without a scene node"));
                     };
@@ -329,6 +335,46 @@ impl Sims {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// What the bed driver was offered per body with each completed step.
+        pub(super) static OFFERS: RefCell<Vec<(u64, Vec<sim::BodySample>)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[test]
+    fn the_columns_of_a_body_are_tagged_with_its_place_in_the_collider_list() {
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition>
+          <object3D id="seabed" primitive="plane" width="400" height="400" segments="20" y="12" rotationX="-90">
+            <crater radius="40" depth="2" rimHeight="1" rimWidth="8" start="2" end="2.5"/>
+          </object3D>
+          <object3D id="left" primitive="sphere" radius="6" x="-30" y="0"/>
+          <object3D id="right" primitive="sphere" radius="6" x="30" y="2"/>
+          <ocean id="sea" width="128" depth="128" cellSize="2" bottomDepth="12" dt="0.0416666666666667" boundary="closed" colliders="seabed right left"/>
+        </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        OFFERS.with(|o| o.borrow_mut().clear());
+        let frame = ev.evaluate(0.5);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        let offers = OFFERS.with(|o| o.borrow().clone());
+        let (_, bodies) = offers.iter().find(|(step, _)| *step == 3).expect("an offer for step 3");
+        // the surface is entry 0 of the list; `right` is 1 and `left` is 2
+        assert_eq!(bodies.iter().map(|b| b.owner).collect::<Vec<_>>(), [1, 2]);
+        for b in bodies {
+            assert!(b.columns > 4 && b.wet == b.columns, "{b:?}");
+            // the displaced water stands above the rest level (y downward) and is almost at rest
+            assert!(b.surface[0] < -1.0 && b.surface[1].abs() < 1e-5 && b.surface[2].abs() < 1e-5, "{b:?}");
+            assert!((b.bed - 12.0).abs() < 1e-6, "{b:?}");
+            assert!(b.velocity.iter().all(|v| v.abs() < 1e-5), "{b:?}");
+        }
+        // `right` sits 2 lower, so it displaces more water than `left`... and holds more columns
+        assert!(
+            bodies[0].centroid[0] > 0.0 && bodies[1].centroid[0] < 0.0,
+            "{:?}",
+            [bodies[0].centroid, bodies[1].centroid]
+        );
+    }
 
     fn frame(bed: Vec<f64>) -> sim::Frame {
         sim::Frame { time: 1.0, cells: vec![Cell { depth: 12., velocity: [0.; 2] }; 4], bed }

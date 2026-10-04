@@ -7,6 +7,8 @@ use glam::{DMat4, DVec3};
 pub(super) struct Colliders {
     beds: Vec<Bed>,
     bodies: Vec<Body>,
+    /// Entries of the `colliders` list, which bound the tags.
+    slots: usize,
     water_level: f64,
     rest_done: bool,
     top: Vec<f64>,
@@ -22,6 +24,8 @@ struct Bed {
 }
 struct Body {
     id: Arc<str>,
+    /// Position in the ocean's `colliders` list, which is the tag of the body's columns.
+    slot: usize,
     points: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
 }
@@ -56,7 +60,7 @@ impl Colliders {
         let count = spec.cells[0] * spec.cells[1];
         let mut remaining = budget;
         let (mut beds, mut bodies) = (Vec::new(), Vec::new());
-        for id in ids {
+        for (slot, id) in ids.iter().enumerate() {
             let node =
                 p.nodes.iter().find(|n| &*n.id == id).ok_or_else(|| format!("collider {id} is not instantiated"))?;
             let e = &*node.elem;
@@ -102,15 +106,33 @@ impl Colliders {
                 remaining = remaining
                     .checked_sub(bytes(points.len(), triangles.len()))
                     .ok_or("ocean collider geometry exceeds memory budget")?;
-                bodies.push(Body { id: node.id.clone(), points, triangles });
+                bodies.push(Body { id: node.id.clone(), slot, points, triangles });
             }
         }
         remaining.checked_sub(count.saturating_mul(24)).ok_or("ocean collider geometry exceeds memory budget")?;
-        Ok(Colliders { beds, bodies, water_level, rest_done: false, top: Vec::new(), hits: Vec::new() })
+        Ok(Colliders {
+            beds,
+            bodies,
+            slots: ids.len(),
+            water_level,
+            rest_done: false,
+            top: Vec::new(),
+            hits: Vec::new(),
+        })
     }
 
     pub(super) fn has_bodies(&self) -> bool {
         !self.bodies.is_empty()
+    }
+
+    /// The bound of the tags the solver is given: a body tags its columns with its position in the
+    /// ocean's `colliders` list (counting the craters' surfaces), so a list maps tags to ids.
+    pub(super) fn body_count(&self) -> usize {
+        if self.bodies.is_empty() {
+            0
+        } else {
+            self.slots
+        }
     }
 
     /// Fills `forcing` for ocean-local `time`. The bed is the bathymetry plus how
@@ -162,8 +184,12 @@ impl Colliders {
         forcing.occupancy.clear();
         forcing.occupancy.resize(n, 0.);
         let mut momentum = vec![[0.; 2]; n];
+        // the body that holds most of a column owns it; bodies come in index order, so the lowest wins a tie
+        let mut held_most = vec![0.; if spec.body_owners > 0 { n } else { 0 }];
+        forcing.owner.clear();
+        forcing.owner.resize(if spec.body_owners > 0 { n } else { 0 }, 0);
         for i in 0..self.bodies.len() {
-            self.occupy(i, spec, ocean, frame_at, time, &frame, inverse, forcing, &mut momentum)?;
+            self.occupy(i, spec, ocean, frame_at, time, &frame, inverse, forcing, &mut momentum, &mut held_most)?;
         }
         forcing.velocity.clear();
         forcing.velocity.resize(n, [0.; 2]);
@@ -197,6 +223,7 @@ impl Colliders {
         inverse: DMat4,
         forcing: &mut sim::Forcing,
         momentum: &mut [[f64; 2]],
+        held_most: &mut [f64],
     ) -> Result<(), String> {
         let body = &self.bodies[index];
         let Some(j) = frame.nodes.iter().position(|n| n.id == body.id) else { return Ok(()) };
@@ -261,6 +288,10 @@ impl Colliders {
                 let rest: DVec3 = DVec3::from_array(a) * u + DVec3::from_array(b) * v + DVec3::from_array(c3) * w;
                 let velocity = (to.transform_point3(rest) - from.transform_point3(rest)) / dt;
                 forcing.occupancy[c] += thickness;
+                if let Some(most) = held_most.get_mut(c).filter(|most| thickness > **most) {
+                    *most = thickness;
+                    forcing.owner[c] = body.slot as u32;
+                }
                 momentum[c][0] += thickness * velocity.x;
                 momentum[c][1] += thickness * velocity.z;
             }
