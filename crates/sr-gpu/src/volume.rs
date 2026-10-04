@@ -292,6 +292,32 @@ impl VolumeDraw {
         Ok(self)
     }
 
+    /// A note for `stats.unsupported` when grid lighting is least accurate: the grid interpolates
+    /// transmittance between nodes, which is a poor model where a cell's optical depth is well
+    /// above 1. None for exact lighting or a medium thin enough for its cells.
+    pub fn light_grid_note(&self) -> Option<String> {
+        let request = self.light_grid?;
+        let m = &self.medium;
+        let object = DMat4::from_cols_array(&m.transform().columns());
+        let index = DMat4::from_cols_array(&m.density().transform().columns());
+        let world = object * index;
+        let voxel = (0..3).map(|axis| world.col(axis).truncate().length()).fold(f64::INFINITY, f64::min);
+        let peak = m
+            .density()
+            .bricks()
+            .flat_map(|(_, values)| values.iter().copied())
+            .chain(std::iter::once(m.density().background()))
+            .fold(0.0f32, |peak, v| peak.max(v.abs()));
+        let spacing = voxel * f64::from(request.cell);
+        let optical = m.optical();
+        let depth = optical.extinction * optical.density_scale * f64::from(peak) * spacing;
+        (depth.is_finite() && depth > LIGHT_GRID_CELL_OPTICAL_DEPTH).then(|| {
+            format!(
+                "lighting=\"grid\" lights this medium from nodes {spacing:.2} units apart and the optical depth across one cell reaches {depth:.1}; the grid is less accurate where cells are that thick, use lighting=\"exact\" or a smaller lightGridCell"
+            )
+        })
+    }
+
     pub fn with_shadows(mut self, cast: bool, receive: bool) -> Self {
         self.cast_shadow = cast;
         self.receive_shadow = receive;
@@ -511,6 +537,9 @@ impl LightGridPlan {
     }
 }
 
+/// Optical depth across one cell above which grid lighting is reported as banding.
+const LIGHT_GRID_CELL_OPTICAL_DEPTH: f64 = 4.0;
+
 /// Most nodes a grid may have: the dome kernel runs one thread a node in at most 65535 groups.
 const MAX_GRID_NODES: u64 = 64 * 65535;
 
@@ -526,10 +555,12 @@ pub fn plan_light_grid(volumes: &[VolumeDraw], lights: u32, dome: bool) -> Resul
     let mut any = false;
     for v in volumes {
         let Some(request) = v.light_grid else { continue };
-        any = true;
         let m = v.medium();
+        // A medium without bounds holds no density (a smoke that has not been born yet): nothing
+        // in it scatters, so it needs no lattice.
+        let Some(bounds) = m.bounds() else { continue };
+        any = true;
         let object = DMat4::from_cols_array(&m.transform().columns());
-        let bounds = m.bounds().ok_or("lighting=\"grid\" needs a medium with bounds")?;
         for k in 0..8 {
             let p = DVec3::from_array(std::array::from_fn(|i| {
                 if k & (1 << i) == 0 {
@@ -694,6 +725,54 @@ mod tests {
         let dry = plan_light_grid(&[draw(1.0, 0.5, Some((1, 64, 128)))], 2, false).unwrap().unwrap();
         assert!(!dry.radiance && !dry.directional);
         assert_eq!(dry.scalar_slots, 2);
+    }
+
+    #[test]
+    fn grid_lighting_of_a_medium_thick_across_a_cell_is_noted() {
+        // the ball has density 1 and voxels of 1 unit: the optical depth across a cell is the extinction
+        let thick = |extinction: f64, cell: u32, grid: bool| {
+            let medium = Medium::new(
+                Arc::new(ball(1.0)),
+                Some(sr_volume::medium::Bounds::new([0.0; 3], [8.0; 3]).unwrap()),
+                Transform::identity(),
+                sr_volume::medium::Optical { extinction, ..Default::default() },
+            )
+            .unwrap();
+            let draw = VolumeDraw::new(Arc::new(medium), March { step_size: 0.5, max_steps: 65536 }).unwrap();
+            if grid {
+                draw.with_light_grid(cell, 64, 128).unwrap()
+            } else {
+                draw
+            }
+        };
+        assert_eq!(thick(30.0, 1, false).light_grid_note(), None, "exact lighting does not band");
+        assert_eq!(thick(2.0, 1, true).light_grid_note(), None);
+        let note = thick(30.0, 1, true).light_grid_note().unwrap();
+        assert!(note.contains("reaches 30.0") && note.contains("1.00 units apart") && note.contains("exact"), "{note}");
+        // a larger cell is thicker, not thinner
+        assert!(thick(2.0, 4, true).light_grid_note().unwrap().contains("reaches 8.0"));
+    }
+
+    #[test]
+    fn an_empty_medium_asking_for_the_grid_needs_no_lattice() {
+        // a smoke that has not been born yet has no bricks and so no bounds
+        let scale = Transform::new(DMat4::from_scale(DVec3::splat(1.0)).to_cols_array()).unwrap();
+        let empty = Medium::new(
+            Arc::new(SparseGrid::new(scale, 0.0, 64).unwrap()),
+            None,
+            Transform::identity(),
+            sr_volume::medium::Optical { extinction: 1.0, ..Default::default() },
+        )
+        .unwrap();
+        assert!(empty.bounds().is_none());
+        let drawn = VolumeDraw::new(Arc::new(empty), March { step_size: 0.5, max_steps: 64 })
+            .unwrap()
+            .with_light_grid(1, 64, 128)
+            .unwrap();
+        assert_eq!(plan_light_grid(std::slice::from_ref(&drawn), 2, true).unwrap(), None);
+        // beside a medium with density, only that one is covered
+        let plan = plan_light_grid(&[drawn, draw(1.0, 0.0, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        assert_eq!(plan.nodes, [9, 9, 9]);
     }
 
     #[test]

@@ -2427,6 +2427,12 @@ impl Renderer {
                             ));
                             return;
                         }
+                        if let Some(note) = volume.light_grid_note() {
+                            let note = format!("{}: {note}", g.nodes[j].id);
+                            if !plan.stats.unsupported.contains(&note) {
+                                plan.stats.unsupported.push(note);
+                            }
+                        }
                         volumes.push(volume);
                     }
                     Ok(None) => {}

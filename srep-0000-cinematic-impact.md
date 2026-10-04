@@ -431,6 +431,15 @@ the asking media is a render error that names the attribute to change; it never
 falls back to exact lighting or a coarser lattice. `VOL10` rejects `lightGrid*`
 attributes without `lighting="grid"`.
 
+Dust derived from solids is thick. A dust density that is a volume fraction of
+solids (about 1e-3 per cell) has an extinction coefficient of roughly
+3Q/(2d) per unit of solid fraction, with Q about 2 and d the grain diameter in
+scene units, so `medium@extinction` is of the order of 1.5 divided by the grain
+diameter. Measured on the impact smoke at 1 m cells (100 micrometre grains, so
+30000): 300 is faint but visible, 3000 reads as smoke and 30000 is an almost
+opaque dome with a hard edge. Such a medium is thick across a cell for grid
+lighting (see the known limits below).
+
 Tiled and whole-frame renders of a grid frame are identical. Surface shading of
 volume shadows (a surface lit through the medium) still uses the exact march.
 
@@ -456,6 +465,27 @@ frame, over the region above the horizon (PSNR and CIEDE2000 ΔE):
   rectangle light at 60, 14 and 9 scene units from the medium: 65, 53 and 43 dB;
   sphere light: 66, 56 and 50 dB. Use `lighting="exact"` for lights within about
   ten times their own size of the medium.
+- Optically thick cells are lit less accurately. The grid interpolates
+  transmittance linearly between nodes, which is a poor model where transmittance
+  falls from 1 to near 0 inside one cell. The renderer measures the optical depth
+  across one cell (extinction × `densityScale` × the peak density × the node
+  spacing) and, above 4, reports it in the frame's unsupported notes with the value
+  and the advice to use `lighting="exact"` or a smaller `lightGridCell`; the frame
+  still renders. Measured on the impact smoke at 1 unit cells and extinction 30000
+  (depth 40 per cell; 640×360, region around the dome, against an exact render with
+  `stepSize` 0.05 at 32 samples per pixel, so the reference is itself noisy): 34.6 dB
+  as rendered and 40.2 and 41.0 dB after Gaussian blurs of 2 and 4 pixels, which
+  remove the noise and keep the structure. The horizontal and vertical lines
+  visible in very thick smoke come from the 1 unit voxels of the density field,
+  each about 40 deep optically, and appear equally in the exact render (mean
+  row-to-row step in the dome interior: exact 0.0089, grid 0.0091). Depths 13,
+  6.6 and 4 (extinctions 10000, 5000 and 3000) were judged by eye on one frame:
+  faint lines, barely visible ones and none.
+- Interpolating optical depth instead of transmittance (with visibility kept
+  separate) was measured and not adopted: 35.0, 42.4 and 43.5 dB on the same thick
+  case against 34.6, 40.2 and 41.0 dB, and 55.8 and 47.7 dB against 56.4 and 47.8 dB
+  on the thin plume without and with ejecta, for a second march in the shader and a
+  changed buffer layout.
 - A medium with `anisotropy` ≠ 0 costs one scalar grid per fixed dome direction;
   the lattice, `lightGridDomeDirections` and the number of lights must fit in
   `lightGridMemoryMiB`.

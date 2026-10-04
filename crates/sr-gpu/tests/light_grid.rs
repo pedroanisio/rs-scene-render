@@ -464,3 +464,54 @@ fn an_area_light_near_the_volume_has_a_known_error() {
         assert!(psnr >= floor, "{kind} at {distance}: {psnr:.1} dB");
     }
 }
+
+/// A live smoke holds no density before its source starts, so its medium has no bounds. Asking for
+/// grid lighting there is not an error; once the source runs, the grid lights the smoke as the
+/// exact march does.
+#[test]
+fn a_live_smoke_before_its_source_starts_is_lit_from_the_grid_without_error() {
+    let Some(gpu) = common::gpu() else { return };
+    let scene = |lighting: &str| {
+        format!(
+            r##"<scene version="1.3"><project width="16" height="16" fps="10" duration="2" background="#00000000"/>
+          <composition><camera id="camera" projection="orthographic" x="2" y="2" z="-20" renderer="pathtrace" pathSamples="1" maxBounces="1" denoise="false"/>
+          <object3D id="cloud" primitive="volume" x="2" y="2">
+            <pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1">
+              <pyroSource shape="box" width="8" height="8" depth="8" densityRate="1" start="1"/>
+            </pyro><medium extinction="0.5" albedo="#FFFFFF" {lighting}/></object3D></composition>
+          <lights><light id="sun" type="directional" yaw="-35" pitch="-50" intensity="3"/></lights></scene>"##
+        )
+    };
+    let frame = |lighting: &str, time: f64| {
+        let doc = sr_model::load_str(&scene(lighting), &sr_model::LoadOptions::without_assets()).unwrap();
+        let shot = common::render_times_on(gpu.clone(), &doc, &[time]).unwrap();
+        assert!(shot.stats.errors.is_empty(), "{lighting} at {time}: {:?}", shot.stats.errors);
+        shot
+    };
+    let before = frame(r#"lighting="grid""#, 0.5);
+    assert!(before.px.iter().all(|p| p[3] == 0.0), "no smoke yet");
+    let (exact, gridded) = (frame("", 1.6), frame(r#"lighting="grid""#, 1.6));
+    assert!(exact.px.iter().map(|p| p[3]).sum::<f32>() > 1.0, "the smoke is born");
+    let psnr = common::psnr(&exact.px, &gridded.px);
+    assert!(psnr >= 40.0, "grid differs from exact: {psnr:.1} dB");
+}
+
+/// Grid lighting of a medium whose cells are optically thick is reported, not refused: the frame
+/// renders, and `stats.unsupported` says how thick and what to do.
+#[test]
+fn grid_lighting_of_thick_smoke_says_it_bands() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = ball_cache("grid_ball.srvol", [0.0; 3], 6.0, 1.0);
+    let medium = |extinction: f64| {
+        grid(&format!(r##"<medium extinction="{extinction}" albedo="#FFFFFF" stepSize="0.5" maxSteps="2048"/>"##))
+    };
+    let thin = render(&gpu, &cache, &Setup { medium: &medium(0.6), samples: 1, ..Default::default() });
+    assert!(thin.stats.unsupported.is_empty(), "{:?}", thin.stats.unsupported);
+    let thick = render(&gpu, &cache, &Setup { medium: &medium(30.0), samples: 1, ..Default::default() });
+    let notes = thick.stats.unsupported.join("\n");
+    assert!(
+        notes.contains("optical depth across one cell reaches 30.0") && notes.contains("lighting=\"exact\""),
+        "{notes}"
+    );
+    assert!(mean(&thick) > 0.0, "the frame is still rendered");
+}
