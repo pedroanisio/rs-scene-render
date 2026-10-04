@@ -927,8 +927,9 @@ particles need, and first in the frame when a document names a gas (the others k
 particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
 past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
 evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
-(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) are charged to the volume's
-`maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
+(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) and the two states the smoke keeps for them (the frame's own volume needs the step the readers started at, and the
+timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
+volume's `maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
 smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
 the target must hold a native pyro volume. Measured cost (release, one core, 20 000 particles over 25 canonical steps of 0.1 s in a 32-cell smoke):
 0.77 s more than naming the gas with no drag, that is 1.5 microseconds per particle step (about five gas queries

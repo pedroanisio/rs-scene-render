@@ -307,3 +307,27 @@ fn a_volume_that_moves_drags_the_particles_where_it_is_when_they_ask() {
     let v = particle(&moving, 1.5).1;
     assert!(v[0] > 1.0, "the volume carried to the particle drags it: {v:?}");
 }
+
+#[test]
+fn the_states_kept_for_a_reader_of_the_gas_are_charged_to_the_smokes_memory() {
+    // a particle step of 1.3 s over a smoke step of 0.1 s holds seventeen velocity fields of 0.84 MB (14.3 MB) at once and
+    // the smoke keeps two states of 1.4 MB for them: 17.1 MB, which 16 MiB (16.8 MB) does not admit, though the fields
+    // alone (which the budget counted before) would have passed; 20 MiB does
+    let run = |mib: u32| {
+        let volume: &'static str = Box::leak(format!(r#"maxMemoryMiB="{mib}""#).into_boxed_str());
+        let xml = Setup { volume, cells: 32, ..Setup::default() }
+            .xml()
+            .replace(r#"lifetime="5" dt="0.1""#, r#"lifetime="5" dt="1.3""#);
+        evaluator(&xml).evaluate(3.0)
+    };
+    let refused = run(16);
+    let said = refused.failures.iter().any(|m| m.contains("dust") && m.contains("cloud") && m.contains("kept states"));
+    assert!(said, "{:?}", refused.failures);
+    let admitted = run(20);
+    assert!(
+        admitted.failures.is_empty() && admitted.problems.is_empty(),
+        "{:?} {:?}",
+        admitted.failures,
+        admitted.problems
+    );
+}

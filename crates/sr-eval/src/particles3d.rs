@@ -238,14 +238,17 @@ impl SceneDriver<'_, '_> {
         if let Some((_, found)) = gas.window.iter().find(|(k, _)| *k == step) {
             return Ok(found.clone());
         }
-        let fresh = pyro
+        let step_gas = pyro
             .gas(self.p, frame, i, step, &mut *self.graphs, self.fields, self.physics.as_deref_mut())
             .map_err(|e| Error::Driver(format!("gas {}: {e}", gas.id)))?;
-        // the fields in use are charged to the smoke's memory allowance, and exceeding it is an error
+        let (fresh, held) = (step_gas.gas, step_gas.held);
+        // the fields in use and the states kept for them are charged to the smoke's memory allowance, and
+        // exceeding it is an error
         let clock = crate::pyro::gas_clock(&frame.nodes[i]).map_err(Error::Driver)?;
-        if (gas.window.len() + 1).saturating_mul(fresh.bytes()) > clock.max_bytes {
+        let fields = (gas.window.len() + 1).saturating_mul(fresh.bytes());
+        if fields.saturating_add(held) > clock.max_bytes {
             return Err(Error::Driver(format!(
-                "gas {}: {} velocity fields of {} bytes exceed its maxMemoryMiB",
+                "gas {}: {} velocity fields of {} bytes and {held} bytes of kept states exceed its maxMemoryMiB",
                 gas.id,
                 gas.window.len() + 1,
                 fresh.bytes()
