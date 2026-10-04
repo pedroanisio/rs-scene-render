@@ -2348,7 +2348,7 @@
       the source is a sphere of the crater's radius at the impact point, active from the impact over the crater's
       formation time (an impulse: at the impact), so shape, position, timing, density, temperature and expansion are
       not given. The dust is `dustFraction` of the volume thrown out of the crater, injected as a volume fraction of
-      solids (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
+      solids, spread over the cells the sphere covers that are not solid (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
       `heatFraction` of (1/2) m U^2 sin(theta)^(3/2) for the body's mass m, speed U and angle theta from the surface;
       it warms the dust by heat / (dust mass x `specificHeat`, J/(kg K)), at most `maxTemperature` kelvin, and the
       expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the

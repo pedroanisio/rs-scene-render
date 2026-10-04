@@ -258,33 +258,11 @@ fn crater_inputs(frame: &FrameGraph, node: usize, start: f64, dt: f64, input: &m
         let h = num(e, "voxelSize", 1.0);
         let used = along.max(0.9 * h);
         let shape = Shape::Sphere { center: centre.to_array(), radius: used };
-        // The dust is spread, as a volume fraction of solids, over the cells whose centres the
-        // sphere covers, so that what is injected is the dust and not what the grid happens to cover.
-        let size = ["width", "height", "depth"].map(|k| num(e, k, 0.0));
-        let covered = (0..3)
-            .map(|axis| {
-                let cells = (size[axis] / h).round() as usize;
-                (0..cells).map(move |c| -0.5 * size[axis] + (c as f64 + 0.5) * h)
-            })
-            .collect::<Vec<_>>();
-        let reach = used * used;
-        let mut cells = 0usize;
-        for x in covered[0].clone() {
-            for y in covered[1].clone() {
-                for z in covered[2].clone() {
-                    let d = [x - centre.x, y - centre.y, z - centre.z];
-                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= reach {
-                        cells += 1;
-                    }
-                }
-            }
-        }
-        if cells == 0 {
-            // the impact is outside the volume: there is nothing of it to put in the smoke
-            continue;
-        }
+        // The dust is given as a total, in volume fractions summed over cells: the solver spreads it over the
+        // cells whose centres the sphere covers and that are not solid, so that what is injected is the dust and
+        // not what the grid, or a ground in the way, happens to leave.
         let voxel = (h * (cause.law.radius / along)).powi(3);
-        let density = made.dust_volume / (cells as f64 * voxel);
+        let density = made.dust_volume / voxel;
         // the impact is known from the first step that starts after it, so that is where it begins
         let at = ((cause.time - start) / dt).ceil() * dt;
         let velocity = |names: [&str; 3]| names.map(|name| number(name, 0.0));

@@ -266,3 +266,29 @@ fn smoke_and_crater_are_found_inside_every_instance_of_a_symbol() {
         .collect();
     assert!(dust[0] > 0.0 && (dust[0] - dust[1]).abs() < 1e-6 * dust[0], "each instance's smoke is its own: {dust:?}");
 }
+
+#[test]
+fn a_ground_that_the_smoke_cannot_enter_does_not_take_any_of_its_dust() {
+    // 0.25 m cells in an 8 m volume whose bottom is the ground, so that the source sphere (a metre or so) is
+    // centred on the ground and about half of its cells are inside it
+    let finer = |xml: String| {
+        xml.replace(r#"y="55""#, r#"y="56""#).replace(
+            r#"width="16" height="16" depth="16" voxelSize="1""#,
+            r#"width="8" height="8" depth="8" voxelSize="0.25""#,
+        )
+    };
+    let dust = |volume: &'static str| {
+        let setup = Setup { source: r#"heatFraction="0" dustFraction="0.01""#, volume, ..Setup::default() };
+        let doc = sr_model::load_str(&finer(setup.xml()), &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = Evaluator::new(&doc, &Default::default()).unwrap();
+        // The ground's surface moves while the crater opens and pushes the air, and the dust with it out of
+        // this small volume, so the dust to compare is the most there has been: the cells are a quarter of a
+        // metre, a sixty-fourth of a cubic metre each.
+        (0..20).map(|k| smoke(&ev, 0.3 + 0.05 * k as f64).0 / 64.0).fold(0.0, f64::max)
+    };
+    let (open, closed) = (dust(""), dust(r#"colliders="ground""#));
+    let want = law_dust(arrival(100.0), 0.01);
+    println!("SMOKE dust with and without the ground as a collider: {closed} and {open}, the law's {want}");
+    assert!((open - want).abs() < 0.2 * want, "with nothing in the way: {open} against {want}");
+    assert!((closed - want).abs() < 0.2 * want, "with the ground in the way: {closed} against {want}");
+}
