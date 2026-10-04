@@ -2146,6 +2146,7 @@
     <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="foamMaterial" type="xs:IDREF"/>
     <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
   </xs:complexType>

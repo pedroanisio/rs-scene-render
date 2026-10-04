@@ -303,3 +303,31 @@ fn ocean_replay_seconds_at_target_resolution() {
         );
     }
 }
+
+#[test]
+fn whitewater_checkpoint_budget_never_changes_the_result_of_a_replay() {
+    let scene = |budget: &str| {
+        format!(
+            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+              <ocean id="sea" width="64" depth="64" cellSize="1" bottomDepth="6" dt="0.0416666666666667">
+                <waterImpulse time="0.2" radius="8" amplitude="-4"/>
+                <whitewater emissionRate="20" threshold="0.05" maxParticles="100000" lifetime="2" {budget}/>
+              </ocean></composition></scene>"#
+        )
+    };
+    let run = |budget: &str| {
+        let ev = evaluator(&scene(budget));
+        let first = ev.evaluate(3.0);
+        assert!(first.problems.is_empty(), "{:?}", first.problems);
+        ev.evaluate(1.0);
+        let again = ev.evaluate(3.0);
+        assert!(again.problems.is_empty(), "{:?}", again.problems);
+        let foam = sea(&again).whitewater.clone().unwrap();
+        assert_eq!(sea(&first).whitewater.as_ref(), Some(&foam));
+        (foam, sea(&again).key)
+    };
+    let (default, key) = run("");
+    assert!(!default.particles.is_empty(), "the test needs foam to mean anything");
+    assert_eq!(run(r#"checkpointMemoryMiB="0""#), (default.clone(), key));
+    assert_eq!(run(r#"checkpointMemoryMiB="1""#), (default, key));
+}

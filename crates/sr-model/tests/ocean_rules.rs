@@ -89,6 +89,18 @@ fn ocean_colliders_name_deformable_beds_and_closed_bodies() {
 }
 
 #[test]
+fn whitewater_checkpoint_memory_is_a_nonnegative_integer_up_to_4096_mib() {
+    for mib in ["0", "1", "64", "4096"] {
+        let node = format!(r#"<ocean id="o"><whitewater checkpointMemoryMiB="{mib}"/></ocean>"#);
+        assert!(codes(&node, "1.3").is_empty(), "{mib}: {:?}", codes(&node, "1.3"));
+    }
+    for mib in ["-1", "4097", "1.5", "64MiB", ""] {
+        let node = format!(r#"<ocean id="o"><whitewater checkpointMemoryMiB="{mib}"/></ocean>"#);
+        assert!(codes(&node, "1.3").contains(&"S06".into()), "{mib:?}: {:?}", codes(&node, "1.3"));
+    }
+}
+
+#[test]
 fn ocean_references_dimensions_and_static_inputs_are_checked() {
     for node in [
         r#"<ocean id="o" bathymetry="sound"/>"#,
