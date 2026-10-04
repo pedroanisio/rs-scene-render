@@ -31,6 +31,8 @@ mod atomicity;
 mod determinism;
 #[cfg(test)]
 mod pockets;
+#[cfg(test)]
+mod sampling;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -559,7 +561,8 @@ impl Field<'_> {
         if (0..3).any(|a| p[a] < 0.0 || p[a] >= self.cells[a] as f64) {
             return false;
         }
-        self.solid[index(p.map(|v| v.floor() as usize), self.cells)]
+        // p is within [0, cells), so truncation is the floor.
+        self.solid[index(p.map(|v| v as usize), self.cells)]
     }
 
     fn trace(&self, p: [f64; 3], dt: f64) -> Result<[f64; 3], Error> {
@@ -593,6 +596,19 @@ impl Field<'_> {
     }
 }
 
+/// `v.floor() as i64` for finite `v` of moderate size, without a libm call (the
+/// baseline x86-64 target has no rounding instruction). Truncation, then one step
+/// down when it rounded up, is exactly the floor.
+fn floor_i64(v: f64) -> i64 {
+    let truncated = v as i64;
+    truncated - i64::from((truncated as f64) > v)
+}
+
+/// Trilinear sample of a cell- or face-centred array. The result is the left to
+/// right sum, starting from +0.0, of `weight * value` over the eight corners in
+/// x-fastest order, with `weight = (wx * wy) * wz`; corners outside the array
+/// contribute `background`. The in-range path below evaluates exactly that
+/// expression without per-corner range checks.
 fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary, background: f64) -> f64 {
     if !finite3(p) {
         return background;
@@ -604,8 +620,25 @@ fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary,
             return background;
         }
     }
-    let lo = p.map(|v| v.floor() as i64);
+    let lo = p.map(floor_i64);
     let f: [f64; 3] = std::array::from_fn(|a| p[a] - lo[a] as f64);
+    let w: [[f64; 2]; 3] = std::array::from_fn(|a| [1.0 - f[a], f[a]]);
+    if (0..3).all(|a| lo[a] >= 0 && lo[a] + 1 < dims[a] as i64) {
+        let (sy, sz) = (dims[0], dims[0] * dims[1]);
+        let base = (lo[2] as usize * dims[1] + lo[1] as usize) * dims[0] + lo[0] as usize;
+        let corner = |bit: usize| values[base + (bit & 1) + ((bit >> 1) & 1) * sy + ((bit >> 2) & 1) * sz];
+        let weight = |bit: usize| (w[0][bit & 1] * w[1][(bit >> 1) & 1]) * w[2][(bit >> 2) & 1];
+        let mut result = 0.0;
+        result += weight(0) * corner(0);
+        result += weight(1) * corner(1);
+        result += weight(2) * corner(2);
+        result += weight(3) * corner(3);
+        result += weight(4) * corner(4);
+        result += weight(5) * corner(5);
+        result += weight(6) * corner(6);
+        result += weight(7) * corner(7);
+        return result;
+    }
     let mut result = 0.0;
     for bit in 0..8 {
         let q: [i64; 3] = std::array::from_fn(|a| lo[a] + ((bit >> a) & 1));
