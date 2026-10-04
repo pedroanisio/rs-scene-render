@@ -810,6 +810,9 @@
     ],
     "w01-non-finite.scene.xml": [
       "W01"
+    ],
+    "w02-open-face.scene.xml": [
+      "W02"
     ]
   }
 }

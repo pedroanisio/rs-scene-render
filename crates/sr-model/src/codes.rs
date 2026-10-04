@@ -34,6 +34,11 @@ const FIXED: &[(&str, &str, &str)] = &[
         "structure",
         "A numeric attribute holds INF, -INF, NaN or a number too large for a double (such as 1e400), also inside lengths and number lists; the schema accepts them but the renderer needs finite values.",
     ),
+    (
+        "W02",
+        "rules",
+        "A pyro source or impulse in a volume with open faces is less than 12 cells from one of them, where its position is in the document and the volume has room to put it further in; the open face changes the flow of the cloud. The number comes from one plume and one face; the side faces were not measured.",
+    ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
     ("A03", "assets", "A remote input (http, https, s3, …) could not be verified offline."),

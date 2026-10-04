@@ -711,6 +711,19 @@ solver operations, not animation of a displayed noise texture. Expansion is an
 authored cinematic divergence source, not a shock-physics equation of state.
 Grid and checkpoint memory use explicit budgets; exceeding a budget is an error.
 
+Sources near an open face (warning `W02`). An open face is a zero-pressure outlet and an inlet for the
+surrounding air, so a source close to one changes the flow of the whole cloud, not only the part that leaves.
+Measured on the plume of the hero scene (64 x 52 x 64 cells of 3 units, the impulse sphere of 7.3 cells radius
+above the bottom face): the peak density at 6 s is 0.307, 0.476, 0.525, 0.673, 0.675, 0.688 and 0.686 with the
+sphere's edge 3, 5, 7 (as authored), 13, 19, 33 and 59 cells from the bottom face, the tail of the plume 28, 28,
+28, 34, 39, 40 and 41 cells down, and with the top face moved 26 cells away instead nothing changes (peak 0.481
+against 0.525, same extent). A document that gives a pyro source or impulse a place (a sphere or a box, no
+animation, not from a crater) in a volume with `boundary="open"` that has room on that axis for the source and
+12 cells at each end, and puts its edge less than 12 cells from an open face, is warned (`W02`, not an error;
+the message names the face and the distance). The 12 comes from one plume, one face (the bottom) and one kind of
+source; the side faces were not measured; and a source with a rotation or a scale is bounded by a sphere
+or by its extent along the axis.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are

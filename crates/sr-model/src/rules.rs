@@ -465,10 +465,86 @@ struct Eval<'a> {
     out: Vec<Diagnostic>,
 }
 
+/// Cells between a pyro source and an open face below which W02 warns. It comes from one plume (the hero scene's,
+/// 64 x 52 x 64 cells), one face (the bottom) and one kind of source, and the side faces were not measured.
+const OPEN_FACE_CELLS: f64 = 12.0;
+
 impl<'a> Eval<'a> {
     fn check(&mut self, ok: bool, n: Node, code: &str, message: impl FnOnce() -> String) {
         if !ok {
             self.out.push(Diagnostic::error(code, message(), Loc::of(n), element_path(n)));
+        }
+    }
+
+    /// A warning: the document is valid and a renderer can run it.
+    fn warn(&mut self, n: Node, code: &str, message: String) {
+        self.out.push(Diagnostic::warning(code, message, Loc::of(n), element_path(n)));
+    }
+
+    /// W02: a pyro source or impulse whose place is in the document and which is closer than
+    /// [`OPEN_FACE_CELLS`] cells to an open face of a volume that has room to put it further in.
+    /// The face is a zero-pressure outlet and an inlet for the surrounding air, so a source this near
+    /// it changes the flow of the whole cloud, which the engine measured on a plume of 64 x 52 x 64
+    /// cells (the peak density 22 % lower with the face 7 cells from the source than with it 33).
+    fn pyro_source_near_open_face(&mut self, n: Node) {
+        let Some(pyro) = n.parent_element().filter(|p| is(*p, "pyro")) else { return };
+        let number = |e: Node, k: &str, default: f64| e.attribute(k).map_or(default, xpath_number);
+        // a source from a crater has no place in the document, and an animated one moves
+        if pyro.attribute("boundary") != Some("open")
+            || n.attribute("crater").is_some()
+            || n.children().any(|c| c.is_element())
+        {
+            return;
+        }
+        let size = [number(pyro, "width", f64::NAN), number(pyro, "height", f64::NAN), number(pyro, "depth", f64::NAN)];
+        let voxel = number(pyro, "voxelSize", f64::NAN);
+        let centre = [number(n, "x", 0.0), number(n, "y", 0.0), number(n, "z", 0.0)];
+        let scale = [number(n, "scaleX", 1.0).abs(), number(n, "scaleY", 1.0).abs(), number(n, "scaleZ", 1.0).abs()];
+        let widest = scale.iter().cloned().fold(0.0, f64::max);
+        let turned = ["rotation", "rotationX", "rotationY"].iter().any(|k| number(n, k, 0.0) != 0.0);
+        // how far the shape reaches from its centre along each axis, or None where it cannot be told
+        let reach: [f64; 3] = match n.attribute("shape").unwrap_or("sphere") {
+            "sphere" => [number(n, "radius", 1.0) * widest; 3],
+            "box" => {
+                let half = [number(n, "width", f64::NAN), number(n, "height", f64::NAN), number(n, "depth", f64::NAN)];
+                if turned {
+                    let radius = half.iter().zip(&scale).map(|(h, s)| (0.5 * h * s).powi(2)).sum::<f64>().sqrt();
+                    [radius; 3]
+                } else {
+                    std::array::from_fn(|i| 0.5 * half[i] * scale[i])
+                }
+            }
+            _ => return,
+        };
+        if !(voxel.is_finite() && voxel > 0.0 && size.iter().chain(&reach).chain(&centre).all(|v| v.is_finite())) {
+            return;
+        }
+        let names = [["-x", "+x"], ["-y", "+y"], ["-z", "+z"]];
+        let mut nearest: Option<(f64, &str)> = None;
+        for axis in 0..3 {
+            let cells = size[axis] / voxel;
+            // room to put the source OPEN_FACE_CELLS from both faces of this axis
+            if cells < 2.0 * OPEN_FACE_CELLS + 2.0 * reach[axis] / voxel {
+                continue;
+            }
+            let half = 0.5 * size[axis];
+            for (side, gap) in [(0, centre[axis] - reach[axis] + half), (1, half - centre[axis] - reach[axis])] {
+                let gap = gap / voxel;
+                if gap < OPEN_FACE_CELLS && nearest.is_none_or(|(least, _)| gap < least) {
+                    nearest = Some((gap, names[axis][side]));
+                }
+            }
+        }
+        if let Some((gap, face)) = nearest {
+            self.warn(
+                n,
+                "W02",
+                format!(
+                    "the edge of this pyro source is {gap:.1} cells from the open {face} face of its volume; closer \
+                     than {OPEN_FACE_CELLS} cells, the face changes the flow of the cloud (that number comes from one \
+                     plume and one face)."
+                ),
+            );
         }
     }
 
@@ -925,6 +1001,7 @@ impl<'a> Eval<'a> {
                 );
             }
             "pyroSource" | "pyroImpulse" => {
+                self.pyro_source_near_open_face(n);
                 let mesh = if a("shape") == Some("mesh") {
                     has("mesh") && contains(&self.sets.mesh_assets, a("mesh"))
                 } else {
