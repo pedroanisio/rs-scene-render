@@ -1457,9 +1457,11 @@ smoke the impact causes, and nothing is authored about it: its shape, place, tim
 temperature and expansion are derived (PYC1), the crater must exist and grow from an impact
 (PYC4), and the engine's parameters belong only to such a source (PYC2). The source is a
 sphere of the crater's radius at the impact point, active from the impact over the crater's
-formation time (an impulse: at the impact). The dust is `dustFraction` of the volume thrown
-out of the crater (`0.8 V`), injected as a volume fraction of solids, so it depends on no unit
-of mass and `medium@extinction` is, in these sources, extinction per unit volume fraction. The
+formation time (an impulse: at the impact), both starting at the first smoke step that begins after the impact, which is when the impact is known. The dust is `dustFraction` of the volume thrown
+out of the crater (`0.8 V`), injected as a volume fraction of solids spread over the cells whose centres the
+sphere covers (a sphere smaller than a voxel is widened to cover one; an impact outside the volume puts
+nothing in it), so that the dust injected is the dust and not what the grid happens to cover, it depends
+on no unit of mass and `medium@extinction` is, in these sources, extinction per unit volume fraction. The
 heat is `heatFraction` of `(1/2) m U^2 sin(theta)^(3/2)` for the body's mass, speed and angle
 from the surface; the exponent is the scaling of shock energy with the angle in the 3D
 hydrocode runs of Pierazzo and Melosh (2000, doi 10.1146/annurev.earth.28.1.141), while the
@@ -1506,7 +1508,7 @@ result depend on the order of calls. Smoke and 3D particles may read the rigid w
 of their own steps past a frame, so after answering a frame the group steps the ocean on to the
 outcomes those readers can ask for (the longest `dt` among the smoke volumes and particle
 systems that collide with the group's bodies); a group therefore simulates a little beyond the
-instant asked for. The rigid world takes a `Load3` (force and torque, scene axes and units) per
+instant asked for (in the cases tried, smoke with a `dt` of 0.2 s read the rigid world no further than the ocean had already reached, so the extension is a tested safeguard that no scene has needed). The rigid world takes a `Load3` (force and torque, scene axes and units) per
 dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
 loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
 

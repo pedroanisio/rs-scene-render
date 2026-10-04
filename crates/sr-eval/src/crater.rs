@@ -26,6 +26,24 @@ pub struct ImpactCrater {
     pub age: f64,
     pub duration: f64,
     pub spec: sr_3d::crater::Spec,
+    /// What the impact itself was, for what it causes besides the crater (smoke).
+    pub(crate) cause: ImpactCause,
+}
+
+/// The physical impact behind a crater, in SI units.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImpactCause {
+    /// Composition time of the impact.
+    pub(crate) time: f64,
+    /// The crater the law gives, metres and seconds.
+    pub(crate) law: sr_sim::cratering::Crater,
+    pub(crate) impactor: Impact,
+    /// Metres per second of the whole relative speed.
+    pub(crate) speed: f64,
+    /// Kilograms per cubic metre of the target.
+    pub(crate) target_density: f64,
+    /// Scene units per metre.
+    pub(crate) pixels_per_meter: f64,
 }
 
 /// What a crater needs, besides the impact, to grow from it. Lengths are in scene units; the
@@ -95,12 +113,13 @@ fn element_number(e: &dyn Element, name: &str) -> Option<f64> {
 
 /// The crater `impact` makes, `age` seconds after it.
 pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -> Result<ImpactCrater, String> {
+    let impactor = Impact {
+        mass: source.mass,
+        density: source.source_density,
+        normal_speed: impact.closing_speed / source.pixels_per_meter,
+    };
     let law = sr_sim::cratering::crater(
-        &Impact {
-            mass: source.mass,
-            density: source.source_density,
-            normal_speed: impact.closing_speed / source.pixels_per_meter,
-        },
+        &impactor,
         &Target {
             material: source.material,
             density: source.density,
@@ -121,7 +140,16 @@ pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -
         rim_width: (law.rim_radius - law.radius) * units,
         influence_depth: source.influence_depth.unwrap_or(2. * radius.max(depth).max(rim_height)),
     };
-    Ok(ImpactCrater { age, duration: law.duration, spec })
+    let speed = impact.relative_velocity.iter().map(|c| c * c).sum::<f64>().sqrt() / source.pixels_per_meter;
+    let cause = ImpactCause {
+        time: impact.time,
+        law,
+        impactor,
+        speed,
+        target_density: source.density.unwrap_or(source.material.table_density()),
+        pixels_per_meter: source.pixels_per_meter,
+    };
+    Ok(ImpactCrater { age, duration: law.duration, spec, cause })
 }
 
 pub fn at(node: &FrameNode) -> Result<Option<Deformation>, String> {

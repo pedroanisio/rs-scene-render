@@ -95,6 +95,11 @@ impl Material {
         }
     }
 
+    /// Kilograms per cubic metre of the target in the table.
+    pub fn table_density(self) -> f64 {
+        self.constants().4
+    }
+
     /// `(Kr, Kd)`: the radius and the depth of the bowl in units of the cube root of its
     /// volume. Water is almost a hemisphere, dry sand is shallow, the rest in between;
     /// regolith and ice take the soil values.
