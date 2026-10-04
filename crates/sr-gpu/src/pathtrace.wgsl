@@ -362,9 +362,17 @@ fn frame_of(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(t, cross(n, t), n);
 }
 
-/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe).
-fn p_spec(s: Surf) -> f32 {
-    return clamp(mix(0.25, 1.0, s.metallic) , 0.05, 1.0);
+/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe): the share
+/// of the surface's reflectance that is specular at this view angle, so that a dielectric seen at
+/// a grazing angle (water, glossy paint) spends its samples where the energy is. Any value in
+/// (0, 1) gives an unbiased estimate; a surface with no diffuse lobe (a metal) takes 1.
+fn p_spec(s: Surf, n: vec3<f32>, v: vec3<f32>) -> f32 {
+    let lum = vec3(0.2126, 0.7152, 0.0722);
+    let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+    let ls = dot(f, lum) * s.specw;
+    let ld = dot((vec3(1.0) - f) * s.albedo, lum) * (1.0 - s.metallic) * (1.0 - s.trans);
+    if (ld <= 0.0) { return 1.0; }
+    return clamp(ls / max(ls + ld, 1e-6), 0.05, 0.95);
 }
 
 fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -373,7 +381,7 @@ fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     let h = normalize(l + v);
     let nh = max(dot(n, h), 0.0);
     let vh = max(dot(v, h), 1e-4);
-    let ps = p_spec(s);
+    let ps = p_spec(s, n, v);
     return ps * d_ggx(nh, s.a) * nh / (4.0 * vh) + (1.0 - ps) * nl / PI;
 }
 
@@ -381,7 +389,7 @@ fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let tbn = frame_of(n);
     let u1 = rnd();
     let u2 = rnd();
-    if (rnd() < p_spec(s)) {
+    if (rnd() < p_spec(s, n, v)) {
         // GGX half vector
         let a2 = s.a * s.a;
         let ct = sqrt((1.0 - u1) / (1.0 + (a2 - 1.0) * u1));
