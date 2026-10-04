@@ -194,6 +194,9 @@ pub struct Ocean {
     step: u64,
     checkpoints: Vec<(u64, State)>,
     checkpoint_capacity: usize,
+    /// Steps between checkpoints: one second of simulated time at first, doubled
+    /// whenever the budget fills.
+    every: u64,
     frame: Frame,
     ends: Option<Ends>,
     last_substeps: u64,
@@ -284,6 +287,7 @@ impl Ocean {
         let mut work = Work { remaining: spec.max_work, substeps: 0 };
         advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
+        let spec_dt = spec.dt;
         let checkpoint_capacity = (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128)).min(4096);
         Ok(Self {
             spec,
@@ -294,6 +298,7 @@ impl Ocean {
             step: 0,
             checkpoints: Vec::new(),
             checkpoint_capacity,
+            every: (1.0 / spec_dt).ceil().clamp(1.0, 1e12) as u64,
             frame,
             ends: None,
             last_substeps: 0,
@@ -319,6 +324,24 @@ impl Ocean {
             return Err(Error::Invalid("at_driven needs Spec::moving_bed"));
         }
         self.seek(time, Some(driver))
+    }
+
+    /// Keeps `state` as the checkpoint of `step` when the cadence asks for it,
+    /// thinning the older ones when the budget is full.
+    fn remember(&mut self, step: u64, state: &State) {
+        if self.checkpoint_capacity == 0 || step % self.every != 0 || self.checkpoints.iter().any(|(k, _)| *k == step) {
+            return;
+        }
+        while self.checkpoints.len() >= self.checkpoint_capacity {
+            self.every = self.every.saturating_mul(2);
+            let every = self.every;
+            self.checkpoints.retain(|(k, _)| k % every == 0);
+            if step % every != 0 {
+                return;
+            }
+        }
+        let at = self.checkpoints.partition_point(|(k, _)| *k < step);
+        self.checkpoints.insert(at, (step, state.clone()));
     }
 
     fn sample(&self, driver: &mut dyn Driver, time: f64, out: &mut Forcing) -> Result<(), Error> {
@@ -410,6 +433,7 @@ impl Ocean {
                     &mut scratch,
                 )?,
             }
+            self.remember(k, &state);
         }
         let mut sampled = state.clone();
         let mut frame_bed = Vec::new();
@@ -433,12 +457,6 @@ impl Ocean {
         }
         let mut frame = publish(&sampled, self.spec.dry_tolerance)?;
         frame.bed = frame_bed;
-        if self.checkpoint_capacity > 0 && target > 0 && !self.checkpoints.iter().any(|(k, _)| *k == target) {
-            if self.checkpoints.len() == self.checkpoint_capacity {
-                self.checkpoints.remove(0);
-            }
-            self.checkpoints.push((target, state.clone()));
-        }
         self.canonical = state;
         self.step = target;
         self.frame = frame;

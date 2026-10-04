@@ -939,7 +939,8 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `seed` | 0 | Independent full unsigned 64-bit seed |
 | `maxParticles` | 10000 | Live count ceiling, at most 1,000,000; overflow is an error |
 | `maxMemoryMiB` | 64 | Independent state/workspace ceiling, at most 4096 MiB |
-| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth), and tracers keep no checkpoints, so every request that goes back in time replays from zero: a cold seek to 6 s on 518,400 cells with a 1/24 s step costs about 600 million units |
+| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth). The tracers keep checkpoints within their own byte budget, one per second of simulated time at first and every second, fourth, eighth... second when the budget fills, so a request that goes back in time replays from the nearest checkpoint at or before it; a cold seek to 6 s on 518,400 cells with a 1/24 s step still costs about 600 million units |
+| `checkpointMemoryMiB` | 64 | Byte ceiling of the retained tracer checkpoints, 0 to 4096 MiB, separate from `maxMemoryMiB`; zero keeps none, so every request that goes back in time replays from zero |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
@@ -2104,6 +2105,7 @@ Also includes `pyroShape`, inventoried below.
 | `maxParticles` | xs:positiveInteger; maxInclusive=1000000 | Default `10000` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `64` |
 | `maxWork` | xs:positiveInteger; maxInclusive=1000000000000 | Default `100000000` |
+| `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
 

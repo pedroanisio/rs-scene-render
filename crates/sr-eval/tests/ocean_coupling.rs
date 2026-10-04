@@ -262,3 +262,72 @@ fn colliders_that_are_neither_bed_nor_body_are_rejected_when_the_scene_loads() {
     };
     assert!(format!("{error:?}").contains("OCN6"), "{error:?}");
 }
+
+/// Wall time of the ocean stage (solver, foam and surface) for a forward seek and a
+/// backward one on the target-resolution ocean of the hero scene, alone, with and
+/// without the cratered seabed driving its bed. Run on request:
+/// `cargo test --release -p sr-eval --test ocean_coupling -- --ignored --nocapture ocean_replay`.
+#[test]
+#[ignore = "timing measurement"]
+fn ocean_replay_seconds_at_target_resolution() {
+    let full = include_str!("../../../examples/cinematic-impact/hero-hires.scene.xml");
+    let a = full.find("<ocean").unwrap();
+    let ocean = &full[a..full.find("</ocean>").unwrap() + "</ocean>".len()];
+    let seabed = &full[full.find("<object3D id=\"seabed\"").unwrap()..];
+    let seabed = &seabed[..seabed.find("</object3D>").unwrap() + "</object3D>".len()];
+    let no_foam = {
+        let w = ocean.find("<whitewater").unwrap();
+        format!("{}{}", &ocean[..w], &ocean[ocean[w..].find("/>").unwrap() + w + 2..])
+    };
+    for (name, colliders, foam) in [
+        ("static bed", "", true),
+        ("static bed, no foam", "", false),
+        ("cratered seabed", " colliders=\"seabed\"", true),
+    ] {
+        let ocean = if foam { ocean } else { no_foam.as_str() };
+        let ocean = ocean.replacen("<ocean id=\"sea\"", &format!("<ocean id=\"sea\"{colliders}"), 1);
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><materials><material id="water" baseColor="#06212C"/><material id="bed" baseColor="#756653"/></materials><composition>{seabed}{ocean}</composition></scene>"##
+        );
+        let ev = evaluator(&xml);
+        let seconds = |t: f64| {
+            let frame = ev.evaluate(t);
+            assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+            frame.sim_seconds.ocean
+        };
+        let forward: f64 = (1..=72).map(|k| seconds(k as f64 / 24.0)).sum();
+        let back = seconds(1.5);
+        let again = seconds(3.0);
+        println!(
+            "REPLAY {name}: 72 sequential frames to 3.0 s took {forward:.1} s in the ocean stage; a backward seek to 1.5 s {back:.2} s; forward to 3.0 s again {again:.2} s"
+        );
+    }
+}
+
+#[test]
+fn whitewater_checkpoint_budget_never_changes_the_result_of_a_replay() {
+    let scene = |budget: &str| {
+        format!(
+            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+              <ocean id="sea" width="64" depth="64" cellSize="1" bottomDepth="6" dt="0.0416666666666667">
+                <waterImpulse time="0.2" radius="8" amplitude="-4"/>
+                <whitewater emissionRate="20" threshold="0.05" maxParticles="100000" lifetime="2" {budget}/>
+              </ocean></composition></scene>"#
+        )
+    };
+    let run = |budget: &str| {
+        let ev = evaluator(&scene(budget));
+        let first = ev.evaluate(3.0);
+        assert!(first.problems.is_empty(), "{:?}", first.problems);
+        ev.evaluate(1.0);
+        let again = ev.evaluate(3.0);
+        assert!(again.problems.is_empty(), "{:?}", again.problems);
+        let foam = sea(&again).whitewater.clone().unwrap();
+        assert_eq!(sea(&first).whitewater.as_ref(), Some(&foam));
+        (foam, sea(&again).key)
+    };
+    let (default, key) = run("");
+    assert!(!default.particles.is_empty(), "the test needs foam to mean anything");
+    assert_eq!(run(r#"checkpointMemoryMiB="0""#), (default.clone(), key));
+    assert_eq!(run(r#"checkpointMemoryMiB="1""#), (default, key));
+}

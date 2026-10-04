@@ -594,3 +594,40 @@ fn body_vectors_are_charged_to_resident_memory() {
     assert!(make(true, moving + 72 * n).is_ok());
     assert!(matches!(make(true, moving + 72 * n - 1), Err(Error::Limit(_))));
 }
+
+/// Substeps a seek to `t` integrates after the solver has run on to 6 s, with room
+/// for `states` checkpoints.
+fn backward_substeps(states: usize, order: Order) -> (u64, sr_sim::ocean::Frame) {
+    let cells = [24, 24];
+    let state_bytes = 24 * 24 * 24 + 128;
+    let mut s =
+        Spec { origin: [-6.0, -6.0], dt: 1.0 / 20.0, checkpoint_bytes: states * state_bytes, ..spec(cells, order) };
+    s.max_work = 1 << 40;
+    let initial = vec![Cell { depth: 1.0, velocity: [0.0; 2] }; 24 * 24];
+    let mut ocean = Ocean::new(s, vec![1.0; 24 * 24], initial, vec![]).unwrap();
+    let mut driver = crater(cells, 0.5, 0.4, 1.5, 4.0, 1.0);
+    for k in 1..=120 {
+        ocean.at_driven(k as f64 / 20.0, &mut driver).unwrap();
+    }
+    let frame = ocean.at_driven(3.35, &mut driver).unwrap().clone();
+    assert!(ocean.checkpoint_bytes() <= states * state_bytes);
+    (ocean.last_seek_substeps(), frame)
+}
+
+/// A backward seek restarts from a checkpoint about a second apart, not from the
+/// most recent targets: the first second of simulated time is not replayed again.
+#[test]
+fn a_backward_seek_restarts_from_the_nearest_second_checkpoint() {
+    for order in ORDERS {
+        let (cold, expected) = backward_substeps(0, order);
+        for states in [3, 7, 40] {
+            let (warm, frame) = backward_substeps(states, order);
+            assert_eq!(frame, expected, "{order:?}, {states} states: replay must be bit-identical");
+            println!("CHECKPOINT {order:?} {states} states: {warm} substeps against {cold} cold");
+            // Room for six states keeps every second; three thin them to every other
+            // second, so the nearest one to 3.35 s is at 2 s instead of 3 s.
+            let factor = if states >= 7 { 4 } else { 2 };
+            assert!(warm * factor < cold, "{order:?}, {states} states: {warm} substeps against {cold}");
+        }
+    }
+}
