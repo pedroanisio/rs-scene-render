@@ -920,8 +920,9 @@ dragged by the gas inside the volume's domain and by still air outside it with t
 gas fades linearly to rest across one cell outside the domain, so what the particle feels has no jump at the
 boundary, for an open volume and for a closed one), and not at all with `drag` zero. The position is taken to
 the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
-time the gas is the linear interpolation of the two smoke steps around the instant (the particle's canonical steps
-are the only ones that ask, so motion-blur samples read nothing new). The smoke is simulated as far as the
+time the gas is the linear interpolation of the two smoke steps around the instant (a frame between two canonical steps takes the particle on by a partial segment of its step, which asks a handful of times per
+particle (two to five measured) from the step's own context: no smoke step is simulated and no field fetched, so
+motion-blur samples add queries and no simulation). The smoke is simulated as far as the
 particles need, and first in the frame when a document names a gas (the others keep their order), so that the
 particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
 past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh

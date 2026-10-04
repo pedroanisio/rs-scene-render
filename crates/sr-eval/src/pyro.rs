@@ -23,6 +23,13 @@ pub struct SimVolume {
 
 thread_local! {
     static EXPORTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Smoke steps simulated by native smoke evaluation on the calling thread so far, replays included.
+#[doc(hidden)]
+pub fn steps_on_this_thread() -> u64 {
+    STEPS.with(std::cell::Cell::get)
 }
 
 /// Volume exports made by native smoke evaluation on the calling thread so far.
@@ -44,6 +51,16 @@ struct Runtime {
     last_revision: Option<u64>,
     /// Whether a source or impulse comes from a crater, whose impact the rigid world finds.
     craters: bool,
+    /// The last states a reader of the gas has fetched (at most two, by step): a reader takes the timeline a step
+    /// past the frame's own volume, and the frame must be able to export the step it is at without the timeline
+    /// going back to a checkpoint and replaying.
+    hold: Vec<Held>,
+}
+
+struct Held {
+    step: u64,
+    revision: u64,
+    state: pyro::State,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -133,6 +150,7 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
         last: None,
         last_revision: None,
         craters,
+        hold: Vec::new(),
     })
 }
 
@@ -311,6 +329,7 @@ fn state_at<'r>(
     let volume_start = p.nodes[node as usize].start;
     timeline
         .at_with_revision(source_time, &mut |_, time, state| {
+            STEPS.with(|count| count.set(count.get() + 1));
             let (t, clocks) = crate::sim::source_sample(p, node, time + p.nodes[node as usize].start, at);
             let mut frame = if clocks.is_empty() {
                 graphs.at(t)
@@ -389,7 +408,11 @@ impl Sims {
         let runtime = self.runtimes.entry(id.clone()).or_insert_with(|| build(p, node, e));
         let runtime = runtime.as_mut().map_err(|e| e.clone())?;
         let source_time = step as f64 * runtime.dt;
-        let (state, _) = state_at(
+        let target = pyro::fixed_step_index(source_time.max(0.0) / runtime.dt);
+        if let Some(held) = runtime.hold.iter().find(|h| h.step == target) {
+            return Ok(Arc::new(held.state.gas()));
+        }
+        let (state, revision) = state_at(
             &mut runtime.timeline,
             &runtime.meshes,
             &mut runtime.colliders,
@@ -404,7 +427,15 @@ impl Sims {
             fields,
             physics,
         )?;
-        Ok(Arc::new(state.gas()))
+        let gas = Arc::new(state.gas());
+        // keep the state: the frame's own volume wants the step the reader started at, and the timeline is now
+        // past it
+        runtime.hold.push(Held { step: target, revision, state: state.clone() });
+        while runtime.hold.len() > 2 {
+            let oldest = (0..runtime.hold.len()).min_by_key(|&k| runtime.hold[k].step).expect("a held state");
+            runtime.hold.remove(oldest);
+        }
+        Ok(gas)
     }
 
     pub(crate) fn apply(
@@ -429,21 +460,25 @@ impl Sims {
             let runtime = self.runtimes.entry(id.clone()).or_insert_with(|| build(p, node, e));
             let result = (|| -> Result<Arc<SimVolume>, String> {
                 let runtime = runtime.as_mut().map_err(|e| e.clone())?;
-                let (state, revision) = state_at(
-                    &mut runtime.timeline,
-                    &runtime.meshes,
-                    &mut runtime.colliders,
-                    runtime.dt,
-                    runtime.craters,
-                    p,
-                    node,
-                    &id,
-                    g.time,
-                    source_time,
-                    graphs,
-                    fields,
-                    physics.as_deref_mut(),
-                )?;
+                let target = pyro::fixed_step_index(source_time.max(0.0) / runtime.dt);
+                let (state, revision) = match runtime.hold.iter().find(|h| h.step == target) {
+                    Some(held) => (&held.state, held.revision),
+                    None => state_at(
+                        &mut runtime.timeline,
+                        &runtime.meshes,
+                        &mut runtime.colliders,
+                        runtime.dt,
+                        runtime.craters,
+                        p,
+                        node,
+                        &id,
+                        g.time,
+                        source_time,
+                        graphs,
+                        fields,
+                        physics.as_deref_mut(),
+                    )?,
+                };
                 if runtime.last_revision == Some(revision) {
                     if let Some(last) = &runtime.last {
                         return Ok(last.clone());

@@ -1657,7 +1657,9 @@ impl Timeline {
     }
 }
 
-fn fixed_step_index(ratio: f64) -> u64 {
+/// The fixed step a time at `ratio` steps from the start falls at, correcting only the roundoff at exact
+/// boundaries, as [`Timeline`] does when it seeks.
+pub fn fixed_step_index(ratio: f64) -> u64 {
     let nearest = ratio.round();
     (if (ratio - nearest).abs() <= f64::EPSILON * 4.0 * ratio.max(1.0) { nearest } else { ratio.floor() }) as u64
 }

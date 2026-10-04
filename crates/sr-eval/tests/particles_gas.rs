@@ -216,3 +216,94 @@ fn cost_of_the_gas_per_particle_step() {
         1e9 * (with - idle).max(0.0) / queries
     );
 }
+
+#[test]
+fn a_gas_is_found_in_the_scope_of_the_emitter_and_only_there() {
+    // a symbol holding a volume and an emitter that names it, instantiated twice: each instance's emitter reads its own
+    // volume, and the same document gives the same particle in both
+    let inner = Setup::default().xml();
+    let (open, end) =
+        (inner.find("<composition>").unwrap() + "<composition>".len(), inner.find("</composition>").unwrap());
+    let body = &inner[open..end];
+    let wrapped = format!(
+        "{}<symbols><symbol id=\"assembly\" width=\"64\" height=\"64\">{body}</symbol></symbols><composition><instance id=\"a\" symbol=\"assembly\"/><instance id=\"b\" symbol=\"assembly\" x=\"100\"/>{}",
+        &inner[..inner.find("<composition>").unwrap()],
+        &inner[end..]
+    );
+    let ev = evaluator(&wrapped);
+    let frame = ev.evaluate(1.5);
+    assert!(frame.problems.is_empty() && frame.failures.is_empty(), "{:?} {:?}", frame.problems, frame.failures);
+    let moved: Vec<f64> = ["a/dust", "b/dust"]
+        .iter()
+        .map(|id| {
+            let dust = frame.nodes.iter().find(|n| &*n.id == *id).unwrap_or_else(|| panic!("no {id}"));
+            dust.particles3d.as_ref().unwrap().frame.particles[0].velocity[0]
+        })
+        .collect();
+    assert!(
+        moved[0] > 1.0 && (moved[0] - moved[1]).abs() < 1e-9 * moved[0],
+        "each instance drags its own particle: {moved:?}"
+    );
+    // a gas that is only inside a symbol is not instantiated in the scope of an emitter outside it
+    // the volume inside a symbol that nothing instantiates, the emitter outside it
+    let volume_start = inner.find("<object3D id=\"cloud\"").unwrap();
+    let volume_end = inner.find("</object3D>").unwrap() + "</object3D>".len();
+    let volume = &inner[volume_start..volume_end];
+    let outside = format!(
+        "{}<symbols><symbol id=\"s\" width=\"8\" height=\"8\">{volume}</symbol></symbols><composition>{}",
+        &inner[..inner.find("<composition>").unwrap()],
+        &inner[volume_end..]
+    );
+    let message = match sr_model::load_str(&outside, &sr_model::LoadOptions::without_assets()) {
+        Err(error) => format!("the document: {error}"),
+        Ok(doc) => match Evaluator::new(&doc, &Default::default()) {
+            Err(error) => format!("the evaluator: {error}"),
+            Ok(_) => panic!("a gas that is not in the scope of its emitter must be refused"),
+        },
+    };
+    println!("GAS scope: {message}");
+    assert!(message.contains("cloud") || message.contains("gas"), "{message}");
+}
+
+#[test]
+fn a_frame_between_two_canonical_steps_asks_for_a_partial_segment_and_simulates_nothing() {
+    let ev = Setup::default().evaluator();
+    let count = sr_eval::particles3d::gas_queries_on_this_thread;
+    let steps = sr_eval::pyro::steps_on_this_thread;
+    // blur samples go forward through the shutter: the first one simulates up to its step
+    let _ = particle(&ev, 1.46);
+    let smoke = steps();
+    assert!(count() > 0);
+    // a later sample in the same canonical step takes the one particle on by a partial segment of it: a handful of
+    // queries (two for a short span, five when the span is split) from the step's own context, no smoke step
+    // simulated and no field fetched; the same sample again is the same bits
+    for t in [1.47, 1.48, 1.49] {
+        let before = count();
+        let first = particle(&ev, t);
+        let asked = count() - before;
+        assert!((1..=8).contains(&asked), "t = {t}: {asked} queries for one particle");
+        assert_eq!(steps(), smoke, "t = {t}: no smoke step simulated");
+        assert_eq!(bits(&first), bits(&particle(&ev, t)), "t = {t}");
+    }
+}
+
+#[test]
+fn a_volume_that_moves_drags_the_particles_where_it_is_when_they_ask() {
+    // the emitter stands at x = 20, outside a volume 16 across at the origin; the volume is carried to x = 20 by 0.5 s
+    let xml = |moving: bool| {
+        let setup = Setup { x: 20.0, ..Setup::default() }.xml();
+        if moving {
+            setup.replace(
+                r#"<object3D id="cloud" primitive="volume">"#,
+                r#"<object3D id="cloud" primitive="volume"><animate property="x"><key time="0" value="0"/><key time="0.4" value="20"/></animate>"#,
+            )
+        } else {
+            setup
+        }
+    };
+    let (still, moving) = (evaluator(&xml(false)), evaluator(&xml(true)));
+    // the gas is an impulse of the smoke, which the carried volume takes along as it was made in its own axes
+    assert_eq!(particle(&still, 1.5).1, [0.0; 3], "the volume at the origin never meets the particle");
+    let v = particle(&moving, 1.5).1;
+    assert!(v[0] > 1.0, "the volume carried to the particle drags it: {v:?}");
+}

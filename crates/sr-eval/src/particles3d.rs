@@ -31,6 +31,17 @@ struct CraterBurst {
     ejecta: Option<Arc<Vec<Birth>>>,
 }
 
+thread_local! {
+    static GAS_QUERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Gas queries made by 3D particle evaluation on the calling thread so far. A frame whose particle state was
+/// already simulated makes none.
+#[doc(hidden)]
+pub fn gas_queries_on_this_thread() -> u64 {
+    GAS_QUERIES.with(std::cell::Cell::get)
+}
+
 /// The smoke that drags an emitter's particles, and the gas of the steps it has asked for lately.
 struct GasRt {
     /// Effective id of the smoke volume's object.
@@ -277,10 +288,10 @@ impl SceneDriver<'_, '_> {
                 // the smoke steps that cover the particle step, from the one at or before its start to the one
                 // after its end
                 let first = (source0.max(0.0) / clock.dt + 1e-9).floor() as u64;
-                let last = ((source0 + rate * self.step).max(0.0) / clock.dt + 1e-9).floor() as u64 + 1;
+                let last = (((source0 + rate * self.step).max(0.0) / clock.dt - 1e-9).ceil() as u64).max(first);
                 let keep = (last - first + 1) as usize + 2;
                 let mut snapshots = Vec::new();
-                for k in first..=last.max(first) {
+                for k in first..=last {
                     snapshots.push((k, self.gas_step(&frame, i, k, keep)?));
                 }
                 Some(GasAt { t0, source0, rate, dt: clock.dt, world, inverse, snapshots })
@@ -297,6 +308,7 @@ impl SceneDriver<'_, '_> {
     /// interpolation in time of the two smoke steps around the instant, each sampled in the volume's own axes.
     /// A volume that is not in the frame is no gas.
     fn gas_velocity(&mut self, time: f64, position: [f64; 3]) -> Result<[f64; 3], Error> {
+        GAS_QUERIES.with(|count| count.set(count.get() + 1));
         let slot = self.gas_context(time)?;
         let Some(at) = self.gas_at[slot].1.as_ref() else { return Ok([0.0; 3]) };
         let ratio = (at.source0 + at.rate * (time - at.t0)).max(0.0) / at.dt;
