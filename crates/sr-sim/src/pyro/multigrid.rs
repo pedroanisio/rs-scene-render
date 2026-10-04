@@ -23,6 +23,64 @@
 //! * Reductions sum fixed blocks of `BLOCK` consecutive cells serially in index
 //!   order, then combine the partial sums pairwise (0+1, 2+3, ...) in a fixed
 //!   binary tree. No value depends on the thread count.
+//!
+//! Further details that also define the bits:
+//!
+//! * Solver loop (in `project`): zero initial pressure; `z = M r` with `M` the
+//!   V-cycle above; `alpha = rz / (p . Ap)`, `beta = rz_next / rz`; the
+//!   convergence measure is `sqrt(sum(r^2) / fluid cells) / h^2` and the loop ends
+//!   when it is at most `pressure_tolerance` or after `pressure_iterations`
+//!   iterations. `divergence_before`, `rz`, `p . Ap`, the residual norm and
+//!   `divergence_after` are all block reductions; a solid cell adds 0.0 to
+//!   `divergence_after`. A residual already within tolerance skips the first
+//!   V-cycle (this changes no value).
+//! * The operator is the one the Jacobi solver uses: diagonal = fluid neighbours
+//!   plus open-boundary faces, off-diagonal -1 per open fluid face.
+//! * Consistency: before solving, the mean of the right-hand side over each
+//!   connected fluid component with no zero-pressure face (a closed domain, or a
+//!   pocket sealed by solids) is subtracted from that component's cells, summing
+//!   serially in index order. Components are labelled over the +x, +y, +z open
+//!   faces and a component is grounded when some cell's diagonal exceeds its
+//!   number of fluid neighbours. The mean that was removed stays in the
+//!   divergence measured after the solve, so an inconsistent component still
+//!   fails the tolerance check with `Error::Pressure`. `divergence_before` is
+//!   measured before the removal.
+//! * Cells with a zero diagonal (solid cells and fluid cells with no open face)
+//!   have no unknown: the smoother leaves them at 0 and the preconditioner maps
+//!   the residual to itself on them.
+//! * The coarse correction is scaled by `OVERCORRECTION` at every level, not only
+//!   the finest, and the coarse right-hand side of a level is the plain sum of
+//!   the child residuals.
+//! * Direct level: dense Cholesky of the free unknowns (all cells with a nonzero
+//!   diagonal except the pins). The pin of a floating component is its
+//!   lowest-index cell. A pivot that is not finite or is at most
+//!   `1e-10 * diagonal` drops that unknown (it is treated as pinned), so the
+//!   solve never yields a NaN.
+//! * Hierarchy: levels are built while the current level has more than
+//!   `DIRECT_CELLS` cells; a grid with at most that many cells is solved directly
+//!   with no multigrid levels.
+//!
+//! Parameter experiment behind `OVERCORRECTION = 1.5` and V(1,1). Impact scene
+//! (hero domain, open edges, impulse at step 3), 8 threads, load average ~7 so
+//! times are +-30%. Cells are `iterations of CG / ms of the pressure stage`:
+//!
+//! ```text
+//!                       128^3 impulse  128^3 regime  192^3 impulse  192^3 regime
+//! V(1,1) alpha 1.0        22 / 287       10 / 197      28 / 1187      14 / 699
+//! V(1,1) alpha 1.25       16 / 216        7 / 131      19 / 1014      10 / 629
+//! V(1,1) alpha 1.5        14 / 233        7 / 157      16 /  784       9 / 595  <- chosen
+//! V(1,1) alpha 1.75       13 / 242        7 / 158      15 /  825       9 / 618
+//! V(1,1) alpha 1.9        14 / 261        8 / 151      15 / 1238       9 / 734
+//! V(2,2) alpha 1.5         9 / 287        5 / 192      10 / 1139       5 / 649
+//! W(1,1) alpha 1.5         7 / 187        4 / 143       7 /  802       4 / 568
+//! W(1,1) alpha 1.25        8 / 178        5 / 125       8 /  799       5 / 565
+//! ```
+//!
+//! V(1,1) at 1.5 has the lowest or tied pressure time with margin below 20
+//! iterations (1.25 reaches 19); V(2,2) and W only trade iterations for cost per
+//! iteration. A trilinear-interpolation Galerkin hierarchy was not built: the
+//! criterion is already met, and it needs 27 coefficients per coarse cell and a
+//! triple product every step, because the operator changes with the solids.
 
 use super::{coords, LIGHT};
 use rayon::prelude::*;

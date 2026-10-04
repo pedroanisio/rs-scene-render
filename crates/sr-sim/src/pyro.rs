@@ -16,6 +16,7 @@ use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+mod maccormack;
 pub mod mesh;
 mod multigrid;
 
@@ -28,9 +29,13 @@ const LIGHT: usize = 8192;
 #[cfg(test)]
 mod atomicity;
 #[cfg(test)]
+mod detail;
+#[cfg(test)]
 mod determinism;
 #[cfg(test)]
 mod pockets;
+#[cfg(test)]
+mod sampling;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -48,6 +53,20 @@ pub enum Error {
 pub enum Boundary {
     Closed,
     Open,
+}
+
+/// Transport scheme for density, temperature and velocity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Advection {
+    /// Midpoint semi-Lagrangian: unconditionally stable, numerically diffusive.
+    /// The reference results of every release before `MacCormack`.
+    #[default]
+    SemiLagrangian,
+    /// Semi-Lagrangian with a backward-forward error correction (Selle et al.,
+    /// 2008), limited to the local extrema of the interpolation stencil, and
+    /// plain semi-Lagrangian where a collider cuts a trace short. It keeps
+    /// finer detail at the same resolution and cannot create new extrema.
+    MacCormack,
 }
 
 /// Preconditioner of the pressure conjugate-gradient solve.
@@ -87,6 +106,7 @@ pub struct Spec {
     /// RMS divergence error allowed, in 1/second.
     pub pressure_tolerance: f64,
     pub solver: PressureSolver,
+    pub advection: Advection,
     /// Conservative resident state plus step workspace budget, before allocation.
     pub max_bytes: usize,
 }
@@ -109,6 +129,7 @@ impl Default for Spec {
             pressure_iterations: 200,
             pressure_tolerance: 1e-6,
             solver: PressureSolver::Jacobi,
+            advection: Advection::SemiLagrangian,
             max_bytes: 256 << 20,
         }
     }
@@ -559,11 +580,17 @@ impl Field<'_> {
         if (0..3).any(|a| p[a] < 0.0 || p[a] >= self.cells[a] as f64) {
             return false;
         }
-        self.solid[index(p.map(|v| v.floor() as usize), self.cells)]
+        // p is within [0, cells), so truncation is the floor.
+        self.solid[index(p.map(|v| v as usize), self.cells)]
     }
 
     fn trace(&self, p: [f64; 3], dt: f64) -> Result<[f64; 3], Error> {
-        let v = self.velocity_grid(p);
+        self.trace_from(p, self.velocity_grid(p), dt).map(|(end, _)| end)
+    }
+
+    /// Midpoint trace of `p` back by `dt` (forward when negative), given the
+    /// velocity `v` at `p`. The flag reports a trace cut short by a collider.
+    fn trace_from(&self, p: [f64; 3], v: [f64; 3], dt: f64) -> Result<([f64; 3], bool), Error> {
         let mid = std::array::from_fn(|a| p[a] - 0.5 * dt * v[a] / self.h);
         let v = self.velocity_grid(mid);
         let mut end = std::array::from_fn(|a| p[a] - dt * v[a] / self.h);
@@ -585,14 +612,27 @@ impl Field<'_> {
         for i in 1..=steps as usize {
             let q = std::array::from_fn(|a| p[a] + (end[a] - p[a]) * i as f64 / steps);
             if self.solid_at(q) {
-                return Ok(previous);
+                return Ok((previous, true));
             }
             previous = q;
         }
-        Ok(end)
+        Ok((end, false))
     }
 }
 
+/// `v.floor() as i64` for finite `v` of moderate size, without a libm call (the
+/// baseline x86-64 target has no rounding instruction). Truncation, then one step
+/// down when it rounded up, is exactly the floor.
+fn floor_i64(v: f64) -> i64 {
+    let truncated = v as i64;
+    truncated - i64::from((truncated as f64) > v)
+}
+
+/// Trilinear sample of a cell- or face-centred array. The result is the left to
+/// right sum, starting from +0.0, of `weight * value` over the eight corners in
+/// x-fastest order, with `weight = (wx * wy) * wz`; corners outside the array
+/// contribute `background`. The in-range path below evaluates exactly that
+/// expression without per-corner range checks.
 fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary, background: f64) -> f64 {
     if !finite3(p) {
         return background;
@@ -604,8 +644,25 @@ fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary,
             return background;
         }
     }
-    let lo = p.map(|v| v.floor() as i64);
+    let lo = p.map(floor_i64);
     let f: [f64; 3] = std::array::from_fn(|a| p[a] - lo[a] as f64);
+    let w: [[f64; 2]; 3] = std::array::from_fn(|a| [1.0 - f[a], f[a]]);
+    if (0..3).all(|a| lo[a] >= 0 && lo[a] + 1 < dims[a] as i64) {
+        let (sy, sz) = (dims[0], dims[0] * dims[1]);
+        let base = (lo[2] as usize * dims[1] + lo[1] as usize) * dims[0] + lo[0] as usize;
+        let corner = |bit: usize| values[base + (bit & 1) + ((bit >> 1) & 1) * sy + ((bit >> 2) & 1) * sz];
+        let weight = |bit: usize| (w[0][bit & 1] * w[1][(bit >> 1) & 1]) * w[2][(bit >> 2) & 1];
+        let mut result = 0.0;
+        result += weight(0) * corner(0);
+        result += weight(1) * corner(1);
+        result += weight(2) * corner(2);
+        result += weight(3) * corner(3);
+        result += weight(4) * corner(4);
+        result += weight(5) * corner(5);
+        result += weight(6) * corner(6);
+        result += weight(7) * corner(7);
+        return result;
+    }
     let mut result = 0.0;
     for bit in 0..8 {
         let q: [i64; 3] = std::array::from_fn(|a| lo[a] + ((bit >> a) & 1));
@@ -706,10 +763,15 @@ impl Simulation {
         }
         let count =
             s.cells.iter().try_fold(1usize, |v, n| v.checked_mul(*n)).ok_or(Error::Limit("cell count overflow"))?;
-        // Includes two states, advection copies, face arrays, PCG vectors, curl,
-        // collider velocities, allocator overhead and transient volume metadata.
+        // Worst-case live bytes per cell during one step, with every page touched:
+        // committed state 89 (density 8, temperature 8, velocity ~24, solid 1, two
+        // solid-velocity arrays 48) + working state 89 + pressure workspace 65 (six
+        // CG vectors, open-face mask, divergence target) + ~26 for the multigrid
+        // hierarchy, level vectors and component labels = ~270, plus ~20% for
+        // allocator overhead and transient volume metadata. Measured peak RSS of the
+        // impact scene without colliders is 155-256 B per cell.
         let bytes =
-            count.checked_mul(512).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
+            count.checked_mul(320).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
             return Err(Error::Limit("grid and step workspace memory budget"));
         }
@@ -785,7 +847,7 @@ impl Simulation {
         boundaries(&mut state);
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
-        advect(&mut state, dt, self.spec.dissipation, self.spec.cooling, &mut profile)?;
+        advect(&mut state, dt, &self.spec, &mut profile)?;
         profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
@@ -899,7 +961,8 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
 /// out of `s` and sampled in place; fresh arrays are written, so no copy of the
 /// state is made. Solid cells keep the cleared values the collider stage set.
 /// On error `s` is left without fields; callers discard it.
-fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut StepProfile) -> Result<(), Error> {
+fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Result<(), Error> {
+    let (dissipation, cooling) = (spec.dissipation, spec.cooling);
     let started = Instant::now();
     let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
     let old_density = std::mem::take(&mut s.density);
@@ -913,6 +976,13 @@ fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64, profile: &mut 
     let solid = &s.solid;
     let old =
         Field { cells, h: s.h, boundary, velocity: [&old_velocity[0], &old_velocity[1], &old_velocity[2]], solid };
+    if spec.advection == Advection::MacCormack {
+        let scalars =
+            maccormack::Scalars { density: &old_density, temperature: &old_temperature, ambient, decay, cool };
+        maccormack::advect(&old, scalars, (&mut s.density, &mut s.temperature, &mut s.velocity), dt)?;
+        boundaries(s);
+        return Ok(());
+    }
     let results = s
         .density
         .par_chunks_mut(HEAVY)
