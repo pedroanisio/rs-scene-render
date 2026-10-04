@@ -2795,6 +2795,22 @@
       ],
       "validation": "hero-hires.scene.xml changes only resolution, solver and budget attributes of hero.scene.xml: a 128x104x128 plume (multigrid, MacCormack, half-voxel march step), a 720x720 second-order ocean and 100000 ejecta; scene-render validate reports no errors or warnings for both. Evaluated without a GPU at 0.5, 1.0, 1.5 and 3.0 s: no problem reported, plume density non-zero after the impact, ocean and 100000 particles present, and a backward seek from 3.0 s to 1.5 s reproduces the ocean, particles and volume key of the first visit; a seek to 6.0 s completes, and a cold seek to 6.0 s completed without problems. Measured under load: 16.0, 16.7, 24.7 and 62.8 s for the four instants advanced in order, 22.8 s for the backward seek, 170.7 s from there to 6.0 s, 278.8 s for the cold seek; peak resident memory 2302 MiB. The run exposed three budget needs now declared in the scene (ocean surface memory and the work allowances of the ocean and its whitewater).",
       "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The test is ignored by default because it takes minutes and gigabytes. No GPU render of the scene was run for this entry, so image quality, render time and GPU memory at this resolution are unmeasured. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Ejecta thrown out by an impact: driver births in the 3D particle solver and burst@crater",
+      "evidence": [
+        "crates/sr-sim/src/particles3d.rs",
+        "crates/sr-sim/tests/particles3d_births.rs",
+        "crates/sr-sim/src/cratering/ejecta.rs",
+        "crates/sr-sim/tests/ejecta.rs",
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/tests/crater_ejecta.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/valid/ejecta-crater.scene.xml"
+      ],
+      "validation": "The 3D particle Driver can give, per fixed step window, births with exact instant, position, velocity and mass (mass kept in the particle); the 7 tests of particles3d_births cover birth at the exact instant, reverse replay and checkpoint budgets, ids and order among rate and burst births, no change for emitters that give none, an error and not a truncation above maxParticles with the published frame kept, windows asked once going forward, and births outside the window refused. A burst with crater@id (P3D7 to P3D10 in Schematron and Rust, 6 new corpus documents, oracle agreement) is evaluated from the impact the rigid world found: the 7 tests of crater_ejecta check that nothing is thrown before the impact, 300 particles born in order within the formation time, their mass at 0.8 of the crater's (within 20%), launch from between 1.2 body radii and the crater's radius, launch away from the ground, identical particles after scrubbing and on a fresh evaluator, ordinary bursts unchanged beside it, the maxParticles and regolith errors, and a faster body throwing faster. sr-sim, sr-model and sr-eval: 604 passed, 0 failed, 7 ignored; clippy -D warnings and fmt clean.",
+      "limits": "The ejecta law is that of the specification (Housen and Holsapple 2011), whose paper could not be consulted: its equations and constants are unchecked. Launch angle and spread, launch time and the azimuthal asymmetry are the engine's own. The crater's pose is the owner's at the impact. Not run: rendering of the ejecta, GPU, and the hero scene, which still authors its own ejecta. The scene-render test watch_notices_an_included_documents_asset fails on this host also at 8bf11f2 without these changes (checked in a separate worktree), so it is not caused by them; the other CLI tests passed."
     }
   ]
 }

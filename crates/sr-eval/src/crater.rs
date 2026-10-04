@@ -61,8 +61,11 @@ pub(crate) struct ImpactCause {
     /// The crater the law gives, metres and seconds.
     pub(crate) law: sr_sim::cratering::Crater,
     pub(crate) impactor: Impact,
-    /// Metres per second of the whole relative speed.
+    pub(crate) material: Material,
+    /// Metres per second of the whole relative speed, and the direction of that velocity in the
+    /// world's axes (into the surface).
     pub(crate) speed: f64,
+    pub(crate) velocity: [f64; 3],
     /// Kilograms per cubic metre of the target.
     pub(crate) target_density: f64,
     /// Scene units per metre.
@@ -168,7 +171,9 @@ pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -
         time: impact.time,
         law,
         impactor,
+        material: source.material,
         speed,
+        velocity: impact.relative_velocity,
         target_density: source.density.unwrap_or(source.material.table_density()),
         pixels_per_meter: source.pixels_per_meter,
     };

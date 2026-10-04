@@ -299,6 +299,9 @@
     "p3d1.scene.xml": [
       "P3D1"
     ],
+    "p3d10-angle.scene.xml": [
+      "P3D10"
+    ],
     "p3d2.scene.xml": [
       "P3D2"
     ],
@@ -313,6 +316,19 @@
     ],
     "p3d6.scene.xml": [
       "P3D6"
+    ],
+    "p3d7-derived.scene.xml": [
+      "P3D7"
+    ],
+    "p3d7-time.scene.xml": [
+      "P3D3",
+      "P3D7"
+    ],
+    "p3d8-authored.scene.xml": [
+      "P3D8"
+    ],
+    "p3d9-orphan.scene.xml": [
+      "P3D9"
     ],
     "pyc1-derived.scene.xml": [
       "PYC1"
@@ -727,6 +743,7 @@
     "baked-volume.scene.xml": [],
     "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
+    "ejecta-crater.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
     "kitchen-sink.scene.xml": [],

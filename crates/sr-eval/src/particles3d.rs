@@ -5,8 +5,9 @@ use crate::{
     sim::{num, text, FieldSrc, Graphs, PhysicsRt},
     FrameGraph, FrameNode,
 };
+use glam::DVec3;
 use sr_model::element::children;
-use sr_sim::particles3d::{self as sim, Driver, Emission, Error, Hit};
+use sr_sim::particles3d::{self as sim, Birth, Driver, Emission, Error, Hit};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone)]
@@ -19,7 +20,20 @@ pub struct SimParticles3D {
 
 mod colliders;
 
+/// The ejecta of the crater that `crater` names (the effective id of its owner): `count`
+/// particles, launched at `angle` degrees above the tangent plane, spread by `spread`.
+struct CraterBurst {
+    crater: Arc<str>,
+    count: usize,
+    angle: f64,
+    spread: f64,
+    /// The particles of the impact, once it is known, in order of birth in emitter time.
+    ejecta: Option<Arc<Vec<Birth>>>,
+}
+
 struct Runtime {
+    seed: u64,
+    crater_bursts: Vec<CraterBurst>,
     colliders: colliders::Colliders,
     emitter: sim::Emitter,
     names: Option<Vec<String>>,
@@ -63,7 +77,7 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
     };
     let bursts = children(e)
         .into_iter()
-        .filter(|c| c.element_name() == "burst")
+        .filter(|c| c.element_name() == "burst" && text(*c, "crater").is_none())
         .map(|c| sim::Burst {
             time: num(c, "time", 0.),
             count: num(c, "count", 0.) as u64,
@@ -102,7 +116,22 @@ fn build(p: &Program, node: u32, n: &FrameNode) -> Result<Runtime, String> {
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         max_work: number("maxWork", 100000000.) as u64,
     };
+    let crater_bursts = children(e)
+        .into_iter()
+        .filter(|c| c.element_name() == "burst")
+        .filter_map(|c| {
+            Some(CraterBurst {
+                crater: text(c, "crater")?.into(),
+                count: num(c, "count", 0.) as usize,
+                angle: num(c, "angle", 45.),
+                spread: num(c, "angleSpread", 15.),
+                ejecta: None,
+            })
+        })
+        .collect();
     Ok(Runtime {
+        seed: e.seed,
+        crater_bursts,
         colliders: colliders::build(p, n, bytes("meshMemoryMiB", 128.)?)?,
         emitter: sim::Emitter::new(spec).map_err(|e| e.to_string())?,
         names: crate::sim::field_names(e),
@@ -125,6 +154,8 @@ struct SceneDriver<'a, 'b> {
     sweeps: Vec<(u64, u64, Vec<sim::collider::Collider>)>,
     step_origin: f64,
     step: f64,
+    seed: u64,
+    bursts: &'a mut [CraterBurst],
 }
 impl SceneDriver<'_, '_> {
     fn frame(&mut self, time: f64) -> Arc<FrameGraph> {
@@ -147,6 +178,67 @@ impl SceneDriver<'_, '_> {
         }
         self.frames.push((key, f.clone()));
         f
+    }
+
+    /// The emitter's time at which the source clock reads `t`, for the clocks an emitter can
+    /// have here: affine ones that run forward.
+    fn emitter_time(&self, t: f64) -> Result<f64, Error> {
+        let start = self.p.nodes[self.node as usize].start;
+        let (f0, clocks) = crate::sim::source_sample(self.p, self.node, start, self.at);
+        if clocks.is_empty() {
+            return Ok(t - start);
+        }
+        let slope = crate::sim::source_sample(self.p, self.node, start + 1., self.at).0 - f0;
+        if !(slope.is_finite() && slope > 0.) {
+            return Err(Error::Driver("the ejecta of a crater need an emitter clock that runs forward".into()));
+        }
+        Ok((t - f0) / slope)
+    }
+
+    /// The particles that the impact `grown` throws out for burst `k`, in order of birth.
+    fn ejecta(&mut self, k: usize, grown: &crate::crater::ImpactCrater) -> Result<Vec<Birth>, Error> {
+        let cause = grown.cause;
+        let (owner, count, angle, spread) = {
+            let b = &self.bursts[k];
+            (b.crater.clone(), b.count, b.angle, b.spread)
+        };
+        let frame = self.frame(self.emitter_time(cause.time)?);
+        let i =
+            frame.nodes.iter().position(|n| n.id == owner).ok_or_else(|| {
+                Error::Driver(format!("the owner of crater ejecta, {owner}, is missing at the impact"))
+            })?;
+        // the crater is the owner's: where it hit and its axis follow the owner's pose at the impact
+        let world = crate::sim3d::world3(&frame, i, 0);
+        let point = world.transform_point3(DVec3::from(grown.spec.center));
+        let normal = world.transform_vector3(DVec3::from(grown.spec.outward));
+        let metres = cause.pixels_per_meter;
+        let list = sr_sim::cratering::ejecta::ejecta(&sr_sim::cratering::ejecta::Spec {
+            material: cause.material,
+            body_radius: (3. * cause.impactor.mass / (4. * std::f64::consts::PI * cause.impactor.density)).cbrt(),
+            body_density: cause.impactor.density,
+            target_density: cause.target_density,
+            impact_speed: cause.speed,
+            velocity_direction: cause.velocity,
+            normal: normal.to_array(),
+            crater_volume: cause.law.volume,
+            crater_radius: cause.law.radius,
+            crater_duration: cause.law.duration,
+            particles: count,
+            seed: crate::rng::hash(&[self.seed, k as u64, 0xe1ec7a]),
+            angle,
+            angle_spread: spread,
+        })
+        .map_err(Error::Driver)?;
+        list.iter()
+            .map(|e| {
+                Ok(Birth {
+                    time: self.emitter_time(cause.time + e.time)?,
+                    position: std::array::from_fn(|c| point[c] + e.position[c] * metres),
+                    velocity: e.velocity.map(|v| v * metres),
+                    mass: e.mass,
+                })
+            })
+            .collect()
     }
 }
 impl Driver for SceneDriver<'_, '_> {
@@ -176,6 +268,27 @@ impl Driver for SceneDriver<'_, '_> {
             None => self.fields.at(frame.time, Some(&frame)),
         };
         Ok(sr_sim::fields::total3_for(&fields, position, velocity, frame.time, true))
+    }
+    fn births(&mut self, lo: f64, hi: f64) -> Result<Vec<Birth>, Error> {
+        let mut born = Vec::new();
+        for k in 0..self.bursts.len() {
+            if self.bursts[k].ejecta.is_none() {
+                // The impact is known from the first frame after it; before that nothing is thrown out.
+                let frame = self.frame(hi);
+                let Some(grown) =
+                    frame.nodes.iter().find(|n| n.id == self.bursts[k].crater).and_then(|n| n.crater_impact.clone())
+                else {
+                    continue;
+                };
+                self.bursts[k].ejecta = Some(Arc::new(self.ejecta(k, &grown)?));
+            }
+            let Some(list) = self.bursts[k].ejecta.clone() else { continue };
+            let first = lo == self.step_origin;
+            let from = list.partition_point(|b| if first { b.time < lo } else { b.time <= lo });
+            let to = list.partition_point(|b| b.time <= hi);
+            born.extend_from_slice(&list[from.min(to)..to]);
+        }
+        Ok(born)
     }
     fn sweep(&mut self, time: f64, dt: f64, from: [f64; 3], to: [f64; 3], radius: f64) -> Result<Option<Hit>, Error> {
         if self.colliders.is_empty() {
@@ -253,11 +366,16 @@ impl Sims {
                     sweeps: Vec::new(),
                     step_origin: num(&*n.elem, "emissionStart", 0.),
                     step: num(&*n.elem, "dt", 1. / 60.),
+                    seed: rt.seed,
+                    bursts: &mut rt.crater_bursts,
                 };
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
                 let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);
                 for p in &frame.particles {
                     key = crate::rng::hash(&[key, p.id, p.birth.to_bits(), p.lifetime.to_bits(), p.scale.to_bits()]);
+                    if p.mass != 0. {
+                        key = crate::rng::hash(&[key, p.mass.to_bits(), 1]);
+                    }
                     for v in
                         p.position.iter().chain(&p.velocity).chain(p.basis.iter().flatten()).chain(&p.angular_velocity)
                     {

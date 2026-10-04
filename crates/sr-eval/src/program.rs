@@ -2341,7 +2341,7 @@ impl Builder {
                 .filter(|e| e.element_name() == "pyro")
                 .filter_map(|e| attr_str(e, "colliders").map(|s| (s, e.loc())))
                 .collect();
-            if self.nodes[n].name == "particles3D" {
+            if matches!(self.nodes[n].name, "particles3D" | "ocean") {
                 if let Some(list) = attr_str(&*self.nodes[n].elem, "colliders") {
                     lists.push((list, self.nodes[n].elem.loc()));
                 }
@@ -2354,7 +2354,7 @@ impl Builder {
                         Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
                         None => self.diags.push(err(
                             "E11",
-                            format!("pyro collider {id:?} is not instantiated in this scope"),
+                            format!("collider {id:?} is not instantiated in this scope"),
                             loc,
                             &*self.nodes[n].id,
                         )),
@@ -2362,14 +2362,17 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
-            // What a crater causes (smoke) names the crater by its id, in the same lexical scope; the
-            // reference becomes the effective id of the object that owns the crater.
+            // What a crater causes (smoke, ejecta) names the crater by its id, in the same lexical
+            // scope; the reference becomes the effective id of the object that owns the crater.
             let mut cause_owners: HashMap<String, Arc<str>> = HashMap::new();
-            for id in sr_model::element::children(&*self.nodes[n].elem)
-                .into_iter()
+            let kids = sr_model::element::children(&*self.nodes[n].elem);
+            for id in kids
+                .iter()
+                .copied()
                 .filter(|e| e.element_name() == "pyro")
                 .flat_map(|pyro| sr_model::element::children(pyro))
                 .filter(|e| matches!(e.element_name(), "pyroSource" | "pyroImpulse"))
+                .chain(kids.iter().copied().filter(|e| e.element_name() == "burst"))
                 .filter_map(|e| attr_str(e, "crater"))
             {
                 match self.resolve_crater(&scope, &id) {
@@ -2432,6 +2435,11 @@ impl Builder {
                                 input.set_attr("crater", owner).expect("resolved crater owner");
                             }
                         });
+                    }
+                    if child.element_name() == "burst" {
+                        if let Some(owner) = attr_str(child, "crater").and_then(|id| cause_owners.get(&id)) {
+                            child.set_attr("crater", owner).expect("resolved crater owner");
+                        }
                     }
                     if child.element_name() == "crater" {
                         if let Some(source) = attr_str(child, "source").and_then(|id| sources.get(&id)) {

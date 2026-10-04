@@ -128,6 +128,16 @@ pub struct Hit {
     pub normal: [f64; 3],
     pub velocity: [f64; 3],
 }
+/// A particle the driver supplies: an event with its own instant, state and mass,
+/// born in world space with the spec's lifetime, rotation and spin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Birth {
+    pub time: f64,
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    /// Kept on the particle; the render size still comes from the spec.
+    pub mass: f64,
+}
 /// Input queries must be deterministic functions of their arguments. Mutable
 /// state may cache queries, but results must not depend on prior query order.
 /// Birth pose/enabled are queried at each exact emission event; acceleration
@@ -136,6 +146,15 @@ pub trait Driver {
     fn emission(&mut self, time: f64) -> Result<Emission, Error>;
     fn acceleration(&mut self, time: f64, position: [f64; 3], velocity: [f64; 3]) -> Result<[f64; 3], Error>;
     fn sweep(&mut self, time: f64, dt: f64, from: [f64; 3], to: [f64; 3], radius: f64) -> Result<Option<Hit>, Error>;
+    /// Births to add in the fixed step `(lo, hi]` (and `time == lo` on the first
+    /// step, as a burst at the start of the emitter), in any order. Asked once per
+    /// step going forward and again when a seek replays it, so it must be a pure
+    /// function of the window. A time outside the window, nonfinite state, a
+    /// negative mass or more births than `max_particles` leaves room for is an
+    /// error. Births at or after `Spec::end` are not made.
+    fn births(&mut self, _lo: f64, _hi: f64) -> Result<Vec<Birth>, Error> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +168,8 @@ pub struct Particle {
     pub basis: [[f64; 3]; 3],
     pub angular_velocity: [f64; 3],
     pub scale: f64,
+    /// Kilograms of a particle that came from a driver birth; zero otherwise.
+    pub mass: f64,
 }
 impl Particle {
     pub fn age(&self, time: f64) -> f64 {
@@ -202,6 +223,8 @@ impl State {
 struct Event {
     time: f64,
     count: u64,
+    /// A birth the driver supplied, with its own state, instead of a rate or burst one.
+    birth: Option<Birth>,
 }
 #[derive(Clone, Copy, Debug)]
 struct Time(f64);
@@ -425,7 +448,7 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         let count = total.floor() as usize;
         next.carry = total - count as f64;
         for i in 0..count {
-            events.push(Event { time: (lo + (i as f64 + 1. - state.carry) / rate).min(end), count: 1 });
+            events.push(Event { time: (lo + (i as f64 + 1. - state.carry) / rate).min(end), count: 1, birth: None });
         }
     }
     for (i, b) in s.bursts.iter().enumerate() {
@@ -439,8 +462,23 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                 return Err(Error::Limit("burst events per step"));
             }
             *cursor += 1;
-            events.push(Event { time, count: b.count });
+            events.push(Event { time, count: b.count, birth: None });
         }
+    }
+    for b in d.births(lo, hi)? {
+        if !b.time.is_finite() || !finite(b.position) || !finite(b.velocity) || !b.mass.is_finite() || b.mass < 0. {
+            return Err(Error::Driver("birth with nonfinite state or negative mass".into()));
+        }
+        if b.time < lo || b.time > hi || (b.time == lo && lo != s.start) {
+            return Err(Error::Driver("birth outside the window it was asked for".into()));
+        }
+        if s.end.is_some_and(|e| b.time >= e) {
+            continue;
+        }
+        if events.len() >= s.max_events {
+            return Err(Error::Limit("birth events per step"));
+        }
+        events.push(Event { time: b.time, count: 1, birth: Some(b) });
     }
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     let mut deaths = BinaryHeap::new();
@@ -455,6 +493,29 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
     }
     for event in events {
         charge(work)?;
+        if let Some(b) = event.birth {
+            while deaths.peek().is_some_and(|t| t.0 .0 <= event.time) {
+                deaths.pop();
+            }
+            if deaths.len() >= s.max_particles {
+                return Err(Error::Limit("births exceed maxParticles"));
+            }
+            let id = next.frame.emitted;
+            next.frame.emitted = id.checked_add(1).ok_or(Error::Limit("particle ID overflow"))?;
+            charge(work)?;
+            let mut p = spawn(s, &Emission::default(), id, event.time)?;
+            (p.position, p.velocity, p.mass) = (b.position, b.velocity, b.mass);
+            let death = p.birth + p.lifetime;
+            if !death.is_finite() || death <= p.birth {
+                return Err(Error::Invalid("unrepresentable particle lifetime"));
+            }
+            deaths.push(Reverse(Time(death)));
+            if death > hi {
+                motion(s, &mut p, event.time, hi - event.time, d, work)?;
+                next.frame.particles.push(p);
+            }
+            continue;
+        }
         let input = emission(d, event.time)?;
         if !input.enabled {
             continue;
@@ -545,6 +606,7 @@ fn spawn(s: &Spec, e: &Emission, id: u64, birth: f64) -> Result<Particle, Error>
         basis,
         angular_velocity,
         scale: size,
+        mass: 0.,
     };
     if !finite(p.position)
         || !finite(p.velocity)

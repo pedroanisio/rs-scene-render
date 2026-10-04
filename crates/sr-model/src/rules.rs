@@ -792,7 +792,9 @@ impl<'a> Eval<'a> {
                     && direction.iter().all(|v| v.is_finite())
                     && direction.iter().any(|v| *v != 0.)
                     && (!has("emissionEnd") || number("emissionEnd", 0.) >= start)
-                    && kids(n, "burst").all(|b| b.attribute("time").map(xpath_number).is_some_and(|t| t >= start));
+                    && kids(n, "burst").all(|b| {
+                        b.has_attribute("crater") || b.attribute("time").map(xpath_number).is_some_and(|t| t >= start)
+                    });
                 self.check(valid,n,"P3D3",|| "particles3D requires bounded variances, a nonzero direction, an ordered emission window and bursts at or after emissionStart.".into());
                 let dynamic = [
                     "x",
@@ -855,6 +857,34 @@ impl<'a> Eval<'a> {
                 });
                 self.check(grid, n, "PYRO1", || {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
+                });
+            }
+            "burst" if n.parent_element().is_some_and(|p| is(p, "particles3D")) => {
+                let from_crater = has("crater");
+                self.check(
+                    if from_crater { !(has("time") || has("repeat") || has("interval")) } else { has("time") },
+                    n,
+                    "P3D7",
+                    || "a burst requires time unless it comes from a crater, and a burst from a crater derives its instants, so time, repeat and interval may not be given.".into(),
+                );
+                self.check(
+                    a("crater").is_none_or(|id| {
+                        n.document().descendants().any(|c| {
+                            is(c, "crater") && c.attribute("id") == Some(id) && c.attribute("source").is_some()
+                        })
+                    }),
+                    n,
+                    "P3D8",
+                    || "a burst from a crater must name a crater that grows from an impact.".into(),
+                );
+                self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
+                    "angle and angleSpread belong to a burst from a crater.".into()
+                });
+                let degrees = |k: &str, default: f64| a(k).map(xpath_number).unwrap_or(default);
+                let (angle, spread) = (degrees("angle", 45.), degrees("angleSpread", 15.));
+                self.check(!from_crater || (angle - spread >= 0. && angle + spread <= 90.), n, "P3D10", || {
+                    "the launch angle of a burst from a crater and its spread must stay between 0 and 90 degrees."
+                        .into()
                 });
             }
             "pyroSource" | "pyroImpulse" => {

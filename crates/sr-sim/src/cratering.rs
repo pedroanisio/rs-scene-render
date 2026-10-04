@@ -26,6 +26,8 @@
 //! The 2022 table of the same author (arXiv:2203.07476) and the ejecta constants of Housen
 //! and Holsapple (2011) are other parametrisations and are not mixed in here.
 
+pub mod ejecta;
+
 /// What the impactor brings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Impact {
