@@ -304,6 +304,20 @@ fn run(c: &Case) -> (u64, State, Vec<usize>) {
     (hash.0, s.clone(), iterations)
 }
 
+/// A simulation of reference case `index` advanced `steps` steps, with the given
+/// ambient temperature (the background of the exported temperature channel).
+pub(super) fn simulate(index: usize, steps: u64, ambient: f64) -> Simulation {
+    let c = &CASES[index];
+    let mut spec = spec(c);
+    spec.ambient_temperature = ambient;
+    let input = inputs(c, &spec);
+    let mut sim = Simulation::new(spec).unwrap();
+    for _ in 0..steps {
+        sim.step(&input).unwrap();
+    }
+    sim
+}
+
 fn on_pool<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
     rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(f)
 }
@@ -334,7 +348,7 @@ fn final_state_matches_the_reference_hashes() {
 
 /// `cargo test --release -p sr-sim --lib -- --ignored --nocapture print_hashes`
 #[test]
-#[ignore = "prints the hashes used to pin the reference"]
+#[ignore = "prints the hashes that pin the reference"]
 fn print_hashes() {
     for c in &CASES {
         let (hash, state, iterations) = run(c);

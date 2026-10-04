@@ -33,6 +33,8 @@ mod detail;
 #[cfg(test)]
 mod determinism;
 #[cfg(test)]
+mod export;
+#[cfg(test)]
 mod pockets;
 #[cfg(test)]
 mod sampling;
@@ -533,24 +535,46 @@ impl State {
         let h = self.h;
         let o = self.origin.map(|v| v + h * 0.5);
         let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
+        // The five channels are independent; results are inserted in channel order,
+        // so the first error is the one a serial export would report.
+        let grids: Vec<Result<SparseGrid, Error>> =
+            (0..5).into_par_iter().map(|channel| self.export_channel(channel, transform, bricks)).collect();
         let mut volume = Volume::new();
-        for (channel, name) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().enumerate() {
-            let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
-            let mut grid = SparseGrid::new(transform, bg, bricks)?;
-            for k in 0..self.density.len() {
-                let value = match channel {
-                    0 => self.density[k],
-                    1 => self.temperature[k],
-                    _ => self.velocity_at(self.cell_world(k))[channel - 2],
-                } as f32;
-                if !value.is_finite() {
-                    return Err(Error::Invalid("exported field exceeds f32 representation"));
-                }
-                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
-            }
-            volume.insert(name, grid)?;
+        for (name, grid) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().zip(grids) {
+            volume.insert(name, grid?)?;
         }
         Ok(volume)
+    }
+
+    /// One exported channel: 0 density, 1 temperature, 2..=4 velocity components.
+    /// A cell equal to the background is not stored: a new brick starts as
+    /// background and an absent brick reads as background, so setting it is a no-op.
+    fn export_channel(&self, channel: usize, transform: Transform, bricks: usize) -> Result<SparseGrid, Error> {
+        let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
+        let mut grid = SparseGrid::new(transform, bg, bricks)?;
+        let field = self.field();
+        for k in 0..self.density.len() {
+            let value = match channel {
+                0 => self.density[k],
+                1 => self.temperature[k],
+                _ => {
+                    // `velocity_at(cell_world(k))[axis]` without the two unused components.
+                    let p = self.cell_world(k);
+                    if finite3(p) {
+                        field.velocity_axis(self.grid(p), channel - 2)
+                    } else {
+                        0.0
+                    }
+                }
+            } as f32;
+            if !value.is_finite() {
+                return Err(Error::Invalid("exported field exceeds f32 representation"));
+            }
+            if value != bg {
+                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
+            }
+        }
+        Ok(grid)
     }
 }
 

@@ -1,6 +1,9 @@
 //! Per-stage timing of the smoke solver on a cinematic-impact-like plume.
 //!
-//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid] [semilagrangian|maccormack]`
+//! `cargo run --release -p sr-sim --example pyro_profile -- [cells-x] [steps] [pressure-iterations] [colliders] [jacobi|multigrid] [semilagrangian|maccormack] [export]`
+//!
+//! With a final `export` argument it also times `State::volume` (all five channels) after the
+//! last step, three times.
 //!
 //! The domain is 192 x 156 x 192 scene units like `examples/cinematic-impact`
 //! (open edges, impulse + expanding source, buoyancy, vorticity, turbulence);
@@ -29,6 +32,7 @@ fn main() {
         Some("maccormack") => Advection::MacCormack,
         Some(other) => panic!("advection must be semilagrangian or maccormack, not {other}"),
     };
+    let export = args.next().is_some_and(|v| v == "export");
     let (extent, height) = (192.0, 156.0);
     let voxel = extent / nx as f64;
     let ny = (height / voxel).round() as usize;
@@ -129,6 +133,14 @@ fn main() {
             sum.project_reduce += p.project_reduce;
             sum.project_update += p.project_update;
             sum.project_finish += p.project_finish;
+        }
+    }
+    if export {
+        for round in 0..3 {
+            let started = std::time::Instant::now();
+            let volume = sim.state().volume(usize::MAX / 2).expect("export");
+            let bricks: usize = volume.grids().map(|(_, g)| g.brick_count()).sum();
+            println!("export {round}: {:.1} ms ({bricks} bricks)", started.elapsed().as_secs_f64() * 1e3);
         }
     }
     if counted > 0 {
