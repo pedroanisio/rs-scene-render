@@ -386,6 +386,12 @@ pub(crate) fn gas_clock(node: &FrameNode) -> Result<GasClock, String> {
     Ok(GasClock { dt, max_bytes })
 }
 
+/// The gas of one smoke step and the bytes the smoke keeps for readers of its gas.
+pub(crate) struct GasStep {
+    pub(crate) gas: Arc<pyro::Gas>,
+    pub(crate) held: usize,
+}
+
 impl Sims {
     /// The gas of the smoke volume `frame.nodes[i]` at its fixed step `step`, simulating the smoke as far
     /// as that step needs. A step is a pure function of the document, so the copy can be kept as long as
@@ -400,7 +406,7 @@ impl Sims {
         graphs: &mut Graphs<'_>,
         fields: &FieldSrc,
         physics: Option<&mut crate::sim::PhysicsRt>,
-    ) -> Result<Arc<pyro::Gas>, String> {
+    ) -> Result<GasStep, String> {
         let n = &frame.nodes[i];
         let e = config(n).ok_or("a gas must be an object3D that holds a native pyro volume")?;
         let id = n.id.clone();
@@ -410,7 +416,8 @@ impl Sims {
         let source_time = step as f64 * runtime.dt;
         let target = pyro::fixed_step_index(source_time.max(0.0) / runtime.dt);
         if let Some(held) = runtime.hold.iter().find(|h| h.step == target) {
-            return Ok(Arc::new(held.state.gas()));
+            let bytes = runtime.hold.iter().map(|h| h.state.bytes()).sum();
+            return Ok(GasStep { gas: Arc::new(held.state.gas()), held: bytes });
         }
         let (state, revision) = state_at(
             &mut runtime.timeline,
@@ -435,7 +442,16 @@ impl Sims {
             let oldest = (0..runtime.hold.len()).min_by_key(|&k| runtime.hold[k].step).expect("a held state");
             runtime.hold.remove(oldest);
         }
-        Ok(gas)
+        let held = runtime.hold.iter().map(|h| h.state.bytes()).sum::<usize>();
+        // what is kept for a reader is charged to the smoke's memory allowance, with the velocity fields the
+        // reader holds, and exceeding it is an error
+        if held > runtime.max_bytes {
+            return Err(format!(
+                "{} states kept for the particles that read its gas hold {held} bytes and exceed its maxMemoryMiB",
+                runtime.hold.len()
+            ));
+        }
+        Ok(GasStep { gas, held })
     }
 
     pub(crate) fn apply(

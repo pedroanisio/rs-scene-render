@@ -2362,6 +2362,25 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
+            // The emitters whose particles fall into an ocean are named in the same lexical scope.
+            let splash: Option<(String, String)> = (self.nodes[n].name == "ocean")
+                .then(|| attr_str(&*self.nodes[n].elem, "splash"))
+                .flatten()
+                .map(|list| {
+                    let mut resolved = Vec::new();
+                    for id in list.split_whitespace() {
+                        match self.resolve(&scope, id) {
+                            Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
+                            None => self.diags.push(err(
+                                "E11",
+                                format!("splash emitter {id:?} is not instantiated in this scope"),
+                                self.nodes[n].elem.loc(),
+                                &*self.nodes[n].id,
+                            )),
+                        }
+                    }
+                    (list, resolved.join(" "))
+                });
             // The smoke that drags the particles of an emitter is named in the same lexical scope.
             let gas: Option<(String, String)> = (self.nodes[n].name == "particles3D")
                 .then(|| attr_str(&*self.nodes[n].elem, "gas"))
@@ -2449,8 +2468,12 @@ impl Builder {
                 || !sources.is_empty()
                 || !cause_owners.is_empty()
                 || gas.is_some()
+                || splash.is_some()
             {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
+                if let Some((_, effective)) = &splash {
+                    elem.set_attr("splash", effective).expect("resolved ocean splash emitters");
+                }
                 if let Some((_, effective)) = &gas {
                     elem.set_attr("gas", effective).expect("resolved particle gas");
                 }

@@ -39,6 +39,8 @@ pub mod rig;
 pub mod rng;
 pub mod sim;
 mod sim3d;
+#[doc(hidden)]
+pub mod splash;
 pub mod solid;
 pub mod terrain;
 pub mod value;
@@ -121,6 +123,16 @@ impl Evaluator {
     /// may be evaluated in any order or on any thread.
     pub fn has_simulation(&self) -> bool {
         self.sim.is_some()
+    }
+
+    /// What the particles that fall into ocean `ocean` give it in its canonical step `step`, by cell: the
+    /// reading the ocean makes of the particles, for tests of the particles' side of the coupling.
+    #[doc(hidden)]
+    pub fn splash_into(&self, ocean: &str, step: u64) -> Result<Vec<splash::Cell>, String> {
+        match &self.sim {
+            Some(sim) => sim.lock().unwrap_or_else(|e| e.into_inner()).splash.read(ocean, step),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Simulates the document's physics to its end and returns a physics cache file

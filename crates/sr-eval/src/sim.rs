@@ -1689,6 +1689,8 @@ pub struct Runtime {
     pyro: crate::pyro::Sims,
     particles3d: crate::particles3d::Sims,
     ocean: crate::ocean::Sims,
+    /// What the particles that fall into an ocean give it, shared by the emitters and the ocean.
+    pub(crate) splash: crate::splash::Log,
     /// How an ocean's outcome loads the bodies in it; none unless something sets one.
     pub(crate) coupling: Option<crate::group::Coupling>,
     /// Bytes the rigid world's memory of its frames may use; the world's own default when none.
@@ -1865,7 +1867,7 @@ impl Runtime {
             self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
         }
         let smoke_early = smoke_clock.elapsed().as_secs_f64();
-        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut self.pyro);
+        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut self.pyro, &self.splash);
         g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
         let clock = std::time::Instant::now();
         if ocean_seconds.is_none() {

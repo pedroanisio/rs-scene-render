@@ -957,8 +957,9 @@ particles need, and first in the frame when a document names a gas (the others k
 particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
 past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
 evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
-(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) are charged to the volume's
-`maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
+(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) and the two states the smoke keeps for them (the frame's own volume needs the step the readers started at, and the
+timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
+volume's `maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
 smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
 the target must hold a native pyro volume. Measured cost (release, one core, 20 000 particles over 25 canonical steps of 0.1 s in a 32-cell smoke):
 0.77 s more than naming the gas with no drag, that is 1.5 microseconds per particle step (about five gas queries
@@ -968,6 +969,30 @@ canonical step (the volume's matrix and the smoke's clock at its start, the smok
 once per step. The coupling is linear in the relative velocity and one way: the particles do not push the gas, and for
 0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic drag is a rate of about 0.03 per second, so it
 moves dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
+
+Ejecta falling into an ocean (`ocean@splash`, particles side). An ocean lists the emitters whose particles
+fall into it (OCN13: each throws out the ejecta of a crater, so its particles have a mass). The particle solver
+takes a plane of water (a point, the normal out of the water, the rectangle it covers): a particle whose centre
+crosses it downward inside the rectangle, before any contact it would make later in the segment, is removed there,
+and the driver is told which (instant, place, velocity, mass), for every fixed step, an empty list too, and again
+the same when a seek replays the step. The evaluator takes the plane from the ocean at its pose when the emitter
+starts (a function of the document; the ocean must have no scale and both must be on the composition clock, and
+an emitter belongs to one ocean), sums what fell by cell and by canonical step of the ocean (the volume is the
+mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
+velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
+and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
+entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
+overlap it, and a step the particles have not reached is an error that names it. Measured on the impact scene's
+rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no ground collider for the ejecta): all
+4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share to the last
+digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume along the rock's
+travel grows from 90 to 60 to 30 degrees. What the ocean does with the entries (the sparse deposit: the volume
+out of the cell into its eight neighbours, at most 90 % of its water; the momentum into the cell, when it keeps
+a depth) is the ocean's side. A particle that fell in is gone: it does not sink, its vertical momentum and its
+energy are not given to the water, and a particle that has no mass is refused by the rule.
+Until the ocean's side lands, which is an intermediate state of this branch and not one the phase closes in, a
+document that declares `ocean@splash` loses the particles that fall into the water and the ocean is not changed by
+them.
 
 ### Ocean surfaces and impulses
 

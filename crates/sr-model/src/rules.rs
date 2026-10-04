@@ -218,6 +218,8 @@ struct Sets<'a> {
     pyro_colliders: HashSet<&'a str>,
     /// Objects that hold a native pyro volume.
     pyro_volumes: HashSet<&'a str>,
+    /// 3D particle emitters that throw out the ejecta of a crater, whose particles carry a mass.
+    ejecta_emitters: HashSet<&'a str>,
     /// Objects an ocean can use as a deformable bed (a crater on a plane or a mesh)
     /// or as a closed body (any other supported primitive, without a crater).
     ocean_colliders: HashSet<&'a str>,
@@ -263,6 +265,13 @@ struct Sets<'a> {
 fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     let mut s = Sets::default();
     let Some(scene) = scene else { return s };
+    for emitter in scene.descendants().filter(|n| is(*n, "particles3D")) {
+        if let Some(id) = emitter.attribute("id") {
+            if emitter.children().any(|b| is(b, "burst") && b.attribute("crater").is_some()) {
+                s.ejecta_emitters.insert(id);
+            }
+        }
+    }
     for object in scene.descendants().filter(|n| is(*n, "object3D")) {
         let Some(id) = object.attribute("id") else { continue };
         let crater = kids(object, "crater").next().is_some();
@@ -761,6 +770,18 @@ impl<'a> Eval<'a> {
                 });
             }
             "ocean" => {
+                self.check(
+                    a("splash").is_none_or(|list| {
+                        let ids: Vec<_> = list.split_whitespace().collect();
+                        let unique: HashSet<_> = ids.iter().copied().collect();
+                        !ids.is_empty()
+                            && ids.len() == unique.len()
+                            && ids.iter().all(|id| self.sets.ejecta_emitters.contains(id))
+                    }),
+                    n,
+                    "OCN13",
+                    || "ocean splash must name distinct particles3D emitters that throw out the ejecta of a crater, whose particles have a mass.".into(),
+                );
                 self.check(a("bodyCoupling").is_none_or(|c| c == "none") || has("colliders"), n, "OCN8", || {
                     "ocean bodyCoupling needs colliders that list the bodies.".into()
                 });
