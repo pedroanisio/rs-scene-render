@@ -859,6 +859,7 @@ replays from local time zero.
 | `order` | 1 | `1` or `2`; `2` selects the second-order scheme in the numerical contract below. Order 1 reproduces earlier results bit for bit |
 | `bathymetryScale`, `bathymetryOffset` | 1, 0 | Multiply and then offset decoded scene-y bed ordinates |
 | `material` | absent | Material reference; default is white, roughness .05, transmission 1, IOR 1.333, double-sided |
+| `colliders` | absent | Up to 4096 distinct `object3D` ids that move the bed or occupy the water (OCN6, OCN7); see the numerical contract. Absent leaves the bed fixed |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
 | `meshMemoryMiB`, `surfaceMemoryMiB` | 128, 128 | Bathymetry decoding/sampling and generated surface geometry ceilings |
 | `maxWork` | 100000000 | Work allowance per solver seek, at most 1,000,000,000,000; also bounds bathymetry sampling and swell evaluation separately |
@@ -910,8 +911,9 @@ UVs and tangents. Dry cells emit no triangles. The shoreline therefore has cell
 resolution and the mesh cannot represent overturning water. Device buffer limits
 are checked before upload. Native ocean meshes participate in shared depth,
 materials, lights, path tracing and shutter samples. OCN1–OCN4 enforce version,
-reference kinds, finite/resolved solver input and static solver configuration.
-Only pose and opacity are animatable; the six ocean corpus fixtures are checked
+reference kinds, finite/resolved solver input and static solver configuration;
+OCN6 and OCN7 enforce what `colliders` may name and that its geometry is static.
+Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
 #### Foam and spray
@@ -1059,6 +1061,62 @@ Resident input capacities are included in the memory ceiling, which is 256 bytes
 is separately bounded; zero disables retention. Failed seeks leave the published
 frame and caches unchanged. Fractional samples never become canonical state,
 and replay after checkpoint eviction is bit-identical in the conformance tests.
+
+**Moving bed and bodies (`colliders`).** An ocean that names objects in `colliders`
+takes its bed from the scene at every canonical step instead of from its
+bathymetry alone; without the attribute nothing changes, bit for bit. An object
+with a `<crater>` (a plane or a mesh) deforms the bed: the crater deforms the
+object's surface at the step's time, the surface is brought into the ocean's frame
+with the inverse of the ocean's pose, and the bed becomes the bathymetry plus the
+topmost surface ordinate over each cell centre minus the same ordinate at ocean
+time zero. Columns the surface does not cover are unchanged, so the object need
+not coincide with the bathymetry. Any other supported primitive without a crater
+is a closed body (a plane without a crater is neither and is rejected by OCN6);
+its tessellated surface is crossed by vertical lines through the cell centres,
+shifted by a fixed irrational fraction of a cell so that no line runs along a
+shared edge, and an odd number of crossings is an error. Scene frames come from
+the clock mapping, frame cache and rigid-body pass of the smoke solver, so bodies
+of the rigid world work; the bed is sampled at both ends of each canonical step
+and each substep uses its linear value at the substep's midpoint.
+
+The water column follows the bed: depth is kept and the surface shifts, and
+gravity radiates the change. For a given bed this is the exact depth-averaged
+form (the kinematic conditions at the bed and the surface cancel in the depth
+equation), it conserves water to round-off, and it is how earthquake tsunamis are
+started. A bed that does not move reproduces the static solver bit for bit. A body
+raises the bed over its footprint by its vertical extent between the rest level
+and the bed, so the water it displaces appears first as a bulge that radiates,
+and at equilibrium the surface is flat with thinner water under the body. The
+velocity of the water in an occupied column then relaxes toward the body's: with
+`t` the occupied thickness and `h` the depth, the fraction `f = t / (h + t)` of the
+velocity difference closes over a canonical step, and a substep of length `dt`
+closes `1 - (1 - f)^(dt / step)`, so the momentum given does not depend on how many
+substeps the CFL bound chose (it was identical to 1e-15 for 2 to 46 substeps).
+The momentum given during the last whole step is kept for a reaction on the body;
+nothing is applied to the body yet.
+
+Limits of this model, in plain terms. The water is hydrostatic: there is no
+vertical velocity, so a bed or body that moves fast produces no jet and no
+vertical splash, only the surface following it. A body is kinematic with infinite
+mass: the momentum and energy it gives the water are not taken from it, so neither
+is conserved, while the volume of water is. Occupancy is measured against the rest
+level, not the instantaneous surface, because the bed must be a function of time
+alone for replay to hold. The column under a floating body is treated as blocked:
+water does not flow under it. A crater deeper than the water around it drains the
+ring that feeds it; the measured case (radius 52 and depth 25 under 12 units, rim
+7, grown over 1.5 s on 2-unit cells) kept the least depth at 1.26 (first order) and
+1.11 (second order) and the volume to 1.4e-14, with no negative depth.
+
+Measured: a Gaussian uplift of 1% of the depth in a channel launched two pulses at
+7.95 (first order) and 7.85 (second order) after 4 s against the 8.00 of
+`sqrt(g h) t`, with 78% and 98% of half the uplift as height. A falling sphere of
+radius 4, 7 and 10 left a far-field wave of 0.22, 0.66 and 1.11 in 12 units of
+water; entry speed raised it only until the entry became quicker than the wave
+takes to cross the body (0.637, 0.661 and 0.660 for x0.5, x1 and x2). Resident
+memory is charged 24 bytes per cell for the bed vectors and 72 more with bodies;
+collider geometry and its per-column samples count against `meshMemoryMiB`. The
+frame key of a driven ocean includes the bed, because the same depths over another
+bed are another surface.
 
 ### Terrain, crater evolution, fracture and mesh caches
 
@@ -1895,6 +1953,7 @@ Also includes `pyroShape`, inventoried below.
 | `order` | xs:string; enumeration=1, enumeration=2 | Default `1` |
 | `material` | xs:IDREF | Optional; absent |
 | `bathymetry` | xs:IDREF | Optional; absent |
+| `colliders` | xs:IDREFS | Optional; absent |
 
 ### `oceanWaveType`
 

@@ -335,7 +335,7 @@ fn procedural_swell_has_authored_speed_and_preserves_water_and_the_solver_state(
     use sr_sim::ocean::{waves, Frame};
     let mut s = spec([8, 1]);
     s.cell_size = 1.0;
-    let base = Frame { time: 0.0, cells: vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8] };
+    let base = Frame { time: 0.0, cells: vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8], bed: vec![] };
     let w = waves::Wave { wavelength: 8.0, amplitude: 0.1, direction: 0.0, phase: 0.0, speed: 2.0 };
     let a = waves::apply(&s, &base, &[w]).unwrap();
     let b = waves::apply(&s, &Frame { time: 1.0, ..base.clone() }, &[w]).unwrap();
@@ -345,8 +345,11 @@ fn procedural_swell_has_authored_speed_and_preserves_water_and_the_solver_state(
     }
     assert_eq!(base.cells, vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8]);
     assert!((a.cells.iter().map(|c| c.depth).sum::<f64>() - 16.0).abs() < 1e-12);
-    let coast =
-        Frame { time: 2.0, cells: (0..8).map(|i| Cell { depth: i as f64 * 0.01, velocity: [0.0; 2] }).collect() };
+    let coast = Frame {
+        time: 2.0,
+        cells: (0..8).map(|i| Cell { depth: i as f64 * 0.01, velocity: [0.0; 2] }).collect(),
+        bed: vec![],
+    };
     let water = waves::apply(&s, &coast, &[waves::Wave { amplitude: 2.0, ..w }; 4]).unwrap();
     assert!(water.cells.iter().all(|c| c.depth >= 0.0));
     assert_eq!(water.cells[0].depth, 0.0);

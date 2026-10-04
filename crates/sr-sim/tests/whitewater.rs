@@ -7,7 +7,7 @@ fn grid() -> Spec {
     Spec { cells: [8, 4], dt: 0.1, boundary: Boundary::Periodic, ..Default::default() }
 }
 fn water(time: f64, velocity: [f64; 2]) -> Result<Frame, Error> {
-    Ok(Frame { time, cells: vec![Cell { depth: 2., velocity }; 32] })
+    Ok(Frame { time, cells: vec![Cell { depth: 2., velocity }; 32], bed: vec![] })
 }
 fn settings() -> Settings {
     Settings { rate: 20., threshold: 0.1, lifetime: 2., spray_fraction: 0., ..Default::default() }
@@ -72,7 +72,7 @@ fn limits_and_bad_source_samples_fail_atomically() {
     assert!(sim.at(1., |t| water(t, [2., 0.])).unwrap_err().to_string().contains("particle"));
     assert_eq!(sim.frame(), &initial);
     let good = sim.at(0.1, |t| water(t, [2., 0.])).unwrap().clone();
-    assert!(sim.at(0.2, |_| Ok(Frame { time: 0., cells: vec![] })).is_err());
+    assert!(sim.at(0.2, |_| Ok(Frame { time: 0., cells: vec![], bed: vec![] })).is_err());
     assert_eq!(sim.frame(), &good);
     let mut limited = Whitewater::new(grid(), vec![2.; 32], Settings { max_work: 1, ..settings() }).unwrap();
     assert!(limited.at(1., |t| water(t, [2., 0.])).unwrap_err().to_string().contains("work"));
@@ -96,7 +96,11 @@ fn slope_emission_dry_land_open_boundaries_and_emission_windows() {
     assert!(n > 0);
     assert_eq!(slope.at(0.8, source).unwrap().particles.len(), n);
     let mut dry = Whitewater::new(grid(), vec![0.; 32], settings()).unwrap();
-    assert!(dry.at(1., |t| Ok(Frame { time: t, cells: vec![Cell::default(); 32] })).unwrap().particles.is_empty());
+    assert!(dry
+        .at(1., |t| Ok(Frame { time: t, cells: vec![Cell::default(); 32], bed: vec![] }))
+        .unwrap()
+        .particles
+        .is_empty());
     let mut open = Whitewater::new(
         Spec { boundary: Boundary::Open, ..grid() },
         vec![2.; 32],
@@ -111,9 +115,29 @@ fn slope_emission_dry_land_open_boundaries_and_emission_windows() {
 fn activity_overflow_is_reported_and_retained_bed_capacity_is_budgeted() {
     let cfg = Settings { rate: 0., ..settings() };
     let mut sim = Whitewater::new(grid(), vec![2.; 32], cfg).unwrap();
-    let bad = |t| Ok(Frame { time: t, cells: vec![Cell { depth: f64::MAX, velocity: [f64::MAX; 2] }; 32] });
+    let bad =
+        |t| Ok(Frame { time: t, cells: vec![Cell { depth: f64::MAX, velocity: [f64::MAX; 2] }; 32], bed: vec![] });
     assert!(sim.at(0.1, bad).is_err(), "source velocity/depth must be numerically usable, even with emission disabled");
     let mut bed = Vec::with_capacity(100_000);
     bed.extend([2.; 32]);
     assert!(Whitewater::new(grid(), bed, Settings { max_particles: 1, max_bytes: 10_000, ..settings() }).is_err());
+}
+
+/// Foam is born on the surface, which sits at the bed minus the depth: a water
+/// sample that carries its own bed moves the surface with it.
+#[test]
+fn foam_follows_the_bed_each_water_sample_carries() {
+    let born_at = |shift: f64| {
+        let mut sim = Whitewater::new(grid(), vec![2.; 32], settings()).unwrap();
+        let frame = sim.at(0.1, |t| Ok(Frame { bed: vec![2. + shift; 32], ..water(t, [2., 0.])? })).unwrap();
+        frame.particles.iter().map(|p| p.position[1]).collect::<Vec<_>>()
+    };
+    let (level, lowered) = (born_at(0.), born_at(3.));
+    assert!(!level.is_empty() && level.len() == lowered.len());
+    for (a, b) in level.iter().zip(&lowered) {
+        assert!((b - a - 3.).abs() < 1e-12, "surface at {a} moved to {b}");
+    }
+    // A sample whose bed has the wrong length is rejected.
+    let mut sim = Whitewater::new(grid(), vec![2.; 32], settings()).unwrap();
+    assert!(sim.at(0.1, |t| Ok(Frame { bed: vec![2.; 5], ..water(t, [2., 0.])? })).is_err());
 }

@@ -242,7 +242,7 @@ fn moving(shape: Shape, current: DMat4, future: DMat4, dt: f64) -> Result<pyro::
 
 /// Closed topology for voxel regions: seams share indices and polar vertices
 /// are single points, avoiding degenerate render triangles at UV seams/poles.
-fn geometry(
+pub(crate) fn geometry(
     p: &Program,
     node: &crate::program::InstNode,
     thickness: f64,

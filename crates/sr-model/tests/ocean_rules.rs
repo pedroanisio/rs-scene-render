@@ -52,6 +52,42 @@ fn whitewater_work_allowance_has_the_same_trillion_ceiling() {
     }
 }
 
+const SEABED: &str = r#"<object3D id="seabed" primitive="plane" width="40" height="40" segments="8" y="2" rotationX="-90"><crater radius="3" depth="1" rimHeight="0.2" rimWidth="1"/></object3D>"#;
+const ROCK: &str = r#"<object3D id="rock" primitive="sphere" radius="1" y="-3"/>"#;
+const SHEET: &str = r#"<object3D id="sheet" primitive="plane" width="40" height="40" y="2" rotationX="-90"/>"#;
+
+#[test]
+fn ocean_colliders_name_deformable_beds_and_closed_bodies() {
+    let ocean = |colliders: &str| format!(r#"{SEABED}{ROCK}{SHEET}<ocean id="o" colliders="{colliders}"/>"#);
+    for ok in ["seabed", "rock", "seabed rock"] {
+        assert!(codes(&ocean(ok), "1.3").is_empty(), "{ok}: {:?}", codes(&ocean(ok), "1.3"));
+    }
+    // A plane needs a crater to be a bed, and a sphere with none is a body: a plane
+    // without one is neither. Repeats and objects that are not objects are errors.
+    for bad in ["sheet", "seabed sheet", "seabed seabed", "o"] {
+        assert!(
+            codes(&ocean(bad), "1.3").contains(&"OCN6".into())
+                || codes(&ocean(bad), "1.3").iter().any(|c| c.starts_with('S')),
+            "{bad}: {:?}",
+            codes(&ocean(bad), "1.3")
+        );
+    }
+    assert!(codes(&ocean("sheet"), "1.3").contains(&"OCN6".into()));
+    assert!(codes(&ocean("seabed seabed"), "1.3").contains(&"OCN6".into()));
+    // Collider geometry is built once, so its shape is not animated.
+    let animated = format!(
+        r#"{SEABED}<object3D id="rock" primitive="sphere" radius="1" y="-3"><animate property="radius"><key time="0" value="1"/><key time="1" value="2"/></animate></object3D><ocean id="o" colliders="rock"/>"#
+    );
+    assert!(codes(&animated, "1.3").contains(&"OCN7".into()), "{:?}", codes(&animated, "1.3"));
+    // Pose animation is fine.
+    let moving = ROCK.replace(
+        "/>",
+        r#"><animate property="y"><key time="0" value="-3"/><key time="1" value="3"/></animate></object3D>"#,
+    );
+    let scene = format!(r#"{moving}<ocean id="o" colliders="rock"/>"#);
+    assert!(codes(&scene, "1.3").is_empty(), "{:?}", codes(&scene, "1.3"));
+}
+
 #[test]
 fn ocean_references_dimensions_and_static_inputs_are_checked() {
     for node in [

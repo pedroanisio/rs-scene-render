@@ -266,6 +266,12 @@
     "ocn5.scene.xml": [
       "OCN5"
     ],
+    "ocn6.scene.xml": [
+      "OCN6"
+    ],
+    "ocn7.scene.xml": [
+      "OCN7"
+    ],
     "openvdb-format.scene.xml": [
       "S06"
     ],
@@ -686,6 +692,7 @@
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "ocean-colliders.scene.xml": [],
     "ocean-order2.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],

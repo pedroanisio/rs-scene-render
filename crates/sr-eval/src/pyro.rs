@@ -12,7 +12,7 @@ use sr_sim::pyro::{self, Boundary, Impulse, Inputs, Shape, Source, Spec, Timelin
 use std::{collections::HashMap, sync::Arc};
 
 mod bake;
-mod colliders;
+pub(crate) mod colliders;
 
 #[derive(Debug, Clone)]
 pub struct SimVolume {
