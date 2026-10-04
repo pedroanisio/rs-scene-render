@@ -29,6 +29,25 @@ struct Body {
     points: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
 }
+/// A body going down through the ocean's rest level, as the poses of one canonical step show it.
+pub(super) struct Crossing {
+    /// Ocean-local time of the crossing, inside the step.
+    pub(super) time: f64,
+    /// Where the body's centre is then (x, z), ocean-local.
+    pub(super) centre: [f64; 2],
+    /// Ocean-local units per second that the body's centre moves down by.
+    pub(super) speed: f64,
+    /// Cubic ocean-local units that the body holds, and its mass in kilograms.
+    pub(super) volume: f64,
+    pub(super) mass: f64,
+    /// World units per ocean-local unit.
+    pub(super) scale: f64,
+}
+
+/// A body at an instant: its centre, its lowest point, its volume, the world units per ocean-local
+/// unit and its mass.
+type Posed = ([f64; 3], f64, f64, f64, f64);
+
 /// Where a vertical line through a column meets a body's surface.
 struct Hit {
     column: u32,
@@ -207,6 +226,78 @@ impl Colliders {
             *bed -= held;
         }
         Ok(())
+    }
+
+    /// Whether body `id` goes down through the rest level in the canonical step that ends at
+    /// `time` (ocean-local): its lowest point is above the level at the start and at or below it
+    /// at the end, and its centre moves down. A function of the body's poses at the two ends.
+    pub(super) fn crossing(
+        &self,
+        id: &str,
+        spec: &Spec,
+        ocean: &str,
+        frame_at: &mut dyn FnMut(f64) -> Result<Arc<FrameGraph>, String>,
+        time: f64,
+    ) -> Result<Option<Crossing>, String> {
+        let dt = spec.dt;
+        let from = time - dt;
+        if from < 0. {
+            return Ok(None);
+        }
+        let body = self
+            .bodies
+            .iter()
+            .find(|b| &*b.id == id)
+            .ok_or_else(|| format!("water entry body {id} is not a body collider"))?;
+        // lowest point, centre, volume, scale and mass of the body at `t`
+        let mut at = |t: f64| -> Result<Option<Posed>, String> {
+            let frame = frame_at(t)?;
+            let (Some(inverse), Some(j)) =
+                (inverse_of(&frame, ocean)?, frame.nodes.iter().position(|n| n.id == body.id))
+            else {
+                return Ok(None);
+            };
+            let pose = inverse * crate::sim3d::world3(&frame, j, 0);
+            let moved: Vec<DVec3> = body.points.iter().map(|&p| pose.transform_point3(DVec3::from_array(p))).collect();
+            if moved.iter().any(|v| !v.is_finite()) || moved.is_empty() {
+                return Err("ocean body geometry is nonfinite".into());
+            }
+            let low = moved.iter().map(|v| v.y).fold(f64::NEG_INFINITY, f64::max);
+            let centre = moved.iter().fold(DVec3::ZERO, |a, v| a + *v) / moved.len() as f64;
+            let signed: f64 = body
+                .triangles
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|i| moved[i as usize]);
+                    a.dot(b.cross(c)) / 6.
+                })
+                .sum();
+            let scale = 1. / inverse.transform_vector3(DVec3::X).length();
+            let mass = children(&*frame.nodes[j].elem)
+                .into_iter()
+                .find(|c| c.element_name() == "rigidBody")
+                .map_or(1., |c| num(c, "mass", 1.));
+            Ok(Some(([centre.x, centre.y, centre.z], low, signed.abs(), scale, mass)))
+        };
+        let (Some((before, low0, _, _, _)), Some((after, low1, volume, scale, mass))) = (at(from)?, at(time)?) else {
+            return Ok(None);
+        };
+        let level = self.water_level;
+        let speed = (after[1] - before[1]) / dt;
+        if !(low0 < level && low1 >= level && speed > 0.) {
+            return Ok(None);
+        }
+        let s = ((level - low0) / (low1 - low0)).clamp(0., 1.);
+        // strictly inside the step, as the solver asks of anything a driver supplies for it
+        let crossing = (from + s * dt).clamp(from.next_up(), time);
+        Ok(Some(Crossing {
+            time: crossing,
+            centre: [before[0] + (after[0] - before[0]) * s, before[2] + (after[2] - before[2]) * s],
+            speed,
+            volume,
+            mass,
+            scale,
+        }))
     }
 
     /// Adds body `index`'s thickness over every column it covers, between the

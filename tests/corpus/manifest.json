@@ -269,6 +269,18 @@
     "ocn1.scene.xml": [
       "OCN1"
     ],
+    "ocn10-derived.scene.xml": [
+      "OCN10"
+    ],
+    "ocn11-static.scene.xml": [
+      "OCN11"
+    ],
+    "ocn11-unlisted.scene.xml": [
+      "OCN11"
+    ],
+    "ocn12-twice.scene.xml": [
+      "OCN12"
+    ],
     "ocn2.scene.xml": [
       "OCN2"
     ],
@@ -766,6 +778,7 @@
     "minimal.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
+    "ocean-entry.scene.xml": [],
     "ocean-order2.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],

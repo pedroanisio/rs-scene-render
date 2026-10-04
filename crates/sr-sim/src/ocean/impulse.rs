@@ -6,7 +6,17 @@ pub enum ImpulseKind {
     AddWater,
     /// Transfers water between a central disc and an annulus, conserving mass.
     Displace,
+    /// A cavity: moves water out of the central disc into the annulus like a negative
+    /// [`ImpulseKind::Displace`], where `amplitude` (not negative) is the depth wanted removed
+    /// at the centre. It moves the wanted volume, or at most [`CAVITY_SHARE`] of the water the
+    /// disc holds, whichever is less, so it is limited by the water layer and never an error
+    /// for lack of donor water; it removes from each column in proportion to its depth and
+    /// never more than [`CAVITY_SHARE`] of it. A disc or annulus without water or without a
+    /// cell centre moves nothing.
+    Cavity,
 }
+/// The most of the water of a disc, and of any column in it, that a cavity removes.
+pub const CAVITY_SHARE: f64 = 0.9;
 #[derive(Clone, Debug)]
 pub struct Impulse {
     pub time: f64,
@@ -27,7 +37,7 @@ impl Impulse {
             || self.radius <= 0.0
             || !self.amplitude.is_finite()
             || self.center.iter().chain(&self.velocity).any(|x| !x.is_finite())
-            || (self.kind == ImpulseKind::AddWater && self.amplitude < 0.0)
+            || (matches!(self.kind, ImpulseKind::AddWater | ImpulseKind::Cavity) && self.amplitude < 0.0)
         {
             return Err(Error::Invalid("impulse time, shape, amplitude or velocity"));
         }
@@ -46,7 +56,10 @@ impl Impulse {
                 [full, center, ring]
             })
             .collect();
-        if !weights.iter().any(|w| w[0] > 0.0) && (self.amplitude != 0.0 || self.velocity != [0.0; 2]) {
+        if self.kind != ImpulseKind::Cavity
+            && !weights.iter().any(|w| w[0] > 0.0)
+            && (self.amplitude != 0.0 || self.velocity != [0.0; 2])
+        {
             return Err(Error::Invalid("impulse does not cover any cell centre"));
         }
         let mut delta = vec![0.0; q.len()];
@@ -75,6 +88,18 @@ impl Impulse {
                 }
             }
             ImpulseKind::Displace => {}
+            ImpulseKind::Cavity if self.amplitude > 0.0 => {
+                let wanted = self.amplitude * weights.iter().map(|w| w[1]).sum::<f64>();
+                let capacity: f64 = weights.iter().zip(q.iter()).map(|(w, q)| w[1] * q[0]).sum();
+                let received: f64 = weights.iter().map(|w| w[2]).sum();
+                let amount = wanted.min(CAVITY_SHARE * capacity);
+                if amount.is_finite() && amount > 0.0 && received > 0.0 {
+                    for ((d, w), q) in delta.iter_mut().zip(&weights).zip(q.iter()) {
+                        *d = amount * (w[2] / received - w[1] * q[0] / capacity);
+                    }
+                }
+            }
+            ImpulseKind::Cavity => {}
         }
         for ((q, d), w) in q.iter_mut().zip(delta).zip(weights) {
             if w[0] == 0.0 {
