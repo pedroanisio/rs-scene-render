@@ -434,6 +434,69 @@ pub struct State {
     solid: Vec<bool>,
 }
 
+/// The velocity of one step's gas, copied out of a [`State`] so that something that reads it (the
+/// particles an emitter drags along) does not hold the simulation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gas {
+    cells: [usize; 3],
+    origin: [f64; 3],
+    h: f64,
+    boundary: Boundary,
+    velocity: [Vec<f64>; 3],
+    solid: Vec<bool>,
+}
+
+impl State {
+    /// A copy of this step's velocity field.
+    pub fn gas(&self) -> Gas {
+        Gas {
+            cells: self.cells,
+            origin: self.origin,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: self.velocity.clone(),
+            solid: self.solid.clone(),
+        }
+    }
+}
+
+impl Gas {
+    /// Bytes the copy holds.
+    pub fn bytes(&self) -> usize {
+        self.velocity.iter().map(|v| v.len() * std::mem::size_of::<f64>()).sum::<usize>() + self.solid.len()
+    }
+
+    /// The gas's velocity at a point in the volume's own axes: the solver's trilinear interpolation
+    /// inside the domain, nothing more than a cell outside it, and in between the value at the nearest
+    /// point of the domain fading to nothing across that cell, so that what a particle feels has no jump
+    /// at the boundary (a closed domain would otherwise hold its wall value forever outside). A point that
+    /// is not finite is at rest.
+    pub fn velocity_at(&self, p: [f64; 3]) -> [f64; 3] {
+        if !finite3(p) {
+            return [0.0; 3];
+        }
+        let q: [f64; 3] = std::array::from_fn(|a| (p[a] - self.origin[a]) / self.h);
+        let outside = (0..3).map(|a| (-q[a]).max(q[a] - self.cells[a] as f64).max(0.0)).fold(0.0, f64::max);
+        if outside >= 1.0 {
+            return [0.0; 3];
+        }
+        let inside: [f64; 3] = std::array::from_fn(|a| q[a].clamp(0.0, self.cells[a] as f64));
+        let field = Field {
+            cells: self.cells,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: [&self.velocity[0], &self.velocity[1], &self.velocity[2]],
+            solid: &self.solid,
+        };
+        let v = field.velocity_grid(inside);
+        if outside == 0.0 {
+            v
+        } else {
+            v.map(|c| c * (1.0 - outside))
+        }
+    }
+}
+
 /// Prescribed velocities at the low and high MAC faces of one solid cell,
 /// including nonlinear deforming boundaries. They are recomputed from the
 /// colliders at the start of every step and used only during it, so they are
