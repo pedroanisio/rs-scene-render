@@ -191,13 +191,12 @@ fn a_crater_on_a_primitive_that_cannot_be_a_bed_is_rejected_when_the_scene_loads
 
 /// A symbol instance with `loop` has a clock that cannot be inverted in general,
 /// so the ocean replays its history for every frame; inside the first cycle it must
-/// give what the plain instance gives. The seabed stays outside the symbol: ids of
-/// colliders are looked up as written, as they are for the smoke and the particles.
+/// give what the plain instance gives. The seabed is inside the symbol with the ocean.
 #[test]
 fn a_clock_that_cannot_be_inverted_gives_the_result_of_the_equivalent_linear_clock() {
     let make = |instance: &str| {
         format!(
-            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="8"/><symbols><symbol id="shot" width="64" height="64" duration="6">{OCEAN}</symbol></symbols><composition><object3D id="seabed" primitive="plane" width="400" height="400" segments="80" y="12" rotationX="-90">{CRATER}</object3D><instance id="take" symbol="shot" {instance}/></composition></scene>"#
+            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="8"/><symbols><symbol id="shot" width="64" height="64" duration="6"><object3D id="seabed" primitive="plane" width="400" height="400" segments="80" y="12" rotationX="-90">{CRATER}</object3D>{OCEAN}</symbol></symbols><composition><instance id="take" symbol="shot" {instance}/></composition></scene>"#
         )
     };
     let linear = evaluator(&make(""), None);

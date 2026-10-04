@@ -2341,7 +2341,7 @@ impl Builder {
                 .filter(|e| e.element_name() == "pyro")
                 .filter_map(|e| attr_str(e, "colliders").map(|s| (s, e.loc())))
                 .collect();
-            if self.nodes[n].name == "particles3D" {
+            if matches!(self.nodes[n].name, "particles3D" | "ocean") {
                 if let Some(list) = attr_str(&*self.nodes[n].elem, "colliders") {
                     lists.push((list, self.nodes[n].elem.loc()));
                 }
@@ -2354,7 +2354,7 @@ impl Builder {
                         Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
                         None => self.diags.push(err(
                             "E11",
-                            format!("pyro collider {id:?} is not instantiated in this scope"),
+                            format!("collider {id:?} is not instantiated in this scope"),
                             loc,
                             &*self.nodes[n].id,
                         )),
