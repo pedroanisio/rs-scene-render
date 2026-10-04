@@ -192,3 +192,85 @@ pub fn crater(impact: &Impact, target: &Target) -> Result<Crater, String> {
         blanket_thickness: ejecta_volume / (2.0 * std::f64::consts::PI * rim_radius * rim_radius),
     })
 }
+
+/// What the engine makes of an impact's energy for smoke. The literature gives ranges, not
+/// values, for how much of it goes into a rising plume (the target's internal energy is
+/// 0.70 to 0.91 of an impact's at 5 to 45 km/s in strong rock, O'Keefe and Ahrens 1977; the
+/// ejecta's kinetic energy 0.07 to 0.5; no value is published for the part in a plume), so
+/// these are the engine's own, with defaults inside those ranges and no published value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmokeParams {
+    /// Share of the impact's energy, scaled by the angle, that heats the dust. Engine default 0.1.
+    pub heat_fraction: f64,
+    /// Share of the ejected volume that is dust held in the smoke. Engine default 0.01.
+    pub dust_fraction: f64,
+    /// Joules per kilogram and kelvin of the dust. Default 1000.
+    pub specific_heat: f64,
+    /// The most the dust is heated by, kelvin: a declared physical cap (vaporisation), not a
+    /// fallback. Default 5000, below the solver's own limit of 50000.
+    pub max_temperature: f64,
+}
+
+impl Default for SmokeParams {
+    fn default() -> Self {
+        SmokeParams { heat_fraction: 0.1, dust_fraction: 0.01, specific_heat: 1000.0, max_temperature: 5000.0 }
+    }
+}
+
+/// The smoke an impact makes, in SI units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Smoke {
+    /// Cubic metres of solid dust put into the smoke.
+    pub dust_volume: f64,
+    /// Kilograms of it.
+    pub dust_mass: f64,
+    /// Joules that heat it.
+    pub heat: f64,
+    /// Kelvin the dust is heated by, at most `max_temperature`.
+    pub temperature_rise: f64,
+    /// Seconds over which a continuous source delivers it: the crater's formation time.
+    pub duration: f64,
+}
+
+/// The smoke of `impact` into `crater` of a target of density `target_density`. `speed` is the
+/// whole relative speed, of which the impact's `normal_speed` is the part along the normal, so
+/// that the angle from the surface has `sin(theta) = normal_speed / speed`.
+///
+/// The dust is `dust_fraction` of the ejected volume and, as a volume fraction of solids, does
+/// not depend on a unit of mass. The heat is `heat_fraction x (1/2) m U^2 x sin(theta)^1.5`:
+/// shock energy falls with the sine of the angle to the 3/2 in the 3D hydrocode runs of Pierazzo
+/// and Melosh (2000, doi 10.1146/annurev.earth.28.1.141). It all goes into the dust, which
+/// warms by `heat / (mass x specific_heat)` up to the cap. The physics is simple on purpose: a
+/// body falling a few metres makes almost no heat, which is the true behaviour in physical units.
+pub fn smoke(
+    impact: &Impact,
+    speed: f64,
+    crater: &Crater,
+    target_density: f64,
+    params: &SmokeParams,
+) -> Result<Smoke, String> {
+    positive("impact speed", speed)?;
+    positive("target density", target_density)?;
+    if speed.partial_cmp(&impact.normal_speed) == Some(std::cmp::Ordering::Less) {
+        return Err("the speed along the normal cannot exceed the speed".into());
+    }
+    if !(params.heat_fraction.is_finite() && (0.0..=1.0).contains(&params.heat_fraction)) {
+        return Err("heatFraction must be between 0 and 1".into());
+    }
+    if !(params.dust_fraction.is_finite() && params.dust_fraction > 0.0 && params.dust_fraction <= 1.0) {
+        return Err("dustFraction must be above 0 and at most 1".into());
+    }
+    positive("specificHeat", params.specific_heat)?;
+    positive("maxTemperature", params.max_temperature)?;
+    let dust_volume = params.dust_fraction * crater.ejecta_volume;
+    let dust_mass = dust_volume * target_density;
+    let sine = impact.normal_speed / speed;
+    let heat = params.heat_fraction * 0.5 * impact.mass * speed * speed * sine.powf(1.5);
+    Ok(Smoke {
+        dust_volume,
+        dust_mass,
+        heat,
+        temperature_rise: (heat / (dust_mass * params.specific_heat)).min(params.max_temperature),
+        duration: crater.duration,
+    })
+}

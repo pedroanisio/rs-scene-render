@@ -189,3 +189,96 @@ fn materials_have_names() {
     }
     assert_eq!(Material::parse("granite"), None);
 }
+
+// ------------------------------------------------------------------------------- smoke
+
+use sr_sim::cratering::{smoke, SmokeParams};
+
+fn made(mass: f64, speed: f64, normal: f64, material: Material) -> (sr_sim::cratering::Crater, Impact) {
+    let impact = impact(mass, 3000.0, normal);
+    let _ = speed;
+    (crater(&impact, &target(material)).unwrap(), impact)
+}
+
+#[test]
+fn the_dust_is_a_fraction_of_the_volume_thrown_out_and_the_heat_a_fraction_of_the_energy() {
+    let (mass, speed, normal) = (1500.0, 3000.0, 3000.0 * 60.0f64.to_radians().sin());
+    let (c, i) = made(mass, speed, normal, Material::SoftRock);
+    let p = SmokeParams::default();
+    let s = smoke(&i, speed, &c, 2100.0, &p).unwrap();
+    assert!(close(s.dust_volume, 0.01 * c.ejecta_volume, 1e-12));
+    assert!(close(s.dust_mass, s.dust_volume * 2100.0, 1e-12));
+    // E = heat fraction x (1/2) m U^2 x sin(theta)^1.5, theta from the surface
+    let energy = 0.1 * 0.5 * mass * speed * speed * (normal / speed).powf(1.5);
+    assert!(close(s.heat, energy, 1e-12), "{} vs {energy}", s.heat);
+    // spread over the dust, at a specific heat of 1000 J/(kg K)
+    assert!(close(s.temperature_rise, (energy / (s.dust_mass * 1000.0)).min(5000.0), 1e-12));
+    assert!(close(s.duration, c.duration, 1e-12), "the window is the crater's formation time");
+}
+
+#[test]
+fn heat_dust_and_temperature_grow_with_the_energy_of_the_impact() {
+    let p = SmokeParams::default();
+    let mut last = (0.0, 0.0, 0.0);
+    for speed in [800.0, 1500.0, 3000.0, 6000.0] {
+        let (c, i) = made(1500.0, speed, speed, Material::SoftRock);
+        let s = smoke(&i, speed, &c, 2100.0, &p).unwrap();
+        assert!(s.heat > last.0 && s.dust_volume > last.1 && s.temperature_rise >= last.2, "{speed}: {s:?}");
+        last = (s.heat, s.dust_volume, s.temperature_rise);
+    }
+    let mut last = 0.0;
+    for mass in [200.0, 800.0, 3200.0] {
+        let (c, i) = made(mass, 3000.0, 3000.0, Material::SoftRock);
+        let s = smoke(&i, 3000.0, &c, 2100.0, &p).unwrap();
+        assert!(s.heat > last, "{mass}");
+        last = s.heat;
+    }
+}
+
+#[test]
+fn a_glancing_impact_heats_less_and_a_slow_one_barely_at_all() {
+    let p = SmokeParams::default();
+    let heat = |degrees: f64| {
+        let normal = 3000.0 * degrees.to_radians().sin();
+        let (c, i) = made(1500.0, 3000.0, normal, Material::SoftRock);
+        smoke(&i, 3000.0, &c, 2100.0, &p).unwrap().heat
+    };
+    assert!(heat(90.0) > heat(60.0) && heat(60.0) > heat(30.0) && heat(30.0) > heat(10.0));
+    // a body falling for a few metres, in physical units, does not make a fireball
+    let (c, i) = made(1500.0, 20.0, 20.0, Material::SoftRock);
+    let slow = smoke(&i, 20.0, &c, 2100.0, &p).unwrap();
+    assert!(slow.temperature_rise < 20.0, "{} K", slow.temperature_rise);
+}
+
+#[test]
+fn the_temperature_rise_is_capped_at_the_documented_vaporisation_limit() {
+    // the dust of a fast impact is heated by a few hundred kelvin at the defaults, because
+    // the heat grows with the energy and the dust with the crater, which grows more slowly
+    let (c, i) = made(1500.0, 20_000.0, 20_000.0, Material::SoftRock);
+    let uncapped = smoke(&i, 20_000.0, &c, 2100.0, &SmokeParams::default()).unwrap();
+    assert!(uncapped.temperature_rise > 100.0 && uncapped.temperature_rise < 5000.0, "{}", uncapped.temperature_rise);
+    // a little dust takes the same heat to the cap, and a lower cap holds
+    let thin = SmokeParams { dust_fraction: 1e-6, ..SmokeParams::default() };
+    assert_eq!(smoke(&i, 20_000.0, &c, 2100.0, &thin).unwrap().temperature_rise, 5000.0);
+    let lower = SmokeParams { max_temperature: 1200.0, dust_fraction: 1e-6, ..SmokeParams::default() };
+    assert_eq!(smoke(&i, 20_000.0, &c, 2100.0, &lower).unwrap().temperature_rise, 1200.0);
+}
+
+#[test]
+fn the_parameters_are_the_engines_and_must_make_sense() {
+    let (c, i) = made(1500.0, 3000.0, 3000.0, Material::SoftRock);
+    let p = SmokeParams::default();
+    assert_eq!((p.heat_fraction, p.dust_fraction, p.specific_heat, p.max_temperature), (0.1, 0.01, 1000.0, 5000.0));
+    for bad in [
+        SmokeParams { heat_fraction: -0.1, ..p },
+        SmokeParams { heat_fraction: 1.5, ..p },
+        SmokeParams { dust_fraction: 0.0, ..p },
+        SmokeParams { dust_fraction: 2.0, ..p },
+        SmokeParams { specific_heat: 0.0, ..p },
+        SmokeParams { max_temperature: f64::NAN, ..p },
+    ] {
+        assert!(smoke(&i, 3000.0, &c, 2100.0, &bad).is_err(), "{bad:?}");
+    }
+    assert!(smoke(&i, 0.0, &c, 2100.0, &p).is_err(), "a speed along the normal cannot exceed the speed");
+    assert!(smoke(&i, 3000.0, &c, -1.0, &p).is_err());
+}
