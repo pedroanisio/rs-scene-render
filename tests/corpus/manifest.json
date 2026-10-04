@@ -308,6 +308,18 @@
     "p3d6.scene.xml": [
       "P3D6"
     ],
+    "pyc1-derived.scene.xml": [
+      "PYC1"
+    ],
+    "pyc2-orphan.scene.xml": [
+      "PYC2"
+    ],
+    "pyc3-time.scene.xml": [
+      "PYC3"
+    ],
+    "pyc4-authored.scene.xml": [
+      "PYC4"
+    ],
     "pyro-advection.scene.xml": [
       "S06"
     ],
@@ -718,6 +730,7 @@
     "openvdb.scene.xml": [],
     "particles3d.scene.xml": [],
     "pyro-colliders.scene.xml": [],
+    "pyro-crater.scene.xml": [],
     "pyro-fields.scene.xml": [],
     "pyro-maccormack.scene.xml": [],
     "pyro-mesh.scene.xml": [],

@@ -1452,6 +1452,33 @@ rock gives an apparent crater 0.8 km across here, against a transient crater of 
 the Earth Impact Effects calculator (Collins, Melosh and Marcus 2005,
 doi 10.1111/j.1945-5100.2005.tb00157.x), a difference within what the two laws disagree by.
 
+Smoke from an impact. A `pyroSource` or `pyroImpulse` with `crater` naming such a crater is the
+smoke the impact causes, and nothing is authored about it: its shape, place, timing, density,
+temperature and expansion are derived (PYC1), the crater must exist and grow from an impact
+(PYC4), and the engine's parameters belong only to such a source (PYC2). The source is a
+sphere of the crater's radius at the impact point, active from the impact over the crater's
+formation time (an impulse: at the impact). The dust is `dustFraction` of the volume thrown
+out of the crater (`0.8 V`), injected as a volume fraction of solids, so it depends on no unit
+of mass and `medium@extinction` is, in these sources, extinction per unit volume fraction. The
+heat is `heatFraction` of `(1/2) m U^2 sin(theta)^(3/2)` for the body's mass, speed and angle
+from the surface; the exponent is the scaling of shock energy with the angle in the 3D
+hydrocode runs of Pierazzo and Melosh (2000, doi 10.1146/annurev.earth.28.1.141), while the
+crater uses the normal component. It warms the dust by `heat / (dust mass x specificHeat)`
+(dust mass: its volume times the target density), at most `maxTemperature` kelvin: a declared
+physical cap (vaporisation), not a fallback, below the solver's limit of 50000 K. The solver
+derives the expansion from the heating, as an ideal gas at constant pressure, `(dT/dt)/T` in
+every cell heated, so there is no authored `expansion`; a sealed domain cannot sustain it, as
+for any expansion. The literature gives ranges, not values, for the share of an impact's
+energy that goes into a plume (internal energy of target and body 0.70 to 0.91 of it at 5 to
+45 km/s in strong rock, O'Keefe and Ahrens 1977; ejecta kinetic energy 0.07 to 0.5 of it), and
+none for the part that rises in smoke, so `heatFraction` 0.1, `dustFraction` 0.01 and
+`specificHeat` 1000 J/(kg K) are the engine's, with no published value, to be calibrated. In
+physical units a slow impact barely heats anything, and even a 20 km/s impact of a body of
+1500 kg heats its dust by only a few hundred kelvin at these defaults, because the dust grows
+with the crater and the crater grows more slowly than the energy: a scene needs physical
+impact speeds, or a smaller `dustFraction`, for a fireball. This is the engine saying what the
+numbers say.
+
 Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
 Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
 through Holsapple's documents and the papers that cite them. The calculator note's table
@@ -1938,6 +1965,11 @@ Also includes `pyroShape`, inventoried below.
 | `velocityRateY` | xs:double | Default `0` |
 | `velocityRateZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `pyroImpulseType`
 
@@ -1945,13 +1977,18 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
-| `time` | nonNegativeDecimal | Required |
+| `time` | nonNegativeDecimal | Required unless `crater` is given (PYC3) |
 | `density` | nonNegativeDecimal | Default `0` |
 | `temperature` | nonNegativeDecimal | Default `0` |
 | `velocityX` | xs:double | Default `0` |
 | `velocityY` | xs:double | Default `0` |
 | `velocityZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `particles3DType`
 

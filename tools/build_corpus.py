@@ -55,6 +55,8 @@ CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration
 
 CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="20" height="20" segments="40" y="2"><crater id="pit" source="rock" targetMaterial="softRock"/><rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>\n'
 
+PYRO_CRATER = CRATER_IMPACT.replace('</composition>', '<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource crater="pit"/><pyroImpulse crater="pit" heatFraction="0.2"/></pyro></object3D></composition>')
+
 def sub(old, new, count=1):
     def f(t):
         assert old in t, f"mutation anchor not found: {old!r}"
@@ -92,6 +94,10 @@ CASES = [
     ("crt7-orphan", ["CRT7"], lambda _: CRATER.replace('<crater ', '<crater strength="1000" ')),
     ("crt8-static", ["CRT8"], lambda _: CRATER_IMPACT.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
     ("s09-crater-id", ["S09"], lambda _: CRATER_IMPACT.replace('id="pit"', 'id="ground"')),
+    ("pyc1-derived", ["PYC1"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource crater="pit" start="1"/>')),
+    ("pyc2-orphan", ["PYC2"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource heatFraction="0.2"/>')),
+    ("pyc3-time", ["PYC3"], lambda _: PYRO_CRATER.replace('<pyroImpulse crater="pit" heatFraction="0.2"/>', '<pyroImpulse density="1"/>')),
+    ("pyc4-authored", ["PYC4"], lambda _: PYRO_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
     ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
     ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
@@ -349,6 +355,7 @@ VALID = {
     "openvdb-sequence": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-%d.vdb" format="openvdb" first="0" last="1" interpolation="linear"'),
     "crater": CRATER,
     "crater-impact": CRATER_IMPACT,
+    "pyro-crater": PYRO_CRATER,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,

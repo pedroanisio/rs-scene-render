@@ -138,6 +138,10 @@
       <sch:assert id="PYRO2" test="not(@end) or (@start and number(@end)&gt;number(@start)) or (not(@start) and number(@end)&gt;0)">pyro source end must be greater than start.</sch:assert>
       <sch:assert id="PYRO3" test="not(@shape='box') or (@width and @height and @depth)">box pyro sources require width, height and depth.</sch:assert>
       <sch:assert id="PYRO4" test="not(@scaleX=0 or @scaleY=0 or @scaleZ=0)">pyro source transforms must be invertible (nonzero scales).</sch:assert>
+      <sch:assert id="PYC1" test="not(@crater and (@start or @end or @time or @densityRate or @temperatureRate or @density or @temperature or @expansion or @shape or @mesh or @radius or @width or @height or @depth or @x or @y or @z or @rotation or @rotationX or @rotationY or @scaleX or @scaleY or @scaleZ))">a pyro source or impulse from a crater derives its shape, place, timing, density, temperature and expansion, so none of them may be given.</sch:assert>
+      <sch:assert id="PYC2" test="@crater or not(@heatFraction or @dustFraction or @specificHeat or @maxTemperature)">heatFraction, dustFraction, specificHeat and maxTemperature belong to a pyro source or impulse from a crater.</sch:assert>
+      <sch:assert id="PYC3" test="not(self::pyroImpulse) or @time or @crater">a pyro impulse requires time unless it comes from a crater.</sch:assert>
+      <sch:assert id="PYC4" test="not(@crater) or /scene//crater[@id=current()/@crater and @source]">a pyro source or impulse from a crater must name a crater that grows from an impact.</sch:assert>
     </sch:rule>
     <sch:rule context="assets/volume">
       <sch:let name="first" value="number(substring(normalize-space(@first),1+number(starts-with(normalize-space(@first),'+'))))"/>

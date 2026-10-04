@@ -885,6 +885,55 @@ impl<'a> Eval<'a> {
                     "PYRO4",
                     || "pyro source transforms must be invertible (nonzero scales).".into(),
                 );
+                const DERIVED: [&str; 22] = [
+                    "start",
+                    "end",
+                    "time",
+                    "densityRate",
+                    "temperatureRate",
+                    "density",
+                    "temperature",
+                    "expansion",
+                    "shape",
+                    "mesh",
+                    "radius",
+                    "width",
+                    "height",
+                    "depth",
+                    "x",
+                    "y",
+                    "z",
+                    "rotation",
+                    "rotationX",
+                    "rotationY",
+                    "scaleX",
+                    "scaleY",
+                ];
+                self.check(
+                    !has("crater") || !(DERIVED.iter().any(|k| has(k)) || has("scaleZ")),
+                    n,
+                    "PYC1",
+                    || "a pyro source or impulse from a crater derives its shape, place, timing, density, temperature and expansion, so none of them may be given.".into(),
+                );
+                self.check(
+                    has("crater") || !["heatFraction", "dustFraction", "specificHeat", "maxTemperature"].iter().any(|k| has(k)),
+                    n,
+                    "PYC2",
+                    || "heatFraction, dustFraction, specificHeat and maxTemperature belong to a pyro source or impulse from a crater.".into(),
+                );
+                self.check(n.tag_name().name() != "pyroImpulse" || has("time") || has("crater"), n, "PYC3", || {
+                    "a pyro impulse requires time unless it comes from a crater.".into()
+                });
+                self.check(
+                    a("crater").is_none_or(|id| {
+                        n.document().descendants().any(|c| {
+                            is(c, "crater") && c.attribute("id") == Some(id) && c.attribute("source").is_some()
+                        })
+                    }),
+                    n,
+                    "PYC4",
+                    || "a pyro source or impulse from a crater must name a crater that grows from an impact.".into(),
+                );
             }
             // p5, p26
             "object3D" => {
