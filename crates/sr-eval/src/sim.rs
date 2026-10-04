@@ -530,7 +530,13 @@ fn shape_for(
     }
 }
 
-fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut Vec<String>) -> Option<PhysicsRt> {
+fn build_physics(
+    p: &Program,
+    g0: &FrameGraph,
+    fields: &FieldSrc,
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Option<PhysicsRt> {
     let ph = p.scene.physics.as_ref();
     let mut bodies = Vec::new();
     let mut specs = Vec::new();
@@ -739,7 +745,7 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
     }
     let has2 = !spec.bodies.is_empty() || !spec.softs.is_empty();
     let world = if cached.is_some() || !has2 { None } else { Some(World::new(spec)) };
-    let three = crate::sim3d::build(p, &g3, cached.is_some(), problems);
+    let three = crate::sim3d::build(p, &g3, cached.is_some(), problems, failures);
     Some(PhysicsRt { world, three, cached, start, step, bodies, softs })
 }
 
@@ -1451,6 +1457,8 @@ pub struct Runtime {
     graph_cache: Vec<(u64, Arc<FrameGraph>)>,
     /// Problems found while building (reported once).
     pub problems: Vec<String>,
+    /// Simulations that could not be built, as `FrameGraph::failures`.
+    pub failures: Vec<String>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -1530,7 +1538,7 @@ impl Runtime {
             let fields = build_fields(p);
             let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
             let g0 = if (g.time - start).abs() < 1e-12 { Arc::new(g.clone()) } else { graphs.at(start) };
-            self.physics = build_physics(p, &g0, &fields, &mut self.problems);
+            self.physics = build_physics(p, &g0, &fields, &mut self.problems, &mut self.failures);
             self.fields = Some(fields);
         }
         let fields = self.fields.as_ref().expect("built");
@@ -1578,11 +1586,14 @@ impl Runtime {
         g.sim_seconds.ocean = clock.elapsed().as_secs_f64();
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
-        let mut pyro_problems = Vec::new();
+        // everything the smoke solver reports is a failure of the solver
+        let mut pyro_failures = Vec::new();
         let clock = std::time::Instant::now();
-        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_problems);
+        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
         g.sim_seconds.smoke = clock.elapsed().as_secs_f64();
-        g.problems.extend(pyro_problems);
+        for failure in pyro_failures {
+            g.fail(failure);
+        }
         self.graph_cache = graphs.cache;
     }
 }
@@ -1676,10 +1687,13 @@ fn set_world(g: &mut FrameGraph, i: usize, w: Affine) {
 /// cache file contents (`scene-render simulate`).
 pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> Result<Vec<u8>, String> {
     let mut problems = Vec::new();
+    let mut failures = Vec::new();
     let fields = build_fields(p);
     let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
     let g0 = base(start);
-    let mut ph = build_physics(p, &g0, &fields, &mut problems).ok_or("the document has no physics bodies")?;
+    let mut ph =
+        build_physics(p, &g0, &fields, &mut problems, &mut failures).ok_or("the document has no physics bodies")?;
+    problems.extend(failures);
     if !problems.is_empty() {
         return Err(problems.join("; "));
     }

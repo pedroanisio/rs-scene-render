@@ -655,7 +655,10 @@ impl Renderer {
     ) -> Option<Arc<crate::three::MeshGpu>> {
         if n.kind == "ocean" {
             let Some(surface) = &n.sim_ocean else {
-                plan.stats.errors.push(format!("{}: ocean evaluation produced no surface", n.id));
+                // a failed solver is already reported as an error with its cause
+                if !ctx.g.failed(&n.id) {
+                    plan.stats.errors.push(format!("{}: ocean evaluation produced no surface", n.id));
+                }
                 return None;
             };
             if surface.mesh.indices.is_empty() {
@@ -2417,6 +2420,8 @@ impl Renderer {
                         volumes.push(volume);
                     }
                     Ok(None) => {}
+                    // a failed simulation is already reported as an error with its cause
+                    Err(_) if g.failed(&g.nodes[j].id) => {}
                     Err(error) => plan.stats.errors.push(format!("{}: {error}", g.nodes[j].id)),
                 }
             } else {

@@ -3154,6 +3154,12 @@ impl Renderer {
         });
         let scale = self.tier.scale;
         let mut plan = Plan::default();
+        // a simulation that could not run leaves the frame without something that was asked for
+        for failure in &g.failures {
+            if !plan.stats.errors.contains(failure) {
+                plan.stats.errors.push(failure.clone());
+            }
+        }
         plan.stats.sim_rigid_seconds = g.sim_seconds.rigid;
         plan.stats.sim_ocean_seconds = g.sim_seconds.ocean;
         plan.stats.sim_smoke_seconds = g.sim_seconds.smoke;
@@ -3218,7 +3224,8 @@ impl Renderer {
             sub: subs.as_ref().map(|s| s as &dyn SubSource),
         };
         for m in &g.problems {
-            if !plan.stats.unsupported.contains(m) {
+            // failures are already errors
+            if !g.failures.contains(m) && !plan.stats.unsupported.contains(m) {
                 plan.stats.unsupported.push(m.clone());
             }
         }

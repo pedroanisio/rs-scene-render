@@ -207,7 +207,14 @@ fn prim_triangles(prim: &sr_3d::Primitive) -> Triangles {
 }
 
 /// The collision shape of object `n` for `rigidBody` `b`, in the object's axes scaled by `s`.
-fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems: &mut Vec<String>) -> Shape3 {
+fn shape_for(
+    p: &Program,
+    n: &FrameNode,
+    b: &dyn Element,
+    s: [f64; 3],
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Shape3 {
     let e: &dyn Element = &*n.elem;
     let kind = text(e, "primitive").unwrap_or_else(|| "box".into());
     let r = attr(n, "radius", 50.0);
@@ -244,7 +251,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             Ok(())
         })();
         if let Err(error) = admission {
-            problems.push(format!("{}: {error}", n.id));
+            failures.push(format!("{}: {error}", n.id));
             return Shape3::Sphere(1.);
         }
     }
@@ -252,7 +259,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     let uniform = (sx - sy).abs() <= 1e-9 * sx.max(1.0) && (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     let round_xz = (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     // the object's triangles (object space, unscaled)
-    let triangles = |problems: &mut Vec<String>| -> Option<Triangles> {
+    let triangles = |problems: &mut Vec<String>, failures: &mut Vec<String>| -> Option<Triangles> {
         if kind == "globe" && text(e, "terrain").is_some() {
             let budget = (num(e, "terrainMemoryMiB", 128.) as usize).saturating_mul(1 << 20);
             let geometry = p
@@ -264,7 +271,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             return match geometry {
                 Ok(t) => Some(t),
                 Err(err) => {
-                    problems.push(format!("{}: rigidBody: {err}", n.id));
+                    failures.push(format!("{}: rigidBody: {err}", n.id));
                     None
                 }
             };
@@ -277,7 +284,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             } {
                 Ok(mesh) => mesh,
                 Err(error) => {
-                    problems.push(format!("{}: rigidBody: {error}", n.id));
+                    failures.push(format!("{}: rigidBody: {error}", n.id));
                     return None;
                 }
             },
@@ -301,7 +308,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 match made {
                     Ok(p) => p,
                     Err(err) => {
-                        problems.push(format!("{}: rigidBody: {err}", n.id));
+                        failures.push(format!("{}: rigidBody: {err}", n.id));
                         return None;
                     }
                 }
@@ -310,7 +317,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 return match mesh_triangles(p, n) {
                     Ok(t) => Some(t),
                     Err(err) => {
-                        problems.push(format!("{}: rigidBody: {err}", n.id));
+                        failures.push(format!("{}: rigidBody: {err}", n.id));
                         None
                     }
                 }
@@ -328,7 +335,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     if crater {
         // Deformation requires the actual tessellated surface, even for shapes
         // normally represented by analytic collision primitives.
-        return match triangles(problems) {
+        return match triangles(problems, failures) {
             Some((points, mut triangles)) => {
                 if s.iter().product::<f64>() < 0. {
                     for triangle in &mut triangles {
@@ -342,7 +349,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     }
     let scaled =
         |(pts, tris): Triangles| (pts.into_iter().map(|q| [q[0] * sx, q[1] * sy, q[2] * sz]).collect::<Vec<_>>(), tris);
-    let hull = |problems: &mut Vec<String>| match triangles(problems) {
+    let hull = |problems: &mut Vec<String>, failures: &mut Vec<String>| match triangles(problems, failures) {
         Some(t) => Shape3::Convex(scaled(t).0),
         None => Shape3::Sphere(r * sx.max(sy).max(sz)),
     };
@@ -361,8 +368,8 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         }
         "cylinder" => Shape3::Cylinder(tall * 0.5 * sy, r * sx.max(sz)),
         "cone" => Shape3::Cone(tall * 0.5 * sy, r * sx.max(sz)),
-        "convex-hull" => hull(problems),
-        "trimesh" | "decomposition" => match triangles(problems) {
+        "convex-hull" => hull(problems, failures),
+        "trimesh" | "decomposition" => match triangles(problems, failures) {
             Some(t) => {
                 let (pts, tris) = scaled(t);
                 if text(b, "shape").as_deref() == Some("trimesh") {
@@ -375,7 +382,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         },
         // auto: the primitive's own form where one fits, else its convex hull
         _ => match kind.as_str() {
-            "globe" if text(e, "terrain").is_some() => match triangles(problems) {
+            "globe" if text(e, "terrain").is_some() => match triangles(problems, failures) {
                 Some((points, mut triangles)) => {
                     let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
                     if s.iter().product::<f64>() < 0. {
@@ -395,7 +402,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 let total = hh.unwrap_or(4.0 * r).max(2.0 * r);
                 Shape3::Capsule((total * 0.5 - r).max(0.0) * sy, r * sx)
             }
-            "text" | "clay" | "extrude" => match triangles(problems) {
+            "text" | "clay" | "extrude" => match triangles(problems, failures) {
                 Some((points, mut triangles)) => {
                     let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
                     if s.iter().product::<f64>() < 0. {
@@ -411,7 +418,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 }
                 None => Shape3::Sphere(r * sx.max(sy).max(sz)),
             },
-            _ => hull(problems),
+            _ => hull(problems, failures),
         },
     }
 }
@@ -436,7 +443,13 @@ pub(crate) fn body_ids(g0: &FrameGraph) -> Vec<Arc<str>> {
 }
 
 /// The 3D world of the document, or `None` without 3D bodies.
-pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut Vec<String>) -> Option<Phys3> {
+pub(crate) fn build(
+    p: &Program,
+    g0: &FrameGraph,
+    cached: bool,
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Option<Phys3> {
     let ph = p.scene.physics.as_ref();
     let mut bodies = Vec::new();
     let mut specs = Vec::new();
@@ -469,8 +482,11 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
                 })
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
-        let shape =
-            if cached || sequence_budget.is_some() { Shape3::Sphere(1.0) } else { shape_for(p, n, c, scale, problems) };
+        let shape = if cached || sequence_budget.is_some() {
+            Shape3::Sphere(1.0)
+        } else {
+            shape_for(p, n, c, scale, problems, failures)
+        };
         let crater_surface = if children(&*n.elem).into_iter().any(|c| c.element_name() == "crater") {
             match &shape {
                 Shape3::TriMesh(points, triangles) => {
@@ -556,7 +572,7 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
         let geometry = match prepare() {
             Ok(g) => g,
             Err(e) => {
-                problems.push(format!("{}: {e}", n.id));
+                failures.push(format!("{}: {e}", n.id));
                 continue;
             }
         };
@@ -680,7 +696,7 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
     let world = match World3::new(spec).with_fractures(events) {
         Ok(world) => Some(world),
         Err(e) => {
-            problems.push(e.to_string());
+            failures.push(e.to_string());
             None
         }
     };

@@ -1073,8 +1073,8 @@ fn render(
         for &f in &frames[..warm] {
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&graphs(f), ev.program(), Some(&mut sub));
-            if let Some(e) = frame.stats.errors.first() {
-                eprintln!("error: frame {f}: {e}");
+            if !frame.stats.errors.is_empty() {
+                report_frame_errors(&format!("frame {f}"), &frame.stats);
                 return Ok(ExitCode::from(1));
             }
             unsupported.extend(frame.stats.unsupported.iter().cloned());
@@ -1092,8 +1092,8 @@ fn render(
             let t1 = std::time::Instant::now();
             let mut sub = |st: f64| ev.evaluate(st);
             last = r.render_with(&g, ev.program(), Some(&mut sub)).stats;
-            if let Some(e) = last.errors.first() {
-                eprintln!("error: frame {f}: {e}");
+            if !last.errors.is_empty() {
+                report_frame_errors(&format!("frame {f}"), &last);
                 return Ok(ExitCode::from(1));
             }
             submit_ms.push(t1.elapsed().as_secs_f64() * 1e3);
@@ -1201,8 +1201,8 @@ fn render(
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&g, ev.program(), Some(&mut sub));
             unsupported.extend(frame.stats.unsupported.iter().cloned());
-            if let Some(e) = frame.stats.errors.first() {
-                eprintln!("error: frame at {:.3} s: {e}", g.time);
+            if !frame.stats.errors.is_empty() {
+                report_frame_errors(&format!("frame at {:.3} s", g.time), &frame.stats);
                 return Ok(ExitCode::from(1));
             }
             let px = r.read(&frame.texture);
@@ -1266,6 +1266,17 @@ fn render(
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Every error of a frame that cannot be written, and the notes about what else was not rendered as
+/// authored, so that the cause of a failure is never left out.
+fn report_frame_errors(label: &str, stats: &sr_gpu::RenderStats) {
+    for error in &stats.errors {
+        eprintln!("error: {label}: {error}");
+    }
+    for note in &stats.unsupported {
+        eprintln!("note: not rendered yet: {note}");
+    }
 }
 
 /// Incremental rendering: only changed frames, and a renderer kept between renders (watch).
