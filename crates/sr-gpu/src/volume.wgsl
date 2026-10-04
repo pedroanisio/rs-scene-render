@@ -101,8 +101,37 @@ fn volume_phase(cosine: f32, g: f32) -> f32 {
     let denom=1.0+g*g-2.0*g*clamp(cosine,-1.0,1.0);
     return (1.0-g*g)/(4.0*PI*denom*sqrt(denom));
 }
+// Skip map of a domain's density grid (see volume.rs): the cell holding `point` in 4-voxel cells
+// of grid index space. Returns the ray parameter where the ray leaves that cell when it holds only
+// negligible density, else -1. The caller must have checked that the domain has no advection and
+// no second frame, so a sample reads only this grid.
+fn volume_empty_until(base: u32, o: vec3<f32>, d: vec3<f32>, point: vec3<f32>) -> f32 {
+    let m=volume_matrix(base+8u);
+    let p=(m*vec4(point,1.0)).xyz;
+    let c=vec3<i32>(floor(p/4.0));
+    let first=tverts[base+15u];
+    let dims=bitcast<vec3<u32>>(tverts[base+22u].xyz);
+    let rel=c-bitcast<vec3<i32>>(first.xyz);
+    if (all(rel>=vec3<i32>(0)) && all(vec3<u32>(rel)<dims)) {
+        let cell=u32(rel.x)+dims.x*(u32(rel.y)+dims.y*u32(rel.z));
+        let word=bitcast<u32>(tverts[bitcast<u32>(first.w)+cell/128u][(cell/32u)%4u]);
+        if (((word>>(cell%32u))&1u)!=0u) { return -1.0; }
+    }
+    let oi=(m*vec4(o,1.0)).xyz; let di=(m*vec4(d,0.0)).xyz;
+    var t=3.0e38;
+    for (var axis=0u; axis<3u; axis++) {
+        if (di[axis]>0.0) { t=min(t,(f32(c[axis]*4+4)-oi[axis])/di[axis]); }
+        else if (di[axis]<0.0) { t=min(t,(f32(c[axis]*4)-oi[axis])/di[axis]); }
+    }
+    return t;
+}
 // Extinction is additive across overlapping domains; their transmittances multiply.
 // This separate function avoids recursive shader calls when evaluating in-scattering.
+// Samples in cells whose density is negligible are jumped over (stopping a little short of the
+// cell's far side to stay clear of rounding). The map is built so that, along any ray through the
+// domain, everything left out adds less than 1e-10 to the optical depth (volume.rs,
+// SKIPPED_OPTICAL_DEPTH): about 300 times below half a unit in the last place of an f32 near 1, so
+// far below the resolution of the transmittance, but not zero.
 fn volume_transmittance(o: vec3<f32>, d: vec3<f32>, distance: f32) -> f32 {
     var optical_depth=0.0;
     for (var i=0u; i<pp.media.y; i++) {
@@ -111,8 +140,21 @@ fn volume_transmittance(o: vec3<f32>, d: vec3<f32>, distance: f32) -> f32 {
         if (interval.y<=interval.x) { continue; }
         let n=max(1u,u32(ceil((interval.y-interval.x)/tverts[base+12u].w)));
         let ds=(interval.y-interval.x)/f32(n);
-        for (var k=0u; k<n; k++) {
-            optical_depth+=volume_density(base,o+d*(interval.x+(f32(k)+0.5)*ds))*tverts[base+5u].w*ds;
+        let skipping=tverts[base+22u].w>0.5;
+        var k=0u;
+        loop {
+            if (k>=n) { break; }
+            let point=o+d*(interval.x+(f32(k)+0.5)*ds);
+            if (skipping) {
+                let until=volume_empty_until(base,o,d,point);
+                if (until>-0.5) {
+                    let last=floor((until-0.02-interval.x)/ds-0.5);
+                    k=max(k+1u,u32(clamp(last+1.0,0.0,f32(n))));
+                    continue;
+                }
+            }
+            optical_depth+=volume_density(base,point)*tverts[base+5u].w*ds;
+            k++;
         }
     }
     return exp(-optical_depth);
