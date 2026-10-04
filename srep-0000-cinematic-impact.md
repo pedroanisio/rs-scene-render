@@ -2541,7 +2541,7 @@ kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and 
 that hold 80 % of the crater's mass, are consequences of the contact) and
 [`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
 second-order ocean 20 m deep that carries it with `bodyCoupling="full"` and makes a crater in the
-seabed; there is no `waterImpulse`). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
+seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
 no effect has a time attribute, that nothing happens before the contact, that the crater, the dust, the
 heat in the dust and the ejecta (their mass, which is 0.8 of the crater's, and their reach) grow with speed,
 mass and angle, that an oblique impact carries the ejecta downrange, that the ocean's water volume is conserved to the last
@@ -2554,13 +2554,17 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   ignore the water.
 - The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
   so a smoke source from that crater would make a cloud on the sea bed.
-- In the ocean scene the highest wave grows with the rock's speed (1.29, 1.54 and 2.17 m for 60, 100
-  and 150 m/s) and with its mass (1.23, 1.54 and 2.77 m for 60 000, 90 478 and 270 000 kg) with
-  `bodyCoupling="full"`, but not with the angle: it is 2.41, 1.54 and 0.09 m for 30, 60 and 90 degrees,
-  because the ocean sees the rock as a bump that moves and has no splash from a plunge, so a rock that
-  arrives straight down makes a wave of a few centimetres. The wave of the crater alone (the sea with the bed
-  as its only collider) does grow with speed, mass and angle. A body lighter than water floats and makes no
-  crater.
+- In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`),
+  the highest wave grows with the rock's speed (4.58, 8.93 and 12.0 m for 60, 100 and 150 m/s at 60 degrees)
+  and with its mass (6.93, 8.93 and 11.07 m for 60 000, 90 478 and 270 000 kg), and the wave of a rock that
+  arrives straight down grows with both too (5.50, 10.20 and 12.05 m by speed; 8.03, 10.20 and 10.77 m by
+  mass). The sweep by angle is recorded and not asserted: 4.07, 8.93 and 10.20 m for 30, 60 and 90
+  degrees, and the crater radius on the seabed by angle is 2.89, 3.85 and 3.63 m (a rock that arrives
+  straight down reaches the bed slower than one that glances in, because the cavity empties the water under it
+  and its drag acts on less). Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by
+  angle 2.41, 1.54 and 0.09 m: the rock was a bump that moves and a plunge made a wave of 9 cm. The wave of
+  the crater alone (the sea with the bed as its only collider, no cavity) grows with speed, mass and angle.
+  A body lighter than water floats and makes no crater.
 - The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
   the speed along the normal to the power 1.7, so the temperature rise barely moves (19.19, 19.07 and 19.08 K
   at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows

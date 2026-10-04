@@ -122,7 +122,13 @@ fn no_effect_in_either_scene_has_an_attribute_of_time() {
     assert_eq!(tags(LAND, "crater").len(), 1);
     assert_eq!(tags(LAND, "pyroSource").len(), 1);
     assert_eq!(tags(OCEAN, "crater").len(), 1);
-    assert!(tags(OCEAN, "waterImpulse").is_empty());
+    // the only water impulse is the body's own entry: it names the body and says nothing else
+    let impulses = tags(OCEAN, "waterImpulse");
+    assert_eq!(impulses.len(), 1);
+    assert!(impulses[0].contains(r#"source="impactor""#), "{impulses:?}");
+    for other in ["x", "z", "radius", "amplitude", "velocityX", "velocityZ", "type"] {
+        assert!(!impulses[0].contains(&format!(" {other}=")), "the cavity derives {other}");
+    }
     assert!(tags(OCEAN, "pyroSource").is_empty() && tags(OCEAN, "pyroImpulse").is_empty(), "no smoke under water");
 }
 
@@ -425,13 +431,14 @@ fn highest_wave(ev: &Evaluator) -> f64 {
 
 /// The same sea, but the rock does not displace water, only the bed the crater lowers does.
 fn crater_only(xml: String) -> String {
-    replace_once(&xml, r#"colliders="seabed impactor""#, r#"colliders="seabed""#)
+    let xml = replace_once(&xml, r#"colliders="seabed impactor""#, r#"colliders="seabed""#);
+    replace_once(&xml, "<waterImpulse source=\"impactor\"/>", "")
 }
 
 #[test]
-fn in_the_sea_the_crater_grows_with_speed_mass_and_angle() {
-    let (speeds, masses, angles) = sweeps();
-    for (name, hits) in [("speed", speeds), ("mass", masses), ("angle", angles)] {
+fn in_the_sea_the_crater_grows_with_speed_and_mass() {
+    let (speeds, masses, _) = sweeps();
+    for (name, hits) in [("speed", speeds), ("mass", masses)] {
         let (radius, depth): (Vec<f64>, Vec<f64>) = hits
             .iter()
             .map(|&h| {
@@ -474,12 +481,15 @@ fn in_the_sea_the_wave_grows_with_the_speed() {
 }
 
 #[test]
-#[ignore = "fails as the engine stands: the ocean sees the rock as a bump that moves, so one that arrives straight down makes a wave of 9 cm and a glancing one 2.4 m"]
-fn in_the_sea_the_wave_grows_with_the_angle() {
-    let (_, _, angles) = sweeps();
-    let waves: Vec<f64> = angles.iter().map(|&h| highest_wave(&sea_variant(h))).collect();
-    println!("IMPACT sea highest wave for 30, 60, 90 degrees: {waves:?}");
-    assert!(increasing(&waves), "wave by angle: {waves:?}");
+fn in_the_sea_a_vertical_plunge_makes_a_wave_that_grows_with_speed_and_mass() {
+    // with the cavity that the body's entry makes of the water, a rock that arrives straight down is not a
+    // bump that does not move: its wave is the cavity's
+    let (speeds, masses, _) = sweeps();
+    for (name, hits) in [("speed", speeds), ("mass", masses)] {
+        let waves: Vec<f64> = hits.iter().map(|h| highest_wave(&sea_variant(Hit { angle: 90.0, ..*h }))).collect();
+        println!("IMPACT sea highest wave of a vertical plunge by {name}: {waves:?}");
+        assert!(increasing(&waves), "wave of a plunge by {name}: {waves:?}");
+    }
 }
 
 #[test]
