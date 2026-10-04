@@ -417,10 +417,47 @@ pub struct State {
     temperature: Vec<f64>,
     velocity: [Vec<f64>; 3],
     solid: Vec<bool>,
-    solid_velocity_low: Vec<[f64; 3]>,
-    // Prescribed velocities at the low/high MAC faces, including nonlinear
-    // deforming boundaries. Uses the same storage as the former affine samples.
-    solid_velocity_high: Vec<[f64; 3]>,
+}
+
+/// Prescribed velocities at the low and high MAC faces of one solid cell,
+/// including nonlinear deforming boundaries. They are recomputed from the
+/// colliders at the start of every step and used only during it, so they are
+/// kept sparsely for the step and not stored in the state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SolidFaces {
+    cell: usize,
+    low: [f64; 3],
+    high: [f64; 3],
+}
+
+/// The solid-cell mask of `obstacles` (the first listed collider that contains a
+/// cell centre wins) and each solid cell's face velocities, in cell order.
+fn voxelize(
+    cells: [usize; 3],
+    origin: [f64; 3],
+    h: f64,
+    obstacles: &[Obstacle],
+) -> Result<(Vec<bool>, Vec<SolidFaces>), Error> {
+    let count = cells.iter().product();
+    let mut solid = vec![false; count];
+    let mut faces = Vec::new();
+    for (k, is_solid) in solid.iter_mut().enumerate() {
+        let p = world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
+        let Some(collider) = obstacles.iter().find(|o| o.shape.contains(p)) else { continue };
+        *is_solid = true;
+        let (mut low_velocity, mut high_velocity) = ([0.0; 3], [0.0; 3]);
+        for (axis, (low_v, high_v)) in low_velocity.iter_mut().zip(&mut high_velocity).enumerate() {
+            let mut low = p;
+            let mut high = p;
+            low[axis] -= 0.5 * h;
+            high[axis] += 0.5 * h;
+            *low_v = collider.velocity_at(low)?[axis];
+            *high_v = collider.velocity_at(high)?[axis];
+        }
+        faces.push(SolidFaces { cell: k, low: low_velocity, high: high_velocity });
+    }
+    faces.shrink_to_fit();
+    Ok((solid, faces))
 }
 
 /// Brick coordinates and the 8x8x8 samples of a brick that holds something other than the background.
@@ -434,8 +471,6 @@ impl State {
             + self.temperature.capacity() * 8
             + self.velocity.iter().map(|v| v.capacity() * 8).sum::<usize>()
             + self.solid.capacity()
-            + self.solid_velocity_low.capacity() * 24
-            + self.solid_velocity_high.capacity() * 24
             + std::mem::size_of::<Self>()
             + 256
     }
@@ -487,9 +522,8 @@ impl State {
         self.field().velocity_grid(p)
     }
 
-    /// Working state of a step: the evolving fields copied from `self`, a fresh
-    /// (empty) solid mask and zero solid velocities. The zero arrays are
-    /// allocated lazily, so only pages near colliders are ever touched.
+    /// Working state of a step: the evolving fields copied from `self` and a fresh
+    /// (empty) solid mask.
     fn working_copy(&self) -> State {
         let copy = |src: &[f64]| {
             let mut dst = vec![0.0; src.len()];
@@ -507,8 +541,6 @@ impl State {
             temperature: copy(&self.temperature),
             velocity: std::array::from_fn(|a| copy(&self.velocity[a])),
             solid: vec![false; count],
-            solid_velocity_low: vec![[0.0; 3]; count],
-            solid_velocity_high: vec![[0.0; 3]; count],
         }
     }
 
@@ -816,14 +848,14 @@ impl Simulation {
         let count =
             s.cells.iter().try_fold(1usize, |v, n| v.checked_mul(*n)).ok_or(Error::Limit("cell count overflow"))?;
         // Worst-case live bytes per cell during one step, with every page touched:
-        // committed state 89 (density 8, temperature 8, velocity ~24, solid 1, two
-        // solid-velocity arrays 48) + working state 89 + pressure workspace 65 (six
-        // CG vectors, open-face mask, divergence target) + ~26 for the multigrid
-        // hierarchy, level vectors and component labels = ~270, plus ~20% for
-        // allocator overhead and transient volume metadata. Measured peak RSS of the
-        // impact scene without colliders is 155-256 B per cell.
+        // committed state 41 (density 8, temperature 8, velocity ~24, solid 1) +
+        // working state 41 + solid-face list 56 (only if every cell were solid; it
+        // is built before the pressure workspace exists) + pressure workspace 65
+        // (six CG vectors, open-face mask, divergence target) + ~26 for the
+        // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
+        // for allocator overhead and transient volume metadata.
         let bytes =
-            count.checked_mul(320).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
+            count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
             return Err(Error::Limit("grid and step workspace memory budget"));
         }
@@ -837,8 +869,6 @@ impl Simulation {
             temperature: vec![s.ambient_temperature; count],
             velocity: std::array::from_fn(|a| vec![0.0; face_dims(s.cells, a).iter().product()]),
             solid: vec![false; count],
-            solid_velocity_low: vec![[0.0; 3]; count],
-            solid_velocity_high: vec![[0.0; 3]; count],
         };
         Ok(Self { spec, state, step: 0 })
     }
@@ -876,30 +906,17 @@ impl Simulation {
         let dt = self.spec.dt;
         let mut state = self.state.working_copy();
         profile.clone = lap(&mut clock);
-        for k in 0..state.density.len() {
-            let p = state.cell_world(k);
-            let collider = input.obstacles.iter().find(|o| o.shape.contains(p));
-            if let Some(collider) = collider {
-                state.solid[k] = true;
-                for axis in 0..3 {
-                    let mut low = p;
-                    let mut high = p;
-                    low[axis] -= 0.5 * state.h;
-                    high[axis] += 0.5 * state.h;
-                    state.solid_velocity_low[k][axis] = collider.velocity_at(low)?[axis];
-                    state.solid_velocity_high[k][axis] = collider.velocity_at(high)?[axis];
-                }
-            }
-            if state.solid[k] {
-                state.density[k] = 0.0;
-                state.temperature[k] = state.ambient;
-            }
+        let (solid, solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
+        state.solid = solid;
+        for cell in &solids {
+            state.density[cell.cell] = 0.0;
+            state.temperature[cell.cell] = state.ambient;
         }
         profile.obstacles = lap(&mut clock);
-        boundaries(&mut state);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
-        advect(&mut state, dt, &self.spec, &mut profile)?;
+        advect(&mut state, dt, &self.spec, &solids, &mut profile)?;
         profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
@@ -934,7 +951,7 @@ impl Simulation {
         profile.inject = lap(&mut clock);
         forces(&mut state, &self.spec, input, self.step);
         profile.forces = lap(&mut clock);
-        boundaries(&mut state);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
         if target.iter().any(|v| !v.is_finite()) {
             return Err(Error::Invalid("nonfinite expansion"));
@@ -976,9 +993,11 @@ fn face_cells(p: [usize; 3], axis: usize, dims: [usize; 3]) -> [Option<usize>; 2
     [left, right]
 }
 
-fn boundaries(s: &mut State) {
+fn boundaries(s: &mut State, solids: &[SolidFaces]) {
     let (cells, boundary) = (s.cells, s.boundary);
-    let (solid, high, low) = (&s.solid, &s.solid_velocity_high, &s.solid_velocity_low);
+    let solid = &s.solid;
+    let faces_of =
+        |c: usize| &solids[solids.binary_search_by_key(&c, |f| f.cell).expect("a solid cell has face velocities")];
     for a in 0..3 {
         let dims = face_dims(cells, a);
         s.velocity[a].par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, velocity)| {
@@ -991,7 +1010,8 @@ fn boundaries(s: &mut State) {
                 let mut count = 0;
                 for (side, cell) in faces.into_iter().enumerate() {
                     if let Some(c) = cell.filter(|&c| solid[c]) {
-                        value += if side == 0 { high[c][a] } else { low[c][a] };
+                        let faces = faces_of(c);
+                        value += if side == 0 { faces.high[a] } else { faces.low[a] };
                         count += 1;
                     }
                 }
@@ -1013,7 +1033,7 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
 /// out of `s` and sampled in place; fresh arrays are written, so no copy of the
 /// state is made. Solid cells keep the cleared values the collider stage set.
 /// On error `s` is left without fields; callers discard it.
-fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Result<(), Error> {
+fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &mut StepProfile) -> Result<(), Error> {
     let (dissipation, cooling) = (spec.dissipation, spec.cooling);
     let started = Instant::now();
     let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
@@ -1032,7 +1052,7 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Res
         let scalars =
             maccormack::Scalars { density: &old_density, temperature: &old_temperature, ambient, decay, cool };
         maccormack::advect(&old, scalars, (&mut s.density, &mut s.temperature, &mut s.velocity), dt)?;
-        boundaries(s);
+        boundaries(s, solids);
         return Ok(());
     }
     let results = s
@@ -1073,7 +1093,7 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, profile: &mut StepProfile) -> Res
             .collect();
         first_error(results)?;
     }
-    boundaries(s);
+    boundaries(s, solids);
     Ok(())
 }
 

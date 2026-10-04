@@ -423,11 +423,32 @@ fn invalid_inputs_and_exhausted_budgets_fail_before_changing_state() {
 }
 
 #[test]
-fn the_step_workspace_budget_is_320_bytes_per_cell_plus_a_fixed_overhead() {
-    let exact = 16usize.pow(3) * 320 + 8192;
+fn the_step_workspace_budget_is_288_bytes_per_cell_plus_a_fixed_overhead() {
+    let exact = 16usize.pow(3) * 288 + 8192;
     let with = |max_bytes| Simulation::new(Spec { cells: [16; 3], max_bytes, ..spec() });
     assert!(with(exact).is_ok());
     assert!(with(exact - 1).is_err());
+}
+
+#[test]
+fn a_resident_state_is_about_41_bytes_per_cell_whatever_the_colliders() {
+    let mut s = spec();
+    s.cells = [32; 3];
+    let cells = 32.0f64.powi(3);
+    let mut sim = Simulation::new(s).unwrap();
+    let empty = sim.state().bytes();
+    let per_cell = empty as f64 / cells;
+    assert!((40.0..43.0).contains(&per_cell), "{per_cell} bytes per cell");
+    // Solid face velocities live only during a step: colliders do not grow the state.
+    let input = Inputs {
+        obstacles: vec![Obstacle {
+            velocity: [0.2, 0.0, 0.0],
+            ..Obstacle::stationary(Shape::Box { min: [2.0; 3], max: [29.0; 3] })
+        }],
+        ..Inputs::default()
+    };
+    sim.step(&input).unwrap();
+    assert_eq!(sim.state().bytes(), empty);
 }
 
 #[test]

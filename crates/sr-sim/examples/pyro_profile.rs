@@ -85,7 +85,13 @@ fn main() {
         ..Inputs::default()
     };
     let mut sim = Simulation::new(spec).expect("spec");
-    println!("{nx}x{ny}x{nx} cells, voxel {voxel:.3}, {} rayon threads", rayon::current_num_threads());
+    let state_bytes = sim.state().bytes();
+    println!(
+        "{nx}x{ny}x{nx} cells, voxel {voxel:.3}, {} rayon threads, state {:.1} MiB ({:.1} B/cell)",
+        rayon::current_num_threads(),
+        state_bytes as f64 / 1048576.0,
+        state_bytes as f64 / (nx * ny * nx) as f64
+    );
     println!("step  cg   total  clone  obst   bnd  advect(copy)  inject forces  p.setup  p.apply p.precond p.reduce p.update p.finish  project   (ms)");
     let mut sum = StepProfile::default();
     let mut counted = 0;
@@ -136,6 +142,15 @@ fn main() {
         }
     }
     if export {
+        for round in 0..3 {
+            let started = std::time::Instant::now();
+            let copy = sim.state().clone();
+            println!(
+                "state clone {round}: {:.1} ms ({:.1} MiB)",
+                started.elapsed().as_secs_f64() * 1e3,
+                copy.bytes() as f64 / 1048576.0
+            );
+        }
         for round in 0..3 {
             let started = std::time::Instant::now();
             let volume = sim.state().volume(usize::MAX / 2).expect("export");

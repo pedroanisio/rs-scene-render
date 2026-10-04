@@ -299,8 +299,17 @@ fn run(c: &Case) -> (u64, State, Vec<usize>) {
     hash.f64s(&s.temperature);
     s.velocity.iter().for_each(|v| hash.f64s(v));
     hash.bytes(&s.solid.iter().map(|&b| u8::from(b)).collect::<Vec<_>>());
-    hash.vec3s(&s.solid_velocity_low);
-    hash.vec3s(&s.solid_velocity_high);
+    // Face velocities of the solid cells, expanded to the dense arrays earlier
+    // releases stored in the state (zero outside solid cells), so the pinned hashes
+    // keep covering them.
+    let (_, solids) = voxelize(s.cells, s.origin, s.h, &input.obstacles).unwrap();
+    let (mut low, mut high) = (vec![[0.0; 3]; s.density.len()], vec![[0.0; 3]; s.density.len()]);
+    for faces in solids {
+        low[faces.cell] = faces.low;
+        high[faces.cell] = faces.high;
+    }
+    hash.vec3s(&low);
+    hash.vec3s(&high);
     (hash.0, s.clone(), iterations)
 }
 
