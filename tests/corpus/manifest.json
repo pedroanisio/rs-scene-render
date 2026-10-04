@@ -287,6 +287,12 @@
     "ocn7.scene.xml": [
       "OCN7"
     ],
+    "ocn8-coupling.scene.xml": [
+      "OCN8"
+    ],
+    "ocn9-drag.scene.xml": [
+      "OCN9"
+    ],
     "openvdb-format.scene.xml": [
       "S06"
     ],
@@ -726,6 +732,7 @@
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
     "ocean-order2.scene.xml": [],
     "ocean.scene.xml": [],

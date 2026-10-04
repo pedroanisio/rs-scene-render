@@ -57,6 +57,8 @@ CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" d
 
 PYRO_CRATER = CRATER_IMPACT.replace('</composition>', '<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource crater="pit"/><pyroImpulse crater="pit" heatFraction="0.2"/></pyro></object3D></composition>')
 
+OCEAN_BUOYANCY = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="float" primitive="sphere" radius="0.5" y="-1"><rigidBody shape="sphere" mass="200"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="4" colliders="float" bodyCoupling="buoyancy" bodyDrag="1.5"/></composition><physics pixelsPerMeter="1"/></scene>\n'
+
 def sub(old, new, count=1):
     def f(t):
         assert old in t, f"mutation anchor not found: {old!r}"
@@ -98,6 +100,8 @@ CASES = [
     ("pyc2-orphan", ["PYC2"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource heatFraction="0.2"/>')),
     ("pyc3-time", ["PYC3"], lambda _: PYRO_CRATER.replace('<pyroImpulse crater="pit" heatFraction="0.2"/>', '<pyroImpulse density="1"/>')),
     ("pyc4-authored", ["PYC4"], lambda _: PYRO_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("ocn8-coupling", ["OCN8"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyCoupling="buoyancy" ')),
+    ("ocn9-drag", ["OCN9"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyDrag="1" ')),
     ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
     ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
@@ -361,6 +365,7 @@ VALID = {
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,
     "ocean-colliders": OCEAN_COUPLED,
+    "ocean-buoyancy": OCEAN_BUOYANCY,
     "ocean-order2": OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="2"'),
     "ocean": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3"/></ocean>'),
     "whitewater-checkpoint": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3" checkpointMemoryMiB="0"/></ocean>'),

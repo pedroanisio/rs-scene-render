@@ -1526,6 +1526,24 @@ rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
+Buoyancy (`ocean@bodyCoupling="buoyancy"`). The group above gets its first physical coupling. Each rigid
+body in the ocean's `colliders` is loaded, every rigid step, with the weight of the water it displaces
+(density 1000 kg/m3 and the ocean's gravity) upward through the centroid of the submerged volume, which
+turns a tilted body, and with a quadratic form drag on its vertical motion, `-(1/2) rho C_d A |v| v`,
+`C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact literature) and `A` the area the
+submerged part presents from above, limited to what stops the body within a step. Horizontal motion has no
+drag of this kind: the water's horizontal reaction on a body is the momentum the body gave the water, which
+the ocean does not yet offer per body. The submerged volume is that of the body's shape (analytic for a
+sphere, a closed mesh for a box, cylinder, cone, capsule, mesh or decomposition) below the water's rest level,
+`waterLevel`, in the ocean's own axes at that time; the surface the waves raise is not yet read, so a body
+rides the rest level and not the swell. The load is held for the whole step and evaluated where the body
+will be halfway through it, because a position-dependent force held from the start of a step adds energy
+(the motion grows) and from the middle adds none. The waterline is a spring of stiffness `rho g A_wl` and
+the explicit step is stable only if its frequency times the step is below 1.8: a body too light for
+`physics/@fixedStep` is an error that names it, not a motion that blows up. Only the vertical motion is
+damped, so a body's roll and its horizontal sliding are not. Such a document cannot be baked into a
+physics cache, since the loads come from the water.
+
 #### Fracture (native scene, rendering and cache integration implemented)
 
 Version 1.3 defines an owned `<fracture>` declaration. The generated typed model,
@@ -2142,6 +2160,8 @@ Also includes `pyroShape`, inventoried below.
 | `material` | xs:IDREF | Optional; absent |
 | `bathymetry` | xs:IDREF | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
+| `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy | Default `none` (the water does nothing to the bodies); `buoyancy` needs `colliders` (OCN8) |
+| `bodyDrag` | nonNegativeDecimal | Optional, with `bodyCoupling` (OCN9); form-drag coefficient of the vertical motion, default `1.0` |
 
 ### `oceanWaveType`
 

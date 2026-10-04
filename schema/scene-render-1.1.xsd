@@ -2120,6 +2120,30 @@
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="bathymetry" type="xs:IDREF"/>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="bodyCoupling" default="none">
+      <xs:annotation><xs:documentation>
+        What the water does to the rigid bodies in `colliders`. `none` (the default) is the existing behaviour: a body
+        displaces the water and nothing acts on the body. `buoyancy` loads each rigid body with the weight of the water it
+        displaces (water density 1000 kg/m3, the ocean's gravity), upward through the centroid of the submerged volume
+        so that a tilted body is turned by it, and with a quadratic form drag on its vertical motion, scaled by
+        `bodyDrag`. A body floats if it is lighter than the water it displaces. The submerged part is measured against
+        the water's rest level, `waterLevel`, in the ocean's own axes; the surface the waves raise is not yet read.
+        The load is held for one rigid step and evaluated halfway through it. A body so light that the waterline's
+        stiffness times the step reaches 1.8 is an error (lower `physics/@fixedStep` or raise the mass), not a damped
+        motion. The rigid body must be a sphere, box, cylinder, cone, capsule or closed mesh. The ocean and the
+        bodies form a group (see the contract text): the ocean is stepped before the rigid world, and the document
+        cannot be baked into a physics cache. Only the vertical motion is damped, so a body's roll is not.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>
+        Coefficient of form drag for the vertical motion of a body through the water, with `bodyCoupling`: the force is
+        -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what stops the body
+        within a step. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        undamped bobbing.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="waterImpulseType">
     <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
