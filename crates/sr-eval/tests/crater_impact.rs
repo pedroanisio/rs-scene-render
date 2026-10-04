@@ -304,3 +304,40 @@ fn a_cache_that_predates_contacts_cannot_serve_a_crater_that_needs_them() {
     );
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn the_source_is_found_inside_every_instance_of_a_symbol() {
+    // the crater and its body inside a symbol instanced twice: each instance's crater grows
+    // from its own rock, whatever the effective ids
+    let xml = Setup::default().xml();
+    let (open, end) = (xml.find("<composition>").unwrap() + "<composition>".len(), xml.find("</composition>").unwrap());
+    let inner = xml[open..end].to_string();
+    let wrapped = format!(
+        "{}<symbols><symbol id=\"assembly\" width=\"64\" height=\"64\">{inner}</symbol></symbols><composition><instance id=\"a\" symbol=\"assembly\"/><instance id=\"b\" symbol=\"assembly\" x=\"100\"/>{}",
+        &xml[..xml.find("<composition>").unwrap()],
+        &xml[end..]
+    );
+    let doc = sr_model::load_str(&wrapped, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e}"));
+    let ev = Evaluator::new(&doc, &Default::default()).unwrap();
+    let frame = ev.evaluate(5.5);
+    assert!(frame.problems.is_empty() && frame.failures.is_empty(), "{:?} {:?}", frame.problems, frame.failures);
+    let grounds: Vec<_> = frame.nodes.iter().filter(|n| n.id.ends_with("ground")).collect();
+    assert_eq!(grounds.len(), 2, "{:?}", frame.nodes.iter().map(|n| n.id.to_string()).collect::<Vec<_>>());
+    let specs: Vec<_> = grounds
+        .iter()
+        .map(|n| {
+            let c = sr_eval::crater::at(n).unwrap().unwrap();
+            assert_eq!(c.progress, 1.0, "{}", n.id);
+            c.kernel.spec()
+        })
+        .collect();
+    assert!(
+        specs[0].radius > 0.0 && close(specs[0].radius, specs[1].radius, 1e-6),
+        "{} {}",
+        specs[0].radius,
+        specs[1].radius
+    );
+    // the single-scene crater is the same crater
+    let alone = full(&Setup::default().evaluator());
+    assert!(close(specs[0].radius, alone.radius, 1e-6));
+}

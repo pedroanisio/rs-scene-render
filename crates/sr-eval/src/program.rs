@@ -2339,7 +2339,27 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
-            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() {
+            // A crater that grows from an impact names its source body, in the same lexical
+            // scope: inside a symbol instance it is that instance's body.
+            let mut sources: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "crater")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        sources.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() || !sources.is_empty() {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
                 if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
                     elem.set_attr("colliders", list).expect("resolved particle colliders");
@@ -2356,6 +2376,11 @@ impl Builder {
                     if child.element_name() == "pyro" {
                         if let Some(list) = attr_str(child, "colliders").and_then(|list| colliders.get(&list)) {
                             child.set_attr("colliders", list).expect("resolved collider token list");
+                        }
+                    }
+                    if child.element_name() == "crater" {
+                        if let Some(source) = attr_str(child, "source").and_then(|id| sources.get(&id)) {
+                            child.set_attr("source", source).expect("resolved crater source");
                         }
                     }
                 });
