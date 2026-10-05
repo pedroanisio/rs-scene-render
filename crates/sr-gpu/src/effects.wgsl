@@ -798,7 +798,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             return acc / 16.0;
         }
         case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner
-            // red magnifies by 1 − l and blue by 1 + l about the centre v1.xy (px), l = amount / reach
+            // red is sampled at 1 − l of its distance from the centre v1.xy (px) and blue at 1 + l, so the red image shrinks and the blue one grows; l = amount / reach
             // (v1.z px, the distance to the input's farthest corner); outside the input is transparent
             let pc = v[1].xy;
             let x = in.uv * d;

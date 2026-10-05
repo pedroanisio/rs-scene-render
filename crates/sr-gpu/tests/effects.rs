@@ -141,7 +141,7 @@ fn vignette_follows_d9() {
 
 #[test]
 fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
-    // Red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
+    // Red is sampled at 1 − l and blue at 1 + l of their distance from the centre (red shrinks, blue grows), l = amount / reach
     // (35.8 px here); samples beyond the frame are transparent
     let Some(r) = render(&fx_doc(
         r##"background="#00000000""##,
