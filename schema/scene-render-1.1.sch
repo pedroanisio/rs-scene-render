@@ -530,4 +530,9 @@
       <sch:assert id="R44" test="/scene/composition//*[@id=current()/@source] or /scene/symbols//*[@id=current()/@source]">effect @source must name a composition node; an asset is placed on a (hidden) layer, and the layer named.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p65">
+    <sch:rule context="generator[@lineWidth]">
+      <sch:assert id="R45" test="@kind='grid'">@lineWidth is the line width of a grid generator.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

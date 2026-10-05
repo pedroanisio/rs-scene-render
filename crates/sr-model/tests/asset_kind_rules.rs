@@ -59,3 +59,21 @@ fn codes_with_effects(effects: &str, node: &str) -> Vec<String> {
     let v = sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets());
     v.diagnostics.into_iter().map(|d| d.code).collect()
 }
+
+#[test]
+fn line_width_belongs_to_grid_generators() {
+    let g = |kind: &str| {
+        let xml = format!(
+            r#"<scene version="1.1"><project width="64" height="64" fps="24" duration="1"/><assets><generator id="g" kind="{kind}" width="8" height="8" lineWidth="1"/></assets><composition/></scene>"#
+        );
+        sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets())
+            .diagnostics
+            .into_iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>()
+    };
+    assert!(g("grid").is_empty(), "{:?}", g("grid"));
+    for kind in ["checkerboard", "stripes", "fractal-noise"] {
+        assert!(g(kind).contains(&"R45".into()), "{kind}: {:?}", g(kind));
+    }
+}

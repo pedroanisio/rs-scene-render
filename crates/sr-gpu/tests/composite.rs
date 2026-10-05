@@ -910,3 +910,27 @@ fn an_animated_path_is_drawn_as_animated() {
     assert_px(&later, 45, 45, [1.0, 1.0, 1.0, 1.0], 1e-3);
     assert_px(&later, 5, 5, [0.0, 0.0, 0.0, 1.0], 1e-3);
 }
+
+#[test]
+fn a_grid_generator_takes_its_line_width_from_line_width_not_from_scale() {
+    // lines are about 4 % of `scale` (4 px at scale 100) unless `lineWidth` (pixels) says otherwise; the pitch is
+    // `scale` either way
+    let width_at = |attrs: &str, scale: u32| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="128" height="64" fps="10" duration="1" background="#000000"/>
+<assets><generator id="gr" kind="grid" width="128" height="64" scale="{scale}" paint="#FFFFFF" paint2="#000000" {attrs}/></assets>
+<composition><layer id="l" asset="gr"/></composition></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = render(&d)?;
+        // a row away from the horizontal lines: the vertical line through the centre (x = 64)
+        Some((0..128u32).filter(|&x| r.at(x, 10)[0] > 0.5).count())
+    };
+    let Some(legacy) = width_at("", 100) else { return };
+    assert_eq!(legacy, 4, "the default stays about 4 % of the scale");
+    assert_eq!(width_at(r#"lineWidth="1""#, 100).unwrap(), 1);
+    assert_eq!(width_at(r#"lineWidth="3""#, 100).unwrap(), 3);
+    // a 1 px line at a 25 px pitch: five vertical lines across 128 px, each one pixel wide
+    assert_eq!(width_at(r#"lineWidth="1""#, 25).unwrap(), 5);
+    assert_eq!(width_at(r#"lineWidth="0""#, 100).unwrap(), 0, "no lines");
+}

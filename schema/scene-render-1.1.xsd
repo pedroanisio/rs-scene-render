@@ -1027,6 +1027,9 @@
     <xs:attribute name="contrast" type="xs:double" default="1"/>
     <xs:attribute name="angle" type="xs:double" default="0"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
+    <xs:attribute name="lineWidth" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>Grid only: the line width in asset pixels, whatever @scale says; the pitch stays @scale. Absent, the lines are about 4 % of @scale wide (at least 1 px). Animates like @scale.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="chartSeriesType">
     <xs:attribute name="name" type="xs:string" use="required"/>

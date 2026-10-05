@@ -248,6 +248,7 @@ CASES = [
     ("r42", ["R42"], sub('<pattern id="checker" asset="logo"/>', '<pattern id="checker" asset="music"/>')),
     ("r43", ["R43"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" emitterAsset="music">')),
     ("r44", ["R44"], sub('<effect id="grade" type="lut" src="../media/grade.cube"/>', '<effect id="grade" type="lut" src="../media/grade.cube"/>\n    <effect id="dm" type="displacement-map" source="logo"/>')),
+    ("r45", ["R45"], sub('<generator id="noise" kind="fractal-noise" width="512" height="512">', '<generator id="noise" kind="fractal-noise" width="512" height="512" lineWidth="2">')),
     ("r33", ["R33"], ins_comp('<erosion id="er" width="10" height="10" heightmap="music"/>')),
     ("r34", ["R34"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" forceFields="gravity music">')),
     ("r35", ["R35"], sub('<pin lon="5" lat="5" label="Here"/>', '<pin lon="5" lat="5" label="Here" textStyle="logo"/>')),

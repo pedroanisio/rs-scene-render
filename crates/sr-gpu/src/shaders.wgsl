@@ -700,7 +700,8 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
     }
     case 6u: {                                                                    // grid: lines from each multiple of `scale`
       let n = clamp(round(s), 2.0, 256.0);
-      let w = max(1.0, round(n * 0.04)) / n;
+      // `lineWidth` (pixels) when given, else about 4 % of the scale; in units of the pitch either way
+      let w = select(max(1.0, round(n * 0.04)) / n, bitcast<f32>(gen.grain.z) / max(s, 1e-3), gen.grain.w == 1u);
       let f = fract(pattern_space(p, s) / s);
       t = select(1.0, 0.0, min(f.x, f.y) < w);
     }

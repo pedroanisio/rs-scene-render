@@ -1386,6 +1386,10 @@ impl<'a> Eval<'a> {
                 "@emitterAsset must name an image asset: particles are emitted from its opaque pixels.".into()
             });
         }
+        // p65
+        if local == "generator" && has("lineWidth") {
+            self.check(a("kind") == Some("grid"), n, "R45", || "@lineWidth is the line width of a grid generator.".into());
+        }
         // p64
         if local == "effect"
             && has("source")

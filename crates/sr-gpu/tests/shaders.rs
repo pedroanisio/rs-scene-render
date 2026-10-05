@@ -344,3 +344,30 @@ fn the_effects_shaders_never_take_a_signed_modulo() {
     let sites = signed_modulo_sites(&source);
     assert!(sites.is_empty(), "signed `%` in {sites:?}: GLSL leaves negative operands undefined");
 }
+
+/// The size naga gives the WGSL struct `name` (its uniform layout), in bytes.
+fn wgsl_struct_size(source: &str, name: &str) -> u32 {
+    let module = naga::front::wgsl::parse_str(source).expect("the shader parses");
+    let (_, ty) = module
+        .types
+        .iter()
+        .find(|(_, t)| t.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("struct {name} in the shader"));
+    match &ty.inner {
+        naga::TypeInner::Struct { span, .. } => *span,
+        other => panic!("{name} is not a struct: {other:?}"),
+    }
+}
+
+#[test]
+fn the_generator_uniform_has_the_same_layout_in_rust_and_wgsl() {
+    // `Gen` is repr(C) in types.rs and mirrored by hand in shaders.wgsl; a field added on one side only shifts the
+    // permutation table and the grain words that follow it, with no error. The sizes pin the two together.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let source = ["common.wgsl", "d24.wgsl", "shaders.wgsl"]
+        .iter()
+        .map(|f| std::fs::read_to_string(format!("{dir}/{f}")).unwrap())
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(wgsl_struct_size(&source, "Gen") as usize, std::mem::size_of::<sr_gpu::types::Gen>());
+}
