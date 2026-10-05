@@ -810,17 +810,19 @@ fn on_land_the_ejecta_are_four_fifths_of_the_craters_mass() {
     assert!(particles.len() == 4000 && (mass - wanted).abs() < 1e-9 * wanted, "{mass} against {wanted}");
 }
 
-/// The land scene with the contact of the ejecta declared: a restitution of 0.15 and a friction of 0.7.
-fn with_friction(xml: &str) -> String {
-    replace_once(xml, r#"colliders="ground">"#, r#"colliders="ground" bounce="0.15" friction="0.7">"#)
+#[test]
+fn the_ejecta_of_the_land_scene_declare_their_contact() {
+    let tag = tags(LAND, "particles3D").into_iter().find(|t| t.contains(r#"id="ejecta""#)).expect("the ejecta");
+    for declared in [r#"bounce="0.15""#, r#"friction="0.7""#, r#"collisionRadius="0.17""#] {
+        assert!(tag.contains(declared), "the ejecta declare {declared}: {tag}");
+    }
 }
 
 #[test]
-fn on_land_the_ejecta_settle_on_the_ground_and_none_goes_through_it_when_they_have_friction() {
-    // with a friction of 0.7 and a restitution of 0.15 most of the 4000 are at rest by 5.9 s: 94 were under 0.2 m/s at
-    // 3 s, 550 at 4.5 s and 3513 at 5.9 s, against 7 with the default friction of zero; the contact radius of 0.5 m is
-    // the particle solver's default, and a smaller one lets some go through the ground
-    let ev = evaluator(&with_friction(&coarse_smoke(&with_hit(LAND, AUTHORED))));
+fn on_land_the_ejecta_settle_on_the_ground_and_none_goes_through_it() {
+    // with a friction of 0.7, a restitution of 0.15 and the radius of the 0.34 m rocks they stand for, most of the
+    // 4000 are at rest by 5.9 s, and none has gone through the ground
+    let ev = evaluator(&coarse_smoke(&with_hit(LAND, AUTHORED)));
     let frame = at(&ev, 5.9);
     let particles = &node(&frame, "ejecta").particles3d.as_ref().unwrap().frame.particles;
     let speed = |p: &sr_sim::particles3d::Particle| p.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -837,12 +839,24 @@ fn on_land_the_ejecta_settle_on_the_ground_and_none_goes_through_it_when_they_ha
 }
 
 #[test]
-#[ignore = "fails as the particle solver stands: with any friction the ejecta of the biggest crater stop it at 2 s with more than 16 collisions in one step"]
-fn on_land_the_ejecta_of_the_heaviest_rock_can_have_friction_too() {
+fn on_land_the_ejecta_of_the_heaviest_rock_settle_too_and_none_goes_through_the_ground() {
     let hit = Hit { mass: 270000.0, ..AUTHORED };
-    let ev = evaluator(&with_friction(&coarse_smoke(&with_hit(LAND, hit))));
+    let ev = evaluator(&coarse_smoke(&with_hit(LAND, hit)));
     let frame = ev.evaluate(2.0);
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let frame = at(&ev, 5.9);
+    let particles = &node(&frame, "ejecta").particles3d.as_ref().unwrap().frame.particles;
+    let speed = |p: &sr_sim::particles3d::Particle| p.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let at_rest = particles.iter().filter(|p| speed(p) < 0.2).count();
+    // the pit of this rock is deeper (3.9 m), and the ground ends 80 m out: what flew past its edge falls on nothing
+    let over = |p: &sr_sim::particles3d::Particle| p.position[0].abs() < 80.0 && p.position[2].abs() < 80.0;
+    let through = particles.iter().filter(|p| over(p) && p.position[1] > 4.2).count();
+    let off = particles.iter().filter(|p| !over(p)).count();
+    println!(
+        "IMPACT land ejecta of the heaviest rock at 5.9 s: {at_rest} of {} under 0.2 m/s, {through} through the ground, {off} past its edge",
+        particles.len()
+    );
+    assert_eq!(through, 0);
 }
 
 #[test]
