@@ -29,3 +29,18 @@ and numbered mesh-sequence rendering with explicit interpolation/missing-frame p
 The local rules are V8/VOL1-VOL9/PYRO1-PYRO8/P3D1-P3D6/OCN1-OCN5/GEO1-GEO3/MSQ1-MSQ4.
 The remaining proposal surface is tracked in tools/evidence/cinematic-impact.json;
 this is not an accepted upstream schema release.
+
+Local additions from the G2-lab and style-library fixes (branch fix/g2-lab-findings), ahead of any SREP; documents
+keep their version, and new attributes on 1.0 elements are accepted in every version (README):
+  - safeAreaForce (boolean) on every node and on symbol: exempts it from the safeArea enforce check (SA01),
+    listed by validate (SA02).
+  - presetEase on textAnimator: the curve of a preset (linear, quad-in, quad-out, cubic-out, expo-out, back-out,
+    bounce-out).
+  - Meaning given to existing attributes: halftone color (ink) and paint (ground), angle used as authored
+    (default 0); selective-color color and amount; group/@collapse documented as accepted with no effect.
+  - New rules: R42 (pattern/@asset is an image), R43 (@emitterAsset is an image), R44 (displacement-map,
+    difference-key and shader @source name a composition node). Evaluation warnings E19 (attribute accepted but not
+    read) and E20 (mask outside its node's box); validation diagnostic SA01 (safe-area enforcement).
+  - Documentation-only edits in the xsd annotations: camera/@fov is horizontal, radial @aspect, textAnimator
+    @presetStart's time base, the colorType note on #RGB, geoLayer polygon outlines, selective-color and halftone.
+The xsd and sch above differ from the vendored sha256 sums by these edits.
