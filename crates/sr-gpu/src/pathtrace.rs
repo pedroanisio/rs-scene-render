@@ -44,6 +44,19 @@ pub struct PtMat {
     /// Alpha cutoff, alpha mode, normal scale, occlusion strength.
     pub texture_params: [f32; 4],
     pub borders: [[f32; 4]; 6],
+    /// Absorption of the medium a refracting surface encloses: Beer-Lambert coefficient per scene
+    /// unit for each colour channel (from the attenuation colour and distance), then unused.
+    pub attenuation: [f32; 4],
+}
+
+/// Beer-Lambert coefficients per scene unit: the light left after `distance` units is `color`.
+/// No distance (infinite or not positive) or a white colour means no absorption.
+fn absorption(color: &[f32; 3], distance: f32) -> [f32; 4] {
+    if !(distance.is_finite() && distance > 0.0) {
+        return [0.0; 4];
+    }
+    let coefficient = |c: f32| (-(c.clamp(1e-4, 1.0).ln()) / distance).max(0.0);
+    [coefficient(color[0]), coefficient(color[1]), coefficient(color[2]), 0.0]
 }
 
 /// A BVH node: bounds, and either (first triangle, count) for a leaf or (second child, 0) for an
@@ -292,6 +305,7 @@ pub fn build(scene: &Scene3) -> PtScene {
                 m.normal_scale,
                 m.occlusion_strength,
             ],
+            attenuation: absorption(&m.attenuation_color, m.attenuation_distance),
         });
         if let Some(key) = instances::key(dr).filter(|k| repetitions[k] > 1) {
             let prototype = *prototype_ids.entry(key).or_insert_with(|| {
@@ -472,6 +486,7 @@ pub fn build(scene: &Scene3) -> PtScene {
             maps: [[0; 4]; 6],
             borders: [[0.0; 4]; 6],
             texture_params: [0.0; 4],
+            attenuation: [0.0; 4],
         });
     }
     if s.pos.is_empty() {
@@ -596,6 +611,23 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_water_shader_adds_the_refracted_shadow_ray_and_the_plain_one_does_not_have_it() {
+        let plain = format!(
+            "{}\n{}\n{}",
+            include_str!("sampling.wgsl"),
+            include_str!("pathtrace.wgsl"),
+            include_str!("volume.wgsl")
+        );
+        assert!(!plain.contains("light_through"), "scenes without transmissive materials keep their shader text");
+        for base in [plain.clone(), grid_source()] {
+            let water = water_source(&base);
+            assert!(water.contains("fn light_through(") && water.contains("inside = entering;"));
+            assert_eq!(water.matches("light_through(p, ng, n, l, ls.w, in_sigma)").count(), 1);
+            assert!(water.contains("fn volume_transmittance("), "shared code is kept");
+        }
+    }
 
     #[test]
     fn the_grid_shader_replaces_the_exact_lighting_and_leaves_the_rest() {
@@ -785,6 +817,38 @@ fn grid_source() -> String {
     )
 }
 
+/// The shader for scenes with a transmissive material: the shader it is given (with or without
+/// light grids) plus the refracted shadow ray, which three small replacements hook in. Scenes
+/// without such a material keep the text, and so the compiled code, they had.
+fn water_source(base: &str) -> String {
+    const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
+    const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
+    for hook in [SIGMA, ENTER, VISIBLE] {
+        assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
+    }
+    let hooked = base
+        .replace(SIGMA, &format!("{SIGMA}    var inside = false;\n"))
+        .replace(
+            ENTER,
+            "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); inside = entering; }\n",
+        )
+        .replace(
+            VISIBLE,
+            &format!(
+                "            if (WATER && inside && lt.size.y > 0.5 && m.extra.z > 0.5) {{\n\
+                 \x20               // a surface under water (or glass): the light reaches it refracted\n\
+                 \x20               let seen = light_through(p, ng, n, l, ls.w, in_sigma);\n\
+                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * rad * seen.vis;\n\
+                 \x20               if (bounce > 0u) {{ c = min(c, vec3(20.0)); }}\n\
+                 \x20               col += c;\n\
+                 \x20               continue;\n\
+                 \x20           }}\n{VISIBLE}"
+            ),
+        );
+    format!("{hooked}\n{}", include_str!("pathtrace_water.wgsl"))
+}
+
 /// Pipelines of the path tracer (built on first use).
 pub struct PtGpu {
     bgl0: wgpu::BindGroupLayout,
@@ -792,6 +856,9 @@ pub struct PtGpu {
     bgl_fin: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
     trace_volume: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
+    /// The same with the `WATER` constant for scenes with transmissive materials: no volumes, volumes
+    /// (by whether their lighting needs albedo), and grid-lit volumes (the same).
+    trace_water: [std::sync::OnceLock<wgpu::ComputePipeline>; 5],
     module: wgpu::ShaderModule,
     /// The variant of the shader with light grids, its group-1 layout and pipelines (built on first use).
     bgl_grid: wgpu::BindGroupLayout,
@@ -914,6 +981,7 @@ impl PtGpu {
             bgl_fin,
             trace,
             trace_volume: std::array::from_fn(|_| std::sync::OnceLock::new()),
+            trace_water: std::array::from_fn(|_| std::sync::OnceLock::new()),
             module,
             bgl_grid,
             grid: std::sync::OnceLock::new(),
@@ -953,6 +1021,9 @@ impl PtGpu {
     }
 
     fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
+        if scene.draws.iter().any(|dr| dr.material.transmission > 0.0) {
+            return self.water_pipeline(d, scene, grid);
+        }
         if scene.volumes.is_empty() {
             return &self.trace;
         }
@@ -988,6 +1059,55 @@ impl PtGpu {
                     constants: &[("HAS_MEDIA", 1.0), ("MEDIUM_LIGHTING", lighting as u8 as f64)],
                     ..Default::default()
                 },
+                cache: None,
+            })
+        })
+    }
+
+    /// The trace pipeline of a scene with transmissive materials: the shader with `WATER` set, so
+    /// scenes without them keep the pipeline, and the speed, they had.
+    fn water_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
+        let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
+        let media = !scene.volumes.is_empty();
+        let slot = match (media, grid) {
+            (false, _) => 0,
+            (true, false) => 1 + lighting as usize,
+            (true, true) => 3 + lighting as usize,
+        };
+        self.trace_water[slot].get_or_init(|| {
+            let constants =
+                [("WATER", 1.0), ("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
+            let source = if media && grid {
+                grid_source()
+            } else {
+                format!(
+                    "{}\n{}\n{}",
+                    include_str!("sampling.wgsl"),
+                    include_str!("pathtrace.wgsl"),
+                    include_str!("volume.wgsl")
+                )
+            };
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pathtrace-water"),
+                source: wgpu::ShaderSource::Wgsl(water_source(&source).into()),
+            });
+            let plain_layout;
+            let layout = if media && grid {
+                &self.grid_pipelines(d).layout
+            } else {
+                plain_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("pathtrace-water"),
+                    bind_group_layouts: &[Some(&self.bgl0)],
+                    immediate_size: 0,
+                });
+                &plain_layout
+            };
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pathtrace-water"),
+                layout: Some(layout),
+                module: &module,
+                entry_point: Some("cs_trace"),
+                compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
                 cache: None,
             })
         })

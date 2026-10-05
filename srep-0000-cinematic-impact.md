@@ -2291,6 +2291,74 @@ projection. Filter halos cover every denoising pass; tile edges must not become
 image edges. Peak image working-buffer allocation is bounded independently of
 frame area. Geometry/texture limits remain separately validated and reported.
 
+### Light through water and glass (path tracer)
+
+Materials with `transmission` above 0 refract in the path tracer. Three
+behaviours apply to them, none needing a schema attribute:
+
+- **Dome behind glass.** A path that crosses a refracting surface and then
+  reaches nothing, or reflects off it up to the sky, sees the 2D layers behind
+  the 3D pass; where those layers leave the pixel open it now also sees the
+  visible dome (layer colour plus one minus its alpha times the dome). A dome
+  that is not visible stays hidden. Before, such a path ended in black: the
+  water of the ocean scenes had a black band at the horizon where the dome
+  should reflect.
+- **Absorption.** `attenuationColor` and `attenuationDistance`, which the
+  rasteriser already used, apply to path-traced paths: a path that refracts into
+  a surface carries the Beer–Lambert coefficient `-ln(colour) / distance` per
+  channel until it leaves, so after one attenuation distance of water the light
+  left is the colour itself. A colour without a distance, or a white colour, does
+  not absorb. Absorption is tracked only in scenes that have a transmissive
+  material; others keep their pipeline, pixels and speed.
+- **Analytic lights below a refracting surface.** The shadow ray of a surface
+  seen from inside the denser medium (a path that refracted in before reaching
+  it) does not stop at the interface. It is refracted there, found by trace and
+  refined once, so that it leaves toward the light, and the contribution carries
+  the blockers on both sides, the interface's tint, transmission and Fresnel
+  transmittance, the factor `cos(theta_air) / eta^2` that goes with the solid
+  angle the interface changes (radiance is not scaled by `1 / eta^2` at
+  refraction in this renderer, so this factor is what makes the sum agree with
+  brute force) and the absorption along the water path. Shadows cast by glass on
+  surfaces in air stay black, as before. The dome needed no change: it reaches
+  submerged surfaces by sampled paths and agrees with 24 bounces at 4 (within
+  3 %, 57 dB).
+
+Measured against brute force (the light replaced by an emissive copy that
+paths find, 1024 samples, flat water 4 units over a diffuse floor, 320×180,
+NVIDIA), as the open floor's brightness under water over its brightness dry:
+sun 0.604 against 0.613; point light and sphere light 0.728 against 0.770 (the
+light's radiance is taken at the straight distance, so a near light is a few
+percent dim); the closed form of a vertical sun over absorbing water within 1 %
+per channel; a submerged box's shadow 10.0 units long against 9.9 refracted
+(15.1 would be the straight direction). Under steep waves (amplitude 1.2,
+wavelength 10) the floor is never brighter than the dry floor and stays within
+5 % of the flat sea's mean, with no flare. Before these changes the sun
+contributed nothing below a transmissive surface (0.000 against 0.613), and 59 %
+of the light of the frame was lost.
+
+Known limits. A camera that starts under the water, or a surface reached
+without a refraction into its medium, is not "inside": the sun does not reach
+it (a test pins this). The shadow ray follows the first transmissive interface;
+a second interface along it (an overturning wave, layered media) is not
+followed, and where the refinement finds no way out toward the light (a steep
+wave, grazing light) the light contributes nothing there: those samples are
+dark, never bright. A textured transmissive surface uses its uniform base
+colour for the tint in the shadow ray. A smoke medium and refracting surfaces
+in one pass are lit independently: the shadow ray does not cross the medium.
+Caustics (light focused by the water surface) are not produced; flat water is
+the exact single-refraction case, a wavy sea an approximation.
+
+What changes in images: surfaces behind water or glass now receive the analytic
+lights, `attenuationColor` and `attenuationDistance` take effect in path-traced
+renders, and glass or water over nothing shows the visible dome. The
+example `examples/cinematic-impact/impact.scene.xml`, whose water has
+transmission 0.85, goes from a mean brightness of 0.00663 to 0.00909 at
+t = 2.0 (plume and ejecta removed for the measurement). Scenes without a
+transmissive material render the same bytes at the same speed. The ocean's default
+spray (transmission .6) is such a material: a 3840×2160 frame of the hero scene,
+whose whitewater is on, changes in 394 pixels (at most 28 code values) around the
+spray, and is identical with the whitewater removed.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
@@ -2847,6 +2915,12 @@ The accompanying conformance suite must cover all of the following:
 - Uniform-density transmittance against Beer–Lambert, transformed media,
   overlapping media in reversed order, inside-volume cameras, mesh occlusion,
   emission, colored scattering and shadowed smoke at changing viewpoints.
+- Light through water and glass: a floor under water lit by the sun, a point
+  light and a sphere light against brute force, absorption against its closed
+  form and by distance, the shadow's refracted position, steep waves without
+  gain or flares, glass shadows in air unchanged, an untouched transmissive object
+  leaving the picture alone, a camera under the water as documented, tiled equal
+  to whole frames, and glass over nothing showing the visible dome.
 - Light grids: default exact lighting unchanged by their existence; grid lighting
   against the exact march for each light type, environment (isotropic and
   anisotropic), cameras inside the volume, surfaces inside the domain, overlapping

@@ -3,6 +3,8 @@
 const PI: f32 = 3.14159265358979;
 override HAS_MEDIA: bool = false;
 override MEDIUM_LIGHTING: bool = false;
+// The scene has transmissive materials: paths track the medium they are inside (absorption).
+override WATER: bool = false;
 
 struct Params {
     // camera → world
@@ -38,6 +40,8 @@ struct Mat {
     maps: array<vec4<u32>, 6>,
     texture_params: vec4<f32>,
     borders: array<vec4<f32>, 6>,
+    // absorption coefficient per unit inside the enclosed medium (rgb)
+    attenuation: vec4<f32>,
 };
 
 struct Node {
@@ -523,12 +527,15 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     var col = vec3(0.0);
     var alpha = 0.0;
     var only_glass = true;
+    // absorption of the medium the path is inside (set where it refracts in, cleared where it leaves)
+    var in_sigma = vec3(0.0);
     var bounce = 0u;
     // surfaces met so far (transmission and opacity events do not count as bounces)
     var met = 0u;
     let max_b = u32(pp.cam.w);
     for (var step = 0u; step < 64u; step++) {
         let hit = trace(o, d, 1e30);
+        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }
         if (HAS_MEDIA) {
             let fog = volume_transport(o, d, hit.t);
             col += thr * fog.rgb;
@@ -550,7 +557,11 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                     let c = pp.view_proj * vec4(o + d * t, 1.0);
                     let uv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
                     if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
-                        col += thr * textureSampleLevel(backdrop, smp, uv, 0.0).rgb;
+                        // premultiplied: where the layers leave the pixel open, the visible dome shows
+                        let behind = textureSampleLevel(backdrop, smp, uv, 0.0);
+                        var seen = behind.rgb;
+                        if (pp.env.x > 1.5) { seen += (1.0 - behind.a) * env_radiance(d, ambient_diffuse, ambient_specular); }
+                        col += thr * seen;
                         break;
                     }
                 }
@@ -638,6 +649,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                 d = normalize(t);
                 o = p - n * 1e-3;
                 thr *= s.albedo;
+                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }
             }
             continue;
         }
