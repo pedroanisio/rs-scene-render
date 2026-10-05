@@ -160,6 +160,45 @@ fn skinned_layer_follows_its_skeleton() {
 }
 
 #[test]
+fn a_skinned_limb_in_a_mirrored_group_is_the_mirror_image() {
+    // a two-bone leg with IK, skinned onto a bar: the same figure in a group flipped across its own vertical or
+    // horizontal axis must draw as the mirror image, bones and skin alike
+    let figure = |tf: &str| {
+        doc(
+            r##"width="64" height="64" background="#000000""##,
+            "",
+            &format!(
+                r##"<group id="g" x="32" y="32" {tf}>
+                 <shape id="goal" shape="ellipse" x="4" y="-4" width="1" height="1"/>
+                 <skeleton id="rig"><bone id="hip" x="0" y="-20" length="12"/><bone id="knee" parent="hip" x="12" length="12"/>
+                   <transformConstraint type="ik" target="goal" bendPositive="true"/></skeleton>
+                 <shape id="leg" shape="rect" x="0" y="-22" width="24" height="4" fill="#FFFFFF"><deform><modifier type="skin" skeleton="rig"/></deform></shape></group>"##
+            ),
+        )
+    };
+    let Some(plain) = render_times(&figure(""), &[0.0]) else { return };
+    let lit = |r: &Rendered| {
+        (0..64u32).flat_map(|y| (0..64u32).map(move |x| (x, y))).filter(|&(x, y)| r.at(x, y)[0] > 0.5).count()
+    };
+    assert!(lit(&plain) > 40, "the limb is drawn: {}", lit(&plain));
+    let across_x = render_times(&figure(r#"scaleX="-1""#), &[0.0]).unwrap();
+    let across_y = render_times(&figure(r#"scaleY="-1""#), &[0.0]).unwrap();
+    let mut bad = (0, 0);
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            if (plain.at(x, y)[0] - across_x.at(63 - x, y)[0]).abs() > 0.2 {
+                bad.0 += 1;
+            }
+            if (plain.at(x, y)[0] - across_y.at(x, 63 - y)[0]).abs() > 0.2 {
+                bad.1 += 1;
+            }
+        }
+    }
+    assert!(bad.0 <= 12, "mirrored across x: {} pixels differ from the mirror image", bad.0);
+    assert!(bad.1 <= 12, "mirrored across y: {} pixels differ from the mirror image", bad.1);
+}
+
+#[test]
 fn puppet_pins_deform_a_shape() {
     let d = doc(
         r##"background="#000000""##,
