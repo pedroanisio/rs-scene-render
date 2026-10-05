@@ -1492,3 +1492,17 @@ fn render_and_encode_accept_a_forced_node() {
         String::from_utf8_lossy(&o.stderr)
     );
 }
+
+#[test]
+fn validate_warns_about_attributes_this_build_does_not_read() {
+    let f = compile_fixture(
+        "ignored",
+        "",
+        r##"<group id="g" collapse="true" width="10" height="10"><shape id="s" shape="rect" width="8" height="8" fill="#FF0000"/></group>"##,
+    );
+    let v = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&v.stdout);
+    assert_eq!(v.status.code(), Some(0), "{out}");
+    assert!(out.contains("warning[E19]") && out.contains("collapse"), "{out}");
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
+}

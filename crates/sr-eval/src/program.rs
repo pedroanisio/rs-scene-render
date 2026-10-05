@@ -1029,6 +1029,8 @@ fn template(
     let lookup = |name: &str| lookup_value(&params, name).map(|v| param_string(&v));
     walk_mut(&mut scene, &mut |e| {
         let loc = e.loc();
+        ignored_attribute(e, &mut *warnings);
+        masks_that_miss(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);
             if !repeat_vars.contains(root) {
@@ -2779,6 +2781,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let duration = t.scene.project.duration.get();
     let (markers, grid) = markers_of(&t.scene);
     let scene = Arc::new(t.scene);
+    zero_opacity_sources(&scene, &mut warnings);
     let mut b = Builder {
         docs: vec![DocCtx {
             tokens: tokens_of(&scene),
@@ -2963,4 +2966,99 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         tracks,
         skins,
     })
+}
+
+/// Attributes the schema accepts that this build does not read: reported (E19, a warning) so that nothing is
+/// accepted silently and then ignored.
+fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let mut note = |what: &str, why: &str| {
+        warnings.push(Diagnostic::warning(
+            "E19",
+            format!("{what} is accepted but has {why}"),
+            e.loc(),
+            e.element_id().unwrap_or(""),
+        ));
+    };
+    match e.element_name() {
+        "group" if matches!(e.get_attr("collapse"), Some(AttrValue::Bool(true))) => note(
+            "<group> @collapse",
+            "no effect in this build (non-isolated groups already share the frame's camera space)",
+        ),
+        "effect" | "effectType"
+            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
+                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
+        {
+            note(
+                "selective-color @channel",
+                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
+            )
+        }
+        _ => {}
+    }
+}
+
+/// Masks use the node's own coordinates: a rectangle or ellipse that adds to or intersects the node's shape and lies
+/// entirely outside the node's box leaves nothing of it, which looks like the node vanishing (E20, a warning).
+fn masks_that_miss(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let num = |e: &dyn Element, name: &str| match e.get_attr(name) {
+        Some(AttrValue::Num(v)) => Some(v),
+        Some(AttrValue::Length(l)) if l.unit == sr_model::values::LengthUnit::Px => Some(l.value),
+        _ => None,
+    };
+    let (Some(w), Some(h)) = (num(e, "width"), num(e, "height")) else { return };
+    for m in children(e).into_iter().filter(|c| c.element_name() == "mask") {
+        let rect_like = matches!(m.get_attr("type").map(|t| t.to_string()).as_deref(), Some("rect" | "ellipse"));
+        let subtracts = matches!(m.get_attr("mode").map(|t| t.to_string()).as_deref(), Some("subtract" | "difference"));
+        let inverted = matches!(m.get_attr("invert"), Some(AttrValue::Bool(true)));
+        let (Some(mw), Some(mh)) = (num(m, "width"), num(m, "height")) else { continue };
+        if !rect_like || subtracts || inverted {
+            continue;
+        }
+        let (x, y) = (num(m, "x").unwrap_or(0.0), num(m, "y").unwrap_or(0.0));
+        if x >= w || y >= h || x + mw <= 0.0 || y + mh <= 0.0 {
+            warnings.push(Diagnostic::warning(
+                "E20",
+                format!("a mask at ({x}, {y}) of {mw} x {mh} lies outside the node's {w} x {h} box: masks use the node's own coordinates"),
+                m.loc(),
+                e.element_id().unwrap_or(""),
+            ));
+        }
+    }
+}
+
+/// A node named as the `source` of a displacement-map, difference-key or shader effect is drawn with its own opacity:
+/// at 0 it contributes nothing and the effect does nothing, silently (E19, a warning). `visible="false"` at opacity 1
+/// keeps a map off screen.
+fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagnostic>) {
+    let mut sources: Vec<(String, Loc)> = Vec::new();
+    walk(scene, &mut |e| {
+        if matches!(e.element_name(), "effect" | "effectType")
+            && matches!(
+                e.get_attr("type").map(|t| t.to_string()).as_deref(),
+                Some("displacement-map" | "difference-key" | "shader")
+            )
+        {
+            if let Some(AttrValue::Str(id)) = e.get_attr("source") {
+                sources.push((id, e.loc()));
+            }
+        }
+    });
+    for (id, loc) in sources {
+        let mut zero = false;
+        walk(scene, &mut |e| {
+            if e.element_id() == Some(id.as_str())
+                && matches!(e.get_attr("opacity"), Some(AttrValue::Num(v)) if v <= 0.0)
+            {
+                zero = true;
+            }
+        });
+        if zero {
+            warnings.push(Diagnostic::warning(
+                "E19",
+                format!("effect source {id:?} has opacity 0, so it is accepted but contributes nothing; hide a map with visible=\"false\" and leave its opacity at 1"),
+                loc,
+                id.as_str(),
+            ));
+        }
+    }
 }

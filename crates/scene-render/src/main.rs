@@ -331,7 +331,9 @@ enum Command {
         /// accessibility findings. Output files are still written.
         #[arg(long)]
         strict: bool,
-        /// Quality tier overriding the document's project@quality (draft renders at half size).
+        /// Quality tier overriding the document's project@quality. draft renders internally at half size (with
+        /// fewer motion-blur samples and no grain) and scales the frames up to the output's size, so the file keeps
+        /// its size and is softer.
         #[arg(long, value_enum)]
         quality: Option<QualityArg>,
     },
@@ -477,14 +479,18 @@ fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<Str
         Ok(ev) => ev,
         Err(report) => return (report.diagnostics, Vec::new()),
     };
+    // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
+    let compiled = ev.warnings().to_vec();
     if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
-        return (Vec::new(), Vec::new());
+        return (compiled, Vec::new());
     }
     let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
     let mut info: Vec<String> =
         out.forced.iter().map(|id| format!("info[SA02]: {id} forced outside the safe area")).collect();
     info.extend(out.note.as_ref().map(|n| format!("info: safe area audit {n}")));
-    (out.diagnostics(ev.program()), info)
+    let mut found = compiled;
+    found.extend(out.diagnostics(ev.program()));
+    (found, info)
 }
 
 fn validate(
