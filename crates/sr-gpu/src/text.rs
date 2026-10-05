@@ -688,13 +688,14 @@ fn animators(
 /// number (in the span with the animator's role, if any) counts up from 0, cubic-out over
 /// the preset's duration, and scrambled characters show their random letters.
 fn substitutions(cx: &Cx, para: &mut Para, anims: &[Animator]) {
-    let t = cx.n.local_time;
+    // presetStart is on the layer's clock (its parent's timeline), by default the layer's start, as for the other presets
+    let (t, layer_start) = (cx.n.timeline_time, cx.n.timeline_time - cx.n.local_time);
     for c in children(&*cx.n.elem) {
         if !is(c, "textAnimator") || c.get_attr("preset").map(|v| v.to_string()).as_deref() != Some("counter") {
             continue;
         }
         let a = Attrs { e: c, props: None };
-        let (start, dur) = (a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0));
+        let (start, dur) = (a.opt("presetStart").unwrap_or(layer_start), a.opt("presetDuration").unwrap_or(1.0));
         let Some(k) = animate::counter_progress(start, dur, a.num("amount", 100.0), t) else {
             continue;
         };

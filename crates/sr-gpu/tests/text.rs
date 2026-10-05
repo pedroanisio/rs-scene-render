@@ -301,3 +301,28 @@ fn mask_reveal_clips_each_line_to_its_own_box() {
     let done = render_times(&d, &[2.5]).unwrap();
     assert!(sum(&done, 0, 0, 200, 120, 0) > 300.0, "both lines are fully drawn after it ends");
 }
+
+#[test]
+fn counter_starts_on_the_same_clock_as_the_other_presets() {
+    // presetStart is composition time for every preset (the layer's parent timeline), not an offset from the
+    // layer's start; absent, a preset starts with its layer
+    let asset = r##"<text id="t" text="8888" width="200" height="100" size="40" color="#FFFFFF" font="DejaVu Sans"/>"##;
+    let layer = |attrs: &str| {
+        format!(
+            r#"<layer id="lt" asset="t" x="0" y="0" start="2"><textAnimator preset="counter" presetDuration="1" {attrs}/></layer>"#
+        )
+    };
+    let ink = |d: &sr_model::Document, t: f64| sum(&render_times(d, &[t]).unwrap(), 0, 0, 200, 100, 0);
+    let d = doc_text(asset, "", &layer(r#"presetStart="2.5""#), 200, 100);
+    let Some(first) = render_times(&d, &[2.2]) else { return };
+    let before = sum(&first, 0, 0, 200, 100, 0);
+    let after = ink(&d, 4.0);
+    // before the start the count shows 0000 -> "0" digits; after it ends the authored 8888 is shown (more ink)
+    assert!(
+        after > before * 1.2,
+        "counter with presetStart=2.5 on a layer starting at 2: before {before}, after {after}"
+    );
+    // without presetStart the count starts with the layer
+    let own = doc_text(asset, "", &layer(""), 200, 100);
+    assert!(ink(&own, 2.05) < ink(&own, 3.5) * 0.95, "the count runs from the layer's start");
+}
