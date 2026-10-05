@@ -57,8 +57,11 @@ impl Attrs<'_> {
             None => None,
         }
     }
-    /// A number list.
+    /// A number list; keys on it hold or interpolate per element like any other animated value.
     pub fn nums(&self, name: &str) -> Option<Vec<f64>> {
+        if let Some(Value::List(l)) = self.animated(name) {
+            return Some(l.to_vec());
+        }
         match self.e.get_attr(name) {
             Some(AttrValue::Numbers(v)) => Some(v),
             _ => None,

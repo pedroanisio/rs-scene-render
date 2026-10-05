@@ -236,3 +236,24 @@ fn pattern_paints_fill_shapes() {
     assert_eq!(r.at(9, 9)[3], 0.0, "nothing outside it");
     assert_eq!(r.at(1, 32)[3], 0.0);
 }
+
+#[test]
+fn animated_number_lists_follow_their_keys() {
+    // cornerRadii and dash are number lists: a key on them must reach the renderer, held or interpolated per element
+    let shapes = r##"<shape id="r" shape="rounded-rect" x="4" y="4" width="20" height="20" fill="#FF0000" cornerRadii="0 0 0 0">
+             <animate property="cornerRadii"><key time="0" value="0 0 0 0"/><key time="1" value="10 10 10 10"/></animate></shape>
+           <shape id="d" shape="line" x="30" y="10" width="32" height="0.001" stroke="#FFFFFF" strokeWidth="2" dash="8 8">
+             <animate property="dash"><key time="0" value="8 8"/><key time="1" value="2 2"/></animate></shape>"##;
+    let d = doc(r##"background="#000000""##, "", shapes);
+    let Some(start) = render_times(&d, &[0.0]) else { return };
+    let Some(end) = render_times(&d, &[1.0]) else { return };
+    // t = 0: square corners (the corner pixel is red) and dashes of 8 (x 30..38 on, 38..46 off)
+    assert_px(&start, 4, 4, [1.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&start, 34, 10, [1.0, 1.0, 1.0, 1.0], 1e-3);
+    assert_px(&start, 42, 10, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    // t = 1: radius 10 leaves the corner pixel empty, and the dashes are 2 long (x 30..32 on, 32..34 off)
+    assert_px(&end, 4, 4, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&end, 31, 10, [1.0, 1.0, 1.0, 1.0], 1e-3);
+    assert_px(&end, 33, 10, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    assert_px(&end, 35, 10, [1.0, 1.0, 1.0, 1.0], 1e-3);
+}
