@@ -354,6 +354,8 @@ struct MaterialU {
     irid: [f32; 4],
     aniso: [f32; 4],
     uv: [f32; 4],
+    /// unevenness, feature size, seed (bits), unused
+    finish: [f32; 4],
     sampling: [[u32; 4]; 6],
     borders: [[f32; 4]; 6],
 }
@@ -436,6 +438,7 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
         irid: [m.iridescence, m.iridescence_ior, m.iridescence_thickness, m.occlusion_strength],
         aniso: [m.anisotropy, m.anisotropy_rotation, m.displacement_scale, bits as f32],
         uv: [m.uv_scale[0], m.uv_scale[1], m.separate_uvs as u32 as f32, 0.0],
+        finish: [m.unevenness, m.unevenness_scale.max(1e-6), f32::from_bits(m.unevenness_seed), 0.0],
         sampling: std::array::from_fn(|i| [maps[i].as_ref().and_then(|t| t.sampler).map_or(0, |s| s.flags()), 0, 0, 0]),
         borders: std::array::from_fn(|i| maps[i].as_ref().and_then(|t| t.sampler).map_or([0.0; 4], |s| s.border)),
     }
@@ -1766,7 +1769,8 @@ impl ThreeEngine {
             let o = ObjectU {
                 model: dr.model.to_cols_array_2d(),
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
-                params: [dr.opacity, dr.receive_shadow as u32 as f32, 0.0, 0.0],
+                // the uniform part of the model matrix: scene units per unit of the mesh (for the unevenness noise)
+                params: [dr.opacity, dr.receive_shadow as u32 as f32, dr.model.x_axis.truncate().length(), 0.0],
                 spacing: [0.0; 4],
                 padding: [[0.; 4]; 6],
             };

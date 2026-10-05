@@ -546,6 +546,9 @@ impl Renderer {
             anisotropy_rotation: (a.num("anisotropyRotation", 0.0) as f32).to_radians(),
             dispersion: a.num("dispersion", 0.0) as f32,
             normal_scale: a.num("normalScale", 1.0) as f32,
+            unevenness: a.num("unevenness", 0.0) as f32,
+            unevenness_scale: a.num("unevennessScale", 8.0) as f32,
+            unevenness_seed: a.num("unevennessSeed", 0.0) as u32,
             displacement_scale: a.num("displacementScale", 0.0) as f32,
             uv_scale: [a.num("uvScaleX", 1.0) as f32, a.num("uvScaleY", 1.0) as f32],
             ..Default::default()

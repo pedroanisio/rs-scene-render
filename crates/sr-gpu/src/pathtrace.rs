@@ -134,8 +134,13 @@ fn srgb_luma(c: [f32; 3]) -> f32 {
 }
 
 /// What the tracer leaves out of `scene`.
-pub fn notes(_scene: &Scene3) -> Vec<String> {
-    Vec::new()
+pub fn notes(scene: &Scene3) -> Vec<String> {
+    let mut notes = Vec::new();
+    // the tracer has no per-point shading hook: the procedural unevenness of a material (a clay finish) is raster-only
+    if scene.draws.iter().any(|d| d.material.unevenness > 0.0 && !d.material.unlit) {
+        notes.push("material unevenness is not applied by the path tracer".to_string());
+    }
+    notes
 }
 
 /// Whether the tracer's scene buffers fit the device. Image working buffers are tiled;

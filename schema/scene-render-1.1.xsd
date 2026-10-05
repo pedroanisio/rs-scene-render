@@ -1511,6 +1511,13 @@
     <xs:attribute name="displacementScale" type="xs:double" default="0"/>
     <xs:attribute name="uvScaleX" type="xs:double" default="1"/>
     <xs:attribute name="uvScaleY" type="xs:double" default="1"/>
+    <xs:attribute name="unevenness" type="unitDecimal" default="0">
+      <xs:annotation><xs:documentation>Amount of procedural surface unevenness: a smooth noise fixed to the object that tilts the shading normal and varies the roughness, for a hand-made (clay) look. 0 is off.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="unevennessScale" type="positiveDecimal" default="8">
+      <xs:annotation><xs:documentation>Size of the largest features of the unevenness, in scene units.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="unevennessSeed" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="materialX" type="xs:anyURI"/>
   </xs:complexType>
   <xs:complexType name="materialsType">

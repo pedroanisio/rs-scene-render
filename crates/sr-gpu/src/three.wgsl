@@ -20,6 +20,8 @@ struct Material {
     aniso: vec4<f32>,
     // uv scale xy
     uv: vec4<f32>,
+    // unevenness, feature size (scene units), seed (bits), unused
+    finish: vec4<f32>,
     sampling: array<vec4<u32>, 6>,
     borders: array<vec4<f32>, 6>,
 };
@@ -67,7 +69,7 @@ fn material_fragment(tex: texture_2d<f32>, uv: vec2<f32>, slot: u32) -> vec4<f32
 struct Object {
     model: mat4x4<f32>,
     normal: mat4x4<f32>,
-    // opacity, receive shadow, unused, unused
+    // opacity, receive shadow, scene units per mesh unit, unused
     params: vec4<f32>,
     // unused xyz, light view index for shadow passes
     spacing: vec4<f32>,
@@ -102,6 +104,7 @@ struct VOut {
     @location(7) emissive_uv: vec2<f32>,
     @location(8) color: vec4<f32>,
     @location(9) @interpolate(flat) object_index: u32,
+    @location(10) local: vec3<f32>,
 };
 
 fn displaced(v: VIn) -> vec3<f32> {
@@ -121,6 +124,7 @@ fn vs_main(v: VIn, @builtin(instance_index) instance: u32) -> VOut {
     let local = displaced(v);
     let w = obj.model * vec4(local, 1.0);
     o.world = w.xyz;
+    o.local = local * obj.params.z;
     o.clip = fr.view_proj * w;
     o.normal = normalize((obj.normal * vec4(v.normal, 0.0)).xyz);
     o.tangent = vec4(normalize((obj.model * vec4(v.tangent.xyz, 0.0)).xyz), v.tangent.w);
@@ -378,10 +382,44 @@ fn sh_irradiance(n: vec3<f32>) -> vec3<f32> {
     return max(r, vec3(0.0)) * fr.params.w;
 }
 
+// ---------------------------------------------------------------- unevenness (a clay finish)
+
+fn pcg_step(x: u32) -> u32 {
+    let state = x * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+// the lattice value of cell (i, j, k) of octave o, in [-1, 1)
+fn lattice(c: vec3<i32>, seed: u32) -> f32 {
+    let h = pcg_step(pcg_step(pcg_step(pcg_step(seed) ^ bitcast<u32>(c.z)) ^ bitcast<u32>(c.y)) ^ bitcast<u32>(c.x));
+    return f32(h) * (2.0 / 4294967296.0) - 1.0;
+}
+fn value_noise(q: vec3<f32>, seed: u32) -> f32 {
+    let f = floor(q);
+    let t = q - f;
+    let w = t * t * (3.0 - 2.0 * t);
+    let c = vec3<i32>(f);
+    let x00 = mix(lattice(c, seed), lattice(c + vec3(1, 0, 0), seed), w.x);
+    let x10 = mix(lattice(c + vec3(0, 1, 0), seed), lattice(c + vec3(1, 1, 0), seed), w.x);
+    let x01 = mix(lattice(c + vec3(0, 0, 1), seed), lattice(c + vec3(1, 0, 1), seed), w.x);
+    let x11 = mix(lattice(c + vec3(0, 1, 1), seed), lattice(c + vec3(1, 1, 1), seed), w.x);
+    return mix(mix(x00, x10, w.y), mix(x01, x11, w.y), w.z);
+}
+// the height field of the unevenness at p (scene units), in [-1, 1]
+// fade: the amplitude of each octave, 1 for features of 2 px or more of screen footprint down to 0 at 1 px
+fn unevenness_height(p: vec3<f32>, fade: vec3<f32>) -> f32 {
+    let q = p / mat.finish.y;
+    let seed = bitcast<u32>(mat.finish.z);
+    return (fade.x * value_noise(q, seed) + fade.y * value_noise(q * 2.0, seed + 1u) * 0.5 + fade.z * value_noise(q * 4.0, seed + 2u) * 0.25) / 1.75;
+}
+
 // ---------------------------------------------------------------- surface
 
 fn surface(i: VOut, front: bool) -> Surface {
     var s: Surface;
+    // the screen footprint of a pixel in the object's scene units (derivatives outside any branch)
+    let footprint = max(length(fwidth(i.local)), 1e-6);
+    let fade = clamp(vec3(mat.finish.y, mat.finish.y * 0.5, mat.finish.y * 0.25) / footprint - vec3(1.0), vec3(0.0), vec3(1.0));
     let bits = u32(mat.aniso.w);
     var base = mat.base_color * i.color;
     if ((bits & 1u) != 0u) { base = base * material_fragment(base_map, i.uv, 0u); }
@@ -394,6 +432,9 @@ fn surface(i: VOut, front: bool) -> Surface {
         rough = rough * mr.g;
         metallic = metallic * mr.b;
     }
+    let unev = mat.finish.x;
+    var uh = 0.0;
+    if (unev > 0.0) { uh = unevenness_height(i.local, fade); rough = rough + 0.25 * unev * uh; }
     s.metallic = clamp(metallic, 0.0, 1.0);
     s.rough = clamp(rough, 0.03, 1.0);
     var n = normalize(i.normal);
@@ -405,6 +446,20 @@ fn surface(i: VOut, front: bool) -> Surface {
         tn = vec3(tn.xy * mat.p1.w, tn.z);
         // glTF normal maps are y-up in texture space; scene space flips y (and z) relative to glTF
         n = normalize(t * tn.x - b * tn.y + n * tn.z);
+        t = normalize(t - n * dot(n, t));
+        b = cross(n, t) * i.tangent.w;
+    }
+    if (unev > 0.0) {
+        // tilt the shading normal against the gradient of the height field (central differences, step s / 32), the
+        // gradient taken along the object's axes and carried to world space
+        let e = mat.finish.y / 32.0;
+        let k = mat.finish.y / (2.0 * e);
+        let g = vec3(
+            unevenness_height(i.local + vec3(e, 0.0, 0.0), fade) - unevenness_height(i.local - vec3(e, 0.0, 0.0), fade),
+            unevenness_height(i.local + vec3(0.0, e, 0.0), fade) - unevenness_height(i.local - vec3(0.0, e, 0.0), fade),
+            unevenness_height(i.local + vec3(0.0, 0.0, e), fade) - unevenness_height(i.local - vec3(0.0, 0.0, e), fade)) * k;
+        let gw = g.x * normalize(obj.model[0].xyz) + g.y * normalize(obj.model[1].xyz) + g.z * normalize(obj.model[2].xyz);
+        n = normalize(n - 0.5 * unev * (gw - dot(gw, n) * n));
         t = normalize(t - n * dot(n, t));
         b = cross(n, t) * i.tangent.w;
     }
