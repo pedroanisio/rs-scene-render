@@ -181,6 +181,50 @@ const LOOKING_DOWN: &str = r#"x="0" y="-12" z="-20" pitch="-30" fov="45""#;
 const OPEN_FLOOR: [usize; 4] = [75, 15, 175, 65];
 const SMALL: [u32; 2] = [320, 180];
 
+/// How a brute-force comparison is sized. A discrete or integrated GPU renders 320x180 frames at
+/// 1024 samples per pixel. A software adapter (llvmpipe) takes half an hour for that, and the
+/// assertion needs far less: it compares the mean of a patch of the open floor, so the noise of the
+/// reference is that of one pixel divided by the square root of the pixels in the patch. The
+/// software path therefore renders half-size frames (the same view, the patch scaled with them) at
+/// 1024 samples; `SR_BRUTE_FORCE=full` forces the full size and samples on any adapter, and nothing
+/// reduces them on a GPU.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Brute {
+    size: [u32; 2],
+    floor: [usize; 4],
+    samples: u32,
+}
+
+const FULL: Brute = Brute { size: SMALL, floor: OPEN_FLOOR, samples: 1024 };
+const REDUCED: Brute = Brute { size: [160, 90], floor: [37, 7, 87, 32], samples: 1024 };
+
+/// Mean and relative noise of the mean of a patch of luminance, from the pixels themselves: their
+/// spread (coefficient of variation) over the square root of their number. A floor lit by one light
+/// varies a little across the patch as well, which only makes this larger, so it is conservative.
+fn patch_noise(px: &[[f32; 4]], width: usize, [x0, y0, x1, y1]: [usize; 4]) -> (f32, f32) {
+    let values: Vec<f32> = (y0..y1).flat_map(|y| (x0..x1).map(move |x| lum(px[y * width + x]))).collect();
+    let n = values.len() as f32;
+    let mean = values.iter().sum::<f32>() / n;
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (n - 1.0);
+    (mean, variance.sqrt() / mean / n.sqrt())
+}
+
+/// The tolerance of a comparison against brute force: the one the test states, or four times the
+/// noise of the two references' means when that is larger, so a smaller reference never loosens a
+/// test below its stated tolerance and never fails on its own noise.
+fn tolerance(stated: f32, wet_noise: f32, dry_noise: f32) -> f32 {
+    stated.max(4.0 * wet_noise.hypot(dry_noise))
+}
+
+fn brute_force() -> Brute {
+    let software = common::gpu().is_some_and(|g| g.info.device_type == wgpu::DeviceType::Cpu);
+    if software && std::env::var("SR_BRUTE_FORCE").as_deref() != Ok("full") {
+        REDUCED
+    } else {
+        FULL
+    }
+}
+
 /// A light that exists only as emissive geometry (so brute-force paths find it) matching an analytic
 /// one: the emission is set so the dry floor agrees with the analytic light's within a few percent.
 fn emissive_sphere(centre: glam::Vec3, radius: f32) -> String {
@@ -195,18 +239,22 @@ const NO_LIGHT: &str = r##"<light id="off" type="ambient" color="#000000" intens
 /// How much light the wet floor keeps against the dry floor under one light, measured on the open
 /// floor: analytic light with the engine's shadow rays against brute force (an emissive copy of the
 /// light, found by paths that refract out of the water), each as wet over dry so the two lights'
-/// calibration cancels. Returns (analytic, brute force).
-fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, bounces: u32) -> Option<(f32, f32)> {
+/// calibration cancels. Returns (analytic, brute force, relative noise of the brute-force ratio).
+fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, bounces: u32) -> Option<(f32, f32, f32)> {
+    let brute = brute_force();
     let render = |water: &str, lights: &str, extra: &str, samples: u32, bounces: u32| {
-        let xml = seabed(water, lights, extra, LOOKING_DOWN, SMALL, samples, bounces)
+        let xml = seabed(water, lights, extra, LOOKING_DOWN, brute.size, samples, bounces)
             .replace("{emission}", &emission.to_string());
         render(&xml)
     };
     let dry = render("", analytic, "", 128, 4)?;
     let wet = render(water, analytic, "", 128, 4)?;
-    let dry_ref = render("", NO_LIGHT, emissive, 1024, bounces)?;
-    let wet_ref = render(water, NO_LIGHT, emissive, 1024, bounces)?;
-    Some((patch(&wet, OPEN_FLOOR) / patch(&dry, OPEN_FLOOR), patch(&wet_ref, OPEN_FLOOR) / patch(&dry_ref, OPEN_FLOOR)))
+    let dry_ref = render("", NO_LIGHT, emissive, brute.samples, bounces)?;
+    let wet_ref = render(water, NO_LIGHT, emissive, brute.samples, bounces)?;
+    let ratio = |wet: &common::Rendered, dry: &common::Rendered| patch(wet, brute.floor) / patch(dry, brute.floor);
+    let width = brute.size[0] as usize;
+    let noise = |r: &common::Rendered| patch_noise(&r.px, width, brute.floor).1;
+    Some((ratio(&wet, &dry), ratio(&wet_ref, &dry_ref), noise(&wet_ref).hypot(noise(&dry_ref))))
 }
 
 /// The sun reaches a floor under water: through the interface with the Fresnel loss, the change of
@@ -221,9 +269,11 @@ fn the_sun_lights_a_floor_under_water_as_brute_force_does() {
     let (distance, radius) = (500.0, 60.0);
     let omega = std::f32::consts::PI * radius * radius / (distance * distance);
     let lamp = emissive_sphere(-shines(yaw, pitch) * distance, radius);
-    let Some((got, want)) = wet_over_dry(&analytic, &lamp, sun / omega, "plain", 24) else { return };
+    let Some((got, want, noise)) = wet_over_dry(&analytic, &lamp, sun / omega, "plain", 24) else { return };
+    eprintln!("sun: wet over dry {got} against the brute force {want} (noise {noise})");
     assert!(want > 0.3, "the reference keeps light under the water: {want}");
-    assert!((got / want - 1.0).abs() < 0.08, "wet over dry: {got} against the brute force {want}");
+    let limit = tolerance(0.08, noise, 0.0);
+    assert!((got / want - 1.0).abs() < limit, "wet over dry: {got} against the brute force {want} (within {limit})");
 }
 
 /// A point light and a sphere light reach the floor under the water as brute force sees them.
@@ -252,9 +302,14 @@ fn point_and_sphere_lights_reach_a_floor_under_water_as_brute_force_does() {
             ),
         ),
     ] {
-        let Some((got, want)) = wet_over_dry(&light, &lamp, emission, "plain", 24) else { return };
+        let Some((got, want, noise)) = wet_over_dry(&light, &lamp, emission, "plain", 24) else { return };
+        eprintln!("{name}: wet over dry {got} against the brute force {want} (noise {noise})");
         assert!(want > 0.3, "{name}: the reference keeps light under the water: {want}");
-        assert!((got / want - 1.0).abs() < 0.15, "{name}: wet over dry {got} against the brute force {want}");
+        let limit = tolerance(0.15, noise, 0.0);
+        assert!(
+            (got / want - 1.0).abs() < limit,
+            "{name}: wet over dry {got} against the brute force {want} (within {limit})"
+        );
     }
 }
 
@@ -567,4 +622,26 @@ fn tiled_frames_equal_whole_frames_with_light_through_glass() {
     assert!(lum(wall_pixel) > 0.02, "the wall inside the glass is lit through it: {wall_pixel:?}");
     let tiled = render(Some(1_200_000));
     assert_eq!(whole, tiled, "tiles must not change a pixel");
+}
+
+/// The reduced reference never loosens a test below the tolerance it states and never fails on its
+/// own noise: the tolerance is the stated one until four times the references' noise exceeds it.
+#[test]
+fn the_brute_force_tolerance_follows_the_noise_of_its_references() {
+    // the reduced frame is the full view at half the size: same floor, a quarter of the pixels
+    let pixels = |b: Brute| (b.floor[2] - b.floor[0]) * (b.floor[3] - b.floor[1]);
+    assert_eq!(REDUCED.size, [FULL.size[0] / 2, FULL.size[1] / 2]);
+    assert_eq!(pixels(REDUCED) * 4, pixels(FULL));
+    assert_eq!(FULL.samples, 1024);
+    assert_eq!(tolerance(0.08, 0.0, 0.0), 0.08);
+    assert_eq!(tolerance(0.08, 0.01, 0.01), 0.08);
+    assert!((tolerance(0.08, 0.03, 0.04) - 0.2).abs() < 1e-6, "4 x hypot(0.03, 0.04)");
+    // noise from the pixels: a patch alternating 0.9 and 1.1 has a spread of 0.1 and a mean of 1
+    let mut px = vec![[0.0f32; 4]; 16 * 16];
+    for (i, p) in px.iter_mut().enumerate() {
+        let v = if i % 2 == 0 { 0.9 } else { 1.1 };
+        *p = [v; 4];
+    }
+    let (mean, noise) = patch_noise(&px, 16, [0, 0, 16, 16]);
+    assert!((mean - 1.0).abs() < 1e-5 && (noise - 0.1 / 16.0).abs() < 1e-3, "{mean} {noise}");
 }
