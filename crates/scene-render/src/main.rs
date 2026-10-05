@@ -594,7 +594,7 @@ fn validate(
 
 fn simulate(file: &Path, output: Option<PathBuf>, out: &mut Out) -> std::io::Result<ExitCode> {
     use sha2::Digest;
-    // the cache being regenerated may no longer match its recorded digest, so assets are not verified
+    // the cache being regenerated may differ from its recorded digest, so assets are not verified
     let doc = match sr_model::load_file(file, &LoadOptions::without_assets()) {
         Ok(d) => d,
         Err(e) => {

@@ -1404,7 +1404,7 @@ fn compile_fixture(name: &str, assets: &str, node: &str) -> String {
 
 #[test]
 fn validate_fails_on_what_compilation_would_reject_at_render() {
-    // a document validate accepts must not fail when render compiles it: each of these used to pass validate
+    // a document validate accepts must not fail when render compiles it: each of these is a document the compile step rejects
     for (name, code, assets, node) in [
         (
             "scale-key",
