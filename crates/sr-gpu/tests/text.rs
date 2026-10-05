@@ -287,3 +287,17 @@ fn a_burned_caption_uses_its_font_asset_whether_or_not_a_text_asset_is_drawn() {
         "the caption lost its font asset when no text layer was drawn: ink {without} px against {with} px with one"
     );
 }
+
+#[test]
+fn mask_reveal_clips_each_line_to_its_own_box() {
+    // a mask-reveal unit waits 1.1 em below its place, which is inside the next line's box: with one clip over
+    // the union of the line boxes, line 1 showed through line 2's box before its window; each line has its own clip
+    let asset = r##"<text id="t" text="AAAA&#10;BBBB" width="200" height="120" size="40" color="#FFFFFF" font="DejaVu Sans"/>"##;
+    let layer = r#"<layer id="lt" asset="t" x="0" y="0"><textAnimator preset="mask-reveal" presetStart="1" presetDuration="1"/></layer>"#;
+    let d = doc_text(asset, "", layer, 200, 120);
+    let Some(waiting) = render_times(&d, &[0.5]) else { return };
+    let ink = sum(&waiting, 0, 0, 200, 120, 0);
+    assert!(ink < 1.0, "nothing shows before the preset starts: {ink}");
+    let done = render_times(&d, &[2.5]).unwrap();
+    assert!(sum(&done, 0, 0, 200, 120, 0) > 300.0, "both lines are fully drawn after it ends");
+}
