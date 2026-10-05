@@ -1111,7 +1111,7 @@ Where the limit bound, and the profile that removes it. The first version emptie
 with the central kernel `(1 - (r/R)^2)^2`, whose peak for the law's volume `V` is `3 V / (pi R^2)`, about twice
 the law's depth `d` for water (`R = 0.8 V^(1/3)`, `d = 0.75 V^(1/3)`), so that it asked the water for more than the
 layer holds even though the law's depth (7.5 to 15.8 m over the rocks of 60000, 90478 and 270000 kg, in
-20 m of water) did not. Measured on the impact-ocean scene (1.5 m cells), the parts of the cavities together
+20 m of water) did not. Measured on the impact-ocean scene on 3 m cells (the acceptance sweeps), the parts of the cavities together
 wanted 266.5, 367.5 and 862.3 and took 266.5, 326.4 and 567.6 (the limit of the weighted disc 344.9, 334.1
 and 567.6): 0 of 24, 17 of 25 and 28 of 29 parts limited, 11% and 34% of the volume lost, and the highest wave
 by mass 6.41, 8.03 and 7.30 m (5.43, 8.69 and 7.81 m by speed in a vertical plunge): the highest crest stopped
