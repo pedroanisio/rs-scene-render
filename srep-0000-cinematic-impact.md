@@ -1741,8 +1741,8 @@ for 90, 60 and 30 degrees): at 4 s it is 0.04, 0.49 and 1.22 m from the impact p
 3e4, 8e3 and 1e5 J against 4.5e8 at the impact (the free rock at 60 and 30 degrees keeps 7.8e7 and 2.4e8 J). The
 mechanical energy never grows after the impact by more than a ten-thousandth of the impact's, and the free rock's
 energy does not grow either. In the ocean scene `full` already gives the water the rock's horizontal momentum, so
-the rock stops on the bed with or without it (hydrostatic: 0.7 and 0.8 m from the crater's centre at 6 s, the highest wave after 4 s 1.958 and 1.950 m;
-depth-filtered: 0.1 and 0.2 m, 1.904 and 1.890 m).
+the rock stops on the bed with or without it (hydrostatic: 0.4 and 0.5 m from the crater's centre at 6 s, the highest wave after 4 s 2.243 and 2.238 m;
+depth-filtered: 0.1 m and 9.8 m, 2.274 and 2.261 m: with the depth filter the free rock rolls out of its crater).
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
@@ -2883,22 +2883,48 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   so a smoke source from that crater would make a cloud on the sea bed.
 - In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`),
   the sweeps are run with the ocean answering by the depth of the water (`bedResponse="depthFiltered"`, the default)
-  and by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells
-  (`tools/impact_sweeps.sh` prints them again; the heights change when the ocean's cavity does). Every order that
-  is asserted holds in both. By speed (60, 100 and 150 m/s at 60 degrees), the highest wave is 4.43, 9.06 and
-  11.70 m in the first and 4.54, 8.93 and 12.11 m in the second; by mass (60 000, 90 478 and 270 000 kg) 6.74, 9.06
-  and 11.65 m and 6.80, 8.93 and 11.62 m; a rock that arrives straight down makes 5.62, 10.20 and 11.95 m by
-  speed and 7.99, 10.20 and 10.85 m by mass in the first, 5.50, 10.20 and 12.05 m and 8.03, 10.20 and 10.62 m in the
-  second. The crater on the seabed is 3.05, 4.00 and 5.29 m in radius by speed and 2.59, 4.00 and 8.02 m by mass
-  (depth 1.28, 1.68, 2.22 m by speed) with the depth filter, and 2.93, 3.85 and 5.12 m and 2.46, 3.85 and 7.94 m
-  without. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows with speed, mass
-  and angle in both, and it is what the response changes most: 0.006, 0.012 and 0.021 m by speed with the filter
-  against 0.16, 0.27 and 0.40 m without: about a twenty-second of the wave. The sweep by angle is recorded and not asserted (an ignored test): the highest wave is 4.16,
-  9.06 and 10.20 m for 30, 60 and 90 degrees with the filter and 4.07, 8.93 and 10.20 m without, and the crater
-  radius by angle is 2.89, 4.00 and 3.63 m and 2.89, 3.85 and 3.63 m (a rock that arrives straight down reaches
-  the bed slower than one that glances in, because the cavity empties the water under it and its drag acts on less).
-  Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by angle 2.41, 1.54 and 0.09 m: the
-  rock was a bump that moves and a plunge made a wave of 9 cm. A body lighter than water floats and makes no crater.
+  and by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells.
+  `tools/impact_sweeps.sh` prints them again. What the tests assert is an order, never a value: the far wave of the
+  sea (the highest the water stands above its rest level in the ring 20 to 40 m from where the rock enters, from the
+  moment the rock is in it) grows with the speed (60, 100 and 150 m/s at 60 degrees) and with the mass (60 000, 90 478
+  and 270 000 kg), and the far wave of a rock that arrives straight down grows with both, in both responses, over the
+  whole sweep and over three points (40, 60 and 80 m/s; 20 000, 40 000 and 60 000 kg) whose cavity the law makes
+  shallower than the water; the crater on the seabed grows with speed and mass; the water is conserved to the last
+  cell; and the highest surface anywhere grows with the speed at 60 degrees. The highest surface anywhere does not
+  grow with the mass at 60 degrees, nor with the speed of a vertical plunge, now that the cavity forms over the law's time in a wide
+  ring (the water the cavity takes is limited, and the largest rocks spread it): that is recorded in an ignored test,
+  not asserted, and the cause is the cavity model's, measured by its owner.
+  Measured on the integration at the time of writing (a dated measurement, not a criterion; the sea's amplitudes
+  change with the cavity's kernel). Far wave, depth filter | hydrostatic, in metres: by speed 0.95, 1.32 and 1.85 | 0.95,
+  1.40 and 1.89; by mass 1.22, 1.32 and 2.22 | 1.20, 1.40 and 2.25; a vertical plunge by speed 1.10, 1.47 and 2.06 |
+  1.11, 1.47 and 2.07, by mass 1.32, 1.47 and 2.43 | 1.32, 1.47 and 2.47. The depth of the cavity by the law for those
+  rocks is 7.5 to 15.8 m, under the 20 m of water. Highest surface anywhere, filter | hydrostatic: by speed 4.49,
+  8.03 and 8.70 | 4.61, 7.99 and 8.65; by mass 6.41, 8.03 and 7.30 | 6.59, 7.99 and 7.30; a vertical plunge by mass 7.60,
+  8.69 and 8.84 | 7.62, 8.79 and 8.88, by speed 5.43, 8.69 and 7.81 | 5.48, 8.79 and 8.42. The crater on the seabed is
+  2.81, 3.42 and 4.09 m in radius by speed and 2.15, 3.42 and 7.49 m by mass (depth 1.18, 1.43 and 1.72 m by speed),
+  the same in both responses. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows
+  with speed, mass and angle in both, and it is what the response changes most: 0.006, 0.012 and 0.021 m by speed with
+  the filter against 0.16, 0.27 and 0.40 m without, about a twenty-second of the wave. The sweep by angle is recorded
+  and not asserted (an ignored test): the highest surface is 4.33, 8.03 and 8.69 m for 30, 60 and 90 degrees with the
+  filter and 4.28, 7.99 and 8.79 m without, and the crater radius by angle 2.77, 3.42 and 3.63 m (a rock that arrives
+  straight down reaches the bed slower than one that glances in, because the cavity empties the water under it and its
+  drag acts on less). Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by angle 2.41, 1.54
+  and 0.09 m: the rock was a bump that moves and a plunge made a wave of 9 cm. A body lighter than water floats and
+  makes no crater.
+- Everything in one ocean. A test over 4 m of water (the seabed raised, the rest of the scene as authored) puts the
+  bed cratered by contact and the rock as colliders, `bodyCoupling="full"`, the cavity of the entry and 3000 ejecta
+  that fall into the same ocean (`splash`), in the depth-filtered response, with the ocean keeping no checkpoint. Nothing
+  fails, the water is conserved to a part in 1e9, and the ocean, the rock and the particles are the same to the bit at
+  any time asked in any order and from a fresh evaluator. 11 of the 3000 ejecta fall in (0.20 m3), because the rest
+  are thrown from the seabed and stay under water.
+  Scheduling that this needed: an ocean that loads rigid bodies is run before the particles of its frame and steps ahead
+  of them, so a canonical step that takes a splash cannot wait for the particles to be computed after it; the ocean
+  asks for them (the emitters that fall into it are made known to the log and computed to the end of that step, a step
+  at a time with the ocean). The particle solver reads the rigid world, so a rigid world that answers with a problem
+  (a load from a step of the water that has not been computed) now fails the particle step that asked, where before it
+  read as a world that stood still and gave other ejecta depending on what had been asked before. An ocean that
+  runs after the particles keeps the old look-ahead: the particles are computed to the end of the ocean's step that
+  holds the frame. Not measured: the cost of that scheduling per frame.
 - The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
   the speed along the normal to the power 1.7, so the temperature rise barely moves (19.19, 19.07 and 19.08 K
   at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows
