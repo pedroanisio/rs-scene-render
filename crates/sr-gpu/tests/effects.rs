@@ -583,8 +583,8 @@ fn a_gradient_map_keeps_the_alpha_of_its_stops() {
 
 #[test]
 fn halftone_does_not_paint_outside_the_edge_of_its_source() {
-    // the screen's cell takes its tone from the cell centre; a pixel of that cell lying outside the shape used to
-    // take the centre's alpha and draw the ground (white) there, cutting the edge into cell-sized steps
+    // the screen's cell takes its tone from the cell centre; a pixel of that cell lying outside the shape must
+    // not take the centre's alpha and draw the ground (white) there, which cuts the edge into cell-sized steps
     let xml = r##"<scene version="1.1"><project width="64" height="32" fps="10" duration="1" background="#00000000"/>
 <composition><shape id="s" shape="rect" x="0" y="0" width="21" height="32" fill="#808080" effects="ht"/></composition>
 <effects><effect id="ht" type="halftone" size="8" angle="0"/></effects></scene>"##;
@@ -833,7 +833,7 @@ fn every_effect_type_draws() {
 #[test]
 fn texture_pool_stays_bounded_over_a_long_motion_blurred_render() {
     // a sized layer that moves and scales: its motion-blur bounds, and so its temporary texture size, change
-    // every frame. Pooled textures of sizes no longer requested must be freed, or a long render runs out of
+    // every frame. Pooled textures of sizes that are not requested again must be freed, or a long render runs out of
     // GPU memory.
     let body = r#"<layer id="m" asset="white" x="8" y="8"><animate property="x"><key time="0" value="0"/><key time="4" value="90"/></animate>
         <animate property="scaleX"><key time="0" value="2"/><key time="4" value="9"/></animate>
