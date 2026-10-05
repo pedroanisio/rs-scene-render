@@ -622,7 +622,14 @@ pub fn counter_text(text: &str, k: f64) -> String {
         let num = &text[s..i];
         let dec = num.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
         let v = num.replace(',', "").parse::<f64>().unwrap_or(0.0) * k;
-        let digits = format!("{v:.dec$}");
+        // a number authored with leading zeros ("007") keeps its width while it counts
+        let int_width = num.split('.').next().map_or(0, str::len);
+        let width = if num.starts_with('0') && int_width > 1 && !num.contains(',') {
+            int_width + dec + usize::from(dec > 0)
+        } else {
+            0
+        };
+        let digits = format!("{v:0width$.dec$}");
         if num.contains(',') {
             let (int, frac) = digits.split_once('.').map(|(a, b)| (a, Some(b))).unwrap_or((&digits, None));
             let (sign, int) = int.strip_prefix('-').map(|x| ("-", x)).unwrap_or(("", int));

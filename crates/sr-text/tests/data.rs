@@ -114,6 +114,11 @@ fn presets_and_selectors() {
     // counter: numbers count up from 0 before layout, keeping decimals and thousands commas
     assert_eq!(animate::counter_text("Count 1,234.50 and 7", 0.5), "Count 617.25 and 4");
     assert_eq!(animate::counter_text("12,000,000", 0.5), "6,000,000");
+    // a number written with leading zeros keeps its width while it counts, as it does when the count ends
+    assert_eq!(animate::counter_text("TRACKS 007", 0.43), "TRACKS 003");
+    assert_eq!(animate::counter_text("TRACKS 007", 0.0), "TRACKS 000");
+    assert_eq!(animate::counter_text("TRACKS 007", 1.0), "TRACKS 007");
+    assert_eq!(animate::counter_text("T-05.5 and 0.5 and 9", 0.4), "T-02.2 and 0.2 and 4");
     let k = animate::counter_progress(0.0, 1.0, 100.0, 0.5).unwrap();
     assert!((k - 0.875).abs() < 1e-12, "cubic-out");
     assert_eq!(animate::counter_text("1234", k), "1080");
