@@ -265,6 +265,14 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
     }
 }
 
+/// Why a node cannot be drawn as it was at another time.
+enum SubMiss {
+    /// The caller passed no sub-frame provider.
+    NoProvider,
+    /// The node did not exist at that time.
+    Absent,
+}
+
 impl Renderer {
     /// Handles transitions, motion blur and node effects; returns whether the node was drawn.
     #[allow(clippy::too_many_arguments)]
@@ -553,16 +561,23 @@ impl Renderer {
         tex
     }
 
-    /// Draws the node with id `id` from the scene at time `t`, bare, into `inner`.
-    fn bare_at(&mut self, plan: &mut Plan, ctx: &Ctx, id: &Arc<str>, t: f64, inner: &Space) -> Option<Arc<Tex>> {
-        let sub = ctx.sub?;
+    /// Draws the node with id `id` from the scene at time `t`, bare, into `inner`; or says why it cannot.
+    fn bare_at(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        id: &Arc<str>,
+        t: f64,
+        inner: &Space,
+    ) -> Result<Arc<Tex>, SubMiss> {
+        let sub = ctx.sub.ok_or(SubMiss::NoProvider)?;
         let sg = sub.at(t);
-        let j = *sg.index.get(id)?;
+        let j = *sg.index.get(id).ok_or(SubMiss::Absent)?;
         let sctx = ctx.at(&sg);
         let was = std::mem::replace(&mut self.sampling, true);
         let t = self.bare_render(plan, &sctx, j, inner);
         self.sampling = was;
-        Some(t)
+        Ok(t)
     }
 
     /// Composites `tex` covering pixel rectangle `rect` of `space` with node `i`'s opacity, blend, masks and matte.
@@ -999,10 +1014,12 @@ impl Renderer {
                 "posterize-time" => {
                     let tq = posterized(t, a);
                     match self.bare_at(plan, ctx, &n.id, tq, inner) {
-                        Some(tx) => src = Some(tx),
-                        None => {
+                        Ok(tx) => src = Some(tx),
+                        Err(SubMiss::NoProvider) => {
                             plan.stats.unsupported.push(format!("{}: posterize-time needs a sub-frame provider", e.id))
                         }
+                        // the node was not there at the start of its step: it is drawn as it was, which is nothing
+                        Err(SubMiss::Absent) => src = Some(self.solid_texture([0.0; 4])),
                     }
                 }
                 "echo" => {
@@ -1022,7 +1039,7 @@ impl Renderer {
                             src.clone().unwrap_or_else(|| self.bare_render(plan, ctx, i, inner))
                         } else {
                             self.bare_at(plan, ctx, &n.id, t - k as f64 * delay, inner)
-                                .unwrap_or_else(|| self.solid_texture([0.0; 4]))
+                                .unwrap_or_else(|_| self.solid_texture([0.0; 4]))
                         };
                         frames.push(tex);
                     }
@@ -1080,9 +1097,14 @@ impl Renderer {
                 continue;
             }
             if kind == "pixel-motion-blur" {
-                let Some(prev) = self.bare_at(plan, ctx, &n.id, t - 1.0 / fps, inner) else {
-                    plan.stats.unsupported.push(format!("{}: pixel-motion-blur needs a sub-frame provider", e.id));
-                    continue;
+                let prev = match self.bare_at(plan, ctx, &n.id, t - 1.0 / fps, inner) {
+                    Ok(prev) => prev,
+                    Err(SubMiss::NoProvider) => {
+                        plan.stats.unsupported.push(format!("{}: pixel-motion-blur needs a sub-frame provider", e.id));
+                        continue;
+                    }
+                    // nothing was there a frame ago: no motion to blur
+                    Err(SubMiss::Absent) => continue,
                 };
                 let slot: fx::FlowSlot = Arc::new(std::sync::OnceLock::new());
                 let now = cur.clone();
