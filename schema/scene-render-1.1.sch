@@ -515,4 +515,14 @@
       <sch:assert id="R41" test="../audioTrack[@id=current()/@transcribe]">an output caption track transcribes one of that output's own audio tracks.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p62">
+    <sch:rule context="paints/pattern">
+      <sch:assert id="R42" test="/scene/assets/image[@id=current()/@asset]">pattern/@asset must name an image asset: a pattern tiles an image.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p63">
+    <sch:rule context="*[@emitterAsset]">
+      <sch:assert id="R43" test="/scene/assets/image[@id=current()/@emitterAsset]">@emitterAsset must name an image asset: particles are emitted from its opaque pixels.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

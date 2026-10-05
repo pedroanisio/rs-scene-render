@@ -1374,6 +1374,18 @@ impl<'a> Eval<'a> {
                 "erosion/@heightmap must name an image asset.".into()
             });
         }
+        // p62
+        if local == "pattern" && has("asset") {
+            self.check(contains(&self.sets.image_assets, a("asset")), n, "R42", || {
+                "pattern/@asset must name an image asset: a pattern tiles an image.".into()
+            });
+        }
+        // p63
+        if has("emitterAsset") {
+            self.check(contains(&self.sets.image_assets, a("emitterAsset")), n, "R43", || {
+                "@emitterAsset must name an image asset: particles are emitted from its opaque pixels.".into()
+            });
+        }
         // p56
         if let Some(list) = a("forceFields") {
             let ok = every_token_names(list, &self.sets.force_fields);

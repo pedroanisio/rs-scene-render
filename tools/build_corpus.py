@@ -245,6 +245,8 @@ CASES = [
     ("r31-baseColor", ["R31-baseColor"], sub('<material id="chrome" metallic="1"', '<material id="chrome" baseColor="var(--nope)" metallic="1"')),
     ("c50", ["C50"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" shape="sprite">')),
     ("r32", ["R32"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" sprite="music">')),
+    ("r42", ["R42"], sub('<pattern id="checker" asset="logo"/>', '<pattern id="checker" asset="music"/>')),
+    ("r43", ["R43"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" emitterAsset="music">')),
     ("r33", ["R33"], ins_comp('<erosion id="er" width="10" height="10" heightmap="music"/>')),
     ("r34", ["R34"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" forceFields="gravity music">')),
     ("r35", ["R35"], sub('<pin lon="5" lat="5" label="Here"/>', '<pin lon="5" lat="5" label="Here" textStyle="logo"/>')),
