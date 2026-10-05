@@ -129,3 +129,44 @@ fn mesh_normal(points: &[V], triangles: &[[u32; 3]], p: V) -> Option<V> {
     }
     unit(sum).or(Some(face))
 }
+
+/// The point of the surface of `shape` nearest `point`, both in the body's own frame, or `None`
+/// where the geometry gives none (a shape that is not a sphere, a box or a mesh, or a point at the
+/// centre of a sphere). Where a body that has just met this surface is: the contact point of
+/// a body that went on a little before the contact was found is inside it by as much.
+pub fn nearest(shape: &Shape3, point: V) -> Option<V> {
+    match shape {
+        Shape3::Sphere(radius) => unit(point).map(|u| u.map(|c| c * radius)),
+        Shape3::Box(half) => {
+            let inside = (0..3).all(|i| point[i].abs() < half[i]);
+            if inside {
+                // the face it is nearest
+                let axis = (0..3).min_by(|&i, &j| (half[i] - point[i].abs()).total_cmp(&(half[j] - point[j].abs())))?;
+                let mut out = point;
+                out[axis] = half[axis].copysign(point[axis]);
+                Some(out)
+            } else {
+                Some(std::array::from_fn(|i| point[i].clamp(-half[i], half[i])))
+            }
+        }
+        Shape3::TriMesh(points, triangles) | Shape3::Decomposition(points, triangles) => {
+            let mut best: Option<(f64, V)> = None;
+            for t in triangles {
+                let (Some(a), Some(b), Some(c)) =
+                    (points.get(t[0] as usize), points.get(t[1] as usize), points.get(t[2] as usize))
+                else {
+                    continue;
+                };
+                let w = nearest_in_triangle(point, *a, *b, *c);
+                let q: V = std::array::from_fn(|i| w[0] * a[i] + w[1] * b[i] + w[2] * c[i]);
+                let d = sub(point, q);
+                let distance = dot(d, d);
+                if best.is_none_or(|(least, _)| distance < least) {
+                    best = Some((distance, q));
+                }
+            }
+            best.map(|(_, q)| q)
+        }
+        _ => None,
+    }
+}

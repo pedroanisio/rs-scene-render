@@ -67,6 +67,9 @@ pub(crate) struct ImpactCause {
     /// world's axes (into the surface).
     pub(crate) speed: f64,
     pub(crate) velocity: [f64; 3],
+    /// The point of the owner's surface nearest the contact, in the owner's object space: the body has
+    /// gone on a little before its contact is found, so the contact point lies inside the surface.
+    pub(crate) surface_point: [f64; 3],
     /// Kilograms per cubic metre of the target.
     pub(crate) target_density: f64,
     /// Scene units per metre.
@@ -201,6 +204,9 @@ pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -
         material: source.material,
         speed,
         velocity: impact.relative_velocity,
+        surface_point: sr_sim::surface::nearest(&source.surface, impact.point)
+            .unwrap_or(impact.point)
+            .map(|c| c / source.scale),
         target_density: source.density.unwrap_or(source.material.table_density()),
         pixels_per_meter: source.pixels_per_meter,
     };
