@@ -47,6 +47,7 @@ OCEAN_COUPLED = '<scene version="1.3"><project width="64" height="64" fps="24" d
 
 GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
 
+MODEL_SELECT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><materials><material id="clay" baseColor="#C48A5A"/></materials><composition><object3D id="piece" primitive="mesh" mesh="set" node="Knight" materialOverride="stone:clay old:clay" x="32" y="32"/></composition></scene>\n'
 TEXT3D = '<scene version="1.1"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="title" primitive="text" text="HI" height="20" tracking="120" x="32" y="32"/></composition></scene>\n'
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
 
@@ -108,6 +109,7 @@ CASES = [
     ("ocn8-coupling", ["OCN8"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyCoupling="buoyancy" ')),
     ("ocn9-drag", ["OCN9"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyDrag="1" ')),
     ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
+    ("mov1", ["MOV1"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay old"')),
     ("txt2", ["TXT2"], lambda _: TEXT3D.replace('primitive="text" text="HI"', 'primitive="box"')),
     ("solid-colliders-tracking", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('<object3D id="letters" primitive="text" text="O"/>', '<object3D id="letters" primitive="text" text="O"><animate property="tracking"><key time="0" value="10"/></animate></object3D>')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
@@ -395,6 +397,7 @@ VALID = {
     "ocean-entry": OCEAN_ENTRY,
     "ocean-hydrostatic": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="hydrostatic" '),
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
+    "model-select": MODEL_SELECT,
     "text3d-tracking": TEXT3D,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,

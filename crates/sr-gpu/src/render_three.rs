@@ -1353,13 +1353,66 @@ impl Renderer {
             let (locals, weights) = sr_3d::anim::pose(model, clip, t);
             let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
             let variant = a.str("materialVariant");
+            // `node`: only that node and what is under it, placed at the object's origin
+            let selected = match a.str("node") {
+                Some(name) => match model.nodes.iter().position(|x| x.name == name) {
+                    Some(k) => Some((k, model.world_matrices(&locals)[k].inverse())),
+                    None => {
+                        plan.stats.errors.push(format!("{}: node {name} not found in the model", n.id));
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let under = |mut k: usize, root: usize| loop {
+                if k == root {
+                    break true;
+                }
+                match model.nodes[k].parent {
+                    Some(p) => k = p,
+                    None => break false,
+                }
+            };
+            // `materialOverride`: imported material name -> document material id
+            let overrides: Vec<(String, String)> = a
+                .str("materialOverride")
+                .map(|s| {
+                    s.split_whitespace()
+                        .filter_map(|pair| pair.split_once(':'))
+                        .map(|(old, new)| (old.to_string(), new.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
+                if selected.as_ref().is_some_and(|(root, _)| !under(item.node, *root)) {
+                    continue;
+                }
                 let prim = &model.primitives[item.prim];
                 let mi = variant
                     .as_ref()
                     .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
                     .or(prim.material);
-                let imported = if doc_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
+                // @material replaces every material; a pair of @materialOverride replaces the ones it names
+                let item_mat = match &doc_mat {
+                    Some(m) => Some(m.clone()),
+                    None => {
+                        let name = mi.and_then(|k| model.materials.get(k)).map(|m| m.name.as_str());
+                        match overrides.iter().find(|(old, _)| Some(old.as_str()) == name) {
+                            Some((_, id)) => {
+                                let m = self.document_material(plan, ctx, id);
+                                if m.is_none() {
+                                    let e = format!("{}: material {id} not found", n.id);
+                                    if !plan.stats.errors.contains(&e) {
+                                        plan.stats.errors.push(e);
+                                    }
+                                }
+                                m
+                            }
+                            None => None,
+                        }
+                    }
+                };
+                let imported = if item_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
                 let mkey = format!("{key}#{}#material{:?}", item.prim, imported.map(|_| mi));
                 let mesh = match self.three_engine().meshes.get(&mkey) {
                     Some(m) => m.clone(),
@@ -1373,7 +1426,7 @@ impl Renderer {
                         m
                     }
                 };
-                let (material, maps) = match &doc_mat {
+                let (material, maps) = match &item_mat {
                     Some((p, m)) => (p.clone(), m.clone()),
                     None => {
                         let mi = variant
@@ -1433,7 +1486,10 @@ impl Renderer {
                 };
                 draws.push(Draw3 {
                     mesh: src,
-                    model: world * model.basis * item.matrix,
+                    model: world
+                        * model.basis
+                        * selected.as_ref().map_or(Mat4::IDENTITY, |(_, inv)| *inv)
+                        * item.matrix,
                     material,
                     maps,
                     opacity,

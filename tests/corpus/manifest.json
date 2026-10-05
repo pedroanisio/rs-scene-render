@@ -259,6 +259,9 @@
     "geo3.scene.xml": [
       "GEO3"
     ],
+    "mov1.scene.xml": [
+      "MOV1"
+    ],
     "msq1.scene.xml": [
       "MSQ1"
     ],
@@ -811,6 +814,7 @@
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "model-select.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
     "ocean-depth-filtered-drag.scene.xml": [],

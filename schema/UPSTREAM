@@ -55,4 +55,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - Stroke markers (markerStart, markerEnd, markerSize; rule C65), implemented as SREP 15 is written (Draft, srep-0015.md).
   - geoLayer @progress traces polygon outlines as well as lines: srep-0000-geo-outline-progress.md (8f0bc2e).
   - object3D @tracking on extruded 3D text (rule TXT2): srep-0000-text3d-tracking.md (926b015).
+  - object3D @node and @materialOverride on imported models (rule MOV1): srep-0000-model-node-material-select.md (2399e6f).
 The xsd and sch above differ from the vendored sha256 sums by these edits.

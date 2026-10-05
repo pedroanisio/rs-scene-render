@@ -2700,6 +2700,12 @@
     <xs:attribute name="volume" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
+    <xs:attribute name="node" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: draw only the node of that name and its descendants, placed so that the node's own origin is the object's origin (the node's transform within the model is dropped, the transforms below it are kept). The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="materialOverride" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a space-separated list of imported-material-name:document-material-id pairs. Each primitive of the model whose material has that name is drawn with the document material instead. A material with no pair keeps its imported look. @material, when present, replaces every material and takes precedence.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="tracking" type="xs:double">
       <xs:annotation><xs:documentation>Extra space after every character of primitive="text", in thousandths of an em of the text size (the object's height). Negative values tighten. Valid only with primitive="text".</xs:documentation></xs:annotation>
     </xs:attribute>

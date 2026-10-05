@@ -575,4 +575,9 @@
       <sch:assert id="TXT2" test="@primitive='text'">@tracking applies to object3D primitive="text".</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p68">
+    <sch:rule context="object3D[@materialOverride]">
+      <sch:assert id="MOV1" test="count(str:tokenize(normalize-space(@materialOverride),' ')) &gt; 0 and count(str:tokenize(normalize-space(@materialOverride),' ')) = count(str:tokenize(normalize-space(@materialOverride),' ')[contains(.,':') and substring-before(.,':')!='' and substring-after(.,':')!=''])">@materialOverride is a space-separated list of name:id pairs.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

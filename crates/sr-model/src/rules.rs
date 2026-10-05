@@ -1210,6 +1210,16 @@ impl<'a> Eval<'a> {
                 self.check(a("primitive") != Some("text") || has("text"), n, "C7", || {
                     "object3D primitive=\"text\" requires @text.".into()
                 });
+                // p68
+                if let Some(pairs) = a("materialOverride") {
+                    let ok = pairs.split_whitespace().count() > 0
+                        && pairs
+                            .split_whitespace()
+                            .all(|t| t.split_once(':').is_some_and(|(o, w)| !o.is_empty() && !w.is_empty()));
+                    self.check(ok, n, "MOV1", || {
+                        "@materialOverride is a space-separated list of name:id pairs.".into()
+                    });
+                }
                 // p67
                 if has("tracking") {
                     self.check(a("primitive") == Some("text"), n, "TXT2", || {
