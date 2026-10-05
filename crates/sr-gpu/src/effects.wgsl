@@ -674,17 +674,21 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
             let a = smoothstep(v[0].x, v[0].x + max(v[0].y, 1e-4), dd);
             return s * a;
         }
-        case 74u: { // halftone: v0 cell px, angle deg, amount
+        case 74u: { // halftone: v0 cell px, angle deg, amount; v1 ink colour, v2 ground colour
             let a = radians(v[0].y);
             let r = mat2x2<f32>(vec2(cos(a), sin(a)), vec2(-sin(a), cos(a)));
             let q = r * px / max(v[0].x, 2.0);
             let cell = floor(q) + 0.5;
             let cpx = transpose(r) * (cell * max(v[0].x, 2.0));
-            let sc = S(cpx / d);
+            // the tone comes from the cell centre, or from the pixel itself where the centre lies off the shape
+            let sc = select(S(cpx / d), s, S(cpx / d).a < 0.01);
             let l = enc(vec3(luma(unpre(sc)))).x;
             let rad = sqrt(1.0 - l) * 0.7071;
             let inside = 1.0 - smoothstep(rad - 0.05, rad + 0.05, length(q - cell));
-            let o = vec4(vec3(0.0), sc.a) * inside + vec4(vec3(1.0), 1.0) * (1.0 - inside) * sc.a;
+            // coverage is the pixel's own, so the screen stops at the source's edge instead of at cell edges
+            let ink = vec4(v[1].rgb * v[1].a, v[1].a);
+            let ground = vec4(v[2].rgb * v[2].a, v[2].a);
+            let o = (ink * inside + ground * (1.0 - inside)) * s.a;
             return mix(s, o, v[0].z);
         }
         default: { return s; }
