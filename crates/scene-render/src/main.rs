@@ -461,21 +461,30 @@ struct FileReport<'a> {
     warnings: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     io_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    info: Vec<String>,
     diagnostics: &'a [Diagnostic],
 }
 
-/// `SA01` findings of a valid document: content that `safeArea@enforce` holds to its region, over the timeline
-/// (sampled at no more than 4800 frames).
-fn safe_area_findings(text: &str, opts: &LoadOptions) -> Vec<Diagnostic> {
-    let Ok(doc) = sr_model::load_str(text, opts) else { return Vec::new() };
-    let Ok(ev) = sr_eval::Evaluator::new(&doc, &Default::default()) else { return Vec::new() };
+/// What validation adds once a document is structurally valid: the errors compiling it for rendering would
+/// raise (a key that does not parse as its property's type, an expression with an unknown function or a
+/// property the element lacks), so that a document `validate` accepts is one `render` can compile; then the
+/// `SA01` findings of `safeArea@enforce` over the frames that matter. Also the information lines: one `SA02`
+/// per node carrying `safeAreaForce`, and how the frames were sampled.
+fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<String>) {
+    let Ok(doc) = sr_model::load_str(text, opts) else { return (Vec::new(), Vec::new()) };
+    let ev = match sr_eval::Evaluator::new(&doc, &Default::default()) {
+        Ok(ev) => ev,
+        Err(report) => return (report.diagnostics, Vec::new()),
+    };
     if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    let n = ev.frame_count().max(1);
-    let step = n.div_ceil(4800);
-    let times: Vec<f64> = (0..n).step_by(step as usize).map(|f| ev.program().fps.frame_time(f)).collect();
-    sr_gpu::safe_audit::diagnostics(&ev, &times)
+    let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
+    let mut info: Vec<String> =
+        out.forced.iter().map(|id| format!("info[SA02]: {id} forced outside the safe area")).collect();
+    info.extend(out.note.as_ref().map(|n| format!("info: safe area audit {n}")));
+    (out.diagnostics(ev.program()), info)
 }
 
 fn validate(
@@ -491,6 +500,7 @@ fn validate(
     let mut worst = 0u8;
     let mut json_files = Vec::new();
     let mut reports = Vec::new();
+    let mut infos: std::collections::HashMap<PathBuf, Vec<String>> = Default::default();
     for file in files {
         let text = match std::fs::read(file).map(String::from_utf8) {
             Ok(Ok(t)) => t,
@@ -512,7 +522,9 @@ fn validate(
         }
         let mut report = sr_model::validate_str(&text, &o);
         if !report.has_errors() {
-            report.diagnostics.extend(safe_area_findings(&text, &o));
+            let (found, info) = compile_findings(&text, &o);
+            report.diagnostics.extend(found);
+            infos.insert(file.clone(), info);
         }
         reports.push((file, Some((text, report)), None));
     }
@@ -527,6 +539,7 @@ fn validate(
                         errors: 0,
                         warnings: 0,
                         io_error: Some(err.clone()),
+                        info: Vec::new(),
                         diagnostics: &[],
                     });
                 } else {
@@ -547,6 +560,7 @@ fn validate(
                         errors: report.error_count(),
                         warnings: report.warning_count(),
                         io_error: None,
+                        info: infos.get(*file).cloned().unwrap_or_default(),
                         diagnostics: &report.diagnostics,
                     });
                 } else {
@@ -555,6 +569,9 @@ fn validate(
                         for d in &report.diagnostics {
                             out.diagnostic(file, &lines, d)?;
                         }
+                    }
+                    for line in infos.get(*file).into_iter().flatten() {
+                        writeln!(out.w, "{line}")?;
                     }
                     out.summary(file, report, deny_warnings)?;
                 }
@@ -1057,13 +1074,17 @@ fn render(
     }
     let eval_warnings = ev.warnings().len();
     // content a safe area holds to its region, over the frames being rendered
-    let audited: Vec<f64> = match (time, frames.is_empty()) {
-        (Some(t), _) => vec![t],
-        (None, true) if bench => (0..ev.frame_count().max(1)).map(|f| ev.program().fps.frame_time(f)).collect(),
-        (None, true) => vec![0.0],
-        (None, false) => frames.iter().map(|&f| ev.program().fps.frame_time(f)).collect(),
+    let safe = match (time, frames.is_empty() && bench) {
+        (None, true) => sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration).diagnostics(ev.program()),
+        _ => {
+            let audited: Vec<f64> = match (time, frames.is_empty()) {
+                (Some(t), _) => vec![t],
+                (None, true) => vec![0.0],
+                (None, false) => frames.iter().map(|&f| ev.program().fps.frame_time(f)).collect(),
+            };
+            sr_gpu::safe_audit::diagnostics(&ev, &audited)
+        }
     };
-    let safe = sr_gpu::safe_audit::diagnostics(&ev, &audited);
     if safe.iter().any(|d| d.is_error()) {
         return report_errors(out, &Report { diagnostics: safe });
     }

@@ -840,11 +840,13 @@ pub fn deliver(
             }
         };
         // content a safe area holds to its region: findings are warnings, or fail before anything is rendered
-        let safe = sr_gpu::safe_audit::diagnostics(&ev, &times);
-        if safe.iter().any(|d| d.is_error()) {
-            return Err(DeliverError::Document(sr_model::Report { diagnostics: safe }));
+        let (from, to) = (times.first().copied().unwrap_or(0.0), times.last().map(|t| t + 1.0 / fps).unwrap_or(0.0));
+        let safe = sr_gpu::safe_audit::check(&ev, from, to);
+        let diagnostics = safe.diagnostics(p);
+        if diagnostics.iter().any(|d| d.is_error()) {
+            return Err(DeliverError::Document(sr_model::Report { diagnostics }));
         }
-        report.warnings.extend(safe.iter().map(|d| format!("{}: {}", d.code, d.message)));
+        report.warnings.extend(diagnostics.iter().map(|d| format!("{}: {}", d.code, d.message)));
         let n = times.len() as u64;
         let mut video = Video {
             ev: &ev,

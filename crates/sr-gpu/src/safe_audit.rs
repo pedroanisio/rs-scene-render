@@ -62,7 +62,59 @@ fn area_of(p: &Program, id: &str) -> Option<([f64; 4], SafeEnforce)> {
 /// Every checked node and burned caption outside the safe region at `times`, one entry per
 /// (id, kind, side): the first time it happens, and its worst overshoot.
 pub fn audit(ev: &Evaluator, times: &[f64]) -> Vec<Timed> {
+    audit_forced(ev, times).0
+}
+
+/// What an audit found: the findings, the nodes that carry `safeAreaForce`, and how the frames were chosen.
+#[derive(Debug, Clone, Default)]
+pub struct Outcome {
+    /// Nodes and captions outside the region.
+    pub timed: Vec<Timed>,
+    /// Ids of nodes carrying `safeAreaForce` (instances and symbols included), in first-seen order.
+    pub forced: Vec<String>,
+    /// `sampled N of M frames`, when the audit did not look at every frame.
+    pub note: Option<String>,
+}
+
+impl Outcome {
+    /// `SA01` diagnostics for the findings.
+    pub fn diagnostics(&self, p: &Program) -> Vec<sr_model::Diagnostic> {
+        self.timed.iter().map(|t| t.diagnostic(p)).collect()
+    }
+}
+
+/// Audits the frames of `from..to` seconds that matter: every frame of a short range, else the window
+/// edges and key times of the checked nodes, the caption page edges, and a coarse grid (see
+/// [`sr_eval::safe_area::sample_times`]). Placement is evaluated without simulations, which do not move text,
+/// captions or tagged nodes.
+pub fn check(ev: &Evaluator, from: f64, to: f64) -> Outcome {
     let p = ev.program();
+    let mut s = sr_eval::safe_area::sample_times(p, from, to);
+    if s.times.len() as u64 != s.frames {
+        // caption pages change what is drawn without any node moving: their edges are frames to look at
+        let mut tc = TextCache::default();
+        let fps = p.fps.as_f64();
+        let mut extra = Vec::new();
+        for tr in crate::text::tracks(&mut tc, p).iter().flatten().filter(|t| t.burn) {
+            for pg in &tr.pages {
+                for t in [pg.start, pg.end - 1.0 / fps] {
+                    if t >= from && t < to {
+                        extra.push(p.fps.frame_time((t * fps).round().max(0.0) as u64));
+                    }
+                }
+            }
+        }
+        s.times.extend(extra);
+        s.times.sort_by(|a, b| a.total_cmp(b));
+        s.times.dedup();
+    }
+    let (timed, forced) = audit_forced(ev, &s.times);
+    Outcome { timed, forced, note: s.note() }
+}
+
+fn audit_forced(ev: &Evaluator, times: &[f64]) -> (Vec<Timed>, Vec<String>) {
+    let p = ev.program();
+    let mut forced: Vec<String> = Vec::new();
     let mut tc = TextCache::default();
     let mut found: BTreeMap<(String, &'static str, &'static str), Timed> = BTreeMap::new();
     let mut note = |t: f64, f: Finding, level: SafeEnforce, area: Option<String>| {
@@ -79,7 +131,12 @@ pub fn audit(ev: &Evaluator, times: &[f64]) -> Vec<Timed> {
         }
     };
     for &t in times {
-        let g = ev.evaluate(t);
+        let g = ev.evaluate_layout(t);
+        for id in sr_eval::safe_area::forced(p, &g) {
+            if !forced.contains(&id) {
+                forced.push(id);
+            }
+        }
         for f in sr_eval::safe_area::audit(p, &g) {
             note(t, f, p.safe_enforce, p.safe_area_id.clone());
         }
@@ -112,5 +169,5 @@ pub fn audit(ev: &Evaluator, times: &[f64]) -> Vec<Timed> {
             }
         }
     }
-    found.into_values().collect()
+    (found.into_values().collect(), forced)
 }

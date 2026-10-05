@@ -109,6 +109,13 @@ impl Evaluator {
         g
     }
 
+    /// Where the nodes are and what they are at composition time `t`, without stepping any simulation:
+    /// the same graph as [`Evaluator::evaluate`] minus simulated state (particles, physics poses, fluids). A
+    /// pure function of `t` at the cost of one walk over the nodes, for checks that only need placement.
+    pub fn evaluate_layout(&self, t: f64) -> FrameGraph {
+        eval::evaluate(&self.program, t)
+    }
+
     /// Whether frames depend on a simulation (physics, particles, agents). Simulated state
     /// is stepped in time order under a lock, so such a document must be evaluated
     /// serially; without one, [`Evaluator::evaluate`] is a pure function of `t` and frames

@@ -1501,6 +1501,9 @@
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="tags" type="xs:NMTOKENS"/>
+    <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>Local addition. true exempts this node and everything it contains from the safeArea enforce check (SA01); validate lists every node that carries it (SA02), so a deliberate placement outside the safe region is never silent.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="z" type="xs:int" default="0"/>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
@@ -3011,6 +3014,9 @@
     <xs:attribute name="height" type="xs:positiveInteger"/>
     <xs:attribute name="duration" type="durationType"/>
     <xs:attribute name="background" type="paintType" default="#00000000"/>
+    <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>Local addition. true exempts every instance of this symbol, and what it draws, from the safeArea enforce check (SA01), as @safeAreaForce on the instance does.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="symbolsType">
     <xs:sequence><xs:element name="symbol" type="symbolType" maxOccurs="unbounded"/></xs:sequence>

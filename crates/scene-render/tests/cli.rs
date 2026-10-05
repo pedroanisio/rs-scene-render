@@ -1389,3 +1389,106 @@ fn render_and_encode_stop_on_enforce_error_and_say_so_on_warn() {
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("SA01")), "{r}");
     assert!(dir.join("w_000.png").is_file());
 }
+
+/// Writes a one-shape document and returns its path.
+fn compile_fixture(name: &str, assets: &str, node: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("sr-cli-compile-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/>{assets}<composition>{node}</composition></scene>"##
+    );
+    let file = dir.join("c.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    file.display().to_string()
+}
+
+#[test]
+fn validate_fails_on_what_compilation_would_reject_at_render() {
+    // a document validate accepts must not fail when render compiles it: each of these used to pass validate
+    for (name, code, assets, node) in [
+        (
+            "scale-key",
+            "E04",
+            "",
+            r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><animate property="scale"><key time="0" value="1"/><key time="1" value="2"/></animate></shape>"##,
+        ),
+        (
+            "text-expression",
+            "E02",
+            r##"<assets><text id="t" text="a" width="40" height="20" size="12"/></assets>"##,
+            r##"<layer id="l" asset="t"><expression property="text">"hi"</expression></layer>"##,
+        ),
+        (
+            "bare-floor",
+            "E01",
+            "",
+            r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><expression property="x">floor(time * 10)</expression></shape>"##,
+        ),
+    ] {
+        let f = compile_fixture(name, assets, node);
+        let v = run(&["validate", &f]);
+        let out = String::from_utf8_lossy(&v.stdout);
+        assert_eq!(v.status.code(), Some(1), "{name}: {out}");
+        assert!(out.contains(&format!("error[{code}]")), "{name}: {out}");
+    }
+}
+
+#[test]
+fn a_document_that_compiles_still_validates() {
+    let f = compile_fixture(
+        "ok",
+        "",
+        r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><animate property="scale"><key time="0" value="1,1"/><key time="1" value="2,2"/></animate><expression property="x">Math.floor(time * 10)</expression></shape>"##,
+    );
+    let v = run(&["validate", &f]);
+    assert_eq!(v.status.code(), Some(0), "{}", String::from_utf8_lossy(&v.stdout));
+}
+
+fn forced_fixture(name: &str, attr: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("sr-cli-force-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="360" height="640" fps="10" duration="1" background="#000000" safeArea="sa"/>
+<safeAreas><safeArea id="sa" preset="youtube-shorts" enforce="error"/></safeAreas>
+<symbols><symbol id="notch" width="64" height="64" duration="1"><shape id="mark" shape="rect" width="64" height="64" fill="#FF8000" tags="logo"/></symbol></symbols>
+<composition><instance id="n" symbol="notch" x="0" y="560" {attr}/></composition></scene>"##
+    );
+    let file = dir.join("f.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    file.display().to_string()
+}
+
+#[test]
+fn a_forced_node_passes_enforce_error_and_validate_says_so() {
+    let f = forced_fixture("without", "");
+    let o = run(&["validate", &f]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stdout));
+
+    let f = forced_fixture("with", r#"safeAreaForce="true""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.contains("info[SA02]: n forced outside the safe area"), "{out}");
+    assert!(!out.contains("SA01"), "{out}");
+    // the force is information, not a warning: it does not fail --deny-warnings
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(0));
+    let j = run(&["validate", "--format", "json", &f]);
+    let v: serde_json::Value = serde_json::from_slice(&j.stdout).unwrap();
+    assert!(v["files"][0]["info"][0].as_str().unwrap().contains("SA02"), "{v}");
+}
+
+#[test]
+fn render_and_encode_accept_a_forced_node() {
+    let f = forced_fixture("deliver", r#"safeAreaForce="true""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
