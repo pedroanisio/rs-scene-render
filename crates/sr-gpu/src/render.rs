@@ -2055,7 +2055,9 @@ impl Renderer {
             d.flags |= flag::CONTRAST_INK;
             d.color[0] = *ink as f32;
         }
-        let three = n.three_d.map(|t| (t, n.anchor));
+        // a node drawn bare (into an effect chain's offscreen) is flat: its 2.5D placement is applied when the result
+        // composites
+        let three = n.three_d.filter(|_| !self.bare.contains(&n.id)).map(|t| (t, n.anchor));
         // stencil modes act on the whole target: outside the layer the backdrop is cut away
         let stencil = matches!(d.blend, 29 | 30) && three.is_none();
         let (bounds, first_vertex) = if frame_space {

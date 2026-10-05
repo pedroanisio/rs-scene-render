@@ -618,6 +618,14 @@ impl Renderer {
         };
         self.flush_vec(plan, cmds);
         self.frame_rect = Some(rect);
+        // a node placed in 2.5D composites its (flat) result through the camera, about the node's pivot
+        let mut hash = hash;
+        if let (Some(t), None) = (n.three_d, self.frame_three) {
+            let proj = self.proj25(ctx.g, ctx.p, space);
+            let cols = proj.to_cols_array().map(|v| v.to_bits() as u64);
+            hash = h(&[hash, hf(t[0]), hf(t[1]), hf(t[2]), hf(n.anchor[0]), hf(n.anchor[1]), h(&cols)]);
+            self.frame_three = Some((t, n.anchor, proj));
+        }
         self.draw_cmd(
             plan,
             ctx,
@@ -633,6 +641,7 @@ impl Renderer {
             true,
         );
         self.frame_rect = None;
+        self.frame_three = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -914,7 +923,11 @@ impl Renderer {
             // reaching up to 64 px past the frame (their resolution and uv depend on it); a warp reads the
             // node's overscan past the frame as far as it reaches
             let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
-            let (m, lo, hx, hy) = if shader {
+            // a node in 2.5D is drawn flat and placed afterwards, so what shows can come from beyond the frame
+            // as well as from inside it: its offscreen is not clamped to the frame (at most 2048 px past it)
+            let (m, lo, hx, hy) = if n.three_d.is_some() {
+                (1.0, -2048.0, fw + 2048.0, fh + 2048.0)
+            } else if shader {
                 (2.0, -64.0, fw + 64.0, fh + 64.0)
             } else {
                 (1.0, -warp_margin, fw + warp_margin, fh + warp_margin)
