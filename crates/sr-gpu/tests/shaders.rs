@@ -301,3 +301,46 @@ fn gl_transitions_corpus_compiles() {
     }
     assert!(bad.is_empty(), "{}/{n} fail:\n{}", bad.len(), bad.join("\n"));
 }
+
+/// Every signed `%` of the effects module: the GLSL back end passes it on as it is, and GLSL leaves a negative left
+/// operand undefined, so OpenGL adapters (Mesa on D3D12) and Vulkan ones disagree on it.
+fn signed_modulo_sites(source: &str) -> Vec<String> {
+    use naga::{BinaryOperator, Expression, ScalarKind};
+    let module = naga::front::wgsl::parse_str(source).expect("the effects module parses");
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .expect("the effects module validates");
+    let mut sites = Vec::new();
+    let mut scan = |name: &str, function: &naga::Function, fi: &naga::valid::FunctionInfo| {
+        for (handle, expr) in function.expressions.iter() {
+            if let Expression::Binary { op: BinaryOperator::Modulo, left, .. } = expr {
+                if fi[*left].ty.inner_with(&module.types).scalar_kind() == Some(ScalarKind::Sint) {
+                    sites.push(name.to_string());
+                    let _ = handle;
+                }
+            }
+        }
+    };
+    for (h, f) in module.functions.iter() {
+        scan(f.name.as_deref().unwrap_or("?"), f, &info[h]);
+    }
+    for (k, ep) in module.entry_points.iter().enumerate() {
+        scan(&ep.name, &ep.function, info.get_entry_point(k));
+    }
+    sites
+}
+
+#[test]
+fn the_effects_shaders_never_take_a_signed_modulo() {
+    // the glitch transition copies rows with a wrapped x offset; its `%` on a negative left operand gave other
+    // pictures on OpenGL and Vulkan adapters with the same seed (xsd: randomness is a pure function of seed, element
+    // and frame). A wrap helper built from operations defined for negatives replaces it; no signed `%` may come back.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let source = ["transfer.wgsl", "d24.wgsl", "effects.wgsl"]
+        .iter()
+        .map(|f| std::fs::read_to_string(format!("{dir}/{f}")).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sites = signed_modulo_sites(&source);
+    assert!(sites.is_empty(), "signed `%` in {sites:?}: GLSL leaves negative operands undefined");
+}

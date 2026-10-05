@@ -1367,9 +1367,14 @@ fn u16_at(t: vec4<f32>, k: u32) -> f32 {
     if (k == 0u) { return round(t.x) * 256.0 + round(t.y); }
     return round(t.z) * 256.0 + round(t.w);
 }
+// x wrapped into [0, n) with operations defined for negative x: a signed `%` leaves a negative left operand
+// undefined in GLSL, so OpenGL and Vulkan adapters would disagree on the same seed.
+fn wrap_i(x: i32, n: i32) -> i32 {
+    return x - n * i32(floor(f32(x) / f32(n)));
+}
 // Glitch: the picture before its RGB split at pixel xy (i32 coordinates, wrapped in x).
 fn glitch_res(x: i32, y: i32, wh: vec2<i32>, swap: bool) -> vec4<f32> {
-    let xw = ((x % wh.x) + wh.x) % wh.x;
+    let xw = wrap_i(x, wh.x);
     var o = select(textureLoad(src, vec2(xw, y), 0), textureLoad(aux, vec2(xw, y), 0), swap);
     let nsl = i32(fx.v[4].x);
     for (var k = 0; k < nsl; k++) {
@@ -1378,7 +1383,7 @@ fn glitch_res(x: i32, y: i32, wh: vec2<i32>, swap: bool) -> vec4<f32> {
         let y0 = i32(u16_at(t0, 0u)); let hh = i32(u16_at(t0, 1u));
         let off = i32(u16_at(t1, 0u)); let other = u16_at(t1, 1u) > 0.5;
         if (y >= y0 && y < y0 + hh) {
-            let sx = (((xw - off) % wh.x) + wh.x) % wh.x;
+            let sx = wrap_i(xw - off, wh.x);
             o = select(textureLoad(src, vec2(sx, y), 0), textureLoad(aux, vec2(sx, y), 0), other != swap);
         }
     }
