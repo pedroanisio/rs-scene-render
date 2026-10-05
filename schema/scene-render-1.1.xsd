@@ -1246,8 +1246,8 @@
   </xs:complexType>
   <xs:complexType name="geoLayerType">
     <xs:annotation><xs:documentation>
-      The features of a geo asset: polygons filled and stroked, lines stroked (drawn on by
-      @progress; polygon outlines are always drawn whole), points as dots. @filter keeps features whose property equals (prop=value) or
+      The features of a geo asset: polygons filled and stroked, lines and outlines stroked (drawn on
+      by @progress: each line or ring from its first vertex; the fill stays whole), points as dots. @filter keeps features whose property equals (prop=value) or
       differs from (prop!=value) a value. Choropleth: @fillBy names a numeric property mapped
       through @domain (data range by default) and @scale onto @palette (colours interpolated in
       sRGB; quantize picks one colour per equal step); features without a value use @noData.

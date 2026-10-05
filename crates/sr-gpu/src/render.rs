@@ -1399,7 +1399,12 @@ impl Renderer {
             // the grain's seed, then (grid) the line width in pixels as float bits and a flag that it was given
             grain: {
                 let line_width = num("lineWidth", gen.line_width.map(|v| v.get()).unwrap_or(-1.0));
-                [grain as u32, (grain >> 32) as u32, (line_width.max(0.0) as f32).to_bits(), u32::from(line_width >= 0.0)]
+                [
+                    grain as u32,
+                    (grain >> 32) as u32,
+                    (line_width.max(0.0) as f32).to_bits(),
+                    u32::from(line_width >= 0.0),
+                ]
             },
             perm,
         };

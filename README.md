@@ -516,7 +516,7 @@ Maps are drawn as vectors from geographic data, so they go through the same comp
 - Tilt a map in perspective with its layer's 3D rotation.
 
 **Content,** painted in document order over `background` (the globe or world outline filled) and under `outline`:
-- `<geoLayer>` fills polygons, strokes lines (drawn on by `progress`; polygon outlines are always drawn whole) and dots points, filtered by `prop=value`/`prop!=value` conditions.
+- `<geoLayer>` fills polygons, strokes lines and polygon outlines (drawn on by `progress`: each line or ring is traced from its first vertex by the same fraction, a ring's closing edge included; the fill stays whole) and dots points, filtered by `prop=value`/`prop!=value` conditions.
 - For a choropleth, `fillBy` names a numeric property mapped through `domain` and a `linear`, `log`, `sqrt` or `quantize` scale onto `palette`, interpolated in sRGB like d3's `interpolateRgb`; features without a value take `noData`.
 - `<featureStyle key="…">` restyles single features (matched on `keyBy`, the feature id by default) and animates, so a country can light up. Neighbouring features with the same paint fill as one shape, so their shared borders leave no anti-aliasing seam.
 - `label` names a property drawn at each feature's centre.
