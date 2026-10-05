@@ -34,24 +34,24 @@ Local additions from the G2-lab and style-library fixes (branch engine/next, in 
 sr-core (srep/srep-0000-<slug>.md, at the sr-core commit named; the editor has not assigned numbers yet). Documents keep
 their version, and new attributes on 1.0 elements are accepted in every version (README):
   - safeAreaForce (boolean) on every node and on symbol, with the enforcement it exempts (SA01) and the information
-    line SA02: srep-0000-safe-area-enforcement.md (2c14549).
+    line SA02: srep-0000-safe-area-enforcement.md (eb16158).
   - Rules R42 (pattern/@asset is an image), R43 (@emitterAsset is an image), R44 (displacement-map, difference-key and
-    shader @source name a composition node): srep-0000-asset-kind-rules.md (ff07431).
+    shader @source name a composition node): srep-0000-asset-kind-rules.md (1e42bf8).
   - Meaning given to existing attributes: halftone color (ink), paint (ground) and angle used as authored (default 0, a
     visible change from 45); selective-color color and amount; and the gradient-map, matte-choke and halftone-edge
-    corrections: srep-0000-effect-parameter-meanings.md (4842a5b).
+    corrections: srep-0000-effect-parameter-meanings.md (c29e3f5).
   - presetEase on textAnimator, and the counter, scramble and mask-reveal corrections: srep-0000-text-preset-ease.md
-    (78da145).
+    (4d21129).
   - Evaluation warnings E19 (attribute accepted but not read: group/@collapse, a selective-color @channel, an effect
     source at opacity 0) and E20 (mask outside its node): the amendment to SREP 18, srep-0000-srep18-amendment-inert-rules.md
-    (a35027a).
+    (d14d384).
   - Documentation-only edits in the xsd annotations (camera/@fov is horizontal, radial @aspect, textAnimator
     @presetStart's time base, the colorType note on #RGB, the expression @property note, geoLayer polygon outlines):
-    srep-0000-annotation-clarifications.md (f3c4bbf). The annotations of the additions above travel with their drafts.
+    srep-0000-annotation-clarifications.md (cee2b40). The annotations of the additions above travel with their drafts.
   - key/@overshoot (back-* curves) and key/@period (elastic-* curves), with the warning for a parameter on a curve that
-    ignores it: srep-0000-key-overshoot-period.md (b7d9645); engine commit 931422b.
-  - layer/@resample (linear, bicubic, mitchell): srep-0000-layer-resample.md (beb372d).
-  - generator/@lineWidth and rule R45: srep-0000-grid-line-width.md (3211f9f).
+    ignores it: srep-0000-key-overshoot-period.md (f3a83fb); engine commit 931422b.
+  - layer/@resample (linear, bicubic, mitchell): srep-0000-layer-resample.md (de85738).
+  - generator/@lineWidth and rule R45: srep-0000-grid-line-width.md (7dc4e1b).
   - Stroke markers (markerStart, markerEnd, markerSize; rule C65), implemented as SREP 15 is written (Draft, srep-0015.md).
-  - geoLayer @progress traces polygon outlines as well as lines: srep-0000-geo-outline-progress.md (56b8637).
+  - geoLayer @progress traces polygon outlines as well as lines: srep-0000-geo-outline-progress.md (8f0bc2e).
 The xsd and sch above differ from the vendored sha256 sums by these edits.
