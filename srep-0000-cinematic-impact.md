@@ -1197,6 +1197,21 @@ and the reaction of `bodyCoupling="full"` is consistent. A sphere through still 
 of the drag of a sphere (`C_d` 1 against about 0.47 for a real sphere), where the relaxation gave about four
 times that; the water is pushed less as it comes to move with the body.
 
+Pressure of the water on a body (`BodySample::pressure`). The momentum a body is credited with (`impulse`) is
+what the solver applied to the water; the water also gains momentum from the slope of the bed the body raises,
+`-g h grad(raise)` per column, which belongs to no one and is, on the body, the wave drag. In the filtered mode the
+driver gives the solver what each body raises the bed by, column by column (`Forcing::lifts`, sparse and per body),
+and at the end of every canonical step each body's sample carries `pressure`: the sum, over the columns of its
+lift and the ring around it, of `-g h grad(raise) cell_area dt`, with `h` the depth at the end of the step and the
+gradient the central difference of the mean of the lift at the end and at the start of the step. It is an
+estimate by the continuous source term and not the scheme's own flux difference, so it does not close to the bit.
+Measured on a periodic basin of 64 x 64 cells 6 m deep, in which a Gaussian mound of 1 m and 3 m width moves
+along x at 4 and 10 m/s for 10 steps and the total momentum of the water changes only by this term: the water
+gained 2.359 and 4.857 (first order) and 2.857 and 5.565 (second order), against credited 2.507 and 5.158
+(+6.3%, +6.2%) and 2.876 and 5.694 (+0.7%, +2.3%); a still mound credits 1.8e-4 against 0. The body is not
+touched; the credit is for the reaction that reads it. In a scene (a sphere of 2 m radius, centre 3 m down in 6 m
+of water, at 6 m/s) it is along the motion only and about 5% of the push of the form drag.
+
 What the sphere crossing deep water now makes. A sphere of 2 m radius at 10 m below the surface of 20 m of
 water raises the highest surface of 8.69 m (at 20 m/s) and 5.52 m (at 50 m/s) in the hydrostatic mode and
 0.177 m and 0.198 m in the filtered one. On the impact-ocean scene without the cavity of the rock's entry, as

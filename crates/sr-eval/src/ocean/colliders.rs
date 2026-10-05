@@ -321,6 +321,12 @@ impl Colliders {
                     for &(c, v) in &placed {
                         raise[c] += v;
                     }
+                    if self.pushes() && !placed.is_empty() {
+                        forcing.lifts.push(sim::Lift {
+                            owner: self.bodies[i].slot as u32,
+                            columns: placed.iter().map(|&(c, v)| (c as u32, v)).collect(),
+                        });
+                    }
                     if let Some(motion) = motion.filter(|_| self.pushes()) {
                         // the form drag of the body on the water it goes through, spread as its volume is
                         let relative = [motion.velocity[0] - water[0], motion.velocity[1] - water[1]];

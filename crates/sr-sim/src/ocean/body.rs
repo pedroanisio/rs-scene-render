@@ -1,5 +1,5 @@
 //! Horizontal momentum that bodies in the water column give to the water.
-use super::{BodySample, Forcing, Push, Spec, SplashCell, State, CAVITY_SHARE, Q};
+use super::{BodySample, Forcing, Lift, Push, Spec, SplashCell, State, CAVITY_SHARE, Q};
 use std::collections::BTreeMap;
 
 /// Relaxes the horizontal velocity of every column a body occupies toward the
@@ -46,7 +46,7 @@ pub(super) fn transfer(
 /// The water around each body at the end of a canonical step: `to` is the sample of the
 /// instant the state is at. A body is reported when it holds most of some cell then, or gave
 /// the water momentum during the step. Empty without `Spec::body_owners`.
-pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing) -> Vec<BodySample> {
+pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing, from: Option<&Forcing>) -> Vec<BodySample> {
     if spec.body_owners == 0 {
         return Vec::new();
     }
@@ -60,6 +60,19 @@ pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing) -> Vec<BodySampl
         if *by != [0.0; 2] {
             footprints.entry(owner as u32).or_default();
         }
+    }
+    let pressures: Vec<(u32, [f64; 2])> = to
+        .lifts
+        .iter()
+        .map(|lift| {
+            (
+                lift.owner,
+                pressure(spec, &state.q, lift, from.and_then(|f| f.lifts.iter().find(|l| l.owner == lift.owner))),
+            )
+        })
+        .collect();
+    for (owner, _) in &pressures {
+        footprints.entry(*owner).or_default();
     }
     let nx = spec.cells[0];
     let centre = |c: usize| {
@@ -75,6 +88,10 @@ pub(super) fn samples(spec: &Spec, state: &State, to: &Forcing) -> Vec<BodySampl
                 owner,
                 columns: cells.len(),
                 impulse: state.exchange_by.get(owner as usize).copied().unwrap_or([0.0; 2]),
+                pressure: pressures
+                    .iter()
+                    .filter(|(o, _)| *o == owner)
+                    .fold([0.0; 2], |a, (_, p)| [a[0] + p[0], a[1] + p[1]]),
                 ..Default::default()
             };
             let (mut bed, mut depth, mut momentum) = (0.0, 0.0, [0.0; 2]);
@@ -222,4 +239,62 @@ pub(super) fn splash(spec: &Spec, q: &mut [Q], cells: &[SplashCell]) {
             q[c][2] += e.momentum[1] / area;
         }
     }
+}
+
+/// The horizontal momentum per unit density that the slope of what `lift` raises gives the water in one
+/// canonical step: `-g h grad(raise) area dt` summed over the columns of the lift and the one around it, `h`
+/// the depth in `q` and the gradient the central difference of the raise (zero outside the lift), taken
+/// as the mean of the raise at the end of the step and at its start (`before`, when the body had one).
+fn pressure(spec: &Spec, q: &[Q], lift: &Lift, before: Option<&Lift>) -> [f64; 2] {
+    let [nx, nz] = spec.cells;
+    let dx = spec.cell_size;
+    let weighted: Vec<(&Lift, f64)> = match before {
+        Some(b) => vec![(lift, 0.5), (b, 0.5)],
+        None => vec![(lift, 1.0)],
+    };
+    let (mut low, mut high) = ([usize::MAX; 2], [0usize; 2]);
+    for (l, _) in &weighted {
+        for &(c, _) in &l.columns {
+            let (x, z) = (c as usize % nx, c as usize / nx);
+            low = [low[0].min(x), low[1].min(z)];
+            high = [high[0].max(x), high[1].max(z)];
+        }
+    }
+    if low[0] == usize::MAX {
+        return [0.0; 2];
+    }
+    let lo = [low[0].saturating_sub(1), low[1].saturating_sub(1)];
+    let hi = [(high[0] + 1).min(nx - 1), (high[1] + 1).min(nz - 1)];
+    let (width, height) = (hi[0] - lo[0] + 1, hi[1] - lo[1] + 1);
+    let mut raise = vec![0.0; width * height];
+    for (l, weight) in &weighted {
+        for &(c, h) in &l.columns {
+            let (x, z) = (c as usize % nx, c as usize / nx);
+            raise[(z - lo[1]) * width + (x - lo[0])] += weight * h;
+        }
+    }
+    let at = |x: isize, z: isize| -> f64 {
+        let (x, z) = (x - lo[0] as isize, z - lo[1] as isize);
+        if x < 0 || z < 0 || x as usize >= width || z as usize >= height {
+            0.0
+        } else {
+            raise[z as usize * width + x as usize]
+        }
+    };
+    let mut force = [0.0; 2];
+    for z in lo[1]..=hi[1] {
+        for x in lo[0]..=hi[0] {
+            let depth = q[z * nx + x][0];
+            if depth < spec.dry_tolerance {
+                continue;
+            }
+            let (xi, zi) = (x as isize, z as isize);
+            let gradient =
+                [(at(xi + 1, zi) - at(xi - 1, zi)) / (2.0 * dx), (at(xi, zi + 1) - at(xi, zi - 1)) / (2.0 * dx)];
+            force[0] -= spec.gravity * depth * gradient[0];
+            force[1] -= spec.gravity * depth * gradient[1];
+        }
+    }
+    let scale = dx * dx * spec.dt;
+    [force[0] * scale, force[1] * scale]
 }

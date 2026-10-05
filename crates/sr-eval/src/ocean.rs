@@ -593,4 +593,29 @@ mod tests {
         let area = colliders::frontal_area(&points, &triangles, [1., 0.], -10., 10.);
         assert!((area - std::f64::consts::PI * 4.).abs() < 0.01 * std::f64::consts::PI * 4., "{area}");
     }
+
+    #[test]
+    fn a_body_in_shallow_water_is_credited_the_pressure_of_the_bed_it_raises() {
+        // 6 m of water, a sphere of 2 m radius with its centre 3 m down, moving at 6 m/s: the water it lifts
+        // is a mound the width of the body, and the slope of that mound pushes the water along
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="6"/><composition>
+          <object3D id="rock" primitive="sphere" radius="2" x="-30" y="3" segments="24"><rigidBody shape="sphere" mass="1000" velocityX="6" restitution="0" linearDamping="0" angularDamping="0"/></object3D>
+          <ocean id="sea" width="128" depth="128" cellSize="1" bottomDepth="6" dt="0.0416666666666667" boundary="closed" colliders="rock" maxWork="100000000000"/>
+        </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#;
+        let offers = offers_of(xml, 1.5);
+        let steps: Vec<_> = offers.iter().filter(|(step, ..)| *step >= 2).collect();
+        assert!(steps.len() > 20);
+        for (step, _, bodies) in &steps {
+            let b = &bodies[0];
+            assert!(b.pressure[0].abs() > 0., "step {step}: {b:?}");
+            assert!(b.pressure[1].abs() < 1e-6 * b.pressure[0].abs() + 1e-9, "along the motion only: {b:?}");
+        }
+        let (_, _, last) = steps.last().unwrap();
+        println!("PRESSURE last step: pressure {:?} against push {:?}", last[0].pressure, last[0].impulse);
+        // a lake without a body that moves has none to credit
+        let still = xml.replace(r#"velocityX="6""#, r#"velocityX="0""#);
+        let offers = offers_of(&still, 1.0);
+        let (_, _, bodies) = offers.last().unwrap();
+        assert!(bodies[0].pressure[0].abs() < 1e-3 * 1e3_f64.min(1.), "{:?}", bodies[0].pressure);
+    }
 }

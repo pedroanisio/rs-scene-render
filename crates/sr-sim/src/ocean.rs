@@ -159,6 +159,11 @@ pub struct Forcing {
     /// sample's time `T`, one entry per body that gives any. Like the bed, a function of the time and of
     /// scene data that does not change.
     pub pushes: Vec<Push>,
+    /// With `Spec::body_owners`: what each body raises the bed by, sparse, in the sample at the end of a
+    /// canonical step. The solver reads it there to credit each body with the horizontal momentum that
+    /// the bed's slope gives the water ([`BodySample::pressure`]); the bed the water runs over is
+    /// `bed`, as ever.
+    pub lifts: Vec<Lift>,
     /// What fell into the water in the canonical step that ends at the sample's time `T`, by cell,
     /// sorted by cell with no cell twice, applied when the step reaches `T`, after the impulses
     /// due then: of each cell's water `volume / cell area` of depth goes (at most
@@ -186,6 +191,15 @@ pub struct SplashCell {
     pub volume: f64,
     /// Horizontal momentum per unit water density, scene units^4/second.
     pub momentum: [f64; 2],
+}
+
+/// How much one body raises the bed in each column it lifts, in the sample: the bodies' share of the
+/// effective bed, for the pressure the water puts on them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lift {
+    pub owner: u32,
+    /// Columns and the height each is raised by (not negative); a column once.
+    pub columns: Vec<(u32, f64)>,
 }
 
 /// Horizontal momentum one body gives the water in a canonical step, per unit water density, spread
@@ -224,6 +238,11 @@ pub struct BodySample {
     pub bed: f64,
     /// Horizontal momentum per unit water density that this body gave the water during the step.
     pub impulse: [f64; 2],
+    /// Horizontal momentum per unit density that the slope of the bed this body raises gives the water in
+    /// the step, `-g h grad(raise)` summed over the columns around its lift with the depth at the end of
+    /// the step and over one canonical step: what is not in `impulse`, the pressure of the water on the body
+    /// (the wave drag), by the end-of-step estimate. Zero without `Forcing::lifts`.
+    pub pressure: [f64; 2],
 }
 
 /// Supplies the bed at an instant. The result must depend only on `time` and on
@@ -472,6 +491,7 @@ impl Ocean {
         out.bodies = bodies;
         out.events.clear();
         out.pushes.clear();
+        out.lifts.clear();
         out.splash.clear();
         out.raise.clear();
         let n = self.initial.q.len();
@@ -507,6 +527,17 @@ impl Ocean {
             })
         {
             return Err(Error::Invalid("driver splash cells, volume or momentum"));
+        }
+        let lifted: usize = out.lifts.iter().map(|l| l.columns.len()).sum();
+        if !out.lifts.is_empty()
+            && (self.spec.body_owners == 0
+                || lifted > 4 * n
+                || out.lifts.iter().any(|l| {
+                    l.owner as usize >= self.spec.body_owners
+                        || l.columns.iter().any(|(c, h)| *c as usize >= n || !h.is_finite() || *h < 0.0)
+                }))
+        {
+            return Err(Error::Invalid("driver lift owner, columns or height"));
         }
         let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
         if columns > 2 * n {
@@ -578,7 +609,7 @@ impl Ocean {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
                     now.pushes = Vec::new();
-                    let bodies = body::samples(&self.spec, &state, &now);
+                    let bodies = body::samples(&self.spec, &state, &now, None);
                     self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
                     (now, next)
                 }
@@ -597,7 +628,7 @@ impl Ocean {
                     // the pushes were for the step that ended; nothing reads them again
                     now.pushes = Vec::new();
                     work.take(if self.spec.body_owners > 0 { state.q.len() } else { 0 })?;
-                    let bodies = body::samples(&self.spec, &state, now);
+                    let bodies = body::samples(&self.spec, &state, now, Some(next));
                     self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)), bodies)?;
                 }
                 _ => advance(
