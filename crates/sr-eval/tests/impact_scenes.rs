@@ -381,48 +381,43 @@ fn sea(ev: &Evaluator, t: f64) -> Sea {
     }
 }
 
+/// How the ocean answers to the bodies and the bed that move through it, written into the document: the sweeps run
+/// on both, so that neither depends on what the default is.
+#[derive(Clone, Copy, Debug)]
+enum Response {
+    /// The water takes what the bed and the bodies do at the depth they do it (`bedResponse="hydrostatic"`).
+    Hydrostatic,
+    /// The depth attenuates it (`bedResponse="depthFiltered"`, the default).
+    Filtered,
+}
+
+impl Response {
+    fn set(self, xml: &str) -> String {
+        let value = match self {
+            Response::Hydrostatic => "hydrostatic",
+            Response::Filtered => "depthFiltered",
+        };
+        replace_once(xml, r#"<ocean id="sea" "#, &format!(r#"<ocean id="sea" bedResponse="{value}" "#))
+    }
+}
+
 /// The sea on 3 m cells instead of 1.5 m, for the sweeps; the authored cells are used by the
 /// tests that do not sweep.
 fn coarse_sea(xml: &str) -> String {
     replace_once(xml, r#"cellSize="1.5""#, r#"cellSize="3""#)
 }
 
-fn sea_variant(hit: Hit) -> Evaluator {
-    evaluator(&coarse_sea(&with_hit(OCEAN, hit)))
+/// The authored sea with the rock arriving as `hit` and the ocean answering as `response`.
+fn ocean_scene(response: Response, hit: Hit) -> String {
+    response.set(&with_hit(OCEAN, hit))
+}
+
+fn sea_variant(response: Response, hit: Hit) -> Evaluator {
+    evaluator(&coarse_sea(&ocean_scene(response, hit)))
 }
 
 /// The water is 20 m deep over 192 x 192 m.
 const WATER: f64 = 20.0 * 192.0 * 192.0;
-
-#[test]
-fn in_the_sea_nothing_happens_before_the_impact() {
-    let ev = evaluator(&with_hit(OCEAN, AUTHORED));
-    let still = sea(&ev, 0.0);
-    for t in [0.5, 1.0, 1.3] {
-        let state = sea(&ev, t);
-        assert_eq!(state.progress, 0.0, "t = {t}: no crater");
-        assert!(
-            state.frame.cells.iter().zip(&still.frame.cells).all(|(a, b)| a.depth == b.depth),
-            "t = {t}: the water is still"
-        );
-        assert!(state.frame.bed.iter().all(|&bed| bed == 20.0), "t = {t}: the bed is flat");
-        assert!(state.crest <= 1e-12, "t = {t}: no wave: {}", state.crest);
-    }
-    assert!(sea(&ev, 1.3).pose[13] < -2.0, "the rock is still above the water");
-    // it reaches the bed about 2 s in, and only then is there a crater
-    assert_eq!(sea(&ev, 1.7).progress, 0.0);
-    let later = sea(&ev, 3.5);
-    assert!(later.progress == 1.0 && later.crest > 0.1, "{} {}", later.progress, later.crest);
-}
-
-#[test]
-fn in_the_sea_the_water_is_conserved_to_the_last_cell() {
-    let ev = evaluator(&with_hit(OCEAN, AUTHORED));
-    for t in [0.5, 1.6, 2.0, 2.5, 3.5, 5.0, 6.0] {
-        let state = sea(&ev, t);
-        assert!((state.water - WATER).abs() < 1e-9 * WATER, "t = {t}: {} against {WATER}", state.water);
-    }
-}
 
 /// The highest the water stands above its rest level from the moment the rock is in it to the end.
 fn highest_wave(ev: &Evaluator) -> f64 {
@@ -435,99 +430,161 @@ fn crater_only(xml: String) -> String {
     replace_once(&xml, "<waterImpulse source=\"impactor\"/>", "")
 }
 
-#[test]
-fn in_the_sea_the_crater_grows_with_speed_and_mass() {
-    let (speeds, masses, _) = sweeps();
-    for (name, hits) in [("speed", speeds), ("mass", masses)] {
-        let (radius, depth): (Vec<f64>, Vec<f64>) = hits
-            .iter()
-            .map(|&h| {
-                let state = sea(&sea_variant(h), 6.0);
-                assert_eq!(state.progress, 1.0);
-                (state.spec[0], state.spec[1])
-            })
-            .unzip();
-        println!("IMPACT sea by {name}: crater radius {radius:?} depth {depth:?}");
-        assert!(increasing(&radius), "crater radius by {name}: {radius:?}");
-        assert!(increasing(&depth), "crater depth by {name}: {depth:?}");
-    }
+macro_rules! sea_tests {
+    ($r:expr) => {
+        #[test]
+        fn in_the_sea_nothing_happens_before_the_impact() {
+            let ev = evaluator(&ocean_scene($r, AUTHORED));
+            let still = sea(&ev, 0.0);
+            for t in [0.5, 1.0, 1.3] {
+                let state = sea(&ev, t);
+                assert_eq!(state.progress, 0.0, "t = {t}: no crater");
+                assert!(
+                    state.frame.cells.iter().zip(&still.frame.cells).all(|(a, b)| a.depth == b.depth),
+                    "t = {t}: the water is still"
+                );
+                assert!(state.frame.bed.iter().all(|&bed| bed == 20.0), "t = {t}: the bed is flat");
+                assert!(state.crest <= 1e-12, "t = {t}: no wave: {}", state.crest);
+            }
+            assert!(sea(&ev, 1.3).pose[13] < -2.0, "the rock is still above the water");
+            // it reaches the bed about 2 s in, and only then is there a crater
+            assert_eq!(sea(&ev, 1.7).progress, 0.0);
+            let later = sea(&ev, 3.5);
+            assert!(later.progress == 1.0 && later.crest > 0.1, "{} {}", later.progress, later.crest);
+        }
+
+        #[test]
+        fn in_the_sea_the_water_is_conserved_to_the_last_cell() {
+            let ev = evaluator(&ocean_scene($r, AUTHORED));
+            for t in [0.5, 1.6, 2.0, 2.5, 3.5, 5.0, 6.0] {
+                let state = sea(&ev, t);
+                assert!((state.water - WATER).abs() < 1e-9 * WATER, "t = {t}: {} against {WATER}", state.water);
+            }
+        }
+
+        #[test]
+        fn in_the_sea_the_crater_grows_with_speed_and_mass() {
+            let (speeds, masses, _) = sweeps();
+            for (name, hits) in [("speed", speeds), ("mass", masses)] {
+                let (radius, depth): (Vec<f64>, Vec<f64>) = hits
+                    .iter()
+                    .map(|&h| {
+                        let state = sea(&sea_variant($r, h), 6.0);
+                        assert_eq!(state.progress, 1.0);
+                        (state.spec[0], state.spec[1])
+                    })
+                    .unzip();
+                println!("IMPACT {:?} sea by {name}: crater radius {radius:?} depth {depth:?}", $r);
+                assert!(increasing(&radius), "crater radius by {name}: {radius:?}");
+                assert!(increasing(&depth), "crater depth by {name}: {depth:?}");
+            }
+        }
+
+        #[test]
+        fn in_the_sea_the_wave_grows_with_the_mass() {
+            let (_, masses, _) = sweeps();
+            let waves: Vec<f64> = masses.iter().map(|&h| highest_wave(&sea_variant($r, h))).collect();
+            println!("IMPACT {:?} sea highest wave by mass: {waves:?}", $r);
+            assert!(increasing(&waves), "wave by mass: {waves:?}");
+        }
+
+        #[test]
+        fn in_the_sea_the_wave_of_the_crater_alone_grows_with_speed_mass_and_angle() {
+            let (speeds, masses, angles) = sweeps();
+            for (name, hits) in [("speed", speeds), ("mass", masses), ("angle", angles)] {
+                let waves: Vec<f64> =
+                    hits.iter().map(|&h| highest_wave(&evaluator(&crater_only(coarse_sea(&ocean_scene($r, h)))))).collect();
+                println!("IMPACT {:?} sea wave of the crater alone by {name}: {waves:?}", $r);
+                assert!(increasing(&waves), "wave by {name}: {waves:?}");
+            }
+        }
+
+        #[test]
+        fn in_the_sea_the_wave_grows_with_the_speed() {
+            let (speeds, _, _) = sweeps();
+            let waves: Vec<f64> = speeds.iter().map(|&h| highest_wave(&sea_variant($r, h))).collect();
+            println!("IMPACT {:?} sea highest wave by speed: {waves:?}", $r);
+            assert!(increasing(&waves), "wave by speed: {waves:?}");
+        }
+
+        #[test]
+        fn in_the_sea_a_vertical_plunge_makes_a_wave_that_grows_with_speed_and_mass() {
+            // with the cavity that the body's entry makes of the water, a rock that arrives straight down is not a
+            // bump that does not move: its wave is the cavity's
+            let (speeds, masses, _) = sweeps();
+            for (name, hits) in [("speed", speeds), ("mass", masses)] {
+                let waves: Vec<f64> = hits.iter().map(|h| highest_wave(&sea_variant($r, Hit { angle: 90.0, ..*h }))).collect();
+                println!("IMPACT {:?} sea highest wave of a vertical plunge by {name}: {waves:?}", $r);
+                assert!(increasing(&waves), "wave of a plunge by {name}: {waves:?}");
+            }
+        }
+
+        /// The sweep by angle is a measurement and not a property: a rock that glances in reaches the bed faster than
+        /// one that arrives straight down, because the cavity empties the water under the second.
+        #[test]
+        #[ignore = "measurement: records the sea by angle, asserts only that it ran"]
+        fn in_the_sea_by_angle_is_recorded() {
+            let (_, _, angles) = sweeps();
+            let (mut waves, mut radius) = (Vec::new(), Vec::new());
+            for h in angles {
+                let ev = sea_variant($r, h);
+                waves.push(highest_wave(&ev));
+                radius.push(sea(&ev, 6.0).spec[0]);
+            }
+            println!("IMPACT {:?} sea by angle 30, 60, 90: highest wave {waves:?} crater radius {radius:?}", $r);
+            assert!(waves.iter().chain(&radius).all(|v| v.is_finite() && *v > 0.0));
+        }
+
+        #[test]
+        fn in_the_sea_the_rock_that_reaches_the_bed_rests_in_its_crater() {
+            let xml = ocean_scene($r, AUTHORED);
+            let (kept, free) = (evaluator(&xml), evaluator(&xml.replace(r#"capture="true""#, r#"capture="false""#)));
+            let late = |ev: &Evaluator| (0..9).map(|k| sea(ev, 4.0 + 0.25 * k as f64).crest).fold(f64::MIN, f64::max);
+            let (held, rolling) = (sea(&kept, 6.0), sea(&free, 6.0));
+            let from_crater = |s: &Sea| ((s.pose[12] - s.spec[3]).powi(2) + (s.pose[14] - s.spec[5]).powi(2)).sqrt();
+            println!(
+                "IMPACT {:?} sea rock at 6 s: {:.1} m from the crater's centre arrested, {:.1} m free; highest wave from 4 s on {:.3} m against {:.3} m",
+                $r,
+                from_crater(&held),
+                from_crater(&rolling),
+                late(&kept),
+                late(&free)
+            );
+            assert!(from_crater(&held) < 3.0, "it stopped in the crater: {}", from_crater(&held));
+            // the water already takes the rock's horizontal momentum with `full`, so arresting it changes the late wave
+            // by next to nothing: that is recorded here, not asserted to be anything else
+            assert!((late(&kept) - late(&free)).abs() < 0.1 * late(&free), "{} against {}", late(&kept), late(&free));
+        }
+
+        #[test]
+        fn in_the_sea_the_same_answers_in_any_order_from_a_fresh_evaluator_and_after_replay_from_the_start() {
+            let times = [3.5, 1.0, 6.0, 2.2, 4.5, 3.5, 0.5];
+            let xml = coarse_sea(&ocean_scene($r, AUTHORED));
+            let first = evaluator(&xml);
+            let forward: Vec<Sea> = times.iter().map(|&t| sea(&first, t)).collect();
+            let fresh = evaluator(&xml);
+            for k in [3, 0, 6, 1, 4, 2, 5] {
+                assert_eq!(forward[k], sea(&fresh, times[k]), "fresh evaluator, t = {}", times[k]);
+            }
+            // the sea keeps no checkpoint but its first
+            let discarding =
+                evaluator(&replace_once(&xml, r#"bodyCoupling="full" maxWork"#, r#"bodyCoupling="full" checkpointMemoryMiB="0" maxWork"#));
+            for (k, &t) in times.iter().enumerate() {
+                assert_eq!(forward[k], sea(&discarding, t), "after discarding checkpoints, t = {t}");
+            }
+        }
+    };
 }
 
-#[test]
-fn in_the_sea_the_wave_grows_with_the_mass() {
-    let (_, masses, _) = sweeps();
-    let waves: Vec<f64> = masses.iter().map(|&h| highest_wave(&sea_variant(h))).collect();
-    println!("IMPACT sea highest wave by mass: {waves:?}");
-    assert!(increasing(&waves), "wave by mass: {waves:?}");
+/// What the ocean scene gives with the water answering by the depth of the bed and the bodies, and without.
+mod filtered {
+    use super::*;
+    sea_tests!(Response::Filtered);
 }
 
-#[test]
-fn in_the_sea_the_wave_of_the_crater_alone_grows_with_speed_mass_and_angle() {
-    let (speeds, masses, angles) = sweeps();
-    for (name, hits) in [("speed", speeds), ("mass", masses), ("angle", angles)] {
-        let waves: Vec<f64> =
-            hits.iter().map(|&h| highest_wave(&evaluator(&crater_only(coarse_sea(&with_hit(OCEAN, h)))))).collect();
-        println!("IMPACT sea wave of the crater alone by {name}: {waves:?}");
-        assert!(increasing(&waves), "wave by {name}: {waves:?}");
-    }
-}
-
-#[test]
-fn in_the_sea_the_wave_grows_with_the_speed() {
-    let (speeds, _, _) = sweeps();
-    let waves: Vec<f64> = speeds.iter().map(|&h| highest_wave(&sea_variant(h))).collect();
-    println!("IMPACT sea highest wave by speed: {waves:?}");
-    assert!(increasing(&waves), "wave by speed: {waves:?}");
-}
-
-#[test]
-fn in_the_sea_a_vertical_plunge_makes_a_wave_that_grows_with_speed_and_mass() {
-    // with the cavity that the body's entry makes of the water, a rock that arrives straight down is not a
-    // bump that does not move: its wave is the cavity's
-    let (speeds, masses, _) = sweeps();
-    for (name, hits) in [("speed", speeds), ("mass", masses)] {
-        let waves: Vec<f64> = hits.iter().map(|h| highest_wave(&sea_variant(Hit { angle: 90.0, ..*h }))).collect();
-        println!("IMPACT sea highest wave of a vertical plunge by {name}: {waves:?}");
-        assert!(increasing(&waves), "wave of a plunge by {name}: {waves:?}");
-    }
-}
-
-#[test]
-fn in_the_sea_the_rock_that_reaches_the_bed_rests_in_its_crater() {
-    let xml = with_hit(OCEAN, AUTHORED);
-    let (kept, free) = (evaluator(&xml), evaluator(&xml.replace(r#"capture="true""#, r#"capture="false""#)));
-    let late = |ev: &Evaluator| (0..9).map(|k| sea(ev, 4.0 + 0.25 * k as f64).crest).fold(f64::MIN, f64::max);
-    let (held, rolling) = (sea(&kept, 6.0), sea(&free, 6.0));
-    let from_crater = |s: &Sea| ((s.pose[12] - s.spec[3]).powi(2) + (s.pose[14] - s.spec[5]).powi(2)).sqrt();
-    println!(
-        "IMPACT sea rock at 6 s: {:.1} m from the crater's centre arrested, {:.1} m free; highest wave from 4 s on {:.3} m against {:.3} m",
-        from_crater(&held),
-        from_crater(&rolling),
-        late(&kept),
-        late(&free)
-    );
-    assert!(from_crater(&held) < 3.0, "it stopped in the crater: {}", from_crater(&held));
-    // the water already takes the rock's horizontal momentum with `full`, so arresting it changes the late wave
-    // by next to nothing: that is recorded here, not asserted to be anything else
-    assert!((late(&kept) - late(&free)).abs() < 0.1 * late(&free), "{} against {}", late(&kept), late(&free));
-}
-
-#[test]
-fn in_the_sea_the_same_answers_in_any_order_from_a_fresh_evaluator_and_after_replay_from_the_start() {
-    let times = [3.5, 1.0, 6.0, 2.2, 4.5, 3.5, 0.5];
-    let xml = coarse_sea(&with_hit(OCEAN, AUTHORED));
-    let first = evaluator(&xml);
-    let forward: Vec<Sea> = times.iter().map(|&t| sea(&first, t)).collect();
-    let fresh = evaluator(&xml);
-    for k in [3, 0, 6, 1, 4, 2, 5] {
-        assert_eq!(forward[k], sea(&fresh, times[k]), "fresh evaluator, t = {}", times[k]);
-    }
-    // the sea keeps no checkpoint but its first
-    let discarding =
-        evaluator(&xml.replace(r#"bodyCoupling="buoyancy""#, r#"bodyCoupling="buoyancy" checkpointMemoryMiB="0""#));
-    for (k, &t) in times.iter().enumerate() {
-        assert_eq!(forward[k], sea(&discarding, t), "after discarding checkpoints, t = {t}");
-    }
+mod hydrostatic {
+    use super::*;
+    sea_tests!(Response::Hydrostatic);
 }
 
 // --------------------------------------------------------------------------------- ejecta
