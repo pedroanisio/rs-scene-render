@@ -609,7 +609,17 @@ impl Ocean {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
                     now.pushes = Vec::new();
-                    let bodies = body::samples(&self.spec, &state, &now, None);
+                    // The pressure of the step that ended at `k` reads the lifts at both its ends, as it does
+                    // when the step is run: the start of the step is sampled again (a function of the time
+                    // alone), so that the record does not depend on where the seek began.
+                    let before = if k >= 1 && self.spec.body_owners > 0 {
+                        let mut start = Forcing::default();
+                        self.sample(driver, (k - 1) as f64 * dt, &mut start, None, Vec::new())?;
+                        Some(start)
+                    } else {
+                        None
+                    };
+                    let bodies = body::samples(&self.spec, &state, &now, before.as_ref());
                     self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
                     (now, next)
                 }

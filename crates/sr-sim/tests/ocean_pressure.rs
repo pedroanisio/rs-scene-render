@@ -121,3 +121,77 @@ fn without_lifts_nothing_is_credited_and_bad_lifts_are_errors() {
     assert!(bad(Lift { owner: 0, columns: vec![(1, -0.5)] }));
     assert!(bad(Lift { owner: 0, columns: vec![(1, f64::NAN)] }));
 }
+
+/// A driver of the moving mound that lists what it was offered with every completed step.
+fn mound_driver(speed: f64, offers: &mut Offers) -> impl FnMut(f64, &mut Forcing) -> Result<(), Error> + '_ {
+    move |time, f| {
+        let (lift, field) = mound(0, 16.0, speed, 1.0, 3.0, time);
+        for (bed, raised) in f.bed.iter_mut().zip(&field) {
+            *bed = DEPTH - raised;
+        }
+        f.occupancy.fill(0.0);
+        f.owner.fill(0);
+        f.lifts = vec![lift];
+        if let Some((k, _)) = f.exchange {
+            offers.push((k, f.bodies.clone()));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn the_pressure_of_a_step_is_the_same_whenever_and_from_wherever_the_step_is_computed() {
+    // checkpoints one canonical step apart or none: a seek back restarts from a checkpoint or from zero, and the
+    // record of every step it offers again must equal the first one to the bit
+    for (order, checkpoint_bytes) in
+        [(Order::First, 0), (Order::Second, 0), (Order::Second, 1 << 20), (Order::First, 1 << 20)]
+    {
+        let mut ocean = Ocean::new(
+            Spec { checkpoint_bytes, ..spec(order) },
+            vec![DEPTH; N * N],
+            vec![Cell { depth: DEPTH, velocity: [0.0; 2] }; N * N],
+            vec![],
+        )
+        .unwrap();
+        let mut first = Offers::new();
+        ocean.at_driven(1.0, &mut mound_driver(8.0, &mut first)).unwrap();
+        assert!(first.iter().any(|(_, bodies)| bodies.iter().any(|b| b.pressure[0] != 0.0)));
+        for back in [0.0, 0.3, 0.55, 0.95] {
+            let mut replay = Offers::new();
+            ocean.at_driven(back, &mut mound_driver(8.0, &mut replay)).unwrap();
+            ocean.at_driven(1.0, &mut mound_driver(8.0, &mut replay)).unwrap();
+            assert!(!replay.is_empty());
+            for (k, bodies) in &replay {
+                let kept = &first.iter().find(|(j, _)| j == k).expect("same step").1;
+                for (a, b) in bodies.iter().zip(kept) {
+                    assert_eq!(
+                        a.pressure.map(f64::to_bits),
+                        b.pressure.map(f64::to_bits),
+                        "{order:?} checkpoints {checkpoint_bytes}: step {k} after going back to {back}"
+                    );
+                }
+                assert_eq!(bodies, kept, "{order:?} checkpoints {checkpoint_bytes}: step {k} after {back}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_pressure_does_not_depend_on_the_number_of_threads() {
+    let record = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            let mut ocean = basin(Order::Second);
+            let mut offers = Offers::new();
+            ocean.at_driven(1.0, &mut mound_driver(8.0, &mut offers)).unwrap();
+            offers
+                .iter()
+                .flat_map(|(_, bodies)| bodies.iter().flat_map(|b| b.pressure.map(f64::to_bits)))
+                .collect::<Vec<u64>>()
+        })
+    };
+    let reference = record(1);
+    assert!(reference.iter().any(|b| *b != 0));
+    assert_eq!(record(2), reference);
+    assert_eq!(record(8), reference);
+}
