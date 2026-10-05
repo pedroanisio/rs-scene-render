@@ -1,6 +1,47 @@
 use super::{Boundary, Error, Order, Spec, Q};
 use rayon::prelude::*;
 
+/// To whom the bed variation of a column belongs: the owner with the largest lift there, and that lift,
+/// for the columns bodies lift, sorted by column.
+#[derive(Default)]
+pub(super) struct Owners {
+    columns: Vec<(u32, u32, f64)>,
+}
+impl Owners {
+    pub(super) fn new(mut columns: Vec<(u32, u32, f64)>) -> Self {
+        columns.sort_by_key(|c| c.0);
+        Owners { columns }
+    }
+    pub(super) fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+    fn of(&self, column: usize) -> Option<(u32, f64)> {
+        let at = self.columns.binary_search_by_key(&(column as u32), |c| c.0).ok()?;
+        Some((self.columns[at].1, self.columns[at].2))
+    }
+    /// The owner of the bed variation across the face between two columns: that of the one lifted more
+    /// (the lowest owner on a tie).
+    fn face(&self, a: usize, b: usize) -> Option<u32> {
+        match (self.of(a), self.of(b)) {
+            (Some(x), Some(y)) => Some(if y.1 > x.1 || (y.1 == x.1 && y.0 < x.0) { y.0 } else { x.0 }),
+            (Some(x), None) => Some(x.0),
+            (None, Some(y)) => Some(y.0),
+            (None, None) => None,
+        }
+    }
+}
+
+/// What a sweep gives the owners of a step: per face with a bed step, the momentum the bed source term of
+/// that face gives the water (per unit density, times the cell area).
+type Partial = Vec<(u32, [f64; 2])>;
+
+/// Where a step adds the momentum its bed source term gives the water, by owner, and with what weight (the
+/// stage of the Runge-Kutta step).
+pub(super) struct Sink<'a> {
+    pub owners: &'a Owners,
+    pub by: &'a mut [[f64; 2]],
+}
+
 fn velocity(q: Q, dry: f64) -> [f64; 2] {
     if q[0] < dry {
         [0.0; 2]
@@ -152,7 +193,18 @@ fn face_cells(face: usize, along: usize, periodic: bool) -> (usize, usize) {
 /// x sweep of one row: adds the flux differences of its faces to `out`, the
 /// row's slice of the next state. Faces run in ascending order, so a cell gets
 /// its left-face contribution before its right-face one.
-fn sweep_x(spec: &Spec, bed: &[f64], q: &[Q], row: usize, out: &mut [Q], factor: f64, faces: &mut Vec<[Q; 2]>) {
+#[allow(clippy::too_many_arguments)]
+fn sweep_x(
+    spec: &Spec,
+    bed: &[f64],
+    q: &[Q],
+    row: usize,
+    out: &mut [Q],
+    factor: f64,
+    faces: &mut Vec<[Q; 2]>,
+    credit: Option<(&Owners, f64)>,
+    partial: &mut Partial,
+) {
     let nx = spec.cells[0];
     let base = row * nx;
     let periodic = spec.boundary == Boundary::Periodic;
@@ -168,6 +220,15 @@ fn sweep_x(spec: &Spec, bed: &[f64], q: &[Q], row: usize, out: &mut [Q], factor:
         let refs = (base + kl, base + kr);
         let (l, r) = if second { (faces[kl][1], faces[kr][0]) } else { (q[refs.0], q[refs.1]) };
         let (fl, fr) = face_flux(spec, bed, 0, l, r, refs, (face == 0, face == nx));
+        if let Some((owners, weight)) = credit {
+            // across a face with a bed step the two sides' momentum fluxes differ by the bed source term
+            // (the face at the end of a periodic row is the one at its start)
+            if (face > 0 || periodic) && face < nx && bed[refs.0] != bed[refs.1] {
+                if let Some(owner) = owners.face(refs.0, refs.1) {
+                    partial.push((owner, [weight * factor * spec.cell_size * spec.cell_size * (fr[1] - fl[1]), 0.0]));
+                }
+            }
+        }
         for a in 0..3 {
             if face > 0 {
                 out[face - 1][a] -= factor * fl[a];
@@ -182,6 +243,7 @@ fn sweep_x(spec: &Spec, bed: &[f64], q: &[Q], row: usize, out: &mut [Q], factor:
 /// z sweep of rows `z0..z1`: `out` holds those rows of the next state, already
 /// updated by the x sweep. Faces `z0..=z1` are visited in ascending order; a
 /// cell outside the band is left to the band that owns it.
+#[allow(clippy::too_many_arguments)]
 fn sweep_z(
     spec: &Spec,
     bed: &[f64],
@@ -190,6 +252,8 @@ fn sweep_z(
     out: &mut [Q],
     factor: f64,
     rows: &mut (Vec<[Q; 2]>, Vec<[Q; 2]>),
+    credit: Option<(&Owners, f64)>,
+    partial: &mut Partial,
 ) {
     let [nx, nz] = spec.cells;
     let periodic = spec.boundary == Boundary::Periodic;
@@ -220,6 +284,15 @@ fn sweep_z(
             let refs = (kl * nx + x, kr * nx + x);
             let (l, r) = if second { (below[x][1], above[x][0]) } else { (q[refs.0], q[refs.1]) };
             let (fl, fr) = face_flux(spec, bed, 1, l, r, refs, (face == 0, face == nz));
+            if let Some((owners, weight)) = credit {
+                // a face belongs to the band that starts at it, so that none is counted twice
+                if (face > 0 || periodic) && face < z1 && bed[refs.0] != bed[refs.1] {
+                    if let Some(owner) = owners.face(refs.0, refs.1) {
+                        partial
+                            .push((owner, [0.0, weight * factor * spec.cell_size * spec.cell_size * (fr[2] - fl[2])]));
+                    }
+                }
+            }
             for a in 0..3 {
                 if face > z0 {
                     out[(face - 1 - z0) * nx + x][a] -= factor * fl[a];
@@ -255,19 +328,66 @@ fn settle(spec: &Spec, old: &Q, new: &mut Q, decay: f64) -> Option<Error> {
 
 /// One conservative forward-Euler update with the face fluxes of `q`. The
 /// reported error is the one of the lowest cell index on every path.
-fn euler(spec: &Spec, bed: &[f64], q: &[Q], dt: f64, decay: f64) -> Result<Vec<Q>, Error> {
+///
+/// With a `sink` the momentum that the bed source term of each face with a bed step gives the water is added to
+/// its owner, in the order of the rows and then of the bands, whatever the number of threads.
+fn euler(
+    spec: &Spec,
+    bed: &[f64],
+    q: &[Q],
+    dt: f64,
+    decay: f64,
+    mut sink: Option<(&mut Sink<'_>, f64)>,
+) -> Result<Vec<Q>, Error> {
     let [nx, nz] = spec.cells;
     let parallel = nx * nz >= PARALLEL_CELLS;
     let mut next = q.to_vec();
     let factor = dt / spec.cell_size;
+    let credit = sink.as_ref().map(|(s, w)| (s.owners, *w));
+    let mut give = |partials: &mut dyn Iterator<Item = Partial>| {
+        if let Some((sink, _)) = sink.as_mut() {
+            for list in partials {
+                for (owner, v) in list {
+                    if let Some(by) = sink.by.get_mut(owner as usize) {
+                        by[0] += v[0];
+                        by[1] += v[1];
+                    }
+                }
+            }
+        }
+    };
     if parallel {
-        next.par_chunks_mut(nx).enumerate().for_each_init(Vec::new, |faces, (row, out)| {
-            sweep_x(spec, bed, q, row, out, factor, faces);
-        });
-        next.par_chunks_mut(BAND_ROWS * nx).enumerate().for_each_init(Default::default, |rows, (band, out)| {
-            let z0 = band * BAND_ROWS;
-            sweep_z(spec, bed, q, (z0, (z0 + BAND_ROWS).min(nz)), out, factor, rows);
-        });
+        if credit.is_some() {
+            let rows: Vec<Partial> = next
+                .par_chunks_mut(nx)
+                .enumerate()
+                .map_init(Vec::new, |faces, (row, out)| {
+                    let mut partial = Vec::new();
+                    sweep_x(spec, bed, q, row, out, factor, faces, credit, &mut partial);
+                    partial
+                })
+                .collect();
+            give(&mut rows.into_iter());
+            let bands: Vec<Partial> = next
+                .par_chunks_mut(BAND_ROWS * nx)
+                .enumerate()
+                .map_init(Default::default, |rows, (band, out)| {
+                    let z0 = band * BAND_ROWS;
+                    let mut partial = Vec::new();
+                    sweep_z(spec, bed, q, (z0, (z0 + BAND_ROWS).min(nz)), out, factor, rows, credit, &mut partial);
+                    partial
+                })
+                .collect();
+            give(&mut bands.into_iter());
+        } else {
+            next.par_chunks_mut(nx).enumerate().for_each_init(Vec::new, |faces, (row, out)| {
+                sweep_x(spec, bed, q, row, out, factor, faces, None, &mut Vec::new());
+            });
+            next.par_chunks_mut(BAND_ROWS * nx).enumerate().for_each_init(Default::default, |rows, (band, out)| {
+                let z0 = band * BAND_ROWS;
+                sweep_z(spec, bed, q, (z0, (z0 + BAND_ROWS).min(nz)), out, factor, rows, None, &mut Vec::new());
+            });
+        }
         if let Some(e) =
             q.par_iter().zip(next.par_iter_mut()).find_map_first(|(old, new)| settle(spec, old, new, decay))
         {
@@ -275,13 +395,16 @@ fn euler(spec: &Spec, bed: &[f64], q: &[Q], dt: f64, decay: f64) -> Result<Vec<Q
         }
     } else {
         let mut faces = Vec::new();
+        let mut partial = Vec::new();
         for (row, out) in next.chunks_mut(nx).enumerate() {
-            sweep_x(spec, bed, q, row, out, factor, &mut faces);
+            sweep_x(spec, bed, q, row, out, factor, &mut faces, credit, &mut partial);
+            give(&mut std::iter::once(std::mem::take(&mut partial)));
         }
         let mut rows = Default::default();
         for (band, out) in next.chunks_mut(BAND_ROWS * nx).enumerate() {
             let z0 = band * BAND_ROWS;
-            sweep_z(spec, bed, q, (z0, (z0 + BAND_ROWS).min(nz)), out, factor, &mut rows);
+            sweep_z(spec, bed, q, (z0, (z0 + BAND_ROWS).min(nz)), out, factor, &mut rows, credit, &mut partial);
+            give(&mut std::iter::once(std::mem::take(&mut partial)));
         }
         if let Some(e) = q.iter().zip(next.iter_mut()).find_map(|(old, new)| settle(spec, old, new, decay)) {
             return Err(e);
@@ -305,20 +428,29 @@ fn drag(spec: &Spec, q: &mut [Q], decay: f64) {
     }
 }
 
-pub(super) fn step(spec: &Spec, bed: &[f64], q: &mut Vec<Q>, dt: f64) -> Result<(), Error> {
+///
+/// With a `sink` the momentum that the bed source term gives the water over the step is added to the owners'.
+pub(super) fn step(
+    spec: &Spec,
+    bed: &[f64],
+    q: &mut Vec<Q>,
+    dt: f64,
+    mut sink: Option<&mut Sink<'_>>,
+) -> Result<(), Error> {
     debug_assert_eq!(q.len(), spec.cells[0] * spec.cells[1]);
     match spec.order {
         Order::First => {
-            *q = euler(spec, bed, q, dt, (-spec.damping * dt).exp())?;
+            *q = euler(spec, bed, q, dt, (-spec.damping * dt).exp(), sink.map(|s| (s, 1.0)))?;
         }
         Order::Second => {
             // Strang splitting of drag around SSP-RK2 (Heun).
             let half = (-0.5 * spec.damping * dt).exp();
             let mut next = q.clone();
             drag(spec, &mut next, half);
+            // the step is the mean of the state and the second stage: each stage's change counts for half
             let stage = {
-                let first = euler(spec, bed, &next, dt, 1.0)?;
-                euler(spec, bed, &first, dt, 1.0)?
+                let first = euler(spec, bed, &next, dt, 1.0, sink.as_deref_mut().map(|s| (s, 0.5)))?;
+                euler(spec, bed, &first, dt, 1.0, sink.map(|s| (s, 0.5)))?
             };
             let combine = |(out, (old, new)): (&mut Q, (&Q, &Q))| {
                 *out = std::array::from_fn(|i| 0.5 * (old[i] + new[i]));
