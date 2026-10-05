@@ -1817,7 +1817,17 @@ impl Runtime {
         let mut ocean_seconds = None;
         if grouped {
             let clock = std::time::Instant::now();
-            self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &self.splash);
+            {
+                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
+                let mut pull = |g: &FrameGraph,
+                                graphs: &mut Graphs<'_>,
+                                physics: Option<&mut PhysicsRt>,
+                                ocean: &str,
+                                step: u64| {
+                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
+                };
+                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
+            }
             ocean_seconds = Some(clock.elapsed().as_secs_f64());
         }
         // ---- physics
@@ -1871,7 +1881,17 @@ impl Runtime {
         g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
         let clock = std::time::Instant::now();
         if ocean_seconds.is_none() {
-            self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &self.splash);
+            {
+                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
+                let mut pull = |g: &FrameGraph,
+                                graphs: &mut Graphs<'_>,
+                                physics: Option<&mut PhysicsRt>,
+                                ocean: &str,
+                                step: u64| {
+                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
+                };
+                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
+            }
         }
         g.sim_seconds.ocean = ocean_seconds.unwrap_or_else(|| clock.elapsed().as_secs_f64());
         // ---- flocks and grid simulations

@@ -91,6 +91,11 @@ impl Emitter {
         while (step + 1) as f64 * dt <= local {
             step += 1;
         }
+        self.needed_for(step, own_start)
+    }
+
+    /// The local time of the emitter by which it must have been computed for the ocean's canonical step `step`.
+    pub(crate) fn needed_for(&self, step: u64, own_start: f64) -> f64 {
         let fixed = self.steps_in(step).1 + 1;
         self.start - own_start + fixed as f64 * self.dt
     }
@@ -123,6 +128,12 @@ impl Log {
     pub(crate) fn put(&self, channel: u32, step: u64, entries: &[Entry]) -> Result<Put, String> {
         let mut inner = self.inner();
         inner.entries.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, entries)
+    }
+
+    /// Whether an emitter that falls into `ocean` has made itself known: until one has, a read of the ocean's steps
+    /// would be empty because nobody had said anything, not because nothing fell.
+    pub(crate) fn knows(&self, ocean: &str) -> bool {
+        self.inner().emitters.iter().any(|e| &*e.ocean.id == ocean)
     }
 
     /// What the particles give ocean `ocean` in its canonical step `step`, by cell in order of cell: the

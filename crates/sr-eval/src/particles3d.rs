@@ -292,6 +292,8 @@ struct SceneDriver<'a, 'b> {
     gas_at: Vec<(i64, Option<GasAt>)>,
     /// The ocean the particles fall into, the log that tells it, and the scene units a metre.
     splash: Option<(&'a crate::splash::Emitter, &'a crate::splash::Log, f64)>,
+    /// What the rigid world said when it could not answer, to fail the step that asked rather than go on without it.
+    fault: Option<String>,
 }
 impl SceneDriver<'_, '_> {
     fn frame(&mut self, time: f64) -> Arc<FrameGraph> {
@@ -307,7 +309,12 @@ impl SceneDriver<'_, '_> {
             Arc::new(crate::eval::evaluate_with_clocks(self.p, t, &clocks))
         };
         if let Some(ph) = self.physics.as_deref_mut() {
+            let before = f.problems.len();
             crate::sim::apply_physics(self.p, ph, Arc::make_mut(&mut f), self.graphs, self.fields, t);
+            // a rigid world that could not answer must not be read as one that stood still
+            if f.problems.len() > before && self.fault.is_none() {
+                self.fault = Some(f.problems[before..].join("; "));
+            }
         }
         if self.frames.len() >= 8 {
             self.frames.remove(0);
@@ -559,6 +566,10 @@ impl Driver for SceneDriver<'_, '_> {
         Ok(a)
     }
     fn absorbed(&mut self, step: u64, list: &[sim::Absorbed]) -> Result<(), Error> {
+        // the last thing a fixed step asks before it is kept
+        if let Some(fault) = self.fault.take() {
+            return Err(Error::Driver(fault));
+        }
         let Some((emitter, log, pixels_per_meter)) = self.splash else { return Ok(()) };
         // what they are made of: the target of the crater that threw them
         let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
@@ -643,79 +654,163 @@ impl Sims {
         pyro: &mut crate::pyro::Sims,
         splash: &crate::splash::Log,
     ) {
+        // an ocean that loads the rigid bodies is run before the particles and pulls them as it needs them
+        let grouped = physics.as_deref().is_some_and(|ph| ph.group.is_some());
         for i in 0..g.nodes.len() {
-            let n = &g.nodes[i];
-            if n.kind != "particles3D" {
+            if g.nodes[i].kind != "particles3D" {
                 continue;
             }
-            let id = n.id.clone();
+            let id = g.nodes[i].id.clone();
             let Some(node) = p.nodes.iter().position(|n| n.id == id).map(|n| n as u32) else {
                 continue;
             };
-            if !crate::sim::linear_emitter_clock(p, node) {
-                self.runtimes.remove(&id);
-            }
-            // the ocean the particles fall into is taken at its pose when the emitter starts, once, with the
-            // runtime
-            let fall = if self.runtimes.contains_key(&id) { Ok(None) } else { fall_setup(p, graphs, &id, node) };
-            let rt = self.runtimes.entry(id.clone()).or_insert_with(|| fall.and_then(|fall| build(p, node, n, fall)));
-            if let Ok(rt) = rt {
-                if let Some(emitter) = &rt.splash {
-                    splash.register(emitter);
-                }
-            }
-            let result = (|| -> Result<Arc<SimParticles3D>, String> {
-                let rt = rt.as_mut().map_err(|e| e.clone())?;
-                let mut d = SceneDriver {
-                    p,
-                    node,
-                    id: id.clone(),
-                    at: g.time,
-                    graphs,
-                    fields,
-                    names: rt.names.as_deref(),
-                    physics: physics.as_deref_mut(),
-                    frames: Vec::new(),
-                    colliders: &mut rt.colliders,
-                    sweeps: Vec::new(),
-                    step_origin: num(&*n.elem, "emissionStart", 0.),
-                    step: num(&*n.elem, "dt", 1. / 60.),
-                    seed: rt.seed,
-                    lift: rt.lift,
-                    bursts: &mut rt.crater_bursts,
-                    gas: rt.gas.as_mut().map(|gas| (gas, &mut *pyro, rt.emitter.spec().drag)),
-                    gas_at: Vec::new(),
-                    splash: rt
-                        .splash
-                        .as_ref()
-                        .map(|e| (e, splash, p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()))),
-                };
-                if let Some(emitter) = &rt.splash {
-                    // the ocean reads what falls until the end of its step, which is later than this frame
-                    let until = emitter.needed_until(g.time, p.nodes[node as usize].start);
-                    if until > n.local_time {
-                        rt.emitter.at(until, &mut d).map_err(|e| e.to_string())?;
-                    }
-                }
-                let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
-                let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);
-                for p in &frame.particles {
-                    key = crate::rng::hash(&[key, p.id, p.birth.to_bits(), p.lifetime.to_bits(), p.scale.to_bits()]);
-                    if p.mass != 0. {
-                        key = crate::rng::hash(&[key, p.mass.to_bits(), 1]);
-                    }
-                    for v in
-                        p.position.iter().chain(&p.velocity).chain(p.basis.iter().flatten()).chain(&p.angular_velocity)
-                    {
-                        key = crate::rng::hash(&[key, v.to_bits(), 0]);
-                    }
-                }
-                Ok(Arc::new(SimParticles3D { frame, key, size_curve: rt.size_curve, color_curve: rt.color_curve }))
-            })();
+            let result = self.run(
+                p,
+                g.time,
+                &g.nodes[i],
+                node,
+                None,
+                !grouped,
+                graphs,
+                fields,
+                physics.as_deref_mut(),
+                pyro,
+                splash,
+            );
             match result {
                 Ok(f) => g.nodes[i].particles3d = Some(f),
                 Err(e) => g.fail(format!("{id}: {e}")),
             }
         }
+    }
+
+    /// Computes the emitters that fall into ocean `ocean` as far as its canonical step `step` needs, for an ocean
+    /// that asks for a step the frame has not got to: the particles of a rigid world that the water loads are
+    /// computed a step at a time with the ocean, each needing only what the ocean has already written.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance(
+        &mut self,
+        p: &Program,
+        g: &FrameGraph,
+        graphs: &mut Graphs<'_>,
+        fields: &FieldSrc,
+        mut physics: Option<&mut PhysicsRt>,
+        pyro: &mut crate::pyro::Sims,
+        splash: &crate::splash::Log,
+        ocean: &str,
+        step: u64,
+    ) -> Result<(), String> {
+        for n in g.nodes.iter().filter(|n| n.kind == "particles3D") {
+            let Some(node) = p.nodes.iter().position(|o| o.id == n.id).map(|o| o as u32) else { continue };
+            let listed = p.nodes.iter().any(|o| {
+                o.name == "ocean"
+                    && &*o.id == ocean
+                    && text(&*o.elem, "splash").is_some_and(|l| l.split_whitespace().any(|s| s == &*n.id))
+            });
+            if !listed {
+                continue;
+            }
+            let emitter = match self.runtime(p, graphs, n, node, splash) {
+                Ok(rt) => rt.splash.clone(),
+                Err(error) => return Err(error.clone()),
+            };
+            let emitter = emitter.ok_or_else(|| format!("{} falls into no ocean", n.id))?;
+            let until = emitter.needed_for(step, p.nodes[node as usize].start);
+            self.run(p, g.time, n, node, Some(until), false, graphs, fields, physics.as_deref_mut(), pyro, splash)?;
+        }
+        Ok(())
+    }
+
+    /// The runtime of the emitter, built if it is not, and made known to the ocean it falls into.
+    fn runtime(
+        &mut self,
+        p: &Program,
+        graphs: &mut Graphs<'_>,
+        n: &FrameNode,
+        node: u32,
+        splash: &crate::splash::Log,
+    ) -> &mut Result<Runtime, String> {
+        let id = n.id.clone();
+        if !crate::sim::linear_emitter_clock(p, node) {
+            self.runtimes.remove(&id);
+        }
+        // the ocean the particles fall into is taken at its pose when the emitter starts, once, with the
+        // runtime
+        let fall = if self.runtimes.contains_key(&id) { Ok(None) } else { fall_setup(p, graphs, &id, node) };
+        let rt = self.runtimes.entry(id).or_insert_with(|| fall.and_then(|fall| build(p, node, n, fall)));
+        if let Ok(rt) = rt {
+            if let Some(emitter) = &rt.splash {
+                splash.register(emitter);
+            }
+        }
+        rt
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &mut self,
+        p: &Program,
+        at: f64,
+        n: &FrameNode,
+        node: u32,
+        local_time: Option<f64>,
+        look_ahead: bool,
+        graphs: &mut Graphs<'_>,
+        fields: &FieldSrc,
+        physics: Option<&mut PhysicsRt>,
+        pyro: &mut crate::pyro::Sims,
+        splash: &crate::splash::Log,
+    ) -> Result<Arc<SimParticles3D>, String> {
+        let id = n.id.clone();
+        let rt = self.runtime(p, graphs, n, node, splash).as_mut().map_err(|e| e.clone())?;
+        let local_time = local_time.unwrap_or(n.local_time);
+        let mut d = SceneDriver {
+            p,
+            node,
+            id: id.clone(),
+            at,
+            graphs,
+            fields,
+            names: rt.names.as_deref(),
+            physics,
+            frames: Vec::new(),
+            colliders: &mut rt.colliders,
+            sweeps: Vec::new(),
+            step_origin: num(&*n.elem, "emissionStart", 0.),
+            step: num(&*n.elem, "dt", 1. / 60.),
+            seed: rt.seed,
+            lift: rt.lift,
+            bursts: &mut rt.crater_bursts,
+            gas: rt.gas.as_mut().map(|gas| (gas, &mut *pyro, rt.emitter.spec().drag)),
+            gas_at: Vec::new(),
+            splash: rt
+                .splash
+                .as_ref()
+                .map(|e| (e, splash, p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()))),
+            fault: None,
+        };
+        // an ocean that runs after the particles reads what falls until the end of its step, which is later than
+        // this frame; one that runs before them asks for what it needs as it goes
+        if let (true, Some(emitter)) = (look_ahead, &rt.splash) {
+            let until = emitter.needed_until(at, p.nodes[node as usize].start);
+            if until > local_time {
+                rt.emitter.at(until, &mut d).map_err(|e| e.to_string())?;
+            }
+        }
+        let frame = rt.emitter.at(local_time, &mut d).map_err(|e| e.to_string())?.clone();
+        if let Some(fault) = d.fault.take() {
+            return Err(fault);
+        }
+        let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);
+        for p in &frame.particles {
+            key = crate::rng::hash(&[key, p.id, p.birth.to_bits(), p.lifetime.to_bits(), p.scale.to_bits()]);
+            if p.mass != 0. {
+                key = crate::rng::hash(&[key, p.mass.to_bits(), 1]);
+            }
+            for v in p.position.iter().chain(&p.velocity).chain(p.basis.iter().flatten()).chain(&p.angular_velocity) {
+                key = crate::rng::hash(&[key, v.to_bits(), 0]);
+            }
+        }
+        Ok(Arc::new(SimParticles3D { frame, key, size_curve: rt.size_curve, color_curve: rt.color_curve }))
     }
 }

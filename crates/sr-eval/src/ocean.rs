@@ -37,6 +37,12 @@ struct Runtime {
     /// Whether particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
     splash: bool,
 }
+/// Brings what the ocean named (first) needs of other solvers up to the ocean's canonical step (second): computes the
+/// particles that fall into it as far as that step needs, which they cannot do before the ocean has got to the step
+/// before.
+pub(crate) type Pull<'a> =
+    dyn FnMut(&FrameGraph, &mut Graphs<'_>, Option<&mut PhysicsRt>, &str, u64) -> Result<(), String> + 'a;
+
 #[derive(Default)]
 pub(crate) struct Sims {
     runtimes: HashMap<Arc<str>, Result<Runtime, String>>,
@@ -211,6 +217,7 @@ fn frame_key(frame: &sim::Frame, triangles: usize) -> u64 {
 }
 
 impl Sims {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
         &mut self,
         p: &Program,
@@ -219,6 +226,7 @@ impl Sims {
         fields: &FieldSrc,
         mut physics: Option<&mut PhysicsRt>,
         splash: &crate::splash::Log,
+        pull: &mut Pull<'_>,
     ) {
         let at = g.time;
         for i in 0..g.nodes.len() {
@@ -284,7 +292,14 @@ impl Sims {
                     }
                     // what the particles that fell into the ocean bring, at the sample that closes the step
                     if let (true, Some((step, _))) = (*takes, forcing.exchange) {
-                        let read = splash.read(&id, step).map_err(|message| {
+                        let read = match splash.read(&id, step) {
+                            Ok(read) if splash.knows(&id) => Ok(read),
+                            // the particles are not there yet: they are made known and computed to it now, which
+                            // asks the rigid world for what the water has already given
+                            _ => pull(&*g, graphs, physics.as_deref_mut(), &id, step)
+                                .and_then(|()| splash.read(&id, step)),
+                        }
+                        .map_err(|message| {
                             *failure.borrow_mut() = Some(message);
                             sim::Error::Invalid("ocean splash unavailable")
                         })?;
