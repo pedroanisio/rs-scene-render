@@ -525,4 +525,9 @@
       <sch:assert id="R43" test="/scene/assets/image[@id=current()/@emitterAsset]">@emitterAsset must name an image asset: particles are emitted from its opaque pixels.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p64">
+    <sch:rule context="effect[@source][@type='displacement-map' or @type='difference-key' or @type='shader']">
+      <sch:assert id="R44" test="/scene/composition//*[@id=current()/@source] or /scene/symbols//*[@id=current()/@source]">effect @source must name a composition node; an asset is placed on a (hidden) layer, and the layer named.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

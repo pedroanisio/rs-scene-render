@@ -1386,6 +1386,17 @@ impl<'a> Eval<'a> {
                 "@emitterAsset must name an image asset: particles are emitted from its opaque pixels.".into()
             });
         }
+        // p64
+        if local == "effect"
+            && has("source")
+            && matches!(a("type"), Some("displacement-map" | "difference-key" | "shader"))
+        {
+            let ok =
+                contains(&self.sets.composition_desc, a("source")) || contains(&self.sets.symbols_desc, a("source"));
+            self.check(ok, n, "R44", || {
+                "effect @source must name a composition node; an asset is placed on a (hidden) layer, and the layer named.".into()
+            });
+        }
         // p56
         if let Some(list) = a("forceFields") {
             let ok = every_token_names(list, &self.sets.force_fields);

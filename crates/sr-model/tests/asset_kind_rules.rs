@@ -33,3 +33,29 @@ fn an_emitter_asset_is_an_image() {
         assert!(c.contains(&"R43".into()), "{asset}: {c:?}");
     }
 }
+
+#[test]
+fn an_effect_source_is_a_composition_node_not_an_asset() {
+    // displacement-map, difference-key and shader effects sample another node; an asset id passed validate and
+    // then failed at render ("must name a node (place an image asset on a hidden layer)")
+    let effect = |source: &str| {
+        format!(r#"<effects><effect id="dm" type="displacement-map" source="{source}" amount="4"/></effects>"#)
+    };
+    let nodes = r#"<layer id="map" asset="pic" visible="false"/><shape id="s" shape="rect" width="8" height="8" effects="dm"/>"#;
+    let ok = codes_with_effects(&effect("map"), nodes);
+    assert!(ok.is_empty(), "{ok:?}");
+    for asset in ["grid", "pic"] {
+        let c = codes_with_effects(&effect(asset), nodes);
+        assert!(c.contains(&"R44".into()), "{asset}: {c:?}");
+    }
+}
+
+fn codes_with_effects(effects: &str, node: &str) -> Vec<String> {
+    let xml = format!(
+        r#"<scene version="1.1"><project width="64" height="64" fps="24" duration="1"/>
+<assets><image id="pic" src="pic.png" width="4" height="4"/><generator id="grid" kind="grid" width="8" height="8"/></assets>
+<composition>{node}</composition>{effects}</scene>"#
+    );
+    let v = sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets());
+    v.diagnostics.into_iter().map(|d| d.code).collect()
+}
