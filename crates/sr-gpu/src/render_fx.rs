@@ -893,8 +893,10 @@ impl Renderer {
             })
             .collect();
         let reshaped = sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name()));
+        // a stencil blend cuts the backdrop away outside the node, so its result must cover the whole target
         let bounded = matches!(n.kind, "layer" | "shape")
             && ctx.kids[i].is_empty()
+            && !matches!(self.blend_of(n), 29 | 30)
             && !reshaped
             && !boxes.is_empty()
             && boxes.iter().all(|(_, s)| s.is_some())
