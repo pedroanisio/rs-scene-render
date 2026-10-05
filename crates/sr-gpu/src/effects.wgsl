@@ -42,6 +42,8 @@ struct Fx {
 var<private> gv: array<vec4<f32>, 8>;
 var<private> gop: u32;
 var<private> gseed: vec2<u32>;
+// the factor a colour operation puts on the pixel's alpha (a gradient map ends on a transparent stop)
+var<private> galpha: f32 = 1.0;
 
 @group(0) @binding(0) var<uniform> fx: Fx;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -427,6 +429,7 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             let l = clamp(enc(vec3(luma(c))).x, 0.0, 1.0);
             let g = textureSampleLevel(aux, smp, vec2(l * (255.0 / 256.0) + 0.5 / 256.0, 0.5), 0.0);
             c = mix(c, unpre(g), v[0].x);
+            galpha = mix(1.0, g.a, v[0].x);
         }
         case 13u: { c = mix(c, vec3(luma(c)), v[0].x); } // grayscale
         case 14u: { // sepia
@@ -522,8 +525,10 @@ fn color_step(s: vec4<f32>, uv: vec2<f32>, px: vec2<f32>, d: vec2<f32>) -> vec4<
     let v = gv;
     if (gop < 64u) {
         if (s.a <= 0.0) { return s; }
+        galpha = 1.0;
         let c = grade(lin(unpre(s)), uv, px);
-        return vec4(stored(c) * s.a, s.a);
+        let a = s.a * galpha;
+        return vec4(stored(c) * a, a);
     }
     if (gop == 64u) { // vignette: v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
         let r = length((uv - v[2].xy) * d) / (0.5 * length(d));
