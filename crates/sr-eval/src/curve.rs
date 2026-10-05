@@ -31,6 +31,20 @@ pub enum Ease {
     Bezier(f64, f64, f64, f64),
     /// One of the Penner curves.
     Penner(Penner),
+    /// A `back-*` curve with its own overshoot constant (`key/@overshoot`; the Penner constant is 1.70158).
+    Back {
+        /// `BackIn`, `BackOut` or `BackInOut`.
+        kind: Penner,
+        /// Overshoot constant c1.
+        c1: f64,
+    },
+    /// An `elastic-*` curve with its own period (`key/@period`, a fraction of the segment; Penner: 0.3, in-out 0.45).
+    Elastic {
+        /// `ElasticIn`, `ElasticOut` or `ElasticInOut`.
+        kind: Penner,
+        /// Period of the ringing as a fraction of the segment.
+        period: f64,
+    },
     /// `catmull-rom`: value-space spline through neighbouring keys.
     CatmullRom,
     /// `tcb`: Kochanek–Bartels spline; parameters live on the keys.
@@ -104,6 +118,10 @@ pub struct KeyParams {
     pub step_start: bool,
     /// Spring parameters (stiffness, damping, mass).
     pub spring: [f64; 3],
+    /// `@overshoot`: the constant of a `back-*` curve.
+    pub overshoot: Option<f64>,
+    /// `@period`: the period of an `elastic-*` curve.
+    pub period: Option<f64>,
 }
 
 impl Default for KeyParams {
@@ -115,6 +133,8 @@ impl Default for KeyParams {
             steps: None,
             step_start: false,
             spring: [100.0, 10.0, 1.0],
+            overshoot: None,
+            period: None,
         }
     }
 }
@@ -164,12 +184,12 @@ pub fn resolve(c: Curve, k: &KeyParams) -> Ease {
         Curve::CircIn => p(CircIn),
         Curve::CircOut => p(CircOut),
         Curve::CircInOut => p(CircInOut),
-        Curve::BackIn => p(BackIn),
-        Curve::BackOut => p(BackOut),
-        Curve::BackInOut => p(BackInOut),
-        Curve::ElasticIn => p(ElasticIn),
-        Curve::ElasticOut => p(ElasticOut),
-        Curve::ElasticInOut => p(ElasticInOut),
+        Curve::BackIn => k.overshoot.map_or(p(BackIn), |c1| Ease::Back { kind: BackIn, c1 }),
+        Curve::BackOut => k.overshoot.map_or(p(BackOut), |c1| Ease::Back { kind: BackOut, c1 }),
+        Curve::BackInOut => k.overshoot.map_or(p(BackInOut), |c1| Ease::Back { kind: BackInOut, c1 }),
+        Curve::ElasticIn => k.period.map_or(p(ElasticIn), |period| Ease::Elastic { kind: ElasticIn, period }),
+        Curve::ElasticOut => k.period.map_or(p(ElasticOut), |period| Ease::Elastic { kind: ElasticOut, period }),
+        Curve::ElasticInOut => k.period.map_or(p(ElasticInOut), |period| Ease::Elastic { kind: ElasticInOut, period }),
         Curve::BounceIn => p(BounceIn),
         Curve::BounceOut => p(BounceOut),
         Curve::BounceInOut => p(BounceInOut),
@@ -208,6 +228,8 @@ impl Ease {
             Ease::Linear | Ease::CatmullRom | Ease::Tcb | Ease::Spring { .. } => u,
             Ease::Bezier(x1, y1, x2, y2) => cubic_bezier(x1, y1, x2, y2, u),
             Ease::Penner(p) => penner(p, u),
+            Ease::Back { kind, c1 } => back(kind, u, c1),
+            Ease::Elastic { kind, period } => elastic(kind, u, period),
         }
     }
 
@@ -387,6 +409,44 @@ pub fn penner(p: Penner, u: f64) -> f64 {
                 (1.0 - bounce_out(1.0 - 2.0 * u)) / 2.0
             } else {
                 (1.0 + bounce_out(2.0 * u - 1.0)) / 2.0
+            }
+        }
+    }
+}
+
+/// The `back-*` curves with overshoot constant `c1` (the Penner constant is 1.70158; `c1 = 0` is the plain cubic).
+fn back(kind: Penner, u: f64, c1: f64) -> f64 {
+    let (c2, c3) = (c1 * 1.525, c1 + 1.0);
+    match kind {
+        Penner::BackIn => c3 * u * u * u - c1 * u * u,
+        Penner::BackOut => 1.0 + c3 * (u - 1.0).powi(3) + c1 * (u - 1.0).powi(2),
+        _ => {
+            if u < 0.5 {
+                ((2.0 * u).powi(2) * ((c2 + 1.0) * 2.0 * u - c2)) / 2.0
+            } else {
+                ((2.0 * u - 2.0).powi(2) * ((c2 + 1.0) * (u * 2.0 - 2.0) + c2) + 2.0) / 2.0
+            }
+        }
+    }
+}
+
+/// The `elastic-*` curves with a ringing period `period` (a fraction of the segment). Penner's constants are the
+/// periods 0.3 (in, out) and 0.45 (in-out): the sine runs at 2π·0.1/period per tenth of the segment and its phase
+/// offset is a quarter period.
+fn elastic(kind: Penner, u: f64, period: f64) -> f64 {
+    if u == 0.0 || u == 1.0 {
+        return u;
+    }
+    let w = 2.0 * PI * 0.1 / period;
+    let quarter = period * 2.5;
+    match kind {
+        Penner::ElasticIn => -pow(2.0, 10.0 * u - 10.0) * libm::sin((u * 10.0 - 10.0 - quarter) * w),
+        Penner::ElasticOut => pow(2.0, -10.0 * u) * libm::sin((u * 10.0 - quarter) * w) + 1.0,
+        _ => {
+            if u < 0.5 {
+                -(pow(2.0, 20.0 * u - 10.0) * libm::sin((20.0 * u - 10.0 - quarter) * w)) / 2.0
+            } else {
+                (pow(2.0, -20.0 * u + 10.0) * libm::sin((20.0 * u - 10.0 - quarter) * w)) / 2.0 + 1.0
             }
         }
     }

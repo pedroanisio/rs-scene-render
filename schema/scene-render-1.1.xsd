@@ -369,6 +369,12 @@
     <xs:attribute name="stiffness" type="positiveDecimal" default="100"/>
     <xs:attribute name="damping" type="nonNegativeDecimal" default="10"/>
     <xs:attribute name="mass" type="positiveDecimal" default="1"/>
+    <xs:attribute name="overshoot" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>The constant of a back-in, back-out or back-in-out segment (default 1.70158, about 10 % overshoot; 0 is the plain cubic). Read from the key the segment leaves.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="period" type="positiveDecimal">
+      <xs:annotation><xs:documentation>The ringing period of an elastic-in, elastic-out or elastic-in-out segment as a fraction of the segment (default 0.3; 0.45 for elastic-in-out). Read from the key the segment leaves.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="marker" type="xs:IDREF">
       <xs:annotation><xs:documentation>Snap the key time to a marker; @time becomes an offset from it.</xs:documentation></xs:annotation>
     </xs:attribute>

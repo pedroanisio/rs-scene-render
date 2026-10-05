@@ -2122,6 +2122,7 @@ impl Builder {
                             continue;
                         }
                     };
+                    ignored_key_parameters(&a.keys, a.default_interpolation, who, &mut self.warnings);
                     let spec = ChannelSpec {
                         keys: &a.keys,
                         default: a.default_interpolation,
@@ -2994,6 +2995,32 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
             )
         }
         _ => {}
+    }
+}
+
+/// A key's `overshoot` is read only by the `back-*` curves and its `period` only by the `elastic-*` ones: set on a
+/// segment that leaves with another curve, the attribute does nothing (E19, a warning).
+fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warnings: &mut Vec<Diagnostic>) {
+    use m::Curve::*;
+    for (i, k) in keys.iter().enumerate() {
+        let curve = k.interpolation.unwrap_or(default);
+        let mut note = |attr: &str, family: &str| {
+            warnings.push(Diagnostic::warning(
+                "E19",
+                format!(
+                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect on the {curve:?} curve, which does not read it (only {family} curves do)",
+                    i + 1
+                ),
+                k.loc,
+                who,
+            ))
+        };
+        if k.overshoot.is_some() && !matches!(curve, BackIn | BackOut | BackInOut) {
+            note("overshoot", "back-*");
+        }
+        if k.period.is_some() && !matches!(curve, ElasticIn | ElasticOut | ElasticInOut) {
+            note("period", "elastic-*");
+        }
     }
 }
 
