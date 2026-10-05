@@ -5,7 +5,7 @@
 //! A 40-unit square body of thickness 3 crosses the water at 8 units per second over a flat bed
 //! of 10 (0.5-unit cells, g = 9.81, canonical step 1/24 s). Each mode runs STEPS canonical steps
 //! on a fresh solver, three times, and prints the time per step of each run.
-use sr_sim::ocean::{Boundary, Cell, Forcing, Ocean, Order, Spec};
+use sr_sim::ocean::{Boundary, Cell, Forcing, Lift, Ocean, Order, Spec};
 use std::time::Instant;
 
 fn main() {
@@ -22,7 +22,8 @@ fn main() {
     let (h, dx, dt) = (10.0, 0.5, 1.0 / 24.0);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
     for round in 0..5 {
-        for owners in [0usize, 1] {
+        // owners 0: no tags; 1: tags without lifts; 2: tags and the lift of the body (the pressure credited)
+        for owners in [0usize, 1, 2] {
             let spec = Spec {
                 cells: [n, n],
                 origin: [-(n as f64) * dx / 2.0; 2],
@@ -32,7 +33,7 @@ fn main() {
                 boundary: Boundary::Closed,
                 moving_bed: true,
                 bodies: true,
-                body_owners: owners,
+                body_owners: owners.min(1),
                 max_work: 1 << 50,
                 max_bytes: 4 << 30,
                 checkpoint_bytes: 0,
@@ -44,6 +45,7 @@ fn main() {
                 let mut driver = |time: f64, f: &mut Forcing| -> Result<(), sr_sim::ocean::Error> {
                     let left = -(n as f64) * dx / 2.0 + 8.0 * time;
                     let half = (20.0 / dx) as usize;
+                    let mut lifted = Vec::new();
                     for c in 0..n * n {
                         let (x, z) =
                             ((c % n) as f64 * dx - (n as f64) * dx / 2.0, (c / n) as f64 * dx - (n as f64) * dx / 2.0);
@@ -55,6 +57,12 @@ fn main() {
                         if owners > 0 {
                             f.owner[c] = 0;
                         }
+                        if owners > 1 && inside {
+                            lifted.push((c as u32, t));
+                        }
+                    }
+                    if owners > 1 {
+                        f.lifts = vec![Lift { owner: 0, columns: lifted }];
                     }
                     Ok(())
                 };

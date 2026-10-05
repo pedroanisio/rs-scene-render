@@ -87,8 +87,9 @@ fn what_the_water_gains_from_the_slope_of_the_bed_is_credited_to_the_body_that_r
             if speed > 0.0 {
                 assert!(credited[0].abs() > 0.0 && gained[0].abs() > 0.0);
                 let residual = (gained[0] - credited[0]).abs() / gained[0].abs();
-                let allowed = if order == Order::First { 0.08 } else { 0.03 };
-                assert!(residual < allowed, "{order:?} speed {speed}: residual {residual}");
+                // the credit is the scheme's own source term, accumulated by its sweeps: in a periodic basin with
+                // nothing else acting the water gains exactly that, to rounding
+                assert!(residual < 1e-9, "{order:?} speed {speed}: residual {residual}");
             }
         }
     }
@@ -194,4 +195,70 @@ fn the_pressure_does_not_depend_on_the_number_of_threads() {
     assert!(reference.iter().any(|b| *b != 0));
     assert_eq!(record(2), reference);
     assert_eq!(record(8), reference);
+}
+
+/// The same basin on `side` x `side` cells (large enough for the parallel sweeps) with the mound at its middle.
+fn big(side: usize, with_lifts: bool, order: Order, offers: &mut Offers) -> Vec<Vec<f64>> {
+    let spec = Spec { cells: [side, side], ..spec(order) };
+    let mut ocean = Ocean::new(
+        spec,
+        vec![DEPTH; side * side],
+        vec![Cell { depth: DEPTH, velocity: [0.0; 2] }; side * side],
+        vec![],
+    )
+    .unwrap();
+    let mut frames = Vec::new();
+    for k in 1..=6 {
+        let mut driver = |time: f64, f: &mut Forcing| -> Result<(), Error> {
+            let mut columns = Vec::new();
+            for c in 0..side * side {
+                let (x, z) = ((c % side) as f64 + 0.5, (c / side) as f64 + 0.5);
+                let r2 = (x - 40.0 - 6.0 * time).powi(2) + (z - side as f64 / 2.0).powi(2);
+                let h = (-r2 / 18.0).exp();
+                f.bed[c] = DEPTH - h;
+                if h > 1e-9 {
+                    columns.push((c as u32, h));
+                }
+            }
+            f.occupancy.fill(0.0);
+            f.owner.fill(0);
+            if with_lifts {
+                f.lifts = vec![Lift { owner: 0, columns }];
+            }
+            if let Some((step, _)) = f.exchange {
+                offers.push((step, f.bodies.clone()));
+            }
+            Ok(())
+        };
+        let frame = ocean.at_driven(k as f64 * DT, &mut driver).unwrap();
+        frames.push(frame.cells.iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).collect());
+    }
+    frames
+}
+
+#[test]
+fn on_a_grid_that_runs_in_parallel_the_credit_does_not_depend_on_the_threads_and_the_water_does_not_notice_it() {
+    for order in [Order::First, Order::Second] {
+        let run = |threads: usize, with_lifts: bool| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| {
+                let mut offers = Offers::new();
+                let frames = big(132, with_lifts, order, &mut offers);
+                let credit: Vec<u64> =
+                    offers.iter().flat_map(|(_, b)| b.iter().flat_map(|b| b.pressure.map(f64::to_bits))).collect();
+                (frames.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u64>>(), credit)
+            })
+        };
+        let (water, credit) = run(1, true);
+        assert!(credit.iter().any(|b| *b != 0), "{order:?}: something is credited");
+        for threads in [2, 8] {
+            let (w, c) = run(threads, true);
+            assert_eq!(w, water, "{order:?}: the water with {threads} threads");
+            assert_eq!(c, credit, "{order:?}: the credit with {threads} threads");
+        }
+        // without the lifts nothing is credited and the water is the same bit for bit
+        let (plain, none) = run(8, false);
+        assert_eq!(plain, water, "{order:?}: crediting does not change the water");
+        assert!(none.iter().all(|b| f64::from_bits(*b) == 0.0));
+    }
 }

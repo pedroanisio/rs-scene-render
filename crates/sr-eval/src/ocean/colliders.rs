@@ -268,8 +268,8 @@ impl Colliders {
         let mut momentum = vec![[0.; 2]; n];
         // with the depth filter: what each body raises, filtered, and the sum of those
         let mut raise = vec![0.; if self.filtered { n } else { 0 }];
-        let mut thickness = vec![0.; if self.filtered { n } else { 0 }];
-        let mut heights = vec![0.; if self.filtered { n } else { 0 }];
+        let mut thickness = vec![0.; n];
+        let mut heights = vec![0.; n];
         // the body that holds most of a column owns it; bodies come in index order, so the lowest wins a tie
         let mut held_most = vec![0.; if spec.body_owners > 0 { n } else { 0 }];
         forcing.owner.clear();
@@ -321,7 +321,7 @@ impl Colliders {
                     for &(c, v) in &placed {
                         raise[c] += v;
                     }
-                    if self.pushes() && !placed.is_empty() {
+                    if !placed.is_empty() {
                         forcing.lifts.push(sim::Lift {
                             owner: self.bodies[i].slot as u32,
                             columns: placed.iter().map(|&(c, v)| (c as u32, v)).collect(),
@@ -342,6 +342,19 @@ impl Colliders {
                             });
                         }
                     }
+                }
+            } else {
+                // the hydrostatic response lifts the column by the body's thickness, cut to the water the column
+                // holds: that is what the body owns of the bed
+                let columns: Vec<(u32, f64)> = thickness
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| **t > 0.)
+                    .map(|(c, t)| (c as u32, t.min((forcing.bed[c] - level).max(0.))))
+                    .filter(|(_, h)| *h > 0.)
+                    .collect();
+                if !columns.is_empty() {
+                    forcing.lifts.push(sim::Lift { owner: self.bodies[i].slot as u32, columns });
                 }
             }
         }

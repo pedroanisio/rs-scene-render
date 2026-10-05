@@ -159,10 +159,10 @@ pub struct Forcing {
     /// sample's time `T`, one entry per body that gives any. Like the bed, a function of the time and of
     /// scene data that does not change.
     pub pushes: Vec<Push>,
-    /// With `Spec::body_owners`: what each body raises the bed by, sparse, in the sample at the end of a
-    /// canonical step. The solver reads it there to credit each body with the horizontal momentum that
-    /// the bed's slope gives the water ([`BodySample::pressure`]); the bed the water runs over is
-    /// `bed`, as ever.
+    /// With `Spec::body_owners`: what each body raises the bed by, sparse, in every sample. Only who the
+    /// bed variation of a column belongs to is read from it (the owner with the largest lift, over the two
+    /// ends of the step), to credit each body with the momentum the bed source term of the scheme gives
+    /// the water ([`BodySample::pressure`]); the bed the water runs over is `bed`, as ever.
     pub lifts: Vec<Lift>,
     /// What fell into the water in the canonical step that ends at the sample's time `T`, by cell,
     /// sorted by cell with no cell twice, applied when the step reaches `T`, after the impulses
@@ -238,10 +238,12 @@ pub struct BodySample {
     pub bed: f64,
     /// Horizontal momentum per unit water density that this body gave the water during the step.
     pub impulse: [f64; 2],
-    /// Horizontal momentum per unit density that the slope of the bed this body raises gives the water in
-    /// the step, `-g h grad(raise)` summed over the columns around its lift with the depth at the end of
-    /// the step and over one canonical step: what is not in `impulse`, the pressure of the water on the body
-    /// (the wave drag), by the end-of-step estimate. Zero without `Forcing::lifts`.
+    /// Horizontal momentum per unit density that the bed source term of the scheme gave the water in the
+    /// step across the faces of the bed this body raises (the face owned by the body with the larger lift
+    /// of the two columns): what is not in `impulse`, the pressure of the water on the body (the wave drag).
+    /// It is accumulated by the flux sweeps themselves, so the momentum of the water is exactly the pushes
+    /// plus this plus what the walls give, to rounding; it is the scheme's term, with its reconstruction and
+    /// numerical diffusion, not the continuous one. Zero without `Forcing::lifts`.
     pub pressure: [f64; 2],
 }
 
@@ -298,6 +300,9 @@ struct State {
     exchange: [f64; 2],
     /// The part of `exchange` that each body gave (`Spec::body_owners` elements, or none).
     exchange_by: Vec<[f64; 2]>,
+    /// What the bed source term of the scheme gave the water in that step, by the owner of the bed
+    /// variation (`Spec::body_owners` elements, or none): [`BodySample::pressure`].
+    pressure_by: Vec<[f64; 2]>,
 }
 struct Work {
     remaining: u64,
@@ -417,13 +422,14 @@ impl Ocean {
             q: cells.iter().map(|c| [c.depth, c.depth * c.velocity[0], c.depth * c.velocity[1]]).collect(),
             exchange: [0.0; 2],
             exchange_by: vec![[0.0; 2]; spec.body_owners],
+            pressure_by: vec![[0.0; 2]; spec.body_owners],
         };
         let mut work = Work { remaining: spec.max_work, substeps: 0 };
         advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let spec_dt = spec.dt;
         let checkpoint_capacity =
-            (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 16 * spec.body_owners)).min(4096);
+            (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 32 * spec.body_owners)).min(4096);
         Ok(Self {
             spec,
             bed_y,
@@ -609,17 +615,7 @@ impl Ocean {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
                     now.pushes = Vec::new();
-                    // The pressure of the step that ended at `k` reads the lifts at both its ends, as it does
-                    // when the step is run: the start of the step is sampled again (a function of the time
-                    // alone), so that the record does not depend on where the seek began.
-                    let before = if k >= 1 && self.spec.body_owners > 0 {
-                        let mut start = Forcing::default();
-                        self.sample(driver, (k - 1) as f64 * dt, &mut start, None, Vec::new())?;
-                        Some(start)
-                    } else {
-                        None
-                    };
-                    let bodies = body::samples(&self.spec, &state, &now, before.as_ref());
+                    let bodies = body::samples(&self.spec, &state, &now);
                     self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
                     (now, next)
                 }
@@ -630,6 +626,7 @@ impl Ocean {
             let end = k as f64 * dt;
             state.exchange = [0.0; 2];
             state.exchange_by.iter_mut().for_each(|e| *e = [0.0; 2]);
+            state.pressure_by.iter_mut().for_each(|e| *e = [0.0; 2]);
             match (&mut ends, driver.as_deref_mut()) {
                 (Some((now, next)), Some(driver)) => {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
@@ -638,7 +635,7 @@ impl Ocean {
                     // the pushes were for the step that ended; nothing reads them again
                     now.pushes = Vec::new();
                     work.take(if self.spec.body_owners > 0 { state.q.len() } else { 0 })?;
-                    let bodies = body::samples(&self.spec, &state, now, Some(next));
+                    let bodies = body::samples(&self.spec, &state, now);
                     self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)), bodies)?;
                 }
                 _ => advance(
@@ -697,7 +694,7 @@ impl Ocean {
         &self.frame
     }
     pub fn checkpoint_bytes(&self) -> usize {
-        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128 + 16 * self.spec.body_owners)
+        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128 + 32 * self.spec.body_owners)
     }
 }
 
@@ -758,6 +755,31 @@ fn advance(
             }
         }));
     }
+    // who the bed variation of each column of this step belongs to, from the lifts at its two ends
+    let owners = match bed {
+        Bed::Moving { from, to, .. } if spec.body_owners > 0 => {
+            let mut lifted: std::collections::BTreeMap<(u32, u32), f64> = Default::default();
+            for lift in from.lifts.iter().chain(&to.lifts) {
+                for &(c, h) in &lift.columns {
+                    *lifted.entry((c, lift.owner)).or_insert(0.0) += h;
+                }
+            }
+            // per column the owner with the most
+            let mut columns: Vec<(u32, u32, f64)> = Vec::new();
+            for ((c, owner), h) in lifted {
+                match columns.last_mut() {
+                    Some(last) if last.0 == c => {
+                        if h > last.2 {
+                            *last = (c, owner, h);
+                        }
+                    }
+                    _ => columns.push((c, owner, h)),
+                }
+            }
+            flux::Owners::new(columns)
+        }
+        _ => flux::Owners::default(),
+    };
     // what the driver asked for in the step that ends at `to`, in order of time
     let asked: &[Impulse] = match bed {
         Bed::Moving { to, .. } => &to.events,
@@ -857,7 +879,12 @@ fn advance(
                 &scratch.bed
             }
         };
-        flux::step(spec, bed_now, &mut state.q, dt)?;
+        if owners.is_empty() {
+            flux::step(spec, bed_now, &mut state.q, dt, None)?;
+        } else {
+            let mut sink = flux::Sink { owners: &owners, by: &mut state.pressure_by };
+            flux::step(spec, bed_now, &mut state.q, dt, Some(&mut sink))?;
+        }
         if let Some(step) = bodies {
             let given = if spec.body_push {
                 body::push(spec, &mut state.q, pushed, &mut state.exchange_by, dt, step)

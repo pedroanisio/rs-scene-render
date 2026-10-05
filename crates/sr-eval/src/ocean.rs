@@ -633,4 +633,60 @@ mod tests {
         let (_, _, bodies) = offers.last().unwrap();
         assert!(bodies[0].pressure[0].abs() < 1e-3 * 1e3_f64.min(1.), "{:?}", bodies[0].pressure);
     }
+
+    /// The ball of the coupled-ocean tests (radius 2, half the density of water, 3 m/s along x) in a closed basin of
+    /// 160 m: the water's momentum, the pushes the bodies gave it and the pressure credited, by canonical step.
+    fn balance(response: &str, order: &str, until: f64) -> Vec<(f64, f64, f64, f64)> {
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="20" duration="4"/><composition>
+              <object3D id="ball" primitive="sphere" radius="2" segments="24" x="-10" y="0" z="1">
+                <rigidBody shape="sphere" mass="16755.16" velocityX="3" linearDamping="0" angularDamping="0"/>
+              </object3D>
+              <ocean id="sea" bedResponse="{response}" order="{order}" width="160" depth="160" cellSize="2" bottomDepth="10" dt="0.05" boundary="closed" colliders="ball" bodyCoupling="full"/>
+            </composition>
+            <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"##
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        OFFERS.with(|o| o.borrow_mut().clear());
+        let mut out = Vec::new();
+        for t in [1.0, 2.0, 3.0].into_iter().filter(|t| *t <= until) {
+            let frame = ev.evaluate(t);
+            assert!(
+                frame.problems.is_empty() && frame.failures.is_empty(),
+                "{:?} {:?}",
+                frame.problems,
+                frame.failures
+            );
+            let sea = frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap();
+            let water: f64 = sea.frame.cells.iter().map(|c| c.depth * c.velocity[0] * 4.0).sum();
+            let steps = (t / 0.05_f64).round() as u64;
+            let (mut push, mut pressure) = (0.0, 0.0);
+            for (step, _, bodies) in OFFERS.with(|o| o.borrow().clone()) {
+                if step >= 1 && step <= steps {
+                    push += bodies.iter().map(|b| b.impulse[0]).sum::<f64>();
+                    pressure += bodies.iter().map(|b| b.pressure[0]).sum::<f64>();
+                }
+            }
+            out.push((t, water, push, pressure));
+        }
+        out
+    }
+
+    #[test]
+    fn the_water_has_what_the_bodies_pushed_into_it_and_the_bed_source_credited_to_them() {
+        // water = pushes + pressure + what the walls give, which is nothing until the waves reach them; with the
+        // credit the balance closes to what the walls give, in both responses and both orders, where without it
+        // the bed source term is 3 to 15% of the water
+        for response in ["hydrostatic", "depthFiltered"] {
+            for order in ["1", "2"] {
+                for (t, water, push, pressure) in balance(response, order, 3.0) {
+                    let (without, with) = ((water - push) / water, (water - push - pressure) / water);
+                    println!("BALANCE {response} order {order} t {t}: water {water:.4}, push {push:.4}, pressure {pressure:.4}; residual without {:.3}%, with {:.4}%", 100. * without, 100. * with);
+                    assert!(without.abs() > 0.03, "{response} {order} {t}: the term is there: {without}");
+                    assert!(with.abs() < 0.002, "{response} {order} {t}: closed to the walls: {with}");
+                }
+            }
+        }
+    }
 }
