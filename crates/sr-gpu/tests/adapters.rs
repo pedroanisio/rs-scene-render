@@ -2,7 +2,9 @@
 //! is recognised by name when the driver reports another type, and WSL2 is set up to reach
 //! its GPU through Mesa's D3D12 driver.
 
-use sr_gpu::gpu::{can_run_3d, choose_adapter, choose_adapter_for, is_software, software_warning, wsl_environment, WslProbe};
+use sr_gpu::gpu::{
+    can_run_3d, choose_adapter, choose_adapter_for, is_software, software_warning, wsl_environment, WslProbe,
+};
 use sr_gpu::GpuError;
 use wgpu::{AdapterInfo, Backend, DeviceType};
 

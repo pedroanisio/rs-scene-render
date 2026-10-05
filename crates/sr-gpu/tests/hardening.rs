@@ -434,7 +434,9 @@ fn every_kind_the_3d_pass_draws_reaches_the_3d_pass() {
     kinds.sort_unstable();
     assert_eq!(covered, kinds, "a kind was added to THREE_D_DRAWN without a case here");
     for (kind, xml) in cases {
-        let Ok(g) = sr_gpu::Gpu::with_options(&GpuOptions { backends: wgpu::Backends::GL, adapter: None }) else { return };
+        let Ok(g) = sr_gpu::Gpu::with_options(&GpuOptions { backends: wgpu::Backends::GL, adapter: None }) else {
+            return;
+        };
         let xml = format!(
             r##"<scene version="1.3"><project width="64" height="32" fps="10" duration="4" background="#00000000"/><composition>{xml}</composition></scene>"##
         );

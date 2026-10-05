@@ -141,7 +141,10 @@ fn keyed_morph_weights_move_the_mesh() {
     assert_eq!(end.at(32, 12)[3], 0.0, "weight 1 lowers it");
     assert!(end.at(40, 95)[3] > 0.99 && start.at(40, 95)[3] > 0.99);
     // the static attribute still works, and a key agrees with it
-    let Some(attr) = render(&scene(asset, "", &obj("").replace("y=\"100\"", "y=\"100\" morphWeights=\"1\""), "")) else { return };
+    let Some(attr) = render(&scene(asset, "", &obj("").replace("y=\"100\"", "y=\"100\" morphWeights=\"1\""), ""))
+    else {
+        return;
+    };
     assert_eq!(attr.at(32, 12)[3], 0.0, "the attribute at weight 1");
 }
 

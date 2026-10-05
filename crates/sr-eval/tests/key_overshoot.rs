@@ -49,7 +49,9 @@ fn back_in_and_in_out_read_it_too() {
 fn elastic_period_sets_the_ringing_and_the_default_is_unchanged() {
     // elastic-out(u) = 2^(-10u) sin((10u - p*10/4) * 2pi*0.1/p) + 1, default p = 0.3 (easings.net C4 = 2pi/3)
     let at = |attrs: &str, t: f64| x_at(&document(attrs, "elastic-out"), t);
-    let reference = |u: f64, p: f64| 100.0 * (2f64.powf(-10.0 * u) * ((10.0 * u - p * 2.5) * 2.0 * std::f64::consts::PI * 0.1 / p).sin() + 1.0);
+    let reference = |u: f64, p: f64| {
+        100.0 * (2f64.powf(-10.0 * u) * ((10.0 * u - p * 2.5) * 2.0 * std::f64::consts::PI * 0.1 / p).sin() + 1.0)
+    };
     for u in [0.1, 0.25, 0.4, 0.7] {
         assert!((at("", u) - reference(u, 0.3)).abs() < 1e-9, "default at {u}");
         assert!((at(r#"period="0.3""#, u) - at("", u)).abs() < 1e-9, "explicit default at {u}");

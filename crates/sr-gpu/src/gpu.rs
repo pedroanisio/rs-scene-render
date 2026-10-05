@@ -130,7 +130,9 @@ pub fn choose_adapter_for(found: &[wgpu::AdapterInfo], name: Option<&str>, needs
             if can_run_3d(&found[i]) {
                 Ok(i)
             } else {
-                Err(GpuError::NoThreeD { why: format!("the adapter asked for, {}, cannot run them", describe(&found[i])) })
+                Err(GpuError::NoThreeD {
+                    why: format!("the adapter asked for, {}, cannot run them", describe(&found[i])),
+                })
             }
         }
         None => {
@@ -139,7 +141,10 @@ pub fn choose_adapter_for(found: &[wgpu::AdapterInfo], name: Option<&str>, needs
             }
             (0..found.len()).filter(|&i| can_run_3d(&found[i])).min_by_key(|&i| rank(&found[i])).ok_or_else(|| {
                 GpuError::NoThreeD {
-                    why: format!("none of the adapters found can run them ({})", found.iter().map(describe).collect::<Vec<_>>().join(", ")),
+                    why: format!(
+                        "none of the adapters found can run them ({})",
+                        found.iter().map(describe).collect::<Vec<_>>().join(", ")
+                    ),
                 }
             })
         }

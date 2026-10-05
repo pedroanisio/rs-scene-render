@@ -272,7 +272,9 @@ fn drafts_burn_captions_where_the_final_frame_has_them() {
     let full = at_quality(&gpu, &d, 0.5, Some(ProjectQuality::Final));
     let draft = at_quality(&gpu, &d, 0.5, Some(ProjectQuality::Draft));
     assert_eq!(draft.size, [64, 48]);
-    let lit = |s: &Shot| (0..s.size[1]).flat_map(|y| (0..s.size[0]).map(move |x| (x, y))).filter(|&(x, y)| s.at(x, y)[0] > 0.5).count();
+    let lit = |s: &Shot| {
+        (0..s.size[1]).flat_map(|y| (0..s.size[0]).map(move |x| (x, y))).filter(|&(x, y)| s.at(x, y)[0] > 0.5).count()
+    };
     assert!(lit(&full) > 20, "the final frame has the caption: {}", lit(&full));
     assert!(lit(&draft) > 5, "the draft frame lost its caption: {} lit pixels", lit(&draft));
     let db = psnr(&draft.px, &half(&full));
