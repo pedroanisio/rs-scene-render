@@ -27,11 +27,9 @@
          the impact launches it, with its own velocity and a mass of about 40 kg (a rock of 0.34 m at 2100 kg/m3),
          and then falls under gravity and lands on the ground (the ground is their collider, so they
          meet the crater while it is still forming; they are born clear of its surface by their collision
-         radius). Only the render size is authored here. The contact has the solver's friction of zero, so they slide
-         on a pit that holds them back only by its shape: a friction of 0.7 (about tan 35 degrees, the angle of
-         repose of coarse rock debris) with a restitution of 0.15 settles 3513 of the 4000 by 5.9 s, but stops the
-         particle solver for the heaviest rock of the acceptance sweep, so it is not authored here (see the SREP). -->
-    <particles3D id="ejecta" shape="sphere" segments="6" material="rock" rate="0" seed="20261004" size="0.34" gravityY="9.80665" drag="0" lifetime="6" dt="0.0416666666666667" maxParticles="4000" colliders="ground">
+         radius, 0.17 m, that of the rocks they stand for). A friction of 0.7 (about tan 35 degrees, the angle of repose of
+         coarse rock debris) with a restitution of 0.15 settles them on the pit instead of letting them slide on it. -->
+    <particles3D id="ejecta" shape="sphere" segments="6" material="rock" rate="0" seed="20261004" size="0.34" gravityY="9.80665" drag="0" lifetime="6" dt="0.0416666666666667" maxParticles="4000" colliders="ground" bounce="0.15" friction="0.7" collisionRadius="0.17">
       <burst crater="pit" count="4000"/>
     </particles3D>
     <!-- 48 x 56 x 48 m at 1 m cells, the ground 18 m above the bottom face: the smoke source is a sphere of
