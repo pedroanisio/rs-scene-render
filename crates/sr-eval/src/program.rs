@@ -357,6 +357,9 @@ pub struct ElemTarget {
     pub name: &'static str,
     /// Owning node, if inside one.
     pub node: Option<u32>,
+    /// The element's own `@id` as nodes see it: scoped by the instances it sits in (`inst/b0`). Parts of a node
+    /// (bones, masks, paint stops) carry one when they declare an id, so `prop("b0.rotation")` and links find them.
+    pub id: Option<Arc<str>>,
     /// Static attribute kinds and values.
     pub attrs: Vec<(Arc<str>, PropKind, Value)>,
     /// Slots.
@@ -2082,6 +2085,17 @@ impl Lookup for DocLookup<'_> {
 
 impl Builder {
     fn add_element(&mut self, key: Arc<str>, e: &dyn Element, node: Option<u32>, doc: u16) -> u32 {
+        self.add_element_with_id(key, e, node, doc, None)
+    }
+
+    fn add_element_with_id(
+        &mut self,
+        key: Arc<str>,
+        e: &dyn Element,
+        node: Option<u32>,
+        doc: u16,
+        id: Option<Arc<str>>,
+    ) -> u32 {
         let i = self.elements.len() as u32;
         let mut attrs = snapshot(e, &self.doc(doc).tokens);
         // effects and transitions report their schema type name
@@ -2089,7 +2103,7 @@ impl Builder {
             let params = shader_params(e, &attrs);
             attrs.extend(params);
         }
-        self.elements.push(ElemTarget { key, name: e.element_name(), node, attrs, slots: Vec::new() });
+        self.elements.push(ElemTarget { key, name: e.element_name(), node, id, attrs, slots: Vec::new() });
         i
     }
 
@@ -2213,6 +2227,7 @@ impl Builder {
                                     key,
                                     name: "motionPath",
                                     node: Some(n),
+                                    id: None,
                                     attrs: vec![(Arc::from("progress"), spec.kind, Value::Num(0.0))],
                                     slots: Vec::new(),
                                 });
@@ -2262,7 +2277,14 @@ impl Builder {
                 let key = format!("{path}/{name}[{k}]");
                 *k += 1;
                 if children(c).iter().any(|g| ANIM.contains(&g.element_name())) {
-                    let t = self.add_element(key.as_str().into(), c, Some(n), doc);
+                    let id = c.element_id().map(|i| -> Arc<str> {
+                        if scope.is_empty() {
+                            i.into()
+                        } else {
+                            format!("{scope}/{i}").into()
+                        }
+                    });
+                    let t = self.add_element_with_id(key.as_str().into(), c, Some(n), doc, id);
                     self.nodes[n as usize].parts.push(t);
                     self.animate(Owner::Element(t), c, Some(n), doc, &scope, &key);
                 }
@@ -2709,6 +2731,19 @@ impl Resolver for ExprResolver<'_> {
         if let Some(t) = self.b.elements.iter().position(|e| &*e.key == id) {
             return self.b.slot(Owner::Element(t as u32), prop);
         }
+        // an animated part of a node that declares this id (a bone, a mask), from the scope outward
+        let mut scope = self.scope.to_string();
+        loop {
+            let want = if scope.is_empty() { id.to_string() } else { format!("{scope}/{id}") };
+            if let Some(t) = self.b.elements.iter().position(|e| e.id.as_deref() == Some(want.as_str())) {
+                return self.b.slot(Owner::Element(t as u32), prop);
+            }
+            match scope.rfind('/') {
+                Some(i) => scope.truncate(i),
+                None if scope.is_empty() => break,
+                None => scope.clear(),
+            }
+        }
         // a static element outside the composition
         let scene = self.b.docs[self.doc as usize].scene.clone();
         let mut found = None;
@@ -2777,6 +2812,13 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let roots = b.instantiate(&scene.composition.children, None, &root);
     b.transitions();
     b.resolve_links();
+    // the animated parts of every node exist before anything reads them: a link or expression may name a bone
+    // or another part that sits later in the document
+    for n in 0..b.nodes.len() as u32 {
+        if b.nodes[n as usize].name != "copy" {
+            b.parts(n);
+        }
+    }
     for n in 0..b.nodes.len() as u32 {
         let node = &b.nodes[n as usize];
         if node.name == "copy" {
@@ -2784,7 +2826,6 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         }
         let (elem, doc_ix, scope, id) = (node.elem.clone(), node.doc, node.scope.clone(), node.id.clone());
         b.animate(Owner::Node(n), &*elem, Some(n), doc_ix, &scope, &id);
-        b.parts(n);
         if let Some(c) = attr_str(&*elem, "condition") {
             let seed = b.project_seed;
             b.pending_expr.push((None, Some(n), c, seed, elem.loc(), scope.clone(), doc_ix));

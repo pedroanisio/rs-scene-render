@@ -158,3 +158,19 @@ fn unreadable_tracking_data_is_e17() {
     let Err(e) = Evaluator::new(&d, &EvalOptions::default()) else { panic!("expected E17") };
     assert!(e.diagnostics.iter().any(|x| x.code == "E17"), "{e}");
 }
+
+#[test]
+fn a_bone_is_a_source_for_links_and_expressions_in_either_order() {
+    // a bone is an element with an id and animatable properties: `b0.rotation` must read its animated
+    // value, not its static one, wherever the reading node sits in the document
+    let skeleton = r##"<skeleton id="rig"><bone id="b0" length="10"><animate property="rotation"><key time="0" value="0"/><key time="1" value="90"/></animate></bone></skeleton>"##;
+    let linked = r##"<group id="g" width="10" height="10"><link property="rotation" source="b0.rotation"/></group>"##;
+    let scripted = r##"<group id="h" width="10" height="10"><expression property="rotation">prop("b0.rotation") * 2</expression></group>"##;
+    for body in [format!("{skeleton}{linked}{scripted}"), format!("{linked}{scripted}{skeleton}")] {
+        let d = doc(&body, "");
+        let (half, full) = (eval(&d, 0.5), eval(&d, 1.0));
+        assert!((rot(node(&half, "g")) - 45.0).abs() < 1e-6, "link at 0.5 s: {}", rot(node(&half, "g")));
+        assert!((rot(node(&full, "g")) - 90.0).abs() < 1e-6, "link at 1 s: {}", rot(node(&full, "g")));
+        assert!((rot(node(&full, "h")) - 180.0).abs() < 1e-6, "expression at 1 s: {}", rot(node(&full, "h")));
+    }
+}
