@@ -435,17 +435,20 @@ Dust derived from solids is thick. A dust density that is a volume fraction of
 solids (about 1e-3 per cell) has an extinction coefficient of roughly
 3Q/(2d) per unit of solid fraction, with Q about 2 and d the grain diameter in
 scene units, so `medium@extinction` is of the order of 1.5 divided by the grain
-diameter. Measured on the impact smoke at 1 m cells (100 micrometre grains, so
-30000): 300 is faint but visible, 3000 reads as smoke and 30000 is an almost
-opaque dome with a hard edge. Such a medium is thick across a cell for grid
-lighting (see the known limits below).
+diameter. On the impact smoke at 1 m cells (100 micrometre grains, so 30000):
+300 is faint but visible, 3000 reads as smoke and 30000 is an almost opaque dome
+with a hard edge (1280×720 frames judged by eye, 2026-10-04, commit e144806; ledger:
+"Light grids for the in-scattering of media"). Such a medium is thick across a cell
+for grid lighting (see the known limits below).
 
 Tiled and whole-frame renders of a grid frame are identical. Surface shading of
 volume shadows (a surface lit through the medium) still uses the exact march.
 
-Known limits, measured against `lighting="exact"` at 512 samples per pixel with
-the default `lightGridCell` 1 and 64 dome directions, on the plume of a 1280×720
-frame, over the region above the horizon (PSNR and CIEDE2000 ΔE):
+Known limits, against `lighting="exact"` at 512 samples per pixel with the default
+`lightGridCell` 1 and 64 dome directions, on the plume of a 1280×720 frame, over the
+region above the horizon (PSNR and CIEDE2000 ΔE; measured on the NVIDIA adapter on
+2026-10-04 with the shader of commit ce124c6, load not recorded; ledger: "Light grids
+for the in-scattering of media"):
 
 | Case | PSNR | max ΔE | mean ΔE |
 |---|---|---|---|
@@ -453,39 +456,36 @@ frame, over the region above the horizon (PSNR and CIEDE2000 ΔE):
 | The same plume with 100,000 ejecta fragments in and around it | 47.8 dB | 3.89 | 0.48 |
 
 - Surfaces much thinner than a cell are not resolved: the grid sees them as a
-  smoothed shadow. Eight-point visibility sampling raised the ejecta case from
-  45.7 dB (ΔE max 4.89, one centred sample) to 47.8 dB; finer cells help little
-  once sampling is smooth (cell 2 and 3 measured 45.4 and 44.3 dB against 46.2 dB at
-  cell 1 on the sun-only variant), so the ejecta case stays under the 50 dB and
-  ΔE 2 figure that holds without thin occluders. Part of the measured difference
-  is the two renders' independent sampling noise at 512 samples; it was not
-  separated out.
+  smoothed shadow, so the ejecta case stays under the 50 dB and ΔE 2 figure that
+  holds without thin occluders. Part of the difference is the two renders'
+  independent sampling noise at 512 samples; it was not separated out. Finer cells
+  help little once the visibility sampling is smooth (cells of 2 and 3 voxels gave
+  45.4 and 44.3 dB against 46.2 dB at 1 on the sun-only variant).
 - An area light (rectangle, disc or sphere) close to the volume has a penumbra
-  the grid replaces with the visibility toward the light's centre. Measured on a
-  rectangle light at 60, 14 and 9 scene units from the medium: 65, 53 and 43 dB;
-  sphere light: 66, 56 and 50 dB. Use `lighting="exact"` for lights within about
-  ten times their own size of the medium.
+  the grid replaces with the visibility toward the light's centre: 65, 53 and 43 dB
+  for a rectangle light at 60, 14 and 9 scene units from the medium, 66, 56 and
+  50 dB for a sphere light (same measurement). Use `lighting="exact"` for lights
+  within about ten times their own size of the medium.
 - Optically thick cells are lit less accurately. The grid interpolates
   transmittance linearly between nodes, which is a poor model where transmittance
   falls from 1 to near 0 inside one cell. The renderer measures the optical depth
   across one cell (extinction × `densityScale` × the peak density × the node
   spacing) and, above 4, reports it in the frame's unsupported notes with the value
   and the advice to use `lighting="exact"` or a smaller `lightGridCell`; the frame
-  still renders. Measured on the impact smoke at 1 unit cells and extinction 30000
-  (depth 40 per cell; 640×360, region around the dome, against an exact render with
-  `stepSize` 0.05 at 32 samples per pixel, so the reference is itself noisy): 34.6 dB
-  as rendered and 40.2 and 41.0 dB after Gaussian blurs of 2 and 4 pixels, which
-  remove the noise and keep the structure. The horizontal and vertical lines
+  still renders. On the impact smoke at 1 unit cells and extinction 30000 (depth 40
+  per cell; 640×360, region around the dome, against an exact render with `stepSize`
+  0.05 at 32 samples per pixel, so the reference is itself noisy; 2026-10-04, commit
+  00874e2, load 10 to 15) the grid gives 34.6 dB as rendered and 40.2 and 41.0 dB
+  after Gaussian blurs of 2 and 4 pixels, which remove the noise and keep the
+  structure. The horizontal and vertical lines
   visible in very thick smoke come from the 1 unit voxels of the density field,
   each about 40 deep optically, and appear equally in the exact render (mean
-  row-to-row step in the dome interior: exact 0.0089, grid 0.0091). Depths 13,
-  6.6 and 4 (extinctions 10000, 5000 and 3000) were judged by eye on one frame:
-  faint lines, barely visible ones and none.
-- Interpolating optical depth instead of transmittance (with visibility kept
-  separate) was measured and not adopted: 35.0, 42.4 and 43.5 dB on the same thick
-  case against 34.6, 40.2 and 41.0 dB, and 55.8 and 47.7 dB against 56.4 and 47.8 dB
-  on the thin plume without and with ejecta, for a second march in the shader and a
-  changed buffer layout.
+  row-to-row step in the dome interior: exact 0.0089, grid 0.0091). Depths 13, 6.6
+  and 4 (extinctions 10000, 5000 and 3000) show faint lines, barely visible ones
+  and none (one frame, judged by eye).
+- Transmittance, not optical depth, is what the grid interpolates. Interpolating
+  optical depth with the visibility kept separate was measured on a prototype and
+  not adopted (ledger: "Light grids for the in-scattering of media").
 - A medium with `anisotropy` ≠ 0 costs one scalar grid per fixed dome direction;
   the lattice, `lightGridDomeDirections` and the number of lights must fit in
   `lightGridMemoryMiB`.
@@ -918,11 +918,12 @@ The regression compares 64 shared instances with independently expanded meshes
 under opaque and lit textured materials, normal maps, opacity, participating
 media and coincident placement. Pixel differences stay below 0.003. Shared
 geometry fits a 2 MiB binding limit that rejects expansion. The unchanged UHD
-impact still at 1.5 seconds reports 101,272 physical triangles, 44.977 seconds GPU
+impact at 1.5 seconds reports 101,272 physical triangles, 44.977 seconds GPU
 frame time, 52.91 seconds wall time and 573,220 KiB peak host RSS on RTX 6000 Ada
-Vulkan. The preceding expanded frame used 44.094 seconds GPU time, 55.77 seconds
-wall time and 584,708 KiB host RSS. These single observations demonstrate a small
-host-memory reduction, not a GPU speedup or sequence-throughput improvement.
+Vulkan; the expanded frame used 44.094 seconds GPU time, 55.77 seconds wall time and
+584,708 KiB host RSS (single observations on a build before 2026-10-04, commit not
+recorded, not repeated). They demonstrate a small host-memory reduction, not a GPU
+speedup or sequence-throughput improvement.
 Geometry sharing is rebuilt per frame; persistent caching remains unverified.
 
 Scene colliders use primitive surfaces or mesh rest poses, including finite
@@ -2415,18 +2416,16 @@ behaviours apply to them, none needing a schema attribute:
 
 - **Dome behind glass.** A path that crosses a refracting surface and then
   reaches nothing, or reflects off it up to the sky, sees the 2D layers behind
-  the 3D pass; where those layers leave the pixel open it now also sees the
-  visible dome (layer colour plus one minus its alpha times the dome). A dome
-  that is not visible stays hidden. Before, such a path ended in black: the
-  water of the ocean scenes had a black band at the horizon where the dome
-  should reflect.
+  the 3D pass and, where those layers leave the pixel open, the visible dome
+  (layer colour plus one minus its alpha times the dome). A dome that is not
+  visible stays hidden.
 - **Absorption.** `attenuationColor` and `attenuationDistance`, which the
-  rasteriser already used, apply to path-traced paths: a path that refracts into
+  rasteriser also uses, apply to path-traced paths: a path that refracts into
   a surface carries the Beer–Lambert coefficient `-ln(colour) / distance` per
   channel until it leaves, so after one attenuation distance of water the light
   left is the colour itself. A colour without a distance, or a white colour, does
   not absorb. Absorption is tracked only in scenes that have a transmissive
-  material; others keep their pipeline, pixels and speed.
+  material; other scenes keep their pipeline, pixels and speed.
 - **Analytic lights below a refracting surface.** The shadow ray of a surface
   seen from inside the denser medium (a path that refracted in before reaching
   it) does not stop at the interface. It is refracted there, found by trace and
@@ -2436,22 +2435,41 @@ behaviours apply to them, none needing a schema attribute:
   angle the interface changes (radiance is not scaled by `1 / eta^2` at
   refraction in this renderer, so this factor is what makes the sum agree with
   brute force) and the absorption along the water path. Shadows cast by glass on
-  surfaces in air stay black, as before. The dome needed no change: it reaches
-  submerged surfaces by sampled paths and agrees with 24 bounces at 4 (within
-  3 %, 57 dB).
+  surfaces in air are black. The dome reaches submerged surfaces by sampled paths
+  and needs no such term.
 
-Measured against brute force (the light replaced by an emissive copy that
-paths find, 1024 samples, flat water 4 units over a diffuse floor, 320×180,
-NVIDIA), as the open floor's brightness under water over its brightness dry:
-sun 0.604 against 0.613; point light and sphere light 0.728 against 0.770 (the
-light's radiance is taken at the straight distance, so a near light is a few
-percent dim); the closed form of a vertical sun over absorbing water within 1 %
-per channel; a submerged box's shadow 10.0 units long against 9.9 refracted
-(15.1 would be the straight direction). Under steep waves (amplitude 1.2,
-wavelength 10) the floor is never brighter than the dry floor and stays within
-5 % of the flat sea's mean, with no flare. Before these changes the sun
-contributed nothing below a transmissive surface (0.000 against 0.613), and 59 %
-of the light of the frame was lost.
+Scenes without a transmissive material render the same bytes at the same speed.
+The ocean's default spray (transmission .6) is such a material, so frames with
+whitewater are lit by this path.
+
+Agreement with brute force (the light replaced by an emissive copy that paths
+find, 1024 samples, flat water 4 units over a diffuse floor, 320×180; commit
+c6195de, NVIDIA adapter, 2026-10-05; the renders are deterministic, so the figures
+do not depend on load), as the open floor's brightness under water over its
+brightness dry: sun 0.604 against 0.613; point light 0.728 and sphere light 0.728
+against 0.770 (the light's radiance is taken at the straight distance, so a near
+light is a few percent dim). Closed form of a vertical sun over absorbing water:
+within 1 % per channel. A submerged box's shadow is 10.0 units long where the
+refracted direction gives 9.9 and the straight one 15.1. Under steep waves
+(amplitude 1.2, wavelength 10) the floor is never brighter than the dry floor and
+stays within 5 % of the flat sea's mean, with no flare (tests in
+`crates/sr-gpu/tests/water_light.rs`; ledger: "Light through water and glass in
+the path tracer").
+
+Dome light needs no term of its own below the surface: with 4 bounces a floor
+under water agrees with 24 bounces within 3 % (test
+`dome_light_through_water_does_not_depend_on_the_bounce_limit`, commit c6195de,
+2026-10-05, NVIDIA).
+
+On a software adapter the three brute-force comparisons render half-size frames
+(the same view, the patch scaled with them) at 1024 samples, with the tolerance the
+test states or four times the noise of the references' means when that is larger
+(commit d9aeb32, 2026-10-05, llvmpipe at a load average of 15: the three tests take
+370 s for the three tests, 597 s for the whole test binary instead of 2018 s). The half-size reference of the point and sphere
+lights reads about 5 % above the full-size one (0.810 against 0.770), a bias of the
+half-size frame that the 15 % margin absorbs: the measured errors are 2.1 % (sun)
+and 10.0 % and 10.1 % (point and sphere); `SR_BRUTE_FORCE=full` forces the full size
+on any adapter and nothing reduces them on a GPU.
 
 Known limits. A camera that starts under the water, or a surface reached
 without a refraction into its medium, is not "inside": the sun does not reach
@@ -2463,18 +2481,21 @@ dark, never bright. A textured transmissive surface uses its uniform base
 colour for the tint in the shadow ray. A smoke medium and refracting surfaces
 in one pass are lit independently: the shadow ray does not cross the medium.
 Caustics (light focused by the water surface) are not produced; flat water is
-the exact single-refraction case, a wavy sea an approximation.
+the exact single-refraction case, a wavy sea an approximation. A transmissive
+plane that covers the whole sea (the `farSea` plane of `impact-ocean.scene.xml`, when its
+water material is transmissive)
+tints and hides everything below it as well.
 
-What changes in images: surfaces behind water or glass now receive the analytic
-lights, `attenuationColor` and `attenuationDistance` take effect in path-traced
-renders, and glass or water over nothing shows the visible dome. The
-example `examples/cinematic-impact/impact.scene.xml`, whose water has
-transmission 0.85, goes from a mean brightness of 0.00663 to 0.00909 at
-t = 2.0 (plume and ejecta removed for the measurement). Scenes without a
-transmissive material render the same bytes at the same speed. The ocean's default
-spray (transmission .6) is such a material: a 3840×2160 frame of the hero scene,
-whose whitewater is on, changes in 394 pixels (at most 28 code values) around the
-spray, and is identical with the whitewater removed.
+Two software-adapter tests are unstable on both commits measured. On 2026-10-05
+(llvmpipe, load average 7 in the interleaved set, 3 to 6 in the others; commits
+60a458c and b883ec5; raw logs in the ledger), `effect_costs`
+`layers_whose_content_changes_are_still_sampled_one_by_one` failed 4 of 10 runs on
+60a458c and 2 of 10 on b883ec5 (PSNR 30.7 to 39.1 dB against 40), and 1 of 15 and 0
+of 15 with one llvmpipe thread (`LP_NUM_THREADS=1`); `composite`
+`polygons_and_stars_lie_on_the_inscribed_ellipse` failed 2 of 50 and 4 of 50 runs with
+the default threads and 0 of 80 with one llvmpipe thread. The tests measure image quality and pixel
+values, not time; the difference between the two commits is not significant, and the
+conclusion holds for these two commits only.
 
 ## SRVOL cache version 1
 
