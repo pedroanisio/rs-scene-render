@@ -54,6 +54,19 @@ fn total(ev: &Evaluator, last: u64) -> (f64, [f64; 2], Vec<u32>, usize) {
     (volume, momentum, cells, entries)
 }
 
+/// What the ocean is given in its canonical steps `first` to `last`.
+fn total_between(ev: &Evaluator, first: u64, last: u64) -> (f64, [f64; 2]) {
+    let (mut volume, mut momentum) = (0.0, [0.0; 2]);
+    for step in first..=last {
+        for cell in ev.splash_into("sea", step).unwrap() {
+            volume += cell.volume;
+            momentum[0] += cell.momentum[0];
+            momentum[1] += cell.momentum[1];
+        }
+    }
+    (volume, momentum)
+}
+
 fn alive(ev: &Evaluator, t: f64) -> usize {
     let frame = ev.evaluate(t);
     assert!(
@@ -216,7 +229,11 @@ fn sea(ev: &Evaluator, t: f64) -> Vec<sr_sim::ocean::Cell> {
 }
 
 fn water(cells: &[sr_sim::ocean::Cell]) -> f64 {
-    cells.iter().map(|c| c.depth).sum::<f64>() * CELL * CELL
+    water_of(cells, CELL)
+}
+
+fn water_of(cells: &[sr_sim::ocean::Cell], cell: f64) -> f64 {
+    cells.iter().map(|c| c.depth).sum::<f64>() * cell * cell
 }
 
 fn momentum(cells: &[sr_sim::ocean::Cell]) -> [f64; 2] {
@@ -359,4 +376,57 @@ fn a_time_inside_a_canonical_step_has_what_falls_until_the_step_ends() {
     let _ = alive(&ev, 7.5);
     assert_eq!(bits(&ev, 5.017), first, "after going later and back");
     assert_eq!(bits(&evaluator(&basin(60.0)), 5.017), first, "from a fresh evaluator");
+}
+
+// ---- a beach: the crater is on land and the ocean is next to it ----
+
+/// The rock lands 25 m from the shore, on a ground that ends at the shore, thrown toward the water; the ejecta
+/// fall on the ground and bounce on it unless they pass the shore, and the ocean 200 m square begins there.
+fn beach(angle: f64) -> String {
+    let (vx, vy) = (100.0 * angle.to_radians().cos(), 100.0 * angle.to_radians().sin());
+    let launch = vy - GRAVITY * FLIGHT;
+    let (x, y) = (-25.0 - vx * FLIGHT, -2.0 - launch * FLIGHT - 0.5 * GRAVITY * FLIGHT * FLIGHT);
+    format!(
+        r##"<scene version="1.3"><project width="64" height="64" fps="24" duration="8"/><composition>
+          <object3D id="rock" primitive="sphere" radius="2" x="{x}" y="{y}">
+            <rigidBody shape="sphere" mass="{MASS}" velocityX="{vx}" velocityY="{launch}" restitution="0" linearDamping="0" angularDamping="0"/>
+          </object3D>
+          <object3D id="ground" primitive="plane" width="160" height="160" segments="160" x="-80" y="0" rotationX="-90">
+            <crater id="pit" source="rock" targetMaterial="softRock"/>
+            <rigidBody type="static" shape="auto"/>
+          </object3D>
+          <particles3D id="debris" rate="0" lifetime="8" dt="0.0416666666666667" gravityY="9.80665" maxParticles="4000" size="0.34" colliders="ground">
+            <burst crater="pit" count="4000"/>
+          </particles3D>
+          <ocean id="sea" x="100" y="1" width="200" depth="200" cellSize="2" dt="0.0416666666666667" boundary="closed" splash="debris"/>
+        </composition>
+        <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none" fixInternalEdges="true"/></scene>"##
+    )
+}
+
+#[test]
+fn on_a_beach_what_lands_on_the_ground_stays_and_what_passes_the_shore_is_given_to_the_water() {
+    let ev = evaluator(&beach(60.0));
+    let left = alive(&ev, 7.0);
+    let (volume, given, cells, _) = total(&ev, 167);
+    println!("BEACH {left} of 4000 are on the ground, {} fell in: {volume:.4} m3, momentum {given:.4?}", 4000 - left);
+    assert!(left > 0 && left < 4000, "some land and some fall in: {left}");
+    // all given inside the ocean's 100 x 100 cells, thrown toward the water
+    assert!(cells.iter().all(|&c| (c as usize) < 100 * 100));
+    assert!(volume > 0.0 && given[0] > 0.0, "{volume} {given:?}");
+    // the closed basin has the water it had
+    let (before, after) = (water_of(&sea(&ev, 0.0), 2.0), water_of(&sea(&ev, 7.0), 2.0));
+    assert!((after - before).abs() < 1e-9 * before, "{before} then {after}");
+    // and, before the waves have been turned back by the shore wall that the first of them fall next to, the
+    // momentum it was given: from the first step that has any to the second after it
+    let first = (0..=167u64).find(|&s| !ev.splash_into("sea", s).unwrap().is_empty()).expect("some fell in");
+    let (_, given) = total_between(&ev, first, first + 1);
+    let time = (first + 2) as f64 * STEP;
+    let moved = sea(&ev, time)
+        .iter()
+        .fold([0.0; 2], |m, c| [m[0] + c.depth * c.velocity[0] * 4.0, m[1] + c.depth * c.velocity[1] * 4.0]);
+    println!("BEACH first fall in step {first}: given {given:.6?}, in the ocean {moved:.6?}");
+    for axis in 0..2 {
+        assert!((moved[axis] - given[axis]).abs() < 1e-3 * given[0].hypot(given[1]), "{moved:?} against {given:?}");
+    }
 }
