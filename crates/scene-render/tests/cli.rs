@@ -1506,3 +1506,29 @@ fn validate_warns_about_attributes_this_build_does_not_read() {
     assert!(out.contains("warning[E19]") && out.contains("collapse"), "{out}");
     assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
 }
+
+#[test]
+fn encode_strict_accepts_posterize_time_on_a_node_that_starts_later() {
+    // a node absent at its posterized step start is drawn as it was, which is nothing: not a delivery gap
+    let f = compile_fixture(
+        "pt-start",
+        "",
+        r##"<group id="m" x="0" y="20" width="20" height="20" effects="pt" start="0.2"><shape id="b" shape="rect" x="0" y="0" width="20" height="20" fill="#FFFFFF"/></group>"##,
+    );
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("</scene>", r#"<effects><effect id="pt" type="posterize-time" frequency="8"/></effects></scene>"#);
+    std::fs::write(&f, text).unwrap();
+    let out = PathBuf::from(&f).with_file_name("pt_%03d.png");
+    let o = run(&["encode", &f, "-o", out.to_str().unwrap(), "--end", "0.5", "--strict"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
