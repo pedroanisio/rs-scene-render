@@ -671,6 +671,13 @@ impl Sims {
                         .as_ref()
                         .map(|e| (e, splash, p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()))),
                 };
+                if let Some(emitter) = &rt.splash {
+                    // the ocean reads what falls until the end of its step, which is later than this frame
+                    let until = emitter.needed_until(g.time, p.nodes[node as usize].start);
+                    if until > n.local_time {
+                        rt.emitter.at(until, &mut d).map_err(|e| e.to_string())?;
+                    }
+                }
                 let frame = rt.emitter.at(n.local_time, &mut d).map_err(|e| e.to_string())?.clone();
                 let mut key = crate::rng::hash(&[frame.time.to_bits(), frame.emitted, frame.dropped]);
                 for p in &frame.particles {

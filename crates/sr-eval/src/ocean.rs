@@ -34,6 +34,8 @@ struct Runtime {
     colliders: Option<colliders::Colliders>,
     /// Cavities of bodies that enter the water.
     entries: Vec<cavity::Entry>,
+    /// Whether particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
+    splash: bool,
 }
 #[derive(Default)]
 pub(crate) struct Sims {
@@ -136,6 +138,11 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         Some(built)
     };
     let entries = cavity::read(e, &collider_ids)?;
+    let splash = text(e, "splash").is_some();
+    if splash {
+        // the driver gives what the particles bring at the sample that closes each canonical step
+        spec.moving_bed = true;
+    }
     let solver = sim::Ocean::new(spec.clone(), bed.clone(), cells, impulses).map_err(|e| e.to_string())?;
     let whitewater = e
         .children
@@ -175,6 +182,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         last: None,
         colliders,
         entries,
+        splash,
     })
 }
 /// The solver's frame at `time`, over the driven bed when there is a driver.
@@ -210,6 +218,7 @@ impl Sims {
         graphs: &mut Graphs<'_>,
         fields: &FieldSrc,
         mut physics: Option<&mut PhysicsRt>,
+        splash: &crate::splash::Log,
     ) {
         let at = g.time;
         for i in 0..g.nodes.len() {
@@ -234,7 +243,18 @@ impl Sims {
                 if let Some(last) = rt.last.as_ref().filter(|s| s.frame.time == local_time) {
                     return Ok(last.clone());
                 }
-                let Runtime { solver, spec, bed, waves, whitewater, surface_bytes, last, colliders, entries } = rt;
+                let Runtime {
+                    solver,
+                    spec,
+                    bed,
+                    waves,
+                    whitewater,
+                    surface_bytes,
+                    last,
+                    colliders,
+                    entries,
+                    splash: takes,
+                } = rt;
                 let ppm = p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get());
                 // The bed is a function of ocean-local time, read from the scene at every
                 // solver step; a failure in it is reported as the solver's.
@@ -262,7 +282,20 @@ impl Sims {
                     if let Some((step, momentum)) = forcing.exchange {
                         tests::OFFERS.with(|o| o.borrow_mut().push((step, momentum, forcing.bodies.clone())));
                     }
+                    // what the particles that fell into the ocean bring, at the sample that closes the step
+                    if let (true, Some((step, _))) = (*takes, forcing.exchange) {
+                        let read = splash.read(&id, step).map_err(|message| {
+                            *failure.borrow_mut() = Some(message);
+                            sim::Error::Invalid("ocean splash unavailable")
+                        })?;
+                        forcing.splash = read;
+                    }
                     let (Some(colliders), Some(node)) = (colliders.as_mut(), node) else {
+                        if colliders.is_none() {
+                            // nothing moves the bed: it is the bathymetry
+                            forcing.bed.copy_from_slice(bed);
+                            return Ok(());
+                        }
                         return Err(sim::Error::Invalid("ocean collider without a scene node"));
                     };
                     let mut scene_at = |sim_time: f64| -> Result<Arc<FrameGraph>, String> {

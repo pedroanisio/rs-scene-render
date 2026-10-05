@@ -191,3 +191,172 @@ fn an_emitter_belongs_to_one_ocean_and_an_ocean_that_takes_particles_has_no_scal
     let frame = evaluator(&scaled).evaluate(2.0);
     assert!(frame.failures.iter().any(|m| m.contains("no scale")), "{:?}", frame.failures);
 }
+
+// ---- the ocean's side: what the ocean does with what the particles bring ----
+
+const CELLS: usize = 100;
+const CELL: f64 = 4.0;
+const STEP: f64 = 0.0416666666666667;
+
+/// The same scene with a closed basin, so that all the water that is in it stays in it.
+fn basin(angle: f64) -> String {
+    scene(angle, "", "").replace(r#"boundary="open""#, r#"boundary="closed""#)
+}
+
+/// The depths and velocities of every cell of the ocean at `t`.
+fn sea(ev: &Evaluator, t: f64) -> Vec<sr_sim::ocean::Cell> {
+    let frame = ev.evaluate(t);
+    assert!(
+        frame.problems.is_empty() && frame.failures.is_empty(),
+        "t = {t}: {:?} {:?}",
+        frame.problems,
+        frame.failures
+    );
+    frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().frame.cells.clone()
+}
+
+fn water(cells: &[sr_sim::ocean::Cell]) -> f64 {
+    cells.iter().map(|c| c.depth).sum::<f64>() * CELL * CELL
+}
+
+fn momentum(cells: &[sr_sim::ocean::Cell]) -> [f64; 2] {
+    cells.iter().fold([0.0; 2], |m, c| {
+        [m[0] + c.depth * c.velocity[0] * CELL * CELL, m[1] + c.depth * c.velocity[1] * CELL * CELL]
+    })
+}
+
+/// A solver of the same basin that is given the entries of `ev` by canonical step, the way the evaluator does,
+/// with `dense` giving every cell of the basin in every step, those that receive nothing with nothing.
+fn reference(ev: &Evaluator, steps: u64, dense: bool) -> Vec<sr_sim::ocean::Cell> {
+    use sr_sim::ocean::{Boundary, Cell, Forcing, Ocean, Order, Spec, SplashCell};
+    let spec = Spec {
+        cells: [CELLS, CELLS],
+        origin: [-200.0, -200.0],
+        cell_size: CELL,
+        dt: STEP,
+        gravity: 9.81,
+        damping: 0.0,
+        dry_tolerance: 1e-10,
+        boundary: Boundary::Closed,
+        order: Order::First,
+        max_bytes: 256 << 20,
+        checkpoint_bytes: 64 << 20,
+        max_work: 100_000_000,
+        moving_bed: true,
+        ..Default::default()
+    };
+    let n = CELLS * CELLS;
+    let mut ocean = Ocean::new(spec, vec![10.0; n], vec![Cell { depth: 10.0, velocity: [0.0; 2] }; n], vec![]).unwrap();
+    let lists: Vec<Vec<SplashCell>> = (0..steps)
+        .map(|s| {
+            let list: Vec<SplashCell> = ev
+                .splash_into("sea", s)
+                .unwrap()
+                .into_iter()
+                .map(|c| SplashCell { cell: c.cell, volume: c.volume, momentum: c.momentum })
+                .collect();
+            if !dense {
+                return list;
+            }
+            (0..n as u32)
+                .map(|cell| {
+                    list.iter().find(|e| e.cell == cell).copied().unwrap_or(SplashCell { cell, ..Default::default() })
+                })
+                .collect()
+        })
+        .collect();
+    ocean
+        .at_driven(steps as f64 * STEP, &mut |time: f64, f: &mut Forcing| {
+            f.bed.fill(10.0);
+            let k = (time / STEP).round() as i64 - 1;
+            if k >= 0 && (time - (k + 1) as f64 * STEP).abs() < 1e-9 && (k as usize) < lists.len() {
+                f.splash = lists[k as usize].clone();
+            }
+            Ok(())
+        })
+        .unwrap();
+    ocean.frame().cells.clone()
+}
+
+#[test]
+fn the_water_the_ocean_is_given_displaces_water_and_the_basin_keeps_all_of_it() {
+    let ev = evaluator(&basin(60.0));
+    let _ = alive(&ev, 7.0);
+    let before = water(&sea(&ev, 0.0));
+    let after_cells = sea(&ev, 7.0);
+    let after = water(&after_cells);
+    let (given, ..) = total(&ev, 167);
+    let tallest = after_cells.iter().map(|c| (c.depth - 10.0).abs()).fold(0.0, f64::max);
+    println!(
+        "SPLASH basin {before:.6} m3 before, {after:.6} after; {given:.3} m3 given, the surface moved {tallest:.4} m"
+    );
+    assert!(given > 0.0 && tallest > 1e-3, "the particles moved the water: {tallest}");
+    assert!((after - before).abs() < 1e-9 * before, "the volume is the same: {before} then {after}");
+}
+
+#[test]
+fn the_horizontal_momentum_in_the_ocean_is_the_momentum_given_to_it() {
+    for angle in [30.0, 60.0] {
+        let ev = evaluator(&basin(angle));
+        let _ = alive(&ev, 7.0);
+        let (_, given, ..) = total(&ev, 167);
+        let water = momentum(&sea(&ev, 7.0));
+        println!("SPLASH {angle} degrees: given {given:.5?}, in the ocean {water:.5?}");
+        // the waves have not reached the walls 200 m away and the bed is flat: nothing else gives it momentum
+        assert!(given[0].abs() > 0.0, "{angle}: {given:?}");
+        for axis in 0..2 {
+            assert!(
+                (water[axis] - given[axis]).abs() < 1e-6 * given[0].hypot(given[1]),
+                "{angle} degrees, axis {axis}: {water:?} against {given:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_canonical_step_is_given_once_and_the_ocean_that_is_driven_with_the_log_is_the_same_to_the_bit() {
+    let ev = evaluator(&basin(60.0));
+    let _ = alive(&ev, 7.0);
+    let bits = |cells: &[sr_sim::ocean::Cell]| {
+        cells.iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).map(f64::to_bits).collect::<Vec<_>>()
+    };
+    // exactly at the end of canonical step 167, not between two states
+    let got = bits(&sea(&ev, 168.0 * STEP));
+    // 168 canonical steps; the entries of a step given twice, or in a step later, would make another ocean
+    assert_eq!(bits(&reference(&ev, 168, false)), got, "sparse entries, one event per step");
+    assert_eq!(bits(&reference(&ev, 168, true)), got, "every cell of the basin in every step, nothing in most");
+    // one step late is another ocean
+    assert_ne!(bits(&reference(&ev, 167, false)), got);
+}
+
+#[test]
+fn the_ocean_is_the_same_at_any_time_asked_in_any_order() {
+    let xml = basin(60.0);
+    let ev = evaluator(&xml);
+    let bits = |ev: &Evaluator, t: f64| {
+        sea(ev, t).iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).map(f64::to_bits).collect::<Vec<_>>()
+    };
+    let forward: Vec<_> = [2.0, 4.5, 7.0].iter().map(|&t| bits(&ev, t)).collect();
+    let other = evaluator(&xml);
+    for (i, t) in [7.0, 2.0, 4.5, 7.0, 2.0].into_iter().enumerate() {
+        let index = [2, 0, 1, 2, 0][i];
+        assert_eq!(bits(&other, t), forward[index], "t = {t}");
+    }
+}
+
+#[test]
+fn a_time_inside_a_canonical_step_has_what_falls_until_the_step_ends() {
+    // the ocean at a time that is not on a step needs the splash of the step that holds it, which ends later
+    let ev = evaluator(&basin(60.0));
+    for t in [1.013, 3.3333, 6.987, 7.01] {
+        let cells = sea(&ev, t);
+        assert!(water(&cells) > 0.0, "t = {t}");
+    }
+    let bits = |ev: &Evaluator, t: f64| {
+        sea(ev, t).iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).map(f64::to_bits).collect::<Vec<_>>()
+    };
+    let first = bits(&ev, 5.017);
+    let _ = alive(&ev, 7.5);
+    assert_eq!(bits(&ev, 5.017), first, "after going later and back");
+    assert_eq!(bits(&evaluator(&basin(60.0)), 5.017), first, "from a fresh evaluator");
+}

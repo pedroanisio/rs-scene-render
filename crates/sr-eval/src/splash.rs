@@ -18,15 +18,10 @@ use sr_sim::particles3d::Absorbed;
 /// Bytes the log may hold: an entry is 40 bytes, a step 64 on top of its entries; over it is an error.
 const LOG_BYTES: usize = 16 << 20;
 
-/// What the particles of one cell give the water in one canonical step: scene units cubed of solid,
-/// and horizontal momentum per unit of water density in scene units to the fourth a second, in the
-/// ocean's own axes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Cell {
-    pub cell: u32,
-    pub volume: f64,
-    pub momentum: [f64; 2],
-}
+/// What the particles of one cell give the water in one canonical step: scene units cubed of solid, and horizontal
+/// momentum per unit of water density in scene units to the fourth a second, in the ocean's own axes. The ocean
+/// solver's own type, so that what is read is what is given.
+pub use sr_sim::ocean::SplashCell as Cell;
 
 /// One cell of one canonical step of the ocean, as a particle step recorded it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +67,35 @@ pub(crate) struct Emitter {
     pub(crate) ocean: Ocean,
 }
 
+impl Emitter {
+    /// The fixed steps `first..=last` of the emitter that overlap the canonical step `step` of the ocean.
+    fn steps_in(&self, step: u64) -> (u64, u64) {
+        let (low, high) =
+            (self.ocean.start + step as f64 * self.ocean.dt, self.ocean.start + (step + 1) as f64 * self.ocean.dt);
+        let first = ((low - self.start) / self.dt + 1e-9).floor().max(0.0) as u64;
+        let last = (((high - self.start) / self.dt - 1e-9).ceil() - 1.0).max(0.0) as u64;
+        (first, last)
+    }
+
+    /// The local time of the emitter by which it must have been computed for the ocean to be asked at composition
+    /// time `time`: the ocean at a canonical step is given, with the step it is in, the splash of the step that
+    /// follows, so what falls until the end of the step that holds `time` has to be known. `own_start` is the
+    /// composition time of the emitter's local time zero.
+    pub(crate) fn needed_until(&self, time: f64, own_start: f64) -> f64 {
+        let (dt, local) = (self.ocean.dt, (time - self.ocean.start).max(0.0));
+        // the step the solver counts the time in
+        let mut step = (local / dt).floor() as u64;
+        while step > 0 && step as f64 * dt > local {
+            step -= 1;
+        }
+        while (step + 1) as f64 * dt <= local {
+            step += 1;
+        }
+        let fixed = self.steps_in(step).1 + 1;
+        self.start - own_start + fixed as f64 * self.dt
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     entries: Option<ExchangeLog<Entry>>,
@@ -108,13 +132,7 @@ impl Log {
         let inner = self.inner();
         let mut sums: std::collections::BTreeMap<u32, Cell> = Default::default();
         for emitter in inner.emitters.iter().filter(|e| &*e.ocean.id == ocean) {
-            let (low, high) = (
-                emitter.ocean.start + step as f64 * emitter.ocean.dt,
-                emitter.ocean.start + (step + 1) as f64 * emitter.ocean.dt,
-            );
-            // the fixed steps (a, b] of the emitter that overlap (low, high]
-            let first = ((low - emitter.start) / emitter.dt + 1e-9).floor().max(0.0) as u64;
-            let last = (((high - emitter.start) / emitter.dt - 1e-9).ceil() - 1.0).max(0.0) as u64;
+            let (first, last) = emitter.steps_in(step);
             for k in first..=last {
                 let log = inner.entries.as_ref();
                 let Some(list) = log.and_then(|l| l.get(emitter.channel, k)) else {
