@@ -911,3 +911,41 @@ fn agx_keeps_white_and_grey_neutral() {
         }
     }
 }
+
+#[test]
+fn selective_color_reads_color_and_amount() {
+    // red on the left, blue on the right; the window is centred on the hue of `color` and desaturates what it holds
+    let shot = |attrs: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="16" fps="10" duration="1" background="#000000"/>
+<composition><group id="g" x="0" y="0" width="64" height="16" effects="sc">
+<shape id="r" shape="rect" x="0" y="0" width="32" height="16" fill="#FF0000"/><shape id="b" shape="rect" x="32" y="0" width="32" height="16" fill="#0000FF"/></group></composition>
+<effects><effect id="sc" type="selective-color" saturation="0" {attrs}/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        render(&d)
+    };
+    let sat =
+        |p: [f32; 4]| p[..3].iter().cloned().fold(0.0f32, f32::max) - p[..3].iter().cloned().fold(1.0f32, f32::min);
+    let Some(by_hue) = shot(r#"hue="0""#) else { return };
+    assert!(
+        sat(by_hue.at(8, 8)) < 0.1 && sat(by_hue.at(56, 8)) > 0.9,
+        "hue 0 holds red: {:?} {:?}",
+        by_hue.at(8, 8),
+        by_hue.at(56, 8)
+    );
+    // `color` names the target by its hue: blue holds the blue half and leaves red alone
+    let by_color = shot(r##"color="#0000FF""##).unwrap();
+    assert!(
+        sat(by_color.at(56, 8)) < 0.1 && sat(by_color.at(8, 8)) > 0.9,
+        "color blue holds blue: {:?} {:?}",
+        by_color.at(8, 8),
+        by_color.at(56, 8)
+    );
+    // `amount` mixes the adjusted picture with the original
+    let half = shot(r##"color="#0000FF" amount="0.5""##).unwrap();
+    let s = sat(half.at(56, 8));
+    assert!(s > 0.3 && s < 0.7, "half the adjustment: {s} {:?}", half.at(56, 8));
+    let none = shot(r##"color="#0000FF" amount="0""##).unwrap();
+    assert!(sat(none.at(56, 8)) > 0.9, "{:?}", none.at(56, 8));
+}

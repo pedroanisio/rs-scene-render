@@ -1689,8 +1689,15 @@ impl Builder<'_> {
                 color_op(self, 17, v, Aux::None)
             }
             "selective-color" => {
+                // the window is centred on `hue` (degrees), or on the hue of `color` when one is given; `amount`
+                // mixes the adjusted picture with the original
+                let hue = match a.paint("color").and_then(|p| (cx.color)(&p)) {
+                    Some(c) => hue_of_linear(c),
+                    None => a.num("hue", 0.0),
+                };
+                v[1] = [amount.clamp(0.0, 1.0) as f32, 0.0, 0.0, 0.0];
                 v[0] = [
-                    a.num("hue", 0.0) as f32,
+                    hue as f32,
                     a.num("tolerance", 0.2) as f32,
                     a.num("saturation", 1.0) as f32,
                     a.num("brightness", 0.0) as f32,
@@ -3138,4 +3145,23 @@ mod tests {
         assert_eq!(g[0], [1.0, 0.0, 0.0, 1.0]);
         assert!((g[255][2] - 0.5).abs() < 1e-6 && (g[255][3] - 0.5).abs() < 1e-6, "premultiplied");
     }
+}
+
+/// The hue, in degrees, of a linear colour as the colour operations see it: of its sRGB-encoded values.
+fn hue_of_linear(c: [f64; 4]) -> f64 {
+    let enc = |v: f64| if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    let [r, g, b] = [enc(c[0].max(0.0)), enc(c[1].max(0.0)), enc(c[2].max(0.0))];
+    let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+    let d = mx - mn;
+    if d < 1e-9 {
+        return 0.0;
+    }
+    let h = if mx == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if mx == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h * 60.0
 }
