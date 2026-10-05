@@ -1196,7 +1196,7 @@ mode the water receives, per canonical step, the form drag of the body through i
 the end of the last step (the sample of the water around the body), `A` the area its part below the rest
 level (and above the deepest bed under it) presents to a flow along `U - u`, from the surface of the body
 itself (half the projected area of the cut triangles), and `C_d` is `ocean@bodyDrag` (default 1.0, an engine
-parameter and not from the impact literature, now also the coefficient of the exchange with the water, as it
+parameter and not from the impact literature, also the coefficient of the exchange with the water, as it
 already was of the vertical motion). The push is spread over the same columns and shares as the body's lift,
 a stated approximation: the transfer function of a horizontal impulse at a height was not derived, and the
 vertical-source kernel stands in for it. The solver applies it evenly over the substeps, column by column,
@@ -1210,22 +1210,36 @@ momentum per step against `(1/2) C_d rho A U^2`; computed, not measured); the wa
 to move with the body.
 
 Pressure of the water on a body (`BodySample::pressure`). The momentum a body is credited with (`impulse`) is
-what the solver applied to the water; the water also gains momentum from the slope of the bed the body raises,
-`-g h grad(raise)` per column, which belongs to no one and is, on the body, the wave drag. In the filtered mode the
-driver gives the solver what each body raises the bed by, column by column (`Forcing::lifts`, sparse and per body),
-and at the end of every canonical step each body's sample carries `pressure`: the sum, over the columns of its
-lift and the ring around it, of `-g h grad(raise) cell_area dt`, with `h` the depth at the end of the step and the
-gradient the central difference of the mean of the lift at the end and at the start of the step. It is an
-estimate by the continuous source term and not the scheme's own flux difference, so it does not close to the bit.
-In this phase `pressure` is credited and recorded and is not applied to the body: the body, in
-`bodyCoupling="full"`, gets back `impulse` and nothing else, because applying `pressure` would change the
-full coupling by an estimate good to 1 to 2% (second order). On a periodic basin of 64 x 64 cells 6 m deep, in
-which a Gaussian mound of 1 m and 3 m width moves along x at 4 and 10 m/s for 10 steps and the total momentum of
-the water changes only by this term, the water gained 2.359 and 4.857 (first order) and 2.857 and 5.565 (second
-order), against credited 2.507 and 5.158 (+6.3%, +6.2%) and 2.876 and 5.694 (+0.7%, +2.3%); a still mound
-credits 1.8e-4 against 0 (commit fdfb0b0, 2026-10-05, test ocean_pressure). For a sphere of 2 m radius with its
-centre 3 m down in 6 m of water at 6 m/s the credit is along the motion only and about 5% of the push of the form
-drag (same commit, evaluator test).
+what the solver applied to the water; across a step in the bed the scheme also adds momentum to the water, the source
+term of the hydrostatic reconstruction, `1/2 g [(r^2 - hr^2) - (l^2 - hl^2)]` per interface (`l` and `r` the depths on
+the two sides, `hl` and `hr` the reconstructed ones), which belongs to no one and is, on the body that raises the bed,
+the wave drag. The driver gives the solver what each body raises the bed by, column by column (`Forcing::lifts`,
+sparse and per body, in both responses), and the flux sweeps accumulate that term itself at every interface between
+columns of different bed, to the owner of the interface (that of the column lifted more of the two, the lowest owner on
+a tie; a column with several owners counts for the one that lifts it most), the wrap face of a periodic basin included, for the stages of the step weighted as the scheme weights them. At the end of every
+canonical step each body's sample carries `pressure`, the sum over the step. The sum is reduced in the order of the
+rows and then of the bands, so it does not depend on the number of threads, and it is part of the state and of the
+checkpoint, so a replay from a checkpoint, from zero or without a checkpoint gives the same bits. Without lifts
+nothing is accumulated and the water is bit for bit what it was. The credit is the scheme's term and not the
+continuous `-g h grad(raise)`: it includes the reconstruction and its numerical diffusion, and a bed variation that
+belongs to no owner (a crater) is not credited. In this phase `pressure` is credited and recorded and is not applied
+to the body: the body, in `bodyCoupling="full"`, gets back `impulse` and nothing else.
+The balance of the momentum of the water along x, in a closed basin of 160 m with cells of 2 m and 10 m of water,
+dt 0.05, where a ball of 2 m radius and 16755.16 kg at 3 m/s crosses (the ball of the coupled-ocean tests,
+`bodyCoupling="full"`), at 1, 2 and 3 s: the water has what the bodies pushed into it and what was credited to them,
+to what the walls give. The residual `(water - push - credit)` over the water of the step is 0.0000% (below 5e-5%) at
+all three times in the hydrostatic response in both orders, and in the filtered one 0.0150, 0.0381 and 0.0942% (first
+order) and 0.0135, 0.0351 and 0.0663% (second order); without the credit the same residual is 3.8, 3.1 and 11.0%
+(hydrostatic, first order), 4.3, 4.1 and 9.1% (second), 10.7, 12.3 and 14.6% (filtered, first) and 10.6, 9.3 and
+10.1% (second) (commit d685256, 2026-10-05, test the_water_has_what_the_bodies_pushed_into_it_and_the_bed_source_credited_to_them).
+On a periodic basin of 64 x 64 cells 6 m deep, in which a Gaussian mound of 1 m and 3 m width moves along x at 4 and
+10 m/s for 10 steps and the total momentum of the water changes only by this term, the residual is under 1e-9 of the
+momentum (the bound of the test; about 1e-13 measured on a still mound) (same commit, test ocean_pressure). The earlier form of the credit, an estimate at
+the end of the step by the central difference of the continuous term, was 49 to 65% of the term (6.3 and 6.2% off
+in first order and 0.7 and 2.3% in second on the mound, commit fdfb0b0) and is replaced. The cost of the credit at
+720 x 720 cells, with the code of the previous commit against this one, medians of five rounds: with no owners, with owners
+and with owners and lifts the ratio new over old is 0.922, 0.962 and 0.956 (first order) and 0.995, 0.988 and 1.006
+(second order), within the noise of a machine with load1 between 5.6 and 11.5 and under 2% where it is not.
 
 What a sphere crossing deep water makes. A sphere of 2 m radius at 10 m below the surface of 20 m of water,
 crossing at 20 and 50 m/s, raises the highest surface by 8.69 and 5.52 m in the hydrostatic mode and by 0.177 and
@@ -1501,7 +1515,7 @@ per-body samples (any ocean with bodies) and 32 more for the pushes of the form 
 (the filtered response). Per call, the depth filter charges 24
 bytes per cell and 40 per cell of its largest transform window (1024 x 1024 at most)
 to `meshMemoryMiB`, together with the collider geometry and its per-column samples.
-Checkpoints hold 16 bytes more per body owner. The frame key of a driven ocean
+Checkpoints hold 32 bytes more per body owner (the impulse and the pressure credited). The frame key of a driven ocean
 includes the bed, because the same depths over another bed are another surface.
 
 ### Terrain, crater evolution, fracture and mesh caches
