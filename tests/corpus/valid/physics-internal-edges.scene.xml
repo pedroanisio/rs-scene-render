@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: valid -->
+<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="float" primitive="sphere" radius="0.5" y="-1"><rigidBody shape="sphere" mass="200"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="4" colliders="float" bodyCoupling="buoyancy" bodyDrag="1.5"/></composition><physics pixelsPerMeter="1" fixInternalEdges="true"/></scene>

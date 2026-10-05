@@ -3,6 +3,8 @@
 const PI: f32 = 3.14159265358979;
 override HAS_MEDIA: bool = false;
 override MEDIUM_LIGHTING: bool = false;
+// The scene has transmissive materials: paths track the medium they are inside (absorption).
+override WATER: bool = false;
 
 struct Params {
     // camera → world
@@ -38,6 +40,8 @@ struct Mat {
     maps: array<vec4<u32>, 6>,
     texture_params: vec4<f32>,
     borders: array<vec4<f32>, 6>,
+    // absorption coefficient per unit inside the enclosed medium (rgb)
+    attenuation: vec4<f32>,
 };
 
 struct Node {
@@ -162,9 +166,10 @@ struct Hit {
     u: f32,
     v: f32,
     tri: u32,
+    instance: u32,
 };
 
-fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>) {
+fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>, instance: u32) {
     if (tmat_of(k)==0xffffffffu) {
         let start=k*24u;
         let p=o-tverts[start].xyz;
@@ -175,14 +180,16 @@ fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>)
         let radius=dot(q,inverse*q);
         let opacity=min(0.99,tverts[start+4u].w*exp(-0.5*radius));
         if (radius>9.0 || opacity<1.0/255.0) {return;}
-        (*h).t=t;(*h).u=opacity;(*h).v=0.0;(*h).tri=k;return;
+        (*h).t=t;(*h).u=opacity;(*h).v=0.0;(*h).tri=k;(*h).instance=instance;return;
     }
     let p0 = tp(k, 0u);
     let e1 = tp(k, 1u) - p0;
     let e2 = tp(k, 2u) - p0;
     let pv = cross(d, e2);
     let det = dot(e1, pv);
-    if (abs(det) < 1e-12) { return; }
+    var determinant_scale = 1.0;
+    if (instance != 0xffffffffu) { determinant_scale = tverts[instance*24u+13u].z; }
+    if (abs(det * determinant_scale) < 1e-12) { return; }
     let inv = 1.0 / det;
     let s = o - p0;
     let u = dot(s, pv) * inv;
@@ -196,6 +203,7 @@ fn tri_hit(k: u32, o: vec3<f32>, d: vec3<f32>, tmax: f32, h: ptr<function, Hit>)
         (*h).u = u;
         (*h).v = v;
         (*h).tri = k;
+        (*h).instance = instance;
     }
 }
 
@@ -208,10 +216,54 @@ fn box_hit(lo: vec3<f32>, hi: vec3<f32>, o: vec3<f32>, inv: vec3<f32>, tmax: f32
     return tf >= max(tn, 0.0) && tn < tmax;
 }
 
+fn instance_matrix(instance: u32, offset: u32) -> mat4x4<f32> {
+    let start = instance*24u+offset;
+    return mat4x4(tverts[start],tverts[start+1u],tverts[start+2u],tverts[start+3u]);
+}
+fn hit_material(h: Hit) -> u32 {
+    if (h.instance != 0xffffffffu) { return bitcast<u32>(tverts[h.instance*24u+13u].y); }
+    return tmat_of(h.tri);
+}
+fn hit_position(h: Hit, corner: u32) -> vec3<f32> {
+    let p = tp(h.tri, corner);
+    if (h.instance != 0xffffffffu) { return (instance_matrix(h.instance,1u)*vec4(p,1.0)).xyz; }
+    return p;
+}
+fn hit_normal(h: Hit, corner: u32) -> vec3<f32> {
+    let n = tn(h.tri, corner);
+    if (h.instance != 0xffffffffu) {
+        let transformed = (instance_matrix(h.instance,9u)*vec4(n,0.0)).xyz;
+        if (dot(transformed,transformed) > 0.0) { return normalize(transformed); }
+        return vec3(0.0);
+    }
+    return n;
+}
+fn prototype_hit(instance: u32, world_o: vec3<f32>, world_d: vec3<f32>, tmax: f32, h: ptr<function,Hit>) {
+    let inverse = instance_matrix(instance,5u);
+    let o = (inverse*vec4(world_o,1.0)).xyz;
+    // Do not normalize: the ray parameter remains the world-space distance.
+    let d = (inverse*vec4(world_d,0.0)).xyz;
+    let inv = 1.0 / select(d,vec3(1e-12),abs(d)<vec3(1e-12));
+    var stack: array<u32,64>;
+    stack[0] = bitcast<u32>(tverts[instance*24u+13u].x);
+    var sp = 1;
+    while (sp > 0) {
+        sp -= 1;
+        let n = nodes[stack[sp]];
+        if (!box_hit(n.lo,n.hi,o,inv,(*h).t)) { continue; }
+        if (n.b > 0u) {
+            for (var k=n.a; k<n.a+n.b; k++) { tri_hit(k,o,d,tmax,h,instance); }
+        } else if (sp < 62) {
+            stack[sp]=n.a;stack[sp+1]=n.a-1u;sp+=2;
+        }
+    }
+}
+
 fn trace(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Hit {
     var h: Hit;
     h.t = tmax;
     h.tri = 0xffffffffu;
+    h.instance = 0xffffffffu;
     let inv = 1.0 / select(d, vec3(1e-12), abs(d) < vec3(1e-12));
     var stack: array<u32, 64>;
     var sp = 0;
@@ -222,7 +274,10 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Hit {
         let n = nodes[stack[sp]];
         if (!box_hit(n.lo, n.hi, o, inv, h.t)) { continue; }
         if (n.b > 0u) {
-            for (var k = n.a; k < n.a + n.b; k++) { tri_hit(k, o, d, tmax, &h); }
+            for (var k = n.a; k < n.a + n.b; k++) {
+                if (tmat_of(k) == 0xfffffffeu) { prototype_hit(k,o,d,tmax,&h); }
+                else { tri_hit(k, o, d, tmax, &h, 0xffffffffu); }
+            }
         } else if (sp < 62) {
             stack[sp] = n.a;
             stack[sp + 1] = n.a - 1u;
@@ -311,9 +366,17 @@ fn frame_of(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(t, cross(n, t), n);
 }
 
-/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe).
-fn p_spec(s: Surf) -> f32 {
-    return clamp(mix(0.25, 1.0, s.metallic) , 0.05, 1.0);
+/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe): the share
+/// of the surface's reflectance that is specular at this view angle, so that a dielectric seen at
+/// a grazing angle (water, glossy paint) spends its samples where the energy is. Any value in
+/// (0, 1) gives an unbiased estimate; a surface with no diffuse lobe (a metal) takes 1.
+fn p_spec(s: Surf, n: vec3<f32>, v: vec3<f32>) -> f32 {
+    let lum = vec3(0.2126, 0.7152, 0.0722);
+    let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+    let ls = dot(f, lum) * s.specw;
+    let ld = dot((vec3(1.0) - f) * s.albedo, lum) * (1.0 - s.metallic) * (1.0 - s.trans);
+    if (ld <= 0.0) { return 1.0; }
+    return clamp(ls / max(ls + ld, 1e-6), 0.05, 0.95);
 }
 
 fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -322,7 +385,7 @@ fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     let h = normalize(l + v);
     let nh = max(dot(n, h), 0.0);
     let vh = max(dot(v, h), 1e-4);
-    let ps = p_spec(s);
+    let ps = p_spec(s, n, v);
     return ps * d_ggx(nh, s.a) * nh / (4.0 * vh) + (1.0 - ps) * nl / PI;
 }
 
@@ -330,7 +393,7 @@ fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let tbn = frame_of(n);
     let u1 = rnd();
     let u2 = rnd();
-    if (rnd() < p_spec(s)) {
+    if (rnd() < p_spec(s, n, v)) {
         // GGX half vector
         let a2 = s.a * s.a;
         let ct = sqrt((1.0 - u1) / (1.0 + (a2 - 1.0) * u1));
@@ -357,7 +420,7 @@ fn visibility(origin: vec3<f32>, direction: vec3<f32>, distance: f32) -> f32 {
         if (hit.tri == 0xffffffffu) { return result; }
         let k = hit.tri;
         if (tmat_of(k) != 0xffffffffu) {
-            let m = mats[tmat_of(k)];
+            let m = mats[hit_material(hit)];
             var opacity = m.base.a;
             if (m.texture_params.y != 0.0) {
                 let b = vec3(1.0-hit.u-hit.v,hit.u,hit.v);
@@ -464,12 +527,15 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     var col = vec3(0.0);
     var alpha = 0.0;
     var only_glass = true;
+    // absorption of the medium the path is inside (set where it refracts in, cleared where it leaves)
+    var in_sigma = vec3(0.0);
     var bounce = 0u;
     // surfaces met so far (transmission and opacity events do not count as bounces)
     var met = 0u;
     let max_b = u32(pp.cam.w);
     for (var step = 0u; step < 64u; step++) {
         let hit = trace(o, d, 1e30);
+        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }
         if (HAS_MEDIA) {
             let fog = volume_transport(o, d, hit.t);
             col += thr * fog.rgb;
@@ -491,7 +557,11 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                     let c = pp.view_proj * vec4(o + d * t, 1.0);
                     let uv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
                     if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
-                        col += thr * textureSampleLevel(backdrop, smp, uv, 0.0).rgb;
+                        // premultiplied: where the layers leave the pixel open, the visible dome shows
+                        let behind = textureSampleLevel(backdrop, smp, uv, 0.0);
+                        var seen = behind.rgb;
+                        if (pp.env.x > 1.5) { seen += (1.0 - behind.a) * env_radiance(d, ambient_diffuse, ambient_specular); }
+                        col += thr * seen;
                         break;
                     }
                 }
@@ -514,7 +584,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             if (max(thr.x,max(thr.y,thr.z))<1e-5) {break;}
             continue;
         }
-        var m = mats[tmat_of(k)];
+        var m = mats[hit_material(hit)];
         let bary = vec3(1.0 - hit.u - hit.v, hit.u, hit.v);
         var uv: array<vec2<f32>,6>;
         for (var slot = 0u; slot < 6u; slot++) { uv[slot] = tuv(k,0u,slot)*bary.x + tuv(k,1u,slot)*bary.y + tuv(k,2u,slot)*bary.z; }
@@ -525,18 +595,18 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         m.params.x *= mr.b; m.params.y *= mr.g;
         m.emissive = vec4(m.emissive.rgb * map_sample(m.maps[4], uv[4], m.borders[4]).rgb, m.emissive.w);
         if (m.emissive.w > 0.5) { m.emissive = vec4(m.base.rgb, m.emissive.w); }
-        if (m.texture_params.y == 0.0) { m.base.a = mats[tmat_of(k)].base.a; }
+        if (m.texture_params.y == 0.0) { m.base.a = mats[hit_material(hit)].base.a; }
         if (m.texture_params.y == 1.0) { m.base.a = select(0.0,1.0,m.base.a >= m.texture_params.x); }
-        let p0 = tp(k, 0u);
-        let ng0 = normalize(cross(tp(k, 1u) - p0, tp(k, 2u) - p0));
+        let p0 = hit_position(hit, 0u);
+        let ng0 = normalize(cross(hit_position(hit, 1u) - p0, hit_position(hit, 2u) - p0));
         let bw = 1.0 - hit.u - hit.v;
-        var n = tn(k, 0u) * bw + tn(k, 1u) * hit.u + tn(k, 2u) * hit.v;
+        var n = hit_normal(hit, 0u) * bw + hit_normal(hit, 1u) * hit.u + hit_normal(hit, 2u) * hit.v;
         n = select(normalize(n), ng0, dot(n, n) < 1e-8);
         if (m.maps[1].y != 0u) {
             let duv1 = tuv(k,1u,1u)-tuv(k,0u,1u); let duv2 = tuv(k,2u,1u)-tuv(k,0u,1u);
             let det = duv1.x*duv2.y-duv1.y*duv2.x;
             if (abs(det)>1e-8) {
-                let tangent = ((tp(k,1u)-p0)*duv2.y-(tp(k,2u)-p0)*duv1.y)/det;
+                let tangent = ((hit_position(hit,1u)-p0)*duv2.y-(hit_position(hit,2u)-p0)*duv1.y)/det;
                 let t = normalize(tangent-n*dot(n,tangent));
                 let b = cross(n,t)*sign(det);
                 var mapped = map_sample(m.maps[1], uv[1], m.borders[1]).xyz*2.0-1.0;
@@ -579,6 +649,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                 d = normalize(t);
                 o = p - n * 1e-3;
                 thr *= s.albedo;
+                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }
             }
             continue;
         }

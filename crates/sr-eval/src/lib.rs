@@ -26,11 +26,13 @@ pub mod eval;
 pub mod expr;
 pub mod fracture;
 pub mod geo;
+mod group;
 pub mod layout;
 pub mod mesh_sequence;
 pub mod ocean;
 pub mod particles3d;
 pub mod path;
+mod physcache;
 pub mod program;
 pub mod pyro;
 pub mod rig;
@@ -39,6 +41,8 @@ pub mod safe_area;
 pub mod sim;
 mod sim3d;
 pub mod solid;
+#[doc(hidden)]
+pub mod splash;
 pub mod terrain;
 pub mod value;
 
@@ -76,7 +80,10 @@ pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c s
         .map(|(_, c)| c)
 }
 
-pub use eval::{Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SkinWeights};
+pub use eval::{
+    Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SimSeconds, SkinWeights,
+};
+pub use physcache::PhysicsTrace;
 pub use program::{draws_in_3d, Analysis, EvalOptions, Program, THREE_D_DRAWN};
 pub use safe_area::SafeEnforce;
 pub use value::Value;
@@ -88,6 +95,10 @@ pub struct Evaluator {
     /// Physics and particles, when the document has any.
     sim: Option<std::sync::Mutex<sim::Runtime>>,
 }
+
+/// A body's owner, the momentum it gave the water, and the pressure credited to it: [`Evaluator::around_into`].
+#[doc(hidden)]
+pub type BodyOffer = (u32, [f64; 2], [f64; 2]);
 
 impl Evaluator {
     /// Templates and compiles `doc`. Errors carry `E01`–`E16` diagnostics.
@@ -105,6 +116,9 @@ impl Evaluator {
             let mut rt = sim.lock().unwrap_or_else(|e| e.into_inner());
             rt.apply(&self.program, &mut g, t, &|ts| eval::evaluate(&self.program, ts));
             g.problems.extend(rt.problems.iter().cloned());
+            for failure in &rt.failures {
+                g.fail(failure.clone());
+            }
         }
         g
     }
@@ -124,10 +138,39 @@ impl Evaluator {
         self.sim.is_some()
     }
 
+    /// What the particles that fall into ocean `ocean` give it in its canonical step `step`, by cell: the
+    /// reading the ocean makes of the particles, for tests of the particles' side of the coupling.
+    #[doc(hidden)]
+    pub fn splash_into(&self, ocean: &str, step: u64) -> Result<Vec<splash::Cell>, String> {
+        match &self.sim {
+            Some(sim) => sim.lock().unwrap_or_else(|e| e.into_inner()).splash.read(ocean, step),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// What ocean `ocean` offered about each body in its canonical step `step`, as `(owner, impulse, pressure)`
+    /// per body, each the momentum per unit water density in scene units: what the body gave the water, and what
+    /// the slope of the bed it raised gave the water, which is credited to the body and not applied to it. None
+    /// while the step has not been computed.
+    #[doc(hidden)]
+    pub fn around_into(&self, ocean: &str, step: u64) -> Option<Vec<BodyOffer>> {
+        let sim = self.sim.as_ref()?.lock().unwrap_or_else(|e| e.into_inner());
+        let group = sim.physics.as_ref()?.group.as_ref()?;
+        let list = group.around_at(group.channel(ocean)?, step)?;
+        Some(list.iter().map(|a| (a.owner, a.impulse, a.pressure)).collect())
+    }
+
     /// Simulates the document's physics to its end and returns a physics cache file
     /// (`physics@cache`; its SHA-256 goes in `cacheSha256`).
     pub fn physics_cache(&self) -> Result<Vec<u8>, String> {
         sim::write_cache(&self.program, self.program.duration, &|ts| eval::evaluate(&self.program, ts))
+    }
+
+    /// The velocities and contacts of the 3D rigid bodies over the document's duration:
+    /// those of the verified `physics@cache` when there is one, otherwise simulated.
+    /// A cache baked from other physics is an error.
+    pub fn physics_trace(&self) -> Result<PhysicsTrace, String> {
+        sim::physics_trace(&self.program, &|ts| eval::evaluate(&self.program, ts))
     }
 
     /// State at frame `n` of the project frame rate.

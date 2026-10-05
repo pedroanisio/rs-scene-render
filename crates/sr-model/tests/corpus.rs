@@ -46,7 +46,7 @@ fn corpus_covers_every_rule_and_structural_code() {
     let m = manifest();
     let covered: BTreeSet<&str> = m.values().flat_map(|s| s.values()).flatten().map(String::as_str).collect();
     let mut missing: Vec<&str> = codes::SCH_ASSERTS.iter().map(|a| a.0).filter(|id| !covered.contains(id)).collect();
-    for c in ["S01", "S02", "S03", "S04", "S05", "S06", "S07", "S09", "S10", "A01", "A02", "A03", "A04", "W01"] {
+    for c in ["S01", "S02", "S03", "S04", "S05", "S06", "S07", "S09", "S10", "A01", "A02", "A03", "A04", "W01", "W02"] {
         if !covered.contains(c) {
             missing.push(c);
         }

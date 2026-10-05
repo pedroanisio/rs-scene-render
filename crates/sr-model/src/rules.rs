@@ -216,6 +216,13 @@ struct Sets<'a> {
     sequence_colliders: HashSet<&'a str>,
     volume_assets: HashSet<&'a str>,
     pyro_colliders: HashSet<&'a str>,
+    /// Objects that hold a native pyro volume.
+    pyro_volumes: HashSet<&'a str>,
+    /// 3D particle emitters that throw out the ejecta of a crater, whose particles carry a mass.
+    ejecta_emitters: HashSet<&'a str>,
+    /// Objects an ocean can use as a deformable bed (a crater on a plane or a mesh)
+    /// or as a closed body (any other supported primitive, without a crater).
+    ocean_colliders: HashSet<&'a str>,
     dynamic_pyro_geometry: HashSet<&'a str>,
     geo_assets: Vec<&'a str>,
     image_assets: HashSet<&'a str>,
@@ -258,8 +265,39 @@ struct Sets<'a> {
 fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     let mut s = Sets::default();
     let Some(scene) = scene else { return s };
+    for emitter in scene.descendants().filter(|n| is(*n, "particles3D")) {
+        if let Some(id) = emitter.attribute("id") {
+            if emitter.children().any(|b| is(b, "burst") && b.attribute("crater").is_some()) {
+                s.ejecta_emitters.insert(id);
+            }
+        }
+    }
     for object in scene.descendants().filter(|n| is(*n, "object3D")) {
         let Some(id) = object.attribute("id") else { continue };
+        let crater = kids(object, "crater").next().is_some();
+        let primitive = object.attribute("primitive");
+        if if crater {
+            matches!(primitive, Some("plane" | "mesh"))
+        } else {
+            matches!(
+                primitive,
+                Some(
+                    "box"
+                        | "sphere"
+                        | "globe"
+                        | "cylinder"
+                        | "cone"
+                        | "capsule"
+                        | "torus"
+                        | "mesh"
+                        | "text"
+                        | "extrude"
+                        | "clay"
+                )
+            )
+        } {
+            s.ocean_colliders.insert(id);
+        }
         if matches!(
             object.attribute("primitive"),
             Some(
@@ -278,6 +316,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             )
         ) {
             s.pyro_colliders.insert(id);
+        }
+        if object.children().any(|child| is(child, "pyro")) {
+            s.pyro_volumes.insert(id);
         }
         let procedural_motion = object.children().any(|child| match object.attribute("primitive") {
             Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel")),
@@ -438,10 +479,86 @@ struct Eval<'a> {
     out: Vec<Diagnostic>,
 }
 
+/// Cells between a pyro source and an open face below which W02 warns. It comes from one plume (the hero scene's,
+/// 64 x 52 x 64 cells), one face (the bottom) and one kind of source, and the side faces were not measured.
+const OPEN_FACE_CELLS: f64 = 12.0;
+
 impl<'a> Eval<'a> {
     fn check(&mut self, ok: bool, n: Node, code: &str, message: impl FnOnce() -> String) {
         if !ok {
             self.out.push(Diagnostic::error(code, message(), Loc::of(n), element_path(n)));
+        }
+    }
+
+    /// A warning: the document is valid and a renderer can run it.
+    fn warn(&mut self, n: Node, code: &str, message: String) {
+        self.out.push(Diagnostic::warning(code, message, Loc::of(n), element_path(n)));
+    }
+
+    /// W02: a pyro source or impulse whose place is in the document and which is closer than
+    /// [`OPEN_FACE_CELLS`] cells to an open face of a volume that has room to put it further in.
+    /// The face is a zero-pressure outlet and an inlet for the surrounding air, so a source this near
+    /// it changes the flow of the whole cloud, which the engine measured on a plume of 64 x 52 x 64
+    /// cells (the peak density 22 % lower with the face 7 cells from the source than with it 33).
+    fn pyro_source_near_open_face(&mut self, n: Node) {
+        let Some(pyro) = n.parent_element().filter(|p| is(*p, "pyro")) else { return };
+        let number = |e: Node, k: &str, default: f64| e.attribute(k).map_or(default, xpath_number);
+        // a source from a crater has no place in the document, and an animated one moves
+        if pyro.attribute("boundary") != Some("open")
+            || n.attribute("crater").is_some()
+            || n.children().any(|c| c.is_element())
+        {
+            return;
+        }
+        let size = [number(pyro, "width", f64::NAN), number(pyro, "height", f64::NAN), number(pyro, "depth", f64::NAN)];
+        let voxel = number(pyro, "voxelSize", f64::NAN);
+        let centre = [number(n, "x", 0.0), number(n, "y", 0.0), number(n, "z", 0.0)];
+        let scale = [number(n, "scaleX", 1.0).abs(), number(n, "scaleY", 1.0).abs(), number(n, "scaleZ", 1.0).abs()];
+        let widest = scale.iter().cloned().fold(0.0, f64::max);
+        let turned = ["rotation", "rotationX", "rotationY"].iter().any(|k| number(n, k, 0.0) != 0.0);
+        // how far the shape reaches from its centre along each axis, or None where it cannot be told
+        let reach: [f64; 3] = match n.attribute("shape").unwrap_or("sphere") {
+            "sphere" => [number(n, "radius", 1.0) * widest; 3],
+            "box" => {
+                let half = [number(n, "width", f64::NAN), number(n, "height", f64::NAN), number(n, "depth", f64::NAN)];
+                if turned {
+                    let radius = half.iter().zip(&scale).map(|(h, s)| (0.5 * h * s).powi(2)).sum::<f64>().sqrt();
+                    [radius; 3]
+                } else {
+                    std::array::from_fn(|i| 0.5 * half[i] * scale[i])
+                }
+            }
+            _ => return,
+        };
+        if !(voxel.is_finite() && voxel > 0.0 && size.iter().chain(&reach).chain(&centre).all(|v| v.is_finite())) {
+            return;
+        }
+        let names = [["-x", "+x"], ["-y", "+y"], ["-z", "+z"]];
+        let mut nearest: Option<(f64, &str)> = None;
+        for axis in 0..3 {
+            let cells = size[axis] / voxel;
+            // room to put the source OPEN_FACE_CELLS from both faces of this axis
+            if cells < 2.0 * OPEN_FACE_CELLS + 2.0 * reach[axis] / voxel {
+                continue;
+            }
+            let half = 0.5 * size[axis];
+            for (side, gap) in [(0, centre[axis] - reach[axis] + half), (1, half - centre[axis] - reach[axis])] {
+                let gap = gap / voxel;
+                if gap < OPEN_FACE_CELLS && nearest.is_none_or(|(least, _)| gap < least) {
+                    nearest = Some((gap, names[axis][side]));
+                }
+            }
+        }
+        if let Some((gap, face)) = nearest {
+            self.warn(
+                n,
+                "W02",
+                format!(
+                    "the edge of this pyro source is {gap:.1} cells from the open {face} face of its volume; closer \
+                     than {OPEN_FACE_CELLS} cells, the face changes the flow of the cloud (that number comes from one \
+                     plume and one face)."
+                ),
+            );
         }
     }
 
@@ -548,11 +665,51 @@ impl<'a> Eval<'a> {
                 self.check(number("end", 1.) > number("start", 0.), n, "CRT3", || {
                     "crater end must be greater than start in the object's local clock.".into()
                 });
-                let finite = n.attributes().filter(|a| a.name() != "curve").all(|a| number(a.name(), 0.).is_finite());
+                let finite = n
+                    .attributes()
+                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "capture" | "targetMaterial"))
+                    .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")
                     || (number("influenceDepth", 0.) * 0.5 >= number("depth", 10.).max(number("rimHeight", 2.)));
                 self.check(finite && direction.iter().any(|&x|x!=0.) && number("rimWidth",10.)<=number("radius",50.) && envelope,n,"CRT4",||"crater values must be finite, its normal nonzero, rimWidth <= radius and influenceDepth >= twice max(depth,rimHeight).".into());
+                let derived = ["radius", "depth", "rimHeight", "rimWidth", "start", "end"]
+                    .iter()
+                    .chain(["centerX", "centerY", "centerZ", "normalX", "normalY", "normalZ"].iter());
+                self.check(a("source").is_none() || !derived.into_iter().any(|k| a(k).is_some()), n, "CRT6", || {
+                    "a crater that grows from a source derives its size, timing, centre and axis, so none of them may be given."
+                        .into()
+                });
+                let target = ["targetMaterial", "targetDensity", "strength", "gravity"];
+                self.check(
+                    if a("source").is_some() {
+                        a("targetMaterial").is_some()
+                    } else {
+                        !target.iter().any(|k| a(k).is_some())
+                    },
+                    n,
+                    "CRT7",
+                    || {
+                        "crater source requires targetMaterial, and targetMaterial, targetDensity, strength and gravity belong to a crater with a source."
+                            .into()
+                    },
+                );
+                self.check(
+                    a("source").is_none_or(|id| {
+                        n.document().descendants().any(|o| {
+                            is(o, "object3D")
+                                && o.attribute("id") == Some(id)
+                                && Some(o) != owner
+                                && kids(o, "rigidBody").any(|b| matches!(b.attribute("type"), None | Some("dynamic")))
+                        })
+                    }),
+                    n,
+                    "CRT8",
+                    || "crater source must name another object3D whose rigidBody is dynamic.".into(),
+                );
+                self.check(!has("capture") || has("source"), n, "CRT9", || {
+                    "crater capture belongs to a crater that grows from a source.".into()
+                });
                 self.check(
                     owner.is_none_or(|o| {
                         kids(o, "rigidBody").all(|b| {
@@ -618,6 +775,24 @@ impl<'a> Eval<'a> {
                 });
             }
             "ocean" => {
+                self.check(
+                    a("splash").is_none_or(|list| {
+                        let ids: Vec<_> = list.split_whitespace().collect();
+                        let unique: HashSet<_> = ids.iter().copied().collect();
+                        !ids.is_empty()
+                            && ids.len() == unique.len()
+                            && ids.iter().all(|id| self.sets.ejecta_emitters.contains(id))
+                    }),
+                    n,
+                    "OCN13",
+                    || "ocean splash must name distinct particles3D emitters that throw out the ejecta of a crater, whose particles have a mass.".into(),
+                );
+                self.check(a("bodyCoupling").is_none_or(|c| c == "none") || has("colliders"), n, "OCN8", || {
+                    "ocean bodyCoupling needs colliders that list the bodies.".into()
+                });
+                self.check(!has("bodyDrag") || has("colliders"), n, "OCN9", || {
+                    "ocean bodyDrag belongs to an ocean with colliders.".into()
+                });
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "OCN1", || {
                     "ocean requires version=\"1.3\".".into()
                 });
@@ -684,6 +859,15 @@ impl<'a> Eval<'a> {
                 );
                 let sources: Vec<_> =
                     n.children().filter(|c| c.is_element() && c.tag_name().name() == "whitewater").collect();
+                if let Some(list) = a("colliders") {
+                    let ids: Vec<_> = list.split_whitespace().collect();
+                    let unique: HashSet<_> = ids.iter().copied().collect();
+                    let valid = ids.len() <= 4096
+                        && ids.len() == unique.len()
+                        && ids.iter().all(|id| self.sets.ocean_colliders.contains(id));
+                    self.check(valid, n, "OCN6", || "ocean colliders must name at most 4096 distinct objects: a plane or mesh with a crater, or a closed body without one.".into());
+                    self.check(!ids.iter().any(|id| self.sets.dynamic_pyro_geometry.contains(id)), n, "OCN7", || "ocean collider geometry is static; animate its position, rotation or scale instead of shape parameters.".into());
+                }
                 self.check(
                     sources.len() <= 1
                         && sources.iter().all(|s| {
@@ -718,7 +902,9 @@ impl<'a> Eval<'a> {
                     && direction.iter().all(|v| v.is_finite())
                     && direction.iter().any(|v| *v != 0.)
                     && (!has("emissionEnd") || number("emissionEnd", 0.) >= start)
-                    && kids(n, "burst").all(|b| b.attribute("time").map(xpath_number).is_some_and(|t| t >= start));
+                    && kids(n, "burst").all(|b| {
+                        b.has_attribute("crater") || b.attribute("time").map(xpath_number).is_some_and(|t| t >= start)
+                    });
                 self.check(valid,n,"P3D3",|| "particles3D requires bounded variances, a nonzero direction, an ordered emission window and bursts at or after emissionStart.".into());
                 let dynamic = [
                     "x",
@@ -745,6 +931,10 @@ impl<'a> Eval<'a> {
                     "P3D4",
                     || "particles3D solver configuration is static; animate pose, rate or appearance instead.".into(),
                 );
+                self.check(a("gas").is_none_or(|id| self.sets.pyro_volumes.contains(id)), n, "P3D11", || {
+                    "particles3D gas must name an object3D that holds a native pyro volume; a baked or asset volume has no velocity grid."
+                        .into()
+                });
                 if let Some(list) = a("colliders") {
                     let ids: Vec<_> = list.split_whitespace().collect();
                     let unique: HashSet<_> = ids.iter().copied().collect();
@@ -783,7 +973,73 @@ impl<'a> Eval<'a> {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
                 });
             }
+            "burst" if n.parent_element().is_some_and(|p| is(p, "particles3D")) => {
+                let from_crater = has("crater");
+                self.check(
+                    if from_crater { !(has("time") || has("repeat") || has("interval")) } else { has("time") },
+                    n,
+                    "P3D7",
+                    || "a burst requires time unless it comes from a crater, and a burst from a crater derives its instants, so time, repeat and interval may not be given.".into(),
+                );
+                self.check(
+                    a("crater").is_none_or(|id| {
+                        n.document().descendants().any(|c| {
+                            is(c, "crater") && c.attribute("id") == Some(id) && c.attribute("source").is_some()
+                        })
+                    }),
+                    n,
+                    "P3D8",
+                    || "a burst from a crater must name a crater that grows from an impact.".into(),
+                );
+                self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
+                    "angle and angleSpread belong to a burst from a crater.".into()
+                });
+                let degrees = |k: &str, default: f64| a(k).map(xpath_number).unwrap_or(default);
+                let (angle, spread) = (degrees("angle", 45.), degrees("angleSpread", 15.));
+                self.check(!from_crater || (angle - spread >= 0. && angle + spread <= 90.), n, "P3D10", || {
+                    "the launch angle of a burst from a crater and its spread must stay between 0 and 90 degrees."
+                        .into()
+                });
+            }
+            "waterImpulse" if n.parent_element().is_some_and(|p| is(p, "ocean")) => {
+                let source = a("source");
+                self.check(
+                    source.is_none()
+                        || !["time", "x", "z", "radius", "amplitude", "velocityX", "velocityZ", "type"]
+                            .iter()
+                            .any(|k| has(k)),
+                    n,
+                    "OCN10",
+                    || "a water impulse from a body derives its instant, place, size and shape, so time, x, z, radius, amplitude, velocityX, velocityZ and type may not be given.".into(),
+                );
+                let ocean = n.parent_element();
+                self.check(
+                    source.is_none_or(|id| {
+                        ocean.and_then(|o| o.attribute("colliders")).is_some_and(|l| l.split_whitespace().any(|c| c == id))
+                            && n.document().descendants().any(|o| {
+                                is(o, "object3D")
+                                    && o.attribute("id") == Some(id)
+                                    && !kids(o, "crater").any(|_| true)
+                                    && kids(o, "rigidBody").any(|b| matches!(b.attribute("type"), None | Some("dynamic")))
+                            })
+                    }),
+                    n,
+                    "OCN11",
+                    || "the source of a water impulse must be a dynamic rigid body, without a crater, that the ocean lists in colliders.".into(),
+                );
+                self.check(
+                    source.is_none_or(|id| {
+                        ocean.is_some_and(|o| {
+                            kids(o, "waterImpulse").filter(|w| w.attribute("source") == Some(id)).count() == 1
+                        })
+                    }),
+                    n,
+                    "OCN12",
+                    || "a body makes one cavity: at most one water impulse names it.".into(),
+                );
+            }
             "pyroSource" | "pyroImpulse" => {
+                self.pyro_source_near_open_face(n);
                 let mesh = if a("shape") == Some("mesh") {
                     has("mesh") && contains(&self.sets.mesh_assets, a("mesh"))
                 } else {
@@ -816,6 +1072,55 @@ impl<'a> Eval<'a> {
                     n,
                     "PYRO4",
                     || "pyro source transforms must be invertible (nonzero scales).".into(),
+                );
+                const DERIVED: [&str; 22] = [
+                    "start",
+                    "end",
+                    "time",
+                    "densityRate",
+                    "temperatureRate",
+                    "density",
+                    "temperature",
+                    "expansion",
+                    "shape",
+                    "mesh",
+                    "radius",
+                    "width",
+                    "height",
+                    "depth",
+                    "x",
+                    "y",
+                    "z",
+                    "rotation",
+                    "rotationX",
+                    "rotationY",
+                    "scaleX",
+                    "scaleY",
+                ];
+                self.check(
+                    !has("crater") || !(DERIVED.iter().any(|k| has(k)) || has("scaleZ")),
+                    n,
+                    "PYC1",
+                    || "a pyro source or impulse from a crater derives its shape, place, timing, density, temperature and expansion, so none of them may be given.".into(),
+                );
+                self.check(
+                    has("crater") || !["heatFraction", "dustFraction", "specificHeat", "maxTemperature"].iter().any(|k| has(k)),
+                    n,
+                    "PYC2",
+                    || "heatFraction, dustFraction, specificHeat and maxTemperature belong to a pyro source or impulse from a crater.".into(),
+                );
+                self.check(n.tag_name().name() != "pyroImpulse" || has("time") || has("crater"), n, "PYC3", || {
+                    "a pyro impulse requires time unless it comes from a crater.".into()
+                });
+                self.check(
+                    a("crater").is_none_or(|id| {
+                        n.document().descendants().any(|c| {
+                            is(c, "crater") && c.attribute("id") == Some(id) && c.attribute("source").is_some()
+                        })
+                    }),
+                    n,
+                    "PYC4",
+                    || "a pyro source or impulse from a crater must name a crater that grows from an impact.".into(),
                 );
             }
             // p5, p26
@@ -890,6 +1195,15 @@ impl<'a> Eval<'a> {
                     "VOL3",
                     || "one medium child and @volume are permitted only on a volume primitive.".into(),
                 );
+                let grid_only = kids(n, "medium").all(|m| {
+                    m.attribute("lighting") == Some("grid")
+                        || ["lightGridCell", "lightGridDomeDirections", "lightGridMemoryMiB"]
+                            .iter()
+                            .all(|k| m.attribute(*k).is_none())
+                });
+                self.check(grid_only, n, "VOL10", || {
+                    "the lightGrid* attributes of a medium apply only with lighting=\"grid\".".into()
+                });
                 self.check(a("primitive") != Some("mesh") || has("mesh"), n, "C6", || {
                     "object3D primitive=\"mesh\" requires @mesh.".into()
                 });

@@ -1172,6 +1172,29 @@ impl Builder {
         }
     }
 
+    /// The node that owns the crater `id`, found from `scope` outward like any id.
+    fn resolve_crater(&self, scope: &str, id: &str) -> Option<u32> {
+        let mut s = scope.to_string();
+        loop {
+            let found = self.nodes.iter().position(|n| {
+                n.scope.as_ref() == s.as_str()
+                    && children(&*n.elem)
+                        .into_iter()
+                        .any(|c| c.element_name() == "crater" && attr_str(c, "id").as_deref() == Some(id))
+            });
+            if let Some(k) = found {
+                return Some(k as u32);
+            }
+            if s.is_empty() {
+                return None;
+            }
+            s = match s.rfind('/') {
+                Some(i) => s[..i].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
     fn media_len(&self, doc: u16, asset: &str) -> Option<f64> {
         let a = self.doc(doc).scene.assets.as_ref()?.children.iter().find(|c| c.id() == Some(asset))?;
         match a {
@@ -2362,7 +2385,7 @@ impl Builder {
                 .filter(|e| e.element_name() == "pyro")
                 .filter_map(|e| attr_str(e, "colliders").map(|s| (s, e.loc())))
                 .collect();
-            if self.nodes[n].name == "particles3D" {
+            if matches!(self.nodes[n].name, "particles3D" | "ocean") {
                 if let Some(list) = attr_str(&*self.nodes[n].elem, "colliders") {
                     lists.push((list, self.nodes[n].elem.loc()));
                 }
@@ -2375,7 +2398,7 @@ impl Builder {
                         Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
                         None => self.diags.push(err(
                             "E11",
-                            format!("pyro collider {id:?} is not instantiated in this scope"),
+                            format!("collider {id:?} is not instantiated in this scope"),
                             loc,
                             &*self.nodes[n].id,
                         )),
@@ -2383,8 +2406,121 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
-            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() {
+            // The emitters whose particles fall into an ocean are named in the same lexical scope.
+            let splash: Option<(String, String)> = (self.nodes[n].name == "ocean")
+                .then(|| attr_str(&*self.nodes[n].elem, "splash"))
+                .flatten()
+                .map(|list| {
+                    let mut resolved = Vec::new();
+                    for id in list.split_whitespace() {
+                        match self.resolve(&scope, id) {
+                            Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
+                            None => self.diags.push(err(
+                                "E11",
+                                format!("splash emitter {id:?} is not instantiated in this scope"),
+                                self.nodes[n].elem.loc(),
+                                &*self.nodes[n].id,
+                            )),
+                        }
+                    }
+                    (list, resolved.join(" "))
+                });
+            // The smoke that drags the particles of an emitter is named in the same lexical scope.
+            let gas: Option<(String, String)> = (self.nodes[n].name == "particles3D")
+                .then(|| attr_str(&*self.nodes[n].elem, "gas"))
+                .flatten()
+                .and_then(|id| match self.resolve(&scope, &id) {
+                    Some(i) => Some((id, self.nodes[i as usize].id.to_string())),
+                    None => {
+                        self.diags.push(err(
+                            "E11",
+                            format!("gas {id:?} is not instantiated in this scope"),
+                            self.nodes[n].elem.loc(),
+                            &*self.nodes[n].id,
+                        ));
+                        None
+                    }
+                });
+            // What a crater causes (smoke, ejecta) names the crater by its id, in the same lexical
+            // scope; the reference becomes the effective id of the object that owns the crater.
+            let mut cause_owners: HashMap<String, Arc<str>> = HashMap::new();
+            let kids = sr_model::element::children(&*self.nodes[n].elem);
+            for id in kids
+                .iter()
+                .copied()
+                .filter(|e| e.element_name() == "pyro")
+                .flat_map(|pyro| sr_model::element::children(pyro))
+                .filter(|e| matches!(e.element_name(), "pyroSource" | "pyroImpulse"))
+                .chain(kids.iter().copied().filter(|e| e.element_name() == "burst"))
+                .filter_map(|e| attr_str(e, "crater"))
+            {
+                match self.resolve_crater(&scope, &id) {
+                    Some(owner) => {
+                        cause_owners.insert(id, self.nodes[owner as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            // A crater that grows from an impact names its source body, in the same lexical
+            // scope: inside a symbol instance it is that instance's body.
+            let mut sources: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "crater")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        sources.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            // A water impulse that comes from a body names it in the same lexical scope.
+            let mut entries: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "waterImpulse")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        entries.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("water impulse source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            if parent.is_some()
+                || !entries.is_empty()
+                || !constraints.is_empty()
+                || !colliders.is_empty()
+                || !sources.is_empty()
+                || !cause_owners.is_empty()
+                || gas.is_some()
+                || splash.is_some()
+            {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
+                if let Some((_, effective)) = &splash {
+                    elem.set_attr("splash", effective).expect("resolved ocean splash emitters");
+                }
+                if let Some((_, effective)) = &gas {
+                    elem.set_attr("gas", effective).expect("resolved particle gas");
+                }
                 if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
                     elem.set_attr("colliders", list).expect("resolved particle colliders");
                 }
@@ -2400,6 +2536,26 @@ impl Builder {
                     if child.element_name() == "pyro" {
                         if let Some(list) = attr_str(child, "colliders").and_then(|list| colliders.get(&list)) {
                             child.set_attr("colliders", list).expect("resolved collider token list");
+                        }
+                        child.visit_mut(&mut |input| {
+                            if let Some(owner) = attr_str(input, "crater").and_then(|id| cause_owners.get(&id)) {
+                                input.set_attr("crater", owner).expect("resolved crater owner");
+                            }
+                        });
+                    }
+                    if child.element_name() == "waterImpulse" {
+                        if let Some(body) = attr_str(child, "source").and_then(|id| entries.get(&id)) {
+                            child.set_attr("source", body).expect("resolved water impulse source");
+                        }
+                    }
+                    if child.element_name() == "burst" {
+                        if let Some(owner) = attr_str(child, "crater").and_then(|id| cause_owners.get(&id)) {
+                            child.set_attr("crater", owner).expect("resolved crater owner");
+                        }
+                    }
+                    if child.element_name() == "crater" {
+                        if let Some(source) = attr_str(child, "source").and_then(|id| sources.get(&id)) {
+                            child.set_attr("source", source).expect("resolved crater source");
                         }
                     }
                 });

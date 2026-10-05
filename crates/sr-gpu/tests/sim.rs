@@ -90,15 +90,17 @@ fn physics_cache_round_trip() {
     );
     let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
     let bytes = ev.physics_cache().unwrap();
-    assert!(bytes.starts_with(b"SRPHYS02"));
+    assert!(bytes.starts_with(b"SRPHYS04"));
     use sha2::Digest;
     let sha: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(fixtures().join("fall.physics"), &bytes).unwrap();
-    // a version 1 file (no 3D bodies: no count after the soft-body sizes) reads the same
+    // a version 1 file (no 3D bodies, no fracture count, no identity or contacts) reads the same
     let mut v1 = b"SRPHYS01".to_vec();
     v1.extend_from_slice(&bytes[8..40]);
-    v1.extend_from_slice(&bytes[48..]);
+    v1.extend_from_slice(&bytes[56..64]);
+    v1.extend_from_slice(&bytes[104..]);
     assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 0, "no 3D bodies");
+    assert_eq!(u64::from_le_bytes(bytes[96..104].try_into().unwrap()), 0, "no contacts");
     let sha1: String = sha2::Sha256::digest(&v1).iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(fixtures().join("fall-v1.physics"), &v1).unwrap();
     let old = scene(
@@ -128,8 +130,17 @@ fn physics_cache_round_trip() {
     let d3 =
         sr_model::load_str(&bad, &sr_model::LoadOptions { verify_assets: false, base_dir: Some(fixtures()) }).unwrap();
     let g3 = sr_eval::Evaluator::new(&d3, &Default::default()).unwrap().evaluate(1.5);
-    assert!(g3.problems.iter().any(|m| m.contains("SHA-256")), "{:?}", g3.problems);
-    assert_eq!(world(&g3), world(&simulated));
+    // a version 4 file carries the identity of its document, so a pinned digest it does not
+    // match is an error and nothing is simulated in its place
+    assert!(g3.failures.iter().any(|m| m.contains("SHA-256")), "{:?}", g3.failures);
+    assert_ne!(world(&g3), world(&simulated));
+    // an older file has no identity: the evaluator reports the mismatch and simulates instead
+    let old_bad = bad.replace("fall.physics", "fall-v1.physics");
+    let d4 = sr_model::load_str(&old_bad, &sr_model::LoadOptions { verify_assets: false, base_dir: Some(fixtures()) })
+        .unwrap();
+    let g4 = sr_eval::Evaluator::new(&d4, &Default::default()).unwrap().evaluate(1.5);
+    assert!(g4.problems.iter().any(|m| m.contains("SHA-256")), "{:?}", g4.problems);
+    assert_eq!(world(&g4), world(&simulated));
     std::fs::remove_file(fixtures().join("fall.physics")).ok();
     std::fs::remove_file(fixtures().join("fall-v1.physics")).ok();
 }

@@ -6,7 +6,7 @@ pub use crate::particles::Burst;
 use crate::rng;
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, VecDeque},
 };
 pub mod collider;
 pub mod mesh;
@@ -65,6 +65,8 @@ pub struct Spec {
     pub max_events: usize,
     pub max_bytes: usize,
     pub checkpoint_bytes: usize,
+    /// Water that takes the particles that fall into it; none by default.
+    pub water: Option<Water>,
     /// Maximum emission events, accepted births, motion segments and curvature
     /// refinements in one seek.
     pub max_work: u64,
@@ -100,10 +102,33 @@ impl Default for Spec {
             max_events: 16_384,
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
+            water: None,
             max_work: 100_000_000,
         }
     }
 }
+/// A plane of water that takes the particles falling into it: its `normal` points out of the water, and the
+/// rectangle `extent` (minimum and maximum along each of the unit `axes`, from `origin`) is where the water is.
+/// A particle whose centre crosses the plane downward inside the rectangle is removed there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Water {
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub axes: [[f64; 3]; 2],
+    pub extent: [[f64; 2]; 2],
+}
+
+/// A particle that fell into the water: when, where and how fast it crossed, and what it was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Absorbed {
+    pub id: u64,
+    pub time: f64,
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    /// Kilograms; zero for a particle that came from no driver birth.
+    pub mass: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Emission {
     /// Birth points and local velocities use this full affine. Existing
@@ -128,6 +153,16 @@ pub struct Hit {
     pub normal: [f64; 3],
     pub velocity: [f64; 3],
 }
+/// A particle the driver supplies: an event with its own instant, state and mass,
+/// born in world space with the spec's lifetime, rotation and spin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Birth {
+    pub time: f64,
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    /// Kept on the particle; the render size still comes from the spec.
+    pub mass: f64,
+}
 /// Input queries must be deterministic functions of their arguments. Mutable
 /// state may cache queries, but results must not depend on prior query order.
 /// Birth pose/enabled are queried at each exact emission event; acceleration
@@ -136,6 +171,21 @@ pub trait Driver {
     fn emission(&mut self, time: f64) -> Result<Emission, Error>;
     fn acceleration(&mut self, time: f64, position: [f64; 3], velocity: [f64; 3]) -> Result<[f64; 3], Error>;
     fn sweep(&mut self, time: f64, dt: f64, from: [f64; 3], to: [f64; 3], radius: f64) -> Result<Option<Hit>, Error>;
+    /// Births to add in the fixed step `(lo, hi]` (and `time == lo` on the first
+    /// step, as a burst at the start of the emitter), in any order. Asked once per
+    /// step going forward and again when a seek replays it, so it must be a pure
+    /// function of the window. A time outside the window, nonfinite state, a
+    /// negative mass or more births than `max_particles` leaves room for is an
+    /// error. Births at or after `Spec::end` are not made.
+    fn births(&mut self, _lo: f64, _hi: f64) -> Result<Vec<Birth>, Error> {
+        Ok(Vec::new())
+    }
+    /// The particles that fell into the water in fixed step `step`, in order of their id: told for every
+    /// fixed step the emitter computes (an empty list too), and again, the same, when a seek replays it, so
+    /// a driver that keeps them must compare. An error stops the step.
+    fn absorbed(&mut self, _step: u64, _list: &[Absorbed]) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +199,8 @@ pub struct Particle {
     pub basis: [[f64; 3]; 3],
     pub angular_velocity: [f64; 3],
     pub scale: f64,
+    /// Kilograms of a particle that came from a driver birth; zero otherwise.
+    pub mass: f64,
 }
 impl Particle {
     pub fn age(&self, time: f64) -> f64 {
@@ -192,16 +244,22 @@ struct State {
     frame: Frame,
     carry: f64,
     burst_cursor: Vec<u64>,
+    /// What fell into the water in the step that led to this state.
+    absorbed: Vec<Absorbed>,
 }
 impl State {
     fn bytes(&self) -> usize {
-        256 + self.frame.particles.len() * std::mem::size_of::<Particle>() + self.burst_cursor.len() * 8
+        256 + self.frame.particles.len() * std::mem::size_of::<Particle>()
+            + self.burst_cursor.len() * 8
+            + self.absorbed.len() * std::mem::size_of::<Absorbed>()
     }
 }
 #[derive(Clone, Copy, Debug)]
 struct Event {
     time: f64,
     count: u64,
+    /// A birth the driver supplied, with its own state, instead of a rate or burst one.
+    birth: Option<Birth>,
 }
 #[derive(Clone, Copy, Debug)]
 struct Time(f64);
@@ -229,18 +287,25 @@ pub struct Emitter {
     frame: Frame,
     checkpoints: BTreeMap<u64, State>,
     every: u64,
+    /// The latest fixed steps this emitter computed, by step, so a request a few steps back (a
+    /// shutter's samples, a scrub) restarts from one of them and not from a checkpoint up to a
+    /// second earlier. Together with the checkpoints it stays within `checkpoint_bytes`.
+    recent: VecDeque<(u64, State)>,
 }
+/// Fewest states the recent steps must be able to hold for keeping them to be worth a share of the budget.
+const RECENT_MIN: usize = 3;
 impl Emitter {
     pub fn new(spec: Spec) -> Result<Self, Error> {
         validate(&spec)?;
         let frame = Frame { time: spec.start, ..Default::default() };
-        let state = State { frame: frame.clone(), carry: 0., burst_cursor: vec![0; spec.bursts.len()] };
+        let state =
+            State { frame: frame.clone(), carry: 0., burst_cursor: vec![0; spec.bursts.len()], absorbed: Vec::new() };
         if state.bytes() > spec.checkpoint_bytes {
             return Err(Error::Limit("initial checkpoint bytes"));
         }
         let checkpoints = BTreeMap::from([(0, state.clone())]);
         let every = (1. / spec.step).round().max(1.) as u64;
-        Ok(Self { spec, state, step: 0, frame, checkpoints, every })
+        Ok(Self { spec, state, step: 0, frame, checkpoints, every, recent: VecDeque::new() })
     }
     pub fn spec(&self) -> &Spec {
         &self.spec
@@ -248,8 +313,26 @@ impl Emitter {
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
+    /// Bytes held for replay: the checkpoints and the recent steps.
     pub fn checkpoint_bytes(&self) -> usize {
-        self.checkpoints.values().map(State::bytes).sum()
+        self.checkpoints.values().map(State::bytes).sum::<usize>() + self.recent_bytes()
+    }
+    fn recent_bytes(&self) -> usize {
+        self.recent.iter().map(|(_, s)| s.bytes()).sum()
+    }
+    /// The share of the budget the recent steps may take given states of `bytes`: a quarter, and
+    /// nothing unless it holds at least [`RECENT_MIN`] of them.
+    fn recent_share(&self, bytes: usize) -> usize {
+        let quarter = self.spec.checkpoint_bytes / 4;
+        if quarter / RECENT_MIN.max(1) >= bytes {
+            quarter
+        } else {
+            0
+        }
+    }
+    /// How many recent steps a state of `bytes` can have kept.
+    fn recent_capacity(&self, bytes: usize) -> usize {
+        self.recent_share(bytes) / bytes.max(1)
     }
     /// Each successful fixed step is committed atomically. A failed request keeps
     /// the previously published frame; already completed checkpoints remain usable.
@@ -272,8 +355,13 @@ impl Emitter {
             offset
         };
         let target = offset.floor() as u64;
-        if self.step > target {
-            let (&step, state) = self.checkpoints.range(..=target).next_back().expect("initial checkpoint");
+        // Start from the latest state computed or kept at or before the target: the one this
+        // emitter is at, a recent step, or a checkpoint. They are all the same states, so the
+        // frame does not depend on which one is used.
+        let kept = self.recent.iter().rev().find(|(step, _)| *step <= target).map(|(step, state)| (*step, state));
+        let checkpoint = self.checkpoints.range(..=target).next_back().map(|(step, state)| (*step, state));
+        let best = [kept, checkpoint].into_iter().flatten().max_by_key(|(step, _)| *step);
+        if let Some((step, state)) = best.filter(|(step, _)| *step > self.step || self.step > target) {
             self.state = state.clone();
             self.step = step;
         }
@@ -284,10 +372,17 @@ impl Emitter {
         while self.step < target {
             let hi = self.spec.start + (self.step + 1) as f64 * self.spec.step;
             let next = advance(&self.spec, &self.state, hi, driver, &mut work)?;
+            driver.absorbed(self.step, &next.absorbed)?;
             self.state = next;
             self.step += 1;
+            let bytes = self.state.bytes();
             if self.step % self.every == 0 && !self.checkpoints.contains_key(&self.step) {
-                let bytes = self.state.bytes();
+                // the recent steps give way to checkpoints, which are kept longer
+                while self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes
+                    && !self.recent.is_empty()
+                {
+                    self.recent.pop_front();
+                }
                 while self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes
                     && self.checkpoints.len() > 1
                 {
@@ -296,6 +391,26 @@ impl Emitter {
                 }
                 if self.checkpoint_bytes().saturating_add(bytes) <= self.spec.checkpoint_bytes {
                     self.checkpoints.insert(self.step, self.state.clone());
+                }
+            }
+            // Only the last few steps of a request are worth keeping: a long seek would copy them all.
+            let capacity = self.recent_capacity(bytes);
+            if capacity == 0 {
+                self.recent.clear();
+            } else if target - self.step < capacity as u64
+                && !self.checkpoints.contains_key(&self.step)
+                && !self.recent.iter().any(|(step, _)| *step == self.step)
+            {
+                let share = self.recent_share(bytes);
+                while !self.recent.is_empty()
+                    && (self.recent_bytes() + bytes > share
+                        || self.checkpoint_bytes().saturating_add(bytes) > self.spec.checkpoint_bytes)
+                {
+                    self.recent.pop_front();
+                }
+                if self.checkpoint_bytes().saturating_add(bytes) <= self.spec.checkpoint_bytes {
+                    let at = self.recent.partition_point(|(step, _)| *step < self.step);
+                    self.recent.insert(at, (self.step, self.state.clone()));
                 }
             }
         }
@@ -407,6 +522,7 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         },
         carry: state.carry,
         burst_cursor: state.burst_cursor.clone(),
+        absorbed: Vec::new(),
     };
     let mut events = Vec::new();
     let end = hi.min(s.end.unwrap_or(hi));
@@ -425,7 +541,7 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         let count = total.floor() as usize;
         next.carry = total - count as f64;
         for i in 0..count {
-            events.push(Event { time: (lo + (i as f64 + 1. - state.carry) / rate).min(end), count: 1 });
+            events.push(Event { time: (lo + (i as f64 + 1. - state.carry) / rate).min(end), count: 1, birth: None });
         }
     }
     for (i, b) in s.bursts.iter().enumerate() {
@@ -439,8 +555,23 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                 return Err(Error::Limit("burst events per step"));
             }
             *cursor += 1;
-            events.push(Event { time, count: b.count });
+            events.push(Event { time, count: b.count, birth: None });
         }
+    }
+    for b in d.births(lo, hi)? {
+        if !b.time.is_finite() || !finite(b.position) || !finite(b.velocity) || !b.mass.is_finite() || b.mass < 0. {
+            return Err(Error::Driver("birth with nonfinite state or negative mass".into()));
+        }
+        if b.time < lo || b.time > hi || (b.time == lo && lo != s.start) {
+            return Err(Error::Driver("birth outside the window it was asked for".into()));
+        }
+        if s.end.is_some_and(|e| b.time >= e) {
+            continue;
+        }
+        if events.len() >= s.max_events {
+            return Err(Error::Limit("birth events per step"));
+        }
+        events.push(Event { time: b.time, count: 1, birth: Some(b) });
     }
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     let mut deaths = BinaryHeap::new();
@@ -449,12 +580,39 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
         deaths.push(Reverse(Time(death)));
         if death > hi {
             let mut p = particle.clone();
-            motion(s, &mut p, lo, hi - lo, d, work)?;
-            next.frame.particles.push(p);
+            match motion(s, &mut p, lo, hi - lo, d, work)? {
+                Some(fell) => next.absorbed.push(fell),
+                None => next.frame.particles.push(p),
+            }
         }
     }
     for event in events {
         charge(work)?;
+        if let Some(b) = event.birth {
+            while deaths.peek().is_some_and(|t| t.0 .0 <= event.time) {
+                deaths.pop();
+            }
+            if deaths.len() >= s.max_particles {
+                return Err(Error::Limit("births exceed maxParticles"));
+            }
+            let id = next.frame.emitted;
+            next.frame.emitted = id.checked_add(1).ok_or(Error::Limit("particle ID overflow"))?;
+            charge(work)?;
+            let mut p = spawn(s, &Emission::default(), id, event.time)?;
+            (p.position, p.velocity, p.mass) = (b.position, b.velocity, b.mass);
+            let death = p.birth + p.lifetime;
+            if !death.is_finite() || death <= p.birth {
+                return Err(Error::Invalid("unrepresentable particle lifetime"));
+            }
+            deaths.push(Reverse(Time(death)));
+            if death > hi {
+                match motion(s, &mut p, event.time, hi - event.time, d, work)? {
+                    Some(fell) => next.absorbed.push(fell),
+                    None => next.frame.particles.push(p),
+                }
+            }
+            continue;
+        }
         let input = emission(d, event.time)?;
         if !input.enabled {
             continue;
@@ -476,11 +634,14 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
             }
             deaths.push(Reverse(Time(death)));
             if death > hi {
-                motion(s, &mut p, event.time, hi - event.time, d, work)?;
-                next.frame.particles.push(p);
+                match motion(s, &mut p, event.time, hi - event.time, d, work)? {
+                    Some(fell) => next.absorbed.push(fell),
+                    None => next.frame.particles.push(p),
+                }
             }
         }
     }
+    next.absorbed.sort_by_key(|a| a.id);
     Ok(next)
 }
 
@@ -545,6 +706,7 @@ fn spawn(s: &Spec, e: &Emission, id: u64, birth: f64) -> Result<Particle, Error>
         basis,
         angular_velocity,
         scale: size,
+        mass: 0.,
     };
     if !finite(p.position)
         || !finite(p.velocity)
@@ -555,6 +717,9 @@ fn spawn(s: &Spec, e: &Emission, id: u64, birth: f64) -> Result<Particle, Error>
     }
     Ok(p)
 }
+/// Most contacts that advance no time a particle may spend in one step moving clear of a surface.
+const MAX_RECOVERIES: u32 = 64;
+
 fn motion(
     s: &Spec,
     p: &mut Particle,
@@ -562,9 +727,10 @@ fn motion(
     mut dt: f64,
     d: &mut dyn Driver,
     work: &mut u64,
-) -> Result<(), Error> {
+) -> Result<Option<Absorbed>, Error> {
     let mut contact: Option<([f64; 3], [f64; 3])> = None;
     let mut collisions = 0;
+    let mut recoveries = 0;
     while dt > 0. {
         charge(work)?;
         let a0 = add(s.gravity, d.acceleration(time, p.position, p.velocity)?);
@@ -633,6 +799,26 @@ fn motion(
             }
             break (to, velocity, hit);
         };
+        // A fall into the water comes before any contact it would otherwise have made later in the segment: the
+        // centre crosses the plane downward inside the rectangle, and the particle is taken out there.
+        if let Some(water) = &s.water {
+            let (above, below) = (water_height(water, p.position), water_height(water, to));
+            if above > 0. && below <= 0. {
+                let fraction = above / (above - below);
+                if hit.as_ref().is_none_or(|h| fraction < h.fraction) {
+                    let (position, velocity) = flight(p.position, p.velocity, a, s.drag, span * fraction);
+                    if water_contains(water, position) {
+                        return Ok(Some(Absorbed {
+                            id: p.id,
+                            time: time + span * fraction,
+                            position,
+                            velocity,
+                            mass: p.mass,
+                        }));
+                    }
+                }
+            }
+        }
         let Some(hit) = hit else {
             p.position = to;
             p.velocity = velocity;
@@ -640,9 +826,21 @@ fn motion(
             dt -= span;
             continue;
         };
-        collisions += 1;
-        if collisions > 16 {
-            return Err(Error::Limit("more than 16 collisions in one particle step"));
+        // A contact at fraction 0 advances no time: the particle starts inside the surface, or has
+        // been pushed into a neighbouring facet, and is being moved clear of it. Pushing out of two
+        // facets of a crease in turn converges by a fixed factor per push, so it can take dozens of
+        // them to reach the contact tolerance; those have a limit of their own, and only the contacts
+        // that carry the particle forward in time count toward the 16 of a step.
+        if hit.fraction == 0. {
+            recoveries += 1;
+            if recoveries > MAX_RECOVERIES {
+                return Err(Error::Limit("more than 64 penetration recoveries in one particle step"));
+            }
+        } else {
+            collisions += 1;
+            if collisions > 16 {
+                return Err(Error::Limit("more than 16 collisions in one particle step"));
+            }
         }
         let n = normalize(hit.normal);
         let elapsed = span * hit.fraction;
@@ -653,13 +851,26 @@ fn motion(
         let speed = length(tangent);
         let friction =
             if speed > 0. { (1. - s.friction * (1. + s.restitution) * (-vn).max(0.) / speed).max(0.) } else { 0. };
-        p.velocity =
-            add(hit.velocity, add(scale(n, if vn < 0. { -s.restitution * vn } else { vn }), scale(tangent, friction)));
+        let mut rebound = if vn < 0. { -s.restitution * vn } else { vn };
+        // Inelastic bounces under inward acceleration have a finite-time
+        // accumulation point. Resolve sub-tolerance rebound height as contact
+        // instead of spending the impact budget on an endless shrinking series.
+        // Keep elastic and force-free impacts, including very slow ones, intact.
+        let normal_acceleration = dot(add(a, scale(hit.velocity, -s.drag)), n);
+        let settled = s.restitution > 0.
+            && s.restitution < 1.
+            && vn < 0.
+            && normal_acceleration < 0.
+            && rebound * rebound <= -2. * normal_acceleration * s.collision_tolerance;
+        if settled {
+            rebound = 0.;
+        }
+        p.velocity = add(hit.velocity, add(scale(n, rebound), scale(tangent, friction)));
         // Persistent contact on a changing normal needs finite contact slop.
         // A numerical epsilon alone causes infinitely many grazing impacts on
         // an accelerating/rotating boundary. Bound separation by the authored
         // spatial collision tolerance; isolated impacts retain the small bias.
-        let separation = if contact.is_some_and(|(previous, _)| dot(previous, n) > 0.95) {
+        let separation = if settled || contact.is_some_and(|(previous, _)| dot(previous, n) > 0.95) {
             s.collision_tolerance
         } else {
             radius.max(1.) * 1e-8
@@ -672,7 +883,21 @@ fn motion(
         time += elapsed;
         dt -= elapsed;
     }
-    Ok(())
+    Ok(None)
+}
+
+/// How far above the water's plane a point is, along the normal that points out of the water.
+fn water_height(w: &Water, p: [f64; 3]) -> f64 {
+    dot(w.normal, add(p, scale(w.origin, -1.)))
+}
+
+/// Whether a point is over the water's rectangle.
+fn water_contains(w: &Water, p: [f64; 3]) -> bool {
+    let offset = add(p, scale(w.origin, -1.));
+    (0..2).all(|a| {
+        let along = dot(w.axes[a], offset);
+        (w.extent[a][0]..=w.extent[a][1]).contains(&along)
+    })
 }
 fn flight(p: [f64; 3], v: [f64; 3], a: [f64; 3], drag: f64, dt: f64) -> ([f64; 3], [f64; 3]) {
     let z = drag * dt;

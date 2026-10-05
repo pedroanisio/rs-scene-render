@@ -138,3 +138,31 @@ fn procedural_solids_are_colliders_but_shape_changes_are_not_silently_frozen() {
     )
     .is_empty());
 }
+
+#[test]
+fn pyro_solver_is_a_jacobi_or_multigrid_enumeration() {
+    let object = format!(r#"<object3D id="cloud" primitive="volume">{PYRO}</object3D>"#);
+    for solver in ["jacobi", "multigrid"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro solver="{solver}" "#)));
+        assert!(c.is_empty(), "{solver}: {c:?}");
+    }
+    for solver in ["", "cg", "Multigrid", "jacobi multigrid"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro solver="{solver}" "#)));
+        assert!(c.contains(&"S06".into()), "{solver:?}: {c:?}");
+    }
+}
+
+#[test]
+fn pyro_advection_is_a_semilagrangian_or_maccormack_enumeration() {
+    let object = format!(r#"<object3D id="cloud" primitive="volume">{PYRO}</object3D>"#);
+    for advection in ["semilagrangian", "maccormack"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro advection="{advection}" "#)));
+        assert!(c.is_empty(), "{advection}: {c:?}");
+    }
+    let both = object.replace("<pyro ", r#"<pyro solver="multigrid" advection="maccormack" "#);
+    assert!(codes(&both).is_empty(), "{:?}", codes(&both));
+    for advection in ["", "MacCormack", "semi-lagrangian", "rk4"] {
+        let c = codes(&object.replace("<pyro ", &format!(r#"<pyro advection="{advection}" "#)));
+        assert!(c.contains(&"S06".into()), "{advection:?}: {c:?}");
+    }
+}

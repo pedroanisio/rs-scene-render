@@ -19,7 +19,7 @@ fn elevations_are_radial_and_convert_metres_to_scene_units() {
 fn rough_globes_have_exact_seams_watertight_poles_and_outward_nonzero_faces() {
     let spec = Globe { radius: 10., planet_radius: 1000., segments: 32, ..Default::default() };
     let m = globe(&spec, |lon, lat| Ok(100. * lon.to_radians().cos() * lat.to_radians().cos())).unwrap();
-    for row in m.vertices.chunks_exact(33) {
+    for row in m.vertices.as_chunks::<33>().0 {
         assert_eq!(row[0].pos, row[32].pos);
         assert_eq!(row[0].normal, row[32].normal);
         assert_eq!(row[0].tangent, row[32].tangent);
@@ -31,7 +31,7 @@ fn rough_globes_have_exact_seams_watertight_poles_and_outward_nonzero_faces() {
         let next = points.len();
         ids.push(*points.entry(v.pos.map(|x| if x == 0. { 0 } else { x.to_bits() })).or_insert(next));
     }
-    for t in m.indices.chunks_exact(3) {
+    for t in m.indices.as_chunks::<3>().0 {
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| Vec3::from(m.vertices[i as usize].pos));
         assert!((b - a).cross(c - a).dot(a + b + c) > 0.);
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {

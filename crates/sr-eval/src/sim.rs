@@ -18,7 +18,9 @@ use sr_model::values::{Color, Paint};
 use sr_sim::fields::{Field, FieldKind};
 use sr_sim::particles::{Burst, EmitShape, Emitter, EmitterDriver, EmitterSpec, Walls};
 use sr_sim::physics::{BodyKind, BodySpec, Bounds, Driver, JointKind, JointSpec, PxPose, Shape, World, WorldSpec};
-use sr_sim::physics3d::Pose3;
+use sr_sim::physics3d::{find_impact, Contact3, Impact3, ImpactWatch, Pose3, Velocity3};
+
+use crate::physcache::{self, PhysicsTrace};
 use sr_sim::soft::{SoftKind, SoftSpec};
 
 use crate::eval::{Affine, FrameGraph};
@@ -245,6 +247,13 @@ pub(crate) struct Graphs<'a> {
     cache: Vec<(u64, Arc<FrameGraph>)>,
 }
 
+impl<'a> Graphs<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(base: &'a dyn Fn(f64) -> FrameGraph) -> Self {
+        Graphs { base, cache: Vec::new() }
+    }
+}
+
 impl Graphs<'_> {
     pub(crate) fn at(&mut self, t: f64) -> Arc<FrameGraph> {
         let key = t.to_bits();
@@ -407,13 +416,37 @@ struct Cached {
     bodies3: usize,
     fractures: usize,
     extended: bool,
+    /// Version 4: velocities, contacts and an identity (`digest`) follow the poses.
+    traced: bool,
+    digest: Option<[u8; 32]>,
+    contacts: Vec<Contact3>,
+    /// The first impact of each watched pair, found in `contacts`.
+    impacts: Vec<Option<Impact3>>,
     frames: Vec<Vec<f64>>,
 }
 
 impl Cached {
-    fn row(&self, t: f64) -> &[f64] {
+    fn index(&self, t: f64) -> usize {
         let k = if t <= self.start { 0 } else { (((t - self.start) / self.step) + 1e-9).floor() as usize };
-        &self.frames[k.min(self.frames.len().saturating_sub(1))]
+        k.min(self.frames.len().saturating_sub(1))
+    }
+
+    fn row(&self, t: f64) -> &[f64] {
+        &self.frames[self.index(t)]
+    }
+
+    /// The pose of 3D body `body` at the start of step `step`.
+    fn pose3(&self, step: u64, body: usize) -> Pose3 {
+        let row = &self.frames[(step as usize).min(self.frames.len() - 1)];
+        let o = self.bodies * 3 + self.soft_points.iter().sum::<usize>() * 2 + 7 * body;
+        Pose3 { pos: [row[o], row[o + 1], row[o + 2]], rot: [row[o + 3], row[o + 4], row[o + 5], row[o + 6]] }
+    }
+
+    /// Find the first impact of each watched pair in the recorded contacts, as the live
+    /// world does while it runs.
+    fn notice(&mut self, watches: &[ImpactWatch]) {
+        self.impacts =
+            watches.iter().map(|w| find_impact(w, &self.contacts, |step| self.pose3(step, w.owner))).collect();
     }
 
     /// 3D body poses: position then quaternion, after the 2D bodies and soft lattices.
@@ -432,9 +465,44 @@ impl Cached {
         } else {
             vec![true; self.bodies3]
         };
-        let fractured =
-            if self.extended { f[flags + self.bodies3..].iter().map(|v| *v == 1.).collect() } else { vec![] };
-        sr_sim::physics3d::Frame3 { bodies, enabled, fractured, ..Default::default() }
+        let fractured = if self.extended {
+            f[flags + self.bodies3..flags + self.bodies3 + self.fractures].iter().map(|v| *v == 1.).collect()
+        } else {
+            vec![]
+        };
+        let velocities = self.velocities(f, flags + self.bodies3 + self.fractures);
+        let step = self.index(t) as u64;
+        let impacts = self.impacts.iter().map(|i| i.filter(|impact| impact.step < step)).collect();
+        sr_sim::physics3d::Frame3 { bodies, enabled, fractured, velocities, impacts, ..Default::default() }
+    }
+
+    /// The 3D bodies' velocities from a row, from offset `o`; none in a cache that has none.
+    fn velocities(&self, row: &[f64], o: usize) -> Vec<Velocity3> {
+        if !self.traced {
+            return Vec::new();
+        }
+        (0..self.bodies3)
+            .map(|k| {
+                let v = &row[o + 6 * k..o + 6 * k + 6];
+                Velocity3 { linear: [v[0], v[1], v[2]], angular: [v[3], v[4], v[5]] }
+            })
+            .collect()
+    }
+
+    /// Velocities and contacts as recorded.
+    fn trace(&self) -> PhysicsTrace {
+        let o = self.bodies * 3 + self.soft_points.iter().sum::<usize>() * 2 + self.bodies3 * 8 + self.fractures;
+        PhysicsTrace {
+            start: self.start,
+            step: self.step,
+            frames: self.frames.len() as u64,
+            contacts: self.contacts.clone(),
+            velocities: if self.traced {
+                self.frames.iter().map(|row| self.velocities(row, o)).collect()
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     fn frame(&self, t: f64) -> sr_sim::physics::Frame {
@@ -462,6 +530,21 @@ pub(crate) struct PhysicsRt {
     step: f64,
     bodies: Vec<BodyNode>,
     softs: Vec<SoftNode>,
+    /// Identity of the 2D world's definition, when the caller asked for it.
+    spec_digest: Option<[u8; 32]>,
+    /// Per 2D body: whether it is kinematic and when a dynamic one is released.
+    follow: Vec<(bool, f64)>,
+    /// The solvers whose outcomes load the 3D bodies, if any are coupled to them.
+    pub(crate) group: Option<crate::group::Group>,
+}
+
+/// What `build_physics` is asked to keep besides the worlds themselves.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Keep {
+    /// The contacts the 3D bodies resolve.
+    pub(crate) contacts: bool,
+    /// The identity of the physics, for a cache to store.
+    pub(crate) identity: bool,
 }
 
 struct PDriver<'a, 'b> {
@@ -530,7 +613,15 @@ fn shape_for(
     }
 }
 
-fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut Vec<String>) -> Option<PhysicsRt> {
+fn build_physics(
+    p: &Program,
+    g0: &FrameGraph,
+    fields: &FieldSrc,
+    graphs: &mut Graphs<'_>,
+    keep: Keep,
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Option<PhysicsRt> {
     let ph = p.scene.physics.as_ref();
     let mut bodies = Vec::new();
     let mut specs = Vec::new();
@@ -713,76 +804,193 @@ fn build_physics(p: &Program, g0: &FrameGraph, fields: &FieldSrc, problems: &mut
         joints,
         softs: soft_specs,
     };
+    let follow: Vec<(bool, f64)> = spec.bodies.iter().map(|b| (b.kind == BodyKind::Kinematic, b.activate_at)).collect();
     // a verified cache replaces the simulation
     let mut cached = None;
+    let mut traced = None;
+    let mut stale = false;
+    let mut plan = crate::sim3d::Plan3::Simulate { record: keep.contacts, digest: keep.identity };
     if let Some(uri) = ph.and_then(|p| p.cache.as_deref()) {
         let base = p.base_dirs.first().cloned().unwrap_or_default();
         if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(uri, &base) {
             if path.is_file() {
+                let counts = |c: &Cached| {
+                    c.bodies == bodies.len()
+                        && c.bodies3 == bodies3_count
+                        && c.fractures == fracture_counts.len()
+                        && c.soft_points == softs.iter().map(|s| s.rows * s.cols).collect::<Vec<_>>()
+                };
                 match read_cache(&path, ph.and_then(|p| p.cache_sha256.as_ref()).map(|s| s.to_string())) {
-                    Ok(c)
-                        if c.bodies == bodies.len()
-                            && c.bodies3 == bodies3_count
-                            && c.fractures == fracture_counts.len()
-                            && c.soft_points == softs.iter().map(|s| s.rows * s.cols).collect::<Vec<_>>() =>
-                    {
-                        cached = Some(c)
+                    Ok(c) if c.traced => {
+                        traced = Some((path, c));
+                        plan = crate::sim3d::Plan3::Verify;
+                    }
+                    Ok(c) if counts(&c) => {
+                        cached = Some((path.clone(), c));
+                        plan = crate::sim3d::Plan3::Placeholder;
                     }
                     Ok(_) => problems.push(format!(
                         "physics cache {}: does not match the document's bodies; simulating",
                         path.display()
                     )),
-                    Err(e) => problems.push(format!("physics cache {}: {e}; simulating", path.display())),
+                    Err(e) if e.strict => {
+                        failures.push(format!("physics cache {}: {}", path.display(), e.message));
+                        stale = true;
+                        plan = crate::sim3d::Plan3::Placeholder;
+                    }
+                    Err(e) => problems.push(format!("physics cache {}: {}; simulating", path.display(), e.message)),
                 }
             }
         }
     }
+    let spec_digest = (keep.identity || traced.is_some()).then(|| {
+        let mut id = physcache::Identity::new();
+        id.value("world2", &spec);
+        id.finish()
+    });
     let has2 = !spec.bodies.is_empty() || !spec.softs.is_empty();
-    let world = if cached.is_some() || !has2 { None } else { Some(World::new(spec)) };
-    let three = crate::sim3d::build(p, &g3, cached.is_some(), problems);
-    Some(PhysicsRt { world, three, cached, start, step, bodies, softs })
+    let world = if cached.is_some() || traced.is_some() || stale || !has2 { None } else { Some(World::new(spec)) };
+    let three = crate::sim3d::build(p, &g3, plan, problems, failures);
+    let mut ph = PhysicsRt { world, three, cached: None, start, step, bodies, softs, spec_digest, follow, group: None };
+    if let Some((path, c)) = cached {
+        // a cache from before contacts were recorded cannot say when a body hit another
+        match ph.three.as_ref().and_then(|t| t.links.first()).zip(ph.three.as_ref()) {
+            Some((link, three)) => failures.push(format!(
+                "physics cache {}: it predates contact recording, which the crater of {} needs; bake it again",
+                path.display(),
+                three.bodies[link.owner].id
+            )),
+            None => ph.cached = Some(c),
+        }
+    }
+    if let Some((path, c)) = traced {
+        // the file is only of use if it was baked from this document
+        let steps = c.frames.len() as u64;
+        match identity(p, &mut ph, graphs, fields, steps) {
+            Ok(have) if Some(have) == c.digest => {
+                let counts = c.bodies == ph.bodies.len()
+                    && c.bodies3 == bodies3_count
+                    && c.fractures == fracture_counts.len()
+                    && c.soft_points == ph.softs.iter().map(|s| s.rows * s.cols).collect::<Vec<_>>();
+                if counts {
+                    let mut c = c;
+                    c.notice(ph.three.as_ref().map_or(&[], |t| &t.watches));
+                    ph.cached = Some(c);
+                } else {
+                    failures.push(format!("physics cache {}: does not match the document's bodies", path.display()));
+                }
+            }
+            Ok(have) => failures.push(format!(
+                "physics cache {}: digest {} is not the document's {}; bake it again",
+                path.display(),
+                hex(&c.digest.unwrap_or_default()),
+                hex(&have)
+            )),
+            Err(e) => failures.push(format!("physics cache {}: {e}", path.display())),
+        }
+    }
+    Some(ph)
 }
 
-/// Cache files: version 2 adds 3D bodies (7 numbers each per frame); version 1 is still read.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The identity of the document's physics over `steps` steps: its world definitions and
+/// what the document feeds them at each step.
+fn identity(
+    p: &Program,
+    ph: &mut PhysicsRt,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+    steps: u64,
+) -> Result<[u8; 32], String> {
+    let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
+    let mut id = physcache::Identity::new();
+    id.part("world2", ph.spec_digest);
+    id.part("world3", ph.three.as_ref().and_then(|t| t.spec_digest));
+    id.value("span", &(ph.start, ph.step, steps));
+    if let Some(three) = &ph.three {
+        let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics, group: None };
+        three.sample_inputs(&mut drv, ph.start, ph.step, steps, &mut id)?;
+    }
+    if !ph.bodies.is_empty() {
+        let mut drv = PDriver { graphs, bodies: &ph.bodies, fields, statics };
+        for k in 0..steps {
+            let t = ph.start + k as f64 * ph.step;
+            let follow: Vec<usize> = ph
+                .follow
+                .iter()
+                .enumerate()
+                .filter(|(_, (kinematic, release))| *kinematic || t < release + ph.step)
+                .map(|(i, _)| i)
+                .collect();
+            if !follow.is_empty() {
+                id.value("poses2", &drv.kinematic(t + ph.step, &follow));
+            }
+            id.value("fields2", &drv.fields(t));
+        }
+    }
+    Ok(id.finish())
+}
+
+/// Cache files: version 2 adds 3D bodies (7 numbers each per frame), version 3 their
+/// participation and fracture flags, and version 4 their velocities, the contacts they
+/// resolved and the identity of the document's physics. Versions 1 to 3 are still read.
 const CACHE_MAGIC: &[u8; 8] = b"SRPHYS02";
 const CACHE_MAGIC_V3: &[u8; 8] = b"SRPHYS03";
 const CACHE_MAGIC_V1: &[u8; 8] = b"SRPHYS01";
 
-fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, String> {
+/// A cache that could not be read. A version 4 file carries the document's identity, so a
+/// failure to read one is an error of the document; for older files it falls back to
+/// simulating.
+struct CacheError {
+    strict: bool,
+    message: String,
+}
+
+impl From<String> for CacheError {
+    fn from(message: String) -> Self {
+        CacheError { strict: false, message }
+    }
+}
+
+fn read_cache(path: &std::path::Path, sha: Option<String>) -> Result<Cached, CacheError> {
     use sha2::Digest;
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let strict = data.starts_with(physcache::MAGIC);
     if let Some(want) = sha {
         let got: String = sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
         if !got.eq_ignore_ascii_case(want.trim()) {
-            return Err(format!("SHA-256 {got} does not match cacheSha256 {want}"));
+            return Err(CacheError { strict, message: format!("SHA-256 {got} does not match cacheSha256 {want}") });
         }
     }
-    parse_cache(&data)
+    parse_cache(&data).map_err(|message| CacheError { strict, message })
 }
 
 fn parse_cache(data: &[u8]) -> Result<Cached, String> {
-    let v3 = data.len() >= 8 && &data[..8] == CACHE_MAGIC_V3;
+    let v4 = data.len() >= 8 && &data[..8] == physcache::MAGIC;
+    let v3 = v4 || (data.len() >= 8 && &data[..8] == CACHE_MAGIC_V3);
     let v2 = v3 || (data.len() >= 8 && &data[..8] == CACHE_MAGIC);
     if data.len() < 40 || !(v2 || &data[..8] == CACHE_MAGIC_V1) {
         return Err("not a scene-render physics cache".into());
     }
     let u64_at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
     let f64_at = |o: usize| f64::from_le_bytes(data[o..o + 8].try_into().unwrap());
-    let (step, start, bodies, nsoft, nframes) =
-        (f64_at(8), f64_at(16), u64_at(24) as usize, u64_at(32) as usize, 0usize);
-    let _ = nframes;
+    let (step, start, bodies, nsoft) = (f64_at(8), f64_at(16), u64_at(24) as usize, u64_at(32) as usize);
     let mut o = 40;
-    // the soft bodies' point counts, then the 3D body count (version 2) and the frame count
-    if nsoft > (data.len() - o) / 8
-        || data.len() - o - nsoft * 8
-            < if v3 {
-                24
-            } else if v2 {
-                16
-            } else {
-                8
-            }
-    {
+    // the soft bodies' point counts, then the 3D body count (version 2), the fracture count
+    // (version 3), the frame count, and for version 4 the identity and the contact count
+    let tail = if v4 {
+        64
+    } else if v3 {
+        24
+    } else if v2 {
+        16
+    } else {
+        8
+    };
+    if nsoft > (data.len() - o) / 8 || data.len() - o - nsoft * 8 < tail {
         return Err("truncated".into());
     }
     let mut soft_points = Vec::new();
@@ -804,15 +1012,24 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
     };
     let frames_n = u64_at(o) as usize;
     o += 8;
+    let (digest, contact_count) = if v4 {
+        let digest: [u8; 32] = data[o..o + 32].try_into().unwrap();
+        let count = u64_at(o + 32) as usize;
+        o += 40;
+        (Some(digest), count)
+    } else {
+        (None, 0)
+    };
     if frames_n == 0 {
         return Err("no frames".into());
     }
+    let velocities = if v4 { 6 } else { 0 };
     let per = soft_points
         .iter()
         .try_fold(0usize, |a, n| a.checked_add(*n))
         .and_then(|n| n.checked_mul(2))
         .and_then(|n| n.checked_add(bodies.checked_mul(3)?))
-        .and_then(|n| n.checked_add(bodies3.checked_mul(if v3 { 8 } else { 7 })?))
+        .and_then(|n| n.checked_add(bodies3.checked_mul(if v3 { 8 } else { 7 } + velocities)?))
         .and_then(|n| n.checked_add(fractures));
     let bytes = per.and_then(|per| per.checked_mul(frames_n)).and_then(|n| n.checked_mul(8));
     let (Some(per), Some(bytes)) = (per, bytes) else { return Err("truncated".into()) };
@@ -821,10 +1038,36 @@ fn parse_cache(data: &[u8]) -> Result<Cached, String> {
     }
     let frames: Vec<Vec<f64>> =
         (0..frames_n).map(|k| (0..per).map(|i| f64_at(o + (k * per + i) * 8)).collect()).collect();
-    if v3 && frames.iter().any(|row| row[per - bodies3 - fractures..].iter().any(|v| *v != 0. && *v != 1.)) {
-        return Err("invalid physics cache state flag".into());
+    if v3 {
+        let flags = per - bodies3 * velocities - bodies3 - fractures..per - bodies3 * velocities;
+        if frames.iter().any(|row| row[flags.clone()].iter().any(|v| *v != 0. && *v != 1.)) {
+            return Err("invalid physics cache state flag".into());
+        }
     }
-    Ok(Cached { step, start, bodies, soft_points, bodies3, fractures, extended: v3, frames })
+    let rest = &data[o + bytes..];
+    let contacts = if v4 {
+        let expected = contact_count.checked_mul(physcache::CONTACT_RECORD).ok_or("truncated contacts")?;
+        if rest.len() > expected {
+            return Err("trailing bytes after the contacts".into());
+        }
+        physcache::read_contacts(rest, contact_count, frames_n as u64, bodies3, start, step)?
+    } else {
+        Vec::new()
+    };
+    Ok(Cached {
+        step,
+        start,
+        bodies,
+        soft_points,
+        bodies3,
+        fractures,
+        extended: v3,
+        traced: v4,
+        digest,
+        contacts,
+        impacts: Vec::new(),
+        frames,
+    })
 }
 
 // ------------------------------------------------------------------ particles
@@ -1439,18 +1682,26 @@ impl EmitterDriver for EDriver<'_, '_> {
 #[derive(Default)]
 pub struct Runtime {
     built: bool,
-    fields: Option<FieldSrc>,
-    physics: Option<PhysicsRt>,
+    pub(crate) fields: Option<FieldSrc>,
+    pub(crate) physics: Option<PhysicsRt>,
     emitters: HashMap<Arc<str>, EmitterRt>,
     agents: crate::agents::Sims,
     pyro: crate::pyro::Sims,
     particles3d: crate::particles3d::Sims,
     ocean: crate::ocean::Sims,
+    /// What the particles that fall into an ocean give it, shared by the emitters and the ocean.
+    pub(crate) splash: crate::splash::Log,
+    /// How an ocean's outcome loads the bodies in it; none unless something sets one.
+    pub(crate) coupling: Option<crate::group::Coupling>,
+    /// Bytes the rigid world's memory of its frames may use; the world's own default when none.
+    pub(crate) frame_memory: Option<usize>,
     /// Frame graphs without simulation, kept across frames: animated emitters sample them on the frame grid,
     /// so the previous frame's graph is still here when the next frame's steps need it.
     graph_cache: Vec<(u64, Arc<FrameGraph>)>,
     /// Problems found while building (reported once).
     pub problems: Vec<String>,
+    /// Simulations that could not be built, as `FrameGraph::failures`.
+    pub failures: Vec<String>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -1482,9 +1733,17 @@ pub(crate) fn apply_physics(
             (c.frame(t), c.frame3(t))
         } else {
             let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
+            let group = ph.group.clone();
             let frame3 = match ph.three.as_mut() {
                 Some(three) => {
-                    let mut drv = crate::sim3d::Driver { p, graphs, bodies: &three.bodies, fields, statics: &statics };
+                    let mut drv = crate::sim3d::Driver {
+                        p,
+                        graphs,
+                        bodies: &three.bodies,
+                        fields,
+                        statics: &statics,
+                        group: group.as_ref(),
+                    };
                     let Some(world) = three.world.as_mut() else { return };
                     let frame = world.frame_at(t, &mut drv);
                     g.problems.extend(frame.errors.clone());
@@ -1524,19 +1783,59 @@ impl Runtime {
     /// Applies simulation to `g` (evaluated at `t`); `base` evaluates without simulation.
     pub fn apply(&mut self, p: &Program, g: &mut FrameGraph, t: f64, base: &dyn Fn(f64) -> FrameGraph) {
         let mut graphs = Graphs { base, cache: std::mem::take(&mut self.graph_cache) };
+        let clock = std::time::Instant::now();
         if !self.built {
             self.built = true;
             let fields = build_fields(p);
             let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
             let g0 = if (g.time - start).abs() < 1e-12 { Arc::new(g.clone()) } else { graphs.at(start) };
-            self.physics = build_physics(p, &g0, &fields, &mut self.problems);
+            self.physics =
+                build_physics(p, &g0, &fields, &mut graphs, Keep::default(), &mut self.problems, &mut self.failures);
             self.fields = Some(fields);
+            if let (Some(budget), Some(world)) =
+                (self.frame_memory, self.physics.as_mut().and_then(|ph| ph.three.as_mut()))
+            {
+                world.world = world.world.take().map(|w| w.with_frame_log_budget(budget));
+            }
+            if let Some(ph) = self.physics.as_mut() {
+                let hulls: Vec<crate::group::BodyHull> =
+                    ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
+                match crate::group::Group::detect(p, &hulls, ph.step, self.coupling.clone()) {
+                    Ok(Some(_)) if ph.cached.is_some() => self.failures.push(
+                        "a physics cache cannot be combined with an ocean that loads the bodies in it: the loads come from the water"
+                            .into(),
+                    ),
+                    Ok(group) => ph.group = group,
+                    Err(error) => self.failures.push(error),
+                }
+            }
         }
         let fields = self.fields.as_ref().expect("built");
+        // A group runs its ocean first: the ocean's steps pull the rigid world ahead in time order,
+        // each needing only outcomes the ocean has already written.
+        let grouped = self.physics.as_ref().is_some_and(|ph| ph.group.is_some());
+        let mut ocean_seconds = None;
+        if grouped {
+            let clock = std::time::Instant::now();
+            {
+                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
+                let mut pull = |g: &FrameGraph,
+                                graphs: &mut Graphs<'_>,
+                                physics: Option<&mut PhysicsRt>,
+                                ocean: &str,
+                                step: u64| {
+                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
+                };
+                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
+            }
+            ocean_seconds = Some(clock.elapsed().as_secs_f64());
+        }
         // ---- physics
         if let Some(ph) = self.physics.as_mut() {
             apply_physics(p, ph, g, &mut graphs, fields, t);
         }
+        g.sim_seconds.rigid = clock.elapsed().as_secs_f64();
+        let clock = std::time::Instant::now();
         // ---- particles
         let ids: Vec<usize> =
             g.nodes.iter().enumerate().filter(|(_, n)| n.kind == "particleEmitter").map(|(i, _)| i).collect();
@@ -1568,13 +1867,44 @@ impl Runtime {
             rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
-        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut());
-        self.ocean.apply(p, g);
+        // A smoke that drags particles is simulated first, so that the particles ask it for steps it is
+        // already at and the frame's own volume is not asked for one it has gone past; documents with no
+        // gas keep the order they had.
+        let gas = p.nodes.iter().any(|n| n.name == "particles3D" && text(&*n.elem, "gas").is_some());
+        let mut pyro_failures = Vec::new();
+        let smoke_clock = std::time::Instant::now();
+        if gas {
+            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
+        }
+        let smoke_early = smoke_clock.elapsed().as_secs_f64();
+        self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut self.pyro, &self.splash);
+        g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
+        let clock = std::time::Instant::now();
+        if ocean_seconds.is_none() {
+            {
+                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
+                let mut pull = |g: &FrameGraph,
+                                graphs: &mut Graphs<'_>,
+                                physics: Option<&mut PhysicsRt>,
+                                ocean: &str,
+                                step: u64| {
+                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
+                };
+                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
+            }
+        }
+        g.sim_seconds.ocean = ocean_seconds.unwrap_or_else(|| clock.elapsed().as_secs_f64());
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
-        let mut pyro_problems = Vec::new();
-        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_problems);
-        g.problems.extend(pyro_problems);
+        // everything the smoke solver reports is a failure of the solver
+        let clock = std::time::Instant::now();
+        if !gas {
+            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
+        }
+        g.sim_seconds.smoke = smoke_early + clock.elapsed().as_secs_f64();
+        for failure in pyro_failures {
+            g.fail(failure);
+        }
         self.graph_cache = graphs.cache;
     }
 }
@@ -1667,56 +1997,128 @@ fn set_world(g: &mut FrameGraph, i: usize, w: Affine) {
 /// Simulates the document's physics from its start to `end` and returns the
 /// cache file contents (`scene-render simulate`).
 pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> Result<Vec<u8>, String> {
-    let mut problems = Vec::new();
+    let mut graphs = Graphs { base, cache: Vec::new() };
     let fields = build_fields(p);
-    let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
-    let g0 = base(start);
-    let mut ph = build_physics(p, &g0, &fields, &mut problems).ok_or("the document has no physics bodies")?;
-    if !problems.is_empty() {
-        return Err(problems.join("; "));
-    }
+    let mut ph = built(p, &fields, &mut graphs, Keep { contacts: true, identity: true })?;
     if ph.cached.is_some() {
         return Err("already cached".into());
     }
-    let mut world = ph.world.take();
-    let mut three = ph.three.take();
-    let steps = (((end - start) / ph.step).ceil().max(0.0) as u64) + 1;
+    let hulls: Vec<crate::group::BodyHull> = ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
+    if crate::group::Group::detect(p, &hulls, ph.step, None)?.is_some() {
+        return Err("this document cannot be baked into a physics cache: an ocean loads the bodies in it, and the loads come from the water".into());
+    }
+    let steps = (((end - ph.start) / ph.step).ceil().max(0.0) as u64) + 1;
+    let digest = identity(p, &mut ph, &mut graphs, &fields, steps)?;
+    let fractures = ph.three.as_ref().map_or(0, |t| t.fractures.len());
+    let bodies3 = ph.three.as_ref().map_or(0, |t| t.bodies.len());
+    let mut rows = Vec::new();
+    let run = run(p, &mut ph, &mut graphs, &fields, steps, |f, f3| {
+        for b in &f.bodies {
+            for v in [b.x, b.y, b.angle] {
+                rows.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for s in &f.softs {
+            for q in s {
+                rows.extend_from_slice(&q[0].to_le_bytes());
+                rows.extend_from_slice(&q[1].to_le_bytes());
+            }
+        }
+        for b in &f3.bodies {
+            for v in b.pos.iter().chain(&b.rot) {
+                rows.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for flag in f3.enabled.iter().chain(&f3.fractured) {
+            rows.extend_from_slice(&f64::from(u8::from(*flag)).to_le_bytes());
+        }
+        for v in &f3.velocities {
+            for c in v.linear.iter().chain(&v.angular) {
+                rows.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    })?;
     let mut out = Vec::new();
-    let fractures = three.as_ref().map_or(0, |t| t.fractures.len());
-    out.extend_from_slice(if fractures == 0 { CACHE_MAGIC } else { CACHE_MAGIC_V3 });
+    out.extend_from_slice(physcache::MAGIC);
     out.extend_from_slice(&ph.step.to_le_bytes());
-    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&ph.start.to_le_bytes());
     out.extend_from_slice(&(ph.bodies.len() as u64).to_le_bytes());
     out.extend_from_slice(&(ph.softs.len() as u64).to_le_bytes());
     for s in &ph.softs {
         out.extend_from_slice(&((s.rows * s.cols) as u64).to_le_bytes());
     }
-    out.extend_from_slice(&(three.as_ref().map(|t| t.bodies.len()).unwrap_or(0) as u64).to_le_bytes());
-    if fractures > 0 {
-        out.extend_from_slice(&(fractures as u64).to_le_bytes());
-    }
+    out.extend_from_slice(&(bodies3 as u64).to_le_bytes());
+    out.extend_from_slice(&(fractures as u64).to_le_bytes());
     out.extend_from_slice(&steps.to_le_bytes());
+    out.extend_from_slice(&digest);
+    out.extend_from_slice(&(run.contacts.len() as u64).to_le_bytes());
+    out.extend_from_slice(&rows);
+    physcache::write_contacts(&mut out, &run.contacts);
+    Ok(out)
+}
+
+/// The velocities and contacts of the document's 3D rigid bodies over its duration: read
+/// from the cache when there is a verified one, simulated otherwise.
+pub fn physics_trace(p: &Program, base: &dyn Fn(f64) -> FrameGraph) -> Result<PhysicsTrace, String> {
     let mut graphs = Graphs { base, cache: Vec::new() };
-    let statics = if fields.animated { Vec::new() } else { fields.at(start, None) };
+    let fields = build_fields(p);
+    let mut ph = built(p, &fields, &mut graphs, Keep { contacts: true, identity: false })?;
+    if let Some(c) = &ph.cached {
+        return Ok(c.trace());
+    }
+    let steps = (((p.duration - ph.start) / ph.step).ceil().max(0.0) as u64) + 1;
+    let mut velocities = Vec::new();
+    let run = run(p, &mut ph, &mut graphs, &fields, steps, |_, f3| velocities.push(f3.velocities.clone()))?;
+    Ok(PhysicsTrace { start: ph.start, step: ph.step, frames: steps, contacts: run.contacts, velocities })
+}
+
+/// The document's physics, built, with any problem or failure an error.
+fn built(p: &Program, fields: &FieldSrc, graphs: &mut Graphs<'_>, keep: Keep) -> Result<PhysicsRt, String> {
+    let mut problems = Vec::new();
+    let mut failures = Vec::new();
+    let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
+    let g0 = graphs.at(start);
+    let ph = build_physics(p, &g0, fields, graphs, keep, &mut problems, &mut failures)
+        .ok_or("the document has no physics bodies")?;
+    problems.extend(failures);
+    if problems.is_empty() {
+        Ok(ph)
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// What a simulation to the end of the span leaves besides what each step reports.
+struct Run {
+    contacts: Vec<Contact3>,
+}
+
+/// Steps the worlds through `steps` steps from the start, handing each step's 2D and 3D
+/// frames to `each`, then collects the contacts the 3D world recorded.
+fn run(
+    p: &Program,
+    ph: &mut PhysicsRt,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+    steps: u64,
+    mut each: impl FnMut(&sr_sim::physics::Frame, &sr_sim::physics3d::Frame3),
+) -> Result<Run, String> {
+    let mut world = ph.world.take();
+    let mut three = ph.three.take();
+    let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
     for k in 0..steps {
-        let t = start + k as f64 * ph.step;
+        let t = ph.start + k as f64 * ph.step;
         let f = match world.as_mut() {
             Some(w) => {
-                let mut drv =
-                    PDriver { graphs: &mut graphs, bodies: &ph.bodies, fields: &fields, statics: statics.clone() };
+                let mut drv = PDriver { graphs, bodies: &ph.bodies, fields, statics: statics.clone() };
                 w.frame_at(t + 1e-9, &mut drv)
             }
             None => sr_sim::physics::Frame::default(),
         };
         let f3 = match three.as_mut() {
             Some(th) => {
-                let mut drv = crate::sim3d::Driver {
-                    p,
-                    graphs: &mut graphs,
-                    bodies: &th.bodies,
-                    fields: &fields,
-                    statics: &statics,
-                };
+                let mut drv =
+                    crate::sim3d::Driver { p, graphs, bodies: &th.bodies, fields, statics: &statics, group: None };
                 let frame = th.world.as_mut().expect("world").frame_at(t, &mut drv);
                 if !frame.errors.is_empty() {
                     return Err(frame.errors.join("; "));
@@ -1725,29 +2127,16 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
             }
             None => sr_sim::physics3d::Frame3::default(),
         };
-        for b in &f.bodies {
-            for v in [b.x, b.y, b.angle] {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        for s in &f.softs {
-            for q in s {
-                out.extend_from_slice(&q[0].to_le_bytes());
-                out.extend_from_slice(&q[1].to_le_bytes());
-            }
-        }
-        for b in &f3.bodies {
-            for v in b.pos.iter().chain(&b.rot) {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        if fractures > 0 {
-            for flag in f3.enabled.iter().chain(&f3.fractured) {
-                out.extend_from_slice(&f64::from(u8::from(*flag)).to_le_bytes());
-            }
+        each(&f, &f3);
+    }
+    let mut contacts = Vec::new();
+    if let Some(w) = three.as_ref().and_then(|t| t.world.as_ref()) {
+        // the last step is reported but not yet taken, so its contacts do not exist
+        for step in 0..steps.saturating_sub(1) {
+            contacts.extend_from_slice(w.contacts_at(step).ok_or("a step's contacts were not recorded")?);
         }
     }
-    Ok(out)
+    Ok(Run { contacts })
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ impl Driver3 for Surface {
 }
 fn world(kind: BodyKind) -> World3 {
     World3::new(World3Spec {
+        fix_internal_edges: false,
         start: 0.,
         step: 0.01,
         gravity: [0.; 3],
@@ -87,7 +88,8 @@ fn collider_budget_and_dynamic_body_rejections_are_explicit() {
 
 #[test]
 fn collider_revision_restores_with_checkpoint() {
-    let mut world = world(BodyKind::Static);
+    // the replay path, which the frame memory would otherwise bypass
+    let mut world = world(BodyKind::Static).with_frame_log_budget(0);
     let mut driver = Surface { invalid: false, budget: 1 << 20, calls: vec![] };
     assert!(world.frame_at(2., &mut driver).errors.is_empty());
     driver.calls.clear();
@@ -96,6 +98,18 @@ fn collider_revision_restores_with_checkpoint() {
     driver.calls.clear();
     assert!(world.frame_at(0., &mut driver).errors.is_empty());
     assert_eq!(driver.calls, vec![None]);
+}
+
+#[test]
+fn an_earlier_time_already_simulated_asks_the_surface_for_nothing() {
+    let mut world = world(BodyKind::Static);
+    let mut driver = Surface { invalid: false, budget: 1 << 20, calls: vec![] };
+    let late = world.frame_at(2., &mut driver);
+    driver.calls.clear();
+    assert!(world.frame_at(1., &mut driver).errors.is_empty());
+    assert!(world.frame_at(0., &mut driver).errors.is_empty());
+    assert!(driver.calls.is_empty(), "{:?}", driver.calls);
+    assert_eq!(world.frame_at(2., &mut driver), late);
 }
 
 #[test]

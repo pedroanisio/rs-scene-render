@@ -583,3 +583,60 @@ fn particles_land_on_real_3d_colliders_and_follow_a_moving_surface() {
     assert!((f.particles[0].position[1] - 2.1).abs() < 1e-5, "{f:?}");
     assert!((f.particles[0].velocity[1] - 0.1).abs() < 1e-8, "{f:?}");
 }
+
+#[test]
+fn dissipative_micro_bounces_settle_within_collision_tolerance() {
+    struct Floor(Scene);
+    impl Driver for Floor {
+        fn emission(&mut self, _: f64) -> Result<Emission, Error> {
+            let mut m = sr_volume::Transform::identity().columns();
+            m[13] = 1.9 - 1e-8;
+            Ok(Emission { transform: sr_volume::Transform::new(m).unwrap(), ..Default::default() })
+        }
+        fn acceleration(&mut self, _: f64, _: [f64; 3], _: [f64; 3]) -> Result<[f64; 3], Error> {
+            Ok([0.; 3])
+        }
+        fn sweep(&mut self, t: f64, dt: f64, a: [f64; 3], b: [f64; 3], r: f64) -> Result<Option<Hit>, Error> {
+            self.0.sweep(t, dt, a, b, r)
+        }
+    }
+    let mut spec = spec();
+    spec.step = 1. / 24.;
+    spec.radius = 0.1;
+    spec.restitution = 0.15;
+    spec.gravity = [0., 20., 0.];
+    spec.bursts = vec![burst(0., 1)];
+    let mut emitter = Emitter::new(spec).unwrap();
+    let mut driver = Floor(Scene { wall: true, ..Default::default() });
+    for time in [0.5, 1., 0.25, 1.] {
+        let frame = emitter.at(time, &mut driver).unwrap();
+        let p = &frame.particles[0];
+        assert!((p.position[1] - 1.9).abs() <= 0.0011, "{:?}", p.position);
+        assert!(p.velocity[1].abs() < 1e-8, "{:?}", p.velocity);
+    }
+}
+
+#[test]
+fn resolvable_rebounds_keep_their_authored_restitution() {
+    for restitution in [0.15, 1.] {
+        let mut spec = spec();
+        spec.radius = 0.1;
+        spec.collision_tolerance = 1e-8;
+        spec.velocity = [0., 20., 0.];
+        spec.gravity = [0., 20., 0.];
+        spec.restitution = restitution;
+        spec.bursts = vec![burst(0., 1)];
+        let mut emitter = Emitter::new(spec).unwrap();
+        let mut driver = Scene { wall: true, ..Default::default() };
+        let frame = emitter.at(0.1, &mut driver).unwrap();
+        // Solve y=20t+10t²=1.9 independently, then integrate the rebound.
+        let impact_time = ((476f64).sqrt() - 20.) / 20.;
+        let incoming = 20. + 20. * impact_time;
+        let remaining = 0.1 - impact_time;
+        let expected_velocity = -restitution * incoming + 20. * remaining;
+        let expected_y = 1.9 - restitution * incoming * remaining + 10. * remaining * remaining;
+        let p = &frame.particles[0];
+        assert!((p.velocity[1] - expected_velocity).abs() < 1e-6, "{restitution}: {:?}", p.velocity);
+        assert!((p.position[1] - expected_y).abs() < 1e-6, "{restitution}: {:?}", p.position);
+    }
+}

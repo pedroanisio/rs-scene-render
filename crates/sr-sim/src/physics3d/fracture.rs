@@ -244,6 +244,7 @@ mod tests {
             start: Pose3::default(),
         };
         let world = World3::new(World3Spec {
+            fix_internal_edges: false,
             start: 0.,
             step: 0.01,
             gravity: [0.; 3],

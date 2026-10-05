@@ -11,10 +11,36 @@
 //! confinement follows Fedkiw, Stam and Jensen, SIGGRAPH 2001. Obstacles are
 //! voxelized at cell centres and must be resolved by the authored grid.
 
+use rayon::prelude::*;
 use sr_volume::{SparseGrid, Transform, Volume};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
+mod key;
+mod maccormack;
 pub mod mesh;
+mod multigrid;
+
+pub use key::volume_key;
+
+/// Minimum elements per rayon task. Task boundaries never change a value: every
+/// parallel loop writes each element from the same expression as the serial loop
+/// did, and all reductions stay serial and in index order.
+const HEAVY: usize = 256;
+const LIGHT: usize = 8192;
+
+#[cfg(test)]
+mod atomicity;
+#[cfg(test)]
+mod detail;
+#[cfg(test)]
+mod determinism;
+#[cfg(test)]
+mod export;
+#[cfg(test)]
+mod pockets;
+#[cfg(test)]
+mod sampling;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,6 +58,33 @@ pub enum Error {
 pub enum Boundary {
     Closed,
     Open,
+}
+
+/// Transport scheme for density, temperature and velocity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Advection {
+    /// Midpoint semi-Lagrangian: unconditionally stable, numerically diffusive.
+    /// The reference results of every release before `MacCormack`.
+    #[default]
+    SemiLagrangian,
+    /// Semi-Lagrangian with a backward-forward error correction (Selle et al.,
+    /// 2008), limited to the local extrema of the interpolation stencil, and
+    /// plain semi-Lagrangian where a collider cuts a trace short. It keeps
+    /// finer detail at the same resolution and cannot create new extrema.
+    MacCormack,
+}
+
+/// Preconditioner of the pressure conjugate-gradient solve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PressureSolver {
+    /// Diagonal (Jacobi) preconditioner with serial, in-order reductions. The
+    /// reference results of every release before `Multigrid`.
+    #[default]
+    Jacobi,
+    /// Algebraic-multigrid V(1,1) preconditioner with fixed-block reductions;
+    /// iteration counts stay roughly independent of resolution. Results are
+    /// deterministic for any thread count but differ from `Jacobi` in the last bits.
+    Multigrid,
 }
 
 #[derive(Clone, Debug)]
@@ -53,9 +106,12 @@ pub struct Spec {
     /// Seeded acceleration amplitude, scene units/second².
     pub turbulence: f64,
     pub seed: u64,
+    /// Maximum conjugate-gradient iterations.
     pub pressure_iterations: usize,
     /// RMS divergence error allowed, in 1/second.
     pub pressure_tolerance: f64,
+    pub solver: PressureSolver,
+    pub advection: Advection,
     /// Conservative resident state plus step workspace budget, before allocation.
     pub max_bytes: usize,
 }
@@ -77,6 +133,8 @@ impl Default for Spec {
             seed: 0,
             pressure_iterations: 200,
             pressure_tolerance: 1e-6,
+            solver: PressureSolver::Jacobi,
+            advection: Advection::SemiLagrangian,
             max_bytes: 256 << 20,
         }
     }
@@ -269,6 +327,15 @@ pub struct Impulse {
 pub struct Inputs {
     pub sources: Vec<Source>,
     pub impulses: Vec<Impulse>,
+    /// Sources whose expansion follows from their heat rather than being given: smoke heated at
+    /// constant pressure, as an ideal gas, expands at `(dT/dt) / T` in every cell it heats, so
+    /// `expansion` must be zero. Their `density_rate` is a total: the sum of the volume fractions
+    /// they add, per second, spread evenly over the cells their shape covers that are not solid.
+    /// Otherwise they are `sources`.
+    pub heated: Vec<Source>,
+    /// One-shot totals with the same derived expansion; `expansion` must be zero. Their `density`
+    /// is the sum of the volume fractions they add, spread evenly over the free cells they cover.
+    pub heated_impulses: Vec<Impulse>,
     pub obstacles: Vec<Obstacle>,
     pub acceleration: [f64; 3],
     /// Optional per-cell acceleration, x-fastest. Empty means no spatial field;
@@ -278,13 +345,19 @@ pub struct Inputs {
 
 impl Inputs {
     fn validate(&self) -> Result<(), Error> {
-        if self.sources.len().saturating_add(self.impulses.len()) > 4096 || self.obstacles.len() > 4096 {
+        let heated = self.heated.len().saturating_add(self.heated_impulses.len());
+        if self.sources.len().saturating_add(self.impulses.len()).saturating_add(heated) > 4096
+            || self.obstacles.len() > 4096
+        {
             return Err(Error::Limit("at most 4096 sources/colliders per step"));
         }
         if !finite3(self.acceleration) {
             return Err(Error::Invalid("nonfinite acceleration"));
         }
-        for s in &self.sources {
+        if self.heated.iter().any(|s| s.expansion != 0.0) || self.heated_impulses.iter().any(|i| i.expansion != 0.0) {
+            return Err(Error::Invalid("the expansion of a heated source is derived from its heat"));
+        }
+        for s in self.sources.iter().chain(&self.heated) {
             s.shape.validate()?;
             if !s.start.is_finite()
                 || s.end.is_some_and(|e| !e.is_finite() || e <= s.start)
@@ -302,7 +375,7 @@ impl Inputs {
                 return Err(Error::Invalid("nonfinite collider velocity"));
             }
         }
-        for impulse in &self.impulses {
+        for impulse in self.impulses.iter().chain(&self.heated_impulses) {
             impulse.shape.validate()?;
             if !nonnegative(impulse.time)
                 || !nonnegative(impulse.density)
@@ -338,6 +411,9 @@ fn index(p: [usize; 3], dims: [usize; 3]) -> usize {
 fn coords(k: usize, dims: [usize; 3]) -> [usize; 3] {
     [k % dims[0], (k / dims[0]) % dims[1], k / (dims[0] * dims[1])]
 }
+fn world_point(origin: [f64; 3], h: f64, p: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|a| origin[a] + h * p[a])
+}
 fn face_dims(mut dims: [usize; 3], axis: usize) -> [usize; 3] {
     dims[axis] += 1;
     dims
@@ -356,11 +432,114 @@ pub struct State {
     temperature: Vec<f64>,
     velocity: [Vec<f64>; 3],
     solid: Vec<bool>,
-    solid_velocity_low: Vec<[f64; 3]>,
-    // Prescribed velocities at the low/high MAC faces, including nonlinear
-    // deforming boundaries. Uses the same storage as the former affine samples.
-    solid_velocity_high: Vec<[f64; 3]>,
 }
+
+/// The velocity of one step's gas, copied out of a [`State`] so that something that reads it (the
+/// particles an emitter drags along) does not hold the simulation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gas {
+    cells: [usize; 3],
+    origin: [f64; 3],
+    h: f64,
+    boundary: Boundary,
+    velocity: [Vec<f64>; 3],
+    solid: Vec<bool>,
+}
+
+impl State {
+    /// A copy of this step's velocity field.
+    pub fn gas(&self) -> Gas {
+        Gas {
+            cells: self.cells,
+            origin: self.origin,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: self.velocity.clone(),
+            solid: self.solid.clone(),
+        }
+    }
+}
+
+impl Gas {
+    /// Bytes the copy holds.
+    pub fn bytes(&self) -> usize {
+        self.velocity.iter().map(|v| v.len() * std::mem::size_of::<f64>()).sum::<usize>() + self.solid.len()
+    }
+
+    /// The gas's velocity at a point in the volume's own axes: the solver's trilinear interpolation
+    /// inside the domain, nothing more than a cell outside it, and in between the value at the nearest
+    /// point of the domain fading to nothing across that cell, so that what a particle feels has no jump
+    /// at the boundary (a closed domain would otherwise hold its wall value forever outside). A point that
+    /// is not finite is at rest.
+    pub fn velocity_at(&self, p: [f64; 3]) -> [f64; 3] {
+        if !finite3(p) {
+            return [0.0; 3];
+        }
+        let q: [f64; 3] = std::array::from_fn(|a| (p[a] - self.origin[a]) / self.h);
+        let outside = (0..3).map(|a| (-q[a]).max(q[a] - self.cells[a] as f64).max(0.0)).fold(0.0, f64::max);
+        if outside >= 1.0 {
+            return [0.0; 3];
+        }
+        let inside: [f64; 3] = std::array::from_fn(|a| q[a].clamp(0.0, self.cells[a] as f64));
+        let field = Field {
+            cells: self.cells,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: [&self.velocity[0], &self.velocity[1], &self.velocity[2]],
+            solid: &self.solid,
+        };
+        let v = field.velocity_grid(inside);
+        if outside == 0.0 {
+            v
+        } else {
+            v.map(|c| c * (1.0 - outside))
+        }
+    }
+}
+
+/// Prescribed velocities at the low and high MAC faces of one solid cell,
+/// including nonlinear deforming boundaries. They are recomputed from the
+/// colliders at the start of every step and used only during it, so they are
+/// kept sparsely for the step and not stored in the state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SolidFaces {
+    cell: usize,
+    low: [f64; 3],
+    high: [f64; 3],
+}
+
+/// The solid-cell mask of `obstacles` (the first listed collider that contains a
+/// cell centre wins) and each solid cell's face velocities, in cell order.
+fn voxelize(
+    cells: [usize; 3],
+    origin: [f64; 3],
+    h: f64,
+    obstacles: &[Obstacle],
+) -> Result<(Vec<bool>, Vec<SolidFaces>), Error> {
+    let count = cells.iter().product();
+    let mut solid = vec![false; count];
+    let mut faces = Vec::new();
+    for (k, is_solid) in solid.iter_mut().enumerate() {
+        let p = world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
+        let Some(collider) = obstacles.iter().find(|o| o.shape.contains(p)) else { continue };
+        *is_solid = true;
+        let (mut low_velocity, mut high_velocity) = ([0.0; 3], [0.0; 3]);
+        for (axis, (low_v, high_v)) in low_velocity.iter_mut().zip(&mut high_velocity).enumerate() {
+            let mut low = p;
+            let mut high = p;
+            low[axis] -= 0.5 * h;
+            high[axis] += 0.5 * h;
+            *low_v = collider.velocity_at(low)?[axis];
+            *high_v = collider.velocity_at(high)?[axis];
+        }
+        faces.push(SolidFaces { cell: k, low: low_velocity, high: high_velocity });
+    }
+    faces.shrink_to_fit();
+    Ok((solid, faces))
+}
+
+/// Brick coordinates and the 8x8x8 samples of a brick that holds something other than the background.
+type ExportedBrick = ([i32; 3], Box<[f32; 512]>);
 
 impl State {
     /// Resident state storage and checkpoint-map bookkeeping. Step scratch is
@@ -370,8 +549,6 @@ impl State {
             + self.temperature.capacity() * 8
             + self.velocity.iter().map(|v| v.capacity() * 8).sum::<usize>()
             + self.solid.capacity()
-            + self.solid_velocity_low.capacity() * 24
-            + self.solid_velocity_high.capacity() * 24
             + std::mem::size_of::<Self>()
             + 256
     }
@@ -391,7 +568,7 @@ impl State {
     }
 
     fn world(&self, p: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|a| self.origin[a] + self.h * p[a])
+        world_point(self.origin, self.h, p)
     }
     fn cell_world(&self, k: usize) -> [f64; 3] {
         self.world(coords(k, self.cells).map(|v| v as f64 + 0.5))
@@ -409,11 +586,40 @@ impl State {
         self.velocity_grid(self.grid(p))
     }
 
+    fn field(&self) -> Field<'_> {
+        Field {
+            cells: self.cells,
+            h: self.h,
+            boundary: self.boundary,
+            velocity: [&self.velocity[0], &self.velocity[1], &self.velocity[2]],
+            solid: &self.solid,
+        }
+    }
+
     fn velocity_grid(&self, p: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|axis| {
-            let q = std::array::from_fn(|a| p[a] - if a == axis { 0.0 } else { 0.5 });
-            sample(&self.velocity[axis], face_dims(self.cells, axis), q, self.boundary, 0.0)
-        })
+        self.field().velocity_grid(p)
+    }
+
+    /// Working state of a step: the evolving fields copied from `self` and a fresh
+    /// (empty) solid mask.
+    fn working_copy(&self) -> State {
+        let copy = |src: &[f64]| {
+            let mut dst = vec![0.0; src.len()];
+            dst.par_chunks_mut(LIGHT).zip(src.par_chunks(LIGHT)).for_each(|(d, s)| d.copy_from_slice(s));
+            dst
+        };
+        let count = self.density.len();
+        State {
+            cells: self.cells,
+            origin: self.origin,
+            h: self.h,
+            ambient: self.ambient,
+            boundary: self.boundary,
+            density: copy(&self.density),
+            temperature: copy(&self.temperature),
+            velocity: std::array::from_fn(|a| copy(&self.velocity[a])),
+            solid: vec![false; count],
+        }
     }
 
     /// Divergence in 1/second; an out-of-domain cell returns zero.
@@ -431,15 +637,122 @@ impl State {
             .sum()
     }
 
+    /// Export all five scalar channels in scene units. The bound includes the
+    /// worst-case brick storage before allocating any grid; no field is dropped.
+    pub fn volume(&self, max_bytes: usize) -> Result<Volume, Error> {
+        let bricks = self.cells.iter().map(|n| n.div_ceil(8)).product::<usize>();
+        let needed = bricks
+            .checked_mul(5 * (512 * 4 + 128))
+            .and_then(|v| v.checked_add(4096))
+            .ok_or(Error::Limit("volume export size overflow"))?;
+        if needed > max_bytes {
+            return Err(Error::Limit("volume export memory budget"));
+        }
+        let h = self.h;
+        let o = self.origin.map(|v| v + h * 0.5);
+        let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
+        // The five channels are independent; results are inserted in channel order,
+        // so the first error is the one a serial export would report.
+        let grids: Vec<Result<SparseGrid, Error>> =
+            (0..5).into_par_iter().map(|channel| self.export_channel(channel, transform, bricks)).collect();
+        let mut volume = Volume::new();
+        for (name, grid) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().zip(grids) {
+            volume.insert(name, grid?)?;
+        }
+        Ok(volume)
+    }
+
+    /// One exported channel: 0 density, 1 temperature, 2..=4 velocity components.
+    /// Each 8x8x8 brick is filled from the state in parallel and stored whole; a
+    /// brick whose samples all equal the background is not stored, and voxels
+    /// outside the domain keep the background.
+    fn export_channel(&self, channel: usize, transform: Transform, bricks: usize) -> Result<SparseGrid, Error> {
+        let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
+        let mut grid = SparseGrid::new(transform, bg, bricks)?;
+        let per_axis = self.cells.map(|n| n.div_ceil(8));
+        let field = self.field();
+        let sample = |k: usize| -> f64 {
+            match channel {
+                0 => self.density[k],
+                1 => self.temperature[k],
+                _ => {
+                    // `velocity_at(cell_world(k))[axis]` without the two unused components.
+                    let p = self.cell_world(k);
+                    if finite3(p) {
+                        field.velocity_axis(self.grid(p), channel - 2)
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        };
+        let filled: Vec<Option<ExportedBrick>> = (0..bricks)
+            .into_par_iter()
+            .with_min_len(4)
+            .map(|b| -> Result<_, Error> {
+                let brick = coords(b, per_axis);
+                let mut values = Box::new([bg; 512]);
+                let mut stored = false;
+                for z in 0..8usize.min(self.cells[2] - brick[2] * 8) {
+                    for y in 0..8usize.min(self.cells[1] - brick[1] * 8) {
+                        for x in 0..8usize.min(self.cells[0] - brick[0] * 8) {
+                            let k = index([brick[0] * 8 + x, brick[1] * 8 + y, brick[2] * 8 + z], self.cells);
+                            let value = sample(k) as f32;
+                            if !value.is_finite() {
+                                return Err(Error::Invalid("exported field exceeds f32 representation"));
+                            }
+                            values[x + 8 * y + 64 * z] = value;
+                            stored |= value != bg;
+                        }
+                    }
+                }
+                Ok(stored.then(|| (brick.map(|v| v as i32), values)))
+            })
+            .collect::<Result<_, Error>>()?;
+        for (key, values) in filled.into_iter().flatten() {
+            grid.set_brick(key, &values)?;
+        }
+        Ok(grid)
+    }
+}
+
+/// Read-only view of the fields semi-Lagrangian tracing needs, so advection can
+/// sample the pre-advection velocity while the new fields are written elsewhere.
+#[derive(Clone, Copy)]
+struct Field<'a> {
+    cells: [usize; 3],
+    h: f64,
+    boundary: Boundary,
+    velocity: [&'a [f64]; 3],
+    solid: &'a [bool],
+}
+
+impl Field<'_> {
+    fn velocity_grid(&self, p: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|axis| self.velocity_axis(p, axis))
+    }
+
+    /// One component of `velocity_grid`, bit-identical to indexing its result.
+    fn velocity_axis(&self, p: [f64; 3], axis: usize) -> f64 {
+        let q = std::array::from_fn(|a| p[a] - if a == axis { 0.0 } else { 0.5 });
+        sample(self.velocity[axis], face_dims(self.cells, axis), q, self.boundary, 0.0)
+    }
+
     fn solid_at(&self, p: [f64; 3]) -> bool {
         if (0..3).any(|a| p[a] < 0.0 || p[a] >= self.cells[a] as f64) {
             return false;
         }
-        self.solid[index(p.map(|v| v.floor() as usize), self.cells)]
+        // p is within [0, cells), so truncation is the floor.
+        self.solid[index(p.map(|v| v as usize), self.cells)]
     }
 
     fn trace(&self, p: [f64; 3], dt: f64) -> Result<[f64; 3], Error> {
-        let v = self.velocity_grid(p);
+        self.trace_from(p, self.velocity_grid(p), dt).map(|(end, _)| end)
+    }
+
+    /// Midpoint trace of `p` back by `dt` (forward when negative), given the
+    /// velocity `v` at `p`. The flag reports a trace cut short by a collider.
+    fn trace_from(&self, p: [f64; 3], v: [f64; 3], dt: f64) -> Result<([f64; 3], bool), Error> {
         let mid = std::array::from_fn(|a| p[a] - 0.5 * dt * v[a] / self.h);
         let v = self.velocity_grid(mid);
         let mut end = std::array::from_fn(|a| p[a] - dt * v[a] / self.h);
@@ -461,48 +774,27 @@ impl State {
         for i in 1..=steps as usize {
             let q = std::array::from_fn(|a| p[a] + (end[a] - p[a]) * i as f64 / steps);
             if self.solid_at(q) {
-                return Ok(previous);
+                return Ok((previous, true));
             }
             previous = q;
         }
-        Ok(end)
-    }
-
-    /// Export all five scalar channels in scene units. The bound includes the
-    /// worst-case brick storage before allocating any grid; no field is dropped.
-    pub fn volume(&self, max_bytes: usize) -> Result<Volume, Error> {
-        let bricks = self.cells.iter().map(|n| n.div_ceil(8)).product::<usize>();
-        let needed = bricks
-            .checked_mul(5 * (512 * 4 + 128))
-            .and_then(|v| v.checked_add(4096))
-            .ok_or(Error::Limit("volume export size overflow"))?;
-        if needed > max_bytes {
-            return Err(Error::Limit("volume export memory budget"));
-        }
-        let h = self.h;
-        let o = self.origin.map(|v| v + h * 0.5);
-        let transform = Transform::new([h, 0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0, h, 0.0, o[0], o[1], o[2], 1.0])?;
-        let mut volume = Volume::new();
-        for (channel, name) in ["density", "temperature", "velocity.x", "velocity.y", "velocity.z"].iter().enumerate() {
-            let bg = if channel == 1 { self.ambient as f32 } else { 0.0 };
-            let mut grid = SparseGrid::new(transform, bg, bricks)?;
-            for k in 0..self.density.len() {
-                let value = match channel {
-                    0 => self.density[k],
-                    1 => self.temperature[k],
-                    _ => self.velocity_at(self.cell_world(k))[channel - 2],
-                } as f32;
-                if !value.is_finite() {
-                    return Err(Error::Invalid("exported field exceeds f32 representation"));
-                }
-                grid.set(coords(k, self.cells).map(|v| v as i32), value)?;
-            }
-            volume.insert(name, grid)?;
-        }
-        Ok(volume)
+        Ok((end, false))
     }
 }
 
+/// `v.floor() as i64` for finite `v` of moderate size, without a libm call (the
+/// baseline x86-64 target has no rounding instruction). Truncation, then one step
+/// down when it rounded up, is exactly the floor.
+fn floor_i64(v: f64) -> i64 {
+    let truncated = v as i64;
+    truncated - i64::from((truncated as f64) > v)
+}
+
+/// Trilinear sample of a cell- or face-centred array. The result is the left to
+/// right sum, starting from +0.0, of `weight * value` over the eight corners in
+/// x-fastest order, with `weight = (wx * wy) * wz`; corners outside the array
+/// contribute `background`. The in-range path below evaluates exactly that
+/// expression without per-corner range checks.
 fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary, background: f64) -> f64 {
     if !finite3(p) {
         return background;
@@ -514,8 +806,25 @@ fn sample(values: &[f64], dims: [usize; 3], mut p: [f64; 3], boundary: Boundary,
             return background;
         }
     }
-    let lo = p.map(|v| v.floor() as i64);
+    let lo = p.map(floor_i64);
     let f: [f64; 3] = std::array::from_fn(|a| p[a] - lo[a] as f64);
+    let w: [[f64; 2]; 3] = std::array::from_fn(|a| [1.0 - f[a], f[a]]);
+    if (0..3).all(|a| lo[a] >= 0 && lo[a] + 1 < dims[a] as i64) {
+        let (sy, sz) = (dims[0], dims[0] * dims[1]);
+        let base = (lo[2] as usize * dims[1] + lo[1] as usize) * dims[0] + lo[0] as usize;
+        let corner = |bit: usize| values[base + (bit & 1) + ((bit >> 1) & 1) * sy + ((bit >> 2) & 1) * sz];
+        let weight = |bit: usize| (w[0][bit & 1] * w[1][(bit >> 1) & 1]) * w[2][(bit >> 2) & 1];
+        let mut result = 0.0;
+        result += weight(0) * corner(0);
+        result += weight(1) * corner(1);
+        result += weight(2) * corner(2);
+        result += weight(3) * corner(3);
+        result += weight(4) * corner(4);
+        result += weight(5) * corner(5);
+        result += weight(6) * corner(6);
+        result += weight(7) * corner(7);
+        return result;
+    }
     let mut result = 0.0;
     for bit in 0..8 {
         let q: [i64; 3] = std::array::from_fn(|a| lo[a] + ((bit >> a) & 1));
@@ -535,6 +844,47 @@ pub struct StepReport {
     pub divergence_before: f64,
     pub divergence_after: f64,
     pub pressure_iterations: usize,
+}
+
+/// Wall time per stage of one fixed step, from `Simulation::step_profiled`.
+/// `project_*` split the pressure solve; the conjugate-gradient parts sum over
+/// all iterations. Timing never feeds back into the solver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepProfile {
+    /// Copying the committed fields into the working state at the start of the step.
+    pub clone: Duration,
+    /// Collider voxelization, solid velocities and the cell clearing they imply.
+    pub obstacles: Duration,
+    /// Face boundary conditions and state validation, summed over the step.
+    pub boundaries_validate: Duration,
+    /// Semi-Lagrangian advection, including allocation of the advected fields.
+    pub advect: Duration,
+    pub advect_clone: Duration,
+    /// Sources and impulses.
+    pub inject: Duration,
+    /// Acceleration, buoyancy, turbulence and vorticity confinement.
+    pub forces: Duration,
+    /// Diagonal, right-hand side and initial residual of the pressure solve.
+    pub project_setup: Duration,
+    /// Operator applications inside the conjugate-gradient loop.
+    pub project_apply: Duration,
+    /// V-cycle preconditioner applications (multigrid solver only).
+    pub project_precondition: Duration,
+    /// Inner products and residual norms inside that loop.
+    pub project_reduce: Duration,
+    /// Elementwise vector updates inside that loop.
+    pub project_update: Duration,
+    /// Pressure-gradient subtraction and the final divergence check.
+    pub project_finish: Duration,
+    pub total: Duration,
+    pub pressure_iterations: usize,
+}
+
+fn lap(since: &mut Instant) -> Duration {
+    let now = Instant::now();
+    let elapsed = now - *since;
+    *since = now;
+    elapsed
 }
 
 pub struct Simulation {
@@ -575,10 +925,15 @@ impl Simulation {
         }
         let count =
             s.cells.iter().try_fold(1usize, |v, n| v.checked_mul(*n)).ok_or(Error::Limit("cell count overflow"))?;
-        // Includes two states, advection copies, face arrays, PCG vectors, curl,
-        // collider velocities, allocator overhead and transient volume metadata.
+        // Worst-case live bytes per cell during one step, with every page touched:
+        // committed state 41 (density 8, temperature 8, velocity ~24, solid 1) +
+        // working state 41 + solid-face list 56 (only if every cell were solid; it
+        // is built before the pressure workspace exists) + pressure workspace 65
+        // (six CG vectors, open-face mask, divergence target) + ~26 for the
+        // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
+        // for allocator overhead and transient volume metadata.
         let bytes =
-            count.checked_mul(512).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
+            count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
             return Err(Error::Limit("grid and step workspace memory budget"));
         }
@@ -592,8 +947,6 @@ impl Simulation {
             temperature: vec![s.ambient_temperature; count],
             velocity: std::array::from_fn(|a| vec![0.0; face_dims(s.cells, a).iter().product()]),
             solid: vec![false; count],
-            solid_velocity_low: vec![[0.0; 3]; count],
-            solid_velocity_high: vec![[0.0; 3]; count],
         };
         Ok(Self { spec, state, step: 0 })
     }
@@ -608,6 +961,14 @@ impl Simulation {
     /// Advance exactly one fixed step. Inputs must describe this substep's
     /// collider pose. Failure leaves both the previous state and clock intact.
     pub fn step(&mut self, input: &Inputs) -> Result<StepReport, Error> {
+        self.step_profiled(input).map(|(report, _)| report)
+    }
+
+    /// `step` plus the wall time of each stage. Results are identical.
+    pub fn step_profiled(&mut self, input: &Inputs) -> Result<(StepReport, StepProfile), Error> {
+        let mut profile = StepProfile::default();
+        let started = Instant::now();
+        let mut clock = started;
         input.validate()?;
         if !input.spatial_acceleration.is_empty() && input.spatial_acceleration.len() != self.state.density.len() {
             return Err(Error::Invalid("spatial acceleration must match the domain cell count"));
@@ -621,31 +982,20 @@ impl Simulation {
             return Err(Error::Invalid("fixed-step clock cannot advance"));
         }
         let dt = self.spec.dt;
-        let mut state = self.state.clone();
-        for k in 0..state.density.len() {
-            let p = state.cell_world(k);
-            let collider = input.obstacles.iter().find(|o| o.shape.contains(p));
-            state.solid[k] = collider.is_some();
-            state.solid_velocity_low[k] = [0.0; 3];
-            state.solid_velocity_high[k] = [0.0; 3];
-            if let Some(collider) = collider {
-                for axis in 0..3 {
-                    let mut low = p;
-                    let mut high = p;
-                    low[axis] -= 0.5 * state.h;
-                    high[axis] += 0.5 * state.h;
-                    state.solid_velocity_low[k][axis] = collider.velocity_at(low)?[axis];
-                    state.solid_velocity_high[k][axis] = collider.velocity_at(high)?[axis];
-                }
-            }
-            if state.solid[k] {
-                state.density[k] = 0.0;
-                state.temperature[k] = state.ambient;
-            }
+        let mut state = self.state.working_copy();
+        profile.clone = lap(&mut clock);
+        let (solid, solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
+        state.solid = solid;
+        for cell in &solids {
+            state.density[cell.cell] = 0.0;
+            state.temperature[cell.cell] = state.ambient;
         }
-        boundaries(&mut state);
+        profile.obstacles = lap(&mut clock);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
-        advect(&mut state, dt, self.spec.dissipation, self.spec.cooling)?;
+        profile.boundaries_validate += lap(&mut clock);
+        advect(&mut state, dt, &self.spec, &solids, &mut profile)?;
+        profile.advect = lap(&mut clock);
         let mut target = vec![0.0; state.density.len()];
         for source in &input.sources {
             let overlap = (end.min(source.end.unwrap_or(end)) - start.max(source.start)).max(0.0);
@@ -656,44 +1006,79 @@ impl Simulation {
                 &mut state,
                 &mut target,
                 &source.shape,
-                source.density_rate * overlap,
-                source.temperature_rate * overlap,
-                source.velocity_rate.map(|v| v * overlap),
-                source.expansion * (overlap / dt),
+                Injection {
+                    density: source.density_rate * overlap,
+                    temperature: source.temperature_rate * overlap,
+                    velocity: source.velocity_rate.map(|v| v * overlap),
+                    expansion: source.expansion * (overlap / dt),
+                    heated: None,
+                },
             );
         }
-        for impulse in &input.impulses {
+        for source in &input.heated {
+            let overlap = (end.min(source.end.unwrap_or(end)) - start.max(source.start)).max(0.0);
+            if overlap == 0.0 {
+                continue;
+            }
+            inject(
+                &mut state,
+                &mut target,
+                &source.shape,
+                Injection {
+                    density: source.density_rate * overlap,
+                    temperature: source.temperature_rate * overlap,
+                    velocity: source.velocity_rate.map(|v| v * overlap),
+                    expansion: 0.0,
+                    heated: Some(dt),
+                },
+            );
+        }
+        for (impulse, heated) in
+            input.impulses.iter().map(|i| (i, None)).chain(input.heated_impulses.iter().map(|i| (i, Some(dt))))
+        {
             let ratio = impulse.time / dt;
             if ratio.is_finite() && fixed_step_index(ratio) == self.step {
                 inject(
                     &mut state,
                     &mut target,
                     &impulse.shape,
-                    impulse.density,
-                    impulse.temperature,
-                    impulse.velocity,
-                    impulse.expansion / dt,
+                    Injection {
+                        density: impulse.density,
+                        temperature: impulse.temperature,
+                        velocity: impulse.velocity,
+                        expansion: impulse.expansion / dt,
+                        heated,
+                    },
                 );
             }
         }
+        profile.inject = lap(&mut clock);
         forces(&mut state, &self.spec, input, self.step);
-        boundaries(&mut state);
+        profile.forces = lap(&mut clock);
+        boundaries(&mut state, &solids);
         validate_state(&state)?;
         if target.iter().any(|v| !v.is_finite()) {
             return Err(Error::Invalid("nonfinite expansion"));
         }
-        let report = project(&mut state, &target, self.spec.pressure_iterations, self.spec.pressure_tolerance)?;
+        profile.boundaries_validate += lap(&mut clock);
+        let report = project(&mut state, &target, &self.spec, &mut profile)?;
+        clock = Instant::now();
         validate_state(&state)?;
+        profile.boundaries_validate += lap(&mut clock);
         self.state = state;
         self.step += 1;
-        Ok(report)
+        profile.pressure_iterations = report.pressure_iterations;
+        profile.total = started.elapsed();
+        Ok((report, profile))
     }
 }
 
 fn validate_state(s: &State) -> Result<(), Error> {
-    if s.density.iter().any(|v| !nonnegative(*v) || *v > f32::MAX as f64)
-        || s.temperature.iter().any(|v| !v.is_finite() || !(0.0..=50_000.0).contains(v))
-        || s.velocity.iter().flatten().any(|v| !v.is_finite() || v.abs() > f32::MAX as f64)
+    if s.density.par_iter().with_min_len(LIGHT).any(|v| !nonnegative(*v) || *v > f32::MAX as f64)
+        || s.temperature.par_iter().with_min_len(LIGHT).any(|v| !v.is_finite() || !(0.0..=50_000.0).contains(v))
+        || s.velocity
+            .iter()
+            .any(|axis| axis.par_iter().with_min_len(LIGHT).any(|v| !v.is_finite() || v.abs() > f32::MAX as f64))
     {
         return Err(Error::Invalid("simulated fields exceed finite density, velocity or 0–50000 K limits"));
     }
@@ -712,113 +1097,174 @@ fn face_cells(p: [usize; 3], axis: usize, dims: [usize; 3]) -> [Option<usize>; 2
     [left, right]
 }
 
-fn boundaries(s: &mut State) {
+fn boundaries(s: &mut State, solids: &[SolidFaces]) {
+    let (cells, boundary) = (s.cells, s.boundary);
+    let solid = &s.solid;
+    let faces_of =
+        |c: usize| &solids[solids.binary_search_by_key(&c, |f| f.cell).expect("a solid cell has face velocities")];
     for a in 0..3 {
-        let dims = face_dims(s.cells, a);
-        for k in 0..s.velocity[a].len() {
+        let dims = face_dims(cells, a);
+        s.velocity[a].par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, velocity)| {
             let p = coords(k, dims);
-            let cells = face_cells(p, a, s.cells);
-            if s.boundary == Boundary::Closed && cells.iter().any(Option::is_none) {
-                s.velocity[a][k] = 0.0;
+            let faces = face_cells(p, a, cells);
+            if boundary == Boundary::Closed && faces.iter().any(Option::is_none) {
+                *velocity = 0.0;
             } else {
                 let mut value = 0.0;
                 let mut count = 0;
-                for (side, cell) in cells.into_iter().enumerate() {
-                    if let Some(c) = cell.filter(|&c| s.solid[c]) {
-                        value += if side == 0 { s.solid_velocity_high[c][a] } else { s.solid_velocity_low[c][a] };
+                for (side, cell) in faces.into_iter().enumerate() {
+                    if let Some(c) = cell.filter(|&c| solid[c]) {
+                        let faces = faces_of(c);
+                        value += if side == 0 { faces.high[a] } else { faces.low[a] };
                         count += 1;
                     }
                 }
                 if count > 0 {
-                    s.velocity[a][k] = value / count as f64;
+                    *velocity = value / count as f64;
                 }
             }
-        }
+        });
     }
 }
 
-fn advect(s: &mut State, dt: f64, dissipation: f64, cooling: f64) -> Result<(), Error> {
-    let old = s.clone();
-    for k in 0..s.density.len() {
-        if s.solid[k] {
-            continue;
-        }
-        let p = coords(k, s.cells).map(|v| v as f64 + 0.5);
-        let q = old.trace(p, dt)?.map(|v| v - 0.5);
-        s.density[k] = sample(&old.density, s.cells, q, s.boundary, 0.0) * (-dissipation * dt).exp();
-        let temperature = sample(&old.temperature, s.cells, q, s.boundary, s.ambient);
-        s.temperature[k] = s.ambient + (temperature - s.ambient) * (-cooling * dt).exp();
+/// Serial first error: chunks are collected in index order, so the error
+/// returned is the one the serial loop would have hit first.
+fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
+    results.into_iter().collect()
+}
+
+/// Advects density, temperature and velocity. The pre-advection fields are moved
+/// out of `s` and sampled in place; fresh arrays are written, so no copy of the
+/// state is made. Solid cells keep the cleared values the collider stage set.
+/// On error `s` is left without fields; callers discard it.
+fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &mut StepProfile) -> Result<(), Error> {
+    let (dissipation, cooling) = (spec.dissipation, spec.cooling);
+    let started = Instant::now();
+    let (cells, boundary, ambient, count) = (s.cells, s.boundary, s.ambient, s.density.len());
+    let old_density = std::mem::take(&mut s.density);
+    let old_temperature = std::mem::take(&mut s.temperature);
+    let old_velocity = std::mem::take(&mut s.velocity);
+    s.density = vec![0.0; count];
+    s.temperature = vec![ambient; count];
+    s.velocity = std::array::from_fn(|a| vec![0.0; old_velocity[a].len()]);
+    profile.advect_clone = started.elapsed();
+    let (decay, cool) = ((-dissipation * dt).exp(), (-cooling * dt).exp());
+    let solid = &s.solid;
+    let old =
+        Field { cells, h: s.h, boundary, velocity: [&old_velocity[0], &old_velocity[1], &old_velocity[2]], solid };
+    if spec.advection == Advection::MacCormack {
+        let scalars =
+            maccormack::Scalars { density: &old_density, temperature: &old_temperature, ambient, decay, cool };
+        maccormack::advect(&old, scalars, (&mut s.density, &mut s.temperature, &mut s.velocity), dt)?;
+        boundaries(s, solids);
+        return Ok(());
     }
+    let results = s
+        .density
+        .par_chunks_mut(HEAVY)
+        .zip(s.temperature.par_chunks_mut(HEAVY))
+        .enumerate()
+        .map(|(chunk, (density, temperature))| -> Result<(), Error> {
+            for (i, (d, t)) in density.iter_mut().zip(temperature.iter_mut()).enumerate() {
+                let k = chunk * HEAVY + i;
+                if solid[k] {
+                    continue;
+                }
+                let p = coords(k, cells).map(|v| v as f64 + 0.5);
+                let q = old.trace(p, dt)?.map(|v| v - 0.5);
+                *d = sample(&old_density, cells, q, boundary, 0.0) * decay;
+                let sampled = sample(&old_temperature, cells, q, boundary, ambient);
+                *t = ambient + (sampled - ambient) * cool;
+            }
+            Ok(())
+        })
+        .collect();
+    first_error(results)?;
     for a in 0..3 {
-        let dims = face_dims(s.cells, a);
-        for k in 0..s.velocity[a].len() {
-            let cell = coords(k, dims);
-            let p = std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 });
-            let q = old.trace(p, dt)?;
-            s.velocity[a][k] = old.velocity_grid(q)[a];
-        }
+        let dims = face_dims(cells, a);
+        let results = s.velocity[a]
+            .par_chunks_mut(HEAVY)
+            .enumerate()
+            .map(|(chunk, values)| -> Result<(), Error> {
+                for (i, value) in values.iter_mut().enumerate() {
+                    let cell = coords(chunk * HEAVY + i, dims);
+                    let p = std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 });
+                    let q = old.trace(p, dt)?;
+                    *value = old.velocity_axis(q, a);
+                }
+                Ok(())
+            })
+            .collect();
+        first_error(results)?;
     }
-    boundaries(s);
+    boundaries(s, solids);
     Ok(())
 }
 
 fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
     let count = s.density.len();
     let mut force = vec![[0.0; 3]; count];
-    for (k, f) in force.iter_mut().enumerate() {
-        for a in 0..3 {
-            f[a] = input.acceleration[a]
-                + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])
-                + spec.turbulence * crate::rng::signed(spec.seed, k as u64, step * 3 + a as u64);
-        }
-        f[1] -= spec.buoyancy * (s.temperature[k] - s.ambient);
+    {
+        let (temperature, ambient) = (&s.temperature, s.ambient);
+        force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
+            for a in 0..3 {
+                f[a] = input.acceleration[a]
+                    + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])
+                    + spec.turbulence * crate::rng::signed(spec.seed, k as u64, step * 3 + a as u64);
+            }
+            f[1] -= spec.buoyancy * (temperature[k] - ambient);
+        });
     }
     if spec.vorticity > 0.0 {
+        let state: &State = s;
         let mut curl = vec![[0.0; 3]; count];
-        for (k, c) in curl.iter_mut().enumerate() {
-            let p = coords(k, s.cells).map(|v| v as f64 + 0.5);
+        curl.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, c)| {
+            let p = coords(k, state.cells).map(|v| v as f64 + 0.5);
             let derivatives: [[f64; 3]; 3] = std::array::from_fn(|a| {
                 let mut lo = p;
                 lo[a] -= 1.0;
                 let mut hi = p;
                 hi[a] += 1.0;
-                let vl = s.velocity_grid(lo);
-                let vh = s.velocity_grid(hi);
-                std::array::from_fn(|b| (vh[b] - vl[b]) / (2.0 * s.h))
+                let vl = state.velocity_grid(lo);
+                let vh = state.velocity_grid(hi);
+                std::array::from_fn(|b| (vh[b] - vl[b]) / (2.0 * state.h))
             });
             *c = [
                 derivatives[1][2] - derivatives[2][1],
                 derivatives[2][0] - derivatives[0][2],
                 derivatives[0][1] - derivatives[1][0],
             ];
-        }
-        for (k, f) in force.iter_mut().enumerate() {
-            let p = coords(k, s.cells);
+        });
+        let curl = &curl;
+        force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
+            let p = coords(k, state.cells);
             let grad = std::array::from_fn(|a| {
                 let mut lo = p;
                 lo[a] = lo[a].saturating_sub(1);
                 let mut hi = p;
-                hi[a] = (hi[a] + 1).min(s.cells[a] - 1);
-                let l = curl[index(lo, s.cells)];
-                let h = curl[index(hi, s.cells)];
-                (dot(h, h).sqrt() - dot(l, l).sqrt()) / (2.0 * s.h)
+                hi[a] = (hi[a] + 1).min(state.cells[a] - 1);
+                let l = curl[index(lo, state.cells)];
+                let h = curl[index(hi, state.cells)];
+                (dot(h, h).sqrt() - dot(l, l).sqrt()) / (2.0 * state.h)
             });
             let length = dot(grad, grad).sqrt();
             if length > 1e-12 {
                 let c = cross(grad.map(|v| v / length), curl[k]);
                 for a in 0..3 {
-                    f[a] += spec.vorticity * s.h * c[a];
+                    f[a] += spec.vorticity * state.h * c[a];
                 }
             }
-        }
+        });
     }
+    let (cells, solid) = (s.cells, &s.solid);
+    let force = &force;
     for (a, values) in s.velocity.iter_mut().enumerate() {
-        let dims = face_dims(s.cells, a);
-        for (k, value) in values.iter_mut().enumerate() {
+        let dims = face_dims(cells, a);
+        values.par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, value)| {
             let mut sum = 0.0;
             let mut n = 0;
-            for c in face_cells(coords(k, dims), a, s.cells).into_iter().flatten() {
-                if !s.solid[c] {
+            for c in face_cells(coords(k, dims), a, cells).into_iter().flatten() {
+                if !solid[c] {
                     sum += force[c][a];
                     n += 1;
                 }
@@ -826,7 +1272,7 @@ fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
             if n > 0 {
                 *value += spec.dt * sum / n as f64;
             }
-        }
+        });
     }
 }
 
@@ -849,7 +1295,9 @@ fn neighbours(p: [usize; 3], dims: [usize; 3]) -> [Option<usize>; 6] {
     })
 }
 
-fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> Result<StepReport, Error> {
+fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile) -> Result<StepReport, Error> {
+    let (iterations, tolerance, solver) = (spec.pressure_iterations, spec.pressure_tolerance, spec.solver);
+    let mut clock = Instant::now();
     let count = s.density.len();
     let fluid = s.solid.iter().filter(|&&solid| !solid).count();
     if fluid == 0 {
@@ -857,91 +1305,241 @@ fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> 
     }
     let mut diagonal = vec![0.0; count];
     let mut rhs = vec![0.0; count];
-    for k in 0..count {
-        if s.solid[k] {
-            continue;
-        }
-        let p = coords(k, s.cells);
-        for n in neighbours(p, s.cells) {
-            if n.map_or(s.boundary == Boundary::Open, |n| !s.solid[n]) {
-                diagonal[k] += 1.0;
-            }
-        }
-        rhs[k] = (target[k] - s.divergence_at(p)) * s.h * s.h;
+    // Bit `side` (neighbours() order: -x, +x, -y, +y, -z, +z) is set when that
+    // neighbour exists and is fluid, i.e. when the operator subtracts its value.
+    let mut open = vec![0u8; count];
+    {
+        let state: &State = s;
+        diagonal
+            .par_iter_mut()
+            .zip(rhs.par_iter_mut())
+            .zip(open.par_iter_mut())
+            .enumerate()
+            .with_min_len(HEAVY)
+            .for_each(|(k, ((d, r), mask))| {
+                if state.solid[k] {
+                    return;
+                }
+                let p = coords(k, state.cells);
+                for (side, n) in neighbours(p, state.cells).into_iter().enumerate() {
+                    if n.map_or(state.boundary == Boundary::Open, |n| !state.solid[n]) {
+                        *d += 1.0;
+                    }
+                    if n.is_some_and(|n| !state.solid[n]) {
+                        *mask |= 1 << side;
+                    }
+                }
+                *r = (target[k] - state.divergence_at(p)) * state.h * state.h;
+            });
     }
-    let rms = |values: &[f64]| (values.iter().map(|v| v * v).sum::<f64>() / fluid as f64).sqrt() / (s.h * s.h);
-    let before = rms(&rhs);
-    if !before.is_finite() {
-        return Err(Error::Invalid("nonfinite pressure right hand side"));
-    }
+    let strides = [1, s.cells[0], s.cells[0] * s.cells[1]];
+    let from_squares = |squares: f64| (squares / fluid as f64).sqrt() / (s.h * s.h);
+    // Same per-cell arithmetic as the neighbours()-based operator: diagonal term
+    // first, then the open neighbours subtracted in -x, +x, -y, +y, -z, +z order.
+    // A solid cell has an empty mask, so it keeps only its diagonal term.
     let apply = |x: &[f64], out: &mut [f64]| {
-        for k in 0..count {
-            out[k] = diagonal[k] * x[k];
-            if s.solid[k] {
-                continue;
-            }
-            for n in neighbours(coords(k, s.cells), s.cells).into_iter().flatten() {
-                if !s.solid[n] {
-                    out[k] -= x[n];
+        out.par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, o)| {
+            *o = diagonal[k] * x[k];
+            let mask = open[k];
+            if mask == 0x3F {
+                *o -= x[k - strides[0]];
+                *o -= x[k + strides[0]];
+                *o -= x[k - strides[1]];
+                *o -= x[k + strides[1]];
+                *o -= x[k - strides[2]];
+                *o -= x[k + strides[2]];
+            } else if mask != 0 {
+                for side in 0..6 {
+                    if mask >> side & 1 == 1 {
+                        let stride = strides[side / 2];
+                        *o -= x[if side % 2 == 0 { k - stride } else { k + stride }];
+                    }
                 }
             }
+        });
+    };
+    let (pressure, before, used) = match solver {
+        PressureSolver::Jacobi => {
+            let rms = |values: &[f64]| from_squares(values.iter().map(|v| v * v).sum::<f64>());
+            let before = rms(&rhs);
+            if !before.is_finite() {
+                return Err(Error::Invalid("nonfinite pressure right hand side"));
+            }
+            let inner = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+            let mut pressure = vec![0.0; count];
+            let mut residual = rhs;
+            let mut z: Vec<_> = residual
+                .par_iter()
+                .zip(diagonal.par_iter())
+                .with_min_len(LIGHT)
+                .map(|(r, d)| if *d > 0.0 { r / d } else { *r })
+                .collect();
+            let mut direction = z.clone();
+            let mut applied = vec![0.0; count];
+            let mut rz = inner(&residual, &z);
+            // Both folds below start from `Iterator::sum`'s identity and add in index
+            // order, exactly like `inner`/`rms`; fusing them only shares the pass over
+            // memory, since the two accumulation chains are independent.
+            let identity = std::iter::empty::<f64>().sum::<f64>();
+            let mut current = rms(&residual);
+            let mut used = 0;
+            profile.project_setup = lap(&mut clock);
+            loop {
+                profile.project_reduce += lap(&mut clock);
+                if !(current > tolerance && used < iterations) {
+                    break;
+                }
+                apply(&direction, &mut applied);
+                profile.project_apply += lap(&mut clock);
+                let denom = inner(&direction, &applied);
+                profile.project_reduce += lap(&mut clock);
+                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
+                    return Err(Error::Pressure(current));
+                }
+                let alpha = rz / denom;
+                pressure
+                    .par_iter_mut()
+                    .zip(residual.par_iter_mut())
+                    .zip(z.par_iter_mut())
+                    .enumerate()
+                    .with_min_len(LIGHT)
+                    .for_each(|(k, ((p, r), z))| {
+                        *p += alpha * direction[k];
+                        *r -= alpha * applied[k];
+                        *z = if diagonal[k] > 0.0 { *r / diagonal[k] } else { *r };
+                    });
+                profile.project_update += lap(&mut clock);
+                let (mut next, mut squares) = (identity, identity);
+                for (r, z) in residual.iter().zip(&z) {
+                    next += r * z;
+                    squares += r * r;
+                }
+                current = from_squares(squares);
+                profile.project_reduce += lap(&mut clock);
+                let beta = next / rz;
+                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
+                profile.project_update += lap(&mut clock);
+                rz = next;
+                used += 1;
+            }
+            if current > tolerance {
+                return Err(Error::Pressure(current));
+            }
+            (pressure, before, used)
+        }
+        PressureSolver::Multigrid => {
+            let from_values =
+                |values: &[f64]| from_squares(multigrid::blocked_sums(count, |k| [values[k] * values[k]])[0]);
+            let before = from_values(&rhs);
+            if !before.is_finite() {
+                return Err(Error::Invalid("nonfinite pressure right hand side"));
+            }
+            let mut rhs = rhs;
+            let (_, hierarchy) = rayon::join(
+                || multigrid::remove_floating_means(s.cells, &s.solid, &open, &diagonal, &mut rhs),
+                || multigrid::Hierarchy::new(multigrid::Fine { dims: s.cells, open: &open, diagonal: &diagonal }),
+            );
+            let mut scratch = hierarchy.scratch();
+            let mut pressure = vec![0.0; count];
+            let mut residual = rhs;
+            let mut z = vec![0.0; count];
+            let mut applied = vec![0.0; count];
+            profile.project_setup = lap(&mut clock);
+            let [squares] = multigrid::blocked_sums(count, |k| [residual[k] * residual[k]]);
+            let mut current = from_squares(squares);
+            let mut used = 0;
+            profile.project_reduce += lap(&mut clock);
+            // A residual already within tolerance needs no preconditioner pass.
+            let (mut direction, mut rz) = if current > tolerance {
+                hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
+                profile.project_precondition += lap(&mut clock);
+                let [rz] = multigrid::blocked_sums(count, |k| [residual[k] * z[k]]);
+                profile.project_reduce += lap(&mut clock);
+                (z.clone(), rz)
+            } else {
+                (Vec::new(), 0.0)
+            };
+            loop {
+                if !(current > tolerance && used < iterations) {
+                    break;
+                }
+                apply(&direction, &mut applied);
+                profile.project_apply += lap(&mut clock);
+                let [denom] = multigrid::blocked_sums(count, |k| [direction[k] * applied[k]]);
+                profile.project_reduce += lap(&mut clock);
+                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
+                    return Err(Error::Pressure(current));
+                }
+                let alpha = rz / denom;
+                pressure.par_iter_mut().zip(residual.par_iter_mut()).enumerate().with_min_len(LIGHT).for_each(
+                    |(k, (p, r))| {
+                        *p += alpha * direction[k];
+                        *r -= alpha * applied[k];
+                    },
+                );
+                profile.project_update += lap(&mut clock);
+                hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
+                profile.project_precondition += lap(&mut clock);
+                let [next, squares] =
+                    multigrid::blocked_sums(count, |k| [residual[k] * z[k], residual[k] * residual[k]]);
+                current = from_squares(squares);
+                profile.project_reduce += lap(&mut clock);
+                let beta = next / rz;
+                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
+                profile.project_update += lap(&mut clock);
+                rz = next;
+                used += 1;
+            }
+            if current > tolerance {
+                return Err(Error::Pressure(current));
+            }
+            (pressure, before, used)
         }
     };
-    let inner = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
-    let mut pressure = vec![0.0; count];
-    let mut residual = rhs;
-    let mut z: Vec<_> = residual.iter().zip(&diagonal).map(|(r, d)| if *d > 0.0 { r / d } else { *r }).collect();
-    let mut direction = z.clone();
-    let mut applied = vec![0.0; count];
-    let mut rz = inner(&residual, &z);
-    let mut used = 0;
-    while rms(&residual) > tolerance && used < iterations {
-        apply(&direction, &mut applied);
-        let denom = inner(&direction, &applied);
-        if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-            return Err(Error::Pressure(rms(&residual)));
-        }
-        let alpha = rz / denom;
-        for k in 0..count {
-            pressure[k] += alpha * direction[k];
-            residual[k] -= alpha * applied[k];
-            z[k] = if diagonal[k] > 0.0 { residual[k] / diagonal[k] } else { residual[k] };
-        }
-        let next = inner(&residual, &z);
-        let beta = next / rz;
-        for k in 0..count {
-            direction[k] = z[k] + beta * direction[k];
-        }
-        rz = next;
-        used += 1;
-    }
-    if rms(&residual) > tolerance {
-        return Err(Error::Pressure(rms(&residual)));
-    }
+    let (cells, boundary, h) = (s.cells, s.boundary, s.h);
     for a in 0..3 {
-        let dims = face_dims(s.cells, a);
-        for k in 0..s.velocity[a].len() {
-            let cells = face_cells(coords(k, dims), a, s.cells);
-            if cells.iter().any(|c| c.is_some_and(|c| s.solid[c]))
-                || (s.boundary == Boundary::Closed && cells.iter().any(Option::is_none))
+        let dims = face_dims(cells, a);
+        let (solid, pressure) = (&s.solid, &pressure);
+        s.velocity[a].par_iter_mut().enumerate().with_min_len(LIGHT).for_each(|(k, velocity)| {
+            let faces = face_cells(coords(k, dims), a, cells);
+            if faces.iter().any(|c| c.is_some_and(|c| solid[c]))
+                || (boundary == Boundary::Closed && faces.iter().any(Option::is_none))
             {
-                continue;
+                return;
             }
-            let [left, right] = cells.map(|c| c.map_or(0.0, |c| pressure[c]));
-            s.velocity[a][k] -= (right - left) / s.h;
-        }
+            let [left, right] = faces.map(|c| c.map_or(0.0, |c| pressure[c]));
+            *velocity -= (right - left) / h;
+        });
     }
-    let after = (target
-        .iter()
-        .enumerate()
-        .filter(|(k, _)| !s.solid[*k])
-        .map(|(k, t)| (s.divergence_at(coords(k, s.cells)) - t).powi(2))
-        .sum::<f64>()
-        / fluid as f64)
-        .sqrt();
+    let after = match solver {
+        PressureSolver::Jacobi => {
+            let squares: Vec<f64> = {
+                let state: &State = s;
+                (0..count)
+                    .into_par_iter()
+                    .with_min_len(HEAVY)
+                    .map(|k| (state.divergence_at(coords(k, state.cells)) - target[k]).powi(2))
+                    .collect()
+            };
+            (squares.iter().enumerate().filter(|(k, _)| !s.solid[*k]).map(|(_, t)| *t).sum::<f64>() / fluid as f64)
+                .sqrt()
+        }
+        PressureSolver::Multigrid => {
+            let state: &State = s;
+            let [sum] = multigrid::blocked_sums(count, |k| {
+                if state.solid[k] {
+                    [0.0]
+                } else {
+                    [(state.divergence_at(coords(k, state.cells)) - target[k]).powi(2)]
+                }
+            });
+            (sum / fluid as f64).sqrt()
+        }
+    };
     if !after.is_finite() || after > tolerance * 1.01 {
         return Err(Error::Pressure(after));
     }
+    profile.project_finish = lap(&mut clock);
     Ok(StepReport { divergence_before: before, divergence_after: after, pressure_iterations: used })
 }
 
@@ -951,6 +1549,7 @@ fn project(s: &mut State, target: &[f64], iterations: usize, tolerance: f64) -> 
 /// history. Recreate this timeline when the authored scene changes.
 pub struct Timeline {
     simulation: Simulation,
+    revision: u64,
     checkpoints: BTreeMap<u64, State>,
     every: u64,
     checkpoint_budget: usize,
@@ -966,7 +1565,7 @@ impl Timeline {
         }
         let every = (1.0 / simulation.spec.dt).ceil().clamp(1.0, 10_000_000.0) as u64;
         let checkpoints = BTreeMap::from([(0, simulation.state.clone())]);
-        Ok(Self { simulation, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
+        Ok(Self { simulation, revision: 0, checkpoints, every, checkpoint_budget: checkpoint_bytes, state_bytes })
     }
 
     pub fn checkpoint_bytes(&self) -> usize {
@@ -992,6 +1591,29 @@ impl Timeline {
         time: f64,
         input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
     ) -> Result<&State, Error> {
+        self.seek(time, input)?;
+        Ok(self.simulation.state())
+    }
+
+    /// Like `at_with_state`, also returning the state's revision. The revision
+    /// changes whenever the timeline replaces its state, by a step or by a restore
+    /// from a checkpoint, even when the replacement lands on the same step index as
+    /// before. Two calls that return equal revisions therefore returned the very
+    /// same state, and anything derived from it can be reused.
+    pub fn at_with_revision(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(&State, u64), Error> {
+        self.seek(time, input)?;
+        Ok((self.simulation.state(), self.revision))
+    }
+
+    fn seek(
+        &mut self,
+        time: f64,
+        input: &mut impl FnMut(u64, f64, &State) -> Result<Inputs, Error>,
+    ) -> Result<(), Error> {
         if !time.is_finite() {
             return Err(Error::Invalid("seek time must be finite"));
         }
@@ -1005,15 +1627,18 @@ impl Timeline {
             let (&step, state) = self.checkpoints.range(..=target).next_back().expect("initial checkpoint is retained");
             self.simulation.state = state.clone();
             self.simulation.step = step;
+            self.revision += 1;
         } else if let Some((&step, state)) = self.checkpoints.range(self.simulation.step..=target).next_back() {
             if step > self.simulation.step {
                 self.simulation.state = state.clone();
                 self.simulation.step = step;
+                self.revision += 1;
             }
         }
         while self.simulation.step < target {
             let value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
             self.simulation.step(&value)?;
+            self.revision += 1;
             let step = self.simulation.step;
             if step % self.every == 0 && !self.checkpoints.contains_key(&step) {
                 // Thin before cloning: transient insertion never exceeds budget.
@@ -1028,39 +1653,75 @@ impl Timeline {
                 }
             }
         }
-        Ok(self.simulation.state())
+        Ok(())
     }
 }
 
-fn fixed_step_index(ratio: f64) -> u64 {
+/// The fixed step a time at `ratio` steps from the start falls at, correcting only the roundoff at exact
+/// boundaries, as [`Timeline`] does when it seeks.
+pub fn fixed_step_index(ratio: f64) -> u64 {
     let nearest = ratio.round();
     (if (ratio - nearest).abs() <= f64::EPSILON * 4.0 * ratio.max(1.0) { nearest } else { ratio.floor() }) as u64
 }
 
-fn inject(
-    state: &mut State,
-    target: &mut [f64],
-    shape: &Shape,
+/// What a source or impulse adds to the cells it covers in one step.
+struct Injection {
     density: f64,
     temperature: f64,
     velocity: [f64; 3],
+    /// Divergence to project to, 1/second.
     expansion: f64,
-) {
-    for (k, target_value) in target.iter_mut().enumerate() {
-        if !state.solid[k] && shape.contains(state.cell_world(k)) {
-            state.density[k] += density;
-            state.temperature[k] += temperature;
-            *target_value += expansion;
+    /// For a source whose expansion follows from its heat: the step, seconds.
+    heated: Option<f64>,
+}
+
+fn inject(state: &mut State, target: &mut [f64], shape: &Shape, add: Injection) {
+    let Injection { density, temperature, velocity, expansion, heated } = add;
+    let (cells, origin, h) = (state.cells, state.origin, state.h);
+    let State { density: cell_density, temperature: cell_temperature, velocity: faces, solid, .. } = state;
+    let solid = &*solid;
+    // what a heated source gives is a total, so that a solid in its way does not take any of it
+    let density = if heated.is_some() {
+        let free = (0..solid.len())
+            .into_par_iter()
+            .with_min_len(HEAVY)
+            .filter(|&k| !solid[k] && shape.contains(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))))
+            .count();
+        if free == 0 {
+            0.0
+        } else {
+            density / free as f64
         }
-    }
-    for (a, amount) in velocity.into_iter().enumerate() {
-        let dims = face_dims(state.cells, a);
-        for k in 0..state.velocity[a].len() {
-            let cell = coords(k, dims);
-            let p = state.world(std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 }));
-            if shape.contains(p) {
-                state.velocity[a][k] += amount;
+    } else {
+        density
+    };
+    cell_density
+        .par_iter_mut()
+        .zip(cell_temperature.par_iter_mut())
+        .zip(target.par_iter_mut())
+        .enumerate()
+        .with_min_len(HEAVY)
+        .for_each(|(k, ((d, t), target_value))| {
+            if !solid[k] && shape.contains(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))) {
+                *d += density;
+                *t += temperature;
+                *target_value += expansion;
+                // an ideal gas heated at constant pressure: dT over a step of dt is a divergence of dT / (T dt)
+                if let Some(dt) = heated {
+                    if temperature > 0.0 && *t > 0.0 {
+                        *target_value += temperature / (*t * dt);
+                    }
+                }
             }
-        }
+        });
+    for (a, amount) in velocity.into_iter().enumerate() {
+        let dims = face_dims(cells, a);
+        faces[a].par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, v)| {
+            let cell = coords(k, dims);
+            let p = world_point(origin, h, std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 }));
+            if shape.contains(p) {
+                *v += amount;
+            }
+        });
     }
 }

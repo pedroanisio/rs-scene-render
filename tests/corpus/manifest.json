@@ -12,6 +12,9 @@
     "a04-sequence-frames.scene.xml": [
       "A04"
     ],
+    "bedresponse-value.scene.xml": [
+      "S06"
+    ],
     "c1.scene.xml": [
       "C1"
     ],
@@ -216,6 +219,24 @@
     "crt5.scene.xml": [
       "CRT5"
     ],
+    "crt6.scene.xml": [
+      "CRT6"
+    ],
+    "crt7-material.scene.xml": [
+      "CRT7"
+    ],
+    "crt7-orphan.scene.xml": [
+      "CRT7"
+    ],
+    "crt8-self.scene.xml": [
+      "CRT8"
+    ],
+    "crt8-static.scene.xml": [
+      "CRT8"
+    ],
+    "crt9-capture-without-source.scene.xml": [
+      "CRT9"
+    ],
     "frx1.scene.xml": [
       "FRX1"
     ],
@@ -251,8 +272,26 @@
     "msq4.scene.xml": [
       "MSQ4"
     ],
+    "ocean-order.scene.xml": [
+      "S06"
+    ],
     "ocn1.scene.xml": [
       "OCN1"
+    ],
+    "ocn10-derived.scene.xml": [
+      "OCN10"
+    ],
+    "ocn11-static.scene.xml": [
+      "OCN11"
+    ],
+    "ocn11-unlisted.scene.xml": [
+      "OCN11"
+    ],
+    "ocn12-twice.scene.xml": [
+      "OCN12"
+    ],
+    "ocn13-splash.scene.xml": [
+      "OCN13"
     ],
     "ocn2.scene.xml": [
       "OCN2"
@@ -266,11 +305,29 @@
     "ocn5.scene.xml": [
       "OCN5"
     ],
+    "ocn6.scene.xml": [
+      "OCN6"
+    ],
+    "ocn7.scene.xml": [
+      "OCN7"
+    ],
+    "ocn8-coupling.scene.xml": [
+      "OCN8"
+    ],
+    "ocn9-drag.scene.xml": [
+      "OCN9"
+    ],
     "openvdb-format.scene.xml": [
       "S06"
     ],
     "p3d1.scene.xml": [
       "P3D1"
+    ],
+    "p3d10-angle.scene.xml": [
+      "P3D10"
+    ],
+    "p3d11-gas.scene.xml": [
+      "P3D11"
     ],
     "p3d2.scene.xml": [
       "P3D2"
@@ -286,6 +343,37 @@
     ],
     "p3d6.scene.xml": [
       "P3D6"
+    ],
+    "p3d7-derived.scene.xml": [
+      "P3D7"
+    ],
+    "p3d7-time.scene.xml": [
+      "P3D3",
+      "P3D7"
+    ],
+    "p3d8-authored.scene.xml": [
+      "P3D8"
+    ],
+    "p3d9-orphan.scene.xml": [
+      "P3D9"
+    ],
+    "pyc1-derived.scene.xml": [
+      "PYC1"
+    ],
+    "pyc2-orphan.scene.xml": [
+      "PYC2"
+    ],
+    "pyc3-time.scene.xml": [
+      "PYC3"
+    ],
+    "pyc4-authored.scene.xml": [
+      "PYC4"
+    ],
+    "pyro-advection.scene.xml": [
+      "S06"
+    ],
+    "pyro-solver.scene.xml": [
+      "S06"
     ],
     "pyro1.scene.xml": [
       "PYRO1"
@@ -617,6 +705,9 @@
     "s07-text.scene.xml": [
       "S07"
     ],
+    "s09-crater-id.scene.xml": [
+      "S09"
+    ],
     "s09-duplicate-id.scene.xml": [
       "S09"
     ],
@@ -655,8 +746,23 @@
     "v8-volumes.scene.xml": [
       "V8"
     ],
+    "vol-light-grid-cell.scene.xml": [
+      "S06"
+    ],
+    "vol-light-grid-directions.scene.xml": [
+      "S06"
+    ],
+    "vol-light-grid-memory.scene.xml": [
+      "S06"
+    ],
+    "vol-lighting-enum.scene.xml": [
+      "S06"
+    ],
     "vol1.scene.xml": [
       "VOL1"
+    ],
+    "vol10.scene.xml": [
+      "VOL10"
     ],
     "vol2.scene.xml": [
       "VOL2"
@@ -681,30 +787,51 @@
     ],
     "vol9.scene.xml": [
       "VOL9"
+    ],
+    "whitewater-checkpoint-range.scene.xml": [
+      "S06"
     ]
   },
   "valid": {
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
+    "crater-capture.scene.xml": [],
+    "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
+    "ejecta-crater.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "ocean-buoyancy.scene.xml": [],
+    "ocean-colliders.scene.xml": [],
+    "ocean-depth-filtered-drag.scene.xml": [],
+    "ocean-entry.scene.xml": [],
+    "ocean-full.scene.xml": [],
+    "ocean-hydrostatic.scene.xml": [],
+    "ocean-order2.scene.xml": [],
+    "ocean-splash.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],
+    "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
+    "physics-internal-edges.scene.xml": [],
     "pyro-colliders.scene.xml": [],
+    "pyro-crater.scene.xml": [],
     "pyro-fields.scene.xml": [],
+    "pyro-maccormack.scene.xml": [],
     "pyro-mesh.scene.xml": [],
+    "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
+    "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
-    "volume.scene.xml": []
+    "volume.scene.xml": [],
+    "whitewater-checkpoint.scene.xml": []
   },
   "warnings": {
     "a03-remote.scene.xml": [
@@ -715,6 +842,9 @@
     ],
     "w01-non-finite.scene.xml": [
       "W01"
+    ],
+    "w02-open-face.scene.xml": [
+      "W02"
     ]
   }
 }

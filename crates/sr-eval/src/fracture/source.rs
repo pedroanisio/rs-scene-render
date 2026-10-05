@@ -171,7 +171,7 @@ fn transform(mesh: &mut Primitive, matrix: DMat4) -> Result<(), String> {
         }
     }
     if sign < 0. {
-        for t in mesh.indices.chunks_exact_mut(3) {
+        for t in mesh.indices.as_chunks_mut::<3>().0 {
             t.swap(1, 2);
         }
     }

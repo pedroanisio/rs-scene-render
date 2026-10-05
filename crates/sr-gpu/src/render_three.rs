@@ -652,7 +652,10 @@ impl Renderer {
     ) -> Option<Arc<crate::three::MeshGpu>> {
         if n.kind == "ocean" {
             let Some(surface) = &n.sim_ocean else {
-                plan.stats.errors.push(format!("{}: ocean evaluation produced no surface", n.id));
+                // a failed solver is already reported as an error with its cause
+                if !ctx.g.failed(&n.id) {
+                    plan.stats.errors.push(format!("{}: ocean evaluation produced no surface", n.id));
+                }
                 return None;
             };
             if surface.mesh.indices.is_empty() {
@@ -1076,6 +1079,7 @@ impl Renderer {
             None
         };
         let mut temperature = None;
+        let mut light_grid = None;
         if let Some(child) = sr_model::element::children(&*n.elem).into_iter().find(|c| c.element_name() == "medium") {
             let key = format!("{}/medium[0]", n.id);
             let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
@@ -1090,6 +1094,13 @@ impl Renderer {
                 anisotropy: a.num("anisotropy", 0.0),
             };
             march = March { step_size: a.num("stepSize", 1.0), max_steps: a.num("maxSteps", 2048.0) as u32 };
+            if a.str("lighting").as_deref() == Some("grid") {
+                light_grid = Some((
+                    a.num("lightGridCell", 1.0) as u32,
+                    a.num("lightGridDomeDirections", 64.0) as u32,
+                    a.num("lightGridMemoryMiB", 128.0) as u64,
+                ));
+            }
             if flag(&a, "blackbody", false) {
                 let (first, second) = temperature_grids.as_ref().ok_or("blackbody requires temperatureGrid")?;
                 temperature =
@@ -1120,9 +1131,11 @@ impl Renderer {
             Vec3::from_array(self.lin_srgb([0.0, 1.0, 0.0])).as_dvec3(),
             Vec3::from_array(self.lin_srgb([0.0, 0.0, 1.0])).as_dvec3(),
         );
-        crate::volume::VolumeDraw::new(Arc::new(medium), march)?.with_thermal_color(thermal_color).map(|draw| {
-            Some(draw.with_shadows(flag(&attrs(n), "castShadow", true), flag(&attrs(n), "receiveShadow", true)))
-        })
+        let mut draw = crate::volume::VolumeDraw::new(Arc::new(medium), march)?.with_thermal_color(thermal_color)?;
+        if let Some((cell, directions, memory)) = light_grid {
+            draw = draw.with_light_grid(cell, directions, memory)?;
+        }
+        Ok(Some(draw.with_shadows(flag(&attrs(n), "castShadow", true), flag(&attrs(n), "receiveShadow", true))))
     }
 
     /// Draws of one 3D object.
@@ -2154,6 +2167,15 @@ impl Renderer {
                 stats.subframes += fs.subframes;
                 stats.decode_wait += fs.decode_wait;
                 stats.vector_seconds += fs.vector_seconds;
+                stats.sim_rigid_seconds += fs.sim_rigid_seconds;
+                stats.sim_ocean_seconds += fs.sim_ocean_seconds;
+                stats.sim_smoke_seconds += fs.sim_smoke_seconds;
+                stats.sim_particles_seconds += fs.sim_particles_seconds;
+                stats.draw_prep_seconds += fs.draw_prep_seconds;
+                stats.volume_prep_seconds += fs.volume_prep_seconds;
+                stats.pt_assemble_seconds += fs.pt_assemble_seconds;
+                stats.pt_bvh_seconds += fs.pt_bvh_seconds;
+                stats.pt_pack_seconds += fs.pt_pack_seconds;
                 for m in fs.unsupported {
                     if !stats.unsupported.contains(&m) {
                         stats.unsupported.push(m);
@@ -2378,13 +2400,18 @@ impl Renderer {
                 continue;
             }
             if g.nodes[j].kind == "particles3D" {
+                let clock = std::time::Instant::now();
                 self.particle_draws3(plan, ctx, j, &cam, opacity.min(1.0), &mut draws);
+                plan.stats.draw_prep_seconds += clock.elapsed().as_secs_f64();
             } else if attrs(&g.nodes[j]).str("primitive").as_deref() == Some("volume") {
                 if volumes.len() >= 64 {
                     plan.stats.errors.push(format!("{}: a 3D pass supports at most 64 volume domains", n.id));
                     return;
                 }
-                match self.volume_draw(ctx, j, opacity.min(1.0)) {
+                let clock = std::time::Instant::now();
+                let drawn = self.volume_draw(ctx, j, opacity.min(1.0));
+                plan.stats.volume_prep_seconds += clock.elapsed().as_secs_f64();
+                match drawn {
                     Ok(Some(volume)) => {
                         let cap = self.gpu.device.limits().max_storage_buffer_binding_size;
                         let bytes =
@@ -2397,13 +2424,23 @@ impl Renderer {
                             ));
                             return;
                         }
+                        if let Some(note) = volume.light_grid_note() {
+                            let note = format!("{}: {note}", g.nodes[j].id);
+                            if !plan.stats.unsupported.contains(&note) {
+                                plan.stats.unsupported.push(note);
+                            }
+                        }
                         volumes.push(volume);
                     }
                     Ok(None) => {}
+                    // a failed simulation is already reported as an error with its cause
+                    Err(_) if g.failed(&g.nodes[j].id) => {}
                     Err(error) => plan.stats.errors.push(format!("{}: {error}", g.nodes[j].id)),
                 }
             } else {
+                let clock = std::time::Instant::now();
                 self.object_draws(plan, ctx, j, opacity.min(1.0), &mut draws, &mut splats);
+                plan.stats.draw_prep_seconds += clock.elapsed().as_secs_f64();
             }
         }
         if draws.is_empty()

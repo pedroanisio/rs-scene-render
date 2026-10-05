@@ -19,6 +19,16 @@ use sr_model::values::{Color, Paint, Rgba};
 use crate::captions::OutputCaptions;
 use crate::DeliverError;
 
+/// The message of a frame the renderer reported errors for: every error, then what else was not
+/// rendered as authored.
+pub(crate) fn failure_message(stats: &sr_gpu::RenderStats) -> String {
+    let mut message = stats.errors.join("; ");
+    if !stats.unsupported.is_empty() {
+        message.push_str(&format!(" (also not rendered as authored: {})", stats.unsupported.join("; ")));
+    }
+    message
+}
+
 pub struct Overlay {
     ev: Evaluator,
     renderer: Renderer,
@@ -141,8 +151,11 @@ impl Overlay {
             renderer.captions_off = captions_off;
             let frame = renderer.render_with(&graph, p, Some(&mut sub));
             renderer.captions_off = false;
-            if let Some(e) = frame.stats.errors.first() {
-                return Err(DeliverError::Render { time: t, message: format!("output layer: {e}") });
+            if !frame.stats.errors.is_empty() {
+                return Err(DeliverError::Render {
+                    time: t,
+                    message: format!("output layer: {}", failure_message(&frame.stats)),
+                });
             }
             stage.place(&frame.texture, &working, &self.tex, Placement::default());
             stage.place_with_overlay(picture, &working, &composite, placement, Some(&self.tex));
@@ -174,8 +187,11 @@ impl Overlay {
         let ev = &self.ev;
         let mut sub = |st: f64| ev.evaluate(st.clamp(0.0, p.duration));
         let frame = self.renderer.render_with(&g, p, Some(&mut sub));
-        if let Some(e) = frame.stats.errors.first() {
-            return Err(DeliverError::Render { time: t, message: format!("output layer: {e}") });
+        if !frame.stats.errors.is_empty() {
+            return Err(DeliverError::Render {
+                time: t,
+                message: format!("output layer: {}", failure_message(&frame.stats)),
+            });
         }
         stage.place(&frame.texture, &self.renderer.working(), &self.tex, Placement::default());
         Ok((&self.tex, frame.stats.unsupported.iter().map(|m| format!("output layer: {m}")).collect()))

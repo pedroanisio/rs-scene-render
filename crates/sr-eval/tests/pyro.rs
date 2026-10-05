@@ -317,3 +317,119 @@ fn included_mesh_source_uses_its_document_and_animated_transform_on_replay() {
         assert_eq!(density.sample_world([0.5, 0.5, 0.5]), 0.0);
     }
 }
+
+/// Density and temperature of the cloud at 1.6 s, as exported bytes, plus the
+/// compositor cache key.
+fn published(extra: &str) -> (Vec<u8>, u64) {
+    let ev = evaluator_size(extra, 16);
+    let frame = ev.evaluate(1.6);
+    assert!(frame.problems.is_empty(), "{extra}: {:?}", frame.problems);
+    let volume = frame.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+    let mut bytes = Vec::new();
+    volume.data.write(&mut bytes).unwrap();
+    (bytes, volume.key)
+}
+
+#[test]
+fn solver_selects_the_pressure_solver_and_enters_the_published_key() {
+    // A tight tolerance makes both solvers converge, so an unconverged
+    // projection (a problem) cannot hide a difference.
+    let tight = r#"pressureTolerance="1e-9" pressureIterations="400" buoyancy="0.02""#;
+    let absent = published(tight);
+    let jacobi = published(&format!(r#"{tight} solver="jacobi""#));
+    let multigrid = published(&format!(r#"{tight} solver="multigrid""#));
+    assert_eq!(absent, jacobi, "an absent solver is jacobi");
+    assert_ne!(jacobi.0, multigrid.0, "the solvers differ in the last bits");
+    assert_ne!(jacobi.1, multigrid.1, "the compositor key must distinguish the solvers");
+    // Both solve the same projection: the fields agree far inside the tolerance of a render.
+    let ev = |solver: &str| {
+        let f = evaluator_size(&format!(r#"{tight} solver="{solver}""#), 16).evaluate(1.6);
+        let v = f.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+        v.data.clone()
+    };
+    let (a, b) = (ev("jacobi"), ev("multigrid"));
+    for name in ["density", "temperature"] {
+        let (a, b) = (a.grid(name).unwrap(), b.grid(name).unwrap());
+        for k in 0..16 {
+            for j in 0..16 {
+                let p = [(k as f64 - 7.5) * 0.99, (j as f64 - 7.5) * 0.99, 0.37];
+                let (x, y) = (a.sample_world(p), b.sample_world(p));
+                assert!((x - y).abs() <= 1e-6 * x.abs().max(1.0), "{name} at {p:?}: {x} vs {y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn advection_selects_the_transport_scheme_and_enters_the_published_key() {
+    let tight = r#"pressureTolerance="1e-9" pressureIterations="400" buoyancy="0.02" vorticity="1""#;
+    let with = |extra: &str| published(&format!("{tight} {extra}"));
+    let absent = with("");
+    let semi = with(r#"advection="semilagrangian""#);
+    let mac = with(r#"advection="maccormack""#);
+    assert_eq!(absent, semi, "an absent advection is semilagrangian");
+    assert_ne!(semi.0, mac.0, "the schemes differ in the published bytes");
+    assert_ne!(semi.1, mac.1, "the compositor key must distinguish the schemes");
+    // The acceptance configuration is its own result, distinct from either option alone.
+    let both = with(r#"solver="multigrid" advection="maccormack""#);
+    let only_solver = with(r#"solver="multigrid""#);
+    assert_ne!(both.0, mac.0);
+    assert_ne!(both.0, only_solver.0);
+    assert_ne!(both.1, mac.1);
+    assert_ne!(both.1, only_solver.1);
+    // MacCormack cannot create new extrema: the exported density stays within its source range.
+    let density_max = |extra: &str| {
+        let f = evaluator_size(&format!("{tight} {extra}"), 16).evaluate(1.6);
+        let v = f.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.clone().unwrap();
+        let grid = v.data.grid("density").unwrap();
+        (0..16 * 16)
+            .map(|i| grid.sample_world([(i % 16) as f64 - 7.5, (i / 16) as f64 - 7.5, 0.3]))
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(density_max(r#"advection="maccormack""#) >= density_max(""), "less diffusion keeps a higher peak");
+}
+
+fn plain_cloud() -> sr_eval::Evaluator {
+    let xml = r#"<scene version="1.3"><project width="32" height="32" fps="10" duration="4"/>
+      <composition><object3D id="cloud" primitive="volume">
+        <pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" turbulence="0.4" seed="3">
+          <pyroSource shape="sphere" radius="2" densityRate="10" temperatureRate="500" start="0.05"/>
+        </pyro><medium blackbody="true"/></object3D></composition></scene>"#;
+    let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    sr_eval::Evaluator::new(&doc, &Default::default()).unwrap()
+}
+
+#[test]
+fn fractional_samples_inside_one_step_export_once_and_changes_of_state_export_again() {
+    let ev = plain_cloud();
+    let volume = |t: f64| {
+        let frame = ev.evaluate(t);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        frame.nodes.iter().find(|n| &*n.id == "cloud").unwrap().sim_volume.as_ref().unwrap().clone()
+    };
+    let exports = sr_eval::pyro::exports_on_this_thread;
+    let start = exports();
+    let a = volume(0.31);
+    assert_eq!(exports() - start, 1);
+    // Four more samples inside the same 0.1 s step: the very same volume, no export.
+    for t in [0.32, 0.35, 0.39, 0.3] {
+        assert!(std::sync::Arc::ptr_eq(&a, &volume(t)), "t={t}");
+    }
+    assert_eq!(exports() - start, 1);
+    // A new step exports once more and differs.
+    let b = volume(0.41);
+    assert_eq!(exports() - start, 2);
+    assert_ne!(a.key, b.key);
+    assert!(std::sync::Arc::ptr_eq(&b, &volume(0.45)));
+    assert_eq!(exports() - start, 2);
+    // Going back replays from a checkpoint: a different state object, so it exports
+    // again, and the replayed content equals the first visit.
+    let earlier = volume(0.11);
+    assert_eq!(exports() - start, 3);
+    assert_ne!(earlier.key, a.key);
+    let a_again = volume(0.33);
+    assert_eq!(exports() - start, 4);
+    assert_eq!(a_again.key, a.key);
+    // The index 0.4 is revisited after a replay: still the state of the first visit.
+    assert_eq!(volume(0.4).key, b.key);
+}

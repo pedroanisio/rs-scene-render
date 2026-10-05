@@ -3,10 +3,7 @@ use std::collections::BTreeMap;
 
 fn cube() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let p = sr_3d::prim::cuboid(2., 2., 2.);
-    (
-        p.vertices.iter().map(|v| v.pos.map(f64::from)).collect(),
-        p.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect(),
-    )
+    (p.vertices.iter().map(|v| v.pos.map(f64::from)).collect(), p.indices.as_chunks::<3>().0.to_vec())
 }
 fn closed(piece: &Piece) {
     let mut edges = BTreeMap::<[u32; 2], (usize, i32)>::new();

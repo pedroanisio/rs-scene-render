@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Authored impact-effects demonstration. Scene units and seconds are artistic;
+     this is not a hydrocode prediction or a measured reconstruction of Chicxulub. -->
+<scene version="1.3">
+  <project width="3840" height="2160" fps="24" duration="6" background="#08121E"/>
+  <metadata><meta name="simulation-kind" value="Authored cinematic impact; not a predictive impact simulation"/></metadata>
+  <materials>
+    <material id="bed" baseColor="#756653" roughness="0.9"/>
+    <material id="water" baseColor="#1D6475" roughness="0.12" transmission="0.85" ior="1.333" thickness="3" doubleSided="true"/>
+    <material id="rock" baseColor="#392D26" roughness="0.8"/>
+    <material id="hot" baseColor="#D97031" emissive="#FF8B32" emissiveStrength="2" roughness="0.6"/>
+  </materials>
+  <composition>
+    <camera id="camera" x="0" y="-140" z="-270" pitch="-26" fov="48" renderer="pathtrace" pathSamples="8" maxBounces="4" denoise="true"/>
+    <object3D id="seabed" primitive="plane" width="1000" height="1000" segments="96" y="12" rotationX="-90" material="bed">
+      <crater radius="52" depth="25" rimHeight="7" rimWidth="10" start="1" end="2.5"/>
+    </object3D>
+    <ocean id="sea" width="720" depth="720" cellSize="6" bottomDepth="12" material="water" dt="0.0416666666666667" boundary="open" damping="0.02">
+      <wave wavelength="70" amplitude="0.25" direction="25" phase="0"/>
+      <waterImpulse time="1" radius="28" amplitude="-8"/>
+      <whitewater emissionRate="2" threshold="0.2" maxParticles="2000" lifetime="2"/>
+    </ocean>
+    <object3D id="impactor" primitive="sphere" radius="7" segments="16" x="-65" y="-90" z="-45" end="1" material="hot">
+      <animate property="x"><key time="0" value="-65"/><key time="1" value="0"/></animate>
+      <animate property="y"><key time="0" value="-90"/><key time="1" value="0"/></animate>
+      <animate property="z"><key time="0" value="-45"/><key time="1" value="0"/></animate>
+    </object3D>
+    <particles3D id="ejecta" shape="sphere" segments="6" material="rock" rate="0" seed="20261003" size="0.7" sizeEnd="0.15" speed="65" speedVariance="25" spread="130" gravityY="20" drag="0.08" lifetime="5" dt="0.0416666666666667" maxParticles="4000" colliders="seabed" collisionRadius="0.75" bounce="0.15">
+      <burst time="1" count="1500"/>
+    </particles3D>
+    <object3D id="plume" primitive="volume" y="-45">
+      <pyro width="192" height="156" depth="192" voxelSize="6" boundary="open" dt="0.0416666666666667" dissipation="0.15" cooling="0.4" buoyancy="0.003" turbulence="2" vorticity="0.5" seed="20261003" pressureIterations="120" pressureTolerance="0.001">
+        <pyroImpulse shape="sphere" y="35" radius="22" time="1" density="0.8" temperature="3000" velocityY="-35" expansion="2"/>
+        <pyroSource shape="sphere" y="30" radius="16" start="1" end="1.5" densityRate="4" temperatureRate="1200" velocityRateY="-20" expansion="2"/>
+      </pyro>
+      <medium extinction="0.12" albedo="#6D6A66" blackbody="true" emissionScale="5" stepSize="3" maxSteps="512"/>
+    </object3D>
+  </composition>
+  <lights>
+    <light id="sky" type="ambient" color="#91B6DF" intensity="0.4"/>
+    <light id="sun" type="directional" color="#FFE7C9" yaw="-35" pitch="-50" intensity="2" castShadow="true"/>
+  </lights>
+</scene>

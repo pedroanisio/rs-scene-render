@@ -43,6 +43,38 @@ fn baked_sequence_requires_a_digest_and_owns_its_timing() {
 }
 
 #[test]
+fn light_grid_attributes_need_grid_lighting_and_stay_in_range() {
+    let grid = |attrs: &str| OBJECT.replace("<medium ", &format!("<medium {attrs} "));
+    for ok in [
+        r#"lighting="exact""#,
+        r#"lighting="grid""#,
+        r#"lighting="grid" lightGridCell="64" lightGridDomeDirections="512" lightGridMemoryMiB="4096""#,
+        r#"lighting="grid" lightGridCell="1" lightGridDomeDirections="8" lightGridMemoryMiB="1""#,
+    ] {
+        assert!(codes("1.3", ASSET, &grid(ok)).is_empty(), "{ok}: {:?}", codes("1.3", ASSET, &grid(ok)));
+    }
+    for orphan in [
+        r#"lightGridCell="2""#,
+        r#"lightGridDomeDirections="32""#,
+        r#"lightGridMemoryMiB="64""#,
+        r#"lighting="exact" lightGridCell="2""#,
+    ] {
+        assert!(codes("1.3", ASSET, &grid(orphan)).contains(&"VOL10".into()), "{orphan}");
+    }
+    for bad in [
+        r#"lighting="fast""#,
+        r#"lighting="grid" lightGridCell="0""#,
+        r#"lighting="grid" lightGridCell="65""#,
+        r#"lighting="grid" lightGridDomeDirections="7""#,
+        r#"lighting="grid" lightGridDomeDirections="513""#,
+        r#"lighting="grid" lightGridMemoryMiB="0""#,
+        r#"lighting="grid" lightGridMemoryMiB="4097""#,
+    ] {
+        assert!(!codes("1.3", ASSET, &grid(bad)).is_empty(), "{bad}");
+    }
+}
+
+#[test]
 fn thermal_schema_requires_a_declared_temperature_channel() {
     let asset = r#"<volume id="smoke" src="smoke.srvol" temperatureGrid="temperature"/>"#;
     let object = r#"<object3D id="v" primitive="volume" volume="smoke"><medium blackbody="true" temperatureScale="2" emissionScale="0.5"/></object3D>"#;
