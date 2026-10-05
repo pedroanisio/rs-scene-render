@@ -29,6 +29,10 @@ pub mod src {
     pub const PAINT: u32 = 2;
     pub const TEXTURE_LOD: u32 = 3;
     pub const PATTERN: u32 = 4;
+    /// A texture magnified with Catmull-Rom (`layer/@resample="bicubic"`); minified samples stay trilinear.
+    pub const BICUBIC: u32 = 5;
+    /// A texture magnified with Mitchell-Netravali, B = C = 1/3 (`layer/@resample="mitchell"`).
+    pub const MITCHELL: u32 = 6;
 }
 
 /// Draw flags.

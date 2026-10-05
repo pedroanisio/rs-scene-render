@@ -2315,7 +2315,11 @@ impl Renderer {
                         let d = Draw {
                             opacity: op as f32,
                             blend,
-                            src_kind: src::TEXTURE,
+                            src_kind: match n.elem.get_attr("resample") {
+                                Some(AttrValue::Str(s)) if s == "bicubic" => src::BICUBIC,
+                                Some(AttrValue::Str(s)) if s == "mitchell" => src::MITCHELL,
+                                _ => src::TEXTURE,
+                            },
                             mask_off,
                             mask_count,
                             seed,
