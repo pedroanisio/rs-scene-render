@@ -265,6 +265,9 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
     }
 }
 
+/// Effects that move pixels in from outside the frame.
+const WARPS: &[&str] = &["turbulent-displace", "displacement-map", "wave-warp", "heat-haze", "ripple"];
+
 /// Why a node cannot be drawn as it was at another time.
 enum SubMiss {
     /// The caller passed no sub-frame provider.
@@ -887,7 +890,11 @@ impl Renderer {
             && !boxes.is_empty()
             && boxes.iter().all(|(_, s)| s.is_some())
             && pad.is_finite();
-        let mut rect = [0.0, 0.0, fw, fh];
+        // warps move pixels in from beyond the frame: the offscreen then covers the frame plus their reach, so a
+        // plane that overscans the frame keeps its picture there (up to 256 px)
+        let warps = effs.iter().any(|e| WARPS.contains(&e.r#type.as_str()));
+        let warp_margin = if warps { pad.ceil().clamp(0.0, 256.0) } else { 0.0 };
+        let mut rect = [-warp_margin, -warp_margin, fw + warp_margin, fh + warp_margin];
         if bounded {
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             let mut reach_px: f64 = 0.0;
@@ -904,9 +911,14 @@ impl Renderer {
                 }
             }
             // custom shaders see tile: the layer's pixels with a 2 px margin,
-            // reaching up to 64 px past the frame (their resolution and uv depend on it)
+            // reaching up to 64 px past the frame (their resolution and uv depend on it); a warp reads the
+            // node's overscan past the frame as far as it reaches
             let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
-            let (m, lo, hx, hy) = if shader { (2.0, -64.0, fw + 64.0, fh + 64.0) } else { (1.0, 0.0, fw, fh) };
+            let (m, lo, hx, hy) = if shader {
+                (2.0, -64.0, fw + 64.0, fh + 64.0)
+            } else {
+                (1.0, -warp_margin, fw + warp_margin, fh + warp_margin)
+            };
             rect = [
                 (x0 - reach_px - m).floor().max(lo),
                 (y0 - reach_px - m).floor().max(lo),

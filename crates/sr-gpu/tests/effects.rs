@@ -949,3 +949,31 @@ fn selective_color_reads_color_and_amount() {
     let none = shot(r##"color="#0000FF" amount="0""##).unwrap();
     assert!(sat(none.at(56, 8)) > 0.9, "{:?}", none.at(56, 8));
 }
+
+#[test]
+fn a_warp_sees_the_overscan_a_node_has_beyond_the_frame() {
+    // a plane that extends past the frame edge keeps the picture there when a displacement moves its pixels:
+    // the chain's offscreen covers the node's overscan as far as the warp reaches, not only the frame
+    let xml = |node: &str| {
+        format!(
+            r##"<scene version="1.1"><project width="96" height="96" fps="10" duration="1" background="#1A1A1A" seed="3"/>
+<composition><shape id="under" shape="rect" x="0" y="0" width="96" height="96" fill="#1A1A1A"/>{node}</composition>
+<effects><effect id="td" type="turbulent-displace" amount="12" size="20" seed="5"/></effects></scene>"##
+        )
+    };
+    let load = |n: &str| {
+        sr_model::load_str(&xml(n), &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"))
+    };
+    let leaf = r##"<shape id="p" shape="rect" x="-30" y="-30" width="156" height="156" fill="#C8281E" effects="td"/>"##;
+    let group = r##"<group id="g" x="-30" y="-30" width="156" height="156" effects="td"><shape id="c" shape="rect" x="0" y="0" width="156" height="156" fill="#C8281E"/></group>"##;
+    for (name, node) in [("leaf", leaf), ("group", group)] {
+        let Some(r) = render(&load(node)) else { return };
+        // the plane covers the whole frame, so no pixel of the first columns, rows or last columns may be the underlay
+        let dark = |x: u32, y: u32| r.at(x, y)[0] < 0.4;
+        let edge: usize = (0..96u32)
+            .flat_map(|k| [(k, 0u32), (k, 95), (0, k), (95, k), (1, k), (k, 1)])
+            .filter(|&(x, y)| dark(x, y))
+            .count();
+        assert!(edge == 0, "{name}: {edge} edge pixels show the dark underlay through the tear");
+    }
+}
