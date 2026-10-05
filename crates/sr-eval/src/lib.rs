@@ -39,9 +39,9 @@ pub mod rig;
 pub mod rng;
 pub mod sim;
 mod sim3d;
+pub mod solid;
 #[doc(hidden)]
 pub mod splash;
-pub mod solid;
 pub mod terrain;
 pub mod value;
 
