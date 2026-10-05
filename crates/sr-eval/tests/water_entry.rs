@@ -82,16 +82,14 @@ fn nothing_happens_before_the_body_enters_and_the_water_changes_at_the_instant_i
     for t in [0.1, 0.25, 0.29] {
         assert!(same(&at(&with, t), &at(&without, t)), "before the entry, at {t}");
     }
-    let after = at(&with, 0.31);
-    let plain = at(&without, 0.31);
-    assert!(!same(&after, &plain), "after the entry");
+    // the cavity forms over the law's time (about 0.4 s for this body), so the water over the entry point
+    // sinks below what it would be without it more and more
     let centre = 32 * 64 + 32;
-    assert!(
-        cells(&after)[centre].depth < cells(&plain)[centre].depth - 0.5,
-        "the cavity is at the entry point: {} against {}",
-        cells(&after)[centre].depth,
-        cells(&plain)[centre].depth
-    );
+    let gap = |t: f64| cells(&at(&without, t))[centre].depth - cells(&at(&with, t))[centre].depth;
+    let (early, late) = (gap(0.34), gap(0.6));
+    assert!(!same(&at(&with, 0.34), &at(&without, 0.34)), "after the entry");
+    assert!(late > 0.05, "the cavity is at the entry point: {late}");
+    assert!(early < late, "it grows: {early} then {late}");
 }
 
 #[test]

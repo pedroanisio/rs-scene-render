@@ -7,8 +7,47 @@ use sr_sim::cratering::{self, Impact, Material, Target};
 pub(super) struct Entry {
     source: Arc<str>,
     /// `None` while the body has not entered; `Some(None)` when its entry made nothing.
-    found: Option<Option<Impulse>>,
+    found: Option<Option<Cavity>>,
 }
+
+/// The cavity of an entry as a whole: the impulse it would be if it formed at once (at the instant of
+/// entry), and the time over which the law has it form.
+struct Cavity {
+    whole: Impulse,
+    duration: f64,
+}
+
+impl Cavity {
+    /// The part of the cavity that forms in the step `(from, time]`: one impulse in the middle of the stretch
+    /// of the step in which it is forming, with the fraction of the whole it is; the parts of every step
+    /// together are the whole.
+    fn part(&self, from: f64, time: f64) -> Option<Impulse> {
+        let start = self.whole.time;
+        let (lo, hi) = (start.max(from), time.min(start + self.duration));
+        if hi <= lo {
+            return None;
+        }
+        let before = grown((lo - start) / self.duration);
+        let part = grown((hi - start) / self.duration) - before;
+        let at = (0.5 * (lo + hi)).clamp(from.next_up(), time);
+        (part > 0.).then(|| Impulse {
+            time: at,
+            amplitude: self.whole.amplitude * part,
+            kind: ImpulseKind::CavityPart { share: part.min(1.), before },
+            ..self.whole.clone()
+        })
+    }
+}
+
+/// How much of a cavity has formed a fraction `s` of the way through its formation: smooth at both
+/// ends, from 0 to 1. The shape of the growth is the engine's choice; the law gives only the duration.
+fn grown(s: f64) -> f64 {
+    let s = s.clamp(0., 1.);
+    s * s * (3. - 2. * s)
+}
+
+/// Cells across, at least, of the ring that receives the water of a cavity.
+const RING_CELLS: f64 = 4.;
 
 /// The entries the ocean's `waterImpulse` children with a `source` ask for.
 pub(super) fn read(e: &sr_model::model::Ocean, colliders: &[String]) -> Result<Vec<Entry>, String> {
@@ -44,12 +83,15 @@ impl Entry {
             self.found = Some(cavity(&crossing, spec, pixels_per_meter)?);
         }
         let from = time - spec.dt;
-        Ok(self.found.iter().flatten().filter(|i| i.time > from && i.time <= time).cloned().collect())
+        // The part that forms in this step, as one impulse in the middle of the stretch of the step in
+        // which the cavity is forming; the parts of all the steps are the whole.
+        let parts = self.found.iter().flatten().filter_map(|c| c.part(from, time));
+        Ok(parts.collect())
     }
 }
 
 /// The cavity of an entry, in ocean-local units; none when the body enters outside the ocean.
-fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result<Option<Impulse>, String> {
+fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result<Option<Cavity>, String> {
     let inside =
         (0..2).all(|a| (spec.origin[a]..spec.origin[a] + spec.cells[a] as f64 * spec.cell_size).contains(&c.centre[a]));
     if !inside {
@@ -65,17 +107,81 @@ fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result
         &Impact { mass: c.mass, density: c.mass / volume, normal_speed: c.speed * metres },
         &Target { material: Material::Water, density: None, strength: None, gravity: spec.gravity * metres },
     )?;
-    // the disc that is emptied is the kernel's central disc, half the impulse's radius, and it is
-    // never smaller than two cells across each way, so that it covers cell centres
-    let radius = (2. * law.radius / metres).max(4. * spec.cell_size);
+    // The disc that is emptied is the kernel's central disc, half the impulse's radius, and the ring
+    // that receives the water is as wide as the disc is deep in radius: neither is narrower than
+    // RING_CELLS cells, so the water goes to a smooth ring that the grid resolves.
+    let radius = (2. * law.radius / metres).max(2. * RING_CELLS * spec.cell_size);
     // The central kernel (1 - 4 r^2)^2 holds pi radius^2 / 12 per unit of amplitude.
     let amplitude = 12. * (law.volume / metres.powi(3)) / (std::f64::consts::PI * radius * radius);
-    Ok(Some(Impulse {
-        time: c.time,
-        center: c.centre,
-        radius,
-        amplitude,
-        velocity: [0.; 2],
-        kind: ImpulseKind::Cavity,
+    Ok(Some(Cavity {
+        whole: Impulse {
+            time: c.time,
+            center: c.centre,
+            radius,
+            amplitude,
+            velocity: [0.; 2],
+            kind: ImpulseKind::Cavity,
+        },
+        duration: law.duration,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn whole(time: f64) -> Cavity {
+        Cavity {
+            whole: Impulse {
+                time,
+                center: [0.; 2],
+                radius: 10.,
+                amplitude: 3.,
+                velocity: [0.; 2],
+                kind: ImpulseKind::Cavity,
+            },
+            duration: 0.43,
+        }
+    }
+
+    #[test]
+    fn the_parts_of_every_step_are_the_whole_cavity_and_each_lies_inside_its_step() {
+        let dt = 1.0 / 24.0;
+        for start in [0.3, 0.3 + 0.5 * dt, 7.0 * dt, 0.0123] {
+            let c = whole(start);
+            let (mut total, mut volume) = (0., 0.);
+            for k in 1..40 {
+                let (from, time) = ((k - 1) as f64 * dt, k as f64 * dt);
+                if let Some(part) = c.part(from, time) {
+                    assert!(
+                        part.time > from && part.time <= time,
+                        "start {start}, step {k}: {} not in ({from}, {time}]",
+                        part.time
+                    );
+                    let ImpulseKind::CavityPart { share, .. } = part.kind else { panic!("a part") };
+                    assert!((part.amplitude - 3. * share).abs() < 1e-15);
+                    total += share;
+                    volume += part.amplitude;
+                }
+            }
+            assert!((total - 1.).abs() < 1e-12, "start {start}: {total}");
+            assert!((volume - 3.).abs() < 1e-12, "start {start}: {volume}");
+        }
+    }
+
+    #[test]
+    fn it_forms_smoothly_slowest_at_the_ends_and_a_step_longer_than_it_takes_holds_all_of_it() {
+        let c = whole(1.0);
+        let dt = 0.43 / 8.;
+        let shares: Vec<f64> = (1..=8)
+            .map(|k| match c.part(1.0 + (k - 1) as f64 * dt, 1.0 + k as f64 * dt).unwrap().kind {
+                ImpulseKind::CavityPart { share, .. } => share,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(shares[0] < shares[3] && shares[7] < shares[4], "{shares:?}");
+        let one = c.part(0.9, 2.0).unwrap();
+        assert_eq!(one.kind, ImpulseKind::CavityPart { share: 1.0, before: 0.0 });
+        assert!(c.part(0.0, 0.9).is_none() && c.part(1.5, 2.0).is_none());
+    }
 }
