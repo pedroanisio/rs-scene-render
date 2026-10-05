@@ -1805,12 +1805,12 @@ impl Builder<'_> {
                 color_op(self, 73, v, Aux::Tex(plate))
             }
             "halftone" => {
-                v[0] = [
-                    (if sz >= 2.0 { sz } else { 8.0 } * px) as f32,
-                    if angle != 0.0 { angle } else { 45.0 } as f32,
-                    amount.clamp(0.0, 1.0) as f32,
-                    0.0,
-                ];
+                // the screen's angle is the authored one, the schema's default 0 included; ink is `color` (black)
+                // and the ground between the dots `paint` (opaque white)
+                v[0] =
+                    [(if sz >= 2.0 { sz } else { 8.0 } * px) as f32, angle as f32, amount.clamp(0.0, 1.0) as f32, 0.0];
+                v[1] = v4(colour("color", [0.0, 0.0, 0.0, 1.0]));
+                v[2] = v4(colour("paint", [1.0, 1.0, 1.0, 1.0]));
                 color_op(self, 74, v, Aux::None)
             }
             "glitch" => {
