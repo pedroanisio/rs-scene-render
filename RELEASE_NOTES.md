@@ -17,3 +17,14 @@ The binary is built on Ubuntu 24.04 and requires Linux x86-64 with glibc 2.39 or
 Validation before the version bump: 637 Rust tests passed, with 4 benchmarks ignored, and 14 Python tests passed. Seven new regression tests failed before their fixes and passed afterward. Formatting, Clippy and golden comparisons passed without replacing references. The `still-formats` evidence case passed locally, including HEIC decoding. The release workflow smoke-tests validation, PNG rendering and a two-frame FFV1 encode using the release binary.
 
 The distributed binary targets Linux x86-64. Windows and macOS portability checks do not establish rendering equivalence on those platforms. Evidence probes establish technical behavior; artistic quality still requires visual and temporal review.
+
+## After v0.1.2
+
+Image changes in the path tracer for scenes with transmissive materials (`transmission` above 0); scenes without one render the same bytes at the same speed.
+
+- Surfaces seen through water or glass now receive the analytic lights: the shadow ray is refracted at the interface instead of being blocked by it, with Fresnel transmittance and absorption. Before, a floor under water got no direct light at all. In `examples/cinematic-impact/impact.scene.xml` the mean brightness at t = 2.0 goes from 0.00663 to 0.00909 (plume and ejecta removed for the measurement). Shadows that glass casts on surfaces in air stay black.
+- `attenuationColor` and `attenuationDistance` now take effect in path-traced renders (they already did in raster): after one attenuation distance the light left is the colour, per channel.
+- Glass or water over nothing now shows the visible dome where it showed black, including the dome's reflection on water at the horizon.
+- The ocean's default spray is transmissive, so frames with whitewater change slightly around the spray (a UHD hero frame: 394 pixels, at most 28 code values).
+- Limits: a camera that starts under the water does not see the sun on the floor, caustics are not produced, and very steep waves can leave samples dark. See the cinematic impact SREP, "Light through water and glass".
+

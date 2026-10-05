@@ -613,6 +613,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_water_shader_adds_the_refracted_shadow_ray_and_the_plain_one_does_not_have_it() {
+        let plain = format!(
+            "{}\n{}\n{}",
+            include_str!("sampling.wgsl"),
+            include_str!("pathtrace.wgsl"),
+            include_str!("volume.wgsl")
+        );
+        assert!(!plain.contains("light_through"), "scenes without transmissive materials keep their shader text");
+        for base in [plain.clone(), grid_source()] {
+            let water = water_source(&base);
+            assert!(water.contains("fn light_through(") && water.contains("inside = entering;"));
+            assert_eq!(water.matches("light_through(p, ng, n, l, ls.w, in_sigma)").count(), 1);
+            assert!(water.contains("fn volume_transmittance("), "shared code is kept");
+        }
+    }
+
+    #[test]
     fn the_grid_shader_replaces_the_exact_lighting_and_leaves_the_rest() {
         let source = grid_source();
         assert_eq!(source.matches("fn volume_incident(").count(), 1, "one volume_incident");
@@ -798,6 +815,38 @@ fn grid_source() -> String {
         shared,
         include_str!("volume_grid.wgsl")
     )
+}
+
+/// The shader for scenes with a transmissive material: the shader it is given (with or without
+/// light grids) plus the refracted shadow ray, which three small replacements hook in. Scenes
+/// without such a material keep the text, and so the compiled code, they had.
+fn water_source(base: &str) -> String {
+    const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
+    const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
+    for hook in [SIGMA, ENTER, VISIBLE] {
+        assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
+    }
+    let hooked = base
+        .replace(SIGMA, &format!("{SIGMA}    var inside = false;\n"))
+        .replace(
+            ENTER,
+            "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); inside = entering; }\n",
+        )
+        .replace(
+            VISIBLE,
+            &format!(
+                "            if (WATER && inside && lt.size.y > 0.5 && m.extra.z > 0.5) {{\n\
+                 \x20               // a surface under water (or glass): the light reaches it refracted\n\
+                 \x20               let seen = light_through(p, ng, n, l, ls.w, in_sigma);\n\
+                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * rad * seen.vis;\n\
+                 \x20               if (bounce > 0u) {{ c = min(c, vec3(20.0)); }}\n\
+                 \x20               col += c;\n\
+                 \x20               continue;\n\
+                 \x20           }}\n{VISIBLE}"
+            ),
+        );
+    format!("{hooked}\n{}", include_str!("pathtrace_water.wgsl"))
 }
 
 /// Pipelines of the path tracer (built on first use).
@@ -1028,25 +1077,35 @@ impl PtGpu {
         self.trace_water[slot].get_or_init(|| {
             let constants =
                 [("WATER", 1.0), ("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
-            let (module, layout);
+            let source = if media && grid {
+                grid_source()
+            } else {
+                format!(
+                    "{}\n{}\n{}",
+                    include_str!("sampling.wgsl"),
+                    include_str!("pathtrace.wgsl"),
+                    include_str!("volume.wgsl")
+                )
+            };
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pathtrace-water"),
+                source: wgpu::ShaderSource::Wgsl(water_source(&source).into()),
+            });
             let plain_layout;
-            if media && grid {
-                let g = self.grid_pipelines(d);
-                module = &g.module;
-                layout = &g.layout;
+            let layout = if media && grid {
+                &self.grid_pipelines(d).layout
             } else {
                 plain_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("pathtrace-water"),
                     bind_group_layouts: &[Some(&self.bgl0)],
                     immediate_size: 0,
                 });
-                module = &self.module;
-                layout = &plain_layout;
-            }
+                &plain_layout
+            };
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("pathtrace-water"),
                 layout: Some(layout),
-                module,
+                module: &module,
                 entry_point: Some("cs_trace"),
                 compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
                 cache: None,
