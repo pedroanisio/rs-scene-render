@@ -52,4 +52,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
     ignores it: srep-0000-key-overshoot-period.md (b7d9645); engine commit 931422b.
   - layer/@resample (linear, bicubic, mitchell): srep-0000-layer-resample.md (beb372d).
   - generator/@lineWidth and rule R45: srep-0000-grid-line-width.md (3211f9f).
+  - Stroke markers (markerStart, markerEnd, markerSize; rule C65), implemented as SREP 15 is written (Draft, srep-0015.md).
 The xsd and sch above differ from the vendored sha256 sums by these edits.

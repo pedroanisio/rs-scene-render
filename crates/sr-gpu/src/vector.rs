@@ -9,6 +9,7 @@ use sr_model::element::{children, AttrValue, Element};
 use sr_vector::arap::{Pin, PinKind, Puppet};
 use sr_vector::deform::{Axis, Deformer};
 use sr_vector::geom::{p, Xf, P};
+use sr_vector::markers::{self, Marker};
 use sr_vector::measure::{self, TrimMode};
 use sr_vector::modifiers::{self, Item, Modifier};
 use sr_vector::scene::{Cmd, FillRule, MaskOp, Paint, Scene};
@@ -257,6 +258,8 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
     };
     let dash = a.nums("dash").unwrap_or_default();
     let dash_off = a.num("dashOffset", 0.0);
+    let marker_of = |k: &str| a.str(k).map_or(Marker::None, |v| Marker::parse(&v));
+    let (marker_start, marker_end) = (marker_of("markerStart"), marker_of("markerEnd"));
     let position = a.str("strokePosition").unwrap_or_else(|| "center".into());
     let stroke_first = a.str("paintOrder").as_deref() == Some("stroke-fill");
     let mut scene = Scene::default();
@@ -324,11 +327,28 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
         if sw <= 0.0 || outline.is_empty() {
             return;
         }
+        // markers sit at the ends of the drawn outline; the stroke stops short of them by their setback, and they are
+        // not dashed
+        let marked = (marker_start != Marker::None || marker_end != Marker::None)
+            .then(|| markers::apply(outline, marker_start, marker_end, a.num("markerSize", 4.0), &style, tol));
+        let outline = marked.as_ref().map_or(outline, |m| &m.outline[..]);
         let dashed =
             if dash.iter().any(|v| *v > 0.0) { measure::dash(outline, &dash, dash_off) } else { outline.to_vec() };
         let clip = position != "center";
         let st = Style { width: if clip { sw * 2.0 } else { sw }, ..style };
-        let polys = stroke::stroke(&dashed, &st, tol);
+        let mut polys = stroke::stroke(&dashed, &st, tol);
+        if let Some(m) = &marked {
+            // stroke and markers are one coverage: the polygons share the stroke's winding for the nonzero union
+            let flip = polys.iter().map(markers::area).find(|a| a.abs() > 1e-9).is_some_and(|a| a < 0.0);
+            for q in &m.fills {
+                let mut q = q.clone();
+                if flip {
+                    q.pts.reverse();
+                }
+                polys.push(q);
+            }
+            polys.extend(m.stroked.iter().cloned());
+        }
         if polys.is_empty() {
             return;
         }

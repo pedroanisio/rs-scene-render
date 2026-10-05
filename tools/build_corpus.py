@@ -148,6 +148,7 @@ CASES = [
     ("c1", ["C1"], sub('<vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z"', '<vector id="icon" shape="path"')),
     ("c2", ["C2"], sub('<vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z"', '<vector id="icon" shape="svg"')),
     ("c3", ["C3"], sub('<shape id="dot" shape="ellipse"', '<shape id="dot" shape="path"')),
+    ("c65", ["C65"], sub('<shape id="dot" shape="ellipse"', '<shape id="dot" shape="ellipse" markerEnd="arrow"')),
     ("c4", ["C4"], sub('<mask type="ellipse" width="800" height="800"/>', '<mask type="path"/>')),
     ("c5", ["C5"], sub('<mask type="ellipse" width="800" height="800"/>', '<mask type="ellipse" width="800"/>')),
     ("c6", ["C6"], sub('primitive="mesh" mesh="robot"', 'primitive="mesh"')),

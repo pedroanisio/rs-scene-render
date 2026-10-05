@@ -324,6 +324,24 @@
     </xs:attribute>
   </xs:attributeGroup>
 
+  <xs:simpleType name="strokeMarkerType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/><xs:enumeration value="arrow"/><xs:enumeration value="open-arrow"/>
+      <xs:enumeration value="circle"/><xs:enumeration value="square"/><xs:enumeration value="diamond"/>
+      <xs:enumeration value="bar"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:attributeGroup name="strokeMarkers">
+    <xs:annotation><xs:documentation>
+      Markers drawn at the start and end of an open outline, in the stroke's paint, pointing along it
+      (the start marker points backwards). markerSize is in multiples of strokeWidth. With trim paths,
+      markers sit at the ends of the visible part.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="markerStart" type="strokeMarkerType" default="none"/>
+    <xs:attribute name="markerEnd" type="strokeMarkerType" default="none"/>
+    <xs:attribute name="markerSize" type="positiveDecimal" default="4"/>
+  </xs:attributeGroup>
+
   <xs:complexType name="paramValueType">
     <xs:annotation><xs:documentation>Generic named value (shader uniforms, plugin params).</xs:documentation></xs:annotation>
     <xs:attribute name="name" type="xs:NMTOKEN" use="required"/>
@@ -2011,6 +2029,7 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
     <xs:attributeGroup ref="strokeStyle"/>
     <xs:attributeGroup ref="trimPath"/>
+    <xs:attributeGroup ref="strokeMarkers"/>
   </xs:complexType>
 
   <xs:complexType name="burstType">

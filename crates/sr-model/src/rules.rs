@@ -602,6 +602,11 @@ impl<'a> Eval<'a> {
                 self.check(a("shape") != Some("path") || has("path"), n, "C3", || {
                     "shape shape=\"path\" requires @path.".into()
                 });
+                // p66
+                let marked = ["markerStart", "markerEnd"].iter().any(|k| a(k).is_some_and(|v| v != "none"));
+                self.check(!marked || matches!(a("shape"), Some("path" | "line")), n, "C65", || {
+                    "markers need an open outline: shape=\"path\" or \"line\".".into()
+                });
             }
             // p4
             "mask" => {
