@@ -288,11 +288,8 @@ impl Renderer {
     }
 
     fn world_point(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Vec3> {
-        if let Some(n) = g
-            .nodes
-            .iter()
-            .find(|m| &*m.id == id)
-            .filter(|n| !(sr_eval::draws_in_3d(n.kind) || n.kind == "camera"))
+        if let Some(n) =
+            g.nodes.iter().find(|m| &*m.id == id).filter(|n| !(sr_eval::draws_in_3d(n.kind) || n.kind == "camera"))
         {
             let p = n.world.apply(n.anchor);
             return Some(Vec3::new(p[0] as f32, p[1] as f32, n.three_d.map(|t| t[0]).unwrap_or(0.0) as f32));
@@ -2606,8 +2603,22 @@ impl Renderer {
             parts: Some(Box::new(crate::particles::ParticleJob { insts, sprite })),
         });
         let (w, hgt) = (space.size[0] as f64, space.size[1] as f64);
-        let hash = h(&[root_hash, sr_eval::rng::hash_str(&n.id), hf(ctx.g.time), pf.pos.len() as u64, 0x5a17]);
+        // the cloud is drawn in target pixels: a node placed in 2.5D carries that sheet through the frame camera
+        self.frame_three = n.three_d.map(|t| (t, n.anchor, self.proj25(ctx.g, ctx.p, space)));
+        let placed = self.frame_three.map(|(t, a, m)| {
+            let cols = m.to_cols_array().map(|v| v.to_bits() as u64);
+            h(&[hf(t[0]), hf(t[1]), hf(t[2]), hf(a[0]), hf(a[1]), h(&cols)])
+        });
+        let hash = h(&[
+            root_hash,
+            sr_eval::rng::hash_str(&n.id),
+            hf(ctx.g.time),
+            pf.pos.len() as u64,
+            placed.unwrap_or(0),
+            0x5a17,
+        ]);
         self.composite(plan, ctx, i, space, op, tex, [0.0, 0.0, w, hgt], cmds, hash);
+        self.frame_three = None;
     }
 }
 

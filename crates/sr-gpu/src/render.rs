@@ -296,6 +296,9 @@ pub struct Renderer {
     unblended: Option<Arc<str>>,
     /// Pixel rectangle of the next frame-space quad (defaults to the whole target).
     frame_rect: Option<[f64; 4]>,
+    /// 2.5D placement (zDepth, rotationX, rotationY), the pivot in node space and the frame camera for the next
+    /// frame-space quad: set by a node whose offscreen is built in target pixels but must still be placed in 2.5D.
+    frame_three: Option<([f64; 3], [f64; 2], glam::Mat4)>,
     /// Reuse effect results across frames (off with `SR_FX_NO_CACHE`, for measuring effect cost).
     fx_cache: bool,
     three: Option<Box<crate::three::ThreeEngine>>,
@@ -879,6 +882,7 @@ impl Renderer {
             sampling: false,
             unblended: None,
             frame_rect: None,
+            frame_three: None,
             fx_cache: std::env::var_os("SR_FX_NO_CACHE").is_none(),
             three: None,
             three_assets: HashMap::new(),
@@ -1575,26 +1579,8 @@ impl Renderer {
                     clips[i] = to_clip(p, space.size);
                     pix[i] = p;
                 }
-                Some(([z, rx, ry], anchor)) => {
-                    let a = xf.apply(anchor);
-                    let (mut vx, mut vy, mut vz) = (p[0] - a[0], p[1] - a[1], 0.0);
-                    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
-                    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
-                    let ny = vy * cx + vz * sx;
-                    vz = -vy * sx + vz * cx;
-                    vy = ny;
-                    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
-                    let nx = vx * cy - vz * sy;
-                    vz = vx * sy + vz * cy;
-                    vx = nx;
-                    let (px, py, pz) = (a[0] + vx, a[1] + vy, z + vz);
-                    // through the frame camera (target px → frame → clip → target clip)
-                    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
-                    // true clip coordinates: the rasteriser clips what lies behind the eye (w < 0 fails 0 ≤ z ≤ w)
-                    clips[i] = [c.x, c.y, 0.0, c.w];
-                    let wv = c.w.max(1e-3);
-                    let (w, hh) = (space.size[0] as f64, space.size[1] as f64);
-                    pix[i] = [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh];
+                Some((three, anchor)) => {
+                    (clips[i], pix[i]) = project_25(p, three, xf.apply(anchor), proj, space.size);
                 }
             }
         }
@@ -1661,9 +1647,35 @@ impl Renderer {
         let px = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
         let uvs = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let first = plan.verts.len() as u32;
+        // a 2.5D node's offscreen is a flat sheet in target pixels, turned and projected about the node's pivot
+        let three = self.frame_three.take().map(|(t, anchor, proj)| (t, space.xform.then(world).apply(anchor), proj));
+        let mut clips = [[0f32; 4]; 4];
+        let mut pix = px;
+        for i in 0..4 {
+            clips[i] = to_clip(px[i], space.size);
+            if let Some((t, a, proj)) = &three {
+                (clips[i], pix[i]) = project_25(px[i], *t, *a, proj, space.size);
+            }
+        }
         for i in [0usize, 1, 2, 0, 2, 3] {
             let l = inv.apply(px[i]);
-            plan.verts.push(Vertex { clip: to_clip(px[i], space.size), uv: uvs[i], local: l.map(|v| v as f32) });
+            plan.verts.push(Vertex { clip: clips[i], uv: uvs[i], local: l.map(|v| v as f32) });
+        }
+        if three.is_some() {
+            let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+            for q in pix {
+                b = [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])];
+            }
+            let clamp = |v: f64, hi: u32| v.clamp(0.0, hi as f64) as u32;
+            return (
+                [
+                    clamp(b[0].floor() - 1.0, space.size[0]),
+                    clamp(b[1].floor() - 1.0, space.size[1]),
+                    clamp(b[2].ceil() + 1.0, space.size[0]),
+                    clamp(b[3].ceil() + 1.0, space.size[1]),
+                ],
+                first,
+            );
         }
         let b = [
             r[0].max(0.0) as u32,
@@ -4204,4 +4216,32 @@ mod draw_uniform_tests {
             assert!(empty.iter().all(|b| *b == 0));
         }
     }
+}
+
+/// A point `p` of the target (pixels, in the plane z = 0) placed in 2.5D: turned about `pivot` by `rotationX` then
+/// `rotationY`, moved to depth `zDepth`, and seen through the frame camera `proj`. Returns the clip coordinates (with
+/// the true w, so the rasteriser clips what lies behind the eye) and the pixel it lands on.
+fn project_25(
+    p: [f64; 2],
+    [z, rx, ry]: [f64; 3],
+    pivot: [f64; 2],
+    proj: &glam::Mat4,
+    size: [u32; 2],
+) -> ([f32; 4], [f64; 2]) {
+    let (mut vx, mut vy, mut vz) = (p[0] - pivot[0], p[1] - pivot[1], 0.0);
+    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
+    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
+    let ny = vy * cx + vz * sx;
+    vz = -vy * sx + vz * cx;
+    vy = ny;
+    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
+    let nx = vx * cy - vz * sy;
+    vz = vx * sy + vz * cy;
+    vx = nx;
+    let (px, py, pz) = (pivot[0] + vx, pivot[1] + vy, z + vz);
+    // through the frame camera (target px → frame → clip → target clip)
+    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
+    let wv = c.w.max(1e-3);
+    let (w, hh) = (size[0] as f64, size[1] as f64);
+    ([c.x, c.y, 0.0, c.w], [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh])
 }

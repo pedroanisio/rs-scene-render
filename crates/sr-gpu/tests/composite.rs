@@ -855,3 +855,41 @@ fn specialized_ellipse_masks_match_general_masks_exactly() {
     .unwrap();
     assert_eq!(specialized.px, general.px);
 }
+
+fn emitter_box(attrs: &str) -> Option<[u32; 4]> {
+    // a dust cloud over a 200 x 100 rect on a 480 x 270 frame, speed 0 so the cloud keeps its shape
+    let xml = format!(
+        r##"<scene version="1.1"><project width="480" height="270" fps="24" duration="2" background="#000000" motionBlur="false" seed="1"/>
+<composition><particleEmitter id="e" preset="dust" x="240" y="135" emitterShape="rect" emitterWidth="200" emitterHeight="100" rate="120" lifetime="2" speed="0" size="6" color="#FFFFFF" seed="5" preroll="2" {attrs}/></composition></scene>"##
+    );
+    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+    let r = render(&d)?;
+    let lit: Vec<(u32, u32)> =
+        (0..270u32).flat_map(|y| (0..480u32).map(move |x| (x, y))).filter(|&(x, y)| r.at(x, y)[0] > 0.2).collect();
+    assert!(lit.len() > 50, "the cloud is drawn: {} lit pixels", lit.len());
+    let (x0, x1) = (lit.iter().map(|p| p.0).min()?, lit.iter().map(|p| p.0).max()?);
+    let (y0, y1) = (lit.iter().map(|p| p.1).min()?, lit.iter().map(|p| p.1).max()?);
+    Some([x0, y0, x1, y1])
+}
+
+#[test]
+fn particle_emitters_place_themselves_in_2_5d() {
+    // nodeAttributes promise threeD placement for every node: an emitter at depth shrinks, and turns, like a layer
+    let Some(flat) = emitter_box("") else { return };
+    let w = |b: [u32; 4]| (b[2] - b[0]) as f64;
+    let h = |b: [u32; 4]| (b[3] - b[1]) as f64;
+    // zDepth 0 changes nothing
+    let zero = emitter_box(r#"threeD="true" zDepth="0""#).unwrap();
+    assert!((w(zero) - w(flat)).abs() <= 2.0 && (h(zero) - h(flat)).abs() <= 2.0, "{zero:?} vs {flat:?}");
+    // zDepth 600 under a 60 degree horizontal field: scale f / (f + 600) with f = 240 / tan 30 degrees = 415.7
+    let far = emitter_box(r#"threeD="true" zDepth="600""#).unwrap();
+    let want = 415.7 / (415.7 + 600.0);
+    for (name, got, base) in [("width", w(far), w(flat)), ("height", h(far), h(flat))] {
+        let ratio = got / base;
+        assert!((ratio - want).abs() < 0.07, "{name} ratio {ratio:.2}, wanted about {want:.2}: {far:?} vs {flat:?}");
+    }
+    // rotationY turns the sheet edge-on: narrower, same height
+    let turned = emitter_box(r#"threeD="true" rotationY="60""#).unwrap();
+    assert!(w(turned) < w(flat) * 0.8, "rotationY did not narrow the cloud: {turned:?} vs {flat:?}");
+    assert!((h(turned) - h(flat)).abs() < h(flat) * 0.25, "{turned:?} vs {flat:?}");
+}
