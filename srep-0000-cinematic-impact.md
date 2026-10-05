@@ -986,13 +986,20 @@ overlap it, and a step the particles have not reached is an error that names it.
 rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no ground collider for the ejecta): all
 4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share to the last
 digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume along the rock's
-travel grows from 90 to 60 to 30 degrees. What the ocean does with the entries (the sparse deposit: the volume
-out of the cell into its eight neighbours, at most 90 % of its water; the momentum into the cell, when it keeps
-a depth) is the ocean's side. A particle that fell in is gone: it does not sink, its vertical momentum and its
-energy are not given to the water, and a particle that has no mass is refused by the rule.
-Until the ocean's side lands, which is an intermediate state of this branch and not one the phase closes in, a
-document that declares `ocean@splash` loses the particles that fall into the water and the ocean is not changed by
-them.
+travel grows from 90 to 60 to 30 degrees. The ocean's side: at the sample that closes each canonical step the ocean passes the solver the entries of that
+step, and the solver takes the volume out of the cell and gives it equally to its eight neighbours (at most 90 %
+of the cell's water) and adds the momentum to the cell when it keeps a depth. The ocean at a time is given the
+splash of the step that holds the time, which ends after it, so the emitter is computed until the end of that
+step before a frame is taken (a time inside a step is as good as one on it). A particle that fell in is gone: it
+does not sink, its vertical momentum and its energy are not given to the water, and a particle that has no mass
+is refused by the rule. Measured on the same scene with a closed basin: the water volume is the one it had to
+1e-9 of itself (the 80.8 m3 are taken from the cells and shared with their neighbours, the surface moves 3 mm),
+the horizontal momentum in the ocean is the momentum in the log to 1e-6 while the waves have not reached the
+walls, an ocean driven directly by the log, sparse or with every cell in every step, is the same to the bit, and
+a step given one late is another ocean. On a beach (the rock lands 25 m from the shore on a ground that ends
+there, the ejecta collide with the ground, the ocean begins at the shore) 3879 of 4000 stay on the ground, 121 fall
+in (2.44 m3) from 4.5 s on, and the ocean has the momentum it was given in the steps that follow the first of them,
+before the shore wall of the closed basin turns the waves back.
 
 ### Ocean surfaces and impulses
 

@@ -2164,8 +2164,6 @@
         (the shallow-water model has no vertical momentum), and a particle that has fallen in is gone, it does not sink.
         The surface is the water's rest level, not the swell, and the ocean is taken at its pose when the emitter
         starts. The deposit does not go through the depth filter of `bedResponse`. An emitter belongs to one ocean.
-        Until the ocean applies the deposit, an intermediate state of this branch, a document that declares the attribute
-        loses the particles in the water and the ocean is not changed by them.
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="bodyCoupling" default="none">
