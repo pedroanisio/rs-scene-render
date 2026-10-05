@@ -2211,8 +2211,10 @@
       Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
       normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
       law's own radius and volume give the disc that is emptied, the water going to the ring around it
-      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). A disc smaller than four cells
-      is widened to four, keeping its volume. The cavity is limited by the water layer: it takes at most 90% of the
+      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). The cavity forms over the
+      law's formation time (0.8 times the square root of its volume's cube root over gravity), in a part for every
+      canonical step that grows smoothly from nothing to the whole (the shape of the growth is the engine's choice,
+      the law gives only the time); a ring or a disc narrower than four cells is widened, keeping the volume. The cavity is limited by the water layer: it takes at most 90% of the
       water of its disc, and of any column in it, so it never exposes the bed and is never an error for lack of water; a
       body that reaches the bed excavates the bed's crater (`crater@source`) instead. The body goes on raising the
       columns it occupies, as before; the cavity is displacement in addition. Hydrostatic: no jet, no crown of

@@ -1055,13 +1055,23 @@ the radius `R` of the cavity. The solver's `cavity` impulse is applied at the in
 under the body's centre: it empties a central disc of radius `R` (the central kernel
 `(1 - 4 (r/a)^2)^2`, with the impulse radius `a = 2R`, whose volume per unit of peak depth removed is
 `pi a^2 / 12`, so the peak removal is `12 V / (pi a^2)`) and puts the water into the ring from `R` to `2R`
-(`sin^2` weight), conserving all of it. A disc that spans fewer than four cells across
-(`a` under four cells) is widened to `a = 4` cells, keeping `V`.
+(`sin^2` weight), conserving all of it. It does not form at once: the law's formation time is
+`T = 0.8 sqrt(V^(1/3) / g)` and the cavity grows over it, in one part for every canonical step, with the
+share of the whole that `p(t) = 3 s^2 - 2 s^3` (`s` the time since the entry over `T`) gives in the step, each
+part applied in the middle of the stretch of the step in which the cavity is forming (so the parts of all the
+steps are the whole). The shape of the growth is the engine's choice; the law gives only `T`. A disc or a
+ring narrower than four cells across (`a` under eight cells) is widened to `a = 8` cells, keeping `V`, so
+that the water goes to a smooth ring that the grid resolves.
 
 How the limit by the water layer is applied. The impulse removes from each column in proportion to
 the column's water, and takes the wanted volume or `0.9` of the water the central disc holds,
-whichever is less: a column therefore loses at most 90% of its depth and the cavity never exposes the
-bed, and a layer too shallow for the wish gives a shallower cavity, never an error (a negative
+whichever is less (a part of share `q`, after a fraction `b` of the cavity has formed, takes at most
+`0.9 q / (1 - 0.9 rho b)` of the water the disc holds then, `rho` being how much of what a part takes the
+disc's weighted water falls by, so that if the water stayed put the parts together would take what one whole
+cavity does, 90% of what the disc held when it began; the moving water makes that hold to a few per cent):
+a column therefore loses
+at most 90% of its depth and the cavity never exposes the bed, and a layer too shallow for the wish gives a
+shallower cavity, never an error (a negative
 `displace` is an error in that case; this is a separate kind). A body that reaches the bed
 excavates the bed's crater (`crater@source`) instead. The driver gives these events to the solver
 for the canonical step they belong to (`Forcing::events`, the impulses whose instant lies in
@@ -1074,13 +1084,13 @@ the body through it.
 
 What it does and does not give. In tests on a 128 x 128 ocean of 2-unit cells, with 2000 kg, 2 m bodies
 entering at 10, 20 and 30 m/s, the far wave (20 to 40 m from the entry) that the cavity alone adds, measured as the
-difference between the water with and without it, is 0.0033, 0.0071 and 0.0170 and grows with the mass
-too (0.0024, 0.0071 and 0.0207 for 500, 2000 and 8000 kg), as the law's volume does. The combined far wave, with the
+difference between the water with and without it, is 0.0050, 0.0121 and 0.0211 and grows with the mass
+too (0.0054, 0.0121 and 0.0277 for 500, 2000 and 8000 kg), as the law's volume does (0.0033, 0.0071 and
+0.0170, and 0.0024, 0.0071 and 0.0207, when the cavity formed at once and its ring was two cells wide). The combined far wave, with the
 occupancy of the body, is not monotone in these runs (0.0326, 0.0390 and 0.0276 at 10, 20 and 30 m/s in 100 m of
 water): the two sources have opposite signs near the entry point and partly cancel, so the cavity does not by
 itself give a wave that grows with the energy of the body; that wants the horizontal reaction on the body, which is
-not here. The model is hydrostatic: no jet, no crown of spray, no air, and the cavity forms at once instead of over the law's
-formation time. The law is that of a crater in water, not a validated model of water entry.
+not here. The model is hydrostatic: no jet, no crown of spray, no air. The law is that of a crater in water, not a validated model of water entry.
 
 Depth response of the surface (`ocean@bedResponse`). A shallow-water solver lifts a whole column by
 what raises its bed, which is right for a displacement much wider than the water is deep and wrong for a

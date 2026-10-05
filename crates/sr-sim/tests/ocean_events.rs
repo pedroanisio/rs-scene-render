@@ -166,3 +166,78 @@ fn a_driver_that_asks_for_nothing_changes_nothing() {
         assert_eq!(a.cells, b.cells, "{order:?}");
     }
 }
+
+fn part(time: f64, share: f64, amplitude: f64, radius: f64) -> Impulse {
+    part_after(time, share, 0.0, amplitude, radius)
+}
+fn part_after(time: f64, share: f64, before: f64, amplitude: f64, radius: f64) -> Impulse {
+    Impulse { kind: ImpulseKind::CavityPart { share, before }, ..cavity(time, amplitude * share, radius) }
+}
+
+#[test]
+fn the_parts_of_a_cavity_take_what_the_whole_does_and_the_limit_of_the_whole_in_all() {
+    // five parts of a fifth, at one instant, against the whole: the same volume moves, each part conserving water
+    let mut whole = flat(spec(Order::First, false, 0), vec![cavity(0.1, 1.0, 4.0)]);
+    let parts: Vec<Impulse> = (0..5).map(|_| part(0.1, 0.2, 1.0, 4.0)).collect();
+    let mut split = flat(spec(Order::First, false, 0), parts);
+    whole.at(0.1).unwrap();
+    split.at(0.1).unwrap();
+    let centre = 16 * N + 16;
+    let (a, b) = (&whole.frame().cells, &split.frame().cells);
+    assert!((volume(&whole) - volume(&split)).abs() < 1e-9, "all the water is kept");
+    // the same wanted volume leaves the disc, spread a little differently as the disc empties
+    let removed = |c: &[Cell]| c.iter().map(|x| (DEPTH - x.depth).max(0.0)).sum::<f64>() * 0.25;
+    assert!((removed(a) - removed(b)).abs() < 1e-9 * removed(a), "{} against {}", removed(a), removed(b));
+    assert!(
+        (a[centre].depth - b[centre].depth).abs() < 0.1 * (DEPTH - a[centre].depth),
+        "{} against {}",
+        a[centre].depth,
+        b[centre].depth
+    );
+    // wishing for far more than the water holds: each part takes its part of the limit, so the parts together take
+    // what one whole cavity would (to a few per cent: the limit is measured on the water the disc holds), and no column is emptied
+    let greedy: Vec<Impulse> = (0..5).map(|i| part_after(0.1, 0.2, 0.2 * i as f64, 10.0, 4.0)).collect();
+    let mut limited = flat(spec(Order::First, false, 0), greedy);
+    let mut single = flat(spec(Order::First, false, 0), vec![cavity(0.1, 10.0, 4.0)]);
+    limited.at(0.1).unwrap();
+    single.at(0.1).unwrap();
+    assert!(limited.frame().cells.iter().all(|c| c.depth >= (1.0 - CAVITY_SHARE) * DEPTH - 1e-12));
+    assert!(
+        (removed(&limited.frame().cells) - removed(&single.frame().cells)).abs()
+            < 0.03 * removed(&single.frame().cells),
+        "{} against {}",
+        removed(&limited.frame().cells),
+        removed(&single.frame().cells)
+    );
+    assert!((volume(&limited) - volume(&single)).abs() < 1e-9);
+}
+
+#[test]
+fn parts_asked_by_the_driver_step_by_step_act_like_the_same_parts_authored() {
+    for order in [Order::First, Order::Second] {
+        let parts = vec![part(0.07, 0.3, 1.5, 4.0), part(0.13, 0.5, 1.5, 4.0), part(0.18, 0.2, 1.5, 4.0)];
+        let mut authored = flat(spec(order, false, 0), parts.clone());
+        let mut asked = flat(spec(order, true, 0), vec![]);
+        let mut driver = asks(parts);
+        for t in [0.1, 0.2, 0.31, 0.5] {
+            assert_eq!(
+                authored.at(t).unwrap().cells,
+                asked.at_driven(t, &mut driver).unwrap().cells,
+                "{order:?} at {t}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_part_must_be_a_positive_share_not_above_the_whole() {
+    for share in [0.0, -0.1, 1.5, f64::NAN] {
+        let bad = Ocean::new(
+            spec(Order::First, false, 0),
+            vec![DEPTH; N * N],
+            vec![Cell { depth: DEPTH, velocity: [0.0; 2] }; N * N],
+            vec![part(0.1, share, 1.0, 4.0)],
+        );
+        assert!(bad.is_err(), "share {share}");
+    }
+}
