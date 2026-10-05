@@ -256,3 +256,34 @@ fn caption_source_words_keep_breaks_when_profanity_is_filtered() {
     assert_eq!(pages[0].text(), "f***\ns***");
     assert_eq!(pages[0].words().len(), 2);
 }
+
+#[test]
+fn a_burned_caption_uses_its_font_asset_whether_or_not_a_text_asset_is_drawn() {
+    // font assets used to be loaded only when a text layer was drawn, so a caption alone fell back to the
+    // default family. A monospaced "i" is several times wider than a proportional one.
+    let mono = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    if !std::path::Path::new(mono).exists() {
+        return;
+    }
+    let ink_width = |with_text: bool| {
+        let layer = if with_text { r#"<layer id="lt" asset="t" x="0" y="0"/>"# } else { "" };
+        let xml = format!(
+            r##"<scene version="1.1"><project width="480" height="120" fps="10" duration="1" background="#000000"/>
+<styles><textStyle id="cap" fontAsset="fm" size="30" color="#FFFFFF"/></styles>
+<assets><font id="fm" src="{mono}" family="DejaVu Sans Mono"/><text id="t" text="." width="20" height="20" size="10" color="#000000"/></assets>
+<composition>{layer}</composition>
+<captions><captionTrack id="cc" language="en" mode="burn" preset="classic" style="cap" maxCharsPerLine="40" x="50%" y="55%" width="90%"><cue start="0" end="1" text="iiiiiiiiii"/></captionTrack></captions></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = render(&d)?;
+        assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+        let lit = |x: u32| (60..120).any(|y| r.at(x, y)[0] > 0.5);
+        let (a, b) = ((0..480u32).find(|&x| lit(x))?, (0..480u32).rev().find(|&x| lit(x))?);
+        Some(b - a)
+    };
+    let (Some(with), Some(without)) = (ink_width(true), ink_width(false)) else { return };
+    assert!(
+        without as f32 >= with as f32 * 0.9,
+        "the caption lost its font asset when no text layer was drawn: ink {without} px against {with} px with one"
+    );
+}

@@ -1153,6 +1153,9 @@ pub fn caption_scene(
     only: Option<&str>,
     errors: &mut Vec<String>,
 ) -> Option<(sr_vector::Scene, u64)> {
+    // a caption style names its font by asset, and font assets load with the first text drawn: a caption on
+    // its own must load them too, or it is set in the fallback family
+    errors.extend(register_fonts(tc, p));
     let tracks = tracks(tc, p);
     let frame = g.size;
     let t = g.time;

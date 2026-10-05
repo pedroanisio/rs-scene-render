@@ -2800,6 +2800,8 @@ impl Renderer {
             }
         }
         let (scene, hsh) = built?;
+        // the scene is in document coordinates; the target may be a scaled one (a draft tier)
+        let scene = scene.transformed(&Xf(space.xform.0));
         let b = scene.bounds().0;
         plan.stats.vector_seconds += clock.elapsed().as_secs_f64();
         let key = cmds as *const Vec<Cmd> as usize;
