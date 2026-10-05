@@ -2225,7 +2225,7 @@
       in the water, or never reaches it, makes no cavity. The cavity is the transient crater of the scaling law of
       Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
       normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
-      law's own radius and volume give the disc that is emptied, the water going to the ring around it
+      law's volume and depth give the disc that is emptied (a bowl profile of the law's depth at its centre holding the law's volume), the water going to the ring around it
       (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). The cavity forms over the
       law's formation time (0.8 times the square root of its volume's cube root over gravity), in a part for every
       canonical step that grows smoothly from nothing to the whole (the shape of the growth is the engine's choice,
