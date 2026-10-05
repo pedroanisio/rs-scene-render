@@ -225,7 +225,7 @@ fn caption_source_newlines_are_opt_in_and_default_pixels_stay_identical() {
             let flattened = render_times(&make("", "aa bb cc dd", preset), &[time]).unwrap();
             assert!(legacy.stats.errors.is_empty() && legacy.stats.unsupported.is_empty());
             assert_eq!(legacy.px, greedy.px, "explicit greedy changes {preset} at {time}");
-            assert_eq!(legacy.px, flattened.px, "default no longer flattens newlines: {preset} at {time}");
+            assert_eq!(legacy.px, flattened.px, "default flattens newlines: {preset} at {time}");
             {
                 let source = render_times(&make(r#"lineBreaks="source""#, "aa bb&#10;cc dd", preset), &[time]).unwrap();
                 if preset == "one-word" {
@@ -259,7 +259,7 @@ fn caption_source_words_keep_breaks_when_profanity_is_filtered() {
 
 #[test]
 fn a_burned_caption_uses_its_font_asset_whether_or_not_a_text_asset_is_drawn() {
-    // font assets used to be loaded only when a text layer was drawn, so a caption alone fell back to the
+    // font assets load with the first text drawn; a caption on its own must load them too, or it falls back to the
     // default family. A monospaced "i" is several times wider than a proportional one.
     let mono = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
     if !std::path::Path::new(mono).exists() {
