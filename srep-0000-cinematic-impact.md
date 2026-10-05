@@ -957,7 +957,7 @@ gas fades linearly to rest across one cell outside the domain, so what the parti
 boundary, for an open volume and for a closed one), and not at all with `drag` zero. The position is taken to
 the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
 time the gas is the linear interpolation of the two smoke steps around the instant (a frame between two canonical steps takes the particle on by a partial segment of its step, which asks a handful of times per
-particle (two to five measured) from the step's own context: no smoke step is simulated and no field fetched, so
+particle (two to five, counted in test `particles_gas`, commit 0c9df98, 2026-10-04) from the step's own context: no smoke step is simulated and no field fetched, so
 motion-blur samples add queries and no simulation). The smoke is simulated as far as the
 particles need, and first in the frame when a document names a gas (the others keep their order), so that the
 particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
@@ -967,45 +967,64 @@ evaluator and a smoke that kept no checkpoint but the first give the same bits. 
 timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
 volume's `maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
 smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
-the target must hold a native pyro volume. Measured cost (release, one core, 20 000 particles over 25 canonical steps of 0.1 s in a 32-cell smoke):
-0.77 s more than naming the gas with no drag, that is 1.5 microseconds per particle step (about five gas queries
-of 300 ns, since the integrator asks at several points of a step), so 100 000 particles over a 6 s film at 24
-steps a second would take about 22 s, serial because the driver is asked one particle at a time. The context of a
-canonical step (the volume's matrix and the smoke's clock at its start, the smoke steps that cover it) is built
-once per step. The coupling is linear in the relative velocity and one way: the particles do not push the gas, and for
-0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic drag is a rate of about 0.03 per second, so it
-moves dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
+the target must hold a native pyro volume. The context of a canonical step (the volume's matrix and the
+smoke's clock at its start, the smoke steps that cover it) is built once per step, and the driver is asked
+one particle at a time, so the coupling is serial. Cost, test `particles_gas` (release, one core, 20 000 particles
+over 25 canonical steps of 0.1 s in a 32-cell smoke; commit 0c9df98, 2026-10-04, load of the machine not
+recorded): 0.77 s more than naming the gas with no drag, 1.5 microseconds per particle step (about five gas
+queries of 300 ns, since the integrator asks at several points of a step); 100 000 particles over a 6 s film at
+24 steps a second extrapolate to about 22 s, not measured. The coupling is linear in the relative velocity and one
+way: the particles do not push the gas. For 0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic
+drag is a rate of about 0.03 per second (computed from the drag law, not measured), so the coupling moves
+dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
 
-Ejecta falling into an ocean (`ocean@splash`, particles side). An ocean lists the emitters whose particles
-fall into it (OCN13: each throws out the ejecta of a crater, so its particles have a mass). The particle solver
-takes a plane of water (a point, the normal out of the water, the rectangle it covers): a particle whose centre
-crosses it downward inside the rectangle, before any contact it would make later in the segment, is removed there,
-and the driver is told which (instant, place, velocity, mass), for every fixed step, an empty list too, and again
-the same when a seek replays the step. The evaluator takes the plane from the ocean at its pose when the emitter
-starts (a function of the document; the ocean must have no scale and both must be on the composition clock, and
-an emitter belongs to one ocean), sums what fell by cell and by canonical step of the ocean (the volume is the
+Ejecta falling into an ocean (`ocean@splash`). An ocean lists the emitters whose particles fall into it
+(OCN13: each throws out the ejecta of a crater, so its particles have a mass; an emitter belongs to one
+ocean). The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
+covers): a particle whose centre crosses it downward inside the rectangle, before any contact it would make later
+in the segment, is removed there, and the driver is told which (instant, place, velocity, mass), for every fixed
+step, an empty list too, and again the same when a seek replays the step. The evaluator takes the plane from
+the ocean at its pose when the emitter starts (a function of the document; the ocean must have no scale and both
+must be on the composition clock), sums what fell by cell and by canonical step of the ocean (the volume is the
 mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
 velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
 and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
 entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
-overlap it, and a step the particles have not reached is an error that names it. Measured on the impact scene's
-rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no ground collider for the ejecta): all
-4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share to the last
-digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume along the rock's
-travel grows from 90 to 60 to 30 degrees. The ocean's side: at the sample that closes each canonical step the ocean passes the solver the entries of that
-step, and the solver takes the volume out of the cell and gives it equally to its eight neighbours (at most 90 %
-of the cell's water) and adds the momentum to the cell when it keeps a depth. The ocean at a time is given the
-splash of the step that holds the time, which ends after it, so the emitter is computed until the end of that
-step before a frame is taken (a time inside a step is as good as one on it). A particle that fell in is gone: it
-does not sink, its vertical momentum and its energy are not given to the water, and a particle that has no mass
-is refused by the rule. Measured on the same scene with a closed basin: the water volume is the one it had to
+overlap it, and a step the particles have not reached is an error that names it, never an empty splash. At the
+sample that closes each canonical step the ocean passes the solver the entries of that step, and the solver takes
+the volume out of the cell and gives it equally to its eight neighbours (at most 90 % of the cell's water) and
+adds the momentum to the cell when it keeps a depth. A particle that fell in is gone: it does not sink, its
+vertical momentum and its energy are not given to the water, and a particle that has no mass is refused by the
+rule.
+
+Scheduling. The ocean at a time is given the splash of the step that holds the time, which ends after it, so
+the emitter is computed until the end of that step before a frame is taken (an ocean that runs after the
+particles of its frame), or, for an ocean that loads rigid bodies and so runs before them and steps ahead of
+them, the ocean asks for the emitters when a canonical step needs them: they are made known to the log and
+computed to the end of that step, a step at a time with the ocean, each needing only the loads the ocean has
+already written. The particle solver reads the rigid world, so a rigid world that answers with a problem (a
+load from a step of the water that has not been computed) fails the fixed step of the particles that asked,
+before the step is kept. Cost of the scheduling, whole-frame evaluation of 144 frames at 24 fps, three
+alternated runs each, commit 3078153, 2026-10-05, load1 6 to 13: on the authored sea (no particles) 0.058 to 0.062
+s per frame, peak 109 to 112 MiB (the comparison with the binary before the scheduling is in the ledger); with 3000 ejecta, 11 of which fall in (4 m of
+water), 0.106 to 0.119 s per frame without `splash` and 0.109 to 0.115 with it; with 21 000 ejecta of which 9131
+fall in (1 m of water) 0.217 to 0.230 s without and 0.176 to 0.192 with (the particles that fell in are not
+simulated any more), peak 133 and 132 MiB. The cost of the aggregation, the per-step read and the pull is under
+the saving in that last case, about 0.04 s per frame, and was not isolated. With the authored 20 m of water at
+most 34 of 3000 ejecta of the biggest rock of the sweeps reach the surface (they are born on the seabed).
+
+Measured on the impact scene's rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no
+ground collider for the ejecta), tests `ejecta_splash`, commit 613e87f, 2026-10-05 (the results do not depend on
+the load): all 4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share
+to the last digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume
+along the rock's travel grows from 90 to 60 to 30 degrees. In a closed basin the water volume is the one it had to
 1e-9 of itself (the 80.8 m3 are taken from the cells and shared with their neighbours, the surface moves 3 mm),
 the horizontal momentum in the ocean is the momentum in the log to 1e-6 while the waves have not reached the
 walls, an ocean driven directly by the log, sparse or with every cell in every step, is the same to the bit, and
 a step given one late is another ocean. On a beach (the rock lands 25 m from the shore on a ground that ends
-there, the ejecta collide with the ground, the ocean begins at the shore) 3879 of 4000 stay on the ground, 121 fall
-in (2.44 m3) from 4.5 s on, and the ocean has the momentum it was given in the steps that follow the first of them,
-before the shore wall of the closed basin turns the waves back.
+there, the ejecta collide with the ground, the ocean begins at the shore; commit 4d91c1e, 2026-10-05) 3879 of
+4000 stay on the ground and 121 fall in (2.44 m3) from 4.5 s on; the ocean has the momentum it was given in the
+steps that follow the first of them, before the shore wall of the closed basin turns the waves back.
 
 ### Ocean surfaces and impulses
 
@@ -1776,8 +1795,8 @@ and from a baked SRPHYS04 cache, which carries the contacts it is found in.
 
 `crater@capture` (boolean, default false, only with `source`: **CRT9**). The rigid contact kills the normal
 velocity of the body that makes the crater and nothing takes the rest: the impact scene's rock (2 m radius,
-90 478 kg, 100 m/s at 60 degrees) keeps 17 % of its kinetic energy as a sliding that friction turns into rolling
-(35 m/s, five sevenths of its 50 m/s along the ground, omega r = v) and leaves the crater, which opens over half a
+90 478 kg, 100 m/s at 60 degrees) keeps 17 % of its kinetic energy (the free rock's in the same test) as a sliding that friction turns into
+rolling (35 m/s, five sevenths of its 50 m/s along the ground, omega r = v, by the formula) and leaves the crater, which opens over half a
 second after it has crossed the rim. With `capture` the body is arrested from the impact, for a window of
 `2 d / U` plus one step (the time that stops a body at the impact speed `U` in the law's crater depth `d`; slower
 bodies stop sooner) and only while its centre is inside the crater's rim radius in the owner's frame: its
@@ -1788,18 +1807,18 @@ about 0.3 m either way and settles very slowly: a limit of the rigid model). Thi
 mean force of a penetration of depth `d` (kinetic energy over depth), not a published law; the projectile neither
 breaks up nor buries itself. The deceleration is a function of the impact the world noticed and the body's
 state, so any order of requests and a fresh evaluator give the same bits, and without it the world is what
-it was. Measured on the impact scene's rock arriving at 100 m/s (rim 7.16, 6.66, 5.04 m; depth 3.00, 2.79, 2.12 m
-for 90, 60 and 30 degrees): at 4 s it is 0.04, 0.49 and 1.22 m from the impact point, sunk into the pit (y 0.97,
+it was. Measured on the impact scene's rock arriving at 100 m/s (test `crater_capture`, commit 90ce0f1, 2026-10-05,
+load1 6 to 10; the results do not depend on the load): rim 7.16, 6.66, 5.04 m and depth 3.00, 2.79, 2.12 m
+for 90, 60 and 30 degrees; at 4 s it is 0.04, 0.49 and 1.22 m from the impact point, sunk into the pit (y 0.97,
 0.68, -0.39 m, the 2 m radius resting on flat ground is y = -2), at 0.7, 0.4 and 1.3 m/s, and its kinetic energy is
 3e4, 8e3 and 1e5 J against 4.5e8 at the impact (the free rock at 60 and 30 degrees keeps 7.8e7 and 2.4e8 J). The
 mechanical energy never grows after the impact by more than a ten-thousandth of the impact's, and the free rock's
 energy does not grow either. In the ocean scene the water takes momentum from the rock (`full`: the water
 relaxes toward the rock's velocity in the hydrostatic response and receives its form drag in the filtered
-one), so the rock reaches the bed slowed. At 6 s, with and without `capture`, it is 0.4 and 0.5 m from the
-crater's centre in the hydrostatic response (the highest wave after 4 s 2.243 and 2.238 m; measured before
-2026-10-04, not repeated) and 0.1 and 8.5 m in the filtered one (2.097 and 2.083 m; commit 7e9264c, 2026-10-05,
-test impact_scenes on 3 m cells, which replaced 9.8 m, 2.274 and 2.261 m of the first kernel): with the depth
-filter the free rock rolls out of its crater and `capture` keeps it in.
+one), so the rock reaches the bed slowed. At 6 s, with and without `capture`, it is 0.6 and 0.7 m from the
+crater's centre in the hydrostatic response (the highest wave after 4 s 2.136 and 2.132 m) and 0.1 and 8.5 m in the
+filtered one (2.097 and 2.083 m): with the depth filter the free rock rolls out of its crater and `capture` keeps it
+in (test `impact_scenes` on 3 m cells, commit e22458b on fa63e5d, 2026-10-05, deterministic).
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
@@ -1984,17 +2003,21 @@ checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
 Internal edges of meshes (`physics@fixInternalEdges`, default false). The contact of a body with a mesh of
 triangles is reported against the triangle edge or corner it meets, and the normal there tilts with the
-tessellation: on the 1 m ground of the land scene a rock arriving at 60 degrees got a contact normal
-(-0.103, -0.045, -0.994), a normal speed of 91.2 m/s for the authored 86.6, and was pushed 7.35 m across its
-line of travel in 4 s (0.42 m with the edges fixed). With the attribute true the world builds its meshes with
-the parry flag that takes adjacent triangles into account (`FIX_INTERNAL_EDGES_TWO_SIDED`, the mesh taken
-as two-sided: the one-sided flag discards the contacts of a mesh wound the other way, which lost the
-impacts on a sphere's mesh), and a flat mesh gives its own normal in every tessellation (sr-sim test: grounds
-of 8, 13 and 40 cells with moved corners and alternating diagonals, normal (0, 1, 0) to 1e-9 and no sideways
-kick; without it the normals tilt by up to 0.15). The attribute changes the motion of every 3D body that
-lands or slides on a mesh, which is why it is off, and a physics cache baked with it carries it in its
-identity (a world without it hashes as it did). Crater impacts take their axis and speed from the owner's
-surface either way. The impact scenes set it; their sweeps are the same orderings with it on and off.
+tessellation. With the attribute true the world builds its meshes with the parry flag that takes adjacent
+triangles into account (`FIX_INTERNAL_EDGES_TWO_SIDED`, the mesh taken as two-sided: the one-sided flag discards the
+contacts of a mesh wound the other way, which loses the impacts on a sphere's mesh), and a flat mesh gives its own
+normal in every tessellation. The attribute changes the motion of every 3D body that lands or slides on a mesh,
+which is why it is off, and a physics cache baked with it carries it in its identity (a world without it hashes as
+it did). Crater impacts take their axis and speed from the owner's surface either way. The impact scenes set it;
+their sweeps are the same orderings with it on and off. Measured: grounds of 8, 13 and 40 cells with moved
+corners and alternating diagonals (test `internal_edges` of sr-sim, commit 90ce0f1, 2026-10-05, a deterministic
+result): with the attribute the normal is (0, 1, 0) to 1e-9 and the body is not kicked sideways; without it the
+normal tilts by up to 0.149. On the 1 m ground of the land scene a rock arriving at 60 degrees got, without it, a
+contact normal (-0.103, -0.045, -0.994), a normal speed of 91.2 m/s for the authored 86.6, and was pushed 7.35 m
+across its line of travel in 4 s (0.42 m with the edges fixed): a single run with a disposable program on
+2026-10-04, before commit b8eaa4b, not a test and not repeated. The normal speed of the land scene with the
+attribute is 86.63 m/s for the authored 86.60 on grounds of 8 to 160 segments (test `crater_normal`, same commit
+and date).
 
 Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
 first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
@@ -2015,7 +2038,8 @@ from the water.
 
 Reading the surface under the body gives the radiation damping that a rest level lacks: the body's motion
 raises and lowers the water it floats on, and the water takes the energy away. With `bedResponse="hydrostatic"`, a ball of 2094 kg and 1 m
-radius, dropped 1.5 m into a closed 16 m ocean 20 m deep, is within 3 cm of its draft for good from 8.75 s
+radius, dropped 1.5 m into a closed 16 m ocean 20 m deep (test `ocean_buoyancy`, which pins the response; the figures
+are those of commit 76618aa, 2026-10-04, and the test passes at 90ce0f1, 2026-10-05; not repeated), is within 3 cm of its draft for good from 8.75 s
 reading the surface and from 24 s at the rest level, and 60 s later is 1.1 cm below the draft the weight
 needs (1.2 cm above at the rest level); with no drag at all it settles from a swing of 1.2 m to under 10 cm
 by 15 s, where at the rest level it kept bobbing. No linear damping term is added: the algebraic
@@ -2032,9 +2056,20 @@ rigid steps is read by that number of them, counted in integers, since a window 
 less is a few per cent of the momentum. It is read one canonical step late, by the rule of the group, so
 the momentum of the body and the water is conserved to what is in flight: in a closed basin of 160 m (`bedResponse="hydrostatic"`), before
 the waves reach the walls, a ball of 16 755 kg at 3 m/s and a canonical step of 0.1, 0.05 and 0.025 s keeps
-total momentum to within 13 %, 10 % and 4.8 % of its own at the worst of three instants. Roll is not
-damped, there is no added mass, and the force acts at the centre. The water's momentum exceeds what the
-bodies are credited with giving it by a few per cent that the per-body samples do not attribute.
+total momentum to within 13 %, 10 % and 4.8 % of its own at the worst of three instants (test `ocean_full`,
+commit 90ce0f1, 2026-10-05, a deterministic result: 13.2 %, 10.5 % and 4.8 %). Roll is not damped, there is no
+added mass, and the force acts at the centre.
+
+The pressure of the water on a body. The water also gains momentum from the slope of the bed a body raises,
+`-g h grad(raise)`, which belongs to no body's push and is the wave drag on it. The per-body sample carries it as
+`pressure`, an estimate by the continuous source term, credited to the body and recorded in the exchange log,
+and not applied to the body: the force on it is the push above. In the closed basin of the test above
+(the ball at 3 m/s, canonical step 0.05 s, momentum of the water against what the exchange says the body gave it,
+at 1, 2 and 3 s): with `bedResponse="hydrostatic"`, where the bed is not lifted and the credit is zero, the water
+has 3.7 %, 3.0 % and 10.8 % more; with `"depthFiltered"` 13.3 %, 13.2 % and 14.9 % more without the credit and
+7.1 %, 6.8 % and 7.7 % more with it (a test of commit 388ffe0, not yet integrated; 2026-10-05; deterministic).
+What is left is not attributed to anything and its decomposition is being diagnosed; the estimate of the credit
+is being replaced by the exact figure of the scheme.
 
 Per-body water samples. With bodies in an ocean the solver tags every occupied column with the body
 that holds most of it (its position in the ocean's `colliders` list, which counts the surfaces
@@ -2940,67 +2975,61 @@ mass and angle, that an oblique impact carries the ejecta downrange, that the oc
 cell and the dust is what the law gives, and that any order of instants, a fresh evaluator and a replay
 from the first checkpoint give the same bits. Limits that the scenes show and the engine does not hide:
 
-- The ejecta of the land scene land on the ground, which is their collider, with the solver's friction of zero, so
-  only 7 of the 4000 are under 0.2 m/s at 5.9 s: they slide about the pit. A friction of 0.7 with a restitution
-  of 0.15 (about tan 35 degrees, the angle of repose of coarse rock debris, inside the 0.6 to 0.85 that Byerlee's
-  law gives for rock on rock; the engine's choice, not a measurement of this ejecta, and the literature ranges are
-  from memory and not checked in the session that wrote them) settles them: 94 under 0.2 m/s at 3 s, 550 at 4.5 s and
-  3513 at 5.9 s, none through the ground. It is not in the scene because it stops the particle solver, with "more than
-  16 collisions in one particle step", at 2 s for the heaviest rock of the sweeps (270 000 kg, the biggest crater), and
-  with any friction tried (0.3, 0.5, 0.7, 0.85); an ignored test keeps the case. The contact radius is the solver's default
-  of 0.5 m, bigger than the 0.17 m of the rocks they stand for: with 0.17 m 754 of them end under the pit, through the
-  ground. The ocean scene has no ejecta: they would be launched from the sea bed and ignore the water.
+- The ejecta of the land scene land on the ground, which is their collider, with a restitution of 0.15, a
+  friction of 0.7 and the contact radius of the 0.34 m rocks they stand for, 0.17 m (the friction is about tan 35
+  degrees, the angle of repose of coarse rock debris, inside the 0.6 to 0.85 that Byerlee's law gives for rock on
+  rock: the engine's choice, not a measurement of this ejecta, and the literature ranges are from memory and not
+  checked). They are born clear of the surface the crater has by then, so the heaviest rock of the sweeps
+  (270 000 kg, the biggest crater) runs to the end like the others. Measured by `impact_scenes` (commit e22458b
+  on fa63e5d, 2026-10-05, deterministic): with the authored rock 3748 of the 4000 are under 0.2 m/s at 5.9 s and
+  none is below the ground; with the heaviest rock 1861 of 4000, none below the ground over its 80 m, and 29 that
+  flew past its edge and fall on nothing. The ocean scene has no ejecta: they would be launched from the sea bed
+  and ignore the water, and with the authored 20 m of water at most 34 of 3000 ejecta of the biggest rock of the
+  sweeps reach the surface (commit 3078153, 2026-10-05).
 - The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
   so a smoke source from that crater would make a cloud on the sea bed.
-- In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`),
-  the sweeps are run with the ocean answering by the depth of the water (`bedResponse="depthFiltered"`, the default)
-  and by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells.
-  `tools/impact_sweeps.sh` prints them again. What the tests assert is an order, never a value: the far wave of the
-  sea (the highest the water stands above its rest level in the ring 20 to 40 m from where the rock enters, from the
+- In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`), the
+  sweeps are run with the ocean answering by the depth of the water (`bedResponse="depthFiltered"`, the default) and
+  by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells, and
+  `tools/impact_sweeps.sh` prints them. What the tests assert is an order, never a value. The far wave of the sea
+  (the highest the water stands above its rest level in the ring 20 to 40 m from where the rock enters, from the
   moment the rock is in it) grows with the speed (60, 100 and 150 m/s at 60 degrees) and with the mass (60 000, 90 478
   and 270 000 kg), and the far wave of a rock that arrives straight down grows with both, in both responses, over the
-  whole sweep and over three points (40, 60 and 80 m/s; 20 000, 40 000 and 60 000 kg) whose cavity the law makes
-  shallower than the water; the crater on the seabed grows with speed and mass; the water is conserved to the last
-  cell; and the highest surface anywhere grows with the speed at 60 degrees. The highest surface anywhere does not
-  grow with the mass at 60 degrees, nor with the speed of a vertical plunge, now that the cavity forms over the law's time in a wide
-  ring (the water the cavity takes is limited, and the largest rocks spread it): that is recorded in an ignored test,
-  not asserted, and the cause is the cavity model's, measured by its owner.
-  Measured on the integration at the time of writing (a dated measurement, not a criterion; the sea's amplitudes
-  change with the cavity's kernel). Far wave, depth filter | hydrostatic, in metres: by speed 0.95, 1.32 and 1.85 | 0.95,
-  1.40 and 1.89; by mass 1.22, 1.32 and 2.22 | 1.20, 1.40 and 2.25; a vertical plunge by speed 1.10, 1.47 and 2.06 |
-  1.11, 1.47 and 2.07, by mass 1.32, 1.47 and 2.43 | 1.32, 1.47 and 2.47. The depth of the cavity by the law for those
-  rocks is 7.5 to 15.8 m, under the 20 m of water. Highest surface anywhere, filter | hydrostatic: by speed 4.49,
-  8.03 and 8.70 | 4.61, 7.99 and 8.65; by mass 6.41, 8.03 and 7.30 | 6.59, 7.99 and 7.30; a vertical plunge by mass 7.60,
-  8.69 and 8.84 | 7.62, 8.79 and 8.88, by speed 5.43, 8.69 and 7.81 | 5.48, 8.79 and 8.42. The crater on the seabed is
-  2.81, 3.42 and 4.09 m in radius by speed and 2.15, 3.42 and 7.49 m by mass (depth 1.18, 1.43 and 1.72 m by speed),
-  the same in both responses. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows
-  with speed, mass and angle in both, and it is what the response changes most: 0.006, 0.012 and 0.021 m by speed with
-  the filter against 0.16, 0.27 and 0.40 m without, about a twenty-second of the wave. The sweep by angle is recorded
-  and not asserted (an ignored test): the highest surface is 4.33, 8.03 and 8.69 m for 30, 60 and 90 degrees with the
-  filter and 4.28, 7.99 and 8.79 m without, and the crater radius by angle 2.77, 3.42 and 3.63 m (a rock that arrives
-  straight down reaches the bed slower than one that glances in, because the cavity empties the water under it and its
-  drag acts on less). Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by angle 2.41, 1.54
-  and 0.09 m: the rock was a bump that moves and a plunge made a wave of 9 cm. A body lighter than water floats and
-  makes no crater.
-- Everything in one ocean. A test over 4 m of water (the seabed raised, the rest of the scene as authored) puts the
-  bed cratered by contact and the rock as colliders, `bodyCoupling="full"`, the cavity of the entry and 3000 ejecta
-  that fall into the same ocean (`splash`), in the depth-filtered response, with the ocean keeping no checkpoint. Nothing
-  fails, the water is conserved to a part in 1e9, and the ocean, the rock and the particles are the same to the bit at
-  any time asked in any order and from a fresh evaluator. 11 of the 3000 ejecta fall in (0.20 m3), because the rest
-  are thrown from the seabed and stay under water.
-  Scheduling that this needed: an ocean that loads rigid bodies is run before the particles of its frame and steps ahead
-  of them, so a canonical step that takes a splash cannot wait for the particles to be computed after it; the ocean
-  asks for them (the emitters that fall into it are made known to the log and computed to the end of that step, a step
-  at a time with the ocean). The particle solver reads the rigid world, so a rigid world that answers with a problem
-  (a load from a step of the water that has not been computed) now fails the particle step that asked, where before it
-  read as a world that stood still and gave other ejecta depending on what had been asked before. An ocean that
-  runs after the particles keeps the old look-ahead: the particles are computed to the end of the ocean's step that
-  holds the frame. Not measured: the cost of that scheduling per frame.
+  whole sweep and over three lighter or slower points (40, 60 and 80 m/s; 20 000, 40 000 and 60 000 kg), chosen
+  because the cavity of the first model was limited at the heavier ones; the crater on the seabed grows with speed and
+  mass; the water is conserved to the last cell; and the highest surface anywhere grows with the speed at 60 degrees.
+  The highest surface anywhere by mass at 60 degrees, by speed and mass of a vertical plunge, and every sweep by
+  angle are recorded in ignored tests and not asserted: the first pair of the mass sweep is 0.4 % apart.
+  Measured by `impact_scenes` (commit e22458b on fa63e5d, 2026-10-05, load1 13 to 15; the values are deterministic
+  and the load does not change them; the amplitudes change with the cavity's kernel, so this is a dated
+  measurement and not a criterion), depth filter | hydrostatic, metres. Far wave: by speed 0.91, 1.51 and 2.30 |
+  0.89, 1.54 and 2.31; by mass 1.14, 1.51 and 2.71 | 1.18, 1.54 and 2.76; a vertical plunge by speed 0.99, 1.72 and
+  2.56 | 1.01, 1.73 and 2.57, by mass 1.34, 1.72 and 2.94 | 1.34, 1.73 and 2.99; the three lighter or slower points
+  by speed 0.61, 0.91 and 1.17 | 0.61, 0.89 and 1.22, by mass 0.62, 0.93 and 1.14 | 0.66, 0.91 and 1.18. The depth of
+  the cavity by the law for those rocks is 7.5 to 15.8 m, under the 20 m of water. Highest surface anywhere: by speed
+  4.17, 4.74 and 7.52 | 4.31, 4.84 and 7.58; by mass 4.72, 4.74 and 8.22 | 4.79, 4.84 and 8.42; a vertical plunge by speed
+  4.53, 5.82 and 8.07 | 4.58, 5.85 and 8.02, by mass 4.71, 5.82 and 8.55 | 4.72, 5.85 and 8.60; by angle 30, 60 and 90
+  degrees 4.10, 4.74 and 5.82 | 4.11, 4.84 and 5.85. The crater on the seabed is 2.81, 3.42 and 4.09 m in radius by speed
+  and 2.15, 3.42 and 7.49 m by mass (depth 1.18, 1.43 and 1.72 m by speed), and 2.77, 3.42 and 3.63 m by angle, the same
+  in both responses. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows with
+  speed, mass and angle in both responses: by speed 0.006, 0.012 and 0.021 m with the filter and 0.16, 0.27 and
+  0.40 m without. With `capture` the rock rests in its crater and without it the rock lies 8.5 m (filtered) or 0.7 m
+  (hydrostatic) from it at 6 s. A body lighter than water floats and makes no
+  crater.
+- Everything in one ocean. A test over 4 m of water (the seabed raised, the rest of the scene as authored) puts
+  the bed cratered by contact and the rock as colliders, `bodyCoupling="full"`, the cavity of the entry and 3000
+  ejecta that fall into the same ocean (`splash`), in the depth-filtered response, with the ocean keeping no
+  checkpoint. Nothing fails, the water is conserved to a part in 1e9, and the ocean, the rock and the particles are
+  the same to the bit at any time asked in any order and from a fresh evaluator. 11 of the 3000 ejecta fall in
+  (0.20 m3), because the rest are thrown from the seabed and stay under water (test `impact_scenes`, commit
+  b1552ce, 2026-10-05, deterministic). The scheduling that makes this possible is in the paragraph on ejecta falling
+  into an ocean; the whole-frame cost of the ocean side of the scene is in the ledger, milestone "Phase budget".
 - The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
-  the speed along the normal to the power 1.7, so the temperature rise barely moves (19.19, 19.07 and 19.08 K
+  the speed along the normal to the power 1.7, so the temperature rise barely moves (19.20, 19.07 and 19.08 K
   at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows
   with the angle (5.7, 13.6 and 17.1 cubic metres of dust times kelvin), and the temperature grows with speed
-  and with mass. A slow impact in physical units is a cold cloud.
+  and with mass (test `impact_scenes`, commit e22458b, 2026-10-05, deterministic). A slow impact in physical
+  units is a cold cloud.
 
 The accompanying conformance suite must cover all of the following:
 
