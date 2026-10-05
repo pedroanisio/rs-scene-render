@@ -113,3 +113,36 @@ fn simple_shapes_give_their_own_normals_and_others_none() {
     assert!(normal(&Shape3::Capsule(1.0, 1.0), [1.0, 0.0, 0.0]).is_none());
     assert!(normal(&Shape3::TriMesh(vec![], vec![]), [0.0; 3]).is_none());
 }
+
+mod nearest_point {
+    use super::plane;
+    use sr_sim::physics3d::Shape3;
+    use sr_sim::surface::nearest;
+
+    #[test]
+    fn a_point_a_little_inside_a_flat_mesh_is_brought_to_its_surface() {
+        let flat = plane(6, 5.0, 0.0);
+        let q = nearest(&flat, [1.3, -0.4, 0.27]).unwrap();
+        assert!((q[0] - 1.3).abs() < 1e-12 && (q[1] + 0.4).abs() < 1e-12 && q[2].abs() < 1e-12, "{q:?}");
+        // beyond the edge, the nearest point is on the edge
+        let q = nearest(&flat, [9.0, 0.0, 1.0]).unwrap();
+        assert!((q[0] - 5.0).abs() < 1e-12 && q[2].abs() < 1e-12, "{q:?}");
+    }
+
+    #[test]
+    fn a_sphere_and_a_box_have_their_nearest_point_on_the_surface() {
+        let q = nearest(&Shape3::Sphere(2.0), [0.0, 0.0, 1.5]).unwrap();
+        assert!((q[2] - 2.0).abs() < 1e-12);
+        assert!(nearest(&Shape3::Sphere(2.0), [0.0; 3]).is_none());
+        let half = [1.0, 2.0, 3.0];
+        // inside: the nearest face
+        let q = nearest(&Shape3::Box(half), [0.9, 0.0, 0.0]).unwrap();
+        assert_eq!(q, [1.0, 0.0, 0.0]);
+        let q = nearest(&Shape3::Box(half), [-0.2, 1.95, 0.5]).unwrap();
+        assert_eq!(q, [-0.2, 2.0, 0.5]);
+        // outside: clamped
+        let q = nearest(&Shape3::Box(half), [4.0, -0.5, 1.0]).unwrap();
+        assert_eq!(q, [1.0, -0.5, 1.0]);
+        assert!(nearest(&Shape3::Cone(1.0, 1.0), [0.0; 3]).is_none());
+    }
+}

@@ -468,9 +468,19 @@ impl SceneDriver<'_, '_> {
         // the crater is the owner's: where it hit and its axis follow the owner's pose at the impact
         let world = crate::sim3d::world3(&frame, i, 0);
         let normal = world.transform_vector3(DVec3::from(grown.spec.outward));
-        // The contact point of the impact lies a little inside the surface, where a particle would be
-        // buried under it; they are born clear of the surface by the radius they collide with.
-        let point = world.transform_point3(DVec3::from(grown.spec.center)) + normal.normalize_or_zero() * self.lift;
+        // The contact point lies inside the surface, by as far as the body went on before the contact was
+        // found (up to a rigid step of its motion): the launches start from the nearest point of the surface.
+        let point = world.transform_point3(DVec3::from(cause.surface_point));
+        let unit_normal = normal.normalize_or_zero();
+        // ... and from where the surface is when each is launched: the crater has grown by then, and its
+        // rim has risen over the places that were level, where a particle left at the old height would be
+        // buried under the surface and pushed down by it. Each starts clear of the surface by the radius it
+        // collides with.
+        let element = children(&*frame.nodes[i].elem)
+            .into_iter()
+            .find(|c| c.element_name() == "crater")
+            .ok_or_else(|| Error::Driver(format!("{owner} has no crater")))?;
+        let to_object = world.inverse();
         let metres = cause.pixels_per_meter;
         let list = sr_sim::cratering::ejecta::ejecta(&sr_sim::cratering::ejecta::Spec {
             material: cause.material,
@@ -491,9 +501,18 @@ impl SceneDriver<'_, '_> {
         .map_err(Error::Driver)?;
         list.iter()
             .map(|e| {
+                let level = point + DVec3::from(e.position.map(|c| c * metres));
+                let age = crate::crater::ImpactCrater { age: e.time, ..grown.clone() };
+                let deformation = crate::crater::from_impact(element, &age).map_err(Error::Driver)?;
+                let on_surface = deformation
+                    .kernel
+                    .map(to_object.transform_point3(level).to_array(), deformation.progress)
+                    .map_err(Error::Driver)?
+                    .position;
+                let position = world.transform_point3(DVec3::from(on_surface)) + unit_normal * self.lift;
                 Ok(Birth {
                     time: self.emitter_time(cause.time + e.time)?,
-                    position: std::array::from_fn(|c| point[c] + e.position[c] * metres),
+                    position: position.to_array(),
                     velocity: e.velocity.map(|v| v * metres),
                     mass: e.mass,
                 })

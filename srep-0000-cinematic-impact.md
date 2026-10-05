@@ -1105,7 +1105,20 @@ a column therefore loses
 at most 90% of its depth and the cavity never exposes the bed, and a layer too shallow for the wish gives a
 shallower cavity, never an error (a negative
 `displace` is an error in that case; this is a separate kind). A body that reaches the bed
-excavates the bed's crater (`crater@source`) instead. The driver gives these events to the solver
+excavates the bed's crater (`crater@source`) instead.
+
+Where the limit binds (measured on the impact-ocean scene, 20 m of water, 1.5 m cells, the rock of 60000,
+90478 and 270000 kg at the authored speed and angle; wanted and limit are in the cavity's own weighted
+units). The law's depth is not what reaches the layer: the impulse's central kernel `(1 - 4 (r/a)^2)^2` is
+more peaked than the bowl, so a volume `V` asks for a peak removal of `12 V / (pi a^2)`, about 1.5 times the
+law's depth (7.5 to 15.8 m over the three masses, below the 20 m layer), and it is that peak, up to 24 m,
+against 90% of the water of the disc (18 m at the centre) that limits. The parts together wanted 266.5, 367.5
+and 862.3 and took 266.5, 326.4 and 567.6 (the limit of the weighted disc being 344.9, 334.1 and 567.6),
+so the lightest rock is not limited at all, the authored one in 17 of 25 parts loses 11% of its volume and the
+heaviest in 28 of 29 loses 34%. When the demanded peak exceeds the layer the displaced volume is limited
+and the highest surface stops growing with the energy of the rock (the highest wave by mass was 6.41, 8.03
+and 7.30 m, and in a vertical plunge by speed 5.43, 8.69 and 7.81 m); the far wave of the cavity alone is
+not limited that way and still grows. The driver gives these events to the solver
 for the canonical step they belong to (`Forcing::events`, the impulses whose instant lies in
 `(T - dt, T]` at the sample that ends the step at `T`), a function of the time and the scene alone, and the
 solver applies them among the substeps in order of time after authored impulses of the same instant,
