@@ -62,11 +62,21 @@ pub(crate) struct Around {
     pub(crate) centroid: [f64; 2],
     pub(crate) surface: [f64; 3],
     pub(crate) impulse: [f64; 2],
+    /// What the slope of the bed the body raises gave the water in the step: credited to the body and recorded, not
+    /// applied to it.
+    pub(crate) pressure: [f64; 2],
 }
 
 impl From<&sr_sim::ocean::BodySample> for Around {
     fn from(s: &sr_sim::ocean::BodySample) -> Around {
-        Around { owner: s.owner, wet: s.wet as u32, centroid: s.centroid, surface: s.surface, impulse: s.impulse }
+        Around {
+            owner: s.owner,
+            wet: s.wet as u32,
+            centroid: s.centroid,
+            surface: s.surface,
+            impulse: s.impulse,
+            pressure: s.pressure,
+        }
     }
 }
 
@@ -78,6 +88,7 @@ impl Record for Around {
             && bits(&self.centroid, &other.centroid)
             && bits(&self.surface, &other.surface)
             && bits(&self.impulse, &other.impulse)
+            && bits(&self.pressure, &other.pressure)
     }
 }
 
@@ -364,6 +375,13 @@ impl Group {
     pub(crate) fn record(&self, ocean: usize, step: u64, exchange: Exchange) -> Result<Put, String> {
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         log.put(ocean as u32, step, &[exchange])
+    }
+
+    /// What the water offered about each body in canonical step `step` of ocean `ocean`, once it has been computed:
+    /// the momentum each gave the water and the pressure of the bed it raised, by body.
+    pub(crate) fn around_at(&self, ocean: usize, step: u64) -> Option<Vec<Around>> {
+        let log = self.around.lock().unwrap_or_else(|e| e.into_inner());
+        log.get(ocean as u32, step).map(<[Around]>::to_vec)
     }
 
     /// Record what the water offered about each body in canonical step `step` of ocean `ocean`.

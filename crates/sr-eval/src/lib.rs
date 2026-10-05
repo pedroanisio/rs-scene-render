@@ -94,6 +94,10 @@ pub struct Evaluator {
     sim: Option<std::sync::Mutex<sim::Runtime>>,
 }
 
+/// A body's owner, the momentum it gave the water, and the pressure credited to it: [`Evaluator::around_into`].
+#[doc(hidden)]
+pub type BodyOffer = (u32, [f64; 2], [f64; 2]);
+
 impl Evaluator {
     /// Templates and compiles `doc`. Errors carry `E01`–`E16` diagnostics.
     pub fn new(doc: &sr_model::Document, opts: &EvalOptions) -> Result<Evaluator, sr_model::Report> {
@@ -133,6 +137,18 @@ impl Evaluator {
             Some(sim) => sim.lock().unwrap_or_else(|e| e.into_inner()).splash.read(ocean, step),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// What ocean `ocean` offered about each body in its canonical step `step`, as `(owner, impulse, pressure)`
+    /// per body, each the momentum per unit water density in scene units: what the body gave the water, and what
+    /// the slope of the bed it raised gave the water, which is credited to the body and not applied to it. None
+    /// while the step has not been computed.
+    #[doc(hidden)]
+    pub fn around_into(&self, ocean: &str, step: u64) -> Option<Vec<BodyOffer>> {
+        let sim = self.sim.as_ref()?.lock().unwrap_or_else(|e| e.into_inner());
+        let group = sim.physics.as_ref()?.group.as_ref()?;
+        let list = group.around_at(group.channel(ocean)?, step)?;
+        Some(list.iter().map(|a| (a.owner, a.impulse, a.pressure)).collect())
     }
 
     /// Simulates the document's physics to its end and returns a physics cache file

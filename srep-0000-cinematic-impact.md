@@ -2075,16 +2075,16 @@ total momentum to within 13 %, 10 % and 4.8 % of its own at the worst of three i
 commit 90ce0f1, 2026-10-05, a deterministic result: 13.2 %, 10.5 % and 4.8 %). Roll is not damped, there is no
 added mass, and the force acts at the centre.
 
-The pressure of the water on a body. The water also gains momentum from the slope of the bed a body raises,
-`-g h grad(raise)`, which belongs to no body's push and is the wave drag on it. The per-body sample carries it as
-`pressure`, an estimate by the continuous source term, credited to the body and recorded in the exchange log,
-and not applied to the body: the force on it is the push above. In the closed basin of the test above
-(the ball at 3 m/s, canonical step 0.05 s, momentum of the water against what the exchange says the body gave it,
-at 1, 2 and 3 s): with `bedResponse="hydrostatic"`, where the bed is not lifted and the credit is zero, the water
-has 3.7 %, 3.0 % and 10.8 % more; with `"depthFiltered"` 13.3 %, 13.2 % and 14.9 % more without the credit and
-7.1 %, 6.8 % and 7.7 % more with it (a test of commit 388ffe0, not yet integrated; 2026-10-05; deterministic).
-What is left is not attributed to anything and its decomposition is being diagnosed; the estimate of the credit
-is being replaced by the exact figure of the scheme.
+The pressure of the water on a body, in the exchange. The per-body sample's `pressure` is the bed source of the
+scheme itself, credited to the body by the ocean solver (the paragraph on `BodySample::pressure` above), and the
+exchange log records it with the momentum the body gave the water, to the bit on a replay. It is not applied to
+the body: the force on it is the push above. In the closed basin of the test above (the ball at 3 m/s, canonical
+step 0.05 s, first order; the momentum of the water along x against the sum of the records of the exchange up to
+the canonical steps that have ended by 1, 2 and 3 s; test `the_water_has_the_momentum_the_exchange_says_the_body_gave_it_and_the_pressure_is_what_is_left`,
+commit 1ba58cd, 2026-10-05, deterministic): the water has 3.8 %, 3.1 % and 11.0 % more than the body gave it with
+`bedResponse="hydrostatic"` and 10.7 %, 12.3 % and 14.6 % more with `"depthFiltered"`; with the credit it has
+0.00 %, 0.00 % and 0.00 % more in the first and 0.01 %, 0.04 % and 0.09 % in the second, the residuals of the
+solver's own balance in the paragraph above.
 
 Per-body water samples. With bodies in an ocean the solver tags every occupied column with the body
 that holds most of it (its position in the ocean's `colliders` list, which counts the surfaces

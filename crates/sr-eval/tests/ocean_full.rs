@@ -14,11 +14,13 @@ struct Basin {
     dt: f64,
     /// Metres a second along x.
     speed: f64,
+    /// How the ocean answers to the body: `hydrostatic` or `depthFiltered`.
+    response: &'static str,
 }
 
 impl Default for Basin {
     fn default() -> Self {
-        Basin { coupling: "full", dt: 0.05, speed: 3.0 }
+        Basin { coupling: "full", dt: 0.05, speed: 3.0, response: "hydrostatic" }
     }
 }
 
@@ -29,12 +31,13 @@ impl Basin {
               <object3D id="ball" primitive="sphere" radius="2" segments="24" x="-10" y="0" z="1">
                 <rigidBody shape="sphere" mass="{MASS}" velocityX="{speed}" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" bedResponse="hydrostatic" width="160" depth="160" cellSize="2" bottomDepth="10" dt="{dt}" boundary="closed" colliders="ball" bodyCoupling="{coupling}"/>
+              <ocean id="sea" bedResponse="{response}" width="160" depth="160" cellSize="2" bottomDepth="10" dt="{dt}" boundary="closed" colliders="ball" bodyCoupling="{coupling}"/>
             </composition>
             <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"##,
             speed = self.speed,
             dt = self.dt,
             coupling = self.coupling,
+            response = self.response,
         )
     }
 
@@ -124,5 +127,47 @@ fn any_order_of_instants_and_a_fresh_evaluator_give_the_same_motion_bit_for_bit(
     for (k, &t) in times.iter().enumerate() {
         let (x, w) = at(&fresh, t);
         assert_eq!(first[k], (x.to_bits(), w.map(f64::to_bits)), "t = {t}");
+    }
+}
+
+/// Water's momentum along x, kilograms metres a second, and what the exchange says the body gave it (`impulse`) and the
+/// bed it raised gave it (`pressure`) over the canonical steps that have ended by `t`, in the same units.
+fn balance(ev: &Evaluator, basin: &Basin, t: f64) -> (f64, f64, f64) {
+    let (_, water) = at(ev, t);
+    // the record numbered n is what was given in the n-th canonical step that has ended (the record 0 is the initial
+    // sample and holds nothing), so the water at `t` has the records 0 to the number of steps that have ended
+    let steps = (t / basin.dt).round() as u64;
+    let (mut impulse, mut pressure) = (0.0, 0.0);
+    for step in 0..=steps {
+        let list = ev.around_into("sea", step).unwrap_or_else(|| panic!("step {step} not computed"));
+        for (_, i, p) in list {
+            impulse += RHO * i[0];
+            pressure += RHO * p[0];
+        }
+    }
+    (water[0], impulse, pressure)
+}
+
+#[test]
+fn the_water_has_the_momentum_the_exchange_says_the_body_gave_it_and_the_pressure_is_what_is_left() {
+    for response in ["hydrostatic", "depthFiltered"] {
+        let basin = Basin { response, ..Basin::default() };
+        let ev = basin.evaluator();
+        for t in [1.0, 2.0, 3.0] {
+            let (water, impulse, pressure) = balance(&ev, &basin, t);
+            let (without, with) = ((water - impulse) / water, (water - impulse - pressure) / water);
+            println!(
+                "FULL {response} t {t}: water {water:.3}, impulse {impulse:.3}, pressure {pressure:.3}; residual without {:.3} ({:.2}%), with {:.3} ({:.2}%)",
+                water - impulse,
+                100.0 * without,
+                water - impulse - pressure,
+                100.0 * with
+            );
+            // what the slope of the bed the body raises gives the water is credited to it, and adding it leaves less of
+            // the water's momentum unexplained
+            assert!(with.abs() < without.abs(), "{response}: without {without}, with {with}");
+            // with the bed source of the scheme itself nothing is left but what the scheme's rounding leaves
+            assert!(with.abs() < 0.005, "{response} at {t} s: {with}");
+        }
     }
 }
