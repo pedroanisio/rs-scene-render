@@ -2909,6 +2909,199 @@
       ],
       "validation": "Ejecta of a crater are launched from the nearest point of the owner's surface (sr_sim::surface::nearest) mapped by the crater as grown at the instant of each launch, clear of it by the collision radius. With the collision radius of the rocks the 4000 particles stand for, 0.17 m, 678 of 4000 ended below the ground; born only at the nearest point of the original surface 109 did; born on the grown surface none (test crater_ejecta_ground, at 2.0, 3.0 and 5.9 s); the default radius 0.5 m keeps its outcome (impact_scenes land: 11 passed, 1 ignored). The cavity limit measured on the impact-ocean scene (60000, 90478, 270000 kg): the parts together wanted 266.5, 367.5, 862.3 and took 266.5, 326.4, 567.6; limited parts 0 of 24, 17 of 25, 28 of 29.",
       "limits": "With a collision radius of 0.02 m about 1500 of 4000 still end below the ground, with the particle step 1/24 s and with 0.01 s alike: the collider is a mesh of 1 m facets whose chords differ from the true bowl and rim by more than that radius, so a particle born on the analytic surface can be under a facet and is pushed through it. The friction case of the 270000 kg rock (more than 16 collisions that advance time against a surface that accelerates) is not fixed."
+    },
+    {
+      "name": "The cavity of a water entry has the law's depth, not twice it",
+      "evidence": [
+        "crates/sr-eval/src/ocean/cavity.rs",
+        "srep-0000-cinematic-impact.md",
+        "schema/scene-render-1.1.xsd"
+      ],
+      "validation": "The disc emptied by the cavity of waterImpulse@source is sized so that its bowl profile has the law's depth as peak and holds the law's volume, R = sqrt(3V/(pi d)), instead of the law's radius, whose profile peaked at about twice the depth. On the impact-ocean scene (rocks of 60000, 90478, 270000 kg, 20 m of water) the parts wanted 266.6, 367.8, 862.2 and took all of it (limits 582.0, 704.9, 1152.3), none limited, where before 0 of 24, 17 of 25 and 28 of 29 were. The acceptance sweeps of the sea (both modes), which two of them failed with the former profile, all pass: highest wave by mass 4.72, 4.74, 8.22 m (before 6.41, 8.03, 7.30), by speed 4.17, 4.74, 7.52 m (before 4.49, 8.03, 8.70), vertical plunge by speed 4.53, 5.82, 8.07 m (before 5.43, 8.69, 7.81) and by mass 4.71, 5.82, 8.55 m; the wave of the crater alone unchanged (0.0057, 0.0124, 0.0210 by speed). water_entry, ocean_depth_filter and the cavity unit tests pass.",
+      "limits": "The wave by mass between the lightest and the authored rock is 4.72 against 4.74 m: growing, but within 0.5%. The cost was not changed (the cavity adds one impulse per step). The shape of the bowl is the crater element's, (1 - x^2)^2, not a measured profile of a water cavity."
+    },
+    {
+      "name": "Pressure of the water on a body credited per owner",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/body.rs",
+        "crates/sr-sim/tests/ocean_pressure.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/src/ocean.rs"
+      ],
+      "validation": "Forcing::lifts (what each body raises the bed by, sparse) and BodySample::pressure: per canonical step, -g h grad(raise) area dt over the lift and the ring around it, h at the end of the step, the gradient from the mean of the lift at the end and at the start. In a periodic basin of 64 x 64 cells of 6 m where a mound moves and nothing else changes the total momentum, the water gained 2.359, 4.857 (first order) and 2.857, 5.565 (second order) for 4 and 10 m/s, and the credit was 2.507, 5.158 and 2.876, 5.694: residuals 6.3%, 6.2%, 0.7%, 2.3% (tests ocean_pressure: residual under 8% first order and 3% second, bad lifts are errors, nothing credited without lifts). Evaluator test: a sphere of 2 m radius moving at 6 m/s in 6 m of water is credited pressure along the motion only, about 5% of the push.",
+      "limits": "An estimate by the continuous source term, not the flux difference of the scheme; with end-of-step depth. The 2 to 4% unowned momentum that Saturno measured with bodyCoupling=full in a closed basin was not reproduced here: the residual was measured on a periodic basin with a moving mound, not on that scene, and the credit is not yet added to the exchange. Cost not measured (the window of the lift and one column ring per body per step)."
+    },
+    {
+      "name": "Phase budget: cost of the ocean side of the authored impact-ocean scene",
+      "evidence": [
+        "examples/cinematic-impact/impact-ocean.scene.xml"
+      ],
+      "validation": "The authored impact-ocean scene (192 x 192 m at 1.5 m cells over 20 m, second order, dt 1/24 s, the rock of 90478 kg at 100 m/s, the crater and the physics of the scene; lights removed, nothing drawn) evaluated frame by frame, 144 frames at 24 fps, on the CPU with a disposable program (not committed) that times each Evaluator::evaluate and reads the peak resident set from /proc; 3 runs of each variant, alternated (variants in order, three rounds), load1 noted at start and end of each run. Variants (all with the default bedResponse=depthFiltered unless said): 1 ocean without colliders; 2 colliders seabed only; 3 seabed and rock, bodyCoupling none; 4 buoyancy; 5 full; 6 full and the cavity (the authored scene); 7 as 6 with bedResponse=hydrostatic. Mean seconds per frame over the three runs (total of the evaluation, of which the ocean's own clock): 1-no-colliders: 0.0534 (0.0211); 2-bed-only: 0.0618 (0.0297); 3-bed+rock-none: 0.0647 (0.0622); 4-bed+rock-buoyancy: 0.0592 (0.0577); 5-bed+rock-full: 0.0569 (0.0554); 6-full+cavity: 0.058 (0.0565); 7-full+cavity-hydrostatic: 0.0567 (0.0553). Slowest frame per run: 1-no-colliders: [0.314, 0.278, 0.285] s at frame [43, 46]; 2-bed-only: [0.312, 0.293, 0.287] s at frame [43]; 3-bed+rock-none: [0.301, 0.304, 0.296] s at frame [42, 45]; 4-bed+rock-buoyancy: [0.276, 0.271, 0.265] s at frame [50]; 5-bed+rock-full: [0.275, 0.283, 0.281] s at frame [48, 55, 56]; 6-full+cavity: [0.287, 0.266, 0.289] s at frame [49, 51, 54]; 7-full+cavity-hydrostatic: [0.263, 0.297, 0.279] s at frame [48, 51]. Peak RSS (MiB): 1-no-colliders: 102; 2-bed-only: 105; 3-bed+rock-none: 114; 4-bed+rock-buoyancy: 109; 5-bed+rock-full: 113; 6-full+cavity: 113; 7-full+cavity-hydrostatic: 112. load1 over all runs 6.0 to 7.1.",
+      "limits": "Wall time of whole-frame evaluation on a shared machine with load1 between 6.0 and 7.1 throughout, so about 7 busy cores; the three runs of one variant differ by up to 6%, which is the size of the differences among variants 4 to 7 (0.0592, 0.0569, 0.0580, 0.0567 s/frame), so those are not told apart: neither full against buoyancy, nor the cavity, nor bedResponse hydrostatic against depthFiltered shows a cost at this size. Variant 3 (bodyCoupling none) is about 10% above them (0.0647 s/frame, runs 0.0673, 0.0645, 0.0623), and that was explained by counting: in variants 3 and 4 alike the ocean asks for 2.01 scene frames per frame, the rigid world answers 3.0 requests and runs 5.0 steps of 1/120 s per frame, with no checkpoint restore (the hypothesis that without a group it asks for instants the frame log lacks and steps more often is refuted: 5 steps per frame in both; the log answers 1 request per frame in the grouped variants and none in 3), and the ocean's bed driver is called once per frame in both. What differs is what a step costs while the rock is in contact with the deforming bed: 24.2 and 26.1 ms per step in frames 36 to 59 of variant 3 (120 steps) against 2.3 ms in frames 36 to 47 and 33.1 ms in frames 48 to 59 of variant 4 (60 steps in contact), the other frames 0.01 to 3 ms in both. With no coupling the rock is not slowed by the water, reaches the bed about half a second earlier and stays in contact with the crater for about twice as many frames. It is the rigid world's contact cost, not the ocean's. The slowest frames (42 to 56, 1.75 to 2.3 s into the scene) are those where the rock reaches the bed and the crater grows. The ocean's own clock includes the rigid world's steps that it pulls when it is grouped with it or reads the bodies (variants 3 to 7), so the total is the figure to compare. Evaluation only: no render, no GPU, no encode. 1.5 m cells and 20 m of water; the 720 x 720 grids of the other scenes were measured in the entries of the solver and the filter.",
+      "variants": {
+        "1-no-colliders": {
+          "s_per_frame_runs": [
+            0.0532,
+            0.0524,
+            0.0547
+          ],
+          "s_per_frame_mean": 0.0534,
+          "ocean_s_per_frame_mean": 0.0211,
+          "slowest_frame_s_runs": [
+            0.314,
+            0.278,
+            0.285
+          ],
+          "slowest_frame_at": [
+            43,
+            46
+          ],
+          "peak_rss_mib": 102,
+          "load1_range": [
+            6.33,
+            6.82
+          ]
+        },
+        "2-bed-only": {
+          "s_per_frame_runs": [
+            0.0634,
+            0.0614,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0618,
+          "ocean_s_per_frame_mean": 0.0297,
+          "slowest_frame_s_runs": [
+            0.312,
+            0.293,
+            0.287
+          ],
+          "slowest_frame_at": [
+            43
+          ],
+          "peak_rss_mib": 105,
+          "load1_range": [
+            6.12,
+            7.09
+          ]
+        },
+        "3-bed+rock-none": {
+          "s_per_frame_runs": [
+            0.0673,
+            0.0645,
+            0.0623
+          ],
+          "s_per_frame_mean": 0.0647,
+          "ocean_s_per_frame_mean": 0.0622,
+          "slowest_frame_s_runs": [
+            0.301,
+            0.304,
+            0.296
+          ],
+          "slowest_frame_at": [
+            42,
+            45
+          ],
+          "peak_rss_mib": 114,
+          "load1_range": [
+            6.03,
+            7.09
+          ]
+        },
+        "4-bed+rock-buoyancy": {
+          "s_per_frame_runs": [
+            0.0578,
+            0.0592,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0592,
+          "ocean_s_per_frame_mean": 0.0577,
+          "slowest_frame_s_runs": [
+            0.276,
+            0.271,
+            0.265
+          ],
+          "slowest_frame_at": [
+            50
+          ],
+          "peak_rss_mib": 109,
+          "load1_range": [
+            6.03,
+            6.85
+          ]
+        },
+        "5-bed+rock-full": {
+          "s_per_frame_runs": [
+            0.0582,
+            0.0569,
+            0.0557
+          ],
+          "s_per_frame_mean": 0.0569,
+          "ocean_s_per_frame_mean": 0.0554,
+          "slowest_frame_s_runs": [
+            0.275,
+            0.283,
+            0.281
+          ],
+          "slowest_frame_at": [
+            48,
+            55,
+            56
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.39,
+            6.74
+          ]
+        },
+        "6-full+cavity": {
+          "s_per_frame_runs": [
+            0.0595,
+            0.0581,
+            0.0564
+          ],
+          "s_per_frame_mean": 0.058,
+          "ocean_s_per_frame_mean": 0.0565,
+          "slowest_frame_s_runs": [
+            0.287,
+            0.266,
+            0.289
+          ],
+          "slowest_frame_at": [
+            49,
+            51,
+            54
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.27,
+            6.74
+          ]
+        },
+        "7-full+cavity-hydrostatic": {
+          "s_per_frame_runs": [
+            0.058,
+            0.0581,
+            0.0541
+          ],
+          "s_per_frame_mean": 0.0567,
+          "ocean_s_per_frame_mean": 0.0553,
+          "slowest_frame_s_runs": [
+            0.263,
+            0.297,
+            0.279
+          ],
+          "slowest_frame_at": [
+            48,
+            51
+          ],
+          "peak_rss_mib": 112,
+          "load1_range": [
+            6.27,
+            7.03
+          ]
+        }
+      }
     }
   ]
 }

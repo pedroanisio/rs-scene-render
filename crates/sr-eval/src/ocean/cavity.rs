@@ -107,12 +107,18 @@ fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result
         &Impact { mass: c.mass, density: c.mass / volume, normal_speed: c.speed * metres },
         &Target { material: Material::Water, density: None, strength: None, gravity: spec.gravity * metres },
     )?;
-    // The disc that is emptied is the kernel's central disc, half the impulse's radius, and the ring
-    // that receives the water is as wide as the disc is deep in radius: neither is narrower than
-    // RING_CELLS cells, so the water goes to a smooth ring that the grid resolves.
-    let radius = (2. * law.radius / metres).max(2. * RING_CELLS * spec.cell_size);
+    // The disc that is emptied is the kernel's central disc, half the impulse's radius. Its profile
+    // (1 - (r/R)^2)^2 holds pi R^2 / 3 per unit of depth at the centre, so a volume V with the depth d that
+    // the law gives for the bowl takes R = sqrt(3 V / (pi d)): the peak of the removal is then the law's
+    // depth, where the law's own radius would ask for about twice that of a profile so peaked, more than the
+    // water can give. Neither the disc nor the ring that receives the water is narrower than RING_CELLS
+    // cells, so the water goes to a smooth ring that the grid resolves.
+    let (volume_u, depth_u) = (law.volume / metres.powi(3), law.depth / metres);
+    let disc =
+        if depth_u > 0. { (3. * volume_u / (std::f64::consts::PI * depth_u)).sqrt() } else { law.radius / metres };
+    let radius = (2. * disc).max(2. * RING_CELLS * spec.cell_size);
     // The central kernel (1 - 4 r^2)^2 holds pi radius^2 / 12 per unit of amplitude.
-    let amplitude = 12. * (law.volume / metres.powi(3)) / (std::f64::consts::PI * radius * radius);
+    let amplitude = 12. * volume_u / (std::f64::consts::PI * radius * radius);
     Ok(Some(Cavity {
         whole: Impulse {
             time: c.time,

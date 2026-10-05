@@ -1084,9 +1084,9 @@ those of the calculator note), with the body's mass and density (its mass over t
 closed surface), the speed of its centre downward over the step (the component normal to the
 surface) and the ocean's gravity, in metres through `physics@pixelsPerMeter`. The law gives the volume `V` and
 the radius `R` of the cavity. The solver's `cavity` impulse is applied at the instant of entry, centred
-under the body's centre: it empties a central disc of radius `R` (the central kernel
+under the body's centre: it empties a central disc of radius `R = sqrt(3 V / (pi d))`, `d` the law's depth (the central kernel
 `(1 - 4 (r/a)^2)^2`, with the impulse radius `a = 2R`, whose volume per unit of peak depth removed is
-`pi a^2 / 12`, so the peak removal is `12 V / (pi a^2)`) and puts the water into the ring from `R` to `2R`
+`pi a^2 / 12`, so the peak removal is `12 V / (pi a^2)`, equal to `d`) and puts the water into the ring from `R` to `2R`
 (`sin^2` weight), conserving all of it. It does not form at once: the law's formation time is
 `T = 0.8 sqrt(V^(1/3) / g)` and the cavity grows over it, in one part for every canonical step, with the
 share of the whole that `p(t) = 3 s^2 - 2 s^3` (`s` the time since the entry over `T`) gives in the step, each
@@ -1107,25 +1107,21 @@ shallower cavity, never an error (a negative
 `displace` is an error in that case; this is a separate kind). A body that reaches the bed
 excavates the bed's crater (`crater@source`) instead.
 
-Where the limit binds (measured on the impact-ocean scene, 20 m of water, 1.5 m cells, the rock of 60000,
-90478 and 270000 kg at the authored speed and angle; wanted and limit are in the cavity's own weighted
-units). The law's depth is not what reaches the layer: the impulse's central kernel `(1 - 4 (r/a)^2)^2` is
-more peaked than the bowl, so a volume `V` asks for a peak removal of `12 V / (pi a^2)`, about 1.5 times the
-law's depth (7.5 to 15.8 m over the three masses, below the 20 m layer), and it is that peak, up to 24 m,
-against 90% of the water of the disc (18 m at the centre) that limits. The parts together wanted 266.5, 367.5
-and 862.3 and took 266.5, 326.4 and 567.6 (the limit of the weighted disc being 344.9, 334.1 and 567.6),
-so the lightest rock is not limited at all, the authored one in 17 of 25 parts loses 11% of its volume and the
-heaviest in 28 of 29 loses 34%. When the demanded peak exceeds the layer the displaced volume is limited
-and the highest surface stops growing with the energy of the rock (the highest wave by mass was 6.41, 8.03
-and 7.30 m, and in a vertical plunge by speed 5.43, 8.69 and 7.81 m); the far wave of the cavity alone is
-not limited that way and still grows. The driver gives these events to the solver
-for the canonical step they belong to (`Forcing::events`, the impulses whose instant lies in
-`(T - dt, T]` at the sample that ends the step at `T`), a function of the time and the scene alone, and the
-solver applies them among the substeps in order of time after authored impulses of the same instant,
-so a replay, with or without checkpoints, gives the same water (tested bit for bit against the same
-impulse authored statically). The cavity is a one-way event; the body goes on raising the columns it
-occupies exactly as before, the cavity being displacement in addition, and the water does not act back on
-the body through it.
+Where the limit bound, and the profile that removes it. The first version emptied a disc of the law's own radius `R`
+with the central kernel `(1 - (r/R)^2)^2`, whose peak for the law's volume `V` is `3 V / (pi R^2)`, about twice
+the law's depth `d` for water (`R = 0.8 V^(1/3)`, `d = 0.75 V^(1/3)`), so that it asked the water for more than the
+layer holds even though the law's depth (7.5 to 15.8 m over the rocks of 60000, 90478 and 270000 kg, in
+20 m of water) did not. Measured on the impact-ocean scene (1.5 m cells), the parts of the cavities together
+wanted 266.5, 367.5 and 862.3 and took 266.5, 326.4 and 567.6 (the limit of the weighted disc 344.9, 334.1
+and 567.6): 0 of 24, 17 of 25 and 28 of 29 parts limited, 11% and 34% of the volume lost, and the highest wave
+by mass 6.41, 8.03 and 7.30 m (5.43, 8.69 and 7.81 m by speed in a vertical plunge): the highest crest stopped
+growing with the energy. The disc is now sized so that the profile has the law's depth as its peak and holds the
+law's volume, `R = sqrt(3 V / (pi d))` (about 1.4 times wider than the law's radius, for water), and the ring that
+receives the water goes from there to twice that. The three cavities then want 266.6, 367.8 and 862.2 against
+limits of 582.0, 704.9 and 1152.3 and take all of it (0 parts limited); the highest wave by mass is 4.72, 4.74
+and 8.22 m and by speed 4.17, 4.74 and 7.52 m, in a vertical plunge by speed 4.53, 5.82 and 8.07 m and by mass
+4.71, 5.82 and 8.55 m, all growing. The 90% limit is a protection for shallow water and no longer
+shapes the deep-water results.
 
 What it does and does not give. In tests on a 128 x 128 ocean of 2-unit cells, with 2000 kg, 2 m bodies
 entering at 10, 20 and 30 m/s, the far wave (20 to 40 m from the entry) that the cavity alone adds, measured as the
@@ -1200,6 +1196,21 @@ and the reaction of `bodyCoupling="full"` is consistent. A sphere through still 
 `(1/2) C_d (pi a^2) U^2` of impulse to within 1% (104.05 against 104.72 at 2 m radius and 20 m/s), the order
 of the drag of a sphere (`C_d` 1 against about 0.47 for a real sphere), where the relaxation gave about four
 times that; the water is pushed less as it comes to move with the body.
+
+Pressure of the water on a body (`BodySample::pressure`). The momentum a body is credited with (`impulse`) is
+what the solver applied to the water; the water also gains momentum from the slope of the bed the body raises,
+`-g h grad(raise)` per column, which belongs to no one and is, on the body, the wave drag. In the filtered mode the
+driver gives the solver what each body raises the bed by, column by column (`Forcing::lifts`, sparse and per body),
+and at the end of every canonical step each body's sample carries `pressure`: the sum, over the columns of its
+lift and the ring around it, of `-g h grad(raise) cell_area dt`, with `h` the depth at the end of the step and the
+gradient the central difference of the mean of the lift at the end and at the start of the step. It is an
+estimate by the continuous source term and not the scheme's own flux difference, so it does not close to the bit.
+Measured on a periodic basin of 64 x 64 cells 6 m deep, in which a Gaussian mound of 1 m and 3 m width moves
+along x at 4 and 10 m/s for 10 steps and the total momentum of the water changes only by this term: the water
+gained 2.359 and 4.857 (first order) and 2.857 and 5.565 (second order), against credited 2.507 and 5.158
+(+6.3%, +6.2%) and 2.876 and 5.694 (+0.7%, +2.3%); a still mound credits 1.8e-4 against 0. The body is not
+touched; the credit is for the reaction that reads it. In a scene (a sphere of 2 m radius, centre 3 m down in 6 m
+of water, at 6 m/s) it is along the motion only and about 5% of the push of the form drag.
 
 What the sphere crossing deep water now makes. A sphere of 2 m radius at 10 m below the surface of 20 m of
 water raises the highest surface of 8.69 m (at 20 m/s) and 5.52 m (at 50 m/s) in the hydrostatic mode and

@@ -2,11 +2,11 @@
 //! collider: they land on it, with no error, and the replay is identical.
 use sr_eval::Evaluator;
 
-fn scene(count: usize, segments: usize, radius: &str) -> String {
+fn scene(count: usize, segments: usize, radius: &str, mass: u32) -> String {
     format!(
         r#"<scene version="1.3"><project width="320" height="180" fps="24" duration="6"/><composition>
           <object3D id="impactor" primitive="sphere" radius="2" segments="24" x="-74.4" y="-120">
-            <rigidBody shape="sphere" mass="90478" velocityX="50" velocityY="72" restitution="0" linearDamping="0" angularDamping="0"/>
+            <rigidBody shape="sphere" mass="{mass}" velocityX="50" velocityY="72" restitution="0" linearDamping="0" angularDamping="0"/>
           </object3D>
           <object3D id="ground" primitive="plane" width="160" height="160" segments="{segments}" y="0" rotationX="-90">
             <crater id="pit" source="impactor" targetMaterial="softRock"/>
@@ -24,7 +24,12 @@ fn evaluator(count: usize, segments: usize) -> Evaluator {
 }
 
 fn with_radius(count: usize, segments: usize, radius: &str) -> Evaluator {
-    let doc = sr_model::load_str(&scene(count, segments, radius), &sr_model::LoadOptions::without_assets()).unwrap();
+    heavy(count, segments, radius, 90478)
+}
+
+fn heavy(count: usize, segments: usize, radius: &str, mass: u32) -> Evaluator {
+    let doc =
+        sr_model::load_str(&scene(count, segments, radius, mass), &sr_model::LoadOptions::without_assets()).unwrap();
     Evaluator::new(&doc, &Default::default()).unwrap()
 }
 
@@ -104,4 +109,20 @@ fn ejecta_of_the_physical_size_of_the_rocks_do_not_go_through_the_ground() {
         let through = p.frame.particles.iter().filter(|q| q.position[1] > 3.3).count();
         assert_eq!(through, 0, "through the ground at {t}");
     }
+}
+
+#[test]
+fn the_ejecta_of_the_biggest_crater_can_have_friction_and_land_on_a_surface_that_accelerates() {
+    // a rock of 270000 kg, the ejecta with a restitution of 0.15 and a friction of 0.7: it stopped the solver at
+    // 2 s with more than 16 collisions in a step. The particles that did it had been born under the rim that was
+    // rising over them, and the sheet that pushed them down was caught up with, again and again, by the rim
+    // passing; born on the surface the crater has by then they are not
+    let ev = heavy(4000, 160, r#" bounce="0.15" friction="0.7""#, 270000);
+    for t in [1.8, 2.0, 2.5, 3.0, 5.9] {
+        let p = ejecta(&ev, t);
+        assert!(p.frame.particles.iter().all(|q| q.position[1] < 40.0), "none sinks through the ground at {t}");
+    }
+    let again = ejecta(&ev, 2.0);
+    ejecta(&ev, 1.7);
+    assert_eq!(ejecta(&ev, 2.0).frame, again.frame, "scrubbing gives the same ejecta");
 }
