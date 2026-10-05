@@ -277,7 +277,6 @@ fn overflowing_displacement_capacity_is_an_error_not_created_water() {
 #[test]
 fn event_sort_workspace_is_included_in_the_resident_budget() {
     let mut s = spec([1, 1]);
-    s.max_bytes = 160_000;
     let events: Vec<_> = (0..2_000)
         .map(|i| Impulse {
             time: ((i * 997) % 2_000 + 1) as f64,
@@ -288,9 +287,16 @@ fn event_sort_workspace_is_included_in_the_resident_budget() {
             kind: ImpulseKind::AddWater,
         })
         .collect();
-    // The event vector fits; stable sorting also needs a temporary allocation.
-    assert!(events.len() * std::mem::size_of::<Impulse>() < s.max_bytes);
-    assert!(Ocean::new(s, vec![1.0], vec![Cell::default()], events).is_err());
+    // The budget is derived from the size of an event, whatever that is: one cell (256 bytes) and the fixed
+    // 4096 are always charged, the event vector fits in what is left with half as much again, and the
+    // vector together with the temporary allocation of a stable sort (twice the vector) does not.
+    let vector = events.capacity() * std::mem::size_of::<Impulse>();
+    s.max_bytes = 256 + 4096 + vector + vector / 2;
+    assert!(vector < s.max_bytes);
+    assert!(Ocean::new(s.clone(), vec![1.0], vec![Cell::default()], events.clone()).is_err());
+    // with room for the sort as well it is accepted
+    s.max_bytes = 256 + 4096 + 2 * vector + 1024;
+    assert!(Ocean::new(s, vec![1.0], vec![Cell::default()], events).is_ok());
 }
 
 #[test]
