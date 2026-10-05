@@ -2931,6 +2931,177 @@
       ],
       "validation": "Forcing::lifts (what each body raises the bed by, sparse) and BodySample::pressure: per canonical step, -g h grad(raise) area dt over the lift and the ring around it, h at the end of the step, the gradient from the mean of the lift at the end and at the start. In a periodic basin of 64 x 64 cells of 6 m where a mound moves and nothing else changes the total momentum, the water gained 2.359, 4.857 (first order) and 2.857, 5.565 (second order) for 4 and 10 m/s, and the credit was 2.507, 5.158 and 2.876, 5.694: residuals 6.3%, 6.2%, 0.7%, 2.3% (tests ocean_pressure: residual under 8% first order and 3% second, bad lifts are errors, nothing credited without lifts). Evaluator test: a sphere of 2 m radius moving at 6 m/s in 6 m of water is credited pressure along the motion only, about 5% of the push.",
       "limits": "An estimate by the continuous source term, not the flux difference of the scheme; with end-of-step depth. The 2 to 4% unowned momentum that Saturno measured with bodyCoupling=full in a closed basin was not reproduced here: the residual was measured on a periodic basin with a moving mound, not on that scene, and the credit is not yet added to the exchange. Cost not measured (the window of the lift and one column ring per body per step)."
+    },
+    {
+      "name": "Phase budget: cost of the ocean side of the authored impact-ocean scene",
+      "evidence": [
+        "examples/cinematic-impact/impact-ocean.scene.xml"
+      ],
+      "validation": "The authored impact-ocean scene (192 x 192 m at 1.5 m cells over 20 m, second order, dt 1/24 s, the rock of 90478 kg at 100 m/s, the crater and the physics of the scene; lights removed, nothing drawn) evaluated frame by frame, 144 frames at 24 fps, on the CPU with a disposable program (not committed) that times each Evaluator::evaluate and reads the peak resident set from /proc; 3 runs of each variant, alternated (variants in order, three rounds), load1 noted at start and end of each run. Variants (all with the default bedResponse=depthFiltered unless said): 1 ocean without colliders; 2 colliders seabed only; 3 seabed and rock, bodyCoupling none; 4 buoyancy; 5 full; 6 full and the cavity (the authored scene); 7 as 6 with bedResponse=hydrostatic. Mean seconds per frame over the three runs (total of the evaluation, of which the ocean's own clock): 1-no-colliders: 0.0534 (0.0211); 2-bed-only: 0.0618 (0.0297); 3-bed+rock-none: 0.0647 (0.0622); 4-bed+rock-buoyancy: 0.0592 (0.0577); 5-bed+rock-full: 0.0569 (0.0554); 6-full+cavity: 0.058 (0.0565); 7-full+cavity-hydrostatic: 0.0567 (0.0553). Slowest frame per run: 1-no-colliders: [0.314, 0.278, 0.285] s at frame [43, 46]; 2-bed-only: [0.312, 0.293, 0.287] s at frame [43]; 3-bed+rock-none: [0.301, 0.304, 0.296] s at frame [42, 45]; 4-bed+rock-buoyancy: [0.276, 0.271, 0.265] s at frame [50]; 5-bed+rock-full: [0.275, 0.283, 0.281] s at frame [48, 55, 56]; 6-full+cavity: [0.287, 0.266, 0.289] s at frame [49, 51, 54]; 7-full+cavity-hydrostatic: [0.263, 0.297, 0.279] s at frame [48, 51]. Peak RSS (MiB): 1-no-colliders: 102; 2-bed-only: 105; 3-bed+rock-none: 114; 4-bed+rock-buoyancy: 109; 5-bed+rock-full: 113; 6-full+cavity: 113; 7-full+cavity-hydrostatic: 112. load1 over all runs 6.0 to 7.1.",
+      "limits": "Wall time of whole-frame evaluation on a shared machine with load1 between 6.0 and 7.1 throughout, so about 7 busy cores; the three runs of one variant differ by up to 6%, which is the size of the differences among variants 4 to 7 (0.0592, 0.0569, 0.0580, 0.0567 s/frame), so those are not told apart: neither full against buoyancy, nor the cavity, nor bedResponse hydrostatic against depthFiltered shows a cost at this size. Variant 3 (bodyCoupling none) is about 10% above them (0.0647 s/frame, runs 0.0673, 0.0645, 0.0623), which was not explained: it is the one variant in which the rock and the ocean are not in a coupled group. The slowest frames (42 to 56, 1.75 to 2.3 s into the scene) are those where the rock reaches the bed and the crater grows. The ocean's own clock includes the rigid world's steps that it pulls when it is grouped with it or reads the bodies (variants 3 to 7), so the total is the figure to compare. Evaluation only: no render, no GPU, no encode. 1.5 m cells and 20 m of water; the 720 x 720 grids of the other scenes were measured in the entries of the solver and the filter.",
+      "variants": {
+        "1-no-colliders": {
+          "s_per_frame_runs": [
+            0.0532,
+            0.0524,
+            0.0547
+          ],
+          "s_per_frame_mean": 0.0534,
+          "ocean_s_per_frame_mean": 0.0211,
+          "slowest_frame_s_runs": [
+            0.314,
+            0.278,
+            0.285
+          ],
+          "slowest_frame_at": [
+            43,
+            46
+          ],
+          "peak_rss_mib": 102,
+          "load1_range": [
+            6.33,
+            6.82
+          ]
+        },
+        "2-bed-only": {
+          "s_per_frame_runs": [
+            0.0634,
+            0.0614,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0618,
+          "ocean_s_per_frame_mean": 0.0297,
+          "slowest_frame_s_runs": [
+            0.312,
+            0.293,
+            0.287
+          ],
+          "slowest_frame_at": [
+            43
+          ],
+          "peak_rss_mib": 105,
+          "load1_range": [
+            6.12,
+            7.09
+          ]
+        },
+        "3-bed+rock-none": {
+          "s_per_frame_runs": [
+            0.0673,
+            0.0645,
+            0.0623
+          ],
+          "s_per_frame_mean": 0.0647,
+          "ocean_s_per_frame_mean": 0.0622,
+          "slowest_frame_s_runs": [
+            0.301,
+            0.304,
+            0.296
+          ],
+          "slowest_frame_at": [
+            42,
+            45
+          ],
+          "peak_rss_mib": 114,
+          "load1_range": [
+            6.03,
+            7.09
+          ]
+        },
+        "4-bed+rock-buoyancy": {
+          "s_per_frame_runs": [
+            0.0578,
+            0.0592,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0592,
+          "ocean_s_per_frame_mean": 0.0577,
+          "slowest_frame_s_runs": [
+            0.276,
+            0.271,
+            0.265
+          ],
+          "slowest_frame_at": [
+            50
+          ],
+          "peak_rss_mib": 109,
+          "load1_range": [
+            6.03,
+            6.85
+          ]
+        },
+        "5-bed+rock-full": {
+          "s_per_frame_runs": [
+            0.0582,
+            0.0569,
+            0.0557
+          ],
+          "s_per_frame_mean": 0.0569,
+          "ocean_s_per_frame_mean": 0.0554,
+          "slowest_frame_s_runs": [
+            0.275,
+            0.283,
+            0.281
+          ],
+          "slowest_frame_at": [
+            48,
+            55,
+            56
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.39,
+            6.74
+          ]
+        },
+        "6-full+cavity": {
+          "s_per_frame_runs": [
+            0.0595,
+            0.0581,
+            0.0564
+          ],
+          "s_per_frame_mean": 0.058,
+          "ocean_s_per_frame_mean": 0.0565,
+          "slowest_frame_s_runs": [
+            0.287,
+            0.266,
+            0.289
+          ],
+          "slowest_frame_at": [
+            49,
+            51,
+            54
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.27,
+            6.74
+          ]
+        },
+        "7-full+cavity-hydrostatic": {
+          "s_per_frame_runs": [
+            0.058,
+            0.0581,
+            0.0541
+          ],
+          "s_per_frame_mean": 0.0567,
+          "ocean_s_per_frame_mean": 0.0553,
+          "slowest_frame_s_runs": [
+            0.263,
+            0.297,
+            0.279
+          ],
+          "slowest_frame_at": [
+            48,
+            51
+          ],
+          "peak_rss_mib": 112,
+          "load1_range": [
+            6.27,
+            7.03
+          ]
+        }
+      }
     }
   ]
 }
