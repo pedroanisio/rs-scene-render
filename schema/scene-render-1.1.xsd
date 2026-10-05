@@ -2700,6 +2700,9 @@
     <xs:attribute name="volume" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
+    <xs:attribute name="tracking" type="xs:double">
+      <xs:annotation><xs:documentation>Extra space after every character of primitive="text", in thousandths of an em of the text size (the object's height). Negative values tighten. Valid only with primitive="text".</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
     <xs:attribute name="bevel" type="nonNegativeDecimal" default="0"/>

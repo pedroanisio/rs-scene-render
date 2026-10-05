@@ -682,10 +682,11 @@ impl Renderer {
         }
         let key = match kind.as_str() {
             "text" => format!(
-                "text|{}|{:?}|{:?}|{depth}|{bevel}",
+                "text|{}|{:?}|{:?}|{depth}|{bevel}|{}",
                 n.text.as_deref().or(a.str("text").as_deref()).unwrap_or(""),
                 a.str("font"),
-                hh
+                hh,
+                a.num("tracking", 0.0)
             ),
             "extrude" => format!("extrude|{}|{depth}|{bevel}", a.str("path").unwrap_or_default()),
             other => format!("{other}|{r}|{segs}|{w}|{hh:?}|{depth}"),
@@ -714,7 +715,15 @@ impl Renderer {
                 let text = n.text.as_deref().map(str::to_string).or(a.str("text")).unwrap_or_default();
                 let size = hh.unwrap_or(100.0) as f64;
                 let mut tc = std::mem::take(&mut self.text);
-                let polys = crate::text::outline_polygons(&mut tc, ctx.p, &text, a.str("font").as_deref(), size, 0.25);
+                let polys = crate::text::outline_polygons(
+                    &mut tc,
+                    ctx.p,
+                    &text,
+                    a.str("font").as_deref(),
+                    size,
+                    a.num("tracking", 0.0),
+                    0.25,
+                );
                 self.text = tc;
                 let mut polys: Vec<Vec<glam::Vec2>> = polys
                     .into_iter()

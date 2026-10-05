@@ -321,7 +321,7 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             s.pyro_volumes.insert(id);
         }
         let procedural_motion = object.children().any(|child| match object.attribute("primitive") {
-            Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel")),
+            Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel" | "tracking")),
             Some("extrude") => matches!(child.attribute("property"), Some("path" | "bevel")),
             Some("clay") => {
                 matches!(child.attribute("property"), Some("resolution" | "fingerprints" | "seed" | "boil"))
@@ -1210,6 +1210,12 @@ impl<'a> Eval<'a> {
                 self.check(a("primitive") != Some("text") || has("text"), n, "C7", || {
                     "object3D primitive=\"text\" requires @text.".into()
                 });
+                // p67
+                if has("tracking") {
+                    self.check(a("primitive") == Some("text"), n, "TXT2", || {
+                        "@tracking applies to object3D primitive=\"text\".".into()
+                    });
+                }
                 self.check(a("primitive") != Some("extrude") || has("path"), n, "C8", || {
                     "object3D primitive=\"extrude\" requires @path.".into()
                 });

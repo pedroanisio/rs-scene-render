@@ -102,6 +102,7 @@ pub fn text_mesh(p: &crate::Program, n: &FrameNode, budget: usize) -> Result<sr_
             content,
             family: text("font"),
             height: value("height", 100.),
+            tracking: value("tracking", 0.),
             depth: value("depth", 10.) as f32,
             bevel: value("bevel", 0.) as f32,
         },
@@ -113,6 +114,7 @@ struct TextSolid {
     content: String,
     family: Option<String>,
     height: f64,
+    tracking: f64,
     depth: f32,
     bevel: f32,
 }
@@ -135,11 +137,12 @@ fn text_geometry(p: &crate::Program, spec: TextSolid, budget: usize) -> Result<s
             }
         }
     }
-    let polygons = sr_text::extrusion::outline_polygons(
+    let polygons = sr_text::extrusion::outline_polygons_tracked(
         &mut lib,
         &spec.content,
         spec.family.as_deref(),
         spec.height,
+        spec.tracking,
         0.25,
         remaining,
     )?;
@@ -177,6 +180,7 @@ pub(crate) fn collider_triangles(
                 content: text("text").unwrap_or_default(),
                 family: text("font"),
                 height: value("height", 100.),
+                tracking: value("tracking", 0.),
                 depth: value("depth", 10.) as f32,
                 bevel: value("bevel", 0.) as f32,
             },
@@ -215,5 +219,34 @@ mod tests {
             let frame = ev.evaluate(0.);
             assert_eq!(super::clay(&frame.nodes[0]).finish.seed, seed);
         }
+    }
+
+    #[test]
+    fn text_solids_take_their_tracking_from_the_object() {
+        // the collider path builds the text mesh through text_geometry: tracking must widen it like the drawn mesh
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/solid.ttf");
+        let xml = format!(
+            r#"<scene version="1.3"><project width="8" height="8" fps="1" duration="1"/>
+            <assets><font id="face" family="SR Solid Test" src="{}"/></assets>
+            <composition><object3D id="t" primitive="text" text="OO" font="SR Solid Test" height="10" tracking="1000"/></composition></scene>"#,
+            font.display()
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        let width = |tracking: f64| {
+            let spec = super::TextSolid {
+                content: "OO".into(),
+                family: Some("SR Solid Test".into()),
+                height: 10.0,
+                tracking,
+                depth: 2.0,
+                bevel: 0.0,
+            };
+            let mesh = super::text_geometry(ev.program(), spec, usize::MAX).unwrap();
+            let xs = mesh.vertices.iter().map(|v| v.pos[0]);
+            xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min)
+        };
+        // the second glyph moves one em (10 px at height 10) further right
+        assert!((width(1000.0) - width(0.0) - 10.0).abs() < 1e-3, "{} {}", width(0.0), width(1000.0));
     }
 }

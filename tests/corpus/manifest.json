@@ -722,6 +722,13 @@
       "P3D6",
       "PYRO8"
     ],
+    "solid-colliders-tracking.scene.xml": [
+      "P3D6",
+      "PYRO8"
+    ],
+    "txt2.scene.xml": [
+      "TXT2"
+    ],
     "v1-sections.scene.xml": [
       "V1"
     ],
@@ -826,6 +833,7 @@
     "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
+    "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
     "volume-light-grid.scene.xml": [],

@@ -13,6 +13,23 @@ pub fn outline_polygons(
     tolerance: f64,
     max_bytes: usize,
 ) -> Result<Vec<Vec<[f64; 2]>>, String> {
+    outline_polygons_tracked(lib, text, family, size, 0.0, tolerance, max_bytes)
+}
+
+/// [`outline_polygons`] with tracking: after layout, glyph `i` moves along the baseline by
+/// `i · tracking · size / 1000` (tracking in thousandths of an em, as the 2D text attributes use it).
+pub fn outline_polygons_tracked(
+    lib: &mut FontLib,
+    text: &str,
+    family: Option<&str>,
+    size: f64,
+    tracking: f64,
+    tolerance: f64,
+    max_bytes: usize,
+) -> Result<Vec<Vec<[f64; 2]>>, String> {
+    if !tracking.is_finite() {
+        return Err("text extrusion requires a finite tracking".into());
+    }
     if !size.is_finite() || size <= 0. || !tolerance.is_finite() || tolerance <= 0. {
         return Err("text extrusion requires a positive finite size and tolerance".into());
     }
@@ -31,11 +48,11 @@ pub fn outline_polygons(
     let layout = layout::layout(lib, &para);
     let mut out = Vec::new();
     let mut charge = text.len().saturating_mul(1024);
-    for glyph in &layout.glyphs {
+    for (i, glyph) in layout.glyphs.iter().enumerate() {
         let variations = &layout.styles[glyph.style].variations;
         let outline = lib.outline(glyph.face, glyph.gid, variations);
         let scale = glyph.size / lib.upem(glyph.face).max(1.);
-        let transform = Xf([scale, 0., 0., -scale, glyph.x, glyph.y]);
+        let transform = Xf([scale, 0., 0., -scale, glyph.x + i as f64 * tracking * size / 1000., glyph.y]);
         for poly in outline.transform(&transform).flatten(tolerance) {
             if poly.pts.len() >= 3 {
                 charge = charge.saturating_add(poly.pts.len().saturating_mul(256));
