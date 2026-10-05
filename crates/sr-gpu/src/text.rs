@@ -678,6 +678,7 @@ fn animators(
             stagger: a.opt("stagger"),
             overlap: a.opt("overlap").filter(|o| *o != 0.0),
             seed: scramble_seed,
+            ease: a.str("presetEase").and_then(|e| animate::Ease::parse(&e)),
         });
     }
     let _ = roles;
@@ -696,7 +697,8 @@ fn substitutions(cx: &Cx, para: &mut Para, anims: &[Animator]) {
         }
         let a = Attrs { e: c, props: None };
         let (start, dur) = (a.opt("presetStart").unwrap_or(layer_start), a.opt("presetDuration").unwrap_or(1.0));
-        let Some(k) = animate::counter_progress(start, dur, a.num("amount", 100.0), t) else {
+        let ease = a.str("presetEase").and_then(|e| animate::Ease::parse(&e)).unwrap_or(animate::Ease::CubicOut);
+        let Some(k) = animate::counter_progress_with(ease, start, dur, a.num("amount", 100.0), t) else {
             continue;
         };
         let role = a.str("span");

@@ -1763,6 +1763,14 @@
       <xs:annotation><xs:documentation>Time on the layer's parent timeline (composition time for a top-level layer), not an offset from the layer's start; when absent the preset starts at the layer's own start.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="presetDuration" type="positiveDecimal"/>
+    <xs:attribute name="presetEase">
+      <xs:annotation><xs:documentation>The curve of a preset, in place of the preset's own (most use cubic-out, which is front-loaded: at 40 % of the duration it is 78 % done). Without @preset it has no effect.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="linear"/><xs:enumeration value="quad-in"/><xs:enumeration value="quad-out"/>
+        <xs:enumeration value="cubic-out"/><xs:enumeration value="expo-out"/><xs:enumeration value="back-out"/>
+        <xs:enumeration value="bounce-out"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="unit" default="character">
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="character"/><xs:enumeration value="character-no-space"/>

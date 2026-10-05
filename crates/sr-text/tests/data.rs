@@ -543,3 +543,22 @@ fn captions_reject_partial_records_and_invalid_ranges() {
         2
     );
 }
+
+#[test]
+fn a_preset_takes_the_curve_named_by_its_ease_attribute() {
+    let mut lib = sr_text::FontLib::new(true);
+    let l = lay(&mut lib, &[("Line one", None)]);
+    let roles = vec![None];
+    let run = |ease: Option<animate::Ease>, t: f64| {
+        let a = Animator { preset: Some((Preset::MaskReveal, 0.0, 1.0)), ease, ..Default::default() };
+        animate::apply(&lib, &l, &roles, &[a], t).0[0].xf.0[5]
+    };
+    let rest = run(None, 0.0);
+    assert!(rest > 1.0, "the line waits below its place: {rest}");
+    // linear: 40 % of the way at 40 % of the time, 60 % of the offset left
+    assert!((run(Some(animate::Ease::Linear), 0.4) / rest - 0.6).abs() < 1e-9);
+    // the preset's own cubic-out is front-loaded: 78 % done at 40 %, 22 % of the offset left
+    assert!((run(None, 0.4) / rest - 0.216).abs() < 1e-9);
+    assert_eq!(animate::Ease::parse("linear"), Some(animate::Ease::Linear));
+    assert_eq!(animate::Ease::parse("nonsense"), None);
+}

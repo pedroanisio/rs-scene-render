@@ -183,6 +183,8 @@ pub struct Animator {
     /// Preset overlap between units, 0–1 (the preset's own when `None`).
     pub overlap: Option<f64>,
     pub seed: u64,
+    /// The preset's curve, in place of its table's own (`presetEase`).
+    pub ease: Option<Ease>,
 }
 
 impl Default for Animator {
@@ -210,6 +212,7 @@ impl Default for Animator {
             stagger: None,
             overlap: None,
             seed: 0,
+            ease: None,
         }
     }
 }
@@ -232,6 +235,20 @@ pub enum Ease {
 }
 
 impl Ease {
+    /// The curve named by `presetEase`.
+    pub fn parse(name: &str) -> Option<Ease> {
+        Some(match name {
+            "linear" => Ease::Linear,
+            "quad-in" => Ease::QuadIn,
+            "quad-out" => Ease::QuadOut,
+            "cubic-out" => Ease::CubicOut,
+            "expo-out" => Ease::ExpoOut,
+            "back-out" => Ease::BackOut,
+            "bounce-out" => Ease::BounceOut,
+            _ => return None,
+        })
+    }
+
     /// Eased progress at `u` in [0, 1].
     pub fn at(self, u: f64) -> f64 {
         let out = |f: fn(f64) -> f64| 1.0 - f(1.0 - u);
@@ -442,7 +459,9 @@ struct Expanded {
 /// Expands a preset for `n` units at layer time `t` (em: the text size).
 fn preset(a: &Animator, kind: Preset, start: f64, dur: f64, n: usize, t: f64, em: f64) -> Expanded {
     use Preset::*;
-    let (unit0, mode, ease, overlap0) = table(kind);
+    let (unit0, mode, table_ease, overlap0) = table(kind);
+    // `presetEase` replaces the table's curve
+    let ease = a.ease.unwrap_or(table_ease);
     let unit = if a.unit_set { a.unit } else { unit0 };
     let (order, amount, order_seed) = match &a.selector {
         Selector::Range { order, amount, seed, .. } => (*order, amount / 100.0, *seed),
@@ -656,7 +675,12 @@ pub fn counter_text(text: &str, k: f64) -> String {
 /// The progress of a `counter` preset at layer time `t`: cubic-out over the duration,
 /// times @amount; `None` once the numbers show their own value.
 pub fn counter_progress(start: f64, dur: f64, amount: f64, t: f64) -> Option<f64> {
-    let e = Ease::CubicOut.at(((t - start) / dur.max(1e-9)).clamp(0.0, 1.0)) * amount / 100.0;
+    counter_progress_with(Ease::CubicOut, start, dur, amount, t)
+}
+
+/// [`counter_progress`] with another curve (`presetEase`).
+pub fn counter_progress_with(ease: Ease, start: f64, dur: f64, amount: f64, t: f64) -> Option<f64> {
+    let e = ease.at(((t - start) / dur.max(1e-9)).clamp(0.0, 1.0)) * amount / 100.0;
     (e < 1.0).then_some(e)
 }
 
