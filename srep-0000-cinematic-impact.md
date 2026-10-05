@@ -1718,8 +1718,8 @@ for 90, 60 and 30 degrees): at 4 s it is 0.04, 0.49 and 1.22 m from the impact p
 3e4, 8e3 and 1e5 J against 4.5e8 at the impact (the free rock at 60 and 30 degrees keeps 7.8e7 and 2.4e8 J). The
 mechanical energy never grows after the impact by more than a ten-thousandth of the impact's, and the free rock's
 energy does not grow either. In the ocean scene `full` already gives the water the rock's horizontal momentum, so
-the rock stops on the bed with or without it (0.7 and 0.8 m from the crater's centre at 6 s; the highest wave after 4 s
-is 1.958 and 1.950 m).
+the rock stops on the bed with or without it (hydrostatic: 0.7 and 0.8 m from the crater's centre at 6 s, the highest wave after 4 s 1.958 and 1.950 m;
+depth-filtered: 0.1 and 0.2 m, 1.904 and 1.890 m).
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
@@ -2791,16 +2791,23 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
 - The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
   so a smoke source from that crater would make a cloud on the sea bed.
 - In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`),
-  the highest wave grows with the rock's speed (4.58, 8.93 and 12.0 m for 60, 100 and 150 m/s at 60 degrees)
-  and with its mass (6.93, 8.93 and 11.07 m for 60 000, 90 478 and 270 000 kg), and the wave of a rock that
-  arrives straight down grows with both too (5.50, 10.20 and 12.05 m by speed; 8.03, 10.20 and 10.77 m by
-  mass). The sweep by angle is recorded and not asserted: 4.07, 8.93 and 10.20 m for 30, 60 and 90
-  degrees, and the crater radius on the seabed by angle is 2.89, 3.85 and 3.63 m (a rock that arrives
-  straight down reaches the bed slower than one that glances in, because the cavity empties the water under it
-  and its drag acts on less). Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by
-  angle 2.41, 1.54 and 0.09 m: the rock was a bump that moves and a plunge made a wave of 9 cm. The wave of
-  the crater alone (the sea with the bed as its only collider, no cavity) grows with speed, mass and angle.
-  A body lighter than water floats and makes no crater.
+  the sweeps are run with the ocean answering by the depth of the water (`bedResponse="depthFiltered"`, the default)
+  and by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells
+  (`tools/impact_sweeps.sh` prints them again; the heights change when the ocean's cavity does). Every order that
+  is asserted holds in both. By speed (60, 100 and 150 m/s at 60 degrees), the highest wave is 4.43, 9.06 and
+  11.70 m in the first and 4.54, 8.93 and 12.11 m in the second; by mass (60 000, 90 478 and 270 000 kg) 6.74, 9.06
+  and 11.65 m and 6.80, 8.93 and 11.62 m; a rock that arrives straight down makes 5.62, 10.20 and 11.95 m by
+  speed and 7.99, 10.20 and 10.85 m by mass in the first, 5.50, 10.20 and 12.05 m and 8.03, 10.20 and 10.62 m in the
+  second. The crater on the seabed is 3.05, 4.00 and 5.29 m in radius by speed and 2.59, 4.00 and 8.02 m by mass
+  (depth 1.28, 1.68, 2.22 m by speed) with the depth filter, and 2.93, 3.85 and 5.12 m and 2.46, 3.85 and 7.94 m
+  without. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows with speed, mass
+  and angle in both, and it is what the response changes most: 0.006, 0.012 and 0.021 m by speed with the filter
+  against 0.16, 0.27 and 0.40 m without: about a twenty-second of the wave. The sweep by angle is recorded and not asserted (an ignored test): the highest wave is 4.16,
+  9.06 and 10.20 m for 30, 60 and 90 degrees with the filter and 4.07, 8.93 and 10.20 m without, and the crater
+  radius by angle is 2.89, 4.00 and 3.63 m and 2.89, 3.85 and 3.63 m (a rock that arrives straight down reaches
+  the bed slower than one that glances in, because the cavity empties the water under it and its drag acts on less).
+  Without the cavity the same sweeps were 1.29, 1.54 and 2.17 m by speed, and by angle 2.41, 1.54 and 0.09 m: the
+  rock was a bump that moves and a plunge made a wave of 9 cm. A body lighter than water floats and makes no crater.
 - The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
   the speed along the normal to the power 1.7, so the temperature rise barely moves (19.19, 19.07 and 19.08 K
   at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows
