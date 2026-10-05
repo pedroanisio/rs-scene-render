@@ -131,6 +131,8 @@ pub struct Report {
     pub loudness: Option<f64>,
     /// True peak of the delivered mix, dBTP.
     pub true_peak: Option<f64>,
+    /// The decoded-AAC check of the master's true-peak ceiling: what it measured and any gain it applied.
+    pub audio_ceiling: Option<crate::ceiling::Held>,
     /// Content not rendered by this batch, per node.
     pub unsupported: Vec<String>,
     /// Accessibility findings (flash analysis, text contrast, required captions).
@@ -722,7 +724,7 @@ pub fn deliver(
         // explicitly segmented programmes start at zero on their respective clocks.
         let origin = plain.as_ref().map_or(0.0, |tm| tm.composition(0, 0.0));
         let master = programme.as_ref().unwrap_or(&sa.mixed.master);
-        let part = audio::slice(master, sa.mix.rate, start - origin, end - origin);
+        let mut part = audio::slice(master, sa.mix.rate, start - origin, end - origin);
         let weights = sa.mix.layout.loudness_weights();
         // integrated loudness needs at least one 400 ms gating block
         let l = sr_audio::loudness::integrated(&part, sa.mix.rate as f64, &weights);
@@ -733,6 +735,25 @@ pub fn deliver(
             .map(|c| c.as_str().to_string())
             .and_then(|c| Container::parse(&c))
             .or_else(|| Container::from_path(&report.path));
+        // a lossy encode can leave the master's ceiling: hold it for the stream that is delivered
+        let master_settings = &sa.mix.master;
+        let limited = master_settings.limiter || master_settings.normalize != sr_audio::mix::Normalize::None;
+        if limited && crate::ceiling::applies(&output.audio_codec, container) {
+            let held = crate::ceiling::hold(
+                &mut part,
+                sa.mix.rate,
+                sa.mix.layout,
+                master_settings.true_peak,
+                output.audio_bitrate,
+                &tmp,
+            )?;
+            if !held.passes.is_empty() {
+                report.true_peak = Some(sr_audio::loudness::true_peak(&part));
+                let l = sr_audio::loudness::integrated(&part, sa.mix.rate as f64, &weights);
+                report.loudness = (l > -150.0).then_some(l);
+            }
+            report.audio_ceiling = Some(held);
+        }
         if codec.is_audio_only() && container.is_none_or(|c| c == Container::Wav) {
             // final PCM with TPDF dither at the mix bit depth
             sr_audio::wav::write(&report.path, &part, sa.mix.rate, sa.bits, sa.mix.layout, sa.dither)?;

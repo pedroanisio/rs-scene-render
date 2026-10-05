@@ -1608,6 +1608,36 @@ fn encode(
                         .map(|l| format!("{l:.1} LUFS integrated"))
                         .unwrap_or_else(|| "too short for integrated loudness".into());
                     writeln!(out.w, "  audio: {l}, {tp:.1} dBTP true peak, mixed in {:.2} s", r.audio_seconds)?;
+                    if let Some(h) = &r.audio_ceiling {
+                        if h.passes.is_empty() {
+                            writeln!(
+                                out.w,
+                                "  audio ceiling: the AAC decodes to {:.2} dBTP, under the ceiling of {:.2}",
+                                h.first, h.ceiling
+                            )?;
+                        } else {
+                            let passes: Vec<String> = h
+                                .passes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| {
+                                    format!(
+                                        "pass {}: mixed down {:.2} dB, now {:.2} dBTP",
+                                        i + 1,
+                                        -p.gain_db,
+                                        p.decoded_true_peak
+                                    )
+                                })
+                                .collect();
+                            writeln!(
+                                out.w,
+                                "  audio ceiling: the AAC decodes to {:.2} dBTP over a ceiling of {:.2}; {}",
+                                h.first,
+                                h.ceiling,
+                                passes.join("; ")
+                            )?;
+                        }
+                    }
                 }
                 for u in &r.uploads {
                     writeln!(out.w, "  delivered to {u}")?;

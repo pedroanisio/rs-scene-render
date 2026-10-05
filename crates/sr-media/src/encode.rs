@@ -373,7 +373,7 @@ fn preset_rank(p: &str) -> usize {
 /// scale: 4 to 13 windows a film with both tools on (departures up to 1.4), at most 2 with noise
 /// substitution off (up to 0.22), none with both off (up to 0.14). The overall error is no higher
 /// without them. Noise substitution does the same damage at 256 and 320 kb/s.
-fn compressed_audio_args(codec: &str, bitrate: u64) -> Vec<String> {
+pub fn compressed_audio_args(codec: &str, bitrate: u64) -> Vec<String> {
     if codec.starts_with("pcm") {
         return Vec::new();
     }
