@@ -893,3 +893,20 @@ fn particle_emitters_place_themselves_in_2_5d() {
     assert!(w(turned) < w(flat) * 0.8, "rotationY did not narrow the cloud: {turned:?} vs {flat:?}");
     assert!((h(turned) - h(flat)).abs() < h(flat) * 0.25, "{turned:?} vs {flat:?}");
 }
+
+#[test]
+fn an_animated_path_is_drawn_as_animated() {
+    // string keys hold between keys: the shape follows its animated @path, not only the static one
+    let d = doc(
+        r##"width="64" height="64" background="#000000""##,
+        "",
+        r##"<shape id="s" shape="path" path="M0 0 H10 V10 H0 Z" width="10" height="10" fill="#FFFFFF">
+             <animate property="path"><key time="0" value="M0 0 H10 V10 H0 Z"/><key time="1" value="M30 30 H60 V60 H30 Z"/></animate></shape>"##,
+    );
+    let Some(first) = render_times(&d, &[0.0]) else { return };
+    assert_px(&first, 5, 5, [1.0, 1.0, 1.0, 1.0], 1e-3);
+    assert_px(&first, 45, 45, [0.0, 0.0, 0.0, 1.0], 1e-3);
+    let later = render_times(&d, &[1.5]).unwrap();
+    assert_px(&later, 45, 45, [1.0, 1.0, 1.0, 1.0], 1e-3);
+    assert_px(&later, 5, 5, [0.0, 0.0, 0.0, 1.0], 1e-3);
+}

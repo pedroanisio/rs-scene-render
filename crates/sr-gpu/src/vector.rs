@@ -47,6 +47,10 @@ impl Attrs<'_> {
     }
     /// A string or enumeration literal.
     pub fn str(&self, name: &str) -> Option<String> {
+        // string keys (a shape's path, say) hold between keys, like any other animated value
+        if let Some(Value::Str(s)) = self.animated(name) {
+            return Some(s.to_string());
+        }
         match self.e.get_attr(name) {
             Some(AttrValue::Str(s)) => Some(s),
             Some(other) => Some(other.to_string()),
