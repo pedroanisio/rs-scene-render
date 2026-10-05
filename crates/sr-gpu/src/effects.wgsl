@@ -1104,8 +1104,11 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let r = max(v[0].x, 0.0);
     var mx = s.a;
     var mn = s.a;
+    // the pixel the growth comes from: a dilated edge takes its colour
+    var donor = s;
     if (v[0].z > 0.5) {
         let m = morph_wide(p, r);
+        if (m.mx > mx) { donor = S((vec2<f32>(p + m.at_mx) + 0.5) / d); }
         mx = max(mx, m.mx);
         mn = min(mn, m.mn);
     } else {
@@ -1115,7 +1118,9 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
             let cnt = 8 + ring * 4;
             for (var k = 0; k < cnt; k++) {
                 let a = f32(k) / f32(cnt) * 2.0 * PI;
-                let q = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d).a;
+                let qs = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d);
+                let q = qs.a;
+                if (q > mx) { donor = qs; }
                 mx = max(mx, q);
                 mn = min(mn, q);
             }
@@ -1124,7 +1129,9 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     if (fx_op() == 0u) {
         let na = select(mx, mn, v[0].y > 0.5);
         let f = select(0.0, na / s.a, s.a > 1e-5);
-        return select(vec4(unpre(s) * na, na), s * f, s.a > 1e-5 && v[0].y > 0.5);
+        // grown texels take the colour of the nearest source, covered ones keep their own
+        let base = select(unpre(donor), unpre(s), s.a > 1e-5);
+        return select(vec4(base * na, na), s * f, s.a > 1e-5 && v[0].y > 0.5);
     }
     var ring = 0.0;
     let pos = u32(v[0].w);

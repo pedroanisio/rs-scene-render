@@ -136,3 +136,24 @@ fn wide_chokes_keep_soft_edges_soft() {
         assert!(mean < 4e-3 && off == 0, "choke {amount}: mean {mean}, {off} px off the exact result");
     }
 }
+
+#[test]
+fn a_dilated_matte_keeps_the_colour_of_the_edge_it_grows_from() {
+    // a negative matte-choke amount dilates: the grown ring takes the colour of the nearest source, it is not
+    // opaque black (invisible on a black ground, wrong on any other)
+    for amount in [-6, -20] {
+        let d = scene(
+            128,
+            r##"<shape id="sq" shape="rect" x="44" y="44" width="40" height="40" fill="#FF0000" effects="mc"/>"##,
+            &format!(r##"<effect id="mc" type="matte-choke" amount="{amount}"/>"##),
+        );
+        let Some(r) = render_sub(&d, 0.0) else { return };
+        // four texels outside the square's left edge (x = 44), on its middle row
+        let p = r.at(40, 64);
+        assert!(p[3] > 0.95, "amount {amount}: the matte grew: {p:?}");
+        assert!(p[0] > 0.9 && p[1] < 0.1 && p[2] < 0.1, "amount {amount}: the grown ring is red, not black: {p:?}");
+        // and it stops where the amount says
+        let far = r.at((44 + amount - 4) as u32, 64);
+        assert!(far[3] < 0.05, "amount {amount}: beyond the growth: {far:?}");
+    }
+}
