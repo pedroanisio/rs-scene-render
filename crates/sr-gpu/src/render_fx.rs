@@ -201,7 +201,7 @@ fn drawn_bounds(ctx: &Ctx, i: usize, space: &Space) -> Option<[f64; 4]> {
     let mut stack = vec![(i, 0.0f64)];
     while let Some((k, outer)) = stack.pop() {
         let n = &ctx.g.nodes[k];
-        if n.three_d.is_some() || matches!(n.kind, "object3D" | "particles3D" | "ocean") || n.particles.is_some() {
+        if n.three_d.is_some() || sr_eval::draws_in_3d(n.kind) || n.particles.is_some() {
             return None;
         }
         if sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name())) {
@@ -263,6 +263,17 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
         "shader" => crate::shader::padding(e as &dyn Element),
         _ => 0.0,
     }
+}
+
+/// Effects that move pixels in from outside the frame.
+const WARPS: &[&str] = &["turbulent-displace", "displacement-map", "wave-warp", "heat-haze", "ripple"];
+
+/// Why a node cannot be drawn as it was at another time.
+enum SubMiss {
+    /// The caller passed no sub-frame provider.
+    NoProvider,
+    /// The node did not exist at that time.
+    Absent,
 }
 
 impl Renderer {
@@ -553,16 +564,23 @@ impl Renderer {
         tex
     }
 
-    /// Draws the node with id `id` from the scene at time `t`, bare, into `inner`.
-    fn bare_at(&mut self, plan: &mut Plan, ctx: &Ctx, id: &Arc<str>, t: f64, inner: &Space) -> Option<Arc<Tex>> {
-        let sub = ctx.sub?;
+    /// Draws the node with id `id` from the scene at time `t`, bare, into `inner`; or says why it cannot.
+    fn bare_at(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        id: &Arc<str>,
+        t: f64,
+        inner: &Space,
+    ) -> Result<Arc<Tex>, SubMiss> {
+        let sub = ctx.sub.ok_or(SubMiss::NoProvider)?;
         let sg = sub.at(t);
-        let j = *sg.index.get(id)?;
+        let j = *sg.index.get(id).ok_or(SubMiss::Absent)?;
         let sctx = ctx.at(&sg);
         let was = std::mem::replace(&mut self.sampling, true);
         let t = self.bare_render(plan, &sctx, j, inner);
         self.sampling = was;
-        Some(t)
+        Ok(t)
     }
 
     /// Composites `tex` covering pixel rectangle `rect` of `space` with node `i`'s opacity, blend, masks and matte.
@@ -600,6 +618,14 @@ impl Renderer {
         };
         self.flush_vec(plan, cmds);
         self.frame_rect = Some(rect);
+        // a node placed in 2.5D composites its (flat) result through the camera, about the node's pivot
+        let mut hash = hash;
+        if let (Some(t), None) = (n.three_d, self.frame_three) {
+            let proj = self.proj25(ctx.g, ctx.p, space);
+            let cols = proj.to_cols_array().map(|v| v.to_bits() as u64);
+            hash = h(&[hash, hf(t[0]), hf(t[1]), hf(t[2]), hf(n.anchor[0]), hf(n.anchor[1]), h(&cols)]);
+            self.frame_three = Some((t, n.anchor, proj));
+        }
         self.draw_cmd(
             plan,
             ctx,
@@ -615,6 +641,7 @@ impl Renderer {
             true,
         );
         self.frame_rect = None;
+        self.frame_three = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -866,13 +893,19 @@ impl Renderer {
             })
             .collect();
         let reshaped = sr_model::element::children(&*n.elem).iter().any(|c| RESHAPING.contains(&c.element_name()));
+        // a stencil blend cuts the backdrop away outside the node, so its result must cover the whole target
         let bounded = matches!(n.kind, "layer" | "shape")
             && ctx.kids[i].is_empty()
+            && !matches!(self.blend_of(n), 29 | 30)
             && !reshaped
             && !boxes.is_empty()
             && boxes.iter().all(|(_, s)| s.is_some())
             && pad.is_finite();
-        let mut rect = [0.0, 0.0, fw, fh];
+        // warps move pixels in from beyond the frame: the offscreen then covers the frame plus their reach, so a
+        // plane that overscans the frame keeps its picture there (up to 256 px)
+        let warps = effs.iter().any(|e| WARPS.contains(&e.r#type.as_str()));
+        let warp_margin = if warps { pad.ceil().clamp(0.0, 256.0) } else { 0.0 };
+        let mut rect = [-warp_margin, -warp_margin, fw + warp_margin, fh + warp_margin];
         if bounded {
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             let mut reach_px: f64 = 0.0;
@@ -889,9 +922,18 @@ impl Renderer {
                 }
             }
             // custom shaders see tile: the layer's pixels with a 2 px margin,
-            // reaching up to 64 px past the frame (their resolution and uv depend on it)
+            // reaching up to 64 px past the frame (their resolution and uv depend on it); a warp reads the
+            // node's overscan past the frame as far as it reaches
             let shader = effs.iter().any(|e| e.r#type.as_str() == "shader");
-            let (m, lo, hx, hy) = if shader { (2.0, -64.0, fw + 64.0, fh + 64.0) } else { (1.0, 0.0, fw, fh) };
+            // a node in 2.5D is drawn flat and placed afterwards, so what shows can come from beyond the frame
+            // as well as from inside it: its offscreen is not clamped to the frame (at most 2048 px past it)
+            let (m, lo, hx, hy) = if n.three_d.is_some() {
+                (1.0, -2048.0, fw + 2048.0, fh + 2048.0)
+            } else if shader {
+                (2.0, -64.0, fw + 64.0, fh + 64.0)
+            } else {
+                (1.0, -warp_margin, fw + warp_margin, fh + warp_margin)
+            };
             rect = [
                 (x0 - reach_px - m).floor().max(lo),
                 (y0 - reach_px - m).floor().max(lo),
@@ -999,10 +1041,12 @@ impl Renderer {
                 "posterize-time" => {
                     let tq = posterized(t, a);
                     match self.bare_at(plan, ctx, &n.id, tq, inner) {
-                        Some(tx) => src = Some(tx),
-                        None => {
+                        Ok(tx) => src = Some(tx),
+                        Err(SubMiss::NoProvider) => {
                             plan.stats.unsupported.push(format!("{}: posterize-time needs a sub-frame provider", e.id))
                         }
+                        // the node was not there at the start of its step: it is drawn as it was, which is nothing
+                        Err(SubMiss::Absent) => src = Some(self.solid_texture([0.0; 4])),
                     }
                 }
                 "echo" => {
@@ -1022,7 +1066,7 @@ impl Renderer {
                             src.clone().unwrap_or_else(|| self.bare_render(plan, ctx, i, inner))
                         } else {
                             self.bare_at(plan, ctx, &n.id, t - k as f64 * delay, inner)
-                                .unwrap_or_else(|| self.solid_texture([0.0; 4]))
+                                .unwrap_or_else(|_| self.solid_texture([0.0; 4]))
                         };
                         frames.push(tex);
                     }
@@ -1080,9 +1124,14 @@ impl Renderer {
                 continue;
             }
             if kind == "pixel-motion-blur" {
-                let Some(prev) = self.bare_at(plan, ctx, &n.id, t - 1.0 / fps, inner) else {
-                    plan.stats.unsupported.push(format!("{}: pixel-motion-blur needs a sub-frame provider", e.id));
-                    continue;
+                let prev = match self.bare_at(plan, ctx, &n.id, t - 1.0 / fps, inner) {
+                    Ok(prev) => prev,
+                    Err(SubMiss::NoProvider) => {
+                        plan.stats.unsupported.push(format!("{}: pixel-motion-blur needs a sub-frame provider", e.id));
+                        continue;
+                    }
+                    // nothing was there a frame ago: no motion to blur
+                    Err(SubMiss::Absent) => continue,
                 };
                 let slot: fx::FlowSlot = Arc::new(std::sync::OnceLock::new());
                 let now = cur.clone();
@@ -1283,7 +1332,7 @@ impl Renderer {
         let Some(sub) = ctx.sub else { return false };
         let g = ctx.g;
         let n = &g.nodes[i];
-        let three = matches!(n.kind, "object3D" | "particles3D" | "ocean");
+        let three = sr_eval::draws_in_3d(n.kind);
         if three && Self::three_members(g, i).first() != Some(&i) {
             // drawn, and blurred, with the pass of the first object that shares its parent
             return true;
@@ -1502,7 +1551,7 @@ impl Renderer {
     ) -> Option<(Arc<Tex>, [f64; 2], Affine)> {
         let sub = ctx.sub?;
         let n = &ctx.g.nodes[i];
-        if n.matte.is_some() || n.three_d.is_some() || matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+        if n.matte.is_some() || n.three_d.is_some() || sr_eval::draws_in_3d(n.kind) {
             return None;
         }
         let mut look = None;

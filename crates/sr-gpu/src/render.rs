@@ -94,6 +94,26 @@ pub struct RenderStats {
     pub triangles: u64,
     /// Gaussian splats drawn.
     pub splats: u64,
+    /// Seconds the rigid-body runtime spent advancing this frame (inclusive of its first-frame build).
+    pub sim_rigid_seconds: f64,
+    /// Seconds the ocean solver spent producing this frame's surface (inclusive, like all four `sim_*` fields).
+    pub sim_ocean_seconds: f64,
+    /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
+    /// rigid-body stepping its colliders trigger.
+    pub sim_smoke_seconds: f64,
+    /// Seconds 2D emitters and native 3D particles spent advancing to this frame, including any
+    /// rigid-body reads they trigger.
+    pub sim_particles_seconds: f64,
+    /// CPU seconds building the `Draw3` lists of meshes and particles for 3D passes.
+    pub draw_prep_seconds: f64,
+    /// CPU seconds preparing volume draws (baking, grid upload) for 3D passes.
+    pub volume_prep_seconds: f64,
+    /// Path tracer CPU seconds assembling geometry, materials and lights (BVHs excluded).
+    pub pt_assemble_seconds: f64,
+    /// Path tracer CPU seconds building BVHs.
+    pub pt_bvh_seconds: f64,
+    /// Path tracer CPU seconds packing and uploading scene buffers.
+    pub pt_pack_seconds: f64,
     /// WCAG contrast ratio of burned-in text against the backdrop behind it (authored node or caption burn-in).
     pub contrast: Vec<(ContrastTarget, f64)>,
     /// Text layers drawn inside an isolated group (offscreen), where the inline probe cannot
@@ -296,6 +316,9 @@ pub struct Renderer {
     unblended: Option<Arc<str>>,
     /// Pixel rectangle of the next frame-space quad (defaults to the whole target).
     frame_rect: Option<[f64; 4]>,
+    /// 2.5D placement (zDepth, rotationX, rotationY), the pivot in node space and the frame camera for the next
+    /// frame-space quad: set by a node whose offscreen is built in target pixels but must still be placed in 2.5D.
+    frame_three: Option<([f64; 3], [f64; 2], glam::Mat4)>,
     /// Reuse effect results across frames (off with `SR_FX_NO_CACHE`, for measuring effect cost).
     fx_cache: bool,
     three: Option<Box<crate::three::ThreeEngine>>,
@@ -879,6 +902,7 @@ impl Renderer {
             sampling: false,
             unblended: None,
             frame_rect: None,
+            frame_three: None,
             fx_cache: std::env::var_os("SR_FX_NO_CACHE").is_none(),
             three: None,
             three_assets: HashMap::new(),
@@ -931,7 +955,12 @@ impl Renderer {
     /// for that frame's work to complete.
     pub fn gpu_times(&self) -> Option<fx::GpuTimes> {
         let t = self.last_timer.as_ref()?;
-        Some(t.read(&self.gpu.device, self.gpu.queue.get_timestamp_period()))
+        let period = self.gpu.queue.get_timestamp_period();
+        let mut times = t.read(&self.gpu.device, period);
+        for pt in self.three.iter().flat_map(|e| &e.pt_timers) {
+            times.extend(pt.read(&self.gpu.device, period));
+        }
+        Some(times)
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -1392,7 +1421,16 @@ impl Renderer {
             paint_a: ia,
             paint_b: ib,
             seed_hi: (seed >> 32) as u32,
-            grain: [grain as u32, (grain >> 32) as u32, 0, 0],
+            // the grain's seed, then (grid) the line width in pixels as float bits and a flag that it was given
+            grain: {
+                let line_width = num("lineWidth", gen.line_width.map(|v| v.get()).unwrap_or(-1.0));
+                [
+                    grain as u32,
+                    (grain >> 32) as u32,
+                    (line_width.max(0.0) as f32).to_bits(),
+                    u32::from(line_width >= 0.0),
+                ]
+            },
             perm,
         };
         let pd = |i: u32| {
@@ -1575,26 +1613,8 @@ impl Renderer {
                     clips[i] = to_clip(p, space.size);
                     pix[i] = p;
                 }
-                Some(([z, rx, ry], anchor)) => {
-                    let a = xf.apply(anchor);
-                    let (mut vx, mut vy, mut vz) = (p[0] - a[0], p[1] - a[1], 0.0);
-                    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
-                    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
-                    let ny = vy * cx + vz * sx;
-                    vz = -vy * sx + vz * cx;
-                    vy = ny;
-                    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
-                    let nx = vx * cy - vz * sy;
-                    vz = vx * sy + vz * cy;
-                    vx = nx;
-                    let (px, py, pz) = (a[0] + vx, a[1] + vy, z + vz);
-                    // through the frame camera (target px → frame → clip → target clip)
-                    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
-                    // true clip coordinates: the rasteriser clips what lies behind the eye (w < 0 fails 0 ≤ z ≤ w)
-                    clips[i] = [c.x, c.y, 0.0, c.w];
-                    let wv = c.w.max(1e-3);
-                    let (w, hh) = (space.size[0] as f64, space.size[1] as f64);
-                    pix[i] = [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh];
+                Some((three, anchor)) => {
+                    (clips[i], pix[i]) = project_25(p, three, xf.apply(anchor), proj, space.size);
                 }
             }
         }
@@ -1661,9 +1681,35 @@ impl Renderer {
         let px = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
         let uvs = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         let first = plan.verts.len() as u32;
+        // a 2.5D node's offscreen is a flat sheet in target pixels, turned and projected about the node's pivot
+        let three = self.frame_three.take().map(|(t, anchor, proj)| (t, space.xform.then(world).apply(anchor), proj));
+        let mut clips = [[0f32; 4]; 4];
+        let mut pix = px;
+        for i in 0..4 {
+            clips[i] = to_clip(px[i], space.size);
+            if let Some((t, a, proj)) = &three {
+                (clips[i], pix[i]) = project_25(px[i], *t, *a, proj, space.size);
+            }
+        }
         for i in [0usize, 1, 2, 0, 2, 3] {
             let l = inv.apply(px[i]);
-            plan.verts.push(Vertex { clip: to_clip(px[i], space.size), uv: uvs[i], local: l.map(|v| v as f32) });
+            plan.verts.push(Vertex { clip: clips[i], uv: uvs[i], local: l.map(|v| v as f32) });
+        }
+        if three.is_some() {
+            let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+            for q in pix {
+                b = [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])];
+            }
+            let clamp = |v: f64, hi: u32| v.clamp(0.0, hi as f64) as u32;
+            return (
+                [
+                    clamp(b[0].floor() - 1.0, space.size[0]),
+                    clamp(b[1].floor() - 1.0, space.size[1]),
+                    clamp(b[2].ceil() + 1.0, space.size[0]),
+                    clamp(b[3].ceil() + 1.0, space.size[1]),
+                ],
+                first,
+            );
         }
         let b = [
             r[0].max(0.0) as u32,
@@ -1681,7 +1727,7 @@ impl Renderer {
         // Baked volumes use composition time even when a parent's local clock is
         // frozen. Other 3D clips use local time; include both clocks so isolated
         // ancestors cannot retain a previous cache frame.
-        if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+        if sr_eval::draws_in_3d(n.kind) {
             h(&[hf(n.local_time), hf(ctx.g.time)])
         } else {
             n.source_time.map(hf).unwrap_or(1)
@@ -1708,7 +1754,7 @@ impl Renderer {
             n.three_d.map(|t| h(&t.map(hf))).unwrap_or(2),
             // the camera projects 3D objects and 2.5D layers: a still one looks different when it moves,
             // and a cached isolated group (mask, clip, matte, effects) holding it must redraw
-            if matches!(n.kind, "object3D" | "particles3D" | "ocean") || n.three_d.is_some() { ctx.cam } else { 0 },
+            if sr_eval::draws_in_3d(n.kind) || n.three_d.is_some() { ctx.cam } else { 0 },
             n.content.map(|c| h(&[h(&c.dest.map(hf)), h(&c.uv.map(hf))])).unwrap_or(3),
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             props,
@@ -1829,7 +1875,7 @@ impl Renderer {
         let mut words = Vec::new();
         while let Some(k) = stack.pop() {
             let n = &ctx.g.nodes[k];
-            if matches!(n.kind, "object3D" | "particles3D" | "ocean") {
+            if sr_eval::draws_in_3d(n.kind) {
                 if let Some(AttrValue::Str(id)) = n.elem.get_attr("material") {
                     ids.insert(Arc::from(id));
                 }
@@ -2043,7 +2089,9 @@ impl Renderer {
             d.flags |= flag::CONTRAST_INK;
             d.color[0] = *ink as f32;
         }
-        let three = n.three_d.map(|t| (t, n.anchor));
+        // a node drawn bare (into an effect chain's offscreen) is flat: its 2.5D placement is applied when the result
+        // composites
+        let three = n.three_d.filter(|_| !self.bare.contains(&n.id)).map(|t| (t, n.anchor));
         // stencil modes act on the whole target: outside the layer the backdrop is cut away
         let stencil = matches!(d.blend, 29 | 30) && three.is_none();
         let (bounds, first_vertex) = if frame_space {
@@ -2301,7 +2349,11 @@ impl Renderer {
                         let d = Draw {
                             opacity: op as f32,
                             blend,
-                            src_kind: src::TEXTURE,
+                            src_kind: match n.elem.get_attr("resample") {
+                                Some(AttrValue::Str(s)) if s == "bicubic" => src::BICUBIC,
+                                Some(AttrValue::Str(s)) if s == "mitchell" => src::MITCHELL,
+                                _ => src::TEXTURE,
+                            },
                             mask_off,
                             mask_count,
                             seed,
@@ -2353,7 +2405,7 @@ impl Renderer {
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
             "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
-            "object3D" | "particles3D" | "ocean" => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
+            kind if sr_eval::draws_in_3d(kind) => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}
         }
@@ -2800,6 +2852,8 @@ impl Renderer {
             }
         }
         let (scene, hsh) = built?;
+        // the scene is in document coordinates; the target may be a scaled one (a draft tier)
+        let scene = scene.transformed(&Xf(space.xform.0));
         let b = scene.bounds().0;
         plan.stats.vector_seconds += clock.elapsed().as_secs_f64();
         let key = cmds as *const Vec<Cmd> as usize;
@@ -3129,6 +3183,16 @@ impl Renderer {
         });
         let scale = self.tier.scale;
         let mut plan = Plan::default();
+        // a simulation that could not run leaves the frame without something that was asked for
+        for failure in &g.failures {
+            if !plan.stats.errors.contains(failure) {
+                plan.stats.errors.push(failure.clone());
+            }
+        }
+        plan.stats.sim_rigid_seconds = g.sim_seconds.rigid;
+        plan.stats.sim_ocean_seconds = g.sim_seconds.ocean;
+        plan.stats.sim_smoke_seconds = g.sim_seconds.smoke;
+        plan.stats.sim_particles_seconds = g.sim_seconds.particles;
         self.used.clear();
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];
         let mut roots = Vec::new();
@@ -3189,7 +3253,8 @@ impl Renderer {
             sub: subs.as_ref().map(|s| s as &dyn SubSource),
         };
         for m in &g.problems {
-            if !plan.stats.unsupported.contains(m) {
+            // failures are already errors
+            if !g.failures.contains(m) && !plan.stats.unsupported.contains(m) {
                 plan.stats.unsupported.push(m.clone());
             }
         }
@@ -3570,6 +3635,10 @@ impl Renderer {
         // GPU time: a begin/end pair per effect pass, and for the frame when the device can
         // write timestamps between passes
         self.last_timer = None;
+        if let Some(eng) = self.three.as_mut() {
+            eng.time_gpu = self.time_gpu && self.gpu.timestamps;
+            eng.pt_timers.clear();
+        }
         if self.time_gpu && self.gpu.timestamps {
             let passes: usize = plan
                 .jobs
@@ -3704,9 +3773,13 @@ impl Renderer {
                     Self::copy(&mut enc, &job.target, &pre.snapshot, [0, 0, job.target.size[0], job.target.size[1]]);
                     plan.stats.fx_passes += self.fx.record(&mut enc, &pre.passes);
                     if let (Some(three), Some(eng)) = (&pre.three, self.three.as_mut()) {
+                        eng.stats = Default::default();
                         if let Err(error) = eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view) {
                             plan.stats.errors.push(error);
                         }
+                        plan.stats.pt_assemble_seconds += eng.stats.pt_assemble_seconds;
+                        plan.stats.pt_bvh_seconds += eng.stats.pt_bvh_seconds;
+                        plan.stats.pt_pack_seconds += eng.stats.pt_pack_seconds;
                     }
                 }
                 let j = compositor_batch_end(job.cmds.len(), i, snapshot_at.filter(|_| job.root), |k| {
@@ -4033,6 +4106,34 @@ fn pack_draw_uniforms(draws: &[Draw], alignment: u32) -> (Vec<u8>, u32) {
         record[..size].copy_from_slice(bytemuck::bytes_of(draw));
     }
     (bytes, stride)
+}
+
+/// A point `p` of the target (pixels, in the plane z = 0) placed in 2.5D: turned about `pivot` by `rotationX` then
+/// `rotationY`, moved to depth `zDepth`, and seen through the frame camera `proj`. Returns the clip coordinates (with
+/// the true w, so the rasteriser clips what lies behind the eye) and the pixel it lands on.
+fn project_25(
+    p: [f64; 2],
+    [z, rx, ry]: [f64; 3],
+    pivot: [f64; 2],
+    proj: &glam::Mat4,
+    size: [u32; 2],
+) -> ([f32; 4], [f64; 2]) {
+    let (mut vx, mut vy, mut vz) = (p[0] - pivot[0], p[1] - pivot[1], 0.0);
+    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
+    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
+    let ny = vy * cx + vz * sx;
+    vz = -vy * sx + vz * cx;
+    vy = ny;
+    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
+    let nx = vx * cy - vz * sy;
+    vz = vx * sy + vz * cy;
+    vx = nx;
+    let (px, py, pz) = (pivot[0] + vx, pivot[1] + vy, z + vz);
+    // through the frame camera (target px → frame → clip → target clip)
+    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
+    let wv = c.w.max(1e-3);
+    let (w, hh) = (size[0] as f64, size[1] as f64);
+    ([c.x, c.y, 0.0, c.w], [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh])
 }
 
 #[cfg(test)]

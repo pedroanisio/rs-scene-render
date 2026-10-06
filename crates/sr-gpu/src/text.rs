@@ -678,6 +678,7 @@ fn animators(
             stagger: a.opt("stagger"),
             overlap: a.opt("overlap").filter(|o| *o != 0.0),
             seed: scramble_seed,
+            ease: a.str("presetEase").and_then(|e| animate::Ease::parse(&e)),
         });
     }
     let _ = roles;
@@ -688,14 +689,16 @@ fn animators(
 /// number (in the span with the animator's role, if any) counts up from 0, cubic-out over
 /// the preset's duration, and scrambled characters show their random letters.
 fn substitutions(cx: &Cx, para: &mut Para, anims: &[Animator]) {
-    let t = cx.n.local_time;
+    // presetStart is on the layer's clock (its parent's timeline), by default the layer's start, as for the other presets
+    let (t, layer_start) = (cx.n.timeline_time, cx.n.timeline_time - cx.n.local_time);
     for c in children(&*cx.n.elem) {
         if !is(c, "textAnimator") || c.get_attr("preset").map(|v| v.to_string()).as_deref() != Some("counter") {
             continue;
         }
         let a = Attrs { e: c, props: None };
-        let (start, dur) = (a.num("presetStart", 0.0), a.opt("presetDuration").unwrap_or(1.0));
-        let Some(k) = animate::counter_progress(start, dur, a.num("amount", 100.0), t) else {
+        let (start, dur) = (a.opt("presetStart").unwrap_or(layer_start), a.opt("presetDuration").unwrap_or(1.0));
+        let ease = a.str("presetEase").and_then(|e| animate::Ease::parse(&e)).unwrap_or(animate::Ease::CubicOut);
+        let Some(k) = animate::counter_progress_with(ease, start, dur, a.num("amount", 100.0), t) else {
             continue;
         };
         let role = a.str("span");
@@ -820,29 +823,51 @@ pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild
                     f.xf = x.mul(&f.xf);
                 }
             }
-            let mut d = glyph::draw(lib, &lay, (!fx.is_empty()).then_some(&fx[..]), &decor, tol);
-            // mask-reveal clips each line to its box
-            if clip_lines.iter().any(|c| *c) {
+            // mask-reveal clips each line to its box: the lines holding clipped glyphs are drawn apart, each
+            // under the mask of its own box, so a glyph waiting below its place is cut by its own line and not
+            // shown through the next one
+            let masked: Vec<usize> = lay
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.glyphs.clone().any(|k| clip_lines.get(k).copied().unwrap_or(false)))
+                .map(|(i, _)| i)
+                .collect();
+            if masked.is_empty() || fx.is_empty() {
+                return Some(Ok(glyph::draw(lib, &lay, (!fx.is_empty()).then_some(&fx[..]), &decor, tol)));
+            }
+            let hide_except = |keep: &dyn Fn(usize) -> bool| -> Vec<glyph::GlyphFx> {
+                let mut v = fx.clone();
+                for (i, l) in lay.lines.iter().enumerate() {
+                    for k in l.glyphs.clone() {
+                        if !keep(i) {
+                            v[k].hidden = true;
+                        }
+                    }
+                }
+                v
+            };
+            let rest = hide_except(&|i| !masked.contains(&i));
+            let mut d = glyph::draw(lib, &lay, Some(&rest), &decor, tol);
+            for &i in &masked {
+                let only = hide_except(&|j| j == i);
+                let part = glyph::draw(lib, &lay, Some(&only), &glyph::Decor::default(), tol);
+                let rect = lay.lines[i].rect;
                 let mut s = sr_vector::Scene::default();
                 s.cmds.push(sr_vector::Cmd::Push { mask_init: 0.0 });
-                s.extend(std::mem::take(&mut d.scene));
-                let polys = lay
-                    .lines
-                    .iter()
-                    .flat_map(|l| {
-                        sr_vector::shapes::rect(l.rect[0] - 4.0, l.rect[1], l.rect[2] + 8.0, l.rect[3], [0.0; 4])
-                            .flatten(tol)
-                    })
-                    .collect();
+                s.extend(part.scene);
                 s.cmds.push(sr_vector::Cmd::Mask {
-                    polys,
+                    polys: sr_vector::shapes::rect(rect[0] - 4.0, rect[1], rect[2] + 8.0, rect[3], [0.0; 4])
+                        .flatten(tol),
                     rule: sr_vector::FillRule::NonZero,
                     op: sr_vector::MaskOp::Add,
                     opacity: 1.0,
                     invert: false,
                 });
                 s.cmds.push(sr_vector::Cmd::Pop { opacity: 1.0 });
-                d.scene = s;
+                d.scene.extend(s);
+                d.bitmaps.extend(part.bitmaps);
+                d.blurred.extend(part.blurred);
             }
             Ok(d)
         }
@@ -1153,6 +1178,9 @@ pub fn caption_scene(
     only: Option<&str>,
     errors: &mut Vec<String>,
 ) -> Option<(sr_vector::Scene, u64)> {
+    // a caption style names its font by asset, and font assets load with the first text drawn: a caption on
+    // its own must load them too, or it is set in the fallback family
+    errors.extend(register_fonts(tc, p));
     let tracks = tracks(tc, p);
     let frame = g.size;
     let t = g.time;

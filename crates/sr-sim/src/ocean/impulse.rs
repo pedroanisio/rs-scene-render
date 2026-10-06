@@ -1,12 +1,30 @@
 use super::{Error, Spec, Q};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImpulseKind {
     /// Adds nonnegative depth with compact (1-r²)² radial falloff.
     AddWater,
     /// Transfers water between a central disc and an annulus, conserving mass.
     Displace,
+    /// A cavity: moves water out of the central disc into the annulus like a negative
+    /// [`ImpulseKind::Displace`], where `amplitude` (not negative) is the depth wanted removed
+    /// at the centre. It moves the wanted volume, or at most [`CAVITY_SHARE`] of the water the
+    /// disc holds, whichever is less, so it is limited by the water layer and never an error
+    /// for lack of donor water; it removes from each column in proportion to its depth and
+    /// never more than [`CAVITY_SHARE`] of it. A disc or annulus without water or without a
+    /// cell centre moves nothing.
+    Cavity,
+    /// One part of a cavity that forms over several steps: a `share` of the whole (`0 < share <= 1`),
+    /// after the fraction `before` of it (`0 <= before`, `before + share <= 1`) has formed. As
+    /// [`ImpulseKind::Cavity`] with the `amplitude` of the part, limited to
+    /// `CAVITY_SHARE * share / (1 - CAVITY_SHARE * rho * before)` of the water the disc holds now, where `rho`
+    /// is the share of what a part takes that the disc's weighted water falls by (the mean of the kernel
+    /// weight over the water, at most 1). If the water were to stay put the parts together then take the
+    /// limit of one whole cavity: [`CAVITY_SHARE`] of what the disc held when it began.
+    CavityPart { share: f64, before: f64 },
 }
+/// The most of the water of a disc, and of any column in it, that a cavity removes.
+pub const CAVITY_SHARE: f64 = 0.9;
 #[derive(Clone, Debug)]
 pub struct Impulse {
     pub time: f64,
@@ -27,7 +45,9 @@ impl Impulse {
             || self.radius <= 0.0
             || !self.amplitude.is_finite()
             || self.center.iter().chain(&self.velocity).any(|x| !x.is_finite())
-            || (self.kind == ImpulseKind::AddWater && self.amplitude < 0.0)
+            || (matches!(self.kind, ImpulseKind::AddWater | ImpulseKind::Cavity | ImpulseKind::CavityPart { .. })
+                && self.amplitude < 0.0)
+            || matches!(self.kind, ImpulseKind::CavityPart { share, before } if !(share > 0.0 && before >= 0.0 && before + share <= 1.0 + 1e-9))
         {
             return Err(Error::Invalid("impulse time, shape, amplitude or velocity"));
         }
@@ -46,7 +66,10 @@ impl Impulse {
                 [full, center, ring]
             })
             .collect();
-        if !weights.iter().any(|w| w[0] > 0.0) && (self.amplitude != 0.0 || self.velocity != [0.0; 2]) {
+        if !matches!(self.kind, ImpulseKind::Cavity | ImpulseKind::CavityPart { .. })
+            && !weights.iter().any(|w| w[0] > 0.0)
+            && (self.amplitude != 0.0 || self.velocity != [0.0; 2])
+        {
             return Err(Error::Invalid("impulse does not cover any cell centre"));
         }
         let mut delta = vec![0.0; q.len()];
@@ -75,6 +98,26 @@ impl Impulse {
                 }
             }
             ImpulseKind::Displace => {}
+            ImpulseKind::Cavity | ImpulseKind::CavityPart { .. } if self.amplitude > 0.0 => {
+                let wanted = self.amplitude * weights.iter().map(|w| w[1]).sum::<f64>();
+                let capacity: f64 = weights.iter().zip(q.iter()).map(|(w, q)| w[1] * q[0]).sum();
+                let received: f64 = weights.iter().map(|w| w[2]).sum();
+                // the limit of the whole cavity, spread over its parts
+                let limit = if let ImpulseKind::CavityPart { share, before } = self.kind {
+                    let squared: f64 = weights.iter().zip(q.iter()).map(|(w, q)| w[1] * w[1] * q[0]).sum();
+                    let rho = if capacity > 0.0 { squared / capacity } else { 0.0 };
+                    CAVITY_SHARE * share / (1.0 - CAVITY_SHARE * rho * before)
+                } else {
+                    CAVITY_SHARE
+                };
+                let amount = wanted.min(limit * capacity);
+                if amount.is_finite() && amount > 0.0 && received > 0.0 {
+                    for ((d, w), q) in delta.iter_mut().zip(&weights).zip(q.iter()) {
+                        *d = amount * (w[2] / received - w[1] * q[0] / capacity);
+                    }
+                }
+            }
+            ImpulseKind::Cavity | ImpulseKind::CavityPart { .. } => {}
         }
         for ((q, d), w) in q.iter_mut().zip(delta).zip(weights) {
             if w[0] == 0.0 {

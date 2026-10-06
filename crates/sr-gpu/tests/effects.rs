@@ -141,7 +141,7 @@ fn vignette_follows_d9() {
 
 #[test]
 fn chromatic_aberration_shifts_amount_pixels_at_the_farthest_corner() {
-    // Red magnifies by 1 − l and blue by 1 + l about the centre, l = amount / reach
+    // Red is sampled at 1 − l and blue at 1 + l of their distance from the centre (red shrinks, blue grows), l = amount / reach
     // (35.8 px here); samples beyond the frame are transparent
     let Some(r) = render(&fx_doc(
         r##"background="#00000000""##,
@@ -531,6 +531,111 @@ fn time_effects_use_other_frames() {
 }
 
 #[test]
+fn posterize_time_of_a_node_that_did_not_exist_yet_draws_nothing_and_does_not_blame_the_provider() {
+    // the node starts at 0.6 s; with two steps per second the frame at 0.7 s shows the node as it was at 0.5 s,
+    // when it was absent. A sub-frame provider is present, so a "needs a sub-frame provider" note would be false,
+    // and drawing the node live is not "as it was at the start of its step"
+    let d = doc_with(
+        r##"background="#00000000""##,
+        "",
+        r#"<layer id="s" asset="white" x="8" y="8" scaleX="4" scaleY="4" start="0.6" effects="pt"/>"#,
+        r#"<effects><effect id="pt" type="posterize-time" frequency="2"/></effects>"#,
+    );
+    let Some(r) = render_sub(&d, 0.7) else { return };
+    assert!(
+        !r.stats.unsupported.iter().any(|m| m.contains("sub-frame provider")),
+        "a provider was passed: {:?}",
+        r.stats.unsupported
+    );
+    assert!(r.at(10, 10)[3] < 0.05, "the node did not exist at the start of the step: {:?}", r.at(10, 10));
+    // later in the same document the node exists at its step start and shows
+    let r = render_sub(&d, 1.2).unwrap();
+    assert!(r.at(10, 10)[3] > 0.9, "{:?}", r.at(10, 10));
+    // without a provider the note stays
+    let plain = render_times(&d, &[0.7]).unwrap();
+    assert!(plain.stats.unsupported.iter().any(|m| m.contains("sub-frame provider")), "{:?}", plain.stats.unsupported);
+}
+
+#[test]
+fn a_gradient_map_keeps_the_alpha_of_its_stops() {
+    // a map that ends on a transparent stop maps white to transparent: the paper shows through
+    let xml = |amount: &str| {
+        format!(
+            r##"<scene version="1.1"><project width="64" height="16" fps="10" duration="1" background="#00000000"/>
+<paints><linearGradient id="ramp" x1="0" y1="0" x2="1" y2="0"><stop offset="0" color="#000000"/><stop offset="1" color="#FFFFFF"/></linearGradient>
+<linearGradient id="map" x1="0" y1="0" x2="1" y2="0"><stop offset="0" color="#FF4000FF"/><stop offset="1" color="#FF400000"/></linearGradient></paints>
+<composition><shape id="s" shape="rect" x="0" y="0" width="64" height="16" fill="url(#ramp)" effects="gm"/></composition>
+<effects><effect id="gm" type="gradient-map" paint="url(#map)" amount="{amount}"/></effects></scene>"##
+        )
+    };
+    let load = |a: &str| {
+        sr_model::load_str(&xml(a), &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"))
+    };
+    let Some(r) = render(&load("1")) else { return };
+    // dark end: the first stop, opaque; light end: the transparent stop, nothing left
+    assert!(r.at(1, 8)[3] > 0.7, "dark end keeps the opaque stop: {:?}", r.at(1, 8));
+    assert!(r.at(32, 8)[3] > 0.1 && r.at(32, 8)[3] < 0.9, "the middle fades between the stops: {:?}", r.at(32, 8));
+    assert!(r.at(62, 8)[3] < 0.1, "light end maps to the transparent stop: {:?}", r.at(62, 8));
+    // amount 0 leaves the picture as it was: opaque everywhere
+    let none = render(&load("0")).unwrap();
+    assert!(none.at(62, 8)[3] > 0.9, "{:?}", none.at(62, 8));
+}
+
+#[test]
+fn halftone_does_not_paint_outside_the_edge_of_its_source() {
+    // the screen's cell takes its tone from the cell centre; a pixel of that cell lying outside the shape must
+    // not take the centre's alpha and draw the ground (white) there, which cuts the edge into cell-sized steps
+    let xml = r##"<scene version="1.1"><project width="64" height="32" fps="10" duration="1" background="#00000000"/>
+<composition><shape id="s" shape="rect" x="0" y="0" width="21" height="32" fill="#808080" effects="ht"/></composition>
+<effects><effect id="ht" type="halftone" size="8" angle="0"/></effects></scene>"##;
+    let d = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+    let Some(r) = render(&d) else { return };
+    // x = 21..23 share a cell (16..24, centre 20) with covered pixels but are outside the shape
+    for x in 21..24 {
+        for y in [2u32, 9, 17, 28] {
+            assert!(r.at(x, y)[3] < 0.1, "pixel ({x}, {y}) is outside the shape: {:?}", r.at(x, y));
+        }
+    }
+    // inside, the screen still draws: a row through the dots' centres is ink, one at the cells' edge is ground
+    let through: Vec<f32> = (0..16).map(|x| r.at(x, 12)[0]).collect();
+    let between: Vec<f32> = (0..16).map(|x| r.at(x, 8)[0]).collect();
+    assert!(through.iter().all(|v| *v < 0.1), "{through:?}");
+    assert!(between.iter().any(|v| *v > 0.9), "{between:?}");
+}
+
+#[test]
+fn halftone_takes_its_angle_ink_and_ground_from_its_attributes() {
+    let shot = |attrs: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="32" fps="10" duration="1" background="#00000000"/>
+<composition><shape id="s" shape="rect" x="0" y="0" width="64" height="32" fill="#808080" effects="ht"/></composition>
+<effects><effect id="ht" type="halftone" size="8" {attrs}/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        render(&d)
+    };
+    let Some(absent) = shot("") else { return };
+    let zero = shot(r#"angle="0""#).unwrap();
+    let turned = shot(r#"angle="45""#).unwrap();
+    // the schema's default angle is 0: absent and authored 0 are the same screen, an axis-aligned one
+    assert_eq!(absent.px, zero.px, "an absent angle is the default, 0");
+    assert_ne!(absent.px, turned.px, "angle 45 is another screen");
+    let row = |r: &Rendered, y: u32| (0..64u32).filter(|&x| r.at(x, y)[0] < 0.1).count();
+    assert!(row(&absent, 12) >= 60, "a row through the dot centres of a 0 degree screen is ink: {}", row(&absent, 12));
+    assert!(row(&turned, 12) < 50, "not at 45 degrees: {}", row(&turned, 12));
+    // ink and ground colours
+    let coloured = shot(r##"angle="0" color="#FF0000" paint="#00FF00""##).unwrap();
+    let ink = coloured.at(8, 12);
+    let ground = coloured.at(8, 8);
+    assert!(ink[0] > 0.9 && ink[1] < 0.1 && ink[3] > 0.9, "ink is red: {ink:?}");
+    assert!(ground[1] > 0.9 && ground[0] < 0.1 && ground[3] > 0.9, "ground is green: {ground:?}");
+    // a transparent ground leaves the paper showing between the dots
+    let open = shot(r##"angle="0" paint="#FFFFFF00""##).unwrap();
+    assert!(open.at(8, 8)[3] < 0.1, "{:?}", open.at(8, 8));
+    assert!(open.at(8, 12)[3] > 0.9, "{:?}", open.at(8, 12));
+}
+
+#[test]
 fn colour_finishing_applies_looks_exposure_and_tone_mapping() {
     let body = r#"<layer id="a" asset="gray" x="0" y="0" scaleX="16" scaleY="8"/>"#;
     let cm = r#"<colorManagement looks="lk" exposure="1" toneMapping="reinhard"><look id="lk" slope="1" offset="0" power="1"/></colorManagement>"#;
@@ -728,7 +833,7 @@ fn every_effect_type_draws() {
 #[test]
 fn texture_pool_stays_bounded_over_a_long_motion_blurred_render() {
     // a sized layer that moves and scales: its motion-blur bounds, and so its temporary texture size, change
-    // every frame. Pooled textures of sizes no longer requested must be freed, or a long render runs out of
+    // every frame. Pooled textures of sizes that are not requested again must be freed, or a long render runs out of
     // GPU memory.
     let body = r#"<layer id="m" asset="white" x="8" y="8"><animate property="x"><key time="0" value="0"/><key time="4" value="90"/></animate>
         <animate property="scaleX"><key time="0" value="2"/><key time="4" value="9"/></animate>
@@ -804,5 +909,71 @@ fn agx_keeps_white_and_grey_neutral() {
             let spread = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
             assert!(spread < 0.01, "{ws}: {what} through AgX is not neutral: {p:?}");
         }
+    }
+}
+
+#[test]
+fn selective_color_reads_color_and_amount() {
+    // red on the left, blue on the right; the window is centred on the hue of `color` and desaturates what it holds
+    let shot = |attrs: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="16" fps="10" duration="1" background="#000000"/>
+<composition><group id="g" x="0" y="0" width="64" height="16" effects="sc">
+<shape id="r" shape="rect" x="0" y="0" width="32" height="16" fill="#FF0000"/><shape id="b" shape="rect" x="32" y="0" width="32" height="16" fill="#0000FF"/></group></composition>
+<effects><effect id="sc" type="selective-color" saturation="0" {attrs}/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        render(&d)
+    };
+    let sat =
+        |p: [f32; 4]| p[..3].iter().cloned().fold(0.0f32, f32::max) - p[..3].iter().cloned().fold(1.0f32, f32::min);
+    let Some(by_hue) = shot(r#"hue="0""#) else { return };
+    assert!(
+        sat(by_hue.at(8, 8)) < 0.1 && sat(by_hue.at(56, 8)) > 0.9,
+        "hue 0 holds red: {:?} {:?}",
+        by_hue.at(8, 8),
+        by_hue.at(56, 8)
+    );
+    // `color` names the target by its hue: blue holds the blue half and leaves red alone
+    let by_color = shot(r##"color="#0000FF""##).unwrap();
+    assert!(
+        sat(by_color.at(56, 8)) < 0.1 && sat(by_color.at(8, 8)) > 0.9,
+        "color blue holds blue: {:?} {:?}",
+        by_color.at(8, 8),
+        by_color.at(56, 8)
+    );
+    // `amount` mixes the adjusted picture with the original
+    let half = shot(r##"color="#0000FF" amount="0.5""##).unwrap();
+    let s = sat(half.at(56, 8));
+    assert!(s > 0.3 && s < 0.7, "half the adjustment: {s} {:?}", half.at(56, 8));
+    let none = shot(r##"color="#0000FF" amount="0""##).unwrap();
+    assert!(sat(none.at(56, 8)) > 0.9, "{:?}", none.at(56, 8));
+}
+
+#[test]
+fn a_warp_sees_the_overscan_a_node_has_beyond_the_frame() {
+    // a plane that extends past the frame edge keeps the picture there when a displacement moves its pixels:
+    // the chain's offscreen covers the node's overscan as far as the warp reaches, not only the frame
+    let xml = |node: &str| {
+        format!(
+            r##"<scene version="1.1"><project width="96" height="96" fps="10" duration="1" background="#1A1A1A" seed="3"/>
+<composition><shape id="under" shape="rect" x="0" y="0" width="96" height="96" fill="#1A1A1A"/>{node}</composition>
+<effects><effect id="td" type="turbulent-displace" amount="12" size="20" seed="5"/></effects></scene>"##
+        )
+    };
+    let load = |n: &str| {
+        sr_model::load_str(&xml(n), &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"))
+    };
+    let leaf = r##"<shape id="p" shape="rect" x="-30" y="-30" width="156" height="156" fill="#C8281E" effects="td"/>"##;
+    let group = r##"<group id="g" x="-30" y="-30" width="156" height="156" effects="td"><shape id="c" shape="rect" x="0" y="0" width="156" height="156" fill="#C8281E"/></group>"##;
+    for (name, node) in [("leaf", leaf), ("group", group)] {
+        let Some(r) = render(&load(node)) else { return };
+        // the plane covers the whole frame, so no pixel of the first columns, rows or last columns may be the underlay
+        let dark = |x: u32, y: u32| r.at(x, y)[0] < 0.4;
+        let edge: usize = (0..96u32)
+            .flat_map(|k| [(k, 0u32), (k, 95), (0, k), (95, k), (1, k), (k, 1)])
+            .filter(|&(x, y)| dark(x, y))
+            .count();
+        assert!(edge == 0, "{name}: {edge} edge pixels show the dark underlay through the tear");
     }
 }

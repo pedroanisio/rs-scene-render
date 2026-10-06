@@ -421,3 +421,172 @@ fn invalid_inputs_and_exhausted_budgets_fail_before_changing_state() {
         assert_eq!(sim.state(), &old);
     }
 }
+
+#[test]
+fn the_step_workspace_budget_is_288_bytes_per_cell_plus_a_fixed_overhead() {
+    let exact = 16usize.pow(3) * 288 + 8192;
+    let with = |max_bytes| Simulation::new(Spec { cells: [16; 3], max_bytes, ..spec() });
+    assert!(with(exact).is_ok());
+    assert!(with(exact - 1).is_err());
+}
+
+#[test]
+fn a_resident_state_is_about_41_bytes_per_cell_whatever_the_colliders() {
+    let mut s = spec();
+    s.cells = [32; 3];
+    let cells = 32.0f64.powi(3);
+    let mut sim = Simulation::new(s).unwrap();
+    let empty = sim.state().bytes();
+    let per_cell = empty as f64 / cells;
+    assert!((40.0..43.0).contains(&per_cell), "{per_cell} bytes per cell");
+    // Solid face velocities live only during a step: colliders do not grow the state.
+    let input = Inputs {
+        obstacles: vec![Obstacle {
+            velocity: [0.2, 0.0, 0.0],
+            ..Obstacle::stationary(Shape::Box { min: [2.0; 3], max: [29.0; 3] })
+        }],
+        ..Inputs::default()
+    };
+    sim.step(&input).unwrap();
+    assert_eq!(sim.state().bytes(), empty);
+}
+
+#[test]
+fn timeline_revision_changes_exactly_when_the_state_is_replaced() {
+    use sr_sim::pyro::Timeline;
+    let mut s = spec();
+    s.turbulence = 0.3;
+    s.seed = 5;
+    let mut input = |_: u64, _: f64, _: &sr_sim::pyro::State| Ok(Inputs::default());
+    let mut timeline = Timeline::new(s, 1 << 30).unwrap();
+    let mut at = |time: f64| {
+        let (state, revision) = timeline.at_with_revision(time, &mut input).unwrap();
+        (state.clone(), revision)
+    };
+    let (initial, r0) = at(0.0);
+    // Within one fixed step (0.1 s) nothing is replaced.
+    assert_eq!(at(0.0).1, r0);
+    let (three, r3) = at(0.3);
+    assert!(r3 > r0);
+    assert_eq!(at(0.31).1, r3);
+    assert_eq!(at(0.399).1, r3);
+    let (four, r4) = at(0.4);
+    assert!(r4 > r3 && four != three);
+    // Going back restores a checkpoint and replays: a new revision, an equal state,
+    // even though the step index was visited before.
+    let (back, rb) = at(0.1);
+    assert!(rb > r4 && back != three);
+    let (again, ra) = at(0.4);
+    assert!(ra > rb && ra != r4, "a replay of the same index is a different revision");
+    assert!(again == four, "determinism: the replayed state equals the first visit");
+    assert!(initial != four);
+    // A failed step leaves the revision alone.
+    let mut failing = |_: u64, _: f64, _: &sr_sim::pyro::State| Err(sr_sim::pyro::Error::Invalid("injected"));
+    assert!(timeline.at_with_revision(0.9, &mut failing).is_err());
+    let (_, after_failure) = timeline.at_with_revision(0.4, &mut input).unwrap();
+    assert_eq!(after_failure, ra);
+}
+
+mod volume_key {
+    use sr_sim::pyro::volume_key;
+    use sr_volume::{SparseGrid, Transform, Volume};
+
+    fn grid(background: f32, bricks: &[([i32; 3], f32)]) -> SparseGrid {
+        let mut g = SparseGrid::new(Transform::identity(), background, 64).unwrap();
+        for (key, value) in bricks {
+            for i in 0..512 {
+                let (x, y, z) = (i % 8, i / 8 % 8, i / 64);
+                g.set([key[0] * 8 + x, key[1] * 8 + y, key[2] * 8 + z], value + i as f32 * 0.125).unwrap();
+            }
+        }
+        g
+    }
+
+    fn volume(name: &str, background: f32, bricks: &[([i32; 3], f32)]) -> Volume {
+        let mut v = Volume::new();
+        v.insert(name, grid(background, bricks)).unwrap();
+        v
+    }
+
+    const BASE: [([i32; 3], f32); 3] = [([0, 0, 0], 1.0), ([2, -1, 0], 5.0), ([0, 0, 3], 9.0)];
+
+    #[test]
+    fn equal_volumes_hash_equal_and_any_difference_changes_the_key() {
+        let key = volume_key(&volume("density", 0.0, &BASE));
+        assert_eq!(key, volume_key(&volume("density", 0.0, &BASE)));
+        let differing = [
+            volume("density2", 0.0, &BASE),
+            volume("densit", 0.0, &BASE),
+            volume("density", 1e-30, &BASE),
+            volume("density", -0.0, &BASE),
+            volume("density", 0.0, &BASE[..2]),
+            volume("density", 0.0, &[BASE[0], BASE[1], ([0, 0, 4], 9.0)]),
+            volume("density", 0.0, &[BASE[0], BASE[1], ([0, 0, 3], 9.000001)]),
+            volume("density", 0.0, &[([0, 0, 0], 5.0), ([2, -1, 0], 1.0), ([0, 0, 3], 9.0)]),
+        ];
+        for (i, other) in differing.iter().enumerate() {
+            assert_ne!(volume_key(other), key, "variant {i}");
+        }
+        // One flipped low mantissa bit in one voxel, and a swap of two samples.
+        let mut g = grid(0.0, &BASE);
+        g.set([1, 1, 1], f32::from_bits(g.value([1, 1, 1]).to_bits() ^ 1)).unwrap();
+        let mut v = Volume::new();
+        v.insert("density", g).unwrap();
+        assert_ne!(volume_key(&v), key);
+        let mut g = grid(0.0, &BASE);
+        let (a, b) = (g.value([1, 0, 0]), g.value([2, 0, 0]));
+        g.set([1, 0, 0], b).unwrap();
+        g.set([2, 0, 0], a).unwrap();
+        let mut v = Volume::new();
+        v.insert("density", g).unwrap();
+        assert_ne!(volume_key(&v), key, "swapped samples");
+        // Grid order is by name: two grids hash differently from one.
+        let mut two = volume("density", 0.0, &BASE);
+        two.insert("temperature", grid(300.0, &BASE)).unwrap();
+        assert_ne!(volume_key(&two), key);
+    }
+
+    #[test]
+    fn many_single_value_variations_never_collide() {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..3000u32 {
+            let mut g = grid(0.0, &BASE);
+            g.set([i as i32 % 20 - 4, (i as i32 / 20) % 8, 0], 0.5 + i as f32).unwrap();
+            let mut v = Volume::new();
+            v.insert("density", g).unwrap();
+            assert!(seen.insert(volume_key(&v)), "collision at variation {i}");
+        }
+    }
+
+    #[test]
+    fn the_key_does_not_depend_on_the_thread_count() {
+        // Enough bricks to be split across tasks.
+        let bricks: Vec<([i32; 3], f32)> =
+            (0..40).map(|i| ([i % 7 - 3, i / 7, i % 3], i as f32 * 0.37 + 0.1)).collect();
+        let v = volume("density", 0.0, &bricks);
+        let on =
+            |threads| rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| volume_key(&v));
+        let one = on(1);
+        assert_eq!(on(2), one);
+        assert_eq!(on(8), one);
+        assert_eq!(volume_key(&v), one);
+    }
+
+    #[test]
+    fn a_state_hashes_the_same_until_it_changes() {
+        let mut sim = super::Simulation::new(super::spec()).unwrap();
+        let input = super::Inputs {
+            sources: vec![super::Source {
+                density_rate: 5.0,
+                ..super::source(super::Shape::Sphere { center: [4.0; 3], radius: 2.0 })
+            }],
+            ..super::Inputs::default()
+        };
+        sim.step(&input).unwrap();
+        let export = |sim: &super::Simulation| volume_key(&sim.state().volume(usize::MAX / 2).unwrap());
+        let first = export(&sim);
+        assert_eq!(first, export(&sim));
+        sim.step(&input).unwrap();
+        assert_ne!(first, export(&sim));
+    }
+}

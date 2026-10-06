@@ -31,6 +31,7 @@ fn body(half: [f64; 3], mass: f64) -> Body3Spec {
 }
 fn spec() -> World3Spec {
     World3Spec {
+        fix_internal_edges: false,
         start: 0.,
         step: 0.01,
         gravity: [0.; 3],

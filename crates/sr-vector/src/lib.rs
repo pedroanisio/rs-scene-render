@@ -12,6 +12,7 @@ pub mod d24;
 pub mod deform;
 pub mod geom;
 pub mod lottie;
+pub mod markers;
 pub mod measure;
 pub mod modifiers;
 pub mod path;

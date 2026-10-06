@@ -34,6 +34,11 @@ const FIXED: &[(&str, &str, &str)] = &[
         "structure",
         "A numeric attribute holds INF, -INF, NaN or a number too large for a double (such as 1e400), also inside lengths and number lists; the schema accepts them but the renderer needs finite values.",
     ),
+    (
+        "W02",
+        "rules",
+        "A pyro source or impulse in a volume with open faces is less than 12 cells from one of them, where its position is in the document and the volume has room to put it further in; the open face changes the flow of the cloud. The number comes from one plume and one face; the side faces were not measured.",
+    ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
     ("A03", "assets", "A remote input (http, https, s3, …) could not be verified offline."),
@@ -46,6 +51,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("P03", "rules", "A symbol contains an instance of itself, directly or through other symbols."),
     ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 62 levels, the depth the evaluator compiles."),
     ("P05", "rules", "Matte dependencies form a cycle through mattes or contained children, including after composition expansion."),
+    ("SA01", "rules", "Text, a burned caption, or a node tagged cta or logo reaches outside the safe region its safeArea leaves, at some time of the timeline. A warning when safeArea@enforce is warn, an error when it is error. Move the content inside the region or lower enforce. Validation and encode audit every frame of a short range and at most 240 frames of a long one, and say how many they sampled."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 

@@ -334,6 +334,10 @@ Add one optional owned `<medium>` child to volume and pyro objects:
 | `temperatureScale` | finite real > 0; 1 | Multiplies kelvin values before shading |
 | `stepSize` | finite positive length; 1 | Maximum world-space integration step |
 | `maxSteps` | integer 1–65536; 2048 | Ray integration budget |
+| `lighting` | `exact` or `grid`; `exact` | How the path tracer lights in-scattering (see Light grids) |
+| `lightGridCell` | integer 1–64; 1 | Grid node spacing, in voxels of the finest density grid |
+| `lightGridDomeDirections` | integer 8–512; 64 | Fixed environment directions of an anisotropic medium's grid |
+| `lightGridMemoryMiB` | integer 1–4096; 128 | Largest memory the grids of the pass may take |
 
 Extinction integrates over world distance, including nonuniform object scale.
 Overlapping media contribute to total extinction and source terms; reversing
@@ -399,10 +403,102 @@ errors. The cache decoder and renderer both bound file bytes, brick counts and
 cached storage; schema validation alone cannot establish these data-dependent
 limits.
 
+#### Light grids
+
+`lighting="exact"` (the default) marches a shadow ray from every in-scattering
+sample to every analytic light and one environment direction. It is the reference:
+its pixels do not depend on whether grids exist. `lighting="grid"` replaces those
+rays, for the path tracer only, with lookups into grids built once per frame:
+
+- one world-space regular lattice per path-traced 3D pass, covering the union of
+  the bounds of the media that ask for it, with spacing equal to the finest density
+  voxel among them times `lightGridCell` (the finest request wins);
+- per analytic light, one scalar per node: the medium's transmittance toward the
+  light's centre times the visibility of opaque and alpha-blended surfaces. Surface
+  visibility is the mean of eight points jittered within one cell around the node,
+  so a surface thinner than a cell shadows smoothly instead of aliasing;
+- for the environment, radiance pre-integrated over `lightGridDomeDirections`
+  fixed directions when every asking medium has `anisotropy` 0; otherwise one
+  scalar grid per fixed direction, weighted by the medium's phase function;
+- trilinear lookup. A scattering point outside the lattice (including all
+  points of media that did not ask) is lit by the exact march, so a scene can mix
+  both modes.
+
+Grids are rebuilt every frame and every motion-blur sub-frame, because media and
+colliders move. A frame whose lattice needs more nodes than one dispatch can hold
+(about 4.19 million) or more memory than the smallest `lightGridMemoryMiB` among
+the asking media is a render error that names the attribute to change; it never
+falls back to exact lighting or a coarser lattice. `VOL10` rejects `lightGrid*`
+attributes without `lighting="grid"`.
+
+Dust derived from solids is thick. A dust density that is a volume fraction of
+solids (about 1e-3 per cell) has an extinction coefficient of roughly
+3Q/(2d) per unit of solid fraction, with Q about 2 and d the grain diameter in
+scene units, so `medium@extinction` is of the order of 1.5 divided by the grain
+diameter. On the impact smoke at 1 m cells (100 micrometre grains, so 30000):
+300 is faint but visible, 3000 reads as smoke and 30000 is an almost opaque dome
+with a hard edge (1280×720 frames judged by eye, 2026-10-04, commit e144806; ledger:
+"Light grids for the in-scattering of media"). Such a medium is thick across a cell
+for grid lighting (see the known limits below).
+
+Tiled and whole-frame renders of a grid frame are identical. Surface shading of
+volume shadows (a surface lit through the medium) still uses the exact march.
+
+Known limits, against `lighting="exact"` at 512 samples per pixel with the default
+`lightGridCell` 1 and 64 dome directions, on the plume of a 1280×720 frame, over the
+region above the horizon (PSNR and CIEDE2000 ΔE; measured on the NVIDIA adapter on
+2026-10-04 with the shader of commit ce124c6, load not recorded; ledger: "Light grids
+for the in-scattering of media"):
+
+| Case | PSNR | max ΔE | mean ΔE |
+|---|---|---|---|
+| Plume, sun and anisotropic dome, no ejecta | 56.4 dB | 1.50 | 0.25 |
+| The same plume with 100,000 ejecta fragments in and around it | 47.8 dB | 3.89 | 0.48 |
+
+- Surfaces much thinner than a cell are not resolved: the grid sees them as a
+  smoothed shadow, so the ejecta case stays under the 50 dB and ΔE 2 figure that
+  holds without thin occluders. Part of the difference is the two renders'
+  independent sampling noise at 512 samples; it was not separated out. Finer cells
+  help little once the visibility sampling is smooth (cells of 2 and 3 voxels gave
+  45.4 and 44.3 dB against 46.2 dB at 1 on the sun-only variant).
+- An area light (rectangle, disc or sphere) close to the volume has a penumbra
+  the grid replaces with the visibility toward the light's centre: 65, 53 and 43 dB
+  for a rectangle light at 60, 14 and 9 scene units from the medium, 66, 56 and
+  50 dB for a sphere light (same measurement). Use `lighting="exact"` for lights
+  within about ten times their own size of the medium.
+- Optically thick cells are lit less accurately. The grid interpolates
+  transmittance linearly between nodes, which is a poor model where transmittance
+  falls from 1 to near 0 inside one cell. The renderer measures the optical depth
+  across one cell (extinction × `densityScale` × the peak density × the node
+  spacing) and, above 4, reports it in the frame's unsupported notes with the value
+  and the advice to use `lighting="exact"` or a smaller `lightGridCell`; the frame
+  still renders. On the impact smoke at 1 unit cells and extinction 30000 (depth 40
+  per cell; 640×360, region around the dome, against an exact render with `stepSize`
+  0.05 at 32 samples per pixel, so the reference is itself noisy; 2026-10-04, commit
+  00874e2, load 10 to 15) the grid gives 34.6 dB as rendered and 40.2 and 41.0 dB
+  after Gaussian blurs of 2 and 4 pixels, which remove the noise and keep the
+  structure. The horizontal and vertical lines
+  visible in very thick smoke come from the 1 unit voxels of the density field,
+  each about 40 deep optically, and appear equally in the exact render (mean
+  row-to-row step in the dome interior: exact 0.0089, grid 0.0091). Depths 13, 6.6
+  and 4 (extinctions 10000, 5000 and 3000) show faint lines, barely visible ones
+  and none (one frame, judged by eye).
+- Transmittance, not optical depth, is what the grid interpolates. Interpolating
+  optical depth with the visibility kept separate was measured on a prototype and
+  not adopted (ledger: "Light grids for the in-scattering of media").
+- A medium with `anisotropy` ≠ 0 costs one scalar grid per fixed dome direction;
+  the lattice, `lightGridDomeDirections` and the number of lights must fit in
+  `lightGridMemoryMiB`.
+- Spherical harmonics, per-tile grids and multiple scattering are not part of the
+  grid.
+
 ### Pyro simulation
 
 Add an owned `<pyro>` child to `object3D primitive="volume"`. Exactly one volume
-source is required: either `@volume` or one `<pyro>`, never both (VOL1). The object
+source is required: either `@volume` or one `<pyro>`, never both (VOL1); `@volume` names an
+existing volume asset (VOL2); an object has at most one `<medium>`, and `medium`, `@volume` and
+`<pyro>` belong to the volume primitive only (VOL3); explicit medium bounds are all six
+coordinates, each minimum below its maximum (VOL4). The object
 supplies the existing 3D pose, timeline, visibility and `<medium>` behavior.
 This composition reuses the volume renderer and avoids a second transform or
 material implementation. Native pyro always supplies density, temperature and
@@ -422,6 +518,8 @@ The implemented configuration is:
 | `turbulence` | nonnegative acceleration amplitude; 0 | Seeded three-component force, followed by pressure projection |
 | `seed` | unsigned 64-bit integer; 0 | All bits participate; no intermediate floating-point conversion |
 | `pressureIterations` | integer 1–10000; 200 | Maximum pressure-solver iterations |
+| `solver` | `jacobi` or `multigrid`; `jacobi` | Preconditioner of the pressure solve; see the numerical contract. Absent equals `jacobi` and reproduces earlier results bit for bit |
+| `advection` | `semilagrangian` or `maccormack`; `semilagrangian` | Transport scheme for density, temperature and velocity; see the numerical contract. Absent equals `semilagrangian` and reproduces earlier results bit for bit |
 | `pressureTolerance` | positive 1/second; 0.000001 | Maximum RMS divergence residual |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | integers 1–4096; 256 each | Separate solver/workspace and checkpoint budgets |
 | `meshMemoryMiB` | integer 1–4096; 128 | Aggregate conservative charge for distinct mesh regions in this domain |
@@ -429,6 +527,34 @@ The implemented configuration is:
 | `useForceFields` | boolean; true | Disable all scene force fields when false |
 | `colliders` | optional IDREFS | Up to 4096 distinct rigid collision proxies; absent selects none (PYRO7) |
 | `colliderThickness` | optional positive length; twice `voxelSize` | Thickness of referenced planes, in each plane's local units |
+
+**Memory budget by resolution.** The two budgets are checked before any grid is
+allocated. `maxMemoryMiB` must be at least `ceil((cells × 288 + 8192) / 2^20)`: 288
+bytes per cell is the worst-case live memory of one step (the committed state, the
+working state, the list of solid-face velocities if every cell were solid, the
+pressure workspace and the multigrid hierarchy, about 229 bytes) plus headroom for
+allocator overhead. `checkpointMemoryMiB` must be at least
+`ceil(state bytes / 2^20)`, where the state (density, temperature, three face
+velocity arrays and the solid mask) takes about 41.2 bytes per cell plus a few
+hundred bytes of bookkeeping, independent of colliders. A checkpoint is taken every
+second of simulation time; when the budget fills, the spacing doubles and the
+checkpoints between are dropped. Below these minimums the errors are
+`grid and step workspace memory budget` and
+`checkpoint budget cannot hold the initial state`. When only the initial state
+fits, a backward seek replays from the start.
+
+| Grid (cells) | Cells | Minimum `maxMemoryMiB` | Minimum `checkpointMemoryMiB` (one state) | States in 256 MiB |
+|---|---|---|---|---|
+| 64×52×64 | 212,992 | 59 | 9 | 30 |
+| 128×104×128 | 1,703,936 | 469 | 67 | 3 |
+| 192×156×192 | 5,750,784 | 1580 | 226 | 1 |
+
+The minimums are the least values the constructor accepts, found by running the
+solver, and they match the formulas above. Peak resident memory measured on the
+impact scene (6 steps, multigrid, no colliders) was 326 MB at 128×104×128 and 928 MB
+at 192×156×192, below the estimate because untouched pages of zeroed arrays are not
+resident; those figures were measured on a loaded machine and depend on the
+allocator.
 
 `<pyroSource>` accepts `shape="sphere|box|mesh"`, with radius (default 1),
 required positive width/height/depth for boxes (PYRO3), or a mesh asset IDREF
@@ -475,6 +601,76 @@ with confinement following
 An unconverged projection returns an error; it does not silently accept a
 divergent field. In particular, a sealed domain cannot sustain net positive
 expansion. Failed steps preserve the previous state and clock.
+
+**Pressure solver (`solver`).** `jacobi`, the default, is the diagonal-
+preconditioned conjugate gradient above, with reductions that add in cell-index
+order; it defines the results of every earlier release. `multigrid` runs the same
+conjugate-gradient iteration with a different preconditioner and different
+reductions, and these choices define its result bits:
+
+- Coarsening is algebraic aggregation of 2×2×2 cell blocks (`ceil(n/2)` per axis;
+  the last block of an odd axis has fewer children) with the Galerkin operator
+  `PᵀAP` for piecewise-constant `P`: the weight between two aggregates is the
+  number of open fluid faces between their children, and the diagonal is the number
+  of open-boundary (zero-pressure) faces plus the incident weights. Solid cells
+  have no unknown. Coarsening stops at 128 cells or fewer, and that level is solved
+  directly by dense Cholesky.
+- One V(1,1) cycle per application: a red-then-black Gauss–Seidel sweep from a zero
+  guess (colour is the parity of `i+j+k`), restriction of the residual by summing
+  children, the coarse correction scaled by 1.5, then black-then-red
+  post-smoothing. The two sweeps are adjoint, so the cycle is a symmetric positive
+  definite operator, as conjugate gradients requires.
+- Reductions add fixed blocks of 2048 consecutive cells in index order, then
+  combine the block sums pairwise (0+1, 2+3, …) in a fixed binary tree, so no value
+  depends on the thread count.
+- In every connected fluid component without a zero-pressure face (a closed domain,
+  or a pocket sealed by solids) the operator is singular, so the mean of the
+  right-hand side over that component is removed and one coarse unknown per such
+  component is pinned to zero. The removed mean stays in the divergence measured
+  after the solve, so a component that genuinely cannot be made divergence-free
+  still fails the tolerance check instead of being absorbed.
+
+For both solvers `pressureIterations` is the maximum number of conjugate-gradient
+iterations, iteration stops when the RMS residual over fluid cells is at most
+`pressureTolerance`, and a step whose recomputed RMS divergence error exceeds 1.01
+times the tolerance is an error. That criterion is a global RMS over all fluid
+cells, so an error confined to a few cells of a large domain can pass. Multigrid
+results are identical for any thread count but differ from `jacobi` in the last
+bits (the evaluator test compares them to within 1e-6 relative on a 16³ domain).
+Iteration counts stay roughly independent of resolution: measured on the impulse
+step at 128³, `jacobi` needed 275 iterations and `multigrid` 14. Baked SRVSEQ
+caches identify a solver only through their frame contents (the digests of the
+exported frames), so two solvers that produce identical bytes share frames.
+
+**Advection (`advection`).** `semilagrangian`, the default, is the midpoint
+semi-Lagrangian scheme above; it defines the results of every earlier release and
+is unconditionally stable but numerically diffusive. `maccormack` is the
+backward-forward error correction of Selle, Fedkiw, Kim, Liu and Teran (2008)
+with an extrema limiter. For every element at position `p` of a channel:
+
+1. `hat` is the semi-Lagrangian value at `p`.
+2. `til` is `hat` sampled where the forward trace of `p` (the same trace with the
+   step negated) lands.
+3. The value is `hat + 0.5 * (old[p] - til)`, clamped to the minimum and maximum of
+   the eight old values that the interpolation blends around the backward-trace
+   origin (an out-of-range corner with nonzero weight contributes the channel's
+   background value), so the scheme creates no new extremum: density stays
+   non-negative and temperature stays within its previous range.
+4. Where a collider cuts either trace short, the value is `hat`.
+
+The scheme applies to density, temperature and the three velocity components;
+density and temperature share their traces and each velocity component has its
+own. Dissipation and cooling apply afterwards to the limited value, as they apply
+to a semi-Lagrangian sample, and solid cells keep their cleared values. Each
+element is computed from immutable inputs by the same expression, so the result
+does not depend on the thread count. The advection stage costs about 2.5 times the
+semi-Lagrangian stage (2.5 at 64³ and 2.4 at 128³ on the impact scene with one
+thread). On a free Gaussian vortex over 60 steps the scheme kept 96.6% of the
+kinetic energy and 95.7% of the enstrophy, against 68.8% and 61.6% for
+semi-Lagrangian advection (measured with the detail-retention test setup; the test
+itself requires only 1.25 and 1.3 times the semi-Lagrangian values and no energy
+gain). `solver="multigrid"` with `advection="maccormack"` is a supported
+combination and defines its own result bits.
 
 Checkpoints are thinned before cloning to respect their independent hard budget.
 Backward requests replay the same fixed steps and input samples. Source animation
@@ -548,6 +744,19 @@ solver operations, not animation of a displayed noise texture. Expansion is an
 authored cinematic divergence source, not a shock-physics equation of state.
 Grid and checkpoint memory use explicit budgets; exceeding a budget is an error.
 
+Sources near an open face (warning `W02`). An open face is a zero-pressure outlet and an inlet for the
+surrounding air, so a source close to one changes the flow of the whole cloud, not only the part that leaves.
+Measured on the plume of the hero scene (64 x 52 x 64 cells of 3 units, the impulse sphere of 7.3 cells radius
+above the bottom face): the peak density at 6 s is 0.307, 0.476, 0.525, 0.673, 0.675, 0.688 and 0.686 with the
+sphere's edge 3, 5, 7 (as authored), 13, 19, 33 and 59 cells from the bottom face, the tail of the plume 28, 28,
+28, 34, 39, 40 and 41 cells down, and with the top face moved 26 cells away instead nothing changes (peak 0.481
+against 0.525, same extent). A document that gives a pyro source or impulse a place (a sphere or a box, no
+animation, not from a crater) in a volume with `boundary="open"` that has room on that axis for the source and
+12 cells at each end, and puts its edge less than 12 cells from an open face, is warned (`W02`, not an error;
+the message names the face and the distance). The 12 comes from one plume, one face (the bottom) and one kind of
+source; the side faces were not measured; and a source with a rotation or a scale is bounded by a sphere
+or by its extent along the axis.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -573,6 +782,14 @@ unverified. The CPU API's verified contract is:
   angular velocity. A live cap uses deterministic drop-new behavior, with
   checked emitted/dropped counters; a large burst does not allocate or loop
   once for every rejected birth.
+- A driver can also supply births: per fixed step `(lo, hi]` (and `time == lo` on the first step)
+  particles with their own instant, position, velocity and mass, which join the rate and burst
+  births in time order with consecutive ids. The mass is kept in the particle (zero for rate and
+  burst births); the render size still comes from `size`. The driver must answer a window as a
+  pure function of the window, since a seek asks again. A birth outside its window, with nonfinite
+  state or a negative mass is a driver error; more births than `maxParticles` leaves room for is
+  a limit error and, unlike a rate or burst quota, never a truncation. Frames, replays and checkpoints
+  of emitters without driver births are bit-identical to those before this was added.
 - Each particle retains the emitter's full birth affine, including scale and
   shear. Local velocity passes through that affine's linear part, then adds
   explicit inherited world velocity. Gravity and driver accelerations act in
@@ -602,7 +819,7 @@ unverified. The CPU API's verified contract is:
   friction remains unchanged. Elastic and force-free rebounds retain restitution,
   and zero-restitution contacts retain their existing response. This prevents
   finite-time accumulation of shrinking gravity-driven bounces without raising
-  the collision-count ceiling. More than 16 contacts in a step, more than 90 degrees of collider
+  the collision-count ceiling. More than 16 contacts that carry a particle forward in time in a step, more than 64 penetration recoveries (contacts at fraction zero, of a particle that starts inside a surface or is pushed into a neighbouring facet, which advance no time) in a step, more than 90 degrees of collider
   rotation in a sweep, unsupported queries and nonconvergence return errors.
 - Fixed checkpoints and replay make forward, backward and fractional sampling
   deterministic for a deterministic driver. A failed request preserves the
@@ -701,11 +918,12 @@ The regression compares 64 shared instances with independently expanded meshes
 under opaque and lit textured materials, normal maps, opacity, participating
 media and coincident placement. Pixel differences stay below 0.003. Shared
 geometry fits a 2 MiB binding limit that rejects expansion. The unchanged UHD
-impact still at 1.5 seconds reports 101,272 physical triangles, 44.977 seconds GPU
+impact at 1.5 seconds reports 101,272 physical triangles, 44.977 seconds GPU
 frame time, 52.91 seconds wall time and 573,220 KiB peak host RSS on RTX 6000 Ada
-Vulkan. The preceding expanded frame used 44.094 seconds GPU time, 55.77 seconds
-wall time and 584,708 KiB host RSS. These single observations demonstrate a small
-host-memory reduction, not a GPU speedup or sequence-throughput improvement.
+Vulkan; the expanded frame used 44.094 seconds GPU time, 55.77 seconds wall time and
+584,708 KiB host RSS (single observations on a build before 2026-10-04, commit not
+recorded, not repeated). They demonstrate a small host-memory reduction, not a GPU
+speedup or sequence-throughput improvement.
 Geometry sharing is rebuilt per frame; persistent caching remains unverified.
 
 Scene colliders use primitive surfaces or mesh rest poses, including finite
@@ -723,17 +941,103 @@ fallbacks. Contacts affect particles only; they do not push terrain or fragments
 
 Rules `P3D1`–`P3D6` cover the 1.3 version gate, typed asset/shape references,
 variance/direction/emission ranges, static solver configuration, distinct typed
-collider references (at most 4096), and static collider geometry. Their independent
-XSD/Schematron fixtures are `valid/particles3d.scene.xml` and `invalid/p3d1` through
-`p3d6.scene.xml`. Budgets, finite transformed values, importer failures and device
+collider references (at most 4096), and static collider geometry. `P3D7` to `P3D10` cover a
+`burst` with `crater` (the instant, `repeat` and `interval` are not given, the crater grows from an
+impact, `angle` and `angleSpread` belong to such a burst and stay within 0 to 90 degrees together) and
+`P3D11` that `gas` names an object3D with a native pyro volume. Their independent XSD/Schematron
+fixtures are `valid/particles3d.scene.xml`, `valid/ejecta-crater.scene.xml` and `invalid/p3d1`
+through `p3d11-gas.scene.xml`. Budgets, finite transformed values, importer failures and device
 precision limits remain runtime checks with explicit diagnostics.
+
+Particles dragged by smoke (`particles3D@gas`). A reference to the object3D whose native pyro volume drags
+the particles of an emitter; absent is the behaviour there always was. The integrator already solves
+`p'' = a - k v` in closed form with `k` the emitter's `drag`, and the driver adds `k u` to `a`, `u` the gas's
+velocity at the particle's place and time, so a particle obeys `p'' = k (u - v)` plus gravity and fields:
+dragged by the gas inside the volume's domain and by still air outside it with the same coefficient (the
+gas fades linearly to rest across one cell outside the domain, so what the particle feels has no jump at the
+boundary, for an open volume and for a closed one), and not at all with `drag` zero. The position is taken to
+the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
+time the gas is the linear interpolation of the two smoke steps around the instant (a frame between two canonical steps takes the particle on by a partial segment of its step, which asks a handful of times per
+particle (two to five, counted in test `particles_gas`, commit 0c9df98, 2026-10-04) from the step's own context: no smoke step is simulated and no field fetched, so
+motion-blur samples add queries and no simulation). The smoke is simulated as far as the
+particles need, and first in the frame when a document names a gas (the others keep their order), so that the
+particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
+past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
+evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
+(the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) and the two states the smoke keeps for them (the frame's own volume needs the step the readers started at, and the
+timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
+volume's `maxMemoryMiB` (three face arrays of 8 bytes: 5.1 MB for the 64 x 52 x 64 plume, 41 MB for 128 x 104 x 128), and a
+smoke that fails, or a window that does not fit, fails the particles with its message, never as still air. P3D11:
+the target must hold a native pyro volume. The context of a canonical step (the volume's matrix and the
+smoke's clock at its start, the smoke steps that cover it) is built once per step, and the driver is asked
+one particle at a time, so the coupling is serial. Cost, test `particles_gas` (release, one core, 20 000 particles
+over 25 canonical steps of 0.1 s in a 32-cell smoke; commit 0c9df98, 2026-10-04, load of the machine not
+recorded): 0.77 s more than naming the gas with no drag, 1.5 microseconds per particle step (about five gas
+queries of 300 ns, since the integrator asks at several points of a step); 100 000 particles over a 6 s film at
+24 steps a second extrapolate to about 22 s, not measured. The coupling is linear in the relative velocity and one
+way: the particles do not push the gas. For 0.34 m rocks of 2100 kg/m3 in air at 50 m/s relative the quadratic
+drag is a rate of about 0.03 per second (computed from the drag law, not measured), so the coupling moves
+dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
+
+Ejecta falling into an ocean (`ocean@splash`). An ocean lists the emitters whose particles fall into it
+(OCN13: each throws out the ejecta of a crater, so its particles have a mass; an emitter belongs to one
+ocean). The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
+covers): a particle whose centre crosses it downward inside the rectangle, before any contact it would make later
+in the segment, is removed there, and the driver is told which (instant, place, velocity, mass), for every fixed
+step, an empty list too, and again the same when a seek replays the step. The evaluator takes the plane from
+the ocean at its pose when the emitter starts (a function of the document; the ocean must have no scale and both
+must be on the composition clock), sums what fell by cell and by canonical step of the ocean (the volume is the
+mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
+velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
+and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
+entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
+overlap it, and a step the particles have not reached is an error that names it, never an empty splash. At the
+sample that closes each canonical step the ocean passes the solver the entries of that step, and the solver takes
+the volume out of the cell and gives it equally to its eight neighbours (at most 90 % of the cell's water) and
+adds the momentum to the cell when it keeps a depth. A particle that fell in is gone: it does not sink, its
+vertical momentum and its energy are not given to the water, and a particle that has no mass is refused by the
+rule.
+
+Scheduling. The ocean at a time is given the splash of the step that holds the time, which ends after it, so
+the emitter is computed until the end of that step before a frame is taken (an ocean that runs after the
+particles of its frame), or, for an ocean that loads rigid bodies and so runs before them and steps ahead of
+them, the ocean asks for the emitters when a canonical step needs them: they are made known to the log and
+computed to the end of that step, a step at a time with the ocean, each needing only the loads the ocean has
+already written. The particle solver reads the rigid world, so a rigid world that answers with a problem (a
+load from a step of the water that has not been computed) fails the fixed step of the particles that asked,
+before the step is kept. Cost of the scheduling, whole-frame evaluation of 144 frames at 24 fps, three
+alternated runs each, commit 3078153, 2026-10-05, load1 6 to 13: on the authored sea (no particles) 0.058 to 0.062
+s per frame, peak 109 to 112 MiB (the comparison with the binary before the scheduling is in the ledger); with 3000 ejecta, 11 of which fall in (4 m of
+water), 0.106 to 0.119 s per frame without `splash` and 0.109 to 0.115 with it; with 21 000 ejecta of which 9131
+fall in (1 m of water) 0.217 to 0.230 s without and 0.176 to 0.192 with (the particles that fell in are not
+simulated any more), peak 133 and 132 MiB. The cost of the aggregation, the per-step read and the pull is under
+the saving in that last case, about 0.04 s per frame, and was not isolated. With the authored 20 m of water at
+most 34 of 3000 ejecta of the biggest rock of the sweeps reach the surface (they are born on the seabed).
+
+Measured on the impact scene's rock at 60 degrees with an ocean 1 m under the ground (400 m, 4 m cells, no
+ground collider for the ejecta), tests `ejecta_splash`, commit 613e87f, 2026-10-05 (the results do not depend on
+the load): all 4000 particles fall in by 7 s and the log holds 80.7815 m3, the volume of the law's crater share
+to the last digit; by speed 60, 100 and 150 m/s 37.2, 80.8 and 148.2 m3; the horizontal momentum per volume
+along the rock's travel grows from 90 to 60 to 30 degrees. In a closed basin the water volume is the one it had to
+1e-9 of itself (the 80.8 m3 are taken from the cells and shared with their neighbours, the surface moves 3 mm),
+the horizontal momentum in the ocean is the momentum in the log to 1e-6 while the waves have not reached the
+walls, an ocean driven directly by the log, sparse or with every cell in every step, is the same to the bit, and
+a step given one late is another ocean. On a beach (the rock lands 25 m from the shore on a ground that ends
+there, the ejecta collide with the ground, the ocean begins at the shore; commit 4d91c1e, 2026-10-05) 3879 of
+4000 stay on the ground and 121 fall in (2.44 m3) from 4.5 s on; the ocean has the momentum it was given in the
+steps that follow the first of them, before the shore wall of the closed basin turns the waves back.
 
 ### Ocean surfaces and impulses
 
 **Implementation status:** The CPU solver, version-1.3 `<ocean>` node, owned
 waves and impulses, image/mesh bathymetry, local-clock replay, native surface
 meshes, reflective/transmissive rendering, and native foam/spray tracers are
-implemented. The completed UHD film remains unverified.
+implemented, and so are the objects that act on the water and what acts back
+(`colliders` that move the bed or occupy the water, the cavity of a body's entry,
+the depth response `bedResponse`, the form drag of bodies, the per-body samples and
+the pressure credited to each body, buoyancy and the full coupling with the rigid
+world, and the splash of falling ejecta: rules OCN6 to OCN13). The completed UHD
+film remains unverified.
 
 The domain lies in local x/z, centred on the node's origin. Scene y increases
 downward. Poses, parent transforms, opacity and visibility use the native 3D
@@ -756,16 +1060,29 @@ replays from local time zero.
 | `seed` | 0 | Full unsigned 64-bit seed for unspecified wave phases |
 | `bathymetry` | absent | Scoped image or mesh asset reference |
 | `bathymetryEncoding` | red | `red`, `terrarium` or `mapbox`; packed encodings require an image |
+| `order` | 1 | `1` or `2`; `2` selects the second-order scheme in the numerical contract below. Order 1 reproduces earlier results bit for bit |
 | `bathymetryScale`, `bathymetryOffset` | 1, 0 | Multiply and then offset decoded scene-y bed ordinates |
 | `material` | absent | Material reference; default is white, roughness .05, transmission 1, IOR 1.333, double-sided |
+| `colliders` | absent | Up to 4096 distinct `object3D` ids that move the bed or occupy the water (OCN6, OCN7); see the numerical contract. Absent leaves the bed fixed |
+| `bedResponse` | `depthFiltered` | `depthFiltered` or `hydrostatic`: how the surface answers what `colliders` do to the water; no effect without `colliders` |
+| `bodyCoupling` | `none` | `none`, `buoyancy` or `full`: what the water does to the rigid bodies in `colliders` (OCN8) |
+| `bodyDrag` | 1.0 | Form-drag coefficient of a body in the water, vertical (with `bodyCoupling`) and horizontal (`depthFiltered`) (OCN9) |
+| `splash` | absent | Emitters of crater ejecta whose particles fall into this ocean (OCN13) |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
 | `meshMemoryMiB`, `surfaceMemoryMiB` | 128, 128 | Bathymetry decoding/sampling and generated surface geometry ceilings |
-| `maxWork` | 100000000 | Work allowance per solver seek; also bounds bathymetry sampling and swell evaluation separately |
+| `maxWork` | 100000000 | Work allowance per solver seek, at most 1,000,000,000,000; also bounds bathymetry sampling and swell evaluation separately |
 
 Memory attributes are at most 4096 MiB; all except checkpoint memory are positive.
 Admission budgets cover the named operation, not aggregate GPU use or copies
 retained by external API callers. Mesh importer internal dependency allocations
 still need hardening; the flattened geometry is checked against its budget.
+
+The generated surface is charged 256 bytes per vertex plus 48 bytes per cell
+against `surfaceMemoryMiB`: 721 × 721 vertices of a 720 × 720 cell ocean cost 151
+MiB, above the default of 128, so the target-resolution example declares 256. That
+example also declares `maxMemoryMiB="512"` (a second-order solver on 518,400 cells
+is charged 400 bytes per cell, 198 MiB) and `checkpointMemoryMiB="256"` (each
+checkpoint holds about 12.4 MB).
 
 `<wave>` has `wavelength=16`, `amplitude=1`, `direction=0` (degrees from +x toward
 +z), optional phase in degrees and optional nonnegative speed. Missing phase is
@@ -786,6 +1103,195 @@ Its local-time and conservation semantics are specified below. Negative amplitud
 is permitted only for displacement. Wave and impulse children are static owned
 data, not independently animated scene nodes.
 
+Water entry. A `<waterImpulse source="body"/>` is the cavity that a body makes of the water it
+enters, and nothing is authored about when, where or how big: `time`, `x`, `z`, `radius`,
+`amplitude`, `velocityX`, `velocityZ` and `type` may not be given (OCN10), the body must be a
+dynamic rigid body without a crater that the ocean lists in `colliders` (OCN11) and at most one
+impulse names it (OCN12). Without `source` no cavity is made. The entry is the first canonical step in which the
+lowest point of the body goes from above the rest level (`waterLevel`) to at or below it while its
+centre moves down, found from the body's poses at the two ends of each step, with the instant
+placed by linear interpolation of the lowest point inside the step; a body that starts in the water,
+that never reaches it or that enters outside the ocean makes nothing, and a body that goes down
+through the level again makes no second cavity. The scaling law is the transient crater of
+Holsapple (1993) in the material `water` (the engine's `cratering` law, whose constants are
+those of the calculator note), with the body's mass and density (its mass over the volume of its
+closed surface), the speed of its centre downward over the step (the component normal to the
+surface) and the ocean's gravity, in metres through `physics@pixelsPerMeter`. The law gives the volume `V` and
+the radius `R` of the cavity. The solver's `cavity` impulse is applied at the instant of entry, centred
+under the body's centre: it empties a central disc of radius `R = sqrt(3 V / (pi d))`, `d` the law's depth (the central kernel
+`(1 - 4 (r/a)^2)^2`, with the impulse radius `a = 2R`, whose volume per unit of peak depth removed is
+`pi a^2 / 12`, so the peak removal is `12 V / (pi a^2)`, equal to `d`) and puts the water into the ring from `R` to `2R`
+(`sin^2` weight), conserving all of it. It does not form at once: the law's formation time is
+`T = 0.8 sqrt(V^(1/3) / g)` and the cavity grows over it, in one part for every canonical step, with the
+share of the whole that `p(t) = 3 s^2 - 2 s^3` (`s` the time since the entry over `T`) gives in the step, each
+part applied in the middle of the stretch of the step in which the cavity is forming (so the parts of all the
+steps are the whole). The shape of the growth is the engine's choice; the law gives only `T`. A disc or a
+ring narrower than four cells across (`a` under eight cells) is widened to `a = 8` cells, keeping `V`, so
+that the water goes to a smooth ring that the grid resolves.
+
+How the limit by the water layer is applied. The impulse removes from each column in proportion to
+the column's water, and takes the wanted volume or `0.9` of the water the central disc holds,
+whichever is less (a part of share `q`, after a fraction `b` of the cavity has formed, takes at most
+`0.9 q / (1 - 0.9 rho b)` of the water the disc holds then, `rho` being how much of what a part takes the
+disc's weighted water falls by, so that if the water stayed put the parts together would take what one whole
+cavity does, 90% of what the disc held when it began; the moving water makes that hold to a few per cent):
+a column therefore loses
+at most 90% of its depth and the cavity never exposes the bed, and a layer too shallow for the wish gives a
+shallower cavity, never an error (a negative
+`displace` is an error in that case; this is a separate kind). A body that reaches the bed
+excavates the bed's crater (`crater@source`) instead.
+
+The size of the disc and the role of the limit. The disc that is emptied has the bowl profile
+`(1 - (r/R)^2)^2`, whose volume per unit of depth at its centre is `pi R^2 / 3`, with `R = sqrt(3 V / (pi d))`
+for the law's volume `V` and depth `d`: the peak of the removal is the law's depth and the profile holds the
+law's volume (for water `R` is about 1.4 times the law's own radius). A disc with the law's own radius would
+have a peak of about twice the law's depth, which asks the water for more than a layer of a few times the
+depth holds; the 90% limit is therefore a protection for shallow water and does not shape the results in
+deep water. Figures, with the cell size and the commit, are in the ledger entries 'The cavity of a water
+entry has the law's depth, not twice it' and 'Corrections to the figures of the ocean entries' (acceptance
+sweeps on 3 m cells: none of the parts of the three cavities of 60000, 90478 and 270000 kg limited; the
+numbers of the first profile are in the ledger).
+
+What the cavity gives. Two waves are called a far wave in this document and the crest is a third thing; they are
+told apart here once. The cavity's far wave is the largest difference, in the ring 20 to 40 m from the entry point, between the
+water with the cavity and without it, for a body of 2 m radius in 100 m of water on a 128 x 128 ocean of 2 m cells
+(tests water_entry). It grows with the speed (0.0050, 0.0121 and 0.0211 for 10, 20 and 30 m/s at 2000 kg) and with the
+mass (0.0054, 0.0121 and 0.0277 for 500, 2000 and 8000 kg), as the law's volume does (commit 187deaf, 2026-10-05; the disc for these bodies is the minimum of eight cells, so
+the disc of the law's depth leaves it unchanged; the values before the cavity formed over time are in the ledger). The sea's far
+wave is the highest the water stands above its rest level in the ring 20 to 40 m from where the rock enters of the
+impact-ocean scene (the acceptance sweeps in the conformance section). The crest is the highest surface anywhere. The model is hydrostatic: no jet, no crown of spray, no air. The law is that of a
+crater in water, not a validated model of water entry.
+
+Depth response of the surface (`ocean@bedResponse`). A shallow-water solver lifts a whole column by
+what raises its bed, which is right for a displacement much wider than the water is deep and wrong for a
+compact one in deep water: with the hydrostatic response a sphere of 2 m radius resting on the bed of 20 m of
+water raises the surface by 3.00 m the instant it appears, where linear water-wave theory gives 0.024 m (about
+125 times less; commit 76618aa, 2026-10-04, tests ocean_depth_filter and ocean_lift). The
+ocean therefore has `bedResponse`, `depthFiltered` (the default) or `hydrostatic`. `hydrostatic` is the
+long-wave response exactly as it was (the occupancy of a body lifts the column by its thickness, and the
+water relaxes toward the body's velocity in the columns it occupies), kept for comparison and as the mode
+of the tests of the first version; `depthFiltered` attenuates what craters and bodies do to the water by
+its depth. Without `colliders` the attribute has no effect.
+
+The filter. In linear potential flow an instantaneous displacement `zeta` of the bed of water of depth `h`
+raises the free surface by `zeta(k) / cosh(k h)` in Fourier space: the filter that tsunami models apply to a
+seafloor displacement to start a simulation (Kajiura 1963, "The leading wave of a tsunami", Bull. Earthq.
+Res. Inst. Univ. Tokyo 41:535-571; read here only as quoted by the tsunami literature, for example the
+NHESS 24:2773 (2024) article on tsunami initial conditions from seafloor displacement, Geist and Dmowska
+(1999, Pure Appl. Geophys. 154:485) and the comparison of methods for coupled earthquake and tsunami
+modelling (Geophys. J. Int. 234:404, 2023), and not the original paper). The generalisation to a displaced volume at height `z0` above the bed, which the
+engine needs for bodies, is the engine's own derivation, not a citation: for a unit volume source at height
+`z0` in water of depth `h`, with a rigid bed and, for an impulse, zero pressure at the surface, the potential
+of each wavenumber is `A cosh(k z)` below the source and `B sinh(k (h - z))` above it; continuity at the
+source and a jump of `-q` in the vertical derivative give `B = q cosh(k z0) / (k cosh(k h))`, so the vertical
+velocity of the surface, and with it the response, is `cosh(k z0) / cosh(k h)`. The two limits that check it:
+`z0 = 0` is Kajiura's `1/cosh(k h)`, and `z0 = h` (a source at the surface) is 1, no attenuation.
+
+How it is applied. For a crater, the displacement of the bed (the deformed surface less where it lay at time
+zero) is filtered as a source at `z0 = 0` over the depth, `h`, that the bed was moved under, weighted by how
+much it moved. For a body, one kernel per body: the thickness of the body in each column (the part of it
+between the rest level and the bed) is filtered with `z0` the height above the bed of the middle of the
+displaced volume (the volume-weighted mean of the middle of its part in every column) and `h` the rest depth
+under it (weighted by thickness). The result is the lift of the bed, in place of the thickness; the thickness
+itself still marks where the body is (owners, the samples of the water around each body). The transform is a
+radix-2 FFT over a window of the footprint and four depths on each side, where the kernel has fallen to 0.2%
+(`exp(-pi r / (2 h))`), at most 1024 cells wide; a displacement wider than a window is left as it is, its
+response being long-wave there. What is displaced is what is lifted: the part that falls on wet columns of
+the domain is renormalised to the whole, the positive and negative parts of a crater's displacement each
+keeping their total, and the lift is cut to the water the column holds, so the volume is kept to
+rounding except where a cut-off column loses some. A lake at rest is untouched (nothing is displaced, and
+the result is identical to the hydrostatic one); a body at rest sits on a static bed, over which the
+scheme is well balanced; the filtered bed is a function of the time and of the scene, interpolated in time
+over a canonical step as before, nothing new is stored in a checkpoint, a replay is identical and the
+result is the same with 1, 2 and 8 threads. On a 720 x 720 ocean a step took 0.14 s with one body and
+0.14 to 0.16 s with ten, filtered or not, and a crater 0.123 s and 0.128 s (commit 76618aa, 2026-10-04, load1 8
+to 12; the filter is within the noise of the measurement; ledger entry 'Depth response of the ocean surface').
+
+Momentum, in `depthFiltered`. Giving the water the velocity of a body in its columns (the relaxation above)
+is the same long-wave hypothesis: it spreads the momentum of the displaced volume over the whole depth at
+once, a bow wave of a few metres where a small body deep in the water makes none at the surface. In this
+mode the water receives, per canonical step, the form drag of the body through it,
+`(1/2) rho C_d A |U - u| (U - u)` per unit water density, as a push: `U` is the body's horizontal velocity
+(thickness-weighted over its columns), `u` the mean horizontal velocity of the water under its footprint at
+the end of the last step (the sample of the water around the body), `A` the area its part below the rest
+level (and above the deepest bed under it) presents to a flow along `U - u`, from the surface of the body
+itself (half the projected area of the cut triangles), and `C_d` is `ocean@bodyDrag` (default 1.0, an engine
+parameter and not from the impact literature, also the coefficient of the exchange with the water, as it
+already was of the vertical motion). The push is spread over the same columns and shares as the body's lift,
+a stated approximation: the transfer function of a horizontal impulse at a height was not derived, and the
+vertical-source kernel stands in for it. The solver applies it evenly over the substeps, column by column,
+never past the body's velocity (a column's momentum goes toward `U` times its depth and no further), and
+credits the body with exactly what it applied, so what the water receives is what each body is credited with
+and the reaction of `bodyCoupling="full"` is consistent. A sphere through still water gives its first step
+`(1/2) C_d (pi a^2) U^2` of impulse to within 1% (104.05 against 104.72 at 2 m radius and 20 m/s; commit
+4308a71, test in the evaluator), the order of the drag of a sphere (`C_d` 1 against about 0.47 for a real
+sphere); the relaxation of the hydrostatic mode gives about four times that by its formula (`rho A U^2` of
+momentum per step against `(1/2) C_d rho A U^2`; computed, not measured); the water is pushed less as it comes
+to move with the body.
+
+Pressure of the water on a body (`BodySample::pressure`). The momentum a body is credited with (`impulse`) is
+what the solver applied to the water; across a step in the bed the scheme also adds momentum to the water, the source
+term of the hydrostatic reconstruction, `1/2 g [(r^2 - hr^2) - (l^2 - hl^2)]` per interface (`l` and `r` the depths on
+the two sides, `hl` and `hr` the reconstructed ones), which belongs to no one and is, on the body that raises the bed,
+the wave drag. The driver gives the solver what each body raises the bed by, column by column (`Forcing::lifts`,
+sparse and per body, in both responses), and the flux sweeps accumulate that term itself at every interface between
+columns of different bed, to the owner of the interface (that of the column lifted more of the two, the lowest owner on
+a tie; a column with several owners counts for the one that lifts it most), the wrap face of a periodic basin included, for the stages of the step weighted as the scheme weights them. At the end of every
+canonical step each body's sample carries `pressure`, the sum over the step. The sum is reduced in the order of the
+rows and then of the bands, so it does not depend on the number of threads, and it is part of the state and of the
+checkpoint, so a replay from a checkpoint, from zero or without a checkpoint gives the same bits. Without lifts
+nothing is accumulated and the water is bit for bit what it was. The credit is the scheme's term and not the
+continuous `-g h grad(raise)`: it includes the reconstruction and its numerical diffusion, and a bed variation that
+belongs to no owner (a crater) is not credited. In this phase `pressure` is credited and recorded and is not applied
+to the body: the body, in `bodyCoupling="full"`, gets back `impulse` and nothing else.
+The balance of the momentum of the water along x, in a closed basin of 160 m with cells of 2 m and 10 m of water,
+dt 0.05, where a ball of 2 m radius and 16755.16 kg at 3 m/s crosses (the ball of the coupled-ocean tests,
+`bodyCoupling="full"`), at 1, 2 and 3 s: the water has what the bodies pushed into it and what was credited to them,
+to what the walls give. The residual `(water - push - credit)` over the water of the step is 0.0000% (below 5e-5%) at
+all three times in the hydrostatic response in both orders, and in the filtered one 0.0150, 0.0381 and 0.0942% (first
+order) and 0.0135, 0.0351 and 0.0663% (second order); without the credit the same residual is 3.8, 3.1 and 11.0%
+(hydrostatic, first order), 4.3, 4.1 and 9.1% (second), 10.7, 12.3 and 14.6% (filtered, first) and 10.6, 9.3 and
+10.1% (second) (commit d685256, 2026-10-05, test the_water_has_what_the_bodies_pushed_into_it_and_the_bed_source_credited_to_them).
+On a periodic basin of 64 x 64 cells 6 m deep, in which a Gaussian mound of 1 m and 3 m width moves along x at 4 and
+10 m/s for 10 steps and the total momentum of the water changes only by this term, the residual is under 1e-9 of the
+momentum (the bound of the test; about 1e-13 measured on a still mound) (same commit, test ocean_pressure). The earlier form of the credit, an estimate at
+the end of the step by the central difference of the continuous term, was 49 to 65% of the term (6.3 and 6.2% off
+in first order and 0.7 and 2.3% in second on the mound, commit fdfb0b0) and is replaced. The cost of the credit at
+720 x 720 cells, with the code of the previous commit against this one, medians of five rounds: with no owners, with owners
+and with owners and lifts the ratio new over old is 0.922, 0.962 and 0.956 (first order) and 0.995, 0.988 and 1.006
+(second order), within the noise of a machine with load1 between 5.6 and 11.5 and under 2% where it is not.
+
+What a sphere crossing deep water makes. A sphere of 2 m radius at 10 m below the surface of 20 m of water,
+crossing at 20 and 50 m/s, raises the highest surface by 8.69 and 5.52 m in the hydrostatic mode and by 0.177 and
+0.198 m in the filtered one (commit 4308a71, 2026-10-04, test ocean_depth_filter). On the authored impact-ocean
+scene (1.5 m cells, the rock of 90478 kg at 100 m/s and 60 degrees, `bodyCoupling="full"`, 2.5 s into the film) the
+highest surface above the rest level is 0.81 m at (32.2, -3.8) with the cavity and the filtered response, 1.41 m at
+(21.8, -0.8) with the cavity and the hydrostatic one, 0.20 m at (18.8, -0.8) without the cavity and filtered and
+1.24 m at (18.8, -8.2) without it and hydrostatic (commit fa63e5d, 2026-10-05, load1 about 10; ledger entry
+'Corrections to the figures of the ocean entries'). The cavity is a displacement at the surface and is not
+filtered. A crater 40 m across in 6 m of water makes a trough 5% below its hydrostatic one, and one 6 m across in
+40 m of water a trough 6.7 times smaller (test ocean_depth_filter).
+
+Limits. The filter is the response to an impulse; what comes after, in a shallow-water solver, is not
+dispersive (short waves travel at the speed of long ones). For a body that moves it is applied at each
+canonical step, an approximation and not the solution for a moving source, which was not computed (the
+stationary sphere of the reference matches linear theory; the moving ones are checked only to be far below
+the hydrostatic crest). The momentum is a form drag with a single coefficient, with no added mass and no
+wake; the kernel for the momentum is the one of the volume. The cavity of a water entry is not filtered.
+Regions wider than 1024 cells are not filtered. The tests that assert long-wave numbers set
+`bedResponse="hydrostatic"`.
+
+Splash (ocean side; the particles' side, the plane and the log are in the section on three-dimensional particles).
+The driver can give the water what fell into it in a canonical step as a sparse
+list of cells (`Forcing::splash`: cell, volume of solid, horizontal momentum per unit density), sorted, no
+cell twice, applied when the step reaches its end, after the impulses due then, to the water itself and not
+through the lift of any bed. Of each cell's water the depth `volume / cell area` goes, at most 90% of what the
+cell holds (the rest of the volume is dropped, not an error), and is given, all of it, in equal parts to the
+neighbours the cell has among the eight around it (fewer at an edge or a corner); the momentum is added to the
+cell's own unless the cell is left with less than `dryTolerance` of water, when it is dropped. The cost is the
+entries, not the cells. Water is conserved except for what is dropped, and momentum except for what is dropped
+(commit 3d3df6c, tests ocean_splash; the solver does not report what it dropped).
+
 Bathymetry images map the full raster to the domain, using bilinear samples at
 cell centres and clamped edges. Red encoding reads normalized numeric red values
 without color-space or transfer conversion. Packed RGB8 encodings decode upward
@@ -801,9 +1307,16 @@ Surface corners average adjacent wet-cell surface ordinates, with upward normals
 UVs and tangents. Dry cells emit no triangles. The shoreline therefore has cell
 resolution and the mesh cannot represent overturning water. Device buffer limits
 are checked before upload. Native ocean meshes participate in shared depth,
-materials, lights, path tracing and shutter samples. OCN1–OCN4 enforce version,
-reference kinds, finite/resolved solver input and static solver configuration.
-Only pose and opacity are animatable; the six ocean corpus fixtures are checked
+materials, lights, path tracing and shutter samples. The rules, each in the Schematron and
+in the Rust validator: OCN1 (version), OCN2 (reference kinds of material, bathymetry and
+layers), OCN3 (the domain is a whole number of cells, at most 4,000,000, with finite settings and a `dt` of at least 1e-6), OCN4 (static solver configuration),
+OCN5 (one whitewater source, ordered window, material references), OCN6 (what `colliders` may
+name: at most 4096 distinct objects, a plane or mesh with a crater or a closed body without
+one), OCN7 (collider geometry is static), OCN8 (`bodyCoupling` needs `colliders`), OCN9
+(`bodyDrag` belongs to an ocean with `colliders`), OCN10 to OCN12 (a `waterImpulse` with
+`source`: no derived attribute given, a dynamic rigid body without a crater listed in
+`colliders`, one impulse per body) and OCN13 (`splash` names emitters of crater ejecta).
+Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
 #### Foam and spray
@@ -829,7 +1342,8 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `seed` | 0 | Independent full unsigned 64-bit seed |
 | `maxParticles` | 10000 | Live count ceiling, at most 1,000,000; overflow is an error |
 | `maxMemoryMiB` | 64 | Independent state/workspace ceiling, at most 4096 MiB |
-| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000 |
+| `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth). The tracers keep checkpoints within their own byte budget, one per second of simulated time at first and every second, fourth, eighth... second when the budget fills, so a request that goes back in time replays from the nearest checkpoint at or before it; a cold seek to 6 s on 518,400 cells with a 1/24 s step still costs about 600 million units |
+| `checkpointMemoryMiB` | 64 | Byte ceiling of the retained tracer checkpoints, 0 to 4096 MiB, separate from `maxMemoryMiB`; zero keeps none, so every request that goes back in time replays from zero |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
@@ -894,6 +1408,40 @@ zero; a larger negative or nonfinite result is a numerical error. Closed edges
 reflect normal momentum; periodic edges wrap both axes; open edges use
 zero-gradient extrapolation and are **not** an absorbing boundary.
 
+**Second order (`order="2"`).** Each row is reconstructed from the surface
+elevation (depth minus the downward bed ordinate) and the velocity, limited with
+the monotonized-central limiter (van Leer, 1977): the difference across a cell is
+`sign * min(2|a|, 2|b|, |a+b|/2)` for backward and forward differences `a` and
+`b` of equal sign, and zero otherwise. The elevation difference is also capped at
+twice the cell depth so that face depths stay non-negative. Cells with a
+neighbour or themselves below `dryTolerance`, and cells at non-periodic edges,
+keep their cell value, so wet/dry fronts and edges are first order. The face
+states enter the same hydrostatic reconstruction and local Lax–Friedrichs flux.
+The bed stays constant per cell: **order 2 holds for waves over a smooth bed; the
+bed-source term remains first order.** Time stepping is the strong-stability-
+preserving two-stage Runge–Kutta method (Heun) with the time-step bound halved to
+`0.225`; drag is split symmetrically (half a decay before and after). Non-negative
+depth at this bound follows the reasoning of Audusse et al. (2004) for MUSCL
+schemes; it is verified by the wet/dry conformance tests, not proven for the
+unsplit two-dimensional scheme. A negative result beyond round-off remains an
+error. Because the flux is unchanged, strong currents keep the first-order
+dissipation `|u|+sqrt(g*h)`.
+
+Amplitude lost by a `1e-3` periodic wave after five wavelengths (the conformance
+test), by cells per wavelength:
+
+| Cells per wavelength | Order 1 | Order 2 |
+|---|---|---|
+| 10 | 99.96% | 77.2% |
+| 20 | 97.9% | 17.9% |
+| 40 | 85.3% | 2.6% |
+| 80 | 61.7% | 0.34% |
+
+Resolve waves with at least 20 cells per wavelength when using order 2. A
+second-order substep costs about three times a first-order substep (measured
+2.8–3.0 on a 256×256 grid) and the halved bound doubles the substep count when
+it limits the step; seek work is charged accordingly.
+
 Timed impulses subdivide the canonical step at their exact timestamps. Events
 at zero belong to the initial state. Equal-time events retain authored order.
 An add-water impulse adds `amplitude * max(0,1-r*r)^2`, where `r` is distance
@@ -911,12 +1459,84 @@ not an energy-conserving impact coupling.
 Default core settings are 64×64 cells, unit spacing, gravity 9.81 scene units/s²,
 zero damping, closed boundaries, canonical `dt=1/60`, dry tolerance `1e-10`,
 256 MiB resident workspace, 64 MiB checkpoints, and 100 million work units per
-seek. Each substep and impulse charges eight units per cell. At most four
+seek. Each substep and impulse charges eight units per cell (24 per substep for `order="2"`). A cold seek to time `t` therefore costs (canonical steps up to `t`) × (substeps per step) × (8 or 24) × (cells), plus the impulses. For example, a 720 × 720 cell second-order ocean with a 1/24 s step costs about 12.4 million units per substep, so a cold seek to 6 s (144 steps of two or three substeps) needs between 3.6 and 5.4 billion units, which is why the ceiling is a trillion while the default of 100 million stays a guard against accidental work. At most four
 million cells, 16,384 impulses and 4,096 retained checkpoints are admitted.
-Resident input capacities are included in the memory ceiling. Checkpoint memory
+Resident input capacities are included in the memory ceiling, which is 256 bytes per cell (400 for `order="2"`: two more state copies and sweep row buffers; measured peak 158 and at most 278 bytes per cell at one million cells). Checkpoint memory
 is separately bounded; zero disables retention. Failed seeks leave the published
 frame and caches unchanged. Fractional samples never become canonical state,
 and replay after checkpoint eviction is bit-identical in the conformance tests.
+
+**Moving bed and bodies (`colliders`).** An ocean that names objects in `colliders`
+takes its bed from the scene at every canonical step instead of from its
+bathymetry alone; without the attribute nothing changes, bit for bit. An object
+with a `<crater>` (a plane or a mesh) deforms the bed: the crater deforms the
+object's surface at the step's time, the surface is brought into the ocean's frame
+with the inverse of the ocean's pose, and the bed becomes the bathymetry plus the
+topmost surface ordinate over each cell centre minus the same ordinate at ocean
+time zero. Columns the surface does not cover are unchanged, so the object need
+not coincide with the bathymetry. Any other supported primitive without a crater
+is a closed body (a plane without a crater is neither and is rejected by OCN6);
+its tessellated surface is crossed by vertical lines through the cell centres,
+shifted by a fixed irrational fraction of a cell so that no line runs along a
+shared edge, and an odd number of crossings is an error. Scene frames come from
+the clock mapping, frame cache and rigid-body pass of the smoke solver, so bodies
+of the rigid world work; the bed is sampled at both ends of each canonical step
+and each substep uses its linear value at the substep's midpoint.
+
+The water column follows the bed: depth is kept and the surface shifts, and
+gravity radiates the change. For a given bed this is the exact depth-averaged
+form (the kinematic conditions at the bed and the surface cancel in the depth
+equation), it conserves water to round-off, and it is how earthquake tsunamis are
+started. A bed that does not move reproduces the static solver bit for bit. What
+the objects in `colliders` do to the bed is answered by `ocean@bedResponse`: the
+default `depthFiltered` attenuates it by the depth of the water and gives the
+bodies a form drag (the sections "Depth response of the surface" and "Momentum, in
+`depthFiltered`" above); `hydrostatic` is the long-wave answer of the rest of this
+paragraph, where a body raises the bed over its footprint by its vertical extent
+between the rest level and the bed, so the water it displaces appears first as a
+bulge that radiates, and at equilibrium the surface is flat with thinner water
+under the body. In that mode the velocity of the water in an occupied column
+relaxes toward the body's: with
+`t` the occupied thickness and `h` the depth, the fraction `f = t / (h + t)` of the
+velocity difference closes over a canonical step, and a substep of length `dt`
+closes `1 - (1 - f)^(dt / step)`, so the momentum given does not depend on how many
+substeps the CFL bound chose (it was identical to 1e-15 for 2 to 46 substeps).
+The momentum given during the last whole step is kept per body and read by the
+group for the reaction on the body (`ocean@bodyCoupling="full"`, below). In the
+filtered response the water receives the form drag of the body instead, and the
+body is credited with what it applied.
+
+Limits of this model, in plain terms. The water is hydrostatic: there is no
+vertical velocity, so a bed or body that moves fast produces no jet and no
+vertical splash, only the surface following it. With `bodyCoupling="none"` a body
+is kinematic with infinite mass: the momentum and energy it gives the water are
+not taken from it, so neither is conserved, while the volume of water is; with
+`buoyancy` it is loaded by the water's weight and a drag on its vertical motion,
+and with `full` it also gets back the horizontal momentum it gave the water, one
+canonical step late (below), but roll is not damped and there is no added mass. Occupancy is measured against the rest
+level, not the instantaneous surface, because the bed must be a function of time
+alone for replay to hold. The column under a floating body is treated as blocked:
+water does not flow under it. A crater deeper than the water around it drains the
+ring that feeds it; the measured case (radius 52 and depth 25 under 12 units, rim
+7, grown over 1.5 s on 2-unit cells) kept the least depth at 1.26 (first order) and
+1.11 (second order) and the volume to 1.4e-14, with no negative depth.
+
+Measured before 2026-10-04 and not repeated (tests ocean_bed and ocean_coupling,
+`bedResponse="hydrostatic"`): a Gaussian uplift of 1% of the depth in a channel
+launched two pulses at 7.95 (first order) and 7.85 (second order) after 4 s against
+the 8.00 of `sqrt(g h) t`, with 78% and 98% of half the uplift as height. A falling
+sphere of radius 4, 7 and 10 left a far-field wave of 0.22, 0.66 and 1.11 in 12 units
+of water; entry speed raised it only until the entry became quicker than the wave
+takes to cross the body (0.637, 0.661 and 0.660 for x0.5, x1 and x2).
+
+Resident memory of a driven ocean is charged per cell: 24 bytes for the three bed
+vectors (`moving_bed`), 72 more with bodies, 12 more for the owner tags of the
+per-body samples (any ocean with bodies) and 32 more for the pushes of the form drag
+(the filtered response). Per call, the depth filter charges 24
+bytes per cell and 40 per cell of its largest transform window (1024 x 1024 at most)
+to `meshMemoryMiB`, together with the collider geometry and its per-column samples.
+Checkpoints hold 32 bytes more per body owner (the impulse and the pressure credited). The frame key of a driven ocean
+includes the bed, because the same depths over another bed are another surface.
 
 ### Terrain, crater evolution, fracture and mesh caches
 
@@ -1067,7 +1687,7 @@ verifies rejection of a 256-segment plane under a 1 MiB allowance. Import decodi
 extrusion, complete relief construction accounting and retained source meshes
 still need tighter accounting for the full feature.
 
-Rigid replay now admits optional checkpoints before cloning. The engine defaults
+Rigid replay admits optional checkpoints before cloning. The engine defaults
 to a 256 MiB admission estimate and at most 64 optional checkpoints, plus its
 mandatory initial snapshot. Estimates include current triangle/convex/compound
 geometry, contacts and world bookkeeping; shared geometry is conservatively
@@ -1080,7 +1700,7 @@ verify identical dynamic/contact replay with tiny or disabled caches. This is an
 admission estimate, not measured heap/RSS: initial/current states, input source
 geometry, allocator overhead and solver scratch remain outside this allowance.
 
-Particle collider references to crater objects now use the same object-space
+Particle collider references to crater objects use the same object-space
 kernel and sampled local clocks as rendering. The plane collider uses its authored
 render tessellation. World-space vertices are sampled at the endpoints of each
 canonical particle step, anchored at emissionStart, and move linearly between
@@ -1164,9 +1784,324 @@ and production validation are finished.
 
 Rust and Schematron share **CRT1** (version), **CRT2** (single surface owner),
 **CRT3** (ordered timing), **CRT4** (finite direction/profile/envelope) and
-**CRT5** (rigid-body compatibility). `tests/corpus/valid/crater.scene.xml` and
-`tests/corpus/invalid/crt1.scene.xml` through `crt5.scene.xml` independently
+**CRT5** (rigid-body compatibility), with **CRT6** to **CRT8** for a crater from an
+impact and **CRT9** for `capture`. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
+`tests/corpus/invalid/crt1.scene.xml` through `crt9-capture-without-source.scene.xml` independently
 exercise the XSD/Schematron and Rust validators.
+
+#### Crater from an impact (`crater@source`)
+
+A crater whose size and timing are the consequence of an impact rather than authored.
+`source` names the dynamic rigid-body object that makes it; the owner is the surface the
+`crater` belongs to. Nothing in the document says when or how big: the crater begins at
+the first step in which the source, approaching the owner, pushes on it with more than
+twice its own weight in one step (so a body resting on the surface never starts one), is
+centred on the impulse-weighted contact point with its axis along the normal of the owner's surface
+there (a mesh's corner normals interpolated across the triangle the point is on, so that finer or coarser
+triangles of the same surface give the same axis; a sphere's radius; a box's face; the contact's normal only
+chooses the side and is used as it is for shapes that give none), and
+grows in composition time over the law's formation time. Radius, depth, rim, start, end,
+centre and axis are derived, so giving any of them is **CRT6**; `targetMaterial` is
+required with a source and the other target attributes belong only to one (**CRT7**); the
+source must be another object3D with a dynamic rigidBody (**CRT8**). `curve`,
+`influenceDepth` and `maxMemoryMiB` keep their meaning. The impact is part of the rigid
+world's state: the same after any seek, with or without the frame memory, in a fresh world
+and from a baked SRPHYS04 cache, which carries the contacts it is found in.
+
+`crater@capture` (boolean, default false, only with `source`: **CRT9**). The rigid contact kills the normal
+velocity of the body that makes the crater and nothing takes the rest: the impact scene's rock (2 m radius,
+90 478 kg, 100 m/s at 60 degrees) keeps 17 % of its kinetic energy (the free rock's in the same test) as a sliding that friction turns into
+rolling (35 m/s, five sevenths of its 50 m/s along the ground, omega r = v, by the formula) and leaves the crater, which opens over half a
+second after it has crossed the rim. With `capture` the body is arrested from the impact, for a window of
+`2 d / U` plus one step (the time that stops a body at the impact speed `U` in the law's crater depth `d`; slower
+bodies stop sooner) and only while its centre is inside the crater's rim radius in the owner's frame: its
+velocity relative to the owner loses `U^2 / (2 d)` a second along its direction, never more than stops it in
+the step, and its spin loses the same share. All of its kinetic energy can leave it and none can be added. After
+the window it is the ground's: it sinks with the floor of the pit and rocks on it (nothing resists rolling, so a body that sinks to the floor of the bowl swings on it
+about 0.3 m either way and settles very slowly: a limit of the rigid model). This is a model of the engine, the
+mean force of a penetration of depth `d` (kinetic energy over depth), not a published law; the projectile neither
+breaks up nor buries itself. The deceleration is a function of the impact the world noticed and the body's
+state, so any order of requests and a fresh evaluator give the same bits, and without it the world is what
+it was. Measured on the impact scene's rock arriving at 100 m/s (test `crater_capture`, commit 90ce0f1, 2026-10-05,
+load1 6 to 10; the results do not depend on the load): rim 7.16, 6.66, 5.04 m and depth 3.00, 2.79, 2.12 m
+for 90, 60 and 30 degrees; at 4 s it is 0.04, 0.49 and 1.22 m from the impact point, sunk into the pit (y 0.97,
+0.68, -0.39 m, the 2 m radius resting on flat ground is y = -2), at 0.7, 0.4 and 1.3 m/s, and its kinetic energy is
+3e4, 8e3 and 1e5 J against 4.5e8 at the impact (the free rock at 60 and 30 degrees keeps 7.8e7 and 2.4e8 J). The
+mechanical energy never grows after the impact by more than a ten-thousandth of the impact's, and the free rock's
+energy does not grow either. In the ocean scene the water takes momentum from the rock (`full`: the water
+relaxes toward the rock's velocity in the hydrostatic response and receives its form drag in the filtered
+one), so the rock reaches the bed slowed. At 6 s, with and without `capture`, it is 0.6 and 0.7 m from the
+crater's centre in the hydrostatic response (the highest wave after 4 s 2.136 and 2.132 m) and 0.1 and 8.5 m in the
+filtered one (2.097 and 2.083 m): with the depth filter the free rock rolls out of its crater and `capture` keeps it
+in (test `impact_scenes` on 3 m cells, commit e22458b on fa63e5d, 2026-10-05, deterministic).
+
+The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
+1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
+`pi2 = g a / U^2` (no factor of 3.22) and `pi3 = Y / (rho U^2)`,
+
+    pi_V = K1 { pi2 (rho/delta)^((6nu - 2 - mu)/(3 mu))
+                + [K2 pi3 (rho/delta)^((6nu - 2)/(3 mu))]^((2 + mu)/2) }^(-3 mu/(2 + mu))
+
+where `m`, `a` and `delta` are the source's mass, equivalent radius and density (mass over
+the volume its shape encloses), `U` is its speed along that normal before the step
+(the normal component of the relative velocity, so the crater shrinks as the approach
+turns glancing), `rho`, `Y` the target's density and cratering strength, `g` gravity and
+`nu = 0.33`. The strength term's exponent is `(2 + mu)/2`; the 1993 table prints
+`(2 + mu)/mu`, which Holsapple later corrected. Constants, in SI units (the source gives
+`Y` in dyne/cm2 and `rho` in g/cm3), are those of the author's calculator note,
+"Theory and equations for Craters from Impacts and Explosions"
+(lpi.usra.edu/lunar/tools/lunarcratercalc/theory.pdf), which holds both regimes for every
+material in one table:
+
+| `targetMaterial` | K1 | K2 | mu | Y (Pa) | rho (kg/m3) | Kr / Kd |
+|---|---|---|---|---|---|---|
+| `water` | 0.98 | 0 | 0.55 | 0 | 1000 | 0.8 / 0.75 |
+| `drySand` | 0.132 | 0 | 0.41 | 0 | 1700 | 1.4 / 0.35 |
+| `drySoil` | 0.132 | 0.26 | 0.41 | 2e5 | 1700 | 1.1 / 0.6 |
+| `wetSoil` | 0.095 | 0.35 | 0.55 | 5e5 | 2100 | 1.1 / 0.6 |
+| `softRock` | 0.095 | 0.215 | 0.55 | 1e6 | 2100 | 1.1 / 0.6 |
+| `hardRock` | 0.095 | 0.257 | 0.55 | 1e7 | 3200 | 1.1 / 0.6 |
+| `regolith` | 0.132 | 0.26 | 0.41 | 1e4 | 1500 | 1.1 / 0.6 |
+| `ice` | 0.095 | 0.351 | 0.55 | 1.5e4 | 930 | 1.1 / 0.6 |
+
+The excavated volume is `V = pi_V m / rho`; the crater's radius at the original surface is
+`R = Kr V^(1/3)` and its depth `Kd V^(1/3)` (calculator note); the rim crest is at `1.3 R`
+and `0.036` of the rim diameter high (Housen et al. 1983 profiles; Pike 1977, as quoted
+there); the rim spans from `R` to its crest. In the crater element's kernel, whose profile
+is centred on the crest, `radius` is the crest radius and `rimWidth` is `0.3 R`. The
+formation time is `0.8 sqrt(V^(1/3) / g)` (Schmidt and Housen 1987, via the note; other
+sources give 0.5 to 1, so it is good to a factor of two). The ejected volume, `0.8 V`, and
+the thickness of an inverse-cube blanket at the crest that holds it are computed and
+exposed for the ejecta, but nothing is deposited on the terrain.
+
+Units: `physics@pixelsPerMeter` converts scene units to metres for everything the law reads
+and gives. `targetDensity` is kilograms per cubic metre, `strength` pascals, `gravity`
+metres per second squared; gravity defaults to the magnitude of the physics gravity and is
+an error when that is zero and none is given. Housen and Holsapple (2011, Icarus 211:856-875,
+doi 10.1016/j.icarus.2010.09.017) say the dependences on strength and porosity are "only
+poorly constrained", so the table's strength and density can be overridden; they should
+be read as calibration inputs, not measurements.
+
+Limits. One crater per element: the first qualifying contact of the
+source with the owner defines it, and later contacts neither start another nor change it.
+The crater is circular, with no elongation or downrange shift for an oblique impact; real
+ones elongate only at grazing angles (Bottke et al. 2000, doi 10.1006/icar.1999.6323;
+Gault and Wedekind 1978), and the asymmetry of an oblique impact shows in
+the ejecta (below). Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law
+is still applied to the normal component, which keeps the size monotone in the angle, and
+no ricochet is modelled. For large, fast craters angle matters less than the normal
+component says above 45 degrees (Davison and Collins 2022, doi 10.1029/2022GL101117). A
+water layer above the owner is not treated: the crater is the seabed's. The `ice` and
+`regolith` rows are the least certain: the author's later table (arXiv:2203.07476) gives
+other constants for every material, for example `hardRock` K1 0.06 against 0.095 here,
+and an ice strength three orders of magnitude higher, so the two tables are not mixed.
+Housen and Holsapple (2011) use `nu = 0.4` where this law uses 0.33, and no verified
+mapping connects their constants to these; ejecta built from the later paper take only the
+shape of their distribution from it. A 40 m iron body at 20 km/s and 45 degrees into hard
+rock gives an apparent crater 0.8 km across here, against a transient crater of 1.3 km in
+the Earth Impact Effects calculator (Collins, Melosh and Marcus 2005,
+doi 10.1111/j.1945-5100.2005.tb00157.x), a difference within what the two laws disagree by.
+
+Smoke from an impact. A `pyroSource` or `pyroImpulse` with `crater` naming such a crater is the
+smoke the impact causes, and nothing is authored about it: its shape, place, timing, density,
+temperature and expansion are derived (PYC1), the crater must exist and grow from an impact
+(PYC4), and the engine's parameters belong only to such a source (PYC2). The source is a
+sphere of the crater's radius at the impact point, active from the impact over the crater's
+formation time (an impulse: at the impact), both starting at the first smoke step that begins after the impact, which is when the impact is known. The dust is `dustFraction` of the volume thrown
+out of the crater (`0.8 V`), injected as a volume fraction of solids spread over the cells whose centres the
+sphere covers and that are not solid (a ground collider takes none of it; a sphere smaller than a voxel is widened to cover one; an impact outside the volume puts
+nothing in it), so that the dust injected is the dust and not what the grid happens to cover, it depends
+on no unit of mass and `medium@extinction` is, in these sources, extinction per unit volume fraction. The
+heat is `heatFraction` of `(1/2) m U^2 sin(theta)^(3/2)` for the body's mass, speed and angle
+from the surface; the exponent is the scaling of shock energy with the angle in the 3D
+hydrocode runs of Pierazzo and Melosh (2000, doi 10.1146/annurev.earth.28.1.141), while the
+crater uses the normal component. It warms the dust by `heat / (dust mass x specificHeat)`
+(dust mass: its volume times the target density), at most `maxTemperature` kelvin: a declared
+physical cap (vaporisation), not a fallback, below the solver's limit of 50000 K. The solver
+derives the expansion from the heating, as an ideal gas at constant pressure, `(dT/dt)/T` in
+every cell heated, so there is no authored `expansion`; a sealed domain cannot sustain it, as
+for any expansion. The literature gives ranges, not values, for the share of an impact's
+energy that goes into a plume (internal energy of target and body 0.70 to 0.91 of it at 5 to
+45 km/s in strong rock, O'Keefe and Ahrens 1977; ejecta kinetic energy 0.07 to 0.5 of it), and
+none for the part that rises in smoke, so `heatFraction` 0.1, `dustFraction` 0.01 and
+`specificHeat` 1000 J/(kg K) are the engine's, with no published value, to be calibrated. In
+physical units a slow impact barely heats anything, and even a 20 km/s impact of a body of
+1500 kg heats its dust by only a few hundred kelvin at these defaults, because the dust grows
+with the crater and the crater grows more slowly than the energy: a scene needs physical
+impact speeds, or a smaller `dustFraction`, for a fireball. This is the engine saying what the
+numbers say. What the model represents is dust heated by the impact, spread through the crater's
+volume; what it does not represent is the vapour and melt produced near the point of impact and the
+shock wave, which are what a real fireball is made of and belong to later work, so the defaults are not
+to be tuned to make fire. Because the density of these sources is a volume fraction of solids, the
+medium's `extinction` for them is an extinction per unit volume fraction: for grains of diameter `d`
+(in scene units) the geometric-optics value is about `1.5 / d` (3/2 over the grain diameter), so a
+smoke of 2 mm grains in a scene in metres has an extinction near 750 per unit fraction, and the
+author sets `medium@extinction` to about that for the smoke to be seen.
+
+Ejecta from an impact. A `burst` of a `particles3D` with `crater` naming such a crater is what the
+impact throws out, and nothing is authored about when, where, how fast or how heavy: `count`
+particles are born at the instants of their launches, each at its launch distance from the impact
+point in the tangent plane of the contact (placed on the surface as described below), with its own
+velocity and mass, and the instant, `repeat`
+and `interval` are not given (P3D7); the crater must exist and grow from an impact (P3D8); `angle`
+and `angleSpread`, the launch angle above the tangent plane and the half-width of its uniform
+spread in degrees (default 45 and 15), belong to such a burst (P3D9) and stay together within
+0 to 90 (P3D10). The speed of the ejecta launched from distance `x` follows Housen and Holsapple
+(2011), `v/U = C1 [(x/a)(rho/delta)^nu]^(-1/mu) (1 - x/(n2 R))^p` between `1.2 a` and `n2 R`, `a` the
+body's radius, `U` its speed, `rho` and `delta` the densities of the target and the body, `R` the radius
+of the crater and `nu = 0.4`, with the constants `mu, C1, n2, p` of water, dry sand (also dry soil), hard
+rock and weakly cemented basalt (also wet soil and soft rock); regolith and ice have no row and
+are an error. The mass launched from within `x` grows as `x^3 - (1.2 a)^3`, and the particles
+together hold 80% of the crater's mass (`0.8 rho V`); each stands for the same share, at a launch
+distance that is the corresponding quantile, so the count changes the resolution and not the total.
+The paper could not be consulted: the equations and constants are those of the specification this
+was written from and are **to be checked against it**. Where the paper is silent the engine decides:
+the launch angle and its spread, the time of launch (`T (x/R)^3` after the impact, `T` the
+formation time, so the fastest material leaves first), and the lopsidedness of an oblique impact,
+whose density of mass over the azimuth from downrange is `1 + b cos(az)` with
+`b = clamp((45 - theta)/20, 0, 1)` for the angle `theta` of the velocity with the surface, resting on
+the published thresholds of 45 and 25 degrees (Herrick and Forsberg-Taylor 2003,
+doi 10.1111/j.1945-5100.2003.tb00001.x) and no published formula. Each particle is a pure
+function of its index and the seed, so the particles do not depend on the thread count or on a
+seek. The crater's place and axis are the owner's at the impact (a moving owner does not carry the
+launches along), the speed is the whole relative speed of the body, and the positions and
+velocities are in scene units through `physics@pixelsPerMeter`. Where a particle starts: the contact point lies
+inside the owner's surface by as far as the body went on before its contact was found, and by the time most are
+launched the crater has grown, its rim risen over places that were level, so a particle born at the height of the
+original plane is under the surface and the surface pushes it down through the ground. Each particle therefore
+starts from the nearest point of the owner's surface to the contact point (`sr_sim::surface::nearest`, for
+spheres, boxes and meshes) moved to its launch distance in the tangent plane, taken through the crater's map at
+the progress of its own instant, and clear of the surface along the owner's geometric normal by the radius it
+collides with (`collisionRadius` times one plus `scaleVariance`, plus `collisionTolerance`). With the rocks' own
+collision radius of 0.17 m none of the 4000 particles of the land scene ends below the ground (commit 68e9dd2,
+2026-10-05, test crater_ejecta_ground; the counts before are in the ledger); with 0.02 m, smaller than the distance between the chords of the 1 m facets
+of the ground and the true bowl and rim, about 1500 still end below it.; gravity, drag and colliders are
+those of the emitter, and ejecta born before `emissionStart` or at or after `emissionEnd` are not
+made. More particles than `maxParticles` is an error, not a truncation.
+
+Not read in a primary source: Holsapple and Housen (2007), Schmidt and Housen (1987),
+Housen, Schmidt and Holsapple (1983), Pike (1977) and Gault and Wedekind (1978) are known
+through Holsapple's documents and the papers that cite them. The calculator note's table
+and Holsapple (1993) were read directly.
+
+#### Coupled solvers (rigid world and ocean)
+
+An ocean whose `colliders` list a rigid body forms a group with the rigid world; no attribute
+says so. Each member can be replayed alone, so the members do not ask each other again (that
+would restore the other's checkpoints in turn): the ocean writes the outcome of each of its
+canonical steps, once, into an append-only exchange log of small records, and the rigid world
+reads from it the load for each of its steps. Writing a step again must reproduce its record to
+the last bit, or the write is a divergence error; the log has an internal byte budget (16 MiB)
+whose overflow is an error; nothing is dropped, because a record dropped could not be replayed.
+
+The rigid world's step that starts while the ocean's canonical step `m` is the last completed
+reads the outcome of step `m - 1`: a delay of one whole ocean step. It is what makes the
+exchange causal, because to advance a step the ocean samples the bodies at its start and at the
+next canonical instant (to measure their velocity), so it reads the rigid world a full step
+ahead of the outcomes it has. A group therefore applies its ocean before the rigid world in a
+frame; the ocean's steps pull the rigid world ahead in time order, and the rigid world never
+needs an outcome that does not exist. A load that is not there is an error that names the body,
+the step and how far the ocean has got, never a stand-in: the last known value would make the
+result depend on the order of calls. Smoke and 3D particles may read the rigid world up to one
+of their own steps past a frame, so after answering a frame the group steps the ocean on to the
+outcomes those readers can ask for (the longest `dt` among the smoke volumes and particle
+systems that collide with the group's bodies); a group therefore simulates a little beyond the
+instant asked for (in the cases tried, smoke with a `dt` of 0.2 s read the rigid world no further than the ocean had already reached, so the extension is a tested safeguard that no scene has needed). The rigid world takes a `Load3` (force and torque, scene axes and units) per
+dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
+loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
+
+Every member of a group runs on the composition clock (the ocean's local time is the
+composition time less its start, with no remapping), because the exchange is indexed by it. The
+rigid world's frame memory, checkpoints and the log together
+make a backward request cheap: it is answered from the frame memory, or by restoring a
+checkpoint and replaying with the logged loads, and the two agree bit for bit.
+
+Internal edges of meshes (`physics@fixInternalEdges`, default false). The contact of a body with a mesh of
+triangles is reported against the triangle edge or corner it meets, and the normal there tilts with the
+tessellation. With the attribute true the world builds its meshes with the parry flag that takes adjacent
+triangles into account (`FIX_INTERNAL_EDGES_TWO_SIDED`, the mesh taken as two-sided: the one-sided flag discards the
+contacts of a mesh wound the other way, which loses the impacts on a sphere's mesh), and a flat mesh gives its own
+normal in every tessellation. The attribute changes the motion of every 3D body that lands or slides on a mesh,
+which is why it is off, and a physics cache baked with it carries it in its identity (a world without it hashes as
+it did). Crater impacts take their axis and speed from the owner's surface either way. The impact scenes set it;
+their sweeps are the same orderings with it on and off. Measured: grounds of 8, 13 and 40 cells with moved
+corners and alternating diagonals (test `internal_edges` of sr-sim, commit 90ce0f1, 2026-10-05, a deterministic
+result): with the attribute the normal is (0, 1, 0) to 1e-9 and the body is not kicked sideways; without it the
+normal tilts by up to 0.149. On the 1 m ground of the land scene a rock arriving at 60 degrees got, without it, a
+contact normal (-0.103, -0.045, -0.994), a normal speed of 91.2 m/s for the authored 86.6, and was pushed 7.35 m
+across its line of travel in 4 s (0.42 m with the edges fixed): a single run with a disposable program on
+2026-10-04, before commit b8eaa4b, not a test and not repeated. The normal speed of the land scene with the
+attribute is 86.63 m/s for the authored 86.60 on grounds of 8 to 160 segments (test `crater_normal`, same commit
+and date).
+
+Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
+first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
+weight of the water it displaces (density 1000 kg/m3 and the ocean's gravity) upward through the centroid of
+the submerged volume, which turns a tilted body, and with a quadratic form drag on its vertical motion,
+`-(1/2) rho C_d A |v| v`, `C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact
+literature) and `A` the area the submerged part presents from above, limited to what stops the body within a
+step. The submerged volume is that of the body's shape (analytic for a sphere, a closed mesh for a box,
+cylinder, cone, capsule, mesh or decomposition) below the water's free surface under the body: the plane of
+the per-body samples below, from the canonical step before the last one the ocean has completed, or the
+rest level, `waterLevel`, in the ocean's own axes while there is no such step or the body holds no wet
+column. The load is held for the whole step and evaluated where the body will be halfway through it, because
+a position-dependent force held from the start of a step adds energy (the motion grows) and from the middle
+adds none. The waterline is a spring of stiffness `rho g A_wl` and the explicit step is stable only if its
+frequency times the step is below 1.8: a body too light for `physics/@fixedStep` is an error that names
+it, not a motion that blows up. Such a document cannot be baked into a physics cache, since the loads come
+from the water.
+
+Reading the surface under the body gives the radiation damping that a rest level lacks: the body's motion
+raises and lowers the water it floats on, and the water takes the energy away. With `bedResponse="hydrostatic"`, a ball of 2094 kg and 1 m
+radius, dropped 1.5 m into a closed 16 m ocean 20 m deep (test `ocean_buoyancy`, which pins the response; the figures
+are those of commit 76618aa, 2026-10-04, and the test passes at 90ce0f1, 2026-10-05; not repeated), is within 3 cm of its draft for good from 8.75 s
+reading the surface and from 24 s at the rest level, and 60 s later is 1.1 cm below the draft the weight
+needs (1.2 cm above at the rest level); with no drag at all it settles from a swing of 1.2 m to under 10 cm
+by 15 s, where at the rest level it kept bobbing. No linear damping term is added: the algebraic
+convergence of the floating ball is the radiation damping, and the surface plane under a body is not
+the undisturbed surface while the body is displacing water (the water it displaces stands above the rest
+level, so the plane is higher than the swell), which the draft at rest does not feel because the surface
+is flat again then.
+
+`full` also gives the body back the horizontal momentum it gave the water. The momentum per unit density
+that the body gave in a canonical step, `p`, becomes a force on the body's centre, in the ocean's horizontal
+axes mapped into the world, `-rho p / (s^3 dt)` (`s` scene units per metre, `dt` the canonical step), held
+for exactly the rigid steps that read that canonical step: a canonical step that is a whole number of
+rigid steps is read by that number of them, counted in integers, since a window of one rigid step more or
+less is a few per cent of the momentum. It is read one canonical step late, by the rule of the group, so
+the momentum of the body and the water is conserved to what is in flight: in a closed basin of 160 m (`bedResponse="hydrostatic"`), before
+the waves reach the walls, a ball of 16 755 kg at 3 m/s and a canonical step of 0.1, 0.05 and 0.025 s keeps
+total momentum to within 13 %, 10 % and 4.8 % of its own at the worst of three instants (test `ocean_full`,
+commit 90ce0f1, 2026-10-05, a deterministic result: 13.2 %, 10.5 % and 4.8 %). Roll is not damped, there is no
+added mass, and the force acts at the centre.
+
+The pressure of the water on a body, in the exchange. The per-body sample's `pressure` is the bed source of the
+scheme itself, credited to the body by the ocean solver (the paragraph on `BodySample::pressure` above), and the
+exchange log records it with the momentum the body gave the water, to the bit on a replay. It is not applied to
+the body: the force on it is the push above. In the closed basin of the test above (the ball at 3 m/s, canonical
+step 0.05 s, first order; the momentum of the water along x against the sum of the records of the exchange up to
+the canonical steps that have ended by 1, 2 and 3 s; test `the_water_has_the_momentum_the_exchange_says_the_body_gave_it_and_the_pressure_is_what_is_left`,
+commit 1ba58cd, 2026-10-05, deterministic): the water has 3.8 %, 3.1 % and 11.0 % more than the body gave it with
+`bedResponse="hydrostatic"` and 10.7 %, 12.3 % and 14.6 % more with `"depthFiltered"`; with the credit it has
+0.00 %, 0.00 % and 0.00 % more in the first and 0.01 %, 0.04 % and 0.09 % in the second, the residuals of the
+solver's own balance in the paragraph above.
+
+Per-body water samples. With bodies in an ocean the solver tags every occupied column with the body
+that holds most of it (its position in the ocean's `colliders` list, which counts the surfaces
+of craters; the lowest position wins a tie) and, together with the exchange of each completed canonical
+step, offers the driver for every body that holds a column at the end of the step or gave the water
+momentum during it: the horizontal momentum, per unit water density, that this body gave the water
+in the step (the part of the total exchange that its columns gave; the sum over bodies is the total
+to rounding, since a column's momentum is credited whole to its owner); and, from the state at the end
+of the step, the least-squares plane through the free surface of the wet columns of the body's
+footprint (its ordinate at their centre and its two slopes), the depth-weighted mean horizontal water
+velocity under the footprint, and the mean bed ordinate under it with the body's thickness counted
+as bed. Under a body the water that it displaces stands above the rest level, since a column keeps
+its depth while the body raises its bed, so the plane there is not the undisturbed surface. A direction
+in which the footprint has no extent (one row of columns, one column) has no slope. A replay of a step
+offers the same samples bit for bit, restored from a checkpoint or not. The rigid world reads them, from
+the group's log, for the surface under each body and the reaction on it. Without bodies,
+or without tags, nothing changes, and tagging does not alter the water.
 
 #### Fracture (native scene, rendering and cache integration implemented)
 
@@ -1289,15 +2224,35 @@ the numbered source geometry before release; its fragments freeze the selected
 geometry at release and become dynamic. **MSQ4** continues to reject dynamic
 mesh-sequence source bodies and direct pyro/particle references to sequence objects.
 
-Fracture bakes use **SRPHYS03**. Its little-endian header contains the eight-byte
+Physics bakes use **SRPHYS04**. Its little-endian header contains the eight-byte
 magic, f64 step/start, u64 2D-body and soft-body counts, each soft point count,
-u64 3D-body count (including fragments), u64 fracture-event count, and u64 frame
-count. Each row retains the version-2 2D/soft/3D pose fields, followed by one f64
-participation flag per 3D body and one f64 fired flag per event. Flags must be
-exactly zero or one. Counts must match the compiled scene. Geometry is reconstructed
-from immutable scene assets; the cache stores state, not meshes. Documents without
-fracture still write SRPHYS02; SRPHYS01/02 remain readable. Baking samples exact
-physics boundaries without an added timestamp epsilon.
+u64 3D-body count (including fragments), u64 fracture-event count, u64 frame count,
+a 32-byte SHA-256 identity of the document's physics, and a u64 contact count. Each
+row holds the 2D poses, the soft lattices, seven f64 per 3D body (position and
+quaternion), one f64 participation flag per 3D body and one f64 fired flag per
+fracture event (flags must be exactly zero or one), and six f64 per 3D body for its
+linear velocity (scene units per second) and angular velocity (degrees per second).
+After the rows come the contacts the 3D rigid bodies resolved, in step order, each a
+fixed 96-byte record: u64 step, two i32 body indices (the first is never a boundary,
+`-1` is a boundary slab), point, normal, normal impulse and the relative velocity of
+the second body before the step. A contact names a step the file holds, bodies it has,
+and finite numbers. Only impacts are recorded: a pair of bodies whose contact points together push with
+no more than twice the weight impulse of all dynamic bodies in one step is dropped at
+the source, and a pair that is recorded keeps all its points. A pair that nothing solved
+because both bodies were asleep or fixed is dropped too.
+
+The identity covers the 2D and 3D world definitions (bodies, shapes, joints, gravity,
+step, fractures; meshes by their numbers) and, for every baked step, what the document
+feeds the world: which bodies take part, the poses of those that follow animation, the
+force fields and the revision of every deforming surface. A version 4 cache whose
+identity is not the document's, whose pinned `cacheSha256` does not match, or that
+cannot be read is a document error: nothing is simulated in its place. Counts must match the compiled
+scene. Geometry is reconstructed from immutable scene assets; the cache stores state,
+not meshes. SRPHYS01 to SRPHYS03 remain readable and keep their behaviour: they carry
+no identity, only the counts and the optional file hash are checked, and a mismatch
+reports a problem and simulates. `Evaluator::physics_trace` returns the velocities and
+contacts, from the verified cache or from a simulation, and the two agree exactly.
+Baking samples exact physics boundaries without an added timestamp epsilon.
 
 Particle and pyro collider references expand a released object into its enabled
 pieces and stop using the retired source surface. The closed, centroid-relative
@@ -1305,7 +2260,7 @@ partition meshes already include object scale; world-space piece poses therefore
 replace the original object's transform. Particle sweeps use the displacement and
 quaternion difference between sampled poses. Smoke obstacles transform each piece
 into domain coordinates and prescribe its translation/rotation boundary velocity,
-including reflected or rotated domains. Both paths work with live and SRPHYS03
+including reflected or rotated domains. Both paths work with live and SRPHYS04
 physics and deterministic backward seeks. Collider state is sampled on each
 consumer's existing fixed-step clock; a release inside a consumer step is observed
 at its next sampled boundary, so authors should align physics and consumer steps
@@ -1339,14 +2294,14 @@ bounded surface-nets API validates finite inputs, supports resolution through 25
 checks conservative scalar/index-grid plus worst-case output capacity before
 allocation, and caps field work at 100 million blob evaluations (including the
 normal-sampling allowance). Empty/open/invalid solids still fail fracture kernel
-validation. The mesher now emits crossed edges on each first grid plane; omitting
+validation. The mesher emits crossed edges on each first grid plane; omitting
 those faces previously left holes when the surface approached the grid boundary.
 Tests verify closure across sphere sizes, bounded admission, release-time animated
 blob sampling and raster/path-traced silhouette/hole preservation with replay.
 Trigonometric seam canonicalization applies only to round generated primitives;
 text, path and clay vertices keep their generated coordinates.
 
-Ordinary text, path and clay solids now also supply particle and smoke colliders,
+Ordinary text, path and clay solids also supply particle and smoke colliders,
 including source removal and moving-piece replacement after fracture. Automatic
 static/kinematic rigid bodies use triangle surfaces rather than filled box/convex
 proxies, preserving holes before release; dynamic automatic bodies use convex
@@ -1454,6 +2409,94 @@ projection. Filter halos cover every denoising pass; tile edges must not become
 image edges. Peak image working-buffer allocation is bounded independently of
 frame area. Geometry/texture limits remain separately validated and reported.
 
+### Light through water and glass (path tracer)
+
+Materials with `transmission` above 0 refract in the path tracer. Three
+behaviours apply to them, none needing a schema attribute:
+
+- **Dome behind glass.** A path that crosses a refracting surface and then
+  reaches nothing, or reflects off it up to the sky, sees the 2D layers behind
+  the 3D pass and, where those layers leave the pixel open, the visible dome
+  (layer colour plus one minus its alpha times the dome). A dome that is not
+  visible stays hidden.
+- **Absorption.** `attenuationColor` and `attenuationDistance`, which the
+  rasteriser also uses, apply to path-traced paths: a path that refracts into
+  a surface carries the Beer–Lambert coefficient `-ln(colour) / distance` per
+  channel until it leaves, so after one attenuation distance of water the light
+  left is the colour itself. A colour without a distance, or a white colour, does
+  not absorb. Absorption is tracked only in scenes that have a transmissive
+  material; other scenes keep their pipeline, pixels and speed.
+- **Analytic lights below a refracting surface.** The shadow ray of a surface
+  seen from inside the denser medium (a path that refracted in before reaching
+  it) does not stop at the interface. It is refracted there, found by trace and
+  refined once, so that it leaves toward the light, and the contribution carries
+  the blockers on both sides, the interface's tint, transmission and Fresnel
+  transmittance, the factor `cos(theta_air) / eta^2` that goes with the solid
+  angle the interface changes (radiance is not scaled by `1 / eta^2` at
+  refraction in this renderer, so this factor is what makes the sum agree with
+  brute force) and the absorption along the water path. Shadows cast by glass on
+  surfaces in air are black. The dome reaches submerged surfaces by sampled paths
+  and needs no such term.
+
+Scenes without a transmissive material render the same bytes at the same speed.
+The ocean's default spray (transmission .6) is such a material, so frames with
+whitewater are lit by this path.
+
+Agreement with brute force (the light replaced by an emissive copy that paths
+find, 1024 samples, flat water 4 units over a diffuse floor, 320×180; commit
+c6195de, NVIDIA adapter, 2026-10-05; the renders are deterministic, so the figures
+do not depend on load), as the open floor's brightness under water over its
+brightness dry: sun 0.604 against 0.613; point light 0.728 and sphere light 0.728
+against 0.770 (the light's radiance is taken at the straight distance, so a near
+light is a few percent dim). Closed form of a vertical sun over absorbing water:
+within 1 % per channel. A submerged box's shadow is 10.0 units long where the
+refracted direction gives 9.9 and the straight one 15.1. Under steep waves
+(amplitude 1.2, wavelength 10) the floor is never brighter than the dry floor and
+stays within 5 % of the flat sea's mean, with no flare (tests in
+`crates/sr-gpu/tests/water_light.rs`; ledger: "Light through water and glass in
+the path tracer").
+
+Dome light needs no term of its own below the surface: with 4 bounces a floor
+under water agrees with 24 bounces within 3 % (test
+`dome_light_through_water_does_not_depend_on_the_bounce_limit`, commit c6195de,
+2026-10-05, NVIDIA).
+
+On a software adapter the three brute-force comparisons render half-size frames
+(the same view, the patch scaled with them) at 1024 samples, with the tolerance the
+test states or four times the noise of the references' means when that is larger
+(commit d9aeb32, 2026-10-05, llvmpipe at a load average of 15: the three tests take
+370 s for the three tests, 597 s for the whole test binary instead of 2018 s). The half-size reference of the point and sphere
+lights reads about 5 % above the full-size one (0.810 against 0.770), a bias of the
+half-size frame that the 15 % margin absorbs: the measured errors are 2.1 % (sun)
+and 10.0 % and 10.1 % (point and sphere); `SR_BRUTE_FORCE=full` forces the full size
+on any adapter and nothing reduces them on a GPU.
+
+Known limits. A camera that starts under the water, or a surface reached
+without a refraction into its medium, is not "inside": the sun does not reach
+it (a test pins this). The shadow ray follows the first transmissive interface;
+a second interface along it (an overturning wave, layered media) is not
+followed, and where the refinement finds no way out toward the light (a steep
+wave, grazing light) the light contributes nothing there: those samples are
+dark, never bright. A textured transmissive surface uses its uniform base
+colour for the tint in the shadow ray. A smoke medium and refracting surfaces
+in one pass are lit independently: the shadow ray does not cross the medium.
+Caustics (light focused by the water surface) are not produced; flat water is
+the exact single-refraction case, a wavy sea an approximation. A transmissive
+plane that covers the whole sea (the `farSea` plane of `impact-ocean.scene.xml`, when its
+water material is transmissive)
+tints and hides everything below it as well.
+
+Two software-adapter tests are unstable on both commits measured. On 2026-10-05
+(llvmpipe, load average 7 in the interleaved set, 3 to 6 in the others; commits
+60a458c and b883ec5; raw logs in the ledger), `effect_costs`
+`layers_whose_content_changes_are_still_sampled_one_by_one` failed 4 of 10 runs on
+60a458c and 2 of 10 on b883ec5 (PSNR 30.7 to 39.1 dB against 40), and 1 of 15 and 0
+of 15 with one llvmpipe thread (`LP_NUM_THREADS=1`); `composite`
+`polygons_and_stars_lie_on_the_inscribed_ellipse` failed 2 of 50 and 4 of 50 runs with
+the default threads and 0 of 80 with one llvmpipe thread. The tests measure image quality and pixel
+values, not time; the difference between the two commits is not significant, and the
+conclusion holds for these two commits only.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
@@ -1553,6 +2596,10 @@ Also includes `assetProvenance`, inventoried below.
 | `temperatureScale` | positiveDecimal | Default `1` |
 | `stepSize` | positiveDecimal | Default `1` |
 | `maxSteps` | xs:positiveInteger; maxInclusive=65536 | Default `2048` |
+| `lighting` | xs:string; enumeration `exact`, `grid` | Default `exact` |
+| `lightGridCell` | xs:positiveInteger; maxInclusive=64 | Default `1` |
+| `lightGridDomeDirections` | xs:positiveInteger; minInclusive=8, maxInclusive=512 | Default `64` |
+| `lightGridMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
 
 ### `pyroType`
 
@@ -1577,6 +2624,8 @@ Also includes `assetProvenance`, inventoried below.
 | `pressureTolerance` | positiveDecimal | Default `0.000001` |
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
+| `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
+| `advection` | xs:string; enumeration=semilagrangian, enumeration=maccormack | Default `semilagrangian` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `checkpointMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 | `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
@@ -1595,6 +2644,11 @@ Also includes `pyroShape`, inventoried below.
 | `velocityRateY` | xs:double | Default `0` |
 | `velocityRateZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `pyroImpulseType`
 
@@ -1602,13 +2656,18 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
-| `time` | nonNegativeDecimal | Required |
+| `time` | nonNegativeDecimal | Required unless `crater` is given (PYC3) |
 | `density` | nonNegativeDecimal | Default `0` |
 | `temperature` | nonNegativeDecimal | Default `0` |
 | `velocityX` | xs:double | Default `0` |
 | `velocityY` | xs:double | Default `0` |
 | `velocityZ` | xs:double | Default `0` |
 | `expansion` | xs:double | Default `0` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (PYC1 to PYC4) |
+| `heatFraction` | nonNegativeDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.1` |
+| `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
+| `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
+| `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
 ### `particles3DType`
 
@@ -1694,6 +2753,7 @@ Also includes `pyroShape`, inventoried below.
 | `sprite` | xs:IDREF | Optional; absent |
 | `forceFields` | xs:IDREFS | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
+| `gas` | xs:IDREF | Optional; absent; the object3D whose native pyro volume drags the particles (P3D11) |
 | `emitterShape` | xs:string; enumeration=point, enumeration=box, enumeration=sphere, enumeration=mesh | Default `point` |
 | `shape` | xs:string; enumeration=sphere, enumeration=billboard, enumeration=streak, enumeration=mesh | Default `sphere` |
 | `sizeEnd` | nonNegativeDecimal | Optional; absent |
@@ -1702,6 +2762,18 @@ Also includes `pyroShape`, inventoried below.
 | `opacityEnd` | unitDecimal | Optional; absent |
 | `sizeCurve` | curveType | Default `linear` |
 | `colorCurve` | curveType | Default `linear` |
+
+### `burst3DType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | xs:double | Required unless `crater` is given (P3D7) |
+| `count` | xs:positiveInteger | Required |
+| `repeat` | xs:nonNegativeInteger | Default `0` |
+| `interval` | positiveDecimal | Default `1` |
+| `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
+| `angle` | nonNegativeDecimal; maxInclusive=90 | Optional, with `crater`; engine default `45` degrees |
+| `angleSpread` | nonNegativeDecimal; maxInclusive=90 | Optional, with `crater`; engine default `15` degrees |
 
 ### `oceanType`
 
@@ -1745,11 +2817,17 @@ Also includes `pyroShape`, inventoried below.
 | `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `meshMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
 | `surfaceMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `128` |
-| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000000 | Default `100000000` |
 | `boundary` | xs:string; enumeration=closed, enumeration=open, enumeration=periodic | Default `closed` |
 | `bathymetryEncoding` | xs:string; enumeration=red, enumeration=terrarium, enumeration=mapbox | Default `red` |
+| `order` | xs:string; enumeration=1, enumeration=2 | Default `1` |
 | `material` | xs:IDREF | Optional; absent |
 | `bathymetry` | xs:IDREF | Optional; absent |
+| `colliders` | xs:IDREFS | Optional; absent |
+| `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy, enumeration=full | Default `none` (the water does nothing to the bodies); `buoyancy` and `full` need `colliders` (OCN8) |
+| `bodyDrag` | nonNegativeDecimal | Optional, with `colliders` (OCN9); form-drag coefficient of the vertical motion of a body in the water (with `bodyCoupling`) and of its horizontal exchange with it (`bedResponse="depthFiltered"`), default `1.0` |
+| `bedResponse` | xs:string; enumeration=depthFiltered, enumeration=hydrostatic | Default `depthFiltered`; no effect without `colliders` |
+| `splash` | xs:IDREFS | Optional; absent; the particles3D emitters whose particles fall into this ocean, each throwing out the ejecta of a crater (OCN13) |
 
 ### `oceanWaveType`
 
@@ -1773,6 +2851,7 @@ Also includes `pyroShape`, inventoried below.
 | `velocityX` | xs:double | Default `0` |
 | `velocityZ` | xs:double | Default `0` |
 | `type` | xs:string; enumeration=displace, enumeration=add-water | Default `displace` |
+| `source` | xs:IDREF | Optional; a body that enters the water (OCN10 to OCN12); excludes the attributes above |
 
 ### `whitewaterType`
 
@@ -1790,7 +2869,8 @@ Also includes `pyroShape`, inventoried below.
 | `end` | nonNegativeDecimal | Optional; absent |
 | `maxParticles` | xs:positiveInteger; maxInclusive=1000000 | Default `10000` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `64` |
-| `maxWork` | xs:positiveInteger; maxInclusive=1000000000 | Default `100000000` |
+| `maxWork` | xs:positiveInteger; maxInclusive=1000000000000 | Default `100000000` |
+| `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
 
@@ -1798,6 +2878,13 @@ Also includes `pyroShape`, inventoried below.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
+| `id` | xs:ID | Optional; names the crater so that what its impact causes can refer to it |
+| `source` | xs:IDREF | Optional; the dynamic rigid body that makes the crater (CRT6 to CRT8) |
+| `capture` | xs:boolean | Default `false`; only with `source` (CRT9): the body that makes the crater is arrested by it |
+| `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
+| `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
+| `strength` | nonNegativeDecimal | Optional with `source`: Pa |
+| `gravity` | positiveDecimal | Optional with `source`: m/s2; default the physics gravity |
 | `centerX` | xs:double | Default `0` |
 | `centerY` | xs:double | Default `0` |
 | `centerZ` | xs:double | Default `0` |
@@ -1909,6 +2996,76 @@ pre-impact, impact, late settling and reverse replay; production-size execution
 is practical with `cargo test --release -p sr-eval --test cinematic_impact`.
 The full encoded-sequence gate below remains independently required.
 
+Two further examples are written in physical units (`physics/@pixelsPerMeter="1"`, metres and
+seconds, gravity declared) and author no time for any effect:
+[`impact-land.scene.xml`](examples/cinematic-impact/impact-land.scene.xml) (a rock of 2 m radius and 2700
+kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and its ejecta, 4000 particles
+that hold 80 % of the crater's mass, are consequences of the contact) and
+[`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
+second-order ocean 20 m deep that carries it with `bodyCoupling="full"` and makes a crater in the
+seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
+no effect has a time attribute, that nothing happens before the contact, that the crater, the dust, the
+heat in the dust and the ejecta (their mass, which is 0.8 of the crater's, and their reach) grow with speed,
+mass and angle, that an oblique impact carries the ejecta downrange, that the ocean's water volume is conserved to the last
+cell and the dust is what the law gives, and that any order of instants, a fresh evaluator and a replay
+from the first checkpoint give the same bits. Limits that the scenes show and the engine does not hide:
+
+- The ejecta of the land scene land on the ground, which is their collider, with a restitution of 0.15, a
+  friction of 0.7 and the contact radius of the 0.34 m rocks they stand for, 0.17 m (the friction is about tan 35
+  degrees, the angle of repose of coarse rock debris, inside the 0.6 to 0.85 that Byerlee's law gives for rock on
+  rock: the engine's choice, not a measurement of this ejecta, and the literature ranges are from memory and not
+  checked). They are born clear of the surface the crater has by then, so the heaviest rock of the sweeps
+  (270 000 kg, the biggest crater) runs to the end like the others. Measured by `impact_scenes` (commit e22458b
+  on fa63e5d, 2026-10-05, deterministic): with the authored rock 3748 of the 4000 are under 0.2 m/s at 5.9 s and
+  none is below the ground; with the heaviest rock 1861 of 4000, none below the ground over its 80 m, and 29 that
+  flew past its edge and fall on nothing. The ocean scene has no ejecta: they would be launched from the sea bed
+  and ignore the water, and with the authored 20 m of water at most 34 of 3000 ejecta of the biggest rock of the
+  sweeps reach the surface (commit 3078153, 2026-10-05).
+- The ocean scene has no smoke: the crater is under water and the smoke solver has no smoke inside water,
+  so a smoke source from that crater would make a cloud on the sea bed.
+- In the ocean scene, with `bodyCoupling="full"` and the cavity of the rock's entry (`waterImpulse@source`), the
+  sweeps are run with the ocean answering by the depth of the water (`bedResponse="depthFiltered"`, the default) and
+  by the hydrostatic pressure (`"hydrostatic"`), each written into the document by the tests, on 3 m cells, and
+  `tools/impact_sweeps.sh` prints them. What the tests assert is an order, never a value. The far wave of the sea
+  (the highest the water stands above its rest level in the ring 20 to 40 m from where the rock enters, from the
+  moment the rock is in it) grows with the speed (60, 100 and 150 m/s at 60 degrees) and with the mass (60 000, 90 478
+  and 270 000 kg), and the far wave of a rock that arrives straight down grows with both, in both responses, over the
+  whole sweep and over three lighter or slower points (40, 60 and 80 m/s; 20 000, 40 000 and 60 000 kg), chosen
+  because the cavity of the first model was limited at the heavier ones; the crater on the seabed grows with speed and
+  mass; the water is conserved to the last cell; and the highest surface anywhere grows with the speed at 60 degrees.
+  The highest surface anywhere by mass at 60 degrees, by speed and mass of a vertical plunge, and every sweep by
+  angle are recorded in ignored tests and not asserted: the first pair of the mass sweep is 0.4 % apart.
+  Measured by `impact_scenes` (commit e22458b on fa63e5d, 2026-10-05, load1 13 to 15; the values are deterministic
+  and the load does not change them; the amplitudes change with the cavity's kernel, so this is a dated
+  measurement and not a criterion), depth filter | hydrostatic, metres. Far wave: by speed 0.91, 1.51 and 2.30 |
+  0.89, 1.54 and 2.31; by mass 1.14, 1.51 and 2.71 | 1.18, 1.54 and 2.76; a vertical plunge by speed 0.99, 1.72 and
+  2.56 | 1.01, 1.73 and 2.57, by mass 1.34, 1.72 and 2.94 | 1.34, 1.73 and 2.99; the three lighter or slower points
+  by speed 0.61, 0.91 and 1.17 | 0.61, 0.89 and 1.22, by mass 0.62, 0.93 and 1.14 | 0.66, 0.91 and 1.18. The depth of
+  the cavity by the law for those rocks is 7.5 to 15.8 m, under the 20 m of water. Highest surface anywhere: by speed
+  4.17, 4.74 and 7.52 | 4.31, 4.84 and 7.58; by mass 4.72, 4.74 and 8.22 | 4.79, 4.84 and 8.42; a vertical plunge by speed
+  4.53, 5.82 and 8.07 | 4.58, 5.85 and 8.02, by mass 4.71, 5.82 and 8.55 | 4.72, 5.85 and 8.60; by angle 30, 60 and 90
+  degrees 4.10, 4.74 and 5.82 | 4.11, 4.84 and 5.85. The crater on the seabed is 2.81, 3.42 and 4.09 m in radius by speed
+  and 2.15, 3.42 and 7.49 m by mass (depth 1.18, 1.43 and 1.72 m by speed), and 2.77, 3.42 and 3.63 m by angle, the same
+  in both responses. The wave of the crater alone (the sea with the bed as its only collider, no cavity) grows with
+  speed, mass and angle in both responses: by speed 0.006, 0.012 and 0.021 m with the filter and 0.16, 0.27 and
+  0.40 m without. With `capture` the rock rests in its crater and without it the rock lies 8.5 m (filtered) or 0.7 m
+  (hydrostatic) from it at 6 s. A body lighter than water floats and makes no
+  crater.
+- Everything in one ocean. A test over 4 m of water (the seabed raised, the rest of the scene as authored) puts
+  the bed cratered by contact and the rock as colliders, `bodyCoupling="full"`, the cavity of the entry and 3000
+  ejecta that fall into the same ocean (`splash`), in the depth-filtered response, with the ocean keeping no
+  checkpoint. Nothing fails, the water is conserved to a part in 1e9, and the ocean, the rock and the particles are
+  the same to the bit at any time asked in any order and from a fresh evaluator. 11 of the 3000 ejecta fall in
+  (0.20 m3), because the rest are thrown from the seabed and stay under water (test `impact_scenes`, commit
+  b1552ce, 2026-10-05, deterministic). The scheduling that makes this possible is in the paragraph on ejecta falling
+  into an ocean; the whole-frame cost of the ocean side of the scene is in the ledger, milestone "Phase budget".
+- The dust is as hot at 30 degrees as at 90: the heat falls as sin^1.5 of the angle and the dust volume as
+  the speed along the normal to the power 1.7, so the temperature rise barely moves (19.20, 19.07 and 19.08 K
+  at 30, 60 and 90 degrees at 100 m/s with the default heat fraction of 0.1); the heat held by the dust grows
+  with the angle (5.7, 13.6 and 17.1 cubic metres of dust times kelvin), and the temperature grows with speed
+  and with mass (test `impact_scenes`, commit e22458b, 2026-10-05, deterministic). A slow impact in physical
+  units is a cold cloud.
+
 The accompanying conformance suite must cover all of the following:
 
 - Valid minimal examples for each new element, every enum branch, default
@@ -1919,6 +3076,17 @@ The accompanying conformance suite must cover all of the following:
 - Uniform-density transmittance against Beer–Lambert, transformed media,
   overlapping media in reversed order, inside-volume cameras, mesh occlusion,
   emission, colored scattering and shadowed smoke at changing viewpoints.
+- Light through water and glass: a floor under water lit by the sun, a point
+  light and a sphere light against brute force, absorption against its closed
+  form and by distance, the shadow's refracted position, steep waves without
+  gain or flares, glass shadows in air unchanged, an untouched transmissive object
+  leaving the picture alone, a camera under the water as documented, tiled equal
+  to whole frames, and glass over nothing showing the visible dome.
+- Light grids: default exact lighting unchanged by their existence; grid lighting
+  against the exact march for each light type, environment (isotropic and
+  anisotropic), cameras inside the volume, surfaces inside the domain, overlapping
+  media, advected and multi-frame media, tiled against whole frames, determinism,
+  memory and node-count errors, and the measured limits above (VOL10 included).
 - Pyro divergence reduction, source timing, cooling/dissipation, obstacles,
   forward/backward seeking and cache/live equivalence.
 - 3D particles' z motion, distribution, lifetime/cap behavior, delayed birth,
@@ -1946,7 +3114,8 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-31-rule scorecard remain pending implementation reconciliation.** Inventory
+rule scorecard remain pending implementation reconciliation** (the Schematron has 169 assertions at
+commit fa63e5d, 66 of them in the cinematic families OCN, P3D, CRT, PYC, PYRO, VOL, FRX, MSQ and GEO). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.

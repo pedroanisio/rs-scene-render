@@ -15,7 +15,7 @@ pub mod pipeline;
 pub mod segment_audio;
 pub mod segments;
 
-pub use pipeline::{adhoc_output, deliver, Options, Parallel, RenderAdapter, Report};
+pub use pipeline::{adhoc_output, deliver, output_uses_3d, Options, Parallel, RenderAdapter, Report};
 
 /// Delivery errors.
 #[derive(Debug, thiserror::Error)]

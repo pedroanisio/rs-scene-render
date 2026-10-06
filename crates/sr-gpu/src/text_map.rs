@@ -421,7 +421,14 @@ pub fn map_drawing_as(
                     }
                     run.get_or_insert_with(|| (fpaint.clone(), fo, Vec::new())).2.extend(rings.iter().cloned());
                     if spaint.is_some() && fw > 0.0 && !rings.is_empty() {
-                        strokes.push((rings, spaint.clone(), fw, fo));
+                        // `progress` traces each ring from its first vertex by the same fraction, closing edge
+                        // included, like a line; the fill stays whole
+                        let outline = if progress < 1.0 {
+                            measure::trim(&rings, 0.0, progress, 0.0, TrimMode::Simultaneous)
+                        } else {
+                            rings
+                        };
+                        strokes.push((outline, spaint.clone(), fw, fo));
                     }
                     if !pl.lines.is_empty() {
                         let mut lines = polys_of_rings(&pl.lines, false);

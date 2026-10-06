@@ -270,6 +270,13 @@ impl Timer {
         })
     }
 
+    /// A free begin/end pair labelled `label`, for a pass outside the effect chain.
+    pub(crate) fn labelled_pair(&mut self, label: &str) -> Option<u32> {
+        let a = self.pair()?;
+        self.labels.push((label.to_string(), a));
+        Some(a)
+    }
+
     /// Copies the queries written so far where `read` can map them.
     pub fn resolve(&self, enc: &mut wgpu::CommandEncoder) {
         if self.used > 0 {
@@ -298,6 +305,13 @@ impl Timer {
             frame_ms: self.frame.map(ms),
             passes: self.labels.iter().map(|(label, a)| PassTime { label: label.clone(), ms: ms(*a) }).collect(),
         }
+    }
+}
+
+impl GpuTimes {
+    /// Appends the passes of another timer (such as the path tracer's) to this frame's.
+    pub(crate) fn extend(&mut self, other: GpuTimes) {
+        self.passes.extend(other.passes);
     }
 }
 
@@ -1689,8 +1703,15 @@ impl Builder<'_> {
                 color_op(self, 17, v, Aux::None)
             }
             "selective-color" => {
+                // the window is centred on `hue` (degrees), or on the hue of `color` when one is given; `amount`
+                // mixes the adjusted picture with the original
+                let hue = match a.paint("color").and_then(|p| (cx.color)(&p)) {
+                    Some(c) => hue_of_linear(c),
+                    None => a.num("hue", 0.0),
+                };
+                v[1] = [amount.clamp(0.0, 1.0) as f32, 0.0, 0.0, 0.0];
                 v[0] = [
-                    a.num("hue", 0.0) as f32,
+                    hue as f32,
                     a.num("tolerance", 0.2) as f32,
                     a.num("saturation", 1.0) as f32,
                     a.num("brightness", 0.0) as f32,
@@ -1805,12 +1826,12 @@ impl Builder<'_> {
                 color_op(self, 73, v, Aux::Tex(plate))
             }
             "halftone" => {
-                v[0] = [
-                    (if sz >= 2.0 { sz } else { 8.0 } * px) as f32,
-                    if angle != 0.0 { angle } else { 45.0 } as f32,
-                    amount.clamp(0.0, 1.0) as f32,
-                    0.0,
-                ];
+                // the screen's angle is the authored one, the schema's default 0 included; ink is `color` (black)
+                // and the ground between the dots `paint` (opaque white)
+                v[0] =
+                    [(if sz >= 2.0 { sz } else { 8.0 } * px) as f32, angle as f32, amount.clamp(0.0, 1.0) as f32, 0.0];
+                v[1] = v4(colour("color", [0.0, 0.0, 0.0, 1.0]));
+                v[2] = v4(colour("paint", [1.0, 1.0, 1.0, 1.0]));
                 color_op(self, 74, v, Aux::None)
             }
             "glitch" => {
@@ -2831,6 +2852,25 @@ vec4 getToColor(vec2 uv) { return sr_to_user(texture(sampler2D(sr_aux, sr_smp), 
         format!("{pre}{defines}{body}{main}").replace("#define progress (sr_fx.v[0].x)\n", "")
     };
     Ok((glsl, v))
+}
+
+/// The hue, in degrees, of a linear colour as the colour operations see it: of its sRGB-encoded values.
+fn hue_of_linear(c: [f64; 4]) -> f64 {
+    let enc = |v: f64| if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    let [r, g, b] = [enc(c[0].max(0.0)), enc(c[1].max(0.0)), enc(c[2].max(0.0))];
+    let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+    let d = mx - mn;
+    if d < 1e-9 {
+        return 0.0;
+    }
+    let h = if mx == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if mx == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h * 60.0
 }
 
 #[cfg(test)]

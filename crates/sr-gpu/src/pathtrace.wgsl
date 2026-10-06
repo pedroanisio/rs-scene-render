@@ -3,6 +3,8 @@
 const PI: f32 = 3.14159265358979;
 override HAS_MEDIA: bool = false;
 override MEDIUM_LIGHTING: bool = false;
+// The scene has transmissive materials: paths track the medium they are inside (absorption).
+override WATER: bool = false;
 
 struct Params {
     // camera → world
@@ -38,6 +40,8 @@ struct Mat {
     maps: array<vec4<u32>, 6>,
     texture_params: vec4<f32>,
     borders: array<vec4<f32>, 6>,
+    // absorption coefficient per unit inside the enclosed medium (rgb)
+    attenuation: vec4<f32>,
 };
 
 struct Node {
@@ -362,9 +366,17 @@ fn frame_of(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(t, cross(n, t), n);
 }
 
-/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe).
-fn p_spec(s: Surf) -> f32 {
-    return clamp(mix(0.25, 1.0, s.metallic) , 0.05, 1.0);
+/// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe): the share
+/// of the surface's reflectance that is specular at this view angle, so that a dielectric seen at
+/// a grazing angle (water, glossy paint) spends its samples where the energy is. Any value in
+/// (0, 1) gives an unbiased estimate; a surface with no diffuse lobe (a metal) takes 1.
+fn p_spec(s: Surf, n: vec3<f32>, v: vec3<f32>) -> f32 {
+    let lum = vec3(0.2126, 0.7152, 0.0722);
+    let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+    let ls = dot(f, lum) * s.specw;
+    let ld = dot((vec3(1.0) - f) * s.albedo, lum) * (1.0 - s.metallic) * (1.0 - s.trans);
+    if (ld <= 0.0) { return 1.0; }
+    return clamp(ls / max(ls + ld, 1e-6), 0.05, 0.95);
 }
 
 fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -373,7 +385,7 @@ fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     let h = normalize(l + v);
     let nh = max(dot(n, h), 0.0);
     let vh = max(dot(v, h), 1e-4);
-    let ps = p_spec(s);
+    let ps = p_spec(s, n, v);
     return ps * d_ggx(nh, s.a) * nh / (4.0 * vh) + (1.0 - ps) * nl / PI;
 }
 
@@ -381,7 +393,7 @@ fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let tbn = frame_of(n);
     let u1 = rnd();
     let u2 = rnd();
-    if (rnd() < p_spec(s)) {
+    if (rnd() < p_spec(s, n, v)) {
         // GGX half vector
         let a2 = s.a * s.a;
         let ct = sqrt((1.0 - u1) / (1.0 + (a2 - 1.0) * u1));
@@ -515,12 +527,15 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     var col = vec3(0.0);
     var alpha = 0.0;
     var only_glass = true;
+    // absorption of the medium the path is inside (set where it refracts in, cleared where it leaves)
+    var in_sigma = vec3(0.0);
     var bounce = 0u;
     // surfaces met so far (transmission and opacity events do not count as bounces)
     var met = 0u;
     let max_b = u32(pp.cam.w);
     for (var step = 0u; step < 64u; step++) {
         let hit = trace(o, d, 1e30);
+        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }
         if (HAS_MEDIA) {
             let fog = volume_transport(o, d, hit.t);
             col += thr * fog.rgb;
@@ -542,7 +557,11 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                     let c = pp.view_proj * vec4(o + d * t, 1.0);
                     let uv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
                     if (all(uv >= vec2(0.0)) && all(uv <= vec2(1.0))) {
-                        col += thr * textureSampleLevel(backdrop, smp, uv, 0.0).rgb;
+                        // premultiplied: where the layers leave the pixel open, the visible dome shows
+                        let behind = textureSampleLevel(backdrop, smp, uv, 0.0);
+                        var seen = behind.rgb;
+                        if (pp.env.x > 1.5) { seen += (1.0 - behind.a) * env_radiance(d, ambient_diffuse, ambient_specular); }
+                        col += thr * seen;
                         break;
                     }
                 }
@@ -630,6 +649,7 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
                 d = normalize(t);
                 o = p - n * 1e-3;
                 thr *= s.albedo;
+                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }
             }
             continue;
         }

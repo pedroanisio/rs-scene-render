@@ -331,7 +331,9 @@ enum Command {
         /// accessibility findings. Output files are still written.
         #[arg(long)]
         strict: bool,
-        /// Quality tier overriding the document's project@quality (draft renders at half size).
+        /// Quality tier overriding the document's project@quality. draft renders internally at half size (with
+        /// fewer motion-blur samples and no grain) and scales the frames up to the output's size, so the file keeps
+        /// its size and is softer.
         #[arg(long, value_enum)]
         quality: Option<QualityArg>,
     },
@@ -461,7 +463,34 @@ struct FileReport<'a> {
     warnings: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     io_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    info: Vec<String>,
     diagnostics: &'a [Diagnostic],
+}
+
+/// What validation adds once a document is structurally valid: the errors compiling it for rendering would
+/// raise (a key that does not parse as its property's type, an expression with an unknown function or a
+/// property the element lacks), so that a document `validate` accepts is one `render` can compile; then the
+/// `SA01` findings of `safeArea@enforce` over the frames that matter. Also the information lines: one `SA02`
+/// per node carrying `safeAreaForce`, and how the frames were sampled.
+fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<String>) {
+    let Ok(doc) = sr_model::load_str(text, opts) else { return (Vec::new(), Vec::new()) };
+    let ev = match sr_eval::Evaluator::new(&doc, &Default::default()) {
+        Ok(ev) => ev,
+        Err(report) => return (report.diagnostics, Vec::new()),
+    };
+    // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
+    let compiled = ev.warnings().to_vec();
+    if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
+        return (compiled, Vec::new());
+    }
+    let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
+    let mut info: Vec<String> =
+        out.forced.iter().map(|id| format!("info[SA02]: {id} forced outside the safe area")).collect();
+    info.extend(out.note.as_ref().map(|n| format!("info: safe area audit {n}")));
+    let mut found = compiled;
+    found.extend(out.diagnostics(ev.program()));
+    (found, info)
 }
 
 fn validate(
@@ -477,6 +506,7 @@ fn validate(
     let mut worst = 0u8;
     let mut json_files = Vec::new();
     let mut reports = Vec::new();
+    let mut infos: std::collections::HashMap<PathBuf, Vec<String>> = Default::default();
     for file in files {
         let text = match std::fs::read(file).map(String::from_utf8) {
             Ok(Ok(t)) => t,
@@ -496,7 +526,12 @@ fn validate(
                 _ => PathBuf::from("."),
             });
         }
-        let report = sr_model::validate_str(&text, &o);
+        let mut report = sr_model::validate_str(&text, &o);
+        if !report.has_errors() {
+            let (found, info) = compile_findings(&text, &o);
+            report.diagnostics.extend(found);
+            infos.insert(file.clone(), info);
+        }
         reports.push((file, Some((text, report)), None));
     }
     for (file, result, io) in &reports {
@@ -510,6 +545,7 @@ fn validate(
                         errors: 0,
                         warnings: 0,
                         io_error: Some(err.clone()),
+                        info: Vec::new(),
                         diagnostics: &[],
                     });
                 } else {
@@ -530,6 +566,7 @@ fn validate(
                         errors: report.error_count(),
                         warnings: report.warning_count(),
                         io_error: None,
+                        info: infos.get(*file).cloned().unwrap_or_default(),
                         diagnostics: &report.diagnostics,
                     });
                 } else {
@@ -538,6 +575,9 @@ fn validate(
                         for d in &report.diagnostics {
                             out.diagnostic(file, &lines, d)?;
                         }
+                    }
+                    for line in infos.get(*file).into_iter().flatten() {
+                        writeln!(out.w, "{line}")?;
                     }
                     out.summary(file, report, deny_warnings)?;
                 }
@@ -554,7 +594,7 @@ fn validate(
 
 fn simulate(file: &Path, output: Option<PathBuf>, out: &mut Out) -> std::io::Result<ExitCode> {
     use sha2::Digest;
-    // the cache being regenerated may no longer match its recorded digest, so assets are not verified
+    // the cache being regenerated may differ from its recorded digest, so assets are not verified
     let doc = match sr_model::load_file(file, &LoadOptions::without_assets()) {
         Ok(d) => d,
         Err(e) => {
@@ -1039,6 +1079,24 @@ fn render(
         out.diagnostic(file, &lines, w)?;
     }
     let eval_warnings = ev.warnings().len();
+    // content a safe area holds to its region, over the frames being rendered
+    let safe = match (time, frames.is_empty() && bench) {
+        (None, true) => sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration).diagnostics(ev.program()),
+        _ => {
+            let audited: Vec<f64> = match (time, frames.is_empty()) {
+                (Some(t), _) => vec![t],
+                (None, true) => vec![0.0],
+                (None, false) => frames.iter().map(|&f| ev.program().fps.frame_time(f)).collect(),
+            };
+            sr_gpu::safe_audit::diagnostics(&ev, &audited)
+        }
+    };
+    if safe.iter().any(|d| d.is_error()) {
+        return report_errors(out, &Report { diagnostics: safe });
+    }
+    for d in &safe {
+        out.diagnostic(file, &lines, d)?;
+    }
     // a renderer kept from an earlier render of this document (watch), while it still fits
     let inputs = changes::effective_files(file, &doc, ev.program())?;
     let setup = changes::setup_key(&text, &inputs);
@@ -1047,7 +1105,7 @@ fn render(
     let mut r = match kept {
         Some(r) => r,
         None => {
-            let gpu = match sr_gpu::Gpu::new() {
+            let gpu = match sr_gpu::Gpu::new_for(ev.program().uses_3d()) {
                 Ok(g) => g,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -1073,8 +1131,8 @@ fn render(
         for &f in &frames[..warm] {
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&graphs(f), ev.program(), Some(&mut sub));
-            if let Some(e) = frame.stats.errors.first() {
-                eprintln!("error: frame {f}: {e}");
+            if !frame.stats.errors.is_empty() {
+                report_frame_errors(&format!("frame {f}"), &frame.stats);
                 return Ok(ExitCode::from(1));
             }
             unsupported.extend(frame.stats.unsupported.iter().cloned());
@@ -1092,8 +1150,8 @@ fn render(
             let t1 = std::time::Instant::now();
             let mut sub = |st: f64| ev.evaluate(st);
             last = r.render_with(&g, ev.program(), Some(&mut sub)).stats;
-            if let Some(e) = last.errors.first() {
-                eprintln!("error: frame {f}: {e}");
+            if !last.errors.is_empty() {
+                report_frame_errors(&format!("frame {f}"), &last);
                 return Ok(ExitCode::from(1));
             }
             submit_ms.push(t1.elapsed().as_secs_f64() * 1e3);
@@ -1201,8 +1259,8 @@ fn render(
             let mut sub = |st: f64| ev.evaluate(st);
             let frame = r.render_with(&g, ev.program(), Some(&mut sub));
             unsupported.extend(frame.stats.unsupported.iter().cloned());
-            if let Some(e) = frame.stats.errors.first() {
-                eprintln!("error: frame at {:.3} s: {e}", g.time);
+            if !frame.stats.errors.is_empty() {
+                report_frame_errors(&format!("frame at {:.3} s", g.time), &frame.stats);
                 return Ok(ExitCode::from(1));
             }
             let px = r.read(&frame.texture);
@@ -1266,6 +1324,17 @@ fn render(
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Every error of a frame that cannot be written, and the notes about what else was not rendered as
+/// authored, so that the cause of a failure is never left out.
+fn report_frame_errors(label: &str, stats: &sr_gpu::RenderStats) {
+    for error in &stats.errors {
+        eprintln!("error: {label}: {error}");
+    }
+    for note in &stats.unsupported {
+        eprintln!("note: not rendered yet: {note}");
+    }
 }
 
 /// Incremental rendering: only changed frames, and a renderer kept between renders (watch).
@@ -1413,7 +1482,22 @@ fn encode(
         eprintln!("error: {} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
         return Ok(ExitCode::from(2));
     }
-    let gpu = outputs.iter().any(|o| o.codec.as_str() != "audio-only").then(sr_gpu::Gpu::new).transpose();
+    // the adapter is chosen from the document: one that cannot run the 3D pass is skipped when an output draws in 3D
+    let needs_3d = outputs
+        .iter()
+        .filter(|o| o.codec.as_str() != "audio-only")
+        .map(|o| sr_deliver::output_uses_3d(&doc, o, &opts))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|v| v.contains(&true));
+    let gpu = match needs_3d {
+        Ok(needs_3d) => {
+            outputs.iter().any(|o| o.codec.as_str() != "audio-only").then(|| sr_gpu::Gpu::new_for(needs_3d)).transpose()
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::from(2));
+        }
+    };
     let gpu = match gpu {
         Ok(g) => g,
         Err(e) => {

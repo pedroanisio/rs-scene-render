@@ -64,6 +64,16 @@ fn aim(bones: &mut [Bone], worlds: &[Xf], root: &Xf, i: usize, angle: f64) {
 /// two bones use the analytic solution with the bend side from
 /// `bend_positive`; longer chains use FABRIK; a single bone aims at the target.
 pub fn solve_ik(bones: &mut [Bone], root: &Xf, end: usize, target: P, bend_positive: bool, influence: f64) {
+    // The chain is solved in the skeleton's own space, where bone lengths are what the document says: under a
+    // rotated, flipped, skewed or unevenly scaled ancestor the frame-space distances between joints are not the
+    // lengths the analytic solution needs. The target is taken into that space, and the bones keep local values.
+    if let Some(inv) = root.inverse() {
+        return solve_ik_in(bones, &Xf::IDENTITY, end, inv.apply(target), bend_positive, influence);
+    }
+    solve_ik_in(bones, root, end, target, bend_positive, influence)
+}
+
+fn solve_ik_in(bones: &mut [Bone], root: &Xf, end: usize, target: P, bend_positive: bool, influence: f64) {
     let mut ch = chain(bones, end);
     let before = bones.to_vec();
     let worlds = world_poses(bones, root);

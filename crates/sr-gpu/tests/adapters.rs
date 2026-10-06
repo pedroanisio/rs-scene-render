@@ -2,7 +2,9 @@
 //! is recognised by name when the driver reports another type, and WSL2 is set up to reach
 //! its GPU through Mesa's D3D12 driver.
 
-use sr_gpu::gpu::{choose_adapter, is_software, software_warning, wsl_environment, WslProbe};
+use sr_gpu::gpu::{
+    can_run_3d, choose_adapter, choose_adapter_for, is_software, software_warning, wsl_environment, WslProbe,
+};
 use sr_gpu::GpuError;
 use wgpu::{AdapterInfo, Backend, DeviceType};
 
@@ -157,4 +159,53 @@ fn an_adapter_that_cannot_draw_3d_says_how_to_get_one_that_can() {
     assert!(w.contains("scene-render gpus"), "{w}");
     assert!(three_d_warning(&lavapipe()).is_none());
     assert!(three_d_warning(&info("RTX 4050", DeviceType::DiscreteGpu, Backend::Dx12)).is_none());
+}
+
+fn rtx_through_gl() -> AdapterInfo {
+    info("D3D12 (NVIDIA GeForce RTX 4050 Laptop GPU)", DeviceType::Other, Backend::Gl)
+}
+
+#[test]
+fn a_document_with_3d_gets_an_adapter_that_can_draw_it() {
+    // WSL2 with Mesa's D3D12 driver: the GPU is reachable only through OpenGL, which cannot run the 3D pass;
+    // lavapipe (Vulkan) can. A flat document still takes the GPU, a 3D one must not take the adapter that drops its objects.
+    let found = [rtx_through_gl(), lavapipe()];
+    assert_eq!(choose_adapter_for(&found, None, false).unwrap(), 0);
+    assert_eq!(choose_adapter_for(&found, None, true).unwrap(), 1);
+}
+
+#[test]
+fn a_3d_document_picks_the_best_adapter_among_those_that_can_run_it() {
+    let found = [rtx_through_gl(), lavapipe(), info("Radeon 780M", DeviceType::IntegratedGpu, Backend::Vulkan)];
+    assert_eq!(choose_adapter_for(&found, None, true).unwrap(), 2, "hardware Vulkan beats software Vulkan");
+}
+
+#[test]
+fn a_3d_document_with_only_opengl_adapters_is_an_error_that_says_what_to_do() {
+    let e = choose_adapter_for(&[rtx_through_gl()], None, true).unwrap_err();
+    assert!(matches!(e, GpuError::NoThreeD { .. }), "{e:?}");
+    let text = e.to_string();
+    assert!(text.contains("3D") && text.contains("Vulkan") && text.contains("scene-render gpus"), "{text}");
+    assert!(text.contains("D3D12 (NVIDIA GeForce RTX 4050 Laptop GPU)"), "the adapter found is named: {text}");
+    // no 3D: the same adapter is fine
+    assert_eq!(choose_adapter_for(&[rtx_through_gl()], None, false).unwrap(), 0);
+}
+
+#[test]
+fn naming_an_opengl_adapter_for_a_3d_document_is_refused_and_naming_a_capable_one_works() {
+    let found = [rtx_through_gl(), lavapipe()];
+    let e = choose_adapter_for(&found, Some("RTX"), true).unwrap_err();
+    assert!(matches!(e, GpuError::NoThreeD { .. }), "{e:?}");
+    assert_eq!(choose_adapter_for(&found, Some("llvmpipe"), true).unwrap(), 1);
+    assert_eq!(choose_adapter_for(&found, Some("RTX"), false).unwrap(), 0);
+    // an unknown name is still reported as unknown
+    assert!(matches!(choose_adapter_for(&found, Some("nope"), true), Err(GpuError::NoMatch { .. })));
+}
+
+#[test]
+fn can_run_3d_agrees_with_the_3d_warning() {
+    use sr_gpu::gpu::three_d_warning;
+    for a in [rtx_through_gl(), lavapipe(), info("RTX 4050", DeviceType::DiscreteGpu, Backend::Dx12)] {
+        assert_eq!(can_run_3d(&a), three_d_warning(&a).is_none(), "{}", a.name);
+    }
 }

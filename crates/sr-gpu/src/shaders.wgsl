@@ -341,6 +341,57 @@ fn composite(mode: u32, bd: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
 // The coverage (masks, matte, opacity) shade() applied last.
 var<private> COV: f32 = 1.0;
 
+// ------------------------------------------------------------------ magnified textures
+
+// The four cubic weights around the fraction t of a texel span: Catmull-Rom, or Mitchell-Netravali with B = C = 1/3,
+// whose kernel is k(s) = (7 s^3 - 12 s^2 + 16/3) / 6 for s < 1 and (-7/3 s^3 + 12 s^2 - 20 s + 32/3) / 6 for 1 <= s < 2.
+fn mitchell_far(s: f32) -> f32 { return (-7.0 / 3.0 * s * s * s + 12.0 * s * s - 20.0 * s + 32.0 / 3.0) / 6.0; }
+fn mitchell_near(s: f32) -> f32 { return (7.0 * s * s * s - 12.0 * s * s + 16.0 / 3.0) / 6.0; }
+fn cubic_weights(t: f32, mitchell: bool) -> vec4<f32> {
+  if (mitchell) {
+    return vec4(mitchell_far(1.0 + t), mitchell_near(t), mitchell_near(1.0 - t), mitchell_far(2.0 - t));
+  }
+  return vec4(t * (-0.5 + t * (1.0 - 0.5 * t)), 1.0 + t * t * (-2.5 + 1.5 * t), t * (0.5 + t * (2.0 - 1.5 * t)), t * t * (-0.5 + 0.5 * t));
+}
+
+// A layer sample with Catmull-Rom or Mitchell weights where the texture is magnified (nine bilinear fetches), clamped to
+// the range of the four nearest texels; where it is minified, the trilinear sample every layer gets.
+fn resample_cubic(uv: vec2<f32>, mitchell: bool) -> vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(src, 0));
+  let dx = dpdx(uv) * dims;
+  let dy = dpdy(uv) * dims;
+  let plain = textureSample(src, samp, uv);
+  if (max(length(dx), length(dy)) > 1.0) { return plain; }
+  let pos = uv * dims;
+  let tc = floor(pos - 0.5) + 0.5;
+  let f = pos - tc;
+  let wx = cubic_weights(f.x, mitchell);
+  let wy = cubic_weights(f.y, mitchell);
+  let w12x = wx.y + wx.z;
+  let w12y = wy.y + wy.z;
+  let o12 = vec2(wx.z / w12x, wy.z / w12y);
+  let t0 = (tc - 1.0) / dims;
+  let t3 = (tc + 2.0) / dims;
+  let t12 = (tc + o12) / dims;
+  var c = textureSampleLevel(src, samp, vec2(t0.x, t0.y), 0.0) * (wx.x * wy.x);
+  c += textureSampleLevel(src, samp, vec2(t12.x, t0.y), 0.0) * (w12x * wy.x);
+  c += textureSampleLevel(src, samp, vec2(t3.x, t0.y), 0.0) * (wx.w * wy.x);
+  c += textureSampleLevel(src, samp, vec2(t0.x, t12.y), 0.0) * (wx.x * w12y);
+  c += textureSampleLevel(src, samp, vec2(t12.x, t12.y), 0.0) * (w12x * w12y);
+  c += textureSampleLevel(src, samp, vec2(t3.x, t12.y), 0.0) * (wx.w * w12y);
+  c += textureSampleLevel(src, samp, vec2(t0.x, t3.y), 0.0) * (wx.x * wy.w);
+  c += textureSampleLevel(src, samp, vec2(t12.x, t3.y), 0.0) * (w12x * wy.w);
+  c += textureSampleLevel(src, samp, vec2(t3.x, t3.y), 0.0) * (wx.w * wy.w);
+  // the four nearest texels bound the result (no ringing); texel coordinates clamp to the edge
+  let hi = vec2<i32>(dims) - vec2(1);
+  let b = vec2<i32>(floor(pos - 0.5));
+  let a00 = textureLoad(src, clamp(b, vec2(0), hi), 0);
+  let a10 = textureLoad(src, clamp(b + vec2(1, 0), vec2(0), hi), 0);
+  let a01 = textureLoad(src, clamp(b + vec2(0, 1), vec2(0), hi), 0);
+  let a11 = textureLoad(src, clamp(b + vec2(1, 1), vec2(0), hi), 0);
+  return clamp(c, min(min(a00, a10), min(a01, a11)), max(max(a00, a10), max(a01, a11)));
+}
+
 fn shade(v: VOut, cached_mask: bool) -> vec4<f32> {
   let d = draw_params;
   let pixel = vec2<u32>(v.pos.xy);
@@ -357,6 +408,7 @@ fn shade(v: VOut, cached_mask: bool) -> vec4<f32> {
       c = vec4(p.rgb * p.a, p.a);
     }
     case 3u: { c = textureSampleLevel(src, samp, v.uv, d.lod); }
+    case 5u, 6u: { c = resample_cubic(v.uv, d.src_kind == 6u); }
     case 4u: {
       let pg = paints[d.paint];
       let puv = vec2(pg.xform0.x * v.local.x + pg.xform0.z * v.local.y + pg.xform1.x, pg.xform0.y * v.local.x + pg.xform0.w * v.local.y + pg.xform1.y);
@@ -648,7 +700,8 @@ fn fs_generator(v: GOut) -> @location(0) vec4<f32> {
     }
     case 6u: {                                                                    // grid: lines from each multiple of `scale`
       let n = clamp(round(s), 2.0, 256.0);
-      let w = max(1.0, round(n * 0.04)) / n;
+      // `lineWidth` (pixels) when given, else about 4 % of the scale; in units of the pitch either way
+      let w = select(max(1.0, round(n * 0.04)) / n, bitcast<f32>(gen.grain.z) / max(s, 1e-3), gen.grain.w == 1u);
       let f = fract(pattern_space(p, s) / s);
       t = select(1.0, 0.0, min(f.x, f.y) < w);
     }

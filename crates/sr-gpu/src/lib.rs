@@ -16,6 +16,8 @@ pub mod pathtrace;
 pub mod raster;
 pub mod render;
 pub mod resources;
+pub mod safe_audit;
+
 pub mod shader;
 pub mod text;
 pub mod three;

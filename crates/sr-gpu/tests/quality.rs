@@ -258,3 +258,25 @@ fn point_lights_fall_off_over_their_range_in_document_units() {
         }
     }
 }
+
+#[test]
+fn drafts_burn_captions_where_the_final_frame_has_them() {
+    // burned captions were built in document coordinates and drawn into the half-size draft target
+    // unscaled, so they landed off the frame and vanished
+    let Some(gpu) = gpu() else { return };
+    let xml = r##"<scene version="1.1"><project width="128" height="96" fps="10" duration="2" background="#101820"/>
+<styles><textStyle id="cap" size="14" color="#FFFFFF"/></styles>
+<composition/>
+<captions><captionTrack id="cc" language="en" mode="burn" preset="classic" style="cap" x="50%" y="55%" width="90%"><cue start="0" end="2" text="Draft caption"/></captionTrack></captions></scene>"##;
+    let d = sr_model::load_str(xml, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+    let full = at_quality(&gpu, &d, 0.5, Some(ProjectQuality::Final));
+    let draft = at_quality(&gpu, &d, 0.5, Some(ProjectQuality::Draft));
+    assert_eq!(draft.size, [64, 48]);
+    let lit = |s: &Shot| {
+        (0..s.size[1]).flat_map(|y| (0..s.size[0]).map(move |x| (x, y))).filter(|&(x, y)| s.at(x, y)[0] > 0.5).count()
+    };
+    assert!(lit(&full) > 20, "the final frame has the caption: {}", lit(&full));
+    assert!(lit(&draft) > 5, "the draft frame lost its caption: {} lit pixels", lit(&draft));
+    let db = psnr(&draft.px, &half(&full));
+    assert!(db >= 28.0, "captions at the wrong place or scale: {db:.1} dB against the final frame at half size");
+}

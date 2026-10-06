@@ -92,6 +92,8 @@ impl Channel {
                 steps: k.steps.map(|s| s.min(u32::MAX as u64) as u32),
                 step_start: k.step_position == StepPosition::Start,
                 spring: [k.stiffness.get(), k.damping.get(), k.mass.get()],
+                overshoot: k.overshoot.as_ref().map(|v| v.get()),
+                period: k.period.as_ref().map(|v| v.get()),
             };
             let ease = curve::resolve(k.interpolation.unwrap_or(spec.default), &params);
             keys.push(K { t, v, ease, tan_out: None, tan_in: None, spatial: None });

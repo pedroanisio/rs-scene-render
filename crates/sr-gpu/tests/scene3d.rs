@@ -116,6 +116,38 @@ fn imported_meshes_with_variants() {
     assert!(c[2] > c[1] && c[2] > c[0], "blue variant: {c:?}");
 }
 
+const MORPH_GLTF: &str = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+ "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":2,"material":0,"targets":[{"POSITION":1}]}],"weights":[0]}],
+ "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0,1,0,1]},"doubleSided":true}],
+ "buffers":[{"byteLength":80,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM3MTL8AAAAAAAABAAIAAAA="}],
+ "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":36},{"buffer":0,"byteOffset":72,"byteLength":6}],
+ "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+   {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[0,-0.8,0],"max":[0,0,0]},
+   {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}]}"#;
+
+#[test]
+fn keyed_morph_weights_move_the_mesh() {
+    // the triangle's apex is 100 px above the origin; the morph target lowers it by 80 px at weight 1
+    std::fs::write(fixtures().join("morph.gltf"), MORPH_GLTF).unwrap();
+    let asset = r#"<mesh id="morph" src="morph.gltf"/>"#;
+    let obj = |weights: &str| {
+        format!(r#"<object3D id="m" primitive="mesh" mesh="morph" x="30" y="100">{weights}</object3D>"#)
+    };
+    let keyed = obj(r#"<animate property="morphWeights"><key time="0" value="0"/><key time="1" value="1"/></animate>"#);
+    let Some(start) = render_times(&scene(asset, "", &keyed, ""), &[0.0]) else { return };
+    let Some(end) = render_times(&scene(asset, "", &keyed, ""), &[1.0]) else { return };
+    // near the apex (30, 0): covered at weight 0, empty at weight 1; near the base: covered in both
+    assert!(start.at(32, 12)[3] > 0.99, "weight 0 reaches the apex: {:?}", start.at(32, 12));
+    assert_eq!(end.at(32, 12)[3], 0.0, "weight 1 lowers it");
+    assert!(end.at(40, 95)[3] > 0.99 && start.at(40, 95)[3] > 0.99);
+    // the static attribute still works, and a key agrees with it
+    let Some(attr) = render(&scene(asset, "", &obj("").replace("y=\"100\"", "y=\"100\" morphWeights=\"1\""), ""))
+    else {
+        return;
+    };
+    assert_eq!(attr.at(32, 12)[3], 0.0, "the attribute at weight 1");
+}
+
 #[test]
 fn the_camera_moves_3d_objects_and_2_5d_layers_together() {
     let body = |cam: &str| {

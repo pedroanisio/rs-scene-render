@@ -361,3 +361,38 @@ fn a_basemap_asked_for_more_tiles_than_a_frame_can_use_is_an_error() {
     let Some(r) = render(&doc) else { return };
     assert!(r.stats.errors.iter().any(|e| e.contains("tiles")), "{:?}", r.stats.errors);
 }
+
+#[test]
+fn progress_draws_polygon_outlines_on_like_lines() {
+    // a polygon's outline is traced from its first vertex by `progress`, each ring by the same fraction; the fill is
+    // never trimmed
+    let doc = |progress: &str, fill: &str| {
+        map_doc(
+            360,
+            180,
+            &format!(
+                r##"<geo id="sq" src="squares.geojson"/>
+                <map id="m" width="360" height="180" projection="equirectangular">
+                  <geoLayer geo="sq" fill="{fill}" stroke="#FFFFFF" strokeWidth="3" progress="{progress}"/></map>"##
+            ),
+        )
+    };
+    let lit = |r: &Rendered| r.px.iter().filter(|p| p[0] > 0.5 && p[1] > 0.5 && p[2] > 0.5).count();
+    let Some(full) = render_times(&doc("1", "#00000000"), &[0.0]) else { return };
+    let half = render_times(&doc("0.5", "#00000000"), &[0.0]).unwrap();
+    let none = render_times(&doc("0", "#00000000"), &[0.0]).unwrap();
+    let (nf, nh, nn) = (lit(&full), lit(&half), lit(&none));
+    assert!(nf > 100, "the outline is drawn: {nf}");
+    assert!(nn == 0, "nothing at progress 0: {nn}");
+    assert!(nh > nf / 3 && nh < nf * 2 / 3 + 20, "about half the outline at progress 0.5: {nh} of {nf}");
+    // the fill stays whole whatever the progress
+    let filled = |p: &str| render_times(&doc(p, "#FF0000"), &[0.0]).unwrap();
+    // the interior of a square (-90, 10) and a point ten pixels inside its corner are red at progress 0 and at progress 1
+    let (cx, cy) = eq(-90.0, 10.0);
+    let (kx, ky) = eq(-100.0, 0.0);
+    for p in ["0", "0.5", "1"] {
+        let r = filled(p);
+        assert_px(&r, cx, cy, rgb(0xFF0000), 1e-3);
+        assert_px(&r, kx, ky, rgb(0xFF0000), 1e-3);
+    }
+}

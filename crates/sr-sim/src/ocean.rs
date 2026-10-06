@@ -6,11 +6,13 @@
 //! CFL bound controls internal substeps. This depth-averaged model cannot
 //! represent overturning sheets, compressible impact physics or vertical jets.
 
+mod body;
 mod flux;
 mod impulse;
+pub mod lift;
 pub mod waves;
 pub mod whitewater;
-pub use impulse::{Impulse, ImpulseKind};
+pub use impulse::{Impulse, ImpulseKind, CAVITY_SHARE};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,6 +34,16 @@ pub enum Boundary {
     Periodic,
 }
 
+/// Spatial/temporal accuracy of the finite-volume update.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    /// Piecewise-constant states, forward Euler.
+    #[default]
+    First,
+    /// MUSCL reconstruction with the monotonized-central limiter and SSP-RK2.
+    Second,
+}
+
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub cells: [usize; 2],
@@ -45,6 +57,7 @@ pub struct Spec {
     /// Exponential horizontal velocity decay per second.
     pub damping: f64,
     pub boundary: Boundary,
+    pub order: Order,
     /// Momentum is zeroed below this depth; water is never discarded.
     pub dry_tolerance: f64,
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
@@ -52,6 +65,23 @@ pub struct Spec {
     pub checkpoint_bytes: usize,
     /// Work units per seek: eight per cell for each impulse and each substep.
     pub max_work: u64,
+    /// The bed is supplied by a [`Driver`] at every canonical step and the solver
+    /// is sampled with [`Ocean::at_driven`]. Charges three more bed vectors per cell.
+    pub moving_bed: bool,
+    /// The driver also fills the thickness and horizontal velocity of bodies in
+    /// the water column, and the water's momentum relaxes toward theirs. Needs
+    /// `moving_bed`; charges 72 more bytes per cell.
+    pub bodies: bool,
+    /// With `bodies`: the driver also tags every occupied cell with the index of the body that
+    /// holds most of it (`Forcing::owner`, below this count, at most 4096), and what each body
+    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 12 more
+    /// bytes per cell and 16 per body in every checkpoint. Zero: nothing is tagged.
+    pub body_owners: usize,
+    /// With `body_owners`: bodies do not relax the water toward their own velocity; the driver gives
+    /// each the momentum it hands the water in every canonical step as a [`Push`] (a form drag, spread
+    /// over columns), and the solver applies it, never past the body's velocity. Charges 32 more
+    /// bytes per cell. The occupancy and the owners still say where the bodies are.
+    pub body_push: bool,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -63,10 +93,15 @@ impl Default for Spec {
             gravity: 9.81,
             damping: 0.0,
             boundary: Boundary::Closed,
+            order: Order::First,
             dry_tolerance: 1e-10,
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
             max_work: 100_000_000,
+            moving_bed: false,
+            bodies: false,
+            body_owners: 0,
+            body_push: false,
         }
     }
 }
@@ -80,18 +115,198 @@ pub struct Cell {
 pub struct Frame {
     pub time: f64,
     pub cells: Vec<Cell>,
+    /// Bed ordinates (scene y, deeper is larger) the cells sit over at `time`.
+    /// Empty when the solver has no driver: the bed is then the one given to
+    /// [`Ocean::new`].
+    pub bed: Vec<f64>,
+}
+
+/// What a [`Driver`] fills for one instant.
+#[derive(Clone, Debug, Default)]
+pub struct Forcing {
+    /// Effective bed ordinate of every cell centre, scene y downward, with any
+    /// body's thickness already subtracted. The vector arrives with `nx*nz`
+    /// elements; the driver overwrites every one.
+    pub bed: Vec<f64>,
+    /// With `Spec::bodies`: vertical extent of bodies inside the water column of
+    /// every cell, between the rest level and the bed. Empty otherwise.
+    pub occupancy: Vec<f64>,
+    /// With `Spec::bodies`: how much the bed was raised, in every cell, by the bodies in `bed` (the
+    /// bed given is already lowered by this, in scene y), when that is not the occupancy: the
+    /// occupancy filtered by depth is wider and lower than the bodies. Empty when it is the
+    /// occupancy. Only the samples of the water around each body read it.
+    pub raise: Vec<f64>,
+    /// With `Spec::bodies`: horizontal velocity of the body in every cell
+    /// (ignored where `occupancy` is zero). Empty otherwise.
+    pub velocity: Vec<[f64; 2]>,
+    /// Set on the sample taken just after canonical step `k` completes, which is the first
+    /// instant the step's outcome is known: `Some((k, momentum))`, with the horizontal
+    /// momentum per unit water density that bodies gave the water during step `k` (the
+    /// value of [`Ocean::exchanged_impulse`] then). A replay of the step offers the same
+    /// value again. `None` on every other sample.
+    pub exchange: Option<(u64, [f64; 2])>,
+    /// With `Spec::body_owners`: the body that holds most of the occupancy of every cell (ignored
+    /// where `occupancy` is zero; the lowest index wins a tie). The vector arrives with `nx*nz`
+    /// elements. Empty otherwise.
+    pub owner: Vec<u32>,
+    /// Water impulses the driver asks for, in the canonical step that ends at the sample's time
+    /// `T`: those whose `time` lies in `(T - dt, T]`, in any order (they are applied in order of
+    /// time, among the substeps, after authored impulses of the same instant). Like the bed, they
+    /// must be a function of the time and of scene data that does not change, since a replay asks
+    /// again. Nothing may be given at the first sample, which ends no step.
+    pub events: Vec<Impulse>,
+    /// With `Spec::body_push`: what the bodies give the water in the canonical step that ends at the
+    /// sample's time `T`, one entry per body that gives any. Like the bed, a function of the time and of
+    /// scene data that does not change.
+    pub pushes: Vec<Push>,
+    /// With `Spec::body_owners`: what each body raises the bed by, sparse, in every sample. Only who the
+    /// bed variation of a column belongs to is read from it (the owner with the largest lift, over the two
+    /// ends of the step), to credit each body with the momentum the bed source term of the scheme gives
+    /// the water ([`BodySample::pressure`]); the bed the water runs over is `bed`, as ever.
+    pub lifts: Vec<Lift>,
+    /// What fell into the water in the canonical step that ends at the sample's time `T`, by cell,
+    /// sorted by cell with no cell twice, applied when the step reaches `T`, after the impulses
+    /// due then: of each cell's water `volume / cell area` of depth goes (at most
+    /// [`CAVITY_SHARE`] of the cell's water; the rest of the volume is dropped, not an error)
+    /// and is given, all of it, in equal parts to the cell's neighbours (the eight around it, or
+    /// those that exist at the edge of the domain), and `momentum` is added to the cell's momentum
+    /// unless the cell is left with less than `dry_tolerance` of water, in which case it is dropped.
+    /// Water and momentum are conserved except for what is dropped. Applied to the water itself, after
+    /// any lift of a bed, not through it. Costs the entries, not the cells. Empty on every other
+    /// sample.
+    pub splash: Vec<SplashCell>,
+    /// With `Spec::body_owners`, set together with `exchange`: what each body that gave the water
+    /// momentum in step `k`, or stands in it at the end of the step, gets of the water, by body
+    /// index. Empty on every other sample.
+    pub bodies: Vec<BodySample>,
+}
+
+/// What something that fell into the water in one canonical step gives it, in one cell: the volume
+/// of solid that entered the cell's water and the horizontal momentum it brought.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SplashCell {
+    /// Index into the `nx * nz` cells, x fastest.
+    pub cell: u32,
+    /// Scene units cubed.
+    pub volume: f64,
+    /// Horizontal momentum per unit water density, scene units^4/second.
+    pub momentum: [f64; 2],
+}
+
+/// How much one body raises the bed in each column it lifts, in the sample: the bodies' share of the
+/// effective bed, for the pressure the water puts on them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lift {
+    pub owner: u32,
+    /// Columns and the height each is raised by (not negative); a column once.
+    pub columns: Vec<(u32, f64)>,
+}
+
+/// Horizontal momentum one body gives the water in a canonical step, per unit water density, spread
+/// over columns, with the velocity it moves at. Applied evenly over the substeps, column by column,
+/// never past `target`: a column's momentum goes toward `target` times its depth and no further.
+/// What is applied is what the body is credited with ([`BodySample::impulse`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Push {
+    pub owner: u32,
+    /// The body's horizontal velocity.
+    pub target: [f64; 2],
+    /// Total momentum per unit density, for the whole step (scene units^4/second).
+    pub momentum: [f64; 2],
+    /// Columns and the share of the momentum each takes; the shares add up to 1.
+    pub columns: Vec<(u32, f64)>,
+}
+
+/// The water around one body at the end of a canonical step, and what the body gave it during
+/// the step. The footprint is the cells the body holds most of at the end of the step; only
+/// wet cells enter the surface and the velocity.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BodySample {
+    /// Index of the body, as the driver tagged it.
+    pub owner: u32,
+    /// Cells of the footprint, and those of them with water.
+    pub columns: usize,
+    pub wet: usize,
+    /// Centre of the wet cells (x, z), in the domain's coordinates.
+    pub centroid: [f64; 2],
+    /// Least-squares plane through the free surface of the wet cells (y downward): its ordinate
+    /// at `centroid` and its slopes `dy/dx` and `dy/dz`. Without water, the bed level and no slope.
+    pub surface: [f64; 3],
+    /// Mean horizontal velocity of the water under the footprint, weighted by depth.
+    pub velocity: [f64; 2],
+    /// Mean ordinate of the bed under the footprint, with the bodies' thickness counted as bed.
+    pub bed: f64,
+    /// Horizontal momentum per unit water density that this body gave the water during the step.
+    pub impulse: [f64; 2],
+    /// Horizontal momentum per unit density that the bed source term of the scheme gave the water in the
+    /// step across the faces of the bed this body raises (the face owned by the body with the larger lift
+    /// of the two columns): what is not in `impulse`, the pressure of the water on the body (the wave drag).
+    /// It is accumulated by the flux sweeps themselves, so the momentum of the water is exactly the pushes
+    /// plus this plus what the walls give, to rounding; it is the scheme's term, with its reconstruction and
+    /// numerical diffusion, not the continuous one. Zero without `Forcing::lifts`.
+    pub pressure: [f64; 2],
+}
+
+/// Supplies the bed at an instant. The result must depend only on `time` and on
+/// scene data that does not change: replay and checkpoints resample it.
+pub trait Driver {
+    fn sample(&mut self, time: f64, forcing: &mut Forcing) -> Result<(), Error>;
+}
+impl<F: FnMut(f64, &mut Forcing) -> Result<(), Error>> Driver for F {
+    fn sample(&mut self, time: f64, forcing: &mut Forcing) -> Result<(), Error> {
+        self(time, forcing)
+    }
+}
+
+/// What a stretch of substeps sees of the bed and the bodies.
+#[derive(Clone, Copy)]
+enum Bed<'a> {
+    Fixed(&'a [f64]),
+    /// Linear in time between the canonical step's endpoints; each substep uses
+    /// its midpoint value.
+    Moving {
+        from: &'a Forcing,
+        to: &'a Forcing,
+        t0: f64,
+        t1: f64,
+    },
+}
+
+/// Samples at the two ends of the canonical step the solver last stopped in.
+struct Ends {
+    step: u64,
+    now: Forcing,
+    next: Forcing,
+}
+
+/// Interpolated bed and body arrays of the current substep.
+#[derive(Default)]
+struct Scratch {
+    bed: Vec<f64>,
+    occupancy: Vec<f64>,
+    velocity: Vec<[f64; 2]>,
+    owner: Vec<u32>,
 }
 
 /// Conserved depth and two horizontal momenta.
 type Q = [f64; 3];
+
 #[derive(Clone)]
 struct State {
     time: f64,
     next_impulse: usize,
     q: Vec<Q>,
+    /// Momentum bodies gave the water during the canonical step that ended here.
+    exchange: [f64; 2],
+    /// The part of `exchange` that each body gave (`Spec::body_owners` elements, or none).
+    exchange_by: Vec<[f64; 2]>,
+    /// What the bed source term of the scheme gave the water in that step, by the owner of the bed
+    /// variation (`Spec::body_owners` elements, or none): [`BodySample::pressure`].
+    pressure_by: Vec<[f64; 2]>,
 }
 struct Work {
     remaining: u64,
+    substeps: u64,
 }
 impl Work {
     fn take(&mut self, amount: usize) -> Result<(), Error> {
@@ -109,7 +324,12 @@ pub struct Ocean {
     step: u64,
     checkpoints: Vec<(u64, State)>,
     checkpoint_capacity: usize,
+    /// Steps between checkpoints: one second of simulated time at first, doubled
+    /// whenever the budget fills.
+    every: u64,
     frame: Frame,
+    ends: Option<Ends>,
+    last_substeps: u64,
 }
 impl Ocean {
     /// Bed ordinates and initial cells have exactly nx*nz samples. Inputs are
@@ -147,13 +367,28 @@ impl Ocean {
         if !(spec.cell_size * spec.cell_size).is_finite() || spec.cell_size * spec.cell_size == 0.0 {
             return Err(Error::Invalid("cell area"));
         }
+        if spec.bodies && !spec.moving_bed {
+            return Err(Error::Invalid("bodies need Spec::moving_bed"));
+        }
+        if spec.body_push && spec.body_owners == 0 {
+            return Err(Error::Invalid("pushes need Spec::body_owners"));
+        }
+        if spec.body_owners > 4096 || (spec.body_owners > 0 && !spec.bodies) {
+            return Err(Error::Invalid("body owners need Spec::bodies and are at most 4096"));
+        }
         if bed_y.len() != n || cells.len() != n || impulses.len() > 16_384 {
             return Err(Error::Invalid("grid lengths or impulse count"));
         }
         // Input, initial/canonical/published/candidate/fractional/flux copies,
         // impulse scratch and Vec headers; checkpoint storage is separate.
         let bytes = n
-            .checked_mul(256)
+            .checked_mul(
+                256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
+                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
+                    + if spec.bodies { 72 } else { 0 }
+                    + if spec.body_owners > 0 { 12 } else { 0 }
+                    + if spec.body_push { 32 } else { 0 },
+            )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
             .and_then(|v| {
                 // Stable sorting preserves authored equal-time order and may
@@ -185,11 +420,16 @@ impl Ocean {
             time: 0.0,
             next_impulse: 0,
             q: cells.iter().map(|c| [c.depth, c.depth * c.velocity[0], c.depth * c.velocity[1]]).collect(),
+            exchange: [0.0; 2],
+            exchange_by: vec![[0.0; 2]; spec.body_owners],
+            pressure_by: vec![[0.0; 2]; spec.body_owners],
         };
-        let mut work = Work { remaining: spec.max_work };
-        advance(&spec, &bed_y, &impulses, &mut initial, 0.0, &mut work)?;
+        let mut work = Work { remaining: spec.max_work, substeps: 0 };
+        advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
-        let checkpoint_capacity = (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128)).min(4096);
+        let spec_dt = spec.dt;
+        let checkpoint_capacity =
+            (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 32 * spec.body_owners)).min(4096);
         Ok(Self {
             spec,
             bed_y,
@@ -199,17 +439,143 @@ impl Ocean {
             step: 0,
             checkpoints: Vec::new(),
             checkpoint_capacity,
+            every: (1.0 / spec_dt).ceil().clamp(1.0, 1e12) as u64,
             frame,
+            ends: None,
+            last_substeps: 0,
         })
     }
 
-    /// Samples exact time. Fractional steps are disposable; they never alter
-    /// canonical replay. An error leaves the published frame and caches intact.
+    /// Samples exact time with the bed given to [`Ocean::new`]. Fractional steps
+    /// are disposable; they never alter canonical replay. An error leaves the
+    /// published frame and caches intact.
     pub fn at(&mut self, time: f64) -> Result<&Frame, Error> {
+        if self.spec.moving_bed {
+            return Err(Error::Invalid("a moving-bed ocean is sampled with at_driven"));
+        }
+        self.seek(time, None)
+    }
+
+    /// Samples exact time over a bed supplied by `driver`, which is called once
+    /// per canonical step of forward progress and twice when a seek restarts from
+    /// a checkpoint or from the initial state. Errors from the driver leave the
+    /// published frame and the canonical state untouched.
+    pub fn at_driven(&mut self, time: f64, driver: &mut dyn Driver) -> Result<&Frame, Error> {
+        if !self.spec.moving_bed {
+            return Err(Error::Invalid("at_driven needs Spec::moving_bed"));
+        }
+        self.seek(time, Some(driver))
+    }
+
+    /// Keeps `state` as the checkpoint of `step` when the cadence asks for it,
+    /// thinning the older ones when the budget is full.
+    fn remember(&mut self, step: u64, state: &State) {
+        if self.checkpoint_capacity == 0 || step % self.every != 0 || self.checkpoints.iter().any(|(k, _)| *k == step) {
+            return;
+        }
+        while self.checkpoints.len() >= self.checkpoint_capacity {
+            self.every = self.every.saturating_mul(2);
+            let every = self.every;
+            self.checkpoints.retain(|(k, _)| k % every == 0);
+            if step % every != 0 {
+                return;
+            }
+        }
+        let at = self.checkpoints.partition_point(|(k, _)| *k < step);
+        self.checkpoints.insert(at, (step, state.clone()));
+    }
+
+    fn sample(
+        &self,
+        driver: &mut dyn Driver,
+        time: f64,
+        out: &mut Forcing,
+        exchange: Option<(u64, [f64; 2])>,
+        bodies: Vec<BodySample>,
+    ) -> Result<(), Error> {
+        out.exchange = exchange;
+        out.bodies = bodies;
+        out.events.clear();
+        out.pushes.clear();
+        out.lifts.clear();
+        out.splash.clear();
+        out.raise.clear();
+        let n = self.initial.q.len();
+        out.bed.resize(n, 0.0);
+        let wanted = if self.spec.bodies { n } else { 0 };
+        out.occupancy.resize(wanted, 0.0);
+        out.velocity.resize(wanted, [0.0; 2]);
+        let tagged = if self.spec.body_owners > 0 { n } else { 0 };
+        out.owner.resize(tagged, 0);
+        driver.sample(time, out)?;
+        if out.bed.len() != n
+            || out.occupancy.len() != wanted
+            || out.velocity.len() != wanted
+            || out.bed.iter().any(|y| !y.is_finite())
+            || out.occupancy.iter().any(|t| !t.is_finite() || *t < 0.0)
+            || out.velocity.iter().flatten().any(|v| !v.is_finite())
+            || out.owner.len() != tagged
+            || out.owner.iter().zip(&out.occupancy).any(|(o, t)| *t > 0.0 && *o as usize >= self.spec.body_owners)
+            || out.events.len() > 16_384
+            || !(out.pushes.is_empty() || self.spec.body_push)
+            || !(out.raise.is_empty() || (self.spec.bodies && out.raise.len() == n))
+            || out.raise.iter().any(|r| !r.is_finite() || *r < 0.0)
+        {
+            return Err(Error::Invalid("driver bed, thickness or velocity length or value"));
+        }
+        if out.splash.len() > n
+            || out.splash.windows(2).any(|w| w[0].cell >= w[1].cell)
+            || out.splash.iter().any(|e| {
+                e.cell as usize >= n
+                    || !e.volume.is_finite()
+                    || e.volume < 0.0
+                    || e.momentum.iter().any(|m| !m.is_finite())
+            })
+        {
+            return Err(Error::Invalid("driver splash cells, volume or momentum"));
+        }
+        let lifted: usize = out.lifts.iter().map(|l| l.columns.len()).sum();
+        if !out.lifts.is_empty()
+            && (self.spec.body_owners == 0
+                || lifted > 4 * n
+                || out.lifts.iter().any(|l| {
+                    l.owner as usize >= self.spec.body_owners
+                        || l.columns.iter().any(|(c, h)| *c as usize >= n || !h.is_finite() || *h < 0.0)
+                }))
+        {
+            return Err(Error::Invalid("driver lift owner, columns or height"));
+        }
+        let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
+        if columns > 2 * n {
+            return Err(Error::Limit("columns of the pushes of the bodies"));
+        }
+        for push in &out.pushes {
+            let share: f64 = push.columns.iter().map(|(_, w)| w).sum();
+            if push.owner as usize >= self.spec.body_owners
+                || push.target.iter().chain(&push.momentum).any(|v| !v.is_finite())
+                || push.columns.iter().any(|(c, w)| *c as usize >= n || !w.is_finite() || *w < 0.0)
+                || (share - 1.0).abs() > 1e-6
+            {
+                return Err(Error::Invalid("driver push owner, velocity, momentum or columns"));
+            }
+        }
+        let from = time - self.spec.dt;
+        for event in &out.events {
+            event.validate()?;
+            if !(event.time > from && event.time <= time) || time < self.spec.dt {
+                return Err(Error::Invalid("driver event outside the step that ends at the sample"));
+            }
+        }
+        out.events.sort_by(|a, b| a.time.total_cmp(&b.time));
+        Ok(())
+    }
+
+    fn seek(&mut self, time: f64, mut driver: Option<&mut dyn Driver>) -> Result<&Frame, Error> {
         if !time.is_finite() || time < 0.0 {
             return Err(Error::Invalid("sample time"));
         }
-        if time == self.frame.time {
+        // A frame published before any driver call has no bed and cannot answer.
+        if time == self.frame.time && (driver.is_none() || !self.frame.bed.is_empty()) {
             return Ok(&self.frame);
         }
         let quotient = time / self.spec.dt;
@@ -234,34 +600,101 @@ impl Ocean {
             k = *step;
             state = checkpoint.clone();
         }
-        let mut work = Work { remaining: self.spec.max_work };
+        let mut work = Work { remaining: self.spec.max_work, substeps: 0 };
         // Reject impossible replays before entering the loop.
         if target - k > self.spec.max_work / self.initial.q.len() as u64 {
             return Err(Error::Limit("seek work"));
         }
+        let dt = self.spec.dt;
+        let mut scratch = Scratch::default();
+        let mut ends = match driver.as_deref_mut() {
+            None => None,
+            Some(driver) => Some(match &self.ends {
+                Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
+                _ => {
+                    let (mut now, mut next) = (Forcing::default(), Forcing::default());
+                    self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
+                    now.pushes = Vec::new();
+                    let bodies = body::samples(&self.spec, &state, &now);
+                    self.sample(driver, (k + 1) as f64 * dt, &mut next, Some((k, state.exchange)), bodies)?;
+                    (now, next)
+                }
+            }),
+        };
         while k < target {
             k += 1;
-            advance(&self.spec, &self.bed_y, &self.impulses, &mut state, k as f64 * self.spec.dt, &mut work)?;
+            let end = k as f64 * dt;
+            state.exchange = [0.0; 2];
+            state.exchange_by.iter_mut().for_each(|e| *e = [0.0; 2]);
+            state.pressure_by.iter_mut().for_each(|e| *e = [0.0; 2]);
+            match (&mut ends, driver.as_deref_mut()) {
+                (Some((now, next)), Some(driver)) => {
+                    let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
+                    advance(&self.spec, bed, &self.impulses, &mut state, end, &mut work, &mut scratch)?;
+                    std::mem::swap(now, next);
+                    // the pushes were for the step that ended; nothing reads them again
+                    now.pushes = Vec::new();
+                    work.take(if self.spec.body_owners > 0 { state.q.len() } else { 0 })?;
+                    let bodies = body::samples(&self.spec, &state, now);
+                    self.sample(driver, (k + 1) as f64 * dt, next, Some((k, state.exchange)), bodies)?;
+                }
+                _ => advance(
+                    &self.spec,
+                    Bed::Fixed(&self.bed_y),
+                    &self.impulses,
+                    &mut state,
+                    end,
+                    &mut work,
+                    &mut scratch,
+                )?,
+            }
+            self.remember(k, &state);
         }
         let mut sampled = state.clone();
-        advance(&self.spec, &self.bed_y, &self.impulses, &mut sampled, time, &mut work)?;
-        let frame = publish(&sampled, self.spec.dry_tolerance)?;
-        if self.checkpoint_capacity > 0 && target > 0 && !self.checkpoints.iter().any(|(k, _)| *k == target) {
-            if self.checkpoints.len() == self.checkpoint_capacity {
-                self.checkpoints.remove(0);
+        let mut frame_bed = Vec::new();
+        match &ends {
+            Some((now, next)) => {
+                let (t0, t1) = (k as f64 * dt, (k + 1) as f64 * dt);
+                let bed = Bed::Moving { from: now, to: next, t0, t1 };
+                advance(&self.spec, bed, &self.impulses, &mut sampled, time, &mut work, &mut scratch)?;
+                let s = ((time - t0) / (t1 - t0)).clamp(0.0, 1.0);
+                frame_bed = now.bed.iter().zip(&next.bed).map(|(a, b)| a + (b - a) * s).collect();
             }
-            self.checkpoints.push((target, state.clone()));
+            None => advance(
+                &self.spec,
+                Bed::Fixed(&self.bed_y),
+                &self.impulses,
+                &mut sampled,
+                time,
+                &mut work,
+                &mut scratch,
+            )?,
         }
+        let mut frame = publish(&sampled, self.spec.dry_tolerance)?;
+        frame.bed = frame_bed;
         self.canonical = state;
         self.step = target;
         self.frame = frame;
+        self.ends = ends.map(|(now, next)| Ends { step: target, now, next });
+        self.last_substeps = work.substeps;
         Ok(&self.frame)
+    }
+    /// CFL substeps the last successful seek integrated, counting replayed steps
+    /// and the fractional sample.
+    pub fn last_seek_substeps(&self) -> u64 {
+        self.last_substeps
+    }
+    /// Horizontal momentum, per unit water density, that bodies gave the water
+    /// during the last whole canonical step this solver reached. It is the input
+    /// for a reaction on the bodies; the bodies themselves are not touched.
+    pub fn exchanged_impulse(&self) -> [f64; 2] {
+        self.canonical.exchange
     }
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
     pub fn checkpoint_bytes(&self) -> usize {
-        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128)
+        self.checkpoints.len() * (self.initial.q.len() * std::mem::size_of::<Q>() + 128 + 32 * self.spec.body_owners)
     }
 }
 
@@ -280,45 +713,195 @@ fn publish(state: &State, dry: f64) -> Result<Frame, Error> {
             Ok(Cell { depth: q[0], velocity })
         })
         .collect();
-    Ok(Frame { time: state.time, cells: cells? })
+    Ok(Frame { time: state.time, cells: cells?, bed: Vec::new() })
+}
+
+/// Work units per cell and substep. A second-order substep runs two stages,
+/// each a reconstruction plus a flux sweep; it measured 2.8-3.0x the wall time
+/// of a first-order substep on a 256x256 grid (the CFL halving that doubles the
+/// substep count is charged separately, by counting substeps).
+/// Extra resident bytes per cell of a second-order step: two more copies of the
+/// state (48) and the reconstruction row buffers of the sweeps, at most two rows
+/// of two face states per concurrent task (96, reached by a one-row grid).
+/// Measured peak RSS at 1,048,576 cells: first order 158 B/cell on every shape;
+/// second order 182 on square grids and 278 on a 1,048,576 x 1 grid.
+const ORDER2_EXTRA_BYTES: usize = 144;
+const ORDER2_WORK_FACTOR: usize = 3;
+fn step_work(spec: &Spec) -> usize {
+    match spec.order {
+        Order::First => 8,
+        Order::Second => 8 * ORDER2_WORK_FACTOR,
+    }
 }
 
 fn advance(
     spec: &Spec,
-    bed: &[f64],
+    bed: Bed<'_>,
     impulses: &[Impulse],
     state: &mut State,
     target: f64,
     work: &mut Work,
+    scratch: &mut Scratch,
 ) -> Result<(), Error> {
+    if let (true, Bed::Moving { from, to, .. }) = (spec.body_owners > 0 && !spec.body_push, bed) {
+        // the body there at the end of the step, else the one that was; the same in every substep
+        work.take(state.q.len())?;
+        scratch.owner.clear();
+        scratch.owner.extend(to.occupancy.iter().zip(to.owner.iter().zip(&from.owner)).map(|(t, (a, b))| {
+            if *t > 0.0 {
+                *a
+            } else {
+                *b
+            }
+        }));
+    }
+    // who the bed variation of each column of this step belongs to, from the lifts at its two ends
+    let owners = match bed {
+        Bed::Moving { from, to, .. } if spec.body_owners > 0 => {
+            let mut lifted: std::collections::BTreeMap<(u32, u32), f64> = Default::default();
+            for lift in from.lifts.iter().chain(&to.lifts) {
+                for &(c, h) in &lift.columns {
+                    *lifted.entry((c, lift.owner)).or_insert(0.0) += h;
+                }
+            }
+            // per column the owner with the most
+            let mut columns: Vec<(u32, u32, f64)> = Vec::new();
+            for ((c, owner), h) in lifted {
+                match columns.last_mut() {
+                    Some(last) if last.0 == c => {
+                        if h > last.2 {
+                            *last = (c, owner, h);
+                        }
+                    }
+                    _ => columns.push((c, owner, h)),
+                }
+            }
+            flux::Owners::new(columns)
+        }
+        _ => flux::Owners::default(),
+    };
+    // what the driver asked for in the step that ends at `to`, in order of time
+    let asked: &[Impulse] = match bed {
+        Bed::Moving { to, .. } => &to.events,
+        Bed::Fixed(_) => &[],
+    };
+    let mut next_asked = 0;
+    let pushed: &[Push] = match bed {
+        Bed::Moving { to, .. } => &to.pushes,
+        Bed::Fixed(_) => &[],
+    };
+    // what fell in during the step that ends at `t1`, and whether it has been applied
+    let (splash, splash_at): (&[SplashCell], f64) = match bed {
+        Bed::Moving { to, t1, .. } => (&to.splash, t1),
+        Bed::Fixed(_) => (&[], f64::INFINITY),
+    };
+    let mut splashed = false;
     loop {
-        while let Some(event) = impulses.get(state.next_impulse).filter(|i| i.time <= state.time) {
+        // authored impulses first when both are due, then the driver's, each in order of time
+        loop {
+            let authored = impulses.get(state.next_impulse).filter(|i| i.time <= state.time);
+            let driven = asked.get(next_asked).filter(|i| i.time <= state.time);
+            let (event, authored_one) = match (authored, driven) {
+                (Some(a), Some(d)) if d.time < a.time => (d, false),
+                (Some(a), _) => (a, true),
+                (None, Some(d)) => (d, false),
+                (None, None) => break,
+            };
             work.take(state.q.len().saturating_mul(8))?;
             event.apply(spec, &mut state.q)?;
-            state.next_impulse += 1;
+            if authored_one {
+                state.next_impulse += 1;
+            } else {
+                next_asked += 1;
+            }
+        }
+        if !splashed && !splash.is_empty() && state.time >= splash_at {
+            work.take(splash.len().saturating_mul(16))?;
+            body::splash(spec, &mut state.q, splash);
+            splashed = true;
         }
         if state.time >= target {
             break;
         }
-        let end = impulses.get(state.next_impulse).map_or(target, |i| i.time.min(target));
-        work.take(state.q.len().saturating_mul(8))?;
-        let mut speed = [0.0_f64; 2];
-        for q in &state.q {
+        let end = impulses
+            .get(state.next_impulse)
+            .map_or(target, |i| i.time.min(target))
+            .min(asked.get(next_asked).map_or(target, |i| i.time));
+        work.take(state.q.len().saturating_mul(step_work(spec)))?;
+        // Maxima are exact and associative, so the reduction order is irrelevant.
+        let bound = |mut speed: [f64; 2], q: &Q| {
             let c = (spec.gravity * q[0]).sqrt();
             for a in 0..2 {
                 let u = if q[0] >= spec.dry_tolerance { (q[a + 1] / q[0]).abs() } else { 0.0 };
                 speed[a] = speed[a].max(u + c);
             }
-        }
+            speed
+        };
+        let speed = if state.q.len() >= flux::PARALLEL_CELLS {
+            use rayon::prelude::*;
+            state.q.par_iter().fold(|| [0.0_f64; 2], bound).reduce(|| [0.0; 2], |a, b| [a[0].max(b[0]), a[1].max(b[1])])
+        } else {
+            state.q.iter().fold([0.0_f64; 2], bound)
+        };
         let rate = (speed[0] + speed[1]) / spec.cell_size;
         if !rate.is_finite() {
             return Err(Error::Numerical("wave speed overflow"));
         }
-        let dt = if rate == 0.0 { end - state.time } else { (end - state.time).min(0.45 / rate) };
+        let dt = if rate == 0.0 { end - state.time } else { (end - state.time).min(flux::cfl(spec) / rate) };
         if dt <= 0.0 || state.time + dt == state.time {
             return Err(Error::Numerical("timestep precision"));
         }
-        flux::step(spec, bed, &mut state.q, dt)?;
+        work.substeps += 1;
+        let mut bodies = None;
+        let bed_now: &[f64] = match bed {
+            Bed::Fixed(bed) => bed,
+            Bed::Moving { from, to, t0, t1 } => {
+                work.take(state.q.len())?;
+                let s = ((state.time + 0.5 * dt - t0) / (t1 - t0)).clamp(0.0, 1.0);
+                scratch.bed.clear();
+                scratch.bed.extend(from.bed.iter().zip(&to.bed).map(|(a, b)| a + (b - a) * s));
+                if spec.body_push {
+                    // the bodies give momentum by the pushes of the driver, not by relaxing it
+                    bodies = Some(t1 - t0);
+                } else if spec.bodies {
+                    work.take(state.q.len())?;
+                    scratch.occupancy.clear();
+                    scratch.occupancy.extend(from.occupancy.iter().zip(&to.occupancy).map(|(a, b)| a + (b - a) * s));
+                    scratch.velocity.clear();
+                    scratch.velocity.extend(
+                        from.velocity
+                            .iter()
+                            .zip(&to.velocity)
+                            .map(|(a, b)| [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s]),
+                    );
+                    bodies = Some(t1 - t0);
+                }
+                &scratch.bed
+            }
+        };
+        if owners.is_empty() {
+            flux::step(spec, bed_now, &mut state.q, dt, None)?;
+        } else {
+            let mut sink = flux::Sink { owners: &owners, by: &mut state.pressure_by };
+            flux::step(spec, bed_now, &mut state.q, dt, Some(&mut sink))?;
+        }
+        if let Some(step) = bodies {
+            let given = if spec.body_push {
+                body::push(spec, &mut state.q, pushed, &mut state.exchange_by, dt, step)
+            } else {
+                body::transfer(
+                    spec,
+                    &mut state.q,
+                    &scratch.occupancy,
+                    &scratch.velocity,
+                    (&scratch.owner, &mut state.exchange_by),
+                    dt,
+                    step,
+                )
+            };
+            state.exchange[0] += given[0];
+            state.exchange[1] += given[1];
+        }
         state.time = if dt == end - state.time { end } else { state.time + dt };
     }
     Ok(())

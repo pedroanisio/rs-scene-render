@@ -29,6 +29,10 @@ pub mod src {
     pub const PAINT: u32 = 2;
     pub const TEXTURE_LOD: u32 = 3;
     pub const PATTERN: u32 = 4;
+    /// A texture magnified with Catmull-Rom (`layer/@resample="bicubic"`); minified samples stay trilinear.
+    pub const BICUBIC: u32 = 5;
+    /// A texture magnified with Mitchell-Netravali, B = C = 1/3 (`layer/@resample="mitchell"`).
+    pub const MITCHELL: u32 = 6;
 }
 
 /// Draw flags.
@@ -112,7 +116,8 @@ pub struct Gen {
     pub paint_a: u32,
     pub paint_b: u32,
     pub seed_hi: u32,
-    /// Film grain: this frame's seed (low, high), then padding.
+    /// Film grain: this frame's seed (low, high); for a grid, the line width in pixels (f32 bits) and whether one was
+    /// given (1) or the line follows the scale (0).
     pub grain: [u32; 4],
     /// Perlin permutation of 0..255 (seeded 64-bit hash draws), four per vector.
     pub perm: [[u32; 4]; 64],

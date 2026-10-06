@@ -225,7 +225,7 @@ fn caption_source_newlines_are_opt_in_and_default_pixels_stay_identical() {
             let flattened = render_times(&make("", "aa bb cc dd", preset), &[time]).unwrap();
             assert!(legacy.stats.errors.is_empty() && legacy.stats.unsupported.is_empty());
             assert_eq!(legacy.px, greedy.px, "explicit greedy changes {preset} at {time}");
-            assert_eq!(legacy.px, flattened.px, "default no longer flattens newlines: {preset} at {time}");
+            assert_eq!(legacy.px, flattened.px, "default flattens newlines: {preset} at {time}");
             {
                 let source = render_times(&make(r#"lineBreaks="source""#, "aa bb&#10;cc dd", preset), &[time]).unwrap();
                 if preset == "one-word" {
@@ -255,4 +255,74 @@ fn caption_source_words_keep_breaks_when_profanity_is_filtered() {
         sr_text::captions::paginate_with_line_breaks(&cues, None, 80, 2, false, sr_text::captions::LineBreaks::Source);
     assert_eq!(pages[0].text(), "f***\ns***");
     assert_eq!(pages[0].words().len(), 2);
+}
+
+#[test]
+fn a_burned_caption_uses_its_font_asset_whether_or_not_a_text_asset_is_drawn() {
+    // font assets load with the first text drawn; a caption on its own must load them too, or it falls back to the
+    // default family. A monospaced "i" is several times wider than a proportional one.
+    let mono = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    if !std::path::Path::new(mono).exists() {
+        return;
+    }
+    let ink_width = |with_text: bool| {
+        let layer = if with_text { r#"<layer id="lt" asset="t" x="0" y="0"/>"# } else { "" };
+        let xml = format!(
+            r##"<scene version="1.1"><project width="480" height="120" fps="10" duration="1" background="#000000"/>
+<styles><textStyle id="cap" fontAsset="fm" size="30" color="#FFFFFF"/></styles>
+<assets><font id="fm" src="{mono}" family="DejaVu Sans Mono"/><text id="t" text="." width="20" height="20" size="10" color="#000000"/></assets>
+<composition>{layer}</composition>
+<captions><captionTrack id="cc" language="en" mode="burn" preset="classic" style="cap" maxCharsPerLine="40" x="50%" y="55%" width="90%"><cue start="0" end="1" text="iiiiiiiiii"/></captionTrack></captions></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = render(&d)?;
+        assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+        let lit = |x: u32| (60..120).any(|y| r.at(x, y)[0] > 0.5);
+        let (a, b) = ((0..480u32).find(|&x| lit(x))?, (0..480u32).rev().find(|&x| lit(x))?);
+        Some(b - a)
+    };
+    let (Some(with), Some(without)) = (ink_width(true), ink_width(false)) else { return };
+    assert!(
+        without as f32 >= with as f32 * 0.9,
+        "the caption lost its font asset when no text layer was drawn: ink {without} px against {with} px with one"
+    );
+}
+
+#[test]
+fn mask_reveal_clips_each_line_to_its_own_box() {
+    // a mask-reveal unit waits 1.1 em below its place, which is inside the next line's box: with one clip over
+    // the union of the line boxes, line 1 showed through line 2's box before its window; each line has its own clip
+    let asset = r##"<text id="t" text="AAAA&#10;BBBB" width="200" height="120" size="40" color="#FFFFFF" font="DejaVu Sans"/>"##;
+    let layer = r#"<layer id="lt" asset="t" x="0" y="0"><textAnimator preset="mask-reveal" presetStart="1" presetDuration="1"/></layer>"#;
+    let d = doc_text(asset, "", layer, 200, 120);
+    let Some(waiting) = render_times(&d, &[0.5]) else { return };
+    let ink = sum(&waiting, 0, 0, 200, 120, 0);
+    assert!(ink < 1.0, "nothing shows before the preset starts: {ink}");
+    let done = render_times(&d, &[2.5]).unwrap();
+    assert!(sum(&done, 0, 0, 200, 120, 0) > 300.0, "both lines are fully drawn after it ends");
+}
+
+#[test]
+fn counter_starts_on_the_same_clock_as_the_other_presets() {
+    // presetStart is composition time for every preset (the layer's parent timeline), not an offset from the
+    // layer's start; absent, a preset starts with its layer
+    let asset = r##"<text id="t" text="8888" width="200" height="100" size="40" color="#FFFFFF" font="DejaVu Sans"/>"##;
+    let layer = |attrs: &str| {
+        format!(
+            r#"<layer id="lt" asset="t" x="0" y="0" start="2"><textAnimator preset="counter" presetDuration="1" {attrs}/></layer>"#
+        )
+    };
+    let ink = |d: &sr_model::Document, t: f64| sum(&render_times(d, &[t]).unwrap(), 0, 0, 200, 100, 0);
+    let d = doc_text(asset, "", &layer(r#"presetStart="2.5""#), 200, 100);
+    let Some(first) = render_times(&d, &[2.2]) else { return };
+    let before = sum(&first, 0, 0, 200, 100, 0);
+    let after = ink(&d, 4.0);
+    // before the start the count shows 0000 -> "0" digits; after it ends the authored 8888 is shown (more ink)
+    assert!(
+        after > before * 1.2,
+        "counter with presetStart=2.5 on a layer starting at 2: before {before}, after {after}"
+    );
+    // without presetStart the count starts with the layer
+    let own = doc_text(asset, "", &layer(""), 200, 100);
+    assert!(ink(&own, 2.05) < ink(&own, 3.5) * 0.95, "the count runs from the layer's start");
 }

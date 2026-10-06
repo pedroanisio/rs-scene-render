@@ -277,7 +277,6 @@ fn overflowing_displacement_capacity_is_an_error_not_created_water() {
 #[test]
 fn event_sort_workspace_is_included_in_the_resident_budget() {
     let mut s = spec([1, 1]);
-    s.max_bytes = 160_000;
     let events: Vec<_> = (0..2_000)
         .map(|i| Impulse {
             time: ((i * 997) % 2_000 + 1) as f64,
@@ -288,9 +287,16 @@ fn event_sort_workspace_is_included_in_the_resident_budget() {
             kind: ImpulseKind::AddWater,
         })
         .collect();
-    // The event vector fits; stable sorting also needs a temporary allocation.
-    assert!(events.len() * std::mem::size_of::<Impulse>() < s.max_bytes);
-    assert!(Ocean::new(s, vec![1.0], vec![Cell::default()], events).is_err());
+    // The budget is derived from the size of an event, whatever that is: one cell (256 bytes) and the fixed
+    // 4096 are always charged, the event vector fits in what is left with half as much again, and the
+    // vector together with the temporary allocation of a stable sort (twice the vector) does not.
+    let vector = events.capacity() * std::mem::size_of::<Impulse>();
+    s.max_bytes = 256 + 4096 + vector + vector / 2;
+    assert!(vector < s.max_bytes);
+    assert!(Ocean::new(s.clone(), vec![1.0], vec![Cell::default()], events.clone()).is_err());
+    // with room for the sort as well it is accepted
+    s.max_bytes = 256 + 4096 + 2 * vector + 1024;
+    assert!(Ocean::new(s, vec![1.0], vec![Cell::default()], events).is_ok());
 }
 
 #[test]
@@ -335,7 +341,7 @@ fn procedural_swell_has_authored_speed_and_preserves_water_and_the_solver_state(
     use sr_sim::ocean::{waves, Frame};
     let mut s = spec([8, 1]);
     s.cell_size = 1.0;
-    let base = Frame { time: 0.0, cells: vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8] };
+    let base = Frame { time: 0.0, cells: vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8], bed: vec![] };
     let w = waves::Wave { wavelength: 8.0, amplitude: 0.1, direction: 0.0, phase: 0.0, speed: 2.0 };
     let a = waves::apply(&s, &base, &[w]).unwrap();
     let b = waves::apply(&s, &Frame { time: 1.0, ..base.clone() }, &[w]).unwrap();
@@ -345,8 +351,11 @@ fn procedural_swell_has_authored_speed_and_preserves_water_and_the_solver_state(
     }
     assert_eq!(base.cells, vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 8]);
     assert!((a.cells.iter().map(|c| c.depth).sum::<f64>() - 16.0).abs() < 1e-12);
-    let coast =
-        Frame { time: 2.0, cells: (0..8).map(|i| Cell { depth: i as f64 * 0.01, velocity: [0.0; 2] }).collect() };
+    let coast = Frame {
+        time: 2.0,
+        cells: (0..8).map(|i| Cell { depth: i as f64 * 0.01, velocity: [0.0; 2] }).collect(),
+        bed: vec![],
+    };
     let water = waves::apply(&s, &coast, &[waves::Wave { amplitude: 2.0, ..w }; 4]).unwrap();
     assert!(water.cells.iter().all(|c| c.depth >= 0.0));
     assert_eq!(water.cells[0].depth, 0.0);

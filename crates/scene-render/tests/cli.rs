@@ -1215,3 +1215,320 @@ fn plain_exports_keep_the_final_partial_frame() {
         assert_eq!(centre(dir.join(format!("{name}_002.png"))), BLUE);
     }
 }
+
+fn three_d_fixture(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sr-cli-3d-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = r##"<scene version="1.3"><project width="64" height="48" fps="10" duration="1" background="#102030"/>
+<composition><object3D id="ball" primitive="sphere" radius="10" x="32" y="24"/></composition></scene>"##;
+    std::fs::write(dir.join("r.scene.xml"), xml).unwrap();
+    dir
+}
+
+/// True when the machine exposes an OpenGL adapter (the test needs one to select).
+fn has_gl_adapter() -> bool {
+    let o = run_env(&["gpus", "--json"], &[("SR_GPU_BACKEND", "gl")]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return false };
+    r["adapters"].as_array().is_some_and(|a| !a.is_empty())
+}
+
+#[test]
+fn a_3d_document_is_not_rendered_without_its_3d_on_an_opengl_adapter() {
+    // asking for OpenGL only, a document with a 3D object cannot be drawn: that is an error by default,
+    // not a frame without the object and exit 0
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("render-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_BACKEND", "gl")]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(2), "{out}{err}");
+    assert!(err.contains("3D") && err.contains("Vulkan") && err.contains("scene-render gpus"), "{err}");
+}
+
+#[test]
+fn encoding_a_3d_document_on_an_opengl_adapter_fails_and_writes_nothing() {
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("encode-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let pattern = dir.join("gl_%03d.png");
+    let o = run_env(&["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2"], &[("SR_GPU_BACKEND", "gl")]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    // the same exit code as render: scripts test one number for "this adapter cannot draw the document"
+    assert_eq!(o.status.code(), Some(2), "{out}{err}");
+    assert!(format!("{out}{err}").contains("3D"), "{out}{err}");
+    assert!(!dir.join("gl_000.png").exists(), "no frame without the 3D object is written");
+}
+
+#[test]
+fn a_flat_document_still_renders_on_opengl() {
+    if !has_gl_adapter() {
+        eprintln!("skipping: no OpenGL adapter");
+        return;
+    }
+    let dir = render_fixture("flat-gl");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_BACKEND", "gl")]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+fn a_3d_document_takes_an_adapter_that_can_draw_it_by_default() {
+    // on a machine that offers OpenGL only for the GPU and Vulkan for lavapipe (WSL2), the default
+    // adapter would drop the 3D object; the choice now moves to the Vulkan one
+    let o = run(&["gpus", "--json"]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return };
+    let list = r["adapters"].as_array().cloned().unwrap_or_default();
+    if !list.iter().any(|a| a["backend"] != "Gl") {
+        eprintln!("skipping: no non-OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("default");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run(&["render", &scene, "--bench", "--frames", "0..1"]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{out}{err}");
+    assert!(!out.contains("3D objects are not drawn"), "{out}");
+    assert!(!out.contains("(Gl,"), "the render adapter must not be an OpenGL one: {out}");
+}
+
+#[test]
+fn encoding_a_3d_document_by_default_takes_an_adapter_that_can_draw_it() {
+    // encode builds its own adapter, so it needs the same document-driven choice as render
+    let o = run(&["gpus", "--json"]);
+    let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return };
+    let list = r["adapters"].as_array().cloned().unwrap_or_default();
+    if !list.iter().any(|a| a["backend"] != "Gl") {
+        eprintln!("skipping: no non-OpenGL adapter");
+        return;
+    }
+    let dir = three_d_fixture("encode-default");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let pattern = dir.join("d_%03d.png");
+    let o = run(&["encode", &scene, "-o", pattern.to_str().unwrap(), "--end", "0.2"]);
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{out}{err}");
+    assert!(
+        err.contains("rendering on") && !err.contains("(Gl,"),
+        "the encode adapter must not be an OpenGL one: {err}"
+    );
+    assert!(dir.join("d_000.png").is_file(), "{out}{err}");
+}
+
+fn safe_area_fixture(name: &str, enforce: &str) -> (PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("sr-cli-safe-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="360" height="640" fps="10" duration="1" background="#000000" safeArea="sa"/>
+<safeAreas><safeArea id="sa" preset="youtube-shorts" {enforce}/></safeAreas>
+<composition><shape id="cta1" shape="rect" x="0" y="600" width="80" height="30" fill="#FF0000" tags="cta"/></composition></scene>"##
+    );
+    let file = dir.join("s.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    let f = file.display().to_string();
+    (dir, f)
+}
+
+#[test]
+fn validate_reports_a_cta_outside_the_safe_area_at_the_level_enforce_asks() {
+    let (_, f) = safe_area_fixture("validate-error", r#"enforce="error""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.contains("error[SA01]") && out.contains("cta1"), "{out}");
+
+    let (_, f) = safe_area_fixture("validate-warn", r#"enforce="warn""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.contains("warning[SA01]"), "{out}");
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
+
+    let (_, f) = safe_area_fixture("validate-off", r#"enforce="off""#);
+    let out = String::from_utf8_lossy(&run(&["validate", &f]).stdout).to_string();
+    assert!(!out.contains("SA01"), "{out}");
+}
+
+#[test]
+fn render_and_encode_stop_on_enforce_error_and_say_so_on_warn() {
+    let (dir, f) = safe_area_fixture("deliver-error", r#"enforce="error""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    if no_gpu(&o) {
+        return;
+    }
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(1), "{all}");
+    assert!(all.contains("SA01") && all.contains("cta1"), "{all}");
+    let png = dir.join("e_%03d.png");
+    let o = run(&["encode", &f, "-o", png.to_str().unwrap(), "--end", "0.2"]);
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(1), "{all}");
+    assert!(all.contains("SA01"), "{all}");
+    assert!(!dir.join("e_000.png").exists(), "an enforce=error failure writes nothing");
+
+    let (dir, f) = safe_area_fixture("deliver-warn", r#"enforce="warn""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(0), "{all}");
+    assert!(all.contains("SA01"), "{all}");
+    let png = dir.join("w_%03d.png");
+    let o = run(&["encode", &f, "-o", png.to_str().unwrap(), "--end", "0.2", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("SA01")), "{r}");
+    assert!(dir.join("w_000.png").is_file());
+}
+
+/// Writes a one-shape document and returns its path.
+fn compile_fixture(name: &str, assets: &str, node: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("sr-cli-compile-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/>{assets}<composition>{node}</composition></scene>"##
+    );
+    let file = dir.join("c.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    file.display().to_string()
+}
+
+#[test]
+fn validate_fails_on_what_compilation_would_reject_at_render() {
+    // a document validate accepts must not fail when render compiles it: each of these is a document the compile step rejects
+    for (name, code, assets, node) in [
+        (
+            "scale-key",
+            "E04",
+            "",
+            r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><animate property="scale"><key time="0" value="1"/><key time="1" value="2"/></animate></shape>"##,
+        ),
+        (
+            "text-expression",
+            "E02",
+            r##"<assets><text id="t" text="a" width="40" height="20" size="12"/></assets>"##,
+            r##"<layer id="l" asset="t"><expression property="text">"hi"</expression></layer>"##,
+        ),
+        (
+            "bare-floor",
+            "E01",
+            "",
+            r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><expression property="x">floor(time * 10)</expression></shape>"##,
+        ),
+    ] {
+        let f = compile_fixture(name, assets, node);
+        let v = run(&["validate", &f]);
+        let out = String::from_utf8_lossy(&v.stdout);
+        assert_eq!(v.status.code(), Some(1), "{name}: {out}");
+        assert!(out.contains(&format!("error[{code}]")), "{name}: {out}");
+    }
+}
+
+#[test]
+fn a_document_that_compiles_still_validates() {
+    let f = compile_fixture(
+        "ok",
+        "",
+        r##"<shape id="s" shape="rect" width="20" height="20" fill="#FF0000"><animate property="scale"><key time="0" value="1,1"/><key time="1" value="2,2"/></animate><expression property="x">Math.floor(time * 10)</expression></shape>"##,
+    );
+    let v = run(&["validate", &f]);
+    assert_eq!(v.status.code(), Some(0), "{}", String::from_utf8_lossy(&v.stdout));
+}
+
+fn forced_fixture(name: &str, attr: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("sr-cli-force-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let xml = format!(
+        r##"<scene version="1.1"><project width="360" height="640" fps="10" duration="1" background="#000000" safeArea="sa"/>
+<safeAreas><safeArea id="sa" preset="youtube-shorts" enforce="error"/></safeAreas>
+<symbols><symbol id="notch" width="64" height="64" duration="1"><shape id="mark" shape="rect" width="64" height="64" fill="#FF8000" tags="logo"/></symbol></symbols>
+<composition><instance id="n" symbol="notch" x="0" y="560" {attr}/></composition></scene>"##
+    );
+    let file = dir.join("f.scene.xml");
+    std::fs::write(&file, xml).unwrap();
+    file.display().to_string()
+}
+
+#[test]
+fn a_forced_node_passes_enforce_error_and_validate_says_so() {
+    let f = forced_fixture("without", "");
+    let o = run(&["validate", &f]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stdout));
+
+    let f = forced_fixture("with", r#"safeAreaForce="true""#);
+    let o = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    assert!(out.contains("info[SA02]: n forced outside the safe area"), "{out}");
+    assert!(!out.contains("SA01"), "{out}");
+    // the force is information, not a warning: it does not fail --deny-warnings
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(0));
+    let j = run(&["validate", "--format", "json", &f]);
+    let v: serde_json::Value = serde_json::from_slice(&j.stdout).unwrap();
+    assert!(v["files"][0]["info"][0].as_str().unwrap().contains("SA02"), "{v}");
+}
+
+#[test]
+fn render_and_encode_accept_a_forced_node() {
+    let f = forced_fixture("deliver", r#"safeAreaForce="true""#);
+    let o = run(&["render", &f, "--bench", "--frames", "0..1"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+fn validate_warns_about_attributes_this_build_does_not_read() {
+    let f = compile_fixture(
+        "ignored",
+        "",
+        r##"<group id="g" collapse="true" width="10" height="10"><shape id="s" shape="rect" width="8" height="8" fill="#FF0000"/></group>"##,
+    );
+    let v = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&v.stdout);
+    assert_eq!(v.status.code(), Some(0), "{out}");
+    assert!(out.contains("warning[E19]") && out.contains("collapse"), "{out}");
+    assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
+}
+
+#[test]
+fn encode_strict_accepts_posterize_time_on_a_node_that_starts_later() {
+    // a node absent at its posterized step start is drawn as it was, which is nothing: not a delivery gap
+    let f = compile_fixture(
+        "pt-start",
+        "",
+        r##"<group id="m" x="0" y="20" width="20" height="20" effects="pt" start="0.2"><shape id="b" shape="rect" x="0" y="0" width="20" height="20" fill="#FFFFFF"/></group>"##,
+    );
+    let text = std::fs::read_to_string(&f)
+        .unwrap()
+        .replace("</scene>", r#"<effects><effect id="pt" type="posterize-time" frequency="8"/></effects></scene>"#);
+    std::fs::write(&f, text).unwrap();
+    let out = PathBuf::from(&f).with_file_name("pt_%03d.png");
+    let o = run(&["encode", &f, "-o", out.to_str().unwrap(), "--end", "0.5", "--strict"]);
+    if no_gpu(&o) {
+        return;
+    }
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}

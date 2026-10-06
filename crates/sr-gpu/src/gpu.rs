@@ -25,6 +25,14 @@ pub enum GpuError {
     /// The adapter refused the device.
     #[error("the GPU adapter refused to create a device: {0}")]
     Device(String),
+    /// The document has 3D objects, and no adapter that can run the 3D pass was chosen or found.
+    #[error("the document has 3D objects, which need a Vulkan, Metal or DirectX 12 adapter, but {why}; \
+             SR_GPU_BACKEND=vulkan selects Vulkan (on WSL2 that is Mesa lavapipe, a software renderer: complete but slow); \
+             `scene-render gpus` lists the adapters found")]
+    NoThreeD {
+        /// What was wrong with the choice.
+        why: String,
+    },
 }
 
 /// Which adapters to consider.
@@ -98,6 +106,57 @@ pub fn choose_adapter(found: &[wgpu::AdapterInfo], name: Option<&str>) -> Result
             })
         }
         None => Ok((0..found.len()).min_by_key(|&i| rank(&found[i])).unwrap_or(0)),
+    }
+}
+
+/// True when the 3D pass can run on the adapter.
+pub fn can_run_3d(info: &wgpu::AdapterInfo) -> bool {
+    // the 3D pass resolves multisampled depth, which OpenGL shaders cannot read
+    info.backend != wgpu::Backend::Gl
+}
+
+/// Like [`choose_adapter`], for a document that does (`needs_3d`) or does not need the 3D pass.
+///
+/// A document with 3D objects takes the best-ranked adapter that can run them (so, on WSL2 where the GPU is
+/// reachable only through OpenGL, the Vulkan one: lavapipe, slow but complete) instead of one that would drop the objects
+/// without a word. When none can, or the adapter named cannot, that is [`GpuError::NoThreeD`].
+pub fn choose_adapter_for(found: &[wgpu::AdapterInfo], name: Option<&str>, needs_3d: bool) -> Result<usize, GpuError> {
+    if !needs_3d {
+        return choose_adapter(found, name);
+    }
+    match name {
+        Some(_) => {
+            let i = choose_adapter(found, name)?;
+            if can_run_3d(&found[i]) {
+                Ok(i)
+            } else {
+                Err(GpuError::NoThreeD {
+                    why: format!("the adapter asked for, {}, cannot run them", describe(&found[i])),
+                })
+            }
+        }
+        None => {
+            if found.is_empty() {
+                return Err(GpuError::NoAdapter("no adapter was found".into()));
+            }
+            (0..found.len()).filter(|&i| can_run_3d(&found[i])).min_by_key(|&i| rank(&found[i])).ok_or_else(|| {
+                GpuError::NoThreeD {
+                    why: format!(
+                        "none of the adapters found can run them ({})",
+                        found.iter().map(describe).collect::<Vec<_>>().join(", ")
+                    ),
+                }
+            })
+        }
+    }
+}
+
+/// `Ok` when the adapter can run the 3D pass, else [`GpuError::NoThreeD`]: for a device chosen by the caller.
+pub fn require_3d(info: &wgpu::AdapterInfo) -> Result<(), GpuError> {
+    if can_run_3d(info) {
+        Ok(())
+    } else {
+        Err(GpuError::NoThreeD { why: format!("the adapter in use, {}, cannot run them", describe(info)) })
     }
 }
 
@@ -266,11 +325,22 @@ impl Gpu {
         Gpu::with_options(&GpuOptions::from_env())
     }
 
+    /// Like [`Gpu::new`], for a document that does or does not need the 3D pass
+    /// (see [`choose_adapter_for`]).
+    pub fn new_for(needs_3d: bool) -> Result<Gpu, GpuError> {
+        Gpu::with_options_for(&GpuOptions::from_env(), needs_3d)
+    }
+
     /// Opens the adapter `opts` selects.
     pub fn with_options(opts: &GpuOptions) -> Result<Gpu, GpuError> {
+        Gpu::with_options_for(opts, false)
+    }
+
+    /// Opens the adapter `opts` selects for a document that does or does not need the 3D pass.
+    pub fn with_options_for(opts: &GpuOptions, needs_3d: bool) -> Result<Gpu, GpuError> {
         let mut found = enumerate(opts.backends);
         let infos = found.iter().map(|a| a.get_info()).collect::<Vec<_>>();
-        let i = choose_adapter(&infos, opts.adapter.as_deref()).map_err(|e| match e {
+        let i = choose_adapter_for(&infos, opts.adapter.as_deref(), needs_3d).map_err(|e| match e {
             GpuError::NoAdapter(_) => GpuError::NoAdapter(format!("none on {:?}", opts.backends)),
             e => e,
         })?;

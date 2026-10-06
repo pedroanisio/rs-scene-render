@@ -113,7 +113,7 @@
   <xs:simpleType name="colorType">
     <xs:annotation><xs:documentation>
       #RRGGBB, #RRGGBBAA, 3-4 normalised channels in [0,1] ("1,0.5,0,1"), or a
-      style token reference var(--name) resolved from styles/token.
+      style token reference var(--name) resolved from styles/token. The shorthand #RGB and #RGBA is not accepted.
     </xs:documentation></xs:annotation>
     <xs:restriction base="xs:string">
       <xs:pattern value="#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?|(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+)(,(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+)){2,3}|var\(--[A-Za-z0-9_\-]+\)"/>
@@ -324,6 +324,24 @@
     </xs:attribute>
   </xs:attributeGroup>
 
+  <xs:simpleType name="strokeMarkerType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/><xs:enumeration value="arrow"/><xs:enumeration value="open-arrow"/>
+      <xs:enumeration value="circle"/><xs:enumeration value="square"/><xs:enumeration value="diamond"/>
+      <xs:enumeration value="bar"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:attributeGroup name="strokeMarkers">
+    <xs:annotation><xs:documentation>
+      Markers drawn at the start and end of an open outline, in the stroke's paint, pointing along it
+      (the start marker points backwards). markerSize is in multiples of strokeWidth. With trim paths,
+      markers sit at the ends of the visible part.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="markerStart" type="strokeMarkerType" default="none"/>
+    <xs:attribute name="markerEnd" type="strokeMarkerType" default="none"/>
+    <xs:attribute name="markerSize" type="positiveDecimal" default="4"/>
+  </xs:attributeGroup>
+
   <xs:complexType name="paramValueType">
     <xs:annotation><xs:documentation>Generic named value (shader uniforms, plugin params).</xs:documentation></xs:annotation>
     <xs:attribute name="name" type="xs:NMTOKEN" use="required"/>
@@ -369,6 +387,12 @@
     <xs:attribute name="stiffness" type="positiveDecimal" default="100"/>
     <xs:attribute name="damping" type="nonNegativeDecimal" default="10"/>
     <xs:attribute name="mass" type="positiveDecimal" default="1"/>
+    <xs:attribute name="overshoot" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>The constant of a back-in, back-out or back-in-out segment (default 1.70158, about 10 % overshoot; 0 is the plain cubic). Read from the key the segment leaves.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="period" type="positiveDecimal">
+      <xs:annotation><xs:documentation>The ringing period of an elastic-in, elastic-out or elastic-in-out segment as a fraction of the segment (default 0.3; 0.45 for elastic-in-out). Read from the key the segment leaves.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="marker" type="xs:IDREF">
       <xs:annotation><xs:documentation>Snap the key time to a marker; @time becomes an offset from it.</xs:documentation></xs:annotation>
     </xs:attribute>
@@ -389,7 +413,8 @@
   </xs:complexType>
   <xs:complexType name="expressionType">
     <xs:annotation><xs:documentation>
-      Computes @property every frame. The language is a pure, side-effect-free
+      Computes @property every frame; @property names an attribute the element's own type declares (or position,
+      scale, anchor, skew): a text layer's text, for one, is not an animatable property. The language is a pure, side-effect-free
       subset of ECMAScript expressions with these built-ins: time, frame, value,
       index, count, seed, param(name), prop("id.property"), valueAtTime(t),
       wiggle(freq, amp[, octaves, ampMult]), noise(x[,y,z]), random([min,max]),
@@ -597,7 +622,9 @@
       <xs:attribute name="fx" type="xs:double"/>
       <xs:attribute name="fy" type="xs:double"/>
       <xs:attribute name="fr" type="nonNegativeDecimal" default="0"/>
-      <xs:attribute name="aspect" type="positiveDecimal" default="1"/>
+      <xs:attribute name="aspect" type="positiveDecimal" default="1">
+        <xs:annotation><xs:documentation>Multiplier on the gradient's x extent about its centre, applied after the units are mapped. 1 is no stretch. With units="object" the gradient already follows the painted box, so a radial gradient on a wide shape is an ellipse without any aspect; &gt; 1 widens it further, &lt; 1 narrows it.</xs:documentation></xs:annotation>
+      </xs:attribute>
     </xs:extension></xs:complexContent>
   </xs:complexType>
   <xs:complexType name="conicGradientType">
@@ -1018,6 +1045,9 @@
     <xs:attribute name="contrast" type="xs:double" default="1"/>
     <xs:attribute name="angle" type="xs:double" default="0"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
+    <xs:attribute name="lineWidth" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>Grid only: the line width in asset pixels, whatever @scale says; the pitch stays @scale. Absent, the lines are about 4 % of @scale wide (at least 1 px). Animates like @scale.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="chartSeriesType">
     <xs:attribute name="name" type="xs:string" use="required"/>
@@ -1216,8 +1246,8 @@
   </xs:complexType>
   <xs:complexType name="geoLayerType">
     <xs:annotation><xs:documentation>
-      The features of a geo asset: polygons filled and stroked, lines stroked (drawn on by
-      @progress), points as dots. @filter keeps features whose property equals (prop=value) or
+      The features of a geo asset: polygons filled and stroked, lines and outlines stroked (drawn on
+      by @progress: each line or ring from its first vertex; the fill stays whole), points as dots. @filter keeps features whose property equals (prop=value) or
       differs from (prop!=value) a value. Choropleth: @fillBy names a numeric property mapped
       through @domain (data range by default) and @scale onto @palette (colours interpolated in
       sRGB; quantize picks one colour per equal step); features without a value use @noData.
@@ -1398,6 +1428,13 @@
     <xs:attribute name="temperatureScale" type="positiveDecimal" default="1"/>
     <xs:attribute name="stepSize" type="positiveDecimal" default="1"/>
     <xs:attribute name="maxSteps" default="2048"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lighting" default="exact">
+      <xs:annotation><xs:documentation>Version 1.3. How the medium's in-scattering is lit by the path tracer: exact marches a shadow ray from every sample; grid reads transmittance and surface visibility from per-light grids built once per frame (see the cinematic impact SREP). The lightGrid* attributes apply only with grid (VOL10).</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="exact"/><xs:enumeration value="grid"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="lightGridCell" default="1"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridDomeDirections" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="512"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="assetsType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -1501,6 +1538,9 @@
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="tags" type="xs:NMTOKENS"/>
+    <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>Local addition. true exempts this node and everything it contains from the safeArea enforce check (SA01); validate lists every node that carries it (SA02), so a deliberate placement outside the safe region is never silent.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="z" type="xs:int" default="0"/>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
@@ -1753,8 +1793,18 @@
         <xs:enumeration value="tracking-in"/><xs:enumeration value="mask-reveal"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="presetStart" type="xs:double"/>
+    <xs:attribute name="presetStart" type="xs:double">
+      <xs:annotation><xs:documentation>Time on the layer's parent timeline (composition time for a top-level layer), not an offset from the layer's start; when absent the preset starts at the layer's own start.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="presetDuration" type="positiveDecimal"/>
+    <xs:attribute name="presetEase">
+      <xs:annotation><xs:documentation>The curve of a preset, in place of the preset's own (most use cubic-out, which is front-loaded: at 40 % of the duration it is 78 % done). Without @preset it has no effect.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="linear"/><xs:enumeration value="quad-in"/><xs:enumeration value="quad-out"/>
+        <xs:enumeration value="cubic-out"/><xs:enumeration value="expo-out"/><xs:enumeration value="back-out"/>
+        <xs:enumeration value="bounce-out"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="unit" default="character">
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="character"/><xs:enumeration value="character-no-space"/>
@@ -1927,6 +1977,12 @@
         <xs:enumeration value="none"/><xs:enumeration value="frame-mix"/><xs:enumeration value="optical-flow"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="resample" default="linear">
+      <xs:annotation><xs:documentation>The filter used where the layer is drawn larger than its source. linear: bilinear (the default). bicubic: Catmull-Rom, clamped to the range of the four nearest texels. mitchell: Mitchell-Netravali with B = C = 1/3, with the same clamp. Where the layer is drawn at or below its source size every layer uses trilinear mip filtering whatever @resample says.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="linear"/><xs:enumeration value="bicubic"/><xs:enumeration value="mitchell"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="fit" type="fitType" default="none"/>
     <xs:attribute name="boxWidth" type="positiveLengthType"/>
     <xs:attribute name="boxHeight" type="positiveLengthType"/>
@@ -1980,6 +2036,7 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
     <xs:attributeGroup ref="strokeStyle"/>
     <xs:attributeGroup ref="trimPath"/>
+    <xs:attributeGroup ref="strokeMarkers"/>
   </xs:complexType>
 
   <xs:complexType name="burstType">
@@ -1987,6 +2044,30 @@
     <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
+  </xs:complexType>
+  <xs:complexType name="burst3DType">
+    <xs:annotation><xs:documentation>
+      A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
+      throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
+      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
+      (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
+      launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
+      render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed
+      and mass follow the ejecta scaling of Housen and Holsapple (2011) as the engine reads it, which has not been
+      checked against the paper; the launch angle, its spread, the launch time and the lopsidedness of an oblique
+      impact are the engine's own. `angle` is the launch angle above the tangent plane of the contact and
+      `angleSpread` the half-width of the uniform spread around it, in degrees; both stay within 0 to 90 together.
+      The ejecta of regolith and ice have no table row and are an error. Positions and velocities are in scene units
+      through `physics/@pixelsPerMeter`, and gravity, drag and colliders are those of the emitter. The crater's
+      pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="time" type="xs:double"/>
+    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
+    <xs:attribute name="interval" type="positiveDecimal" default="1"/>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="particleEmitterType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -2113,13 +2194,99 @@
     <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="surfaceMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="periodic"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="bathymetryEncoding" default="red"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="order" default="1"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
     <xs:attribute name="bathymetry" type="xs:IDREF"/>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="splash" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The particles3D emitters whose particles fall into this ocean: each must throw out the ejecta of a crater (a
+        `burst` with `crater`), whose particles have a mass (OCN13). Absent (the default) is the behaviour there always was.
+        A particle of a listed emitter whose centre crosses the ocean's rest level (`waterLevel`) downward inside its
+        domain is removed there, and what it brings is given to the water in the canonical step of the crossing, summed
+        by cell: the volume of the particle (its mass over the density of the crater's target) is taken out of the
+        cell's water and given equally to its eight neighbours, never more than 90 % of the cell's water, and its
+        horizontal momentum, divided by the density of the water, is added to the cell's. The water volume and the
+        horizontal momentum that is applied are conserved; the vertical momentum and the energy of the particle are not
+        (the shallow-water model has no vertical momentum), and a particle that has fallen in is gone, it does not sink.
+        The surface is the water's rest level, not the swell, and the ocean is taken at its pose when the emitter
+        starts. The deposit does not go through the depth filter of `bedResponse`. An emitter belongs to one ocean.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="bodyCoupling" default="none">
+      <xs:annotation><xs:documentation>
+        What the water does to the rigid bodies in `colliders`. `none` (the default) is the existing behaviour: a body
+        displaces the water and nothing acts on the body. `buoyancy` loads each rigid body with the weight of the water it
+        displaces (water density 1000 kg/m3, the ocean's gravity), upward through the centroid of the submerged volume
+        so that a tilted body is turned by it, and with a quadratic form drag on its vertical motion, scaled by
+        `bodyDrag`. A body floats if it is lighter than the water it displaces. The submerged part is measured against
+        the free surface under the body: the plane that the ocean fits, in the canonical step before the last one it has
+        completed, through the surface of the wet columns of the body's footprint (the water the body displaces stands
+        above the rest level while it is there, and the plane says so), and against the rest level, `waterLevel`, while
+        there is none; the body's own motion therefore moves the water it floats on, and the water carries the energy of
+        a bobbing body away, so a body with no drag settles. `full` adds the horizontal momentum the body gave the water in
+        that step, taken back as a force along the body's centre over one canonical step, so that the body and the water
+        keep their momentum together (to what is in flight, one step late); roll is not damped, there is no added mass,
+        and a body rides the rest level when the ocean has no water under it. The load is held for one rigid step and
+        evaluated halfway through it. A body so light that the waterline's stiffness times the step reaches 1.8 is an
+        error (lower `physics/@fixedStep` or raise the mass), not a damped motion. The rigid body must be a sphere, box,
+        cylinder, cone, capsule or closed mesh. The ocean and the bodies form a group (see the contract text): the ocean
+        is stepped before the rigid world, and the document cannot be baked into a physics cache.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/><xs:enumeration value="full"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bedResponse" default="depthFiltered">
+      <xs:annotation><xs:documentation>
+        How the free surface answers what the objects in `colliders` do to the water: the bed that a crater moves and
+        the volume a body occupies. `depthFiltered` (the default) attenuates it by the depth of the water: a
+        displacement much narrower than the depth does little to the surface, as in linear water-wave theory, where an
+        instantaneous displacement of wavenumber k is carried to the surface by 1/cosh(k h) for the bed (Kajiura 1963;
+        read here only as quoted by the tsunami literature) and by cosh(k z0)/cosh(k h) for a volume at height z0 above the bed
+        (derived by the engine). The displaced volume is conserved. `hydrostatic` lifts the whole column by the
+        displacement, which is the long-wave answer, right when the displacement is much wider than the depth: the
+        behaviour of the first version, kept for comparison. With `depthFiltered` the horizontal momentum that a
+        body gives the water is also not the relaxation toward its velocity but the form drag of the body through
+        it, (1/2) C_d A |U - u| (U - u) per unit density (C_d is `bodyDrag`, U the body's velocity, u the mean
+        velocity of the water under it, A the area its wet part presents to that flow), spread as the lift of the
+        body is and never past its velocity. It has no effect without `colliders`.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>
+        Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
+        the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
+        stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
+        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        undamped bobbing.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="waterImpulseType">
+    <xs:annotation><xs:documentation>
+      An impulse at an instant (`time`, `x`, `z`, `radius`, `amplitude`, `velocityX`, `velocityZ`, `type`), or the cavity
+      that a body makes of the water it enters: `source` names a dynamic rigidBody object that the ocean lists in
+      `colliders`, and nothing is authored about when, where or how big (none of the others may be given, and a body has
+      at most one). The entry is the first time the lowest point of the body crosses the ocean's rest level (`waterLevel`)
+      downward, found step by step from the body's poses, with the body moving down at that instant; a body that starts
+      in the water, or never reaches it, makes no cavity. The cavity is the transient crater of the scaling law of
+      Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
+      normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
+      law's volume and depth give the disc that is emptied (a bowl profile of the law's depth at its centre holding the law's volume), the water going to the ring around it
+      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). The cavity forms over the
+      law's formation time (0.8 times the square root of its volume's cube root over gravity), in a part for every
+      canonical step that grows smoothly from nothing to the whole (the shape of the growth is the engine's choice,
+      the law gives only the time); a ring or a disc narrower than four cells is widened, keeping the volume. The cavity is limited by the water layer: it takes at most 90% of the
+      water of its disc, and of any column in it, so it never exposes the bed and is never an error for lack of water; a
+      body that reaches the bed excavates the bed's crater (`crater@source`) instead. The body goes on raising the
+      columns it occupies, as before; the cavity is displacement in addition. Hydrostatic: no jet, no crown of
+      spray, no air; the law is that of a crater in water, not a validated model of water entry. The event is made at
+      the first entry only, for the owner's pose at that instant, and an entry outside the ocean makes nothing.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="source" type="xs:IDREF"/>
     <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="x" type="xs:double" default="0"/>
     <xs:attribute name="z" type="xs:double" default="0"/>
@@ -2143,7 +2310,8 @@
     <xs:attribute name="end" type="nonNegativeDecimal"/>
     <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="foamMaterial" type="xs:IDREF"/>
     <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
   </xs:complexType>
@@ -2156,7 +2324,7 @@
   </xs:complexType>
 
   <xs:complexType name="particles3DType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burstType"/></xs:choice>
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burst3DType"/></xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="x" type="xs:double" default="0"/>
@@ -2237,6 +2405,22 @@
     <xs:attribute name="sprite" type="xs:IDREF"/>
     <xs:attribute name="forceFields" type="xs:IDREFS"/>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="gas" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        The object3D whose native pyro volume drags the particles along. Absent (the default) is the behaviour there
+        always was. The acceleration of a particle gains `drag` times the gas's velocity at its place and time, so
+        with the emitter's `drag` k the particle obeys p'' = k (u - v) plus gravity and fields: it is dragged by the gas
+        inside the volume's domain and by still air outside it, with the same coefficient (the gas fades to rest across
+        one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
+        is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
+        linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
+        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
+        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
+        and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
+        velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
+        so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="emitterShape" default="point"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="point"/><xs:enumeration value="box"/><xs:enumeration value="sphere"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="billboard"/><xs:enumeration value="streak"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="sizeEnd" type="nonNegativeDecimal"/>
@@ -2264,9 +2448,31 @@
     <xs:attribute name="scaleZ" type="xs:double" default="1"/>
     <xs:attribute name="mesh" type="xs:IDREF"/>
   </xs:attributeGroup>
+  <xs:attributeGroup name="pyroCrater">
+    <xs:annotation><xs:documentation>
+      A source or impulse that the impact of a crater causes. `crater` names a crater that grows from an impact
+      (`crater@source`); the smoke is derived from that impact and nothing is authored about when, where or how much:
+      the source is a sphere of the crater's radius at the impact point, active from the impact over the crater's
+      formation time (an impulse: at the impact), so shape, position, timing, density, temperature and expansion are
+      not given. The dust is `dustFraction` of the volume thrown out of the crater, injected as a volume fraction of
+      solids, spread over the cells the sphere covers that are not solid (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
+      `heatFraction` of (1/2) m U^2 sin(theta)^(3/2) for the body's mass m, speed U and angle theta from the surface;
+      it warms the dust by heat / (dust mass x `specificHeat`, J/(kg K)), at most `maxTemperature` kelvin, and the
+      expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
+      share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
+      that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
+      `physics/@pixelsPerMeter`.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="dustFraction"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="specificHeat" type="positiveDecimal"/>
+    <xs:attribute name="maxTemperature"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:attributeGroup>
   <xs:complexType name="pyroSourceType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
     <xs:attributeGroup ref="pyroShape"/>
+    <xs:attributeGroup ref="pyroCrater"/>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="densityRate" type="nonNegativeDecimal" default="0"/>
@@ -2278,7 +2484,8 @@
   </xs:complexType>
   <xs:complexType name="pyroImpulseType">
     <xs:attributeGroup ref="pyroShape"/>
-    <xs:attribute name="time" type="nonNegativeDecimal" use="required"/>
+    <xs:attributeGroup ref="pyroCrater"/>
+    <xs:attribute name="time" type="nonNegativeDecimal"/>
     <xs:attribute name="density" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="temperature" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="velocityX" type="xs:double" default="0"/>
@@ -2307,6 +2514,8 @@
     <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="checkpointMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
@@ -2355,7 +2564,58 @@
       also uses this memory allowance. Pyro collider references sample closed midpoint surfaces with
       barycentric material velocities evaluated at MAC faces, reserving retained and step-local geometry
       under both this allowance and the domain meshMemoryMiB. Crater planes retain a centred colliderThickness slab.
+
+      A crater may instead grow from an impact: `source` names the dynamic rigidBody object that makes it. The crater
+      begins at the first step in which that body, approaching the owner, pushes on it with more than twice its own
+      weight in one step, and centres on the impulse-weighted contact point with its axis along the normal of the owner's
+      surface at that point (centerX/Y/Z and normalX/Y/Z are then not read). The normal is the owner's own geometry: for
+      a mesh the corner normals of the triangle the point is on, interpolated, so that the same surface in finer or
+      coarser triangles gives the same axis; a sphere's radius direction; a box's face. The contact's normal only
+      chooses the side, and is used as it is for shapes that give no normal (capsule, cylinder, cone, convex). Radius, depth, rimHeight, rimWidth, start and end are derived and
+      so cannot be given; `curve` and `influenceDepth` and `maxMemoryMiB` keep their meaning. The crater is
+      Holsapple's scaling law (Annu. Rev. Earth Planet. Sci. 21:333, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18) with
+      the constants of the author's calculator note, applied to the body's mass and density, the speed of its approach
+      along that normal, `targetMaterial`, and gravity. The dependence of those constants on strength and
+      porosity is poorly constrained by the source, so `targetDensity` and `strength` override the table. A crater grows in
+      composition time from the impact over the law's formation time, and nothing is simulated before the impact.
+      Units: `physics/@pixelsPerMeter` converts scene units to metres for everything the law reads and gives;
+      `targetDensity` is kilograms per cubic metre, `strength` pascals, `gravity` metres per second squared (default:
+      the magnitude of the physics gravity, an error if that is zero). One impact makes one crater: later contacts of the
+      body neither start another nor change this one. A water layer over the owner is not treated: the crater is the
+      seabed's. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law is still applied to the
+      normal component, which keeps the size monotone in the angle, and no ricochet is modelled.
     </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID">
+      <xs:annotation><xs:documentation>
+        Names the crater so that what its impact causes can refer to it: with `source`, the consequences of the
+        impact (ejecta, smoke) name this crater instead of repeating its body and material.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="capture" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        With `source`: the body that makes the crater is arrested by it. From the impact until its velocity relative to
+        the owner is zero, and only while its centre is inside the crater's rim radius (the law's, in the owner's frame
+        at the point of impact), the body loses velocity at a constant rate of U^2 / (2 d), `U` the body's speed at the
+        impact and `d` the crater's depth by the law, never more than stops it in the step, along minus its velocity
+        relative to the owner; its spin loses the same share. All of its kinetic energy leaves the body, which is what
+        the law spends digging the crater, and none can be added. It is a model of the engine, the mean force of a
+        penetration of depth `d` (kinetic energy over depth), not a published law: the projectile neither breaks up
+        nor buries itself, it stops and follows the floor of the pit. Without it (the default, the behaviour there
+        always was) the body keeps what the contact leaves it, which for a glancing impact is a body that rolls out
+        of the crater it made.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="targetMaterial">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="water"/><xs:enumeration value="drySand"/><xs:enumeration value="drySoil"/>
+        <xs:enumeration value="wetSoil"/><xs:enumeration value="softRock"/><xs:enumeration value="hardRock"/>
+        <xs:enumeration value="regolith"/><xs:enumeration value="ice"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="targetDensity" type="positiveDecimal"/>
+    <xs:attribute name="strength" type="nonNegativeDecimal"/>
+    <xs:attribute name="gravity" type="positiveDecimal"/>
     <xs:attribute name="centerX" type="xs:double" default="0"/>
     <xs:attribute name="centerY" type="xs:double" default="0"/>
     <xs:attribute name="centerZ" type="xs:double" default="0"/>
@@ -2508,7 +2768,9 @@
         <xs:enumeration value="perspective"/><xs:enumeration value="orthographic"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="fov" type="positiveDecimal" default="60"/>
+    <xs:attribute name="fov" type="positiveDecimal" default="60">
+      <xs:annotation><xs:documentation>Horizontal field of view in degrees, across the frame width: the focal distance in pixels is (frame width / 2) / tan(fov / 2), whatever the frame's height, so a portrait frame sees a narrower vertical angle than a landscape one.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="near" type="positiveDecimal" default="0.1"/>
     <xs:attribute name="far" type="positiveDecimal" default="10000"/>
     <xs:attribute name="yaw" type="xs:double" default="0"/>
@@ -2564,7 +2826,7 @@
     </xs:attribute>
     <xs:attribute name="isolate" type="xs:boolean" default="false"/>
     <xs:attribute name="collapse" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>Collapse transformations: 2.5D children share the parent's camera space instead of being flattened.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Accepted, with no effect in this build (validate warns, E19). Groups that are not isolated already pass their 2.5D children straight through, so they share the frame's camera space; isolated groups (clip, mask, matte, effects or blend) draw their children in their own offscreen.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="width" type="positiveLengthType"/>
     <xs:attribute name="height" type="positiveLengthType"/>
@@ -3011,6 +3273,9 @@
     <xs:attribute name="height" type="xs:positiveInteger"/>
     <xs:attribute name="duration" type="durationType"/>
     <xs:attribute name="background" type="paintType" default="#00000000"/>
+    <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>Local addition. true exempts every instance of this symbol, and what it draws, from the safeArea enforce check (SA01), as @safeAreaForce on the instance does.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="symbolsType">
     <xs:sequence><xs:element name="symbol" type="symbolType" maxOccurs="unbounded"/></xs:sequence>
@@ -3026,6 +3291,10 @@
       .3dl, @space), curves (@curve "x,y x,y ..." per @channel), levels,
       white-balance (temperature/tint), exposure, hue-saturation, tonemap.
       shader: GLSL fragment at @src with param children as uniforms.
+      selective-color: @hue (degrees) or @color (its hue) centres a window of width @tolerance; inside it @saturation
+      scales and @brightness adds; @amount mixes the result with the original. @channel is not read (warning E19).
+      halftone: @size is the cell, @angle the screen's angle (default 0), @color the ink (default black) and
+      @paint the ground between the dots (default white).
     </xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
@@ -3312,6 +3581,16 @@
     </xs:attribute>
     <xs:attribute name="pixelsPerMeter" type="positiveDecimal" default="100"/>
     <xs:attribute name="solverIterations" type="xs:positiveInteger" default="8"/>
+    <xs:attribute name="fixInternalEdges" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        For 3D bodies: fix the contacts that the edges between the triangles of a mesh make. A body that meets
+        a flat mesh gets the mesh's normal whatever its tessellation (without it the normal of the triangle
+        edge or corner the body met, which tilts by several degrees and kicks a sliding body sideways), and
+        a crater from an impact on such a mesh has its axis and speed from the surface either way. The meshes
+        are taken as two-sided. It changes the motion of every body that slides or lands on a mesh, so it
+        is off by default, which is the behaviour there always was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="bounds" default="none">
       <xs:simpleType><xs:restriction base="xs:string">

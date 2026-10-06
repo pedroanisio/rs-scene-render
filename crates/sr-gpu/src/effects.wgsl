@@ -42,6 +42,8 @@ struct Fx {
 var<private> gv: array<vec4<f32>, 8>;
 var<private> gop: u32;
 var<private> gseed: vec2<u32>;
+// the factor a colour operation puts on the pixel's alpha (a gradient map ends on a transparent stop)
+var<private> galpha: f32 = 1.0;
 
 @group(0) @binding(0) var<uniform> fx: Fx;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -427,6 +429,7 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             let l = clamp(enc(vec3(luma(c))).x, 0.0, 1.0);
             let g = textureSampleLevel(aux, smp, vec2(l * (255.0 / 256.0) + 0.5 / 256.0, 0.5), 0.0);
             c = mix(c, unpre(g), v[0].x);
+            galpha = mix(1.0, g.a, v[0].x);
         }
         case 13u: { c = mix(c, vec3(luma(c)), v[0].x); } // grayscale
         case 14u: { // sepia
@@ -455,13 +458,13 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             let g = textureSampleLevel(aux, smp, vec2(t * (255.0 / 256.0) + 0.5 / 256.0, 0.5), 0.0);
             c = mix(c, unpre(g), v[0].x * g.a);
         }
-        case 20u: { // selective colour: hue centre v0.x deg, tolerance v0.y, saturation v0.z, brightness v0.w
+        case 20u: { // selective colour: hue centre v0.x deg, tolerance v0.y, saturation v0.z, brightness v0.w; v1.x amount
             var h = rgb2hsv(enc(c));
             let d = abs(fract(h.x - v[0].x / 360.0 + 0.5) - 0.5);
             let w = 1.0 - smoothstep(v[0].y * 0.5, v[0].y * 0.5 + 0.05, d);
             h.y = clamp(h.y * mix(1.0, v[0].z, w), 0.0, 1.0);
             h.z = h.z + v[0].w * w;
-            c = dec(hsv2rgb(h));
+            c = mix(c, dec(hsv2rgb(h)), v[1].x);
         }
         case 21u: { // film grain: v0 0.05·amount, _, frame, field scale (0: draw here); v1 strength, response
             // seeded-hash normals per sample, (y · width + x) · 3 + channel, seed in i.yz, the frame as the channel
@@ -522,8 +525,10 @@ fn color_step(s: vec4<f32>, uv: vec2<f32>, px: vec2<f32>, d: vec2<f32>) -> vec4<
     let v = gv;
     if (gop < 64u) {
         if (s.a <= 0.0) { return s; }
+        galpha = 1.0;
         let c = grade(lin(unpre(s)), uv, px);
-        return vec4(stored(c) * s.a, s.a);
+        let a = s.a * galpha;
+        return vec4(stored(c) * a, a);
     }
     if (gop == 64u) { // vignette: v0 amount, r₀, softness (fractions of the half diagonal); v1 colour; v2.xy centre (uv)
         let r = length((uv - v[2].xy) * d) / (0.5 * length(d));
@@ -669,17 +674,21 @@ fn fs_color(in: VOut) -> @location(0) vec4<f32> {
             let a = smoothstep(v[0].x, v[0].x + max(v[0].y, 1e-4), dd);
             return s * a;
         }
-        case 74u: { // halftone: v0 cell px, angle deg, amount
+        case 74u: { // halftone: v0 cell px, angle deg, amount; v1 ink colour, v2 ground colour
             let a = radians(v[0].y);
             let r = mat2x2<f32>(vec2(cos(a), sin(a)), vec2(-sin(a), cos(a)));
             let q = r * px / max(v[0].x, 2.0);
             let cell = floor(q) + 0.5;
             let cpx = transpose(r) * (cell * max(v[0].x, 2.0));
-            let sc = S(cpx / d);
+            // the tone comes from the cell centre, or from the pixel itself where the centre lies off the shape
+            let sc = select(S(cpx / d), s, S(cpx / d).a < 0.01);
             let l = enc(vec3(luma(unpre(sc)))).x;
             let rad = sqrt(1.0 - l) * 0.7071;
             let inside = 1.0 - smoothstep(rad - 0.05, rad + 0.05, length(q - cell));
-            let o = vec4(vec3(0.0), sc.a) * inside + vec4(vec3(1.0), 1.0) * (1.0 - inside) * sc.a;
+            // coverage is the pixel's own, so the screen stops at the source's edge instead of at cell edges
+            let ink = vec4(v[1].rgb * v[1].a, v[1].a);
+            let ground = vec4(v[2].rgb * v[2].a, v[2].a);
+            let o = (ink * inside + ground * (1.0 - inside)) * s.a;
             return mix(s, o, v[0].z);
         }
         default: { return s; }
@@ -789,7 +798,7 @@ fn fs_warp(in: VOut) -> @location(0) vec4<f32> {
             return acc / 16.0;
         }
         case 14u: { // chromatic aberration: v0.x px of shift at the farthest corner
-            // red magnifies by 1 − l and blue by 1 + l about the centre v1.xy (px), l = amount / reach
+            // red is sampled at 1 − l of its distance from the centre v1.xy (px) and blue at 1 + l, so the red image shrinks and the blue one grows; l = amount / reach
             // (v1.z px, the distance to the input's farthest corner); outside the input is transparent
             let pc = v[1].xy;
             let x = in.uv * d;
@@ -1095,8 +1104,11 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     let r = max(v[0].x, 0.0);
     var mx = s.a;
     var mn = s.a;
+    // the pixel the growth comes from: a dilated edge takes its colour
+    var donor = s;
     if (v[0].z > 0.5) {
         let m = morph_wide(p, r);
+        if (m.mx > mx) { donor = S((vec2<f32>(p + m.at_mx) + 0.5) / d); }
         mx = max(mx, m.mx);
         mn = min(mn, m.mn);
     } else {
@@ -1106,7 +1118,9 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
             let cnt = 8 + ring * 4;
             for (var k = 0; k < cnt; k++) {
                 let a = f32(k) / f32(cnt) * 2.0 * PI;
-                let q = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d).a;
+                let qs = Sz(in.uv + vec2(cos(a), sin(a)) * rr / d);
+                let q = qs.a;
+                if (q > mx) { donor = qs; }
                 mx = max(mx, q);
                 mn = min(mn, q);
             }
@@ -1115,7 +1129,9 @@ fn fs_morph(in: VOut) -> @location(0) vec4<f32> {
     if (fx_op() == 0u) {
         let na = select(mx, mn, v[0].y > 0.5);
         let f = select(0.0, na / s.a, s.a > 1e-5);
-        return select(vec4(unpre(s) * na, na), s * f, s.a > 1e-5 && v[0].y > 0.5);
+        // grown texels take the colour of the nearest source, covered ones keep their own
+        let base = select(unpre(donor), unpre(s), s.a > 1e-5);
+        return select(vec4(base * na, na), s * f, s.a > 1e-5 && v[0].y > 0.5);
     }
     var ring = 0.0;
     let pos = u32(v[0].w);
@@ -1351,9 +1367,14 @@ fn u16_at(t: vec4<f32>, k: u32) -> f32 {
     if (k == 0u) { return round(t.x) * 256.0 + round(t.y); }
     return round(t.z) * 256.0 + round(t.w);
 }
+// x wrapped into [0, n) with operations defined for negative x: a signed `%` leaves a negative left operand
+// undefined in GLSL, so OpenGL and Vulkan adapters would disagree on the same seed.
+fn wrap_i(x: i32, n: i32) -> i32 {
+    return x - n * i32(floor(f32(x) / f32(n)));
+}
 // Glitch: the picture before its RGB split at pixel xy (i32 coordinates, wrapped in x).
 fn glitch_res(x: i32, y: i32, wh: vec2<i32>, swap: bool) -> vec4<f32> {
-    let xw = ((x % wh.x) + wh.x) % wh.x;
+    let xw = wrap_i(x, wh.x);
     var o = select(textureLoad(src, vec2(xw, y), 0), textureLoad(aux, vec2(xw, y), 0), swap);
     let nsl = i32(fx.v[4].x);
     for (var k = 0; k < nsl; k++) {
@@ -1362,7 +1383,7 @@ fn glitch_res(x: i32, y: i32, wh: vec2<i32>, swap: bool) -> vec4<f32> {
         let y0 = i32(u16_at(t0, 0u)); let hh = i32(u16_at(t0, 1u));
         let off = i32(u16_at(t1, 0u)); let other = u16_at(t1, 1u) > 0.5;
         if (y >= y0 && y < y0 + hh) {
-            let sx = (((xw - off) % wh.x) + wh.x) % wh.x;
+            let sx = wrap_i(xw - off, wh.x);
             o = select(textureLoad(src, vec2(sx, y), 0), textureLoad(aux, vec2(sx, y), 0), other != swap);
         }
     }

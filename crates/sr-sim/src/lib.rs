@@ -17,10 +17,13 @@
 
 #![allow(clippy::manual_is_multiple_of)]
 
+pub mod cratering;
 pub mod erosion;
+pub mod exchange;
 pub mod fields;
 pub mod flock;
 pub mod fluid;
+pub mod hydrostatics;
 pub mod ocean;
 pub mod particles;
 pub mod particles3d;
@@ -30,6 +33,7 @@ pub mod pyro;
 pub mod rng;
 pub mod slime;
 pub mod soft;
+pub mod surface;
 pub mod timeline;
 
 pub use fields::{Field, FieldKind};

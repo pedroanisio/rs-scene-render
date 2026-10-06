@@ -63,6 +63,11 @@ impl Crater {
         Ok(Self { spec, axis })
     }
 
+    /// The dimensions this crater was made from; the axis is the one given, not normalised.
+    pub fn spec(&self) -> Spec {
+        self.spec
+    }
+
     /// Progress is clamped to [0,1]. The map is deterministic and stateless.
     pub fn map(&self, point: [f64; 3], progress: f64) -> Result<Mapping, String> {
         if !progress.is_finite() || point.iter().any(|v| !v.is_finite()) {

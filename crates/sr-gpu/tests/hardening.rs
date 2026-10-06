@@ -419,6 +419,38 @@ fn a_3d_document_on_opengl_reports_how_to_render_it() {
 }
 
 #[test]
+fn every_kind_the_3d_pass_draws_reaches_the_3d_pass() {
+    // the list the adapter choice reads (sr_eval::THREE_D_DRAWN) and the renderer's 3D pass agree: on an OpenGL
+    // device each kind is turned back by the 3D pass's own note, so none is drawn by the pass yet missed by the choice
+    use sr_gpu::gpu::GpuOptions;
+    let cases = [
+        ("object3D", r#"<object3D id="n" primitive="sphere" radius="10" x="32" y="16"/>"#),
+        ("particles3D", r#"<particles3D id="n" rate="50" lifetime="1" dt="0.05" x="32" y="16"/>"#),
+        ("ocean", r#"<ocean id="n" width="8" depth="8" bottomDepth="2" x="32" y="16"/>"#),
+    ];
+    let mut covered: Vec<&str> = cases.iter().map(|c| c.0).collect();
+    let mut kinds: Vec<&str> = sr_eval::THREE_D_DRAWN.to_vec();
+    covered.sort_unstable();
+    kinds.sort_unstable();
+    assert_eq!(covered, kinds, "a kind was added to THREE_D_DRAWN without a case here");
+    for (kind, xml) in cases {
+        let Ok(g) = sr_gpu::Gpu::with_options(&GpuOptions { backends: wgpu::Backends::GL, adapter: None }) else {
+            return;
+        };
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="32" fps="10" duration="4" background="#00000000"/><composition>{xml}</composition></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let r = render_times_on(g, &d, &[0.5]).expect("OpenGL renders the rest");
+        assert!(
+            r.stats.unsupported.iter().any(|m| m.starts_with("n: ") && m.contains("3D objects are not drawn")),
+            "{kind}: {:?}",
+            r.stats.unsupported
+        );
+    }
+}
+
+#[test]
 fn a_second_device_opens_on_the_same_adapter() {
     let Some(g) = gpu() else { return };
     let twin = g.open_like().expect("the same adapter opens again");

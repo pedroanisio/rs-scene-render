@@ -357,6 +357,9 @@ pub struct ElemTarget {
     pub name: &'static str,
     /// Owning node, if inside one.
     pub node: Option<u32>,
+    /// The element's own `@id` as nodes see it: scoped by the instances it sits in (`inst/b0`). Parts of a node
+    /// (bones, masks, paint stops) carry one when they declare an id, so `prop("b0.rotation")` and links find them.
+    pub id: Option<Arc<str>>,
     /// Static attribute kinds and values.
     pub attrs: Vec<(Arc<str>, PropKind, Value)>,
     /// Slots.
@@ -498,6 +501,10 @@ pub struct Program {
     pub assets: HashMap<Arc<str>, (u16, String)>,
     /// Safe-area insets (top, right, bottom, left) as fractions of the frame.
     pub safe_area: [f64; 4],
+    /// What `safeArea@enforce` asks of content outside that region.
+    pub safe_enforce: crate::safe_area::SafeEnforce,
+    /// Id of the safe area `safe_area` and `safe_enforce` come from.
+    pub safe_area_id: Option<String>,
     /// Base directory of each document (0 = main, then includes).
     pub base_dirs: Vec<PathBuf>,
     /// Warnings.
@@ -508,11 +515,26 @@ pub struct Program {
     pub skins: HashMap<Arc<str>, Arc<crate::eval::SkinWeights>>,
 }
 
+/// The element names the 3D pass draws. The renderer's 3D pass and the choice of GPU adapter both read this one list,
+/// so a kind added here is drawn and is also asked for an adapter that can run the pass.
+pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean"];
+
+/// True when the 3D pass draws elements named `name` (see [`THREE_D_DRAWN`]).
+pub fn draws_in_3d(name: &str) -> bool {
+    THREE_D_DRAWN.contains(&name)
+}
+
 impl Program {
     /// Identity of this compiled document. Caches can retain a clone and compare with
     /// `Arc::ptr_eq`; retaining it prevents reuse of the identity after the program is dropped.
     pub fn identity(&self) -> &Arc<()> {
         &self.identity
+    }
+
+    /// True when the document has an element the 3D pass draws (`object3D`, `particles3D`, `ocean`),
+    /// so the adapter must be one that can run that pass.
+    pub fn uses_3d(&self) -> bool {
+        self.nodes.iter().any(|n| draws_in_3d(n.name))
     }
 }
 
@@ -1007,6 +1029,8 @@ fn template(
     let lookup = |name: &str| lookup_value(&params, name).map(|v| param_string(&v));
     walk_mut(&mut scene, &mut |e| {
         let loc = e.loc();
+        ignored_attribute(e, &mut *warnings);
+        masks_that_miss(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);
             if !repeat_vars.contains(root) {
@@ -1137,6 +1161,29 @@ impl Builder {
             let key = if s.is_empty() { id.to_string() } else { format!("{s}/{id}") };
             if let Some(&n) = self.ids.get(key.as_str()) {
                 return Some(n);
+            }
+            if s.is_empty() {
+                return None;
+            }
+            s = match s.rfind('/') {
+                Some(i) => s[..i].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
+    /// The node that owns the crater `id`, found from `scope` outward like any id.
+    fn resolve_crater(&self, scope: &str, id: &str) -> Option<u32> {
+        let mut s = scope.to_string();
+        loop {
+            let found = self.nodes.iter().position(|n| {
+                n.scope.as_ref() == s.as_str()
+                    && children(&*n.elem)
+                        .into_iter()
+                        .any(|c| c.element_name() == "crater" && attr_str(c, "id").as_deref() == Some(id))
+            });
+            if let Some(k) = found {
+                return Some(k as u32);
             }
             if s.is_empty() {
                 return None;
@@ -2063,6 +2110,17 @@ impl Lookup for DocLookup<'_> {
 
 impl Builder {
     fn add_element(&mut self, key: Arc<str>, e: &dyn Element, node: Option<u32>, doc: u16) -> u32 {
+        self.add_element_with_id(key, e, node, doc, None)
+    }
+
+    fn add_element_with_id(
+        &mut self,
+        key: Arc<str>,
+        e: &dyn Element,
+        node: Option<u32>,
+        doc: u16,
+        id: Option<Arc<str>>,
+    ) -> u32 {
         let i = self.elements.len() as u32;
         let mut attrs = snapshot(e, &self.doc(doc).tokens);
         // effects and transitions report their schema type name
@@ -2070,7 +2128,7 @@ impl Builder {
             let params = shader_params(e, &attrs);
             attrs.extend(params);
         }
-        self.elements.push(ElemTarget { key, name: e.element_name(), node, attrs, slots: Vec::new() });
+        self.elements.push(ElemTarget { key, name: e.element_name(), node, id, attrs, slots: Vec::new() });
         i
     }
 
@@ -2087,6 +2145,7 @@ impl Builder {
                             continue;
                         }
                     };
+                    ignored_key_parameters(&a.keys, a.default_interpolation, who, &mut self.warnings);
                     let spec = ChannelSpec {
                         keys: &a.keys,
                         default: a.default_interpolation,
@@ -2194,6 +2253,7 @@ impl Builder {
                                     key,
                                     name: "motionPath",
                                     node: Some(n),
+                                    id: None,
                                     attrs: vec![(Arc::from("progress"), spec.kind, Value::Num(0.0))],
                                     slots: Vec::new(),
                                 });
@@ -2243,7 +2303,14 @@ impl Builder {
                 let key = format!("{path}/{name}[{k}]");
                 *k += 1;
                 if children(c).iter().any(|g| ANIM.contains(&g.element_name())) {
-                    let t = self.add_element(key.as_str().into(), c, Some(n), doc);
+                    let id = c.element_id().map(|i| -> Arc<str> {
+                        if scope.is_empty() {
+                            i.into()
+                        } else {
+                            format!("{scope}/{i}").into()
+                        }
+                    });
+                    let t = self.add_element_with_id(key.as_str().into(), c, Some(n), doc, id);
                     self.nodes[n as usize].parts.push(t);
                     self.animate(Owner::Element(t), c, Some(n), doc, &scope, &key);
                 }
@@ -2318,7 +2385,7 @@ impl Builder {
                 .filter(|e| e.element_name() == "pyro")
                 .filter_map(|e| attr_str(e, "colliders").map(|s| (s, e.loc())))
                 .collect();
-            if self.nodes[n].name == "particles3D" {
+            if matches!(self.nodes[n].name, "particles3D" | "ocean") {
                 if let Some(list) = attr_str(&*self.nodes[n].elem, "colliders") {
                     lists.push((list, self.nodes[n].elem.loc()));
                 }
@@ -2331,7 +2398,7 @@ impl Builder {
                         Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
                         None => self.diags.push(err(
                             "E11",
-                            format!("pyro collider {id:?} is not instantiated in this scope"),
+                            format!("collider {id:?} is not instantiated in this scope"),
                             loc,
                             &*self.nodes[n].id,
                         )),
@@ -2339,8 +2406,121 @@ impl Builder {
                 }
                 colliders.insert(list, resolved.join(" "));
             }
-            if parent.is_some() || !constraints.is_empty() || !colliders.is_empty() {
+            // The emitters whose particles fall into an ocean are named in the same lexical scope.
+            let splash: Option<(String, String)> = (self.nodes[n].name == "ocean")
+                .then(|| attr_str(&*self.nodes[n].elem, "splash"))
+                .flatten()
+                .map(|list| {
+                    let mut resolved = Vec::new();
+                    for id in list.split_whitespace() {
+                        match self.resolve(&scope, id) {
+                            Some(i) => resolved.push(self.nodes[i as usize].id.to_string()),
+                            None => self.diags.push(err(
+                                "E11",
+                                format!("splash emitter {id:?} is not instantiated in this scope"),
+                                self.nodes[n].elem.loc(),
+                                &*self.nodes[n].id,
+                            )),
+                        }
+                    }
+                    (list, resolved.join(" "))
+                });
+            // The smoke that drags the particles of an emitter is named in the same lexical scope.
+            let gas: Option<(String, String)> = (self.nodes[n].name == "particles3D")
+                .then(|| attr_str(&*self.nodes[n].elem, "gas"))
+                .flatten()
+                .and_then(|id| match self.resolve(&scope, &id) {
+                    Some(i) => Some((id, self.nodes[i as usize].id.to_string())),
+                    None => {
+                        self.diags.push(err(
+                            "E11",
+                            format!("gas {id:?} is not instantiated in this scope"),
+                            self.nodes[n].elem.loc(),
+                            &*self.nodes[n].id,
+                        ));
+                        None
+                    }
+                });
+            // What a crater causes (smoke, ejecta) names the crater by its id, in the same lexical
+            // scope; the reference becomes the effective id of the object that owns the crater.
+            let mut cause_owners: HashMap<String, Arc<str>> = HashMap::new();
+            let kids = sr_model::element::children(&*self.nodes[n].elem);
+            for id in kids
+                .iter()
+                .copied()
+                .filter(|e| e.element_name() == "pyro")
+                .flat_map(|pyro| sr_model::element::children(pyro))
+                .filter(|e| matches!(e.element_name(), "pyroSource" | "pyroImpulse"))
+                .chain(kids.iter().copied().filter(|e| e.element_name() == "burst"))
+                .filter_map(|e| attr_str(e, "crater"))
+            {
+                match self.resolve_crater(&scope, &id) {
+                    Some(owner) => {
+                        cause_owners.insert(id, self.nodes[owner as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            // A crater that grows from an impact names its source body, in the same lexical
+            // scope: inside a symbol instance it is that instance's body.
+            let mut sources: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "crater")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        sources.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("crater source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            // A water impulse that comes from a body names it in the same lexical scope.
+            let mut entries: HashMap<String, Arc<str>> = HashMap::new();
+            for id in sr_model::element::children(&*self.nodes[n].elem)
+                .into_iter()
+                .filter(|e| e.element_name() == "waterImpulse")
+                .filter_map(|e| attr_str(e, "source"))
+            {
+                match self.resolve(&scope, &id) {
+                    Some(i) => {
+                        entries.insert(id, self.nodes[i as usize].id.clone());
+                    }
+                    None => self.diags.push(err(
+                        "E11",
+                        format!("water impulse source {id:?} is not instantiated in this scope"),
+                        self.nodes[n].elem.loc(),
+                        &*self.nodes[n].id,
+                    )),
+                }
+            }
+            if parent.is_some()
+                || !entries.is_empty()
+                || !constraints.is_empty()
+                || !colliders.is_empty()
+                || !sources.is_empty()
+                || !cause_owners.is_empty()
+                || gas.is_some()
+                || splash.is_some()
+            {
                 let elem = Arc::make_mut(&mut self.nodes[n].elem);
+                if let Some((_, effective)) = &splash {
+                    elem.set_attr("splash", effective).expect("resolved ocean splash emitters");
+                }
+                if let Some((_, effective)) = &gas {
+                    elem.set_attr("gas", effective).expect("resolved particle gas");
+                }
                 if let Some(list) = attr_str(elem, "colliders").and_then(|list| colliders.get(&list)) {
                     elem.set_attr("colliders", list).expect("resolved particle colliders");
                 }
@@ -2356,6 +2536,26 @@ impl Builder {
                     if child.element_name() == "pyro" {
                         if let Some(list) = attr_str(child, "colliders").and_then(|list| colliders.get(&list)) {
                             child.set_attr("colliders", list).expect("resolved collider token list");
+                        }
+                        child.visit_mut(&mut |input| {
+                            if let Some(owner) = attr_str(input, "crater").and_then(|id| cause_owners.get(&id)) {
+                                input.set_attr("crater", owner).expect("resolved crater owner");
+                            }
+                        });
+                    }
+                    if child.element_name() == "waterImpulse" {
+                        if let Some(body) = attr_str(child, "source").and_then(|id| entries.get(&id)) {
+                            child.set_attr("source", body).expect("resolved water impulse source");
+                        }
+                    }
+                    if child.element_name() == "burst" {
+                        if let Some(owner) = attr_str(child, "crater").and_then(|id| cause_owners.get(&id)) {
+                            child.set_attr("crater", owner).expect("resolved crater owner");
+                        }
+                    }
+                    if child.element_name() == "crater" {
+                        if let Some(source) = attr_str(child, "source").and_then(|id| sources.get(&id)) {
+                            child.set_attr("source", source).expect("resolved crater source");
                         }
                     }
                 });
@@ -2690,6 +2890,19 @@ impl Resolver for ExprResolver<'_> {
         if let Some(t) = self.b.elements.iter().position(|e| &*e.key == id) {
             return self.b.slot(Owner::Element(t as u32), prop);
         }
+        // an animated part of a node that declares this id (a bone, a mask), from the scope outward
+        let mut scope = self.scope.to_string();
+        loop {
+            let want = if scope.is_empty() { id.to_string() } else { format!("{scope}/{id}") };
+            if let Some(t) = self.b.elements.iter().position(|e| e.id.as_deref() == Some(want.as_str())) {
+                return self.b.slot(Owner::Element(t as u32), prop);
+            }
+            match scope.rfind('/') {
+                Some(i) => scope.truncate(i),
+                None if scope.is_empty() => break,
+                None => scope.clear(),
+            }
+        }
         // a static element outside the composition
         let scene = self.b.docs[self.doc as usize].scene.clone();
         let mut found = None;
@@ -2725,6 +2938,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let duration = t.scene.project.duration.get();
     let (markers, grid) = markers_of(&t.scene);
     let scene = Arc::new(t.scene);
+    zero_opacity_sources(&scene, &mut warnings);
     let mut b = Builder {
         docs: vec![DocCtx {
             tokens: tokens_of(&scene),
@@ -2758,6 +2972,13 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let roots = b.instantiate(&scene.composition.children, None, &root);
     b.transitions();
     b.resolve_links();
+    // the animated parts of every node exist before anything reads them: a link or expression may name a bone
+    // or another part that sits later in the document
+    for n in 0..b.nodes.len() as u32 {
+        if b.nodes[n as usize].name != "copy" {
+            b.parts(n);
+        }
+    }
     for n in 0..b.nodes.len() as u32 {
         let node = &b.nodes[n as usize];
         if node.name == "copy" {
@@ -2765,7 +2986,6 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         }
         let (elem, doc_ix, scope, id) = (node.elem.clone(), node.doc, node.scope.clone(), node.id.clone());
         b.animate(Owner::Node(n), &*elem, Some(n), doc_ix, &scope, &id);
-        b.parts(n);
         if let Some(c) = attr_str(&*elem, "condition") {
             let seed = b.project_seed;
             b.pending_expr.push((None, Some(n), c, seed, elem.loc(), scope.clone(), doc_ix));
@@ -2850,7 +3070,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let mut roots = roots;
     roots.sort_by_key(|&k| zs[k as usize]);
     let includes = b.docs.iter().skip(1).map(|d| (d.ns.clone(), (*d.scene).clone())).collect();
-    let safe_area = {
+    let resolved_safe_area = {
         let sid = opts
             .layout
             .as_ref()
@@ -2862,27 +3082,19 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
                     .and_then(|x| x.safe_area.clone())
             })
             .or_else(|| scene.project.safe_area.clone());
-        match sid
-            .and_then(|id| scene.safe_areas.as_ref().and_then(|s| s.safe_areas.iter().find(|a| a.id == id)).cloned())
-        {
-            Some(a) => {
-                let p = crate::layout::preset_insets(a.preset);
-                [
-                    a.top.map(|v| v.get()).unwrap_or(p[0]),
-                    a.right.map(|v| v.get()).unwrap_or(p[1]),
-                    a.bottom.map(|v| v.get()).unwrap_or(p[2]),
-                    a.left.map(|v| v.get()).unwrap_or(p[3]),
-                ]
-            }
-            None => [0.0; 4],
-        }
+        sid.and_then(|id| scene.safe_areas.as_ref().and_then(|s| s.safe_areas.iter().find(|a| a.id == id)).cloned())
     };
+    let safe_area = resolved_safe_area.as_ref().map(crate::safe_area::insets_of).unwrap_or([0.0; 4]);
+    let safe_enforce =
+        resolved_safe_area.as_ref().map(|a| crate::safe_area::SafeEnforce::of(a.enforce)).unwrap_or_default();
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
         base_dirs,
         safe_area,
+        safe_enforce,
+        safe_area_id: resolved_safe_area.as_ref().map(|a| a.id.clone()),
         scene: (*scene).clone(),
         includes,
         fps: scene.project.fps,
@@ -2911,4 +3123,125 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         tracks,
         skins,
     })
+}
+
+/// Attributes the schema accepts that this build does not read: reported (E19, a warning) so that nothing is
+/// accepted silently and then ignored.
+fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let mut note = |what: &str, why: &str| {
+        warnings.push(Diagnostic::warning(
+            "E19",
+            format!("{what} is accepted but has {why}"),
+            e.loc(),
+            e.element_id().unwrap_or(""),
+        ));
+    };
+    match e.element_name() {
+        "group" if matches!(e.get_attr("collapse"), Some(AttrValue::Bool(true))) => note(
+            "<group> @collapse",
+            "no effect in this build (non-isolated groups already share the frame's camera space)",
+        ),
+        "effect" | "effectType"
+            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
+                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
+        {
+            note(
+                "selective-color @channel",
+                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
+            )
+        }
+        _ => {}
+    }
+}
+
+/// A key's `overshoot` is read only by the `back-*` curves and its `period` only by the `elastic-*` ones: set on a
+/// segment that leaves with another curve, the attribute does nothing (E19, a warning).
+fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warnings: &mut Vec<Diagnostic>) {
+    use m::Curve::*;
+    for (i, k) in keys.iter().enumerate() {
+        let curve = k.interpolation.unwrap_or(default);
+        let mut note = |attr: &str, family: &str| {
+            warnings.push(Diagnostic::warning(
+                "E19",
+                format!(
+                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect on the {curve:?} curve, which does not read it (only {family} curves do)",
+                    i + 1
+                ),
+                k.loc,
+                who,
+            ))
+        };
+        if k.overshoot.is_some() && !matches!(curve, BackIn | BackOut | BackInOut) {
+            note("overshoot", "back-*");
+        }
+        if k.period.is_some() && !matches!(curve, ElasticIn | ElasticOut | ElasticInOut) {
+            note("period", "elastic-*");
+        }
+    }
+}
+
+/// Masks use the node's own coordinates: a rectangle or ellipse that adds to or intersects the node's shape and lies
+/// entirely outside the node's box leaves nothing of it, which looks like the node vanishing (E20, a warning).
+fn masks_that_miss(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let num = |e: &dyn Element, name: &str| match e.get_attr(name) {
+        Some(AttrValue::Num(v)) => Some(v),
+        Some(AttrValue::Length(l)) if l.unit == sr_model::values::LengthUnit::Px => Some(l.value),
+        _ => None,
+    };
+    let (Some(w), Some(h)) = (num(e, "width"), num(e, "height")) else { return };
+    for m in children(e).into_iter().filter(|c| c.element_name() == "mask") {
+        let rect_like = matches!(m.get_attr("type").map(|t| t.to_string()).as_deref(), Some("rect" | "ellipse"));
+        let subtracts = matches!(m.get_attr("mode").map(|t| t.to_string()).as_deref(), Some("subtract" | "difference"));
+        let inverted = matches!(m.get_attr("invert"), Some(AttrValue::Bool(true)));
+        let (Some(mw), Some(mh)) = (num(m, "width"), num(m, "height")) else { continue };
+        if !rect_like || subtracts || inverted {
+            continue;
+        }
+        let (x, y) = (num(m, "x").unwrap_or(0.0), num(m, "y").unwrap_or(0.0));
+        if x >= w || y >= h || x + mw <= 0.0 || y + mh <= 0.0 {
+            warnings.push(Diagnostic::warning(
+                "E20",
+                format!("a mask at ({x}, {y}) of {mw} x {mh} lies outside the node's {w} x {h} box: masks use the node's own coordinates"),
+                m.loc(),
+                e.element_id().unwrap_or(""),
+            ));
+        }
+    }
+}
+
+/// A node named as the `source` of a displacement-map, difference-key or shader effect is drawn with its own opacity:
+/// at 0 it contributes nothing and the effect does nothing, silently (E19, a warning). `visible="false"` at opacity 1
+/// keeps a map off screen.
+fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagnostic>) {
+    let mut sources: Vec<(String, Loc)> = Vec::new();
+    walk(scene, &mut |e| {
+        if matches!(e.element_name(), "effect" | "effectType")
+            && matches!(
+                e.get_attr("type").map(|t| t.to_string()).as_deref(),
+                Some("displacement-map" | "difference-key" | "shader")
+            )
+        {
+            if let Some(AttrValue::Str(id)) = e.get_attr("source") {
+                sources.push((id, e.loc()));
+            }
+        }
+    });
+    for (id, loc) in sources {
+        let mut zero = false;
+        walk(scene, &mut |e| {
+            if e.element_id() == Some(id.as_str())
+                && matches!(e.get_attr("opacity"), Some(AttrValue::Num(v)) if v <= 0.0)
+            {
+                zero = true;
+            }
+        });
+        if zero {
+            warnings.push(Diagnostic::warning(
+                "E19",
+                format!("effect source {id:?} has opacity 0, so it is accepted but contributes nothing; hide a map with visible=\"false\" and leave its opacity at 1"),
+                loc,
+                id.as_str(),
+            ));
+        }
+    }
 }

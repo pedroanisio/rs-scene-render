@@ -32,6 +32,16 @@ pub(crate) struct Body3Node {
     windows: Vec<(f64, Option<f64>, crate::program::Clock)>,
     /// Undeformed object-space surface; each substep maps this original mesh.
     crater_surface: Option<Triangles>,
+    /// How a crater that grows from an impact on this body is made.
+    crater: Option<Arc<crate::crater::CraterSource>>,
+}
+
+/// A crater element with a source: which watch of the world finds its impact, on which body.
+#[derive(Clone, Debug)]
+pub(crate) struct CraterLink {
+    pub(crate) watch: usize,
+    pub(crate) owner: usize,
+    pub(crate) source: Arc<crate::crater::CraterSource>,
 }
 
 /// The 3D world of a document.
@@ -39,6 +49,29 @@ pub(crate) struct Phys3 {
     pub(crate) world: Option<World3>,
     pub(crate) bodies: Vec<Body3Node>,
     pub(crate) fractures: Vec<FractureNode>,
+    /// Identity of the world's definition, when the caller asked for it.
+    pub(crate) spec_digest: Option<[u8; 32]>,
+    /// Each body's mass and shape, for loads that depend on them (the water's).
+    pub(crate) hulls: Vec<crate::group::BodyHull>,
+    /// The impacts the world watches for and the craters that grow from them.
+    pub(crate) watches: Vec<sr_sim::physics3d::ImpactWatch>,
+    pub(crate) links: Vec<CraterLink>,
+    /// Per body: whether it is kinematic and when a dynamic one is released, so that the
+    /// animation the world follows can be sampled without a world.
+    follow: Vec<(bool, f64)>,
+}
+
+/// What `build` makes of the document's 3D bodies.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Plan3 {
+    /// A world that will be stepped. `record` keeps the contacts it resolves; `digest` also
+    /// hashes its definition (a baked cache stores that identity).
+    Simulate { record: bool, digest: bool },
+    /// No world: an old cache supplies the poses and shapes are not needed.
+    Placeholder,
+    /// No world either, but real shapes and the definition's identity, to check a cache that
+    /// carries one.
+    Verify,
 }
 
 fn attr(n: &FrameNode, name: &str, d: f64) -> f64 {
@@ -207,7 +240,14 @@ fn prim_triangles(prim: &sr_3d::Primitive) -> Triangles {
 }
 
 /// The collision shape of object `n` for `rigidBody` `b`, in the object's axes scaled by `s`.
-fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems: &mut Vec<String>) -> Shape3 {
+fn shape_for(
+    p: &Program,
+    n: &FrameNode,
+    b: &dyn Element,
+    s: [f64; 3],
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Shape3 {
     let e: &dyn Element = &*n.elem;
     let kind = text(e, "primitive").unwrap_or_else(|| "box".into());
     let r = attr(n, "radius", 50.0);
@@ -244,7 +284,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             Ok(())
         })();
         if let Err(error) = admission {
-            problems.push(format!("{}: {error}", n.id));
+            failures.push(format!("{}: {error}", n.id));
             return Shape3::Sphere(1.);
         }
     }
@@ -252,7 +292,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     let uniform = (sx - sy).abs() <= 1e-9 * sx.max(1.0) && (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     let round_xz = (sx - sz).abs() <= 1e-9 * sx.max(1.0);
     // the object's triangles (object space, unscaled)
-    let triangles = |problems: &mut Vec<String>| -> Option<Triangles> {
+    let triangles = |problems: &mut Vec<String>, failures: &mut Vec<String>| -> Option<Triangles> {
         if kind == "globe" && text(e, "terrain").is_some() {
             let budget = (num(e, "terrainMemoryMiB", 128.) as usize).saturating_mul(1 << 20);
             let geometry = p
@@ -264,7 +304,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             return match geometry {
                 Ok(t) => Some(t),
                 Err(err) => {
-                    problems.push(format!("{}: rigidBody: {err}", n.id));
+                    failures.push(format!("{}: rigidBody: {err}", n.id));
                     None
                 }
             };
@@ -277,7 +317,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
             } {
                 Ok(mesh) => mesh,
                 Err(error) => {
-                    problems.push(format!("{}: rigidBody: {error}", n.id));
+                    failures.push(format!("{}: rigidBody: {error}", n.id));
                     return None;
                 }
             },
@@ -301,7 +341,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 match made {
                     Ok(p) => p,
                     Err(err) => {
-                        problems.push(format!("{}: rigidBody: {err}", n.id));
+                        failures.push(format!("{}: rigidBody: {err}", n.id));
                         return None;
                     }
                 }
@@ -310,7 +350,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 return match mesh_triangles(p, n) {
                     Ok(t) => Some(t),
                     Err(err) => {
-                        problems.push(format!("{}: rigidBody: {err}", n.id));
+                        failures.push(format!("{}: rigidBody: {err}", n.id));
                         None
                     }
                 }
@@ -328,7 +368,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     if crater {
         // Deformation requires the actual tessellated surface, even for shapes
         // normally represented by analytic collision primitives.
-        return match triangles(problems) {
+        return match triangles(problems, failures) {
             Some((points, mut triangles)) => {
                 if s.iter().product::<f64>() < 0. {
                     for triangle in &mut triangles {
@@ -342,7 +382,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
     }
     let scaled =
         |(pts, tris): Triangles| (pts.into_iter().map(|q| [q[0] * sx, q[1] * sy, q[2] * sz]).collect::<Vec<_>>(), tris);
-    let hull = |problems: &mut Vec<String>| match triangles(problems) {
+    let hull = |problems: &mut Vec<String>, failures: &mut Vec<String>| match triangles(problems, failures) {
         Some(t) => Shape3::Convex(scaled(t).0),
         None => Shape3::Sphere(r * sx.max(sy).max(sz)),
     };
@@ -361,8 +401,8 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         }
         "cylinder" => Shape3::Cylinder(tall * 0.5 * sy, r * sx.max(sz)),
         "cone" => Shape3::Cone(tall * 0.5 * sy, r * sx.max(sz)),
-        "convex-hull" => hull(problems),
-        "trimesh" | "decomposition" => match triangles(problems) {
+        "convex-hull" => hull(problems, failures),
+        "trimesh" | "decomposition" => match triangles(problems, failures) {
             Some(t) => {
                 let (pts, tris) = scaled(t);
                 if text(b, "shape").as_deref() == Some("trimesh") {
@@ -375,7 +415,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
         },
         // auto: the primitive's own form where one fits, else its convex hull
         _ => match kind.as_str() {
-            "globe" if text(e, "terrain").is_some() => match triangles(problems) {
+            "globe" if text(e, "terrain").is_some() => match triangles(problems, failures) {
                 Some((points, mut triangles)) => {
                     let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
                     if s.iter().product::<f64>() < 0. {
@@ -395,7 +435,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 let total = hh.unwrap_or(4.0 * r).max(2.0 * r);
                 Shape3::Capsule((total * 0.5 - r).max(0.0) * sy, r * sx)
             }
-            "text" | "clay" | "extrude" => match triangles(problems) {
+            "text" | "clay" | "extrude" => match triangles(problems, failures) {
                 Some((points, mut triangles)) => {
                     let points = points.into_iter().map(|p| std::array::from_fn(|i| p[i] * s[i])).collect();
                     if s.iter().product::<f64>() < 0. {
@@ -411,7 +451,7 @@ fn shape_for(p: &Program, n: &FrameNode, b: &dyn Element, s: [f64; 3], problems:
                 }
                 None => Shape3::Sphere(r * sx.max(sy).max(sz)),
             },
-            _ => hull(problems),
+            _ => hull(problems, failures),
         },
     }
 }
@@ -436,7 +476,13 @@ pub(crate) fn body_ids(g0: &FrameGraph) -> Vec<Arc<str>> {
 }
 
 /// The 3D world of the document, or `None` without 3D bodies.
-pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut Vec<String>) -> Option<Phys3> {
+pub(crate) fn build(
+    p: &Program,
+    g0: &FrameGraph,
+    plan: Plan3,
+    problems: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) -> Option<Phys3> {
     let ph = p.scene.physics.as_ref();
     let mut bodies = Vec::new();
     let mut specs = Vec::new();
@@ -469,8 +515,11 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
                 })
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
-        let shape =
-            if cached || sequence_budget.is_some() { Shape3::Sphere(1.0) } else { shape_for(p, n, c, scale, problems) };
+        let shape = if matches!(plan, Plan3::Placeholder) || sequence_budget.is_some() {
+            Shape3::Sphere(1.0)
+        } else {
+            shape_for(p, n, c, scale, problems, failures)
+        };
         let crater_surface = if children(&*n.elem).into_iter().any(|c| c.element_name() == "crater") {
             match &shape {
                 Shape3::TriMesh(points, triangles) => {
@@ -516,7 +565,15 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             index = node.parent.map(|i| i as usize);
         }
         windows.reverse();
-        bodies.push(Body3Node { id: n.id.clone(), scale, windows, crater_surface, fragment: false, sequence_budget });
+        bodies.push(Body3Node {
+            id: n.id.clone(),
+            scale,
+            windows,
+            crater_surface,
+            fragment: false,
+            sequence_budget,
+            crater: None,
+        });
     }
     if bodies.is_empty() {
         return None;
@@ -556,7 +613,7 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
         let geometry = match prepare() {
             Ok(g) => g,
             Err(e) => {
-                problems.push(format!("{}: {e}", n.id));
+                failures.push(format!("{}: {e}", n.id));
                 continue;
             }
         };
@@ -577,6 +634,7 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             body.sequence_budget = None;
             body.fragment = true;
             body.crater_surface = None;
+            body.crater = None;
             body.scale = [1.; 3];
             bodies.push(body);
             fragments.push(sr_sim::physics3d::Fragment3 {
@@ -654,8 +712,32 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
             problems.push(format!("{}: constraint joins a 2D body to a 3D one", k.id));
         }
     }
-    if cached {
-        return Some(Phys3 { world: None, bodies, fractures });
+    let follow: Vec<(bool, f64)> = specs.iter().map(|b| (b.kind == BodyKind::Kinematic, b.activate_at)).collect();
+    let hulls: Vec<crate::group::BodyHull> = bodies
+        .iter()
+        .zip(&specs)
+        .map(|(node, spec)| crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape))
+        .collect();
+    let start = ph.map(|p| p.start).unwrap_or(0.0);
+    let step = ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
+    let gravity = [
+        ph.map(|p| p.gravity_x).unwrap_or(0.0),
+        ph.map(|p| p.gravity_y).unwrap_or(-9.80665),
+        ph.map(|p| num(p, "gravityZ", 0.0)).unwrap_or(0.0),
+    ];
+    let pixels_per_meter = ph.map(|p| p.pixels_per_meter.get()).unwrap_or(100.0);
+    let linked = link_craters(g0, &mut bodies, &specs, gravity, pixels_per_meter, step);
+    let (watches, links) = match linked {
+        Ok(found) => found,
+        // an old cache cannot serve a crater from an impact, and says so itself
+        Err(_) if matches!(plan, Plan3::Placeholder) => (Vec::new(), Vec::new()),
+        Err(error) => {
+            failures.push(error);
+            (Vec::new(), Vec::new())
+        }
+    };
+    if matches!(plan, Plan3::Placeholder) {
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, hulls, watches, links, follow });
     }
     let [fw, fh] = p.size;
     let bounds = match ph.map(|p| p.bounds.to_string()).as_deref() {
@@ -664,27 +746,96 @@ pub(crate) fn build(p: &Program, g0: &FrameGraph, cached: bool, problems: &mut V
         _ => Bounds3::None,
     };
     let spec = World3Spec {
-        start: ph.map(|p| p.start).unwrap_or(0.0),
-        step: ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0),
-        gravity: [
-            ph.map(|p| p.gravity_x).unwrap_or(0.0),
-            ph.map(|p| p.gravity_y).unwrap_or(-9.80665),
-            ph.map(|p| num(p, "gravityZ", 0.0)).unwrap_or(0.0),
-        ],
-        pixels_per_meter: ph.map(|p| p.pixels_per_meter.get()).unwrap_or(100.0),
+        fix_internal_edges: ph.is_some_and(|p| p.fix_internal_edges),
+        start,
+        step,
+        gravity,
+        pixels_per_meter,
         iterations: ph.map(|p| p.solver_iterations as usize).unwrap_or(8),
         bounds,
         bodies: specs,
         joints,
     };
-    let world = match World3::new(spec).with_fractures(events) {
-        Ok(world) => Some(world),
+    let spec_digest = match plan {
+        Plan3::Verify | Plan3::Simulate { digest: true, .. } => {
+            Some(crate::physcache::digest_world3(&spec, &events, &watches, &links))
+        }
+        _ => None,
+    };
+    let Plan3::Simulate { record, .. } = plan else {
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest, hulls, watches, links, follow });
+    };
+    let log = record.then(|| crate::physcache::contact_config(&spec, &watches));
+    let world = World3::new(spec)
+        .with_fractures(events)
+        .map_err(|e| e.to_string())
+        .and_then(|world| world.with_impact_watches(watches.clone()));
+    let world = match world {
+        Ok(world) => Some(match log {
+            Some(config) => world.with_contact_log(config),
+            None => world,
+        }),
         Err(e) => {
-            problems.push(e.to_string());
+            failures.push(e);
             None
         }
     };
-    Some(Phys3 { world, bodies, fractures })
+    Some(Phys3 { world, bodies, fractures, spec_digest, hulls, watches, links, follow })
+}
+
+/// The craters that grow from impacts: for each `crater` element with a `source`, the watch
+/// that finds the impact of that body on the crater's owner and how the crater is made.
+/// Sets the owner's `crater`.
+fn link_craters(
+    g0: &FrameGraph,
+    bodies: &mut [Body3Node],
+    specs: &[Body3Spec],
+    gravity: [f64; 3],
+    pixels_per_meter: f64,
+    step: f64,
+) -> Result<(Vec<sr_sim::physics3d::ImpactWatch>, Vec<CraterLink>), String> {
+    let mut watches = Vec::new();
+    let mut links = Vec::new();
+    for owner in 0..bodies.len() {
+        let Some(node) = g0.nodes.iter().find(|n| n.id == bodies[owner].id) else { continue };
+        let Some(element) =
+            children(&*node.elem).into_iter().find(|c| c.element_name() == "crater" && text(*c, "source").is_some())
+        else {
+            continue;
+        };
+        let id = &bodies[owner].id;
+        let source_id = text(element, "source").unwrap_or_default();
+        let source = bodies
+            .iter()
+            .position(|b| *b.id == *source_id && !b.fragment)
+            .ok_or_else(|| format!("{id}: crater source {source_id} has no 3D rigidBody"))?;
+        if specs[source].kind != BodyKind::Dynamic {
+            return Err(format!("{id}: crater source {source_id} must be a dynamic body"));
+        }
+        let scale = bodies[owner].scale;
+        let uniform = scale.iter().all(|s| *s > 0.0 && (s - scale[0]).abs() <= 1e-9 * scale[0]);
+        if !uniform {
+            return Err(format!("{id}: a crater from an impact needs a uniformly scaled owner"));
+        }
+        let world_gravity = gravity.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let volume = sr_sim::physics3d::shape_volume(&specs[source].shape)
+            .map_err(|e| format!("{source_id}: a crater source {e}"))?;
+        let cfg = crate::crater::CraterSource::read(
+            element,
+            id,
+            world_gravity,
+            pixels_per_meter,
+            (specs[source].mass, volume),
+            scale[0],
+            Arc::new(specs[owner].shape.clone()),
+        )?;
+        let cfg = Arc::new(cfg);
+        let min_impulse = crate::physcache::rest_threshold(specs[source].mass, gravity, pixels_per_meter, step);
+        links.push(CraterLink { watch: watches.len(), owner, source: cfg.clone() });
+        watches.push(sr_sim::physics3d::ImpactWatch { source, owner, min_impulse });
+        bodies[owner].crater = Some(cfg);
+    }
+    Ok((watches, links))
 }
 
 // ------------------------------------------------------------------ stepping
@@ -695,6 +846,8 @@ pub(crate) struct Driver<'a, 'b> {
     pub(crate) bodies: &'a [Body3Node],
     pub(crate) fields: &'a FieldSrc,
     pub(crate) statics: &'a [Field],
+    /// The solvers this world exchanges with, whose outcomes load its bodies.
+    pub(crate) group: Option<&'a crate::group::Group>,
 }
 
 impl Driver3 for Driver<'_, '_> {
@@ -735,31 +888,84 @@ impl Driver3 for Driver<'_, '_> {
                 max_bytes: budget,
             }));
         }
-        let Some((points, triangles)) = &body.crater_surface else { return Ok(None) };
+        let Some(i) = ({
+            let graph = self.graphs.at(t);
+            index_of(&graph, &body.id).map(|i| (graph, i))
+        }) else {
+            return Ok(None);
+        };
+        let Some(crater) = crate::crater::at(&i.0.nodes[i.1])? else { return Ok(None) };
+        deformed_surface(body, &crater, revision)
+    }
+
+    fn surface(
+        &mut self,
+        t: f64,
+        which: usize,
+        revision: Option<u64>,
+        impact: Option<&sr_sim::physics3d::Impact3>,
+    ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
+        let body = &self.bodies[which];
+        let Some(source) = &body.crater else { return self.collider(t, which, revision) };
+        // a crater from an impact has nothing to do until the impact has happened
+        let Some(impact) = impact else { return Ok(None) };
+        let grown = crate::crater::impact_crater(source, impact, t - impact.time)?;
         let graph = self.graphs.at(t);
         let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
-        let Some(crater) = crate::crater::at(&graph.nodes[i])? else { return Ok(None) };
-        let current = crater.progress.to_bits();
-        if revision == Some(current) {
+        let element = children(&*graph.nodes[i].elem)
+            .into_iter()
+            .find(|c| c.element_name() == "crater")
+            .ok_or("missing crater")?;
+        let crater = crate::crater::from_impact(element, &grown)?;
+        deformed_surface(body, &crater, revision)
+    }
+
+    fn load(
+        &mut self,
+        _step: u64,
+        t: f64,
+        which: usize,
+        state: &sr_sim::physics3d::BodyState,
+    ) -> Result<Option<sr_sim::physics3d::Load3>, String> {
+        let Some(group) = self.group else { return Ok(None) };
+        if !state.enabled {
             return Ok(None);
         }
-        let bytes = sr_sim::physics3d::ColliderUpdate3::required_bytes(points.len(), triangles.len())
-            .ok_or("crater collider memory overflow")?;
-        if bytes > crater.max_bytes {
-            return Err(format!("{}: crater collider exceeds memory budget", body.id));
+        let graphs = &mut *self.graphs;
+        group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean, plane: Option<&crate::group::Plane>| {
+            water_frame(&graphs.at(t), ocean, plane)
+        })
+    }
+
+    fn capture(
+        &mut self,
+        _step: u64,
+        t: f64,
+        _source: usize,
+        owner: usize,
+        centre: [f64; 3],
+        impact: &sr_sim::physics3d::Impact3,
+    ) -> Result<Option<f64>, String> {
+        let Some(crater) = self.bodies[owner].crater.as_ref().filter(|c| c.capture) else { return Ok(None) };
+        let grown = crate::crater::impact_crater(crater, impact, 0.0)?;
+        let law = grown.law();
+        // The window in which the body is arrested: the time that stops a body moving at the impact speed,
+        // 2 d / U, which stops any slower one sooner, and a step. After it the body is the ground's: held
+        // for good it would hover over the pit the ground opens under it, and a latch would be a state
+        // of its own that a replay must restore, so the window is a function of the impact's instant.
+        let speed = grown.speed();
+        let step = self.p.scene.physics.as_ref().map_or(1.0 / 120.0, |ph| ph.fixed_step.get());
+        if t >= impact.time + 2.0 * law.depth / speed + step {
+            return Ok(None);
         }
-        let vertices = points
-            .iter()
-            .map(|&p| {
-                crater.kernel.map(p, crater.progress).map(|m| std::array::from_fn(|i| m.position[i] * body.scale[i]))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(sr_sim::physics3d::ColliderUpdate3 {
-            revision: current,
-            vertices,
-            triangles: triangles.clone(),
-            max_bytes: crater.max_bytes,
-        }))
+        // only inside the rim radius of the crater, in the owner's frame, scene units
+        let from = centre.iter().zip(&impact.point).map(|(c, p)| (c - p) * (c - p)).sum::<f64>().sqrt();
+        if from >= law.rim_radius * crater.pixels_per_meter {
+            return Ok(None);
+        }
+        // the mean force of a penetration as deep as the crater: the kinetic energy over the depth, as a
+        // deceleration U^2 / (2 d), here in scene units a second squared
+        Ok(Some(speed * speed / (2.0 * law.depth) * crater.pixels_per_meter))
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {
@@ -775,6 +981,112 @@ impl Driver3 for Driver<'_, '_> {
     }
     fn fields(&mut self, t: f64) -> Vec<Field> {
         self.fields.at_step(t, self.graphs, self.statics)
+    }
+}
+
+/// The owner's surface with `crater` applied, or `None` when it is the one already installed.
+fn deformed_surface(
+    body: &Body3Node,
+    crater: &crate::crater::Deformation,
+    revision: Option<u64>,
+) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
+    let Some((points, triangles)) = &body.crater_surface else { return Ok(None) };
+    let current = crater.progress.to_bits();
+    if revision == Some(current) {
+        return Ok(None);
+    }
+    let bytes = sr_sim::physics3d::ColliderUpdate3::required_bytes(points.len(), triangles.len())
+        .ok_or("crater collider memory overflow")?;
+    if bytes > crater.max_bytes {
+        return Err(format!("{}: crater collider exceeds memory budget", body.id));
+    }
+    let vertices = points
+        .iter()
+        .map(|&p| crater.kernel.map(p, crater.progress).map(|m| std::array::from_fn(|i| m.position[i] * body.scale[i])))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(sr_sim::physics3d::ColliderUpdate3 {
+        revision: current,
+        vertices,
+        triangles: triangles.clone(),
+        max_bytes: crater.max_bytes,
+    }))
+}
+
+/// The ocean's water in the world at one instant: its surface as `y = offset + slope x + slope z`,
+/// the rest level or `plane` (in the ocean's own axes) when one is given, and where the ocean's
+/// own x and z axes point.
+fn water_frame(
+    graph: &FrameGraph,
+    ocean: &crate::group::GroupOcean,
+    plane: Option<&crate::group::Plane>,
+) -> Result<crate::group::WaterFrame, String> {
+    let i = index_of(graph, &ocean.id).ok_or_else(|| format!("{}: the ocean is not in the frame", ocean.id))?;
+    let m = world3(graph, i, 0);
+    let level = |x: f64, z: f64| match plane {
+        None => ocean.water_level,
+        Some(p) => p.level + p.slope[0] * (x - p.centroid[0]) + p.slope[1] * (z - p.centroid[1]),
+    };
+    let at = |x: f64, z: f64| m.transform_point3(DVec3::new(x, level(x, z), z));
+    let (p0, px, pz) = (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0));
+    let (u, v) = (px - p0, pz - p0);
+    // y = a + b x + c z through the three points
+    let det = u.x * v.z - u.z * v.x;
+    if det.abs() < 1e-9 || !det.is_finite() {
+        return Err(format!("{}: a vertical ocean has no surface to float on", ocean.id));
+    }
+    let b = (u.y * v.z - u.z * v.y) / det;
+    let c = (u.x * v.y - u.y * v.x) / det;
+    let axes = [m.transform_vector3(DVec3::X).to_array(), m.transform_vector3(DVec3::Z).to_array()];
+    Ok(crate::group::WaterFrame {
+        surface: sr_sim::hydrostatics::Surface { offset: p0.y - b * p0.x - c * p0.z, slope: [b, c] },
+        axes,
+    })
+}
+
+impl Phys3 {
+    /// Feeds `id` what the document gives the world at each of `steps` steps: which bodies
+    /// take part, the poses of those that follow animation, the force fields and the
+    /// revision of every deforming surface. This is the world's input, sampled on a
+    /// schedule that does not depend on the world's own state.
+    pub(crate) fn sample_inputs(
+        &self,
+        drv: &mut Driver<'_, '_>,
+        start: f64,
+        step: f64,
+        steps: u64,
+        id: &mut crate::physcache::Identity,
+    ) -> Result<(), String> {
+        let deforming: Vec<usize> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.sequence_budget.is_some() || b.crater_surface.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let mut revisions = vec![None; self.bodies.len()];
+        for k in 0..steps {
+            let t = start + k as f64 * step;
+            let visible: Vec<bool> = (0..self.bodies.len()).map(|i| drv.enabled(t, i)).collect();
+            id.value("enabled", &visible);
+            let follow: Vec<usize> = self
+                .follow
+                .iter()
+                .enumerate()
+                .filter(|(_, (kinematic, release))| *kinematic || t < release + step)
+                .map(|(i, _)| i)
+                .collect();
+            if !follow.is_empty() {
+                id.value("poses", &drv.kinematic(t + step, &follow));
+            }
+            id.value("fields", &drv.fields(t));
+            for &i in &deforming {
+                if let Some(update) = drv.collider(t + step, i, revisions[i])? {
+                    revisions[i] = Some(update.revision);
+                    id.value("surface", &(k, i, update.revision, update.vertices.len(), update.triangles.len()));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -803,6 +1115,14 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
         }
         let Some(i) = index_of(g, &b.id) else { continue };
         g.nodes[i].pose3 = Some(compose(pose, b.scale).to_cols_array());
+    }
+    for link in &three.links {
+        let Some(Some(impact)) = frame.impacts.get(link.watch) else { continue };
+        let Some(i) = index_of(g, &three.bodies[link.owner].id) else { continue };
+        match crate::crater::impact_crater(&link.source, impact, g.time - impact.time) {
+            Ok(grown) => g.nodes[i].crater_impact = Some(Arc::new(grown)),
+            Err(error) => g.fail(format!("{}: {error}", three.bodies[link.owner].id)),
+        }
     }
     for (k, fracture) in three.fractures.iter().enumerate() {
         if !frame.fractured.get(k).copied().unwrap_or(false) {

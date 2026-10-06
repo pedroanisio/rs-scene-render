@@ -43,6 +43,8 @@ PARTICLES3D = '<scene version="1.3"><project width="64" height="64" fps="24" dur
 
 OCEAN = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2"><waterImpulse time="0.3" radius="2" amplitude="0.1"/><wave wavelength="4" amplitude="0.1" phase="0"/></ocean></composition></scene>\n'
 
+OCEAN_COUPLED = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="seabed" primitive="plane" width="40" height="40" segments="8" y="2" rotationX="-90"><crater radius="3" depth="1" rimHeight="0.2" rimWidth="1" start="0.5" end="1"/></object3D><object3D id="rock" primitive="sphere" radius="1" y="-3"/><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" colliders="seabed rock"/></composition></scene>\n'
+
 GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
 
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
@@ -50,6 +52,15 @@ MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" d
 FRACTURE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><materials><material id="interior" baseColor="#A06030"/></materials><composition><object3D id="rock" primitive="box" width="4" height="4" depth="4"><rigidBody mass="8"/><fracture at="1" pieces="8" seed="18446744073709551615" interiorMaterial="interior" radialImpulse="4"/></object3D></composition></scene>\n'
 
 CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="ground" primitive="plane" width="20" height="20" segments="40"><crater radius="4" depth="3" rimWidth="1" rimHeight="0.5" start="1" end="2"/><rigidBody type="static"/></object3D></composition></scene>\n'
+
+CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="20" height="20" segments="40" y="2"><crater id="pit" source="rock" targetMaterial="softRock"/><rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>\n'
+
+PYRO_CRATER = CRATER_IMPACT.replace('</composition>', '<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource crater="pit"/><pyroImpulse crater="pit" heatFraction="0.2"/></pyro></object3D></composition>')
+
+OCEAN_BUOYANCY = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="float" primitive="sphere" radius="0.5" y="-1"><rigidBody shape="sphere" mass="200"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="4" colliders="float" bodyCoupling="buoyancy" bodyDrag="1.5"/></composition><physics pixelsPerMeter="1"/></scene>\n'
+EJECTA_CRATER = CRATER_IMPACT.replace('</composition>', '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit" count="200"/></particles3D></composition>')
+
+OCEAN_ENTRY = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-4"><rigidBody mass="5"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" colliders="rock"><waterImpulse source="rock"/></ocean></composition><physics pixelsPerMeter="1"/></scene>\n'
 
 def sub(old, new, count=1):
     def f(t):
@@ -83,6 +94,19 @@ CASES = [
     ("crt3", ["CRT3"], lambda _: CRATER.replace('end="2"', 'end="0"')),
     ("crt4", ["CRT4"], lambda _: CRATER.replace('rimWidth="1"', 'rimWidth="5"')),
     ("crt5", ["CRT5"], lambda _: CRATER.replace('type="static"', 'type="dynamic"')),
+    ("crt6", ["CRT6"], lambda _: CRATER_IMPACT.replace('<crater ', '<crater depth="3" ')),
+    ("crt7-material", ["CRT7"], lambda _: CRATER_IMPACT.replace(' targetMaterial="softRock"', '')),
+    ("crt7-orphan", ["CRT7"], lambda _: CRATER.replace('<crater ', '<crater strength="1000" ')),
+    ("crt9-capture-without-source", ["CRT9"], lambda _: CRATER.replace('<crater ', '<crater capture="true" ', 1)),
+    ("crt8-static", ["CRT8"], lambda _: CRATER_IMPACT.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
+    ("s09-crater-id", ["S09"], lambda _: CRATER_IMPACT.replace('id="pit"', 'id="ground"')),
+    ("pyc1-derived", ["PYC1"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource crater="pit" start="1"/>')),
+    ("pyc2-orphan", ["PYC2"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource heatFraction="0.2"/>')),
+    ("pyc3-time", ["PYC3"], lambda _: PYRO_CRATER.replace('<pyroImpulse crater="pit" heatFraction="0.2"/>', '<pyroImpulse density="1"/>')),
+    ("pyc4-authored", ["PYC4"], lambda _: PYRO_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("ocn8-coupling", ["OCN8"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyCoupling="buoyancy" ')),
+    ("ocn9-drag", ["OCN9"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyDrag="1" ')),
+    ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
     ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
     ("msq3", ["MSQ3"], lambda _: MESH_SEQUENCE.replace('first="0"', 'sha256="' + '0' * 64 + '" first="0"')),
@@ -95,9 +119,27 @@ CASES = [
     ("ocn3", ["OCN3"], lambda _: OCEAN.replace('width="8"', 'width="8.1"')),
     ("ocn4", ["OCN4"], lambda _: OCEAN.replace('</ocean>', '<animate property="bottomDepth"><key time="0" value="2"/></animate></ocean>')),
     ("ocn5", ["OCN5"], lambda _: OCEAN.replace('</ocean>', '<whitewater start="1" end="0.5"/></ocean>')),
+    ("pyro-advection", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro advection="rk4" ')),
+    ("pyro-solver", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro solver="cg" ')),
+    ("ocn6", ["OCN6"], lambda _: OCEAN_COUPLED.replace('colliders="seabed rock"', 'colliders="seabed rock seabed"')),
+    ("ocn7", ["OCN7"], lambda _: OCEAN_COUPLED.replace('<object3D id="rock" primitive="sphere" radius="1" y="-3"/>', '<object3D id="rock" primitive="sphere" radius="1" y="-3"><animate property="radius"><key time="0" value="1"/><key time="1" value="2"/></animate></object3D>')),
+    ("whitewater-checkpoint-range", ["S06"], lambda _: VALID["ocean"].replace('<whitewater ', '<whitewater checkpointMemoryMiB="4097" ')),
+    ("ocean-order", ["S06"], lambda _: OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="3"')),
     ("p3d1", ["P3D1"], lambda _: PARTICLES3D.replace('version="1.3"', 'version="1.2"')),
     ("p3d2", ["P3D2"], lambda _: PARTICLES3D.replace('rate="0"', 'rate="0" emitterShape="mesh"')),
     ("p3d3", ["P3D3"], lambda _: PARTICLES3D.replace('lifetime="2"', 'lifetime="2" lifetimeVariance="2"')),
+    ("p3d7-derived", ["P3D7"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst crater="pit" time="1" count="200"/>')),
+    ("p3d7-time", ["P3D3", "P3D7"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst count="200"/>')),
+    ("p3d8-authored", ["P3D8"], lambda _: EJECTA_CRATER.replace('<crater id="pit" source="rock" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("p3d9-orphan", ["P3D9"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst time="0" count="200" angle="30"/>')),
+    ("ocn13-splash", ["OCN13"], lambda _: EJECTA_CRATER.replace('</composition>', '<ocean id="sea" width="16" depth="16" cellSize="1" splash="debris pit"/></composition>')),
+    ("p3d11-gas", ["P3D11"], lambda _: PARTICLES3D.replace('<particles3D id="dust"', '<particles3D id="dust" gas="floor"')),
+    ("p3d10-angle", ["P3D10"], lambda _: EJECTA_CRATER.replace('count="200"/>', 'count="200" angle="80"/>')),
+    ("bedresponse-value", ["S06"], lambda _: OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="linear" ')),
+    ("ocn10-derived", ["OCN10"], lambda _: OCEAN_ENTRY.replace('<waterImpulse source="rock"/>', '<waterImpulse source="rock" radius="2"/>')),
+    ("ocn11-unlisted", ["OCN11"], lambda _: OCEAN_ENTRY.replace(' colliders="rock"', '')),
+    ("ocn11-static", ["OCN11"], lambda _: OCEAN_ENTRY.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
+    ("ocn12-twice", ["OCN12"], lambda _: OCEAN_ENTRY.replace('<waterImpulse source="rock"/>', '<waterImpulse source="rock"/><waterImpulse source="rock"/>')),
     ("p3d4", ["P3D4"], lambda _: PARTICLES3D.replace('</particles3D>', '<animate property="lifetime"><key time="0" value="2"/></animate></particles3D>')),
     ("p3d5", ["P3D5"], lambda _: PARTICLES3D.replace('colliders="floor"', 'colliders="dust"')),
     ("p3d6", ["P3D6"], lambda _: PARTICLES3D.replace('depth="64"/>', 'depth="64"><animate property="width"><key time="0" value="64"/><key time="1" value="32"/></animate></object3D>')),
@@ -118,6 +160,11 @@ CASES = [
     ("vol6", ["VOL6"], lambda _: VOLUME_SEQUENCE.replace(' last="0"', '')),
     ("vol9", ["VOL9"], lambda _: VOLUME_SEQUENCE.replace('interpolation="linear"', 'interpolation="advect" velocityGridX="velocity.x" velocityGridY="velocity.y"')),
     ("vol8", ["VOL8"], lambda _: VOLUME_BAKED.replace('format="srvseq"', 'format="srvseq" fps="1"')),
+    ("vol10", ["VOL10"], lambda _: VOLUME.replace('<medium ', '<medium lightGridCell="2" ')),
+    ("vol-lighting-enum", ["S06"], lambda _: VOLUME.replace('<medium ', '<medium lighting="fast" ')),
+    ("vol-light-grid-cell", ["S06"], lambda _: VOLUME.replace('<medium ', '<medium lighting="grid" lightGridCell="0" ')),
+    ("vol-light-grid-directions", ["S06"], lambda _: VOLUME.replace('<medium ', '<medium lighting="grid" lightGridDomeDirections="4" ')),
+    ("vol-light-grid-memory", ["S06"], lambda _: VOLUME.replace('<medium ', '<medium lighting="grid" lightGridMemoryMiB="0" ')),
     ("vol7", ["VOL7"], lambda _: VOLUME_SEQUENCE.replace('id="smoke"', 'id="smoke" sha256="' + '0' * 64 + '"')),
     # ---- structure
     ("s01-root", ["S01"], lambda t: MINIMAL.replace("scene", "movie")),
@@ -148,6 +195,7 @@ CASES = [
     ("c1", ["C1"], sub('<vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z"', '<vector id="icon" shape="path"')),
     ("c2", ["C2"], sub('<vector id="icon" shape="path" path="M0 0 L10 0 L5 10 Z"', '<vector id="icon" shape="svg"')),
     ("c3", ["C3"], sub('<shape id="dot" shape="ellipse"', '<shape id="dot" shape="path"')),
+    ("c65", ["C65"], sub('<shape id="dot" shape="ellipse"', '<shape id="dot" shape="ellipse" markerEnd="arrow"')),
     ("c4", ["C4"], sub('<mask type="ellipse" width="800" height="800"/>', '<mask type="path"/>')),
     ("c5", ["C5"], sub('<mask type="ellipse" width="800" height="800"/>', '<mask type="ellipse" width="800"/>')),
     ("c6", ["C6"], sub('primitive="mesh" mesh="robot"', 'primitive="mesh"')),
@@ -245,6 +293,10 @@ CASES = [
     ("r31-baseColor", ["R31-baseColor"], sub('<material id="chrome" metallic="1"', '<material id="chrome" baseColor="var(--nope)" metallic="1"')),
     ("c50", ["C50"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" shape="sprite">')),
     ("r32", ["R32"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" sprite="music">')),
+    ("r42", ["R42"], sub('<pattern id="checker" asset="logo"/>', '<pattern id="checker" asset="music"/>')),
+    ("r43", ["R43"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" emitterAsset="music">')),
+    ("r44", ["R44"], sub('<effect id="grade" type="lut" src="../media/grade.cube"/>', '<effect id="grade" type="lut" src="../media/grade.cube"/>\n    <effect id="dm" type="displacement-map" source="logo"/>')),
+    ("r45", ["R45"], sub('<generator id="noise" kind="fractal-noise" width="512" height="512">', '<generator id="noise" kind="fractal-noise" width="512" height="512" lineWidth="2">')),
     ("r33", ["R33"], ins_comp('<erosion id="er" width="10" height="10" heightmap="music"/>')),
     ("r34", ["R34"], sub('<particleEmitter id="sparks" color="#ffcc00">', '<particleEmitter id="sparks" color="#ffcc00" forceFields="gravity music">')),
     ("r35", ["R35"], sub('<pin lon="5" lat="5" label="Here"/>', '<pin lon="5" lat="5" label="Here" textStyle="logo"/>')),
@@ -324,6 +376,7 @@ ASSET_CASES = [
 WARN_CASES = [
     ("a03-remote", ["A03"], sub('src="../media/clip.mp4"', 'src="https://cdn.example.com/clip.mp4"')),
     ("a04-sequence-hold", ["A04"], sub('first="1" last="5"', 'first="1" last="9" missingFrame="hold"')),
+    ("w02-open-face", ["W02"], lambda _: PYRO.replace('width="8" height="8" depth="8" voxelSize="1"', 'width="64" height="64" depth="64" voxelSize="1" boundary="open"').replace('<pyroSource shape="sphere" radius="2"', '<pyroSource shape="sphere" y="-28" radius="2"')),
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
 
@@ -333,16 +386,34 @@ VALID = {
     "openvdb": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-0.vdb" format="openvdb" temperatureGrid="temperature"').replace('<medium ', '<medium blackbody="true" '),
     "openvdb-sequence": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-%d.vdb" format="openvdb" first="0" last="1" interpolation="linear"'),
     "crater": CRATER,
+    "crater-impact": CRATER_IMPACT,
+    "pyro-crater": PYRO_CRATER,
+    "ejecta-crater": EJECTA_CRATER,
+    "ocean-entry": OCEAN_ENTRY,
+    "ocean-hydrostatic": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="hydrostatic" '),
+    "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,
+    "ocean-colliders": OCEAN_COUPLED,
+    "ocean-buoyancy": OCEAN_BUOYANCY,
+    "physics-internal-edges": OCEAN_BUOYANCY.replace('<physics pixelsPerMeter="1"/>', '<physics pixelsPerMeter="1" fixInternalEdges="true"/>'),
+    "crater-capture": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" capture="true"'),
+    "ocean-splash": EJECTA_CRATER.replace('</composition>', '<ocean id="sea" width="16" depth="16" cellSize="1" splash="debris"/></composition>'),
+    "particles3d-gas": PARTICLES3D.replace('<composition>', '<composition><object3D id="smoke" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" boundary="open"/></object3D>').replace('<particles3D id="dust"', '<particles3D id="dust" drag="1" gas="smoke"'),
+    "ocean-full": OCEAN_BUOYANCY.replace('bodyCoupling="buoyancy"', 'bodyCoupling="full"'),
+    "ocean-order2": OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="2"'),
     "ocean": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3"/></ocean>'),
+    "whitewater-checkpoint": OCEAN.replace('</ocean>', '<whitewater emissionRate="2" threshold="0.3" checkpointMemoryMiB="0"/></ocean>'),
     "pyro": PYRO,
+    "pyro-multigrid": PYRO.replace('<pyro ', '<pyro solver="multigrid" '),
+    "pyro-maccormack": PYRO.replace('<pyro ', '<pyro solver="multigrid" advection="maccormack" '),
     "pyro-mesh": PYRO_MESH,
     "pyro-colliders": PYRO_COLLIDERS,
     "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
     "baked-volume": VOLUME_BAKED,
     "volume": VOLUME,
+    "volume-light-grid": VOLUME.replace('<medium ', '<medium lighting="grid" lightGridCell="2" lightGridDomeDirections="32" lightGridMemoryMiB="64" '),
     "advected-volume": VOLUME_SEQUENCE.replace('uniform-%02d', 'advected-%d').replace('last="0"', 'last="1"').replace('fps="24000/1001"', 'fps="1"').replace('interpolation="linear"', 'interpolation="advect" velocityGridX="velocity.x" velocityGridY="velocity.y" velocityGridZ="velocity.z"').replace(' boundsMinX="0" boundsMinY="0" boundsMinZ="0" boundsMaxX="32" boundsMaxY="32" boundsMaxZ="2"', '').replace('<composition>', '<composition><camera id="camera" x="0" y="0" z="-30" projection="orthographic"/>'),
     "volume-sequence": VOLUME_SEQUENCE.replace('first="0" last="0"', 'first=" +0 " last=" 0000 "').replace('uniform-%02d', 'uniform-0%d').replace('</assets>', '<volume id="hash" src="../media/uniform-##.srvol" first="0" last="0"/></assets>'),
     "thermal-volume": VOLUME.replace('id="smoke" src=', 'id="smoke" temperatureGrid="density" src=').replace('<medium ', '<medium blackbody="true" temperatureScale="5000" '),

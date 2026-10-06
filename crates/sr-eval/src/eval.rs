@@ -222,6 +222,9 @@ pub struct FrameNode {
     /// Native participating-medium simulation, in the object's local 3D frame.
     #[serde(skip)]
     pub sim_volume: Option<Arc<crate::pyro::SimVolume>>,
+    /// A crater that grows from an impact, once the impact has happened (`crater@source`).
+    #[serde(skip)]
+    pub crater_impact: Option<Arc<crate::crater::ImpactCrater>>,
     /// A 3D rigid body's pose: the object's world matrix (column-major, scene space), replacing
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,6 +273,21 @@ pub struct FrameTransition {
     pub elem: Option<Arc<Node>>,
 }
 
+/// Wall-clock seconds the simulation runtimes spent advancing one frame, for statistics.
+/// Each figure is inclusive: particle emitters that read rigid bodies include that work, and
+/// the first frame includes the one-time build of the rigid world.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct SimSeconds {
+    /// Rigid bodies (building the world on the first frame, then stepping it).
+    pub rigid: f64,
+    /// Ocean surface solver.
+    pub ocean: f64,
+    /// Participating-medium (smoke) solver.
+    pub smoke: f64,
+    /// 2D emitters and native 3D particles.
+    pub particles: f64,
+}
+
 /// Everything the compositor needs to draw one frame, without pixels.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FrameGraph {
@@ -292,9 +310,30 @@ pub struct FrameGraph {
     /// Problems found while simulating (physics, particles), reported by the renderer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+    /// The part of `problems` that are simulations authored but unable to run (a resource limit, a
+    /// solver error): the renderer reports each as an error, never as a note, since the frame lacks
+    /// what was asked for. The rest of `problems` are notes about authorised fallbacks.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+    /// Time the simulation runtimes took to produce this frame.
+    #[serde(skip)]
+    pub sim_seconds: SimSeconds,
     /// The project seed (the default for seeded behaviour such as camera shake).
     #[serde(skip)]
     pub seed: u64,
+}
+
+impl FrameGraph {
+    /// Records a simulation that could not run, as a problem and as a failure.
+    pub fn fail(&mut self, message: String) {
+        self.problems.push(message.clone());
+        self.failures.push(message);
+    }
+
+    /// Whether the simulation of node `id` failed to run (its entry in `failures` starts with the id).
+    pub fn failed(&self, id: &str) -> bool {
+        self.failures.iter().any(|f| f.strip_prefix(id).is_some_and(|rest| rest.starts_with(": ")))
+    }
 }
 
 struct Frame<'p> {
@@ -1090,6 +1129,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             fracture: None,
             sim_image: None,
             sim_volume: None,
+            crater_impact: None,
             pose3: None,
             elem: node.elem.clone(),
         });
@@ -1236,6 +1276,8 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         camera,
         elements,
         problems: Vec::new(),
+        failures: Vec::new(),
+        sim_seconds: SimSeconds::default(),
         seed: p.seed,
     }
 }

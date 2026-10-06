@@ -805,3 +805,238 @@ fn advected_cache_documents_move_fields_replay_and_validate_channels() {
         }
     }
 }
+
+/// A ball of smoke hovering over a mirror, written to a cache file; the domain spans
+/// y in [-16, 6], across the mirror's plane (y = 0, up is negative y).
+fn mirror_ball(name: &str) -> std::path::PathBuf {
+    let mut ball = SparseGrid::new(Transform::identity(), 0.0, 16).unwrap();
+    for z in -6..=6 {
+        for y in -15..=-1 {
+            for x in -6..=6 {
+                let (dx, dy, dz) = (x as f32, (y + 8) as f32, z as f32);
+                let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                if r <= 6.5 {
+                    ball.set([x, y, z], (1.0 - r / 6.5).max(0.05)).unwrap();
+                }
+            }
+        }
+    }
+    let mut cache = sr_volume::Volume::new();
+    cache.insert("density", ball).unwrap();
+    let path = common::fixtures().join(name);
+    cache.write(std::fs::File::create(&path).unwrap()).unwrap();
+    path
+}
+
+/// The ball seen by a camera `camera_y` above the plane of a mirror (or none), through a
+/// medium and light rig given as markup.
+fn mirror_view(
+    gpu: &sr_gpu::Gpu,
+    cache: &std::path::Path,
+    camera_y: f64,
+    mirror: bool,
+    half_depth: u32,
+    medium: &str,
+    lights: &str,
+) -> common::Rendered {
+    let xml = mirror_xml(cache, camera_y, mirror, half_depth, medium, lights, 32);
+    let doc =
+        sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(common::fixtures()) })
+            .unwrap();
+    let shot = common::render_times_on(gpu.clone(), &doc, &[0.0]).unwrap();
+    assert!(shot.stats.errors.is_empty(), "{:?}", shot.stats.errors);
+    shot
+}
+
+fn mirror_xml(
+    cache: &std::path::Path,
+    camera_y: f64,
+    mirror: bool,
+    half_depth: u32,
+    medium: &str,
+    lights: &str,
+    samples: u32,
+) -> String {
+    let plane = if mirror {
+        r##"<object3D id="water" primitive="plane" width="400" height="400" rotationX="-90" material="mirror"/>"##
+    } else {
+        ""
+    };
+    format!(
+        r##"<scene version="1.3"><project width="48" height="48" fps="10" duration="1" background="#00000000"/>
+      <assets><volume id="smoke" src="{}" boundsMinX="-9" boundsMinY="-16" boundsMinZ="-{half_depth}" boundsMaxX="9" boundsMaxY="6" boundsMaxZ="{half_depth}"/></assets>
+      <materials><material id="mirror" baseColor="#FFFFFF" metallic="1" roughness="0.02"/></materials>
+      <composition><camera id="camera" x="0" y="{camera_y}" z="-18" fov="90" renderer="pathtrace" pathSamples="{samples}" maxBounces="2" denoise="false"/>
+      {plane}
+      <object3D id="cloud" primitive="volume" volume="smoke">{medium}</object3D>
+      </composition><lights>{lights}</lights></scene>"##,
+        cache.display()
+    )
+}
+
+/// How far the mirror's lower half is from the mirrored camera's view of the same scene (the
+/// mirror fills the frame's lower half; the mirrored camera sees that image upside down), as a
+/// fraction of how much the ball changes that view away from what is behind it, and where the
+/// worst pixel is.
+fn mirror_error(reflected: &common::Rendered, mirrored: &common::Rendered) -> (f32, f32, (u32, u32)) {
+    let h = reflected.size[1];
+    let (mut worst, mut at, mut total, mut effect) = (0.0f32, (0, 0), 0.0f32, 0.0f32);
+    for y in h / 2 + 4..h {
+        // the column at the frame's edge sees only what lies behind the ball
+        let behind = mirrored.at(0, h - 1 - y)[0];
+        for x in 0..reflected.size[0] {
+            let (a, b) = (reflected.at(x, y)[0], mirrored.at(x, h - 1 - y)[0]);
+            total += (a - b).abs();
+            effect += (b - behind).abs();
+            if (a - b).abs() > worst {
+                (worst, at) = ((a - b).abs(), (x, y));
+            }
+        }
+    }
+    assert!(effect > 1.0, "the ball changes the mirrored view: {effect}");
+    (total / effect, worst, at)
+}
+
+/// A smoke ball hovering over a mirror must reflect exactly as it looks from the mirrored
+/// camera, whether the water under it lies in front of the domain (the reflected ray enters
+/// it, half depth 8) or inside it (the reflected ray starts in the medium, half depth 15).
+#[test]
+fn emissive_volume_seen_in_a_mirror_matches_the_mirrored_camera_view() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = mirror_ball("mirror_ball.srvol");
+    let medium = r##"<medium extinction="0.4" albedo="#000000" emissionColor="#FFA040" emissionScale="0.3" stepSize="0.5" maxSteps="512"/>"##;
+    let lights = r##"<light id="dark" type="ambient" color="#000000" intensity="0"/>"##;
+    for half_depth in [8, 15] {
+        let reflected = mirror_view(&gpu, &cache, -3.0, true, half_depth, medium, lights);
+        let mirrored = mirror_view(&gpu, &cache, 3.0, false, half_depth, medium, lights);
+        let (error, worst, at) = mirror_error(&reflected, &mirrored);
+        assert!(
+            error < 0.05,
+            "half depth {half_depth}: mirror differs from the mirrored view by {error} (worst {worst} at {at:?})"
+        );
+    }
+}
+
+/// The same for a medium that only absorbs, against a visible sky: the mirror shows the sky
+/// dimmed as the mirrored camera sees it.
+#[test]
+fn absorbing_volume_seen_in_a_mirror_matches_the_mirrored_camera_view() {
+    let Some(gpu) = common::gpu() else { return };
+    let cache = mirror_ball("mirror_ball.srvol");
+    let medium = r##"<medium extinction="0.4" albedo="#000000" stepSize="0.5" maxSteps="512"/>"##;
+    let lights = r##"<light id="sky" type="dome" environment="gray.png" environmentVisible="true" intensity="1"/>"##;
+    for half_depth in [8, 15] {
+        let reflected = mirror_view(&gpu, &cache, -3.0, true, half_depth, medium, lights);
+        let mirrored = mirror_view(&gpu, &cache, 3.0, false, half_depth, medium, lights);
+        let (error, worst, at) = mirror_error(&reflected, &mirrored);
+        assert!(
+            error < 0.05,
+            "half depth {half_depth}: mirror differs from the mirrored view by {error} (worst {worst} at {at:?})"
+        );
+    }
+}
+
+/// A surface lit through a thin slab of medium: the primary ray and the shadow ray each cross the
+/// slab, so the lit pixel is dimmed by exp(-2 tau). The slab's density grid has bricks, so the
+/// shadow march consults the skip map; a thin but very dense slab (small density, huge
+/// extinction) must not be skipped, while a slab whose optical depth is negligible may be.
+#[test]
+fn shadow_march_dims_by_the_optical_depth_of_thin_dense_media_and_ignores_negligible_ones() {
+    let Some(g) = common::gpu() else { return };
+    let mut eng = ThreeEngine::new(g.device.clone(), g.queue.clone());
+    let black = eng.upload_f16([1, 1], &[[0.0; 4]]).create_view(&Default::default());
+    let smp = g.device.create_sampler(&Default::default());
+    let input = PtInputs { env: &black, backdrop: None, black: &black, sampler: &smp };
+    let pt = PtGpu::new(&g.device, wgpu::TextureFormat::Rgba16Float);
+    let plane = sr_3d::prim::plane(20.0, 20.0, 1);
+    let light = sr_gpu::three::Light3 {
+        kind: sr_gpu::three::LightKind::Directional,
+        pos: Vec3::ZERO,
+        dir: Vec3::Z,
+        right: Vec3::X,
+        color: Vec3::splat(std::f32::consts::PI),
+        range: 0.0,
+        falloff: 2.0,
+        cos_outer: 0.0,
+        cos_inner: 0.0,
+        cast_shadow: false,
+        softness: 0.0,
+        bias: 0.0005,
+        map_size: 128,
+        size: [0.0; 3],
+        ies: None,
+        affects_diffuse: true,
+        affects_specular: true,
+        contact: 0.0,
+    };
+    let render = |eng: &mut ThreeEngine, density: f32, extinction: f64| {
+        let mut grid = SparseGrid::new(Transform::identity(), 0.0, 16).unwrap();
+        for z in 0..=3 {
+            for y in -4..=4 {
+                for x in -4..=4 {
+                    grid.set([x, y, z], density).unwrap();
+                }
+            }
+        }
+        let medium = Medium::new(
+            Arc::new(grid),
+            Some(Bounds::new([-4.0, -4.0, 0.0], [4.0, 4.0, 2.0]).unwrap()),
+            Transform::identity(),
+            Optical { extinction, ..Default::default() },
+        )
+        .unwrap();
+        let scene = Scene3 {
+            cam: resolve(
+                &CameraParams { orthographic: true, position: Some(Vec3::new(0.0, 0.0, -10.0)), ..Default::default() },
+                4.0,
+                4.0,
+            ),
+            clip_fix: Mat4::IDENTITY,
+            size: [4, 4],
+            exposure: 1.0,
+            dof: None,
+            lens_k1: 0.0,
+            draws: vec![sr_gpu::three::Draw3 {
+                mesh: sr_gpu::three::MeshSrc::Cached(eng.upload_mesh(&plane.vertices, &plane.indices)),
+                model: Mat4::from_translation(Vec3::new(0.0, 0.0, 3.0)),
+                material: sr_3d::MaterialParams { base_color: [1.0; 4], roughness: 1.0, ..Default::default() },
+                maps: Default::default(),
+                opacity: 1.0,
+                cast_shadow: true,
+                receive_shadow: true,
+            }],
+            lights: vec![light.clone()],
+            env: None,
+            splats: Vec::new(),
+            volumes: vec![VolumeDraw::new(Arc::new(medium), March { step_size: 0.05, max_steps: 4096 }).unwrap()],
+            encode_srgb: false,
+            ao: None,
+            ssr: false,
+            path: Some(PathOpts { samples: 1, bounces: 1, denoise: false }),
+        };
+        let data = pathtrace::build(&scene);
+        let target = eng.target([4, 4]);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        pathtrace::render(
+            &pt,
+            &g.device,
+            &mut enc,
+            &scene,
+            &data,
+            scene.path.unwrap(),
+            &input,
+            &target.create_view(&Default::default()),
+        );
+        g.queue.submit([enc.finish()]);
+        eng.read(&target)[5][0]
+    };
+    let open = render(&mut eng, 0.0, 1.0);
+    assert!(open > 0.1, "the plane is lit: {open}");
+    // density 1e-6 x extinction 1e6 = 1 per unit over a 2-unit slab: tau = 2, seen twice
+    let thin_dense = render(&mut eng, 1e-6, 1e6);
+    let want = open * (-4.0f32).exp();
+    assert!((thin_dense - want).abs() < 0.02 * open, "thin dense slab: {thin_dense}, expected {want}");
+    // optical depth 2e-30: negligible, whether or not it is skipped
+    let negligible = render(&mut eng, 1e-30, 1.0);
+    assert!((negligible - open).abs() < 1e-4 * open, "negligible slab: {negligible} vs {open}");
+}

@@ -115,9 +115,10 @@
         "Substep relative collider/domain motion including rigid bodies, midpoint affine velocities without rotation-induced expansion, activation windows and deterministic replay",
         "Compiler-qualified 3D parent and transform-constraint targets shared by rendering and simulation",
         "Persistent SRVSEQ render-cache authoring, per-frame SHA-256 integrity, transactional output, composition-clock playback, CLI and schema/asset validation",
-        "Crater-driven closed midpoint solids, domain-relative material motion at MAC faces, shared geometry admission, authored plane slabs, indexed rotational primitives and deterministic replay."
+        "Crater-driven closed midpoint solids, domain-relative material motion at MAC faces, shared geometry admission, authored plane slabs, indexed rotational primitives and deterministic replay.",
+        "Opt-in multigrid-preconditioned pressure solve and MacCormack advection (pyro@solver, pyro@advection), parallel per-cell loops with pinned reference hashes, brick-wise volume export with a content-hashed cache key, a lower step memory estimate and a 41-byte resident state"
       ],
-      "remaining": "Bounded importer dependencies and production visual/performance validation; persistent render bakes are implemented, while exact solver-state resumption is not claimed."
+      "remaining": "Bounded importer dependencies and production visual/performance validation; persistent render bakes are implemented, while exact solver-state resumption is not claimed. Solver speed at 128x104x128 and 192x156x192 was measured under load and then once on a quiet machine (quiet_machine_timing_validation), on x86_64 Linux only and not certified; the multigrid and MacCormack modes are opt-in and have no visual review on the impact film."
     },
     {
       "id": "particles",
@@ -162,7 +163,7 @@
         "Strict 24-frame native pyro/ejecta/ground-collision integration preview and H.264 encode",
         "Continuous sphere contacts with linearly moving crater triangles, barycentric surface velocities, support stabilization, canonical-step reuse and one-interval sweep retention."
       ],
-      "remaining": "CPU preparation still retains one Draw3 per particle/prototype. Native UHD sequence throughput/appearance, complete importer allocation/dependency accounting and scaled collider retention remain unverified."
+      "remaining": "CPU preparation still retains one Draw3 per particle/prototype. Native UHD sequence throughput/appearance, complete importer allocation/dependency accounting and scaled collider retention remain unverified. 100000 ejecta evaluate and replay on the CPU in the target-resolution scene, but draw preparation and rendering at that count were not run for this entry."
     },
     {
       "id": "ocean",
@@ -188,9 +189,10 @@
         "Bounded numeric red/Terrarium/Mapbox bathymetry and rest-mesh top-surface sampling",
         "Native water materials, raster/path-traced meshes and bounded two-batch foam/spray rendering",
         "Deterministic secondary whitewater emission, ballistic spray, advected foam, lifetime/window/budget handling",
-        "Strict native 36-frame render/encode preview and one-sample 3840x2160 render probe"
+        "Strict native 36-frame render/encode preview and one-sample 3840x2160 render probe",
+        "Opt-in second-order MUSCL/SSP-RK2 scheme with the monotonized-central limiter (ocean@order), parallel sweeps identical to serial, second-order memory accounting and work allowance ceilings of 1e12"
       ],
-      "remaining": "Production visual/temporal validation in the full UHD impact film; shared importer dependency allocation hardening. Water is depth-averaged and whitewater is a cinematic read-only tracer effect, not overturning-sheet or compressible impact simulation."
+      "remaining": "Production visual/temporal validation in the full UHD impact film; shared importer dependency allocation hardening. Water is depth-averaged and whitewater is a cinematic read-only tracer effect, not overturning-sheet or compressible impact simulation. Second-order water needs at least 20 cells per wavelength and keeps a first-order bed term; absorbing edges were evaluated and not adopted; whitewater tracers keep no checkpoints, so every backward seek replays from zero; parallel timings were measured under load and on a quiet machine (quiet_machine_timing_validation), and second order at 1.05 million cells takes about 0.5 s per 1/24 s step with eight threads."
     },
     {
       "id": "geometry",
@@ -2351,6 +2353,274 @@
       "srep-0000-cinematic-impact.md": "88631516dbf726e336bba9ef45f05aec3a1106b0c0d3af095e746b060a273a29"
     }
   },
+  "quiet_machine_timing_validation": {
+    "checked_at": "2026-10-04T07:26:32.851736+00:00",
+    "status": "quiet_machine_timings_recorded_single_run_not_certified",
+    "commit": "02a99d0",
+    "host": "8 cores (Intel Xeon Gold 6548Y+, one thread per core), x86_64 Linux",
+    "adapter": "NVIDIA RTX 6000 Ada Generation (Vulkan)",
+    "machine_state": "load average 0.3 to 0.9 at the start of the ocean, evaluator and render runs; other work stopped and the GPU queue empty; 1.3 to 4.4 during the smoke series",
+    "commands": {
+      "smoke": "cargo run --release -p sr-sim --example pyro_profile -- N 8 3000 0 SOLVER ADVECTION export",
+      "ocean": "cargo run --release -p sr-sim --example ocean_profile -- ORDER THREADS SIDE",
+      "evaluator": "cargo test --release -p sr-eval --test hero_hires -- --ignored --nocapture",
+      "render": "python3 tools/probe_render.py (8 samples, one frame per process)"
+    },
+    "smoke": {
+      "domain": "impact-scene domain of 192x156x192 scene units at the three grid resolutions below",
+      "unit": "milliseconds per step; conjugate-gradient iterations in parentheses",
+      "impulse": "worst of steps 2-3",
+      "regime": "median of steps 4-7",
+      "threads_8": {
+        "64x52x64": {
+          "jacobi+semilagrangian": {
+            "impulse": "233 (135)",
+            "regime": "126 (48)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "93 (11)",
+            "regime": "79 (5)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "137 (11)",
+            "regime": "127 (5)"
+          }
+        },
+        "128x104x128": {
+          "jacobi+semilagrangian": {
+            "impulse": "1978 (274)",
+            "regime": "968 (107)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "544 (14)",
+            "regime": "485 (7)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "888 (14)",
+            "regime": "777 (7)"
+          }
+        },
+        "192x156x192": {
+          "jacobi+semilagrangian": {
+            "impulse": "10260 (417)",
+            "regime": "5001 (174)"
+          },
+          "multigrid+semilagrangian": {
+            "impulse": "1961 (16)",
+            "regime": "1630 (9)"
+          },
+          "multigrid+maccormack": {
+            "impulse": "3060 (16)",
+            "regime": "2646 (9)"
+          }
+        }
+      },
+      "threads_1": {
+        "64x52x64": {
+          "jacobi+semilagrangian": {
+            "impulse": 592,
+            "regime": 407
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 424,
+            "regime": 370
+          },
+          "multigrid+maccormack": {
+            "impulse": 701,
+            "regime": 641
+          }
+        },
+        "128x104x128": {
+          "jacobi+semilagrangian": {
+            "impulse": 6567,
+            "regime": 4016
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 3425,
+            "regime": 2984
+          },
+          "multigrid+maccormack": {
+            "impulse": 5771,
+            "regime": 5131
+          }
+        },
+        "192x156x192": {
+          "jacobi+semilagrangian": {
+            "impulse": 31617,
+            "regime": 18301
+          },
+          "multigrid+semilagrangian": {
+            "impulse": 12159,
+            "regime": 10501
+          },
+          "multigrid+maccormack": {
+            "impulse": 20568,
+            "regime": 18142
+          }
+        }
+      },
+      "state_volume_export_best_of_3_ms": {
+        "threads_8": {
+          "64x52x64": 5,
+          "128x104x128": "28-34",
+          "192x156x192": "105-116"
+        },
+        "threads_1": {
+          "64x52x64": 24,
+          "128x104x128": 195,
+          "192x156x192": 660
+        }
+      },
+      "peak_rss_192x156x192_mb": {
+        "jacobi": 724,
+        "multigrid": "897-919"
+      },
+      "reference_at_base_commit_60a458c": "measured earlier under load and in series, not repeated: 128x104x128 6.1 s in regime and 11.5 s at the impulse; 192x156x192 28 s and 54 s"
+    },
+    "ocean": {
+      "conditions": "g 9.81, depth 10, 0.5-unit cells, closed edges, Gaussian hump 0.3 high, canonical step 1/24 s, no checkpoints; one process per run; the first step runs from the initial state and the second from the first",
+      "runs": [
+        {
+          "order": 1,
+          "threads": 1,
+          "cells": 1048576,
+          "load_average_at_start": 0.45,
+          "first_step_s": 0.378,
+          "second_step_s": 0.363,
+          "best_s": 0.363,
+          "peak_rss_mib": 160
+        },
+        {
+          "order": 1,
+          "threads": 8,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 0.101,
+          "second_step_s": 0.086,
+          "best_s": 0.086,
+          "peak_rss_mib": 161
+        },
+        {
+          "order": 2,
+          "threads": 1,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 1.935,
+          "second_step_s": 1.934,
+          "best_s": 1.934,
+          "peak_rss_mib": 185
+        },
+        {
+          "order": 2,
+          "threads": 8,
+          "cells": 1048576,
+          "load_average_at_start": 0.5,
+          "first_step_s": 0.565,
+          "second_step_s": 0.516,
+          "best_s": 0.516,
+          "peak_rss_mib": 185
+        },
+        {
+          "order": 1,
+          "threads": 1,
+          "cells": 4000000,
+          "load_average_at_start": 0.86,
+          "first_step_s": 1.568,
+          "second_step_s": 1.557,
+          "best_s": 1.557,
+          "peak_rss_mib": 582
+        },
+        {
+          "order": 1,
+          "threads": 8,
+          "cells": 4000000,
+          "load_average_at_start": 0.86,
+          "first_step_s": 0.499,
+          "second_step_s": 0.505,
+          "best_s": 0.499,
+          "peak_rss_mib": 582
+        },
+        {
+          "order": 2,
+          "threads": 1,
+          "cells": 4000000,
+          "load_average_at_start": 0.83,
+          "first_step_s": 7.511,
+          "second_step_s": 7.561,
+          "best_s": 7.511,
+          "peak_rss_mib": 674
+        },
+        {
+          "order": 2,
+          "threads": 8,
+          "cells": 4000000,
+          "load_average_at_start": 0.83,
+          "first_step_s": 2.175,
+          "second_step_s": 2.202,
+          "best_s": 2.175,
+          "peak_rss_mib": 675
+        }
+      ],
+      "second_order_1m_cells_repeats": {
+        "threads_8_best_s": [
+          0.525,
+          0.508,
+          0.501,
+          0.502
+        ],
+        "threads_4_best_s": 0.715,
+        "threads_6_best_s": 0.576,
+        "load_average_at_start": "0.71 to 0.89"
+      },
+      "reading": "second order at 1.05 million cells with 8 threads took 0.50 to 0.53 s per 1/24 s step in eight runs, so the 0.5 s target is not met on this machine; an earlier run under load had measured 0.37 s, which these quiet-machine runs do not reproduce"
+    },
+    "evaluator": {
+      "scene": "examples/cinematic-impact/hero-hires.scene.xml",
+      "seconds": {
+        "t=0.5": 10.7,
+        "t=1.0": 10.7,
+        "t=1.5": 12.3,
+        "t=3.0": 35.7,
+        "back to t=1.5": 15.5,
+        "t=6.0": 82.1,
+        "whole test": 167
+      },
+      "peak_rss_gib": 1.74
+    },
+    "render": {
+      "unit": "process wall seconds / smoke seconds / GPU trace seconds / peak RSS",
+      "samples": 8,
+      "frames": {
+        "hero.scene.xml 1280x720 t=0.8": "8.9 s / 1.2 s / 0.1 s / 659 MiB",
+        "hero.scene.xml 1280x720 t=1.5": "7.8 s / 3.2 s / 2.8 s / 610 MiB",
+        "hero.scene.xml 1280x720 t=3.0": "20.5 s / 7.6 s / 10.2 s / 643 MiB",
+        "hero.scene.xml 3840x2160 t=3.0": "132.4 s / 7.5 s / 120.8 s / 706 MiB",
+        "hero-hires.scene.xml 1280x720 t=3.0": "103.3 s / 55.8 s / 31.7 s / 2805 MiB (ocean 9.5 s, particles 3.4 s, CPU render preparation 1.7 s, 4.66 million triangles)",
+        "hero-hires.scene.xml 3840x2160 t=3.0": "426.6 s / 54.5 s / 354.9 s / 2323 MiB"
+      },
+      "reference_at_base_commit_60a458c": "hero.scene.xml 1280x720 t=3.0, measured earlier under load: 74.9 s wall, 35.2 s smoke, 37.0 s trace"
+    },
+    "limits": [
+      "One run of each measurement, without repetition or confidence interval, except the eight second-order ocean runs at 1.05 million cells.",
+      "x86_64 Linux and this adapter only.",
+      "The reference at the base commit was measured under load and was not repeated.",
+      "Path-traced 3840x2160 takes 121 s (base scene) and 355 s (target-resolution scene) per frame at 8 samples, dominated by marched shadows inside the volume; a 144-frame sequence at that cost is not practical and remains open.",
+      "GPU memory was not measured.",
+      "No frame was reviewed for appearance in this measurement.",
+      "Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed."
+    ],
+    "remaining": [
+      "Repeated runs with a confidence interval and a second platform, if the timings are to be certified."
+    ],
+    "source_sha256": {
+      "crates/sr-sim/examples/ocean_profile.rs": "1656d3bea7e046bb808aa51874c41cdc16077a2af46e1e58fe1cc0bf1ded4d95",
+      "crates/sr-sim/examples/pyro_profile.rs": "083be643d357e982766bac50b47acb0358d4e3bea7c36f5471a27c65c0eb0eff",
+      "crates/sr-eval/tests/hero_hires.rs": "fb12a708441e733547404827b0e4212a65316b70826168ca1b25c7b55ce7c8bb",
+      "tools/probe_render.py": "787e55b23bf2909ff4a33e373585888c984bfe4feb4dfb9ab567a3d52dd10d6a",
+      "examples/cinematic-impact/hero.scene.xml": "d827c4fac1683716f675b97f4f69393ec72616b79933c21d6d7f42499f258651",
+      "examples/cinematic-impact/hero-hires.scene.xml": "abdf988d9bc567f7ba703fe8a914a8196ee01cbd88d7f3f42ec2bd7df028cc8a"
+    }
+  },
   "milestones": [
     {
       "name": "Path-traced shared prototype BVHs",
@@ -2394,6 +2664,527 @@
       ],
       "validation": "297 exact rows: 13 cinematic complex types, 2 inherited attribute groups and 18 selected object/camera bindings. Inline restriction facets, requiredness, lexical defaults and absent values match executable XSD. Release hygiene passes.",
       "limits": "This is a field/default reconciliation; final semantic coverage,31-rule review and native UHD sequence acceptance remain required."
+    },
+    {
+      "name": "Parallel smoke solver loops with pinned reference hashes",
+      "evidence": [
+        "crates/sr-sim/src/pyro.rs",
+        "crates/sr-sim/src/pyro/determinism.rs",
+        "crates/sr-sim/src/pyro/atomicity.rs",
+        "crates/sr-sim/examples/pyro_profile.rs"
+      ],
+      "validation": "Per-cell loops (advection, boundary conditions, forces, pressure operator, vector updates, gradient subtraction, divergence check, field validation, source injection) run on rayon with every element written by the same expression as before; reductions stay serial and in index order. Final-state hashes of reference scenarios recorded before the change still match, and are equal on 1, 2 and 8 rayon threads. The pressure operator reads a precomputed open-face mask, two reductions share one pass, the step copies only the evolving fields (density, temperature, velocity), and trilinear sampling has an exact in-range path compared bit for bit with the original on about 240,000 points. A failed step leaves the committed state and clock untouched: injected failures in the collider stage, field validation and the pressure solve, then a corrected retry equals a fresh replay. Advection at 128^3 on one thread, impact scene: 1650-1770 ms before the sampling change, 1423 ms after (measured under load).",
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The reference hashes hold only on that platform. The Jacobi mode keeps serial in-order reductions, so its pressure solve does not scale with threads like the other loops. No GPU render of the faster solver was run for this entry. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Multigrid-preconditioned pressure solve",
+      "evidence": [
+        "crates/sr-sim/src/pyro/multigrid.rs",
+        "crates/sr-sim/src/pyro/pockets.rs",
+        "crates/sr-sim/src/pyro/determinism.rs",
+        "crates/sr-sim/src/pyro.rs"
+      ],
+      "validation": "Conjugate-gradient projection preconditioned by one algebraic-aggregation V(1,1) cycle (2x2x2 aggregates, Galerkin operator, symmetric red-black Gauss-Seidel, coarse correction scaled by 1.5, dense Cholesky on at most 128 cells), with reductions over fixed 2048-cell blocks combined by a fixed binary tree. Tests: V-cycle symmetry and positivity with and without solids, exact Galerkin products, direct solve and mean removal on floating components, sealed fluid pockets (closed, open and expanding: an expanding pocket still fails with a pressure error because the removed mean stays in the final divergence check), equal results on 1, 2 and 8 threads with pinned hashes, iteration counts against resolution, and agreement with the Jacobi solver when both converge tightly. Measured on the impulse step at 128^3: Jacobi 275 iterations, multigrid 14.",
+      "limits": "Convergence is judged by the RMS divergence over all fluid cells, so an error confined to a few cells of a large domain can pass. Multigrid results differ from Jacobi in the last bits, and the reference hashes hold only on x86_64 Linux. Iteration counts are not timings: no wall-time benefit is certified, and the solver has no visual review on the impact film."
+    },
+    {
+      "name": "MacCormack advection with an extrema limiter",
+      "evidence": [
+        "crates/sr-sim/src/pyro/maccormack.rs",
+        "crates/sr-sim/src/pyro/detail.rs",
+        "crates/sr-sim/src/pyro/determinism.rs"
+      ],
+      "validation": "Backward-forward error correction (Selle et al., 2008) for density, temperature and the three velocity components, clamped to the minimum and maximum of the eight old values around the backward-trace origin and falling back to the semi-Lagrangian value where a collider cuts a trace. Free vortex (32^3 closed box, 60 force-free steps, multigrid): kinetic energy kept 96.6% against 68.8% and enstrophy 95.7% against 61.6% for semi-Lagrangian advection; the test requires 1.25x and 1.3x of the semi-Lagrangian values and energy that never grows. A swirling blob against a wall creates no new density or temperature extrema and leaves solid cells clean; results are equal on 1, 2 and 8 threads, with pinned hashes. The impact scene ran 144 steps at 64^3 and 128^3 without error.",
+      "limits": "The advection stage measured 2.5x (64^3) and 2.4x (128^3) the semi-Lagrangian time on one thread, measured on a loaded machine and only on x86_64 Linux, not certified. Velocity uses the scheme on the strength of one vortex test; no visual comparison on the impact film was made. Hashes hold only on x86_64 Linux. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Smoke memory estimate and resident state size",
+      "evidence": [
+        "crates/sr-sim/src/pyro.rs",
+        "crates/sr-sim/tests/pyro.rs",
+        "crates/sr-sim/src/pyro/determinism.rs"
+      ],
+      "validation": "The step memory estimate fell from 512 to 320 and then to 288 bytes per cell plus 8192, from a count of the live arrays (committed state 41, working state 41, solid-face list 56 if every cell were solid, pressure workspace 65, multigrid about 26), and a test pins the figure. Prescribed solid face velocities left the state, which now holds about 41 bytes per cell independent of colliders (a test checks 40-43 bytes per cell and that a step with a collider does not grow it); 30, 3 and 1 states fit 256 MiB at 64x52x64, 128x104x128 and 192x156x192 (14, 1 and none before). Reference hashes of both pressure solvers and both advection schemes pass unchanged. The least budgets the constructor accepts at those three resolutions were found by running it and are tabulated in the SREP. Peak resident memory on the impact scene (6 steps, multigrid, no colliders): 326 MB at 128x104x128 and 928 MB at 192x156x192.",
+      "limits": "Peak resident memory depends on the allocator and on untouched pages, and was measured on a loaded machine and only on x86_64 Linux, not certified. The 25% headroom over the counted bytes is an estimate: collider-heavy scenes and other allocators were not measured. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Cheaper smoke volume export, cache key and checkpoints",
+      "evidence": [
+        "crates/sr-sim/src/pyro/export.rs",
+        "crates/sr-sim/src/pyro/key.rs",
+        "crates/sr-volume/src/lib.rs",
+        "crates/sr-volume/tests/grid.rs",
+        "crates/sr-sim/tests/pyro.rs",
+        "crates/sr-eval/src/pyro.rs",
+        "crates/sr-eval/tests/pyro.rs"
+      ],
+      "validation": "The five volume channels build in parallel and store whole 8x8x8 bricks (SparseGrid::set_brick, equivalent to 512 single sets and atomic on failure); the exported volume is identical to the previous implementation, compared bit for bit on five reference cases (colliders, odd and closed domains) and two temperature backgrounds. A volume is neither exported nor hashed when the simulation state did not change: four samples inside a fixed step return the same volume, a new step exports once, and a backward seek exports again and reproduces the first visit's key. The cache key hashes each brick on its own and combines the hashes in key order, so it is the same for any thread count; a flipped mantissa bit, swapped samples, another name or background, and 3000 single-voxel variations change it. Impact scene after 8 steps on a busy machine: export 610 to 77-100 ms at 128^3 and 2.2 s to 150-165 ms at 192^3; hashing 70 to 3 ms at 128^3 and 254 to 21 ms at 192^3; cloning a 192^3 state for a checkpoint took 102 ms.",
+      "limits": "Timings were measured under load (load average about 12-14) on x86_64 Linux and are not certified. The key is an in-memory cache token whose values changed; no stored key and no test compares it with a fixed value. The dense velocity channels still dominate export time. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Second-order ocean with a monotonized-central limiter",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/flux.rs",
+        "crates/sr-sim/tests/ocean_order2.rs",
+        "crates/sr-sim/tests/ocean.rs"
+      ],
+      "validation": "Spec::order selects first order (default; a digest of the frame bits recorded from the earlier solver is unchanged for closed, open and periodic edges) or second order: MUSCL reconstruction of surface elevation and velocity with the monotonized-central limiter, depth-capped so face depths stay non-negative, first order at wet/dry fronts and non-periodic edge cells, SSP-RK2, a time-step bound halved to 0.225 and Strang-split drag. Amplitude lost by a 1e-3 wave after five wavelengths (order 1 / order 2): 99.96% / 77.2% at 10 cells per wavelength, 97.9% / 17.9% at 20, 85.3% / 2.6% at 40, 61.7% / 0.34% at 80. The minmod and van Leer limiters lost more at 10 and 20 cells (97.4% and 64.1%; 88.2% and 31.1%) and the choice rests on that comparison. Rest on rough bathymetry (to 1e-12), conservation on closed and periodic edges, positivity on wet/dry fronts over rough beaches, replay after checkpoint eviction and equality on 1, 2 and 8 threads pass in both orders.",
+      "limits": "The bed-source term stays first order: second order holds for waves over a smooth bed. Non-negative depth at the 0.225 bound is verified by tests and not proven for the unsplit two-dimensional scheme; negative depth beyond round-off could not be provoked. Ten cells per wavelength still lose 77%, so waves need at least 20 cells per wavelength; the flux stays local Lax-Friedrichs. An absorbing edge (relaxation layer) was built and not adopted: for smooth pulses the zero-gradient open edge already reflects little (about 0% in one dimension, 3-7% against free space for a finite beam) and the layer reflected no less. Digests hold only on x86_64 Linux."
+    },
+    {
+      "name": "Parallel ocean sweeps and second-order memory accounting",
+      "evidence": [
+        "crates/sr-sim/src/ocean/flux.rs",
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/tests/ocean_order2.rs"
+      ],
+      "validation": "Rows (x sweep) and bands of 16 rows (z sweep) run on rayon with the same floating-point operations per cell as the serial sweep. Digests of the full state recorded from the serial solver on a 160x120 grid (both orders, closed/open/periodic edges) match with 1, 2 and 8 threads. Momentum-flux overflow in two cells of different bands reports the same error and preserves the published frame on the serial path and with 1, 2 and 8 threads. A second-order step is charged 400 bytes per cell against 256 for first order: peak resident memory at 1,048,576 cells was 158 B/cell in first order on every grid shape tried and 182-278 B/cell in second order, the largest on a one-row grid; a test pins the admission thresholds. Wall time per 1/24 s step, second order: 1.85 s on one thread, 0.52 s on four and 0.37 s on eight at 1.0 million cells (first order 0.365, 0.106, 0.074 s); 7.69, 3.00 and 2.31 s at 4.0 million cells (first order 1.59, 0.69, 0.54 s).",
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified; the gain at 4 million cells is limited by memory bandwidth and serial state copies. Only the non-finite failure path is tested in parallel: negative depth beyond round-off could not be provoked, and both failing cells report the same message, so the lowest-cell-index rule cannot be told apart by that test. Digests hold only on x86_64 Linux. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Work allowance ceilings for the ocean and its whitewater",
+      "evidence": [
+        "schema/scene-render-1.1.xsd",
+        "crates/sr-model/tests/ocean_rules.rs",
+        "crates/sr-eval/tests/ocean.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "ocean@maxWork and whitewater@maxWork accept up to 1e12 (defaults stay 1e8). A cold seek costs steps x substeps x (8 or 24 units) x cells, which needs billions of units at 518,400 cells, and an ocean without whitewater failed every seek beyond 0.5 s even at the former ceiling of 1e9. Model tests pin the boundary for both elements (1e12 valid; 1e12+1, 0, -1 and non-integers rejected); evaluator tests seek 1.31e9 units under a 1e12 allowance for the solver and for the tracers, so the value reaches both as a u64 without loss.",
+      "limits": "The two evaluator tests are ignored by default (about 12 and 20 seconds in release) and run on request. Tracers keep no checkpoints, so every backward seek replays from zero. The ceilings of other budgets (particles, fracture, smoke) were not re-examined."
+    },
+    {
+      "name": "Schema attributes ocean@order, pyro@solver and pyro@advection",
+      "evidence": [
+        "schema/scene-render-1.1.xsd",
+        "crates/sr-model/tests/ocean_rules.rs",
+        "crates/sr-model/tests/pyro_rules.rs",
+        "crates/sr-eval/tests/ocean.rs",
+        "crates/sr-eval/tests/pyro.rs",
+        "crates/sr-eval/tests/pyro_bake.rs",
+        "tests/corpus/valid/ocean-order2.scene.xml",
+        "tests/corpus/invalid/ocean-order.scene.xml",
+        "tests/corpus/valid/pyro-multigrid.scene.xml",
+        "tests/corpus/valid/pyro-maccormack.scene.xml",
+        "tests/corpus/invalid/pyro-solver.scene.xml",
+        "tests/corpus/invalid/pyro-advection.scene.xml",
+        "tools/build_corpus.py",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "Each attribute is an XSD enumeration whose default equals the previous behavior, so an invalid value is a structural error (S06) and no Schematron or rule assert is needed. The evaluator maps each to the solver; an absent attribute gives the same frame bytes and cache key as the default value, each option changes the published bytes and key, and multigrid with MacCormack differs from either alone. A baked SRVSEQ sequence is identified by the digests of its frame contents, which differ between solvers and schemes. The corpus builder writes 251 documents and the independent lxml oracle agrees with every expectation. The SREP documents the numerical contract of each mode.",
+      "limits": "No Schematron assert backs the enumerations. The iteration counts and vortex retention quoted in the SREP are measurements of the solver tests and are not reproduced by the corpus. A baked cache carries no solver identity beyond its contents, so two modes that produced identical bytes would share frames. GPU rendering of the new modes was not run for this entry."
+    },
+    {
+      "name": "Render stage timings, render probe and reflected-volume tests",
+      "evidence": [
+        "crates/sr-gpu/src/render.rs",
+        "crates/sr-gpu/tests/stage_times.rs",
+        "tools/probe_render.py",
+        "tools/tests/test_probe_render.py",
+        "crates/sr-gpu/tests/volume.rs"
+      ],
+      "validation": "Render statistics report seconds per stage (rigid, ocean, smoke and particle simulation, draw and volume preparation, path-tracer assembly, BVH and packing), and the trace and denoise passes are timed with GPU timestamp queries; the additions change no pixel. tools/probe_render.py renders single frames through the GPU queue and writes stage seconds, GPU pass milliseconds, wall seconds, peak resident memory and a frame hash as JSON; its report logic has unit tests that pass. Two volume tests show that the dark patch under the plume at 3.0 s in the hero scene is the plume's reflection in the ocean and not a volume-domain defect: reflected emissive and absorbing media match the mirrored-camera view with the reflection point in front of and inside the domain, and both tests fail if volumes are ignored after the first surface.",
+      "limits": "No certified frame time exists: the probe has been exercised only under load. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. The explanation of the dark patch rests on those two tests and on visual comparison; no render code was changed for it. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Target-resolution impact scene and evaluator test",
+      "evidence": [
+        "examples/cinematic-impact/hero-hires.scene.xml",
+        "examples/cinematic-impact/hero.scene.xml",
+        "crates/sr-eval/tests/hero_hires.rs"
+      ],
+      "validation": "hero-hires.scene.xml changes only resolution, solver and budget attributes of hero.scene.xml: a 128x104x128 plume (multigrid, MacCormack, half-voxel march step), a 720x720 second-order ocean and 100000 ejecta; scene-render validate reports no errors or warnings for both. Evaluated without a GPU at 0.5, 1.0, 1.5 and 3.0 s: no problem reported, plume density non-zero after the impact, ocean and 100000 particles present, and a backward seek from 3.0 s to 1.5 s reproduces the ocean, particles and volume key of the first visit; a seek to 6.0 s completes, and a cold seek to 6.0 s completed without problems. Measured under load: 16.0, 16.7, 24.7 and 62.8 s for the four instants advanced in order, 22.8 s for the backward seek, 170.7 s from there to 6.0 s, 278.8 s for the cold seek; peak resident memory 2302 MiB. The run exposed three budget needs now declared in the scene (ocean surface memory and the work allowances of the ocean and its whitewater).",
+      "limits": "Timings were measured on a loaded machine and only on x86_64 Linux, not certified. The test is ignored by default because it takes minutes and gigabytes. No GPU render of the scene was run for this entry, so image quality, render time and GPU memory at this resolution are unmeasured. Two failures that predate this work on the software adapter of this host (pathtrace_instances and one test in crates/sr-gpu/tests/volume.rs) are not addressed. Timings measured on a quiet machine are in quiet_machine_timing_validation."
+    },
+    {
+      "name": "Ejecta thrown out by an impact: driver births in the 3D particle solver and burst@crater",
+      "evidence": [
+        "crates/sr-sim/src/particles3d.rs",
+        "crates/sr-sim/tests/particles3d_births.rs",
+        "crates/sr-sim/src/cratering/ejecta.rs",
+        "crates/sr-sim/tests/ejecta.rs",
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/tests/crater_ejecta.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/valid/ejecta-crater.scene.xml"
+      ],
+      "validation": "The 3D particle Driver can give, per fixed step window, births with exact instant, position, velocity and mass (mass kept in the particle); the 7 tests of particles3d_births cover birth at the exact instant, reverse replay and checkpoint budgets, ids and order among rate and burst births, no change for emitters that give none, an error and not a truncation above maxParticles with the published frame kept, windows asked once going forward, and births outside the window refused. A burst with crater@id (P3D7 to P3D10 in Schematron and Rust, 6 new corpus documents, oracle agreement) is evaluated from the impact the rigid world found: the 7 tests of crater_ejecta check that nothing is thrown before the impact, 300 particles born in order within the formation time, their mass at 0.8 of the crater's (within 20%), launch from between 1.2 body radii and the crater's radius, launch away from the ground, identical particles after scrubbing and on a fresh evaluator, ordinary bursts unchanged beside it, the maxParticles and regolith errors, and a faster body throwing faster. sr-sim, sr-model and sr-eval: 604 passed, 0 failed, 7 ignored; clippy -D warnings and fmt clean.",
+      "limits": "The ejecta law is that of the specification (Housen and Holsapple 2011), whose paper could not be consulted: its equations and constants are unchecked. Launch angle and spread, launch time and the azimuthal asymmetry are the engine's own. The crater's pose is the owner's at the impact. Not run: rendering of the ejecta, GPU, and the hero scene, which still authors its own ejecta. The scene-render test watch_notices_an_included_documents_asset fails on this host also at 8bf11f2 without these changes (checked in a separate worktree), so it is not caused by them; the other CLI tests passed."
+    },
+    {
+      "name": "Per-body water samples and owner tags in the ocean solver",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/body.rs",
+        "crates/sr-sim/tests/ocean_owners.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/src/ocean.rs"
+      ],
+      "validation": "With Spec::body_owners the driver tags every occupied column with the body that holds most of it, and at each completed canonical step, next to Forcing::exchange, the driver is offered per body: the momentum that body gave the water in the step, the least-squares plane through the free surface of the wet columns of its footprint (level at the centre and two slopes), the depth-weighted mean horizontal water velocity, and the mean bed ordinate. The 7 tests of ocean_owners check that the per-body impulses add up to the total exchange to rounding, that a single body gave what all gave, bit-identical samples on replay with and without checkpoints (first and second order), that tagging does not change the water, an exact plane through a sloped surface (level, both slopes, velocity, bed) and no slope along a direction without extent, and the errors for an unknown tag and for tags without bodies; one evaluator test checks that two spheres and a crater surface in the colliders list tag their columns with their place in it. sr-sim, sr-model and sr-eval pass; clippy -D warnings and fmt clean.",
+      "limits": "The solver delivers the samples; no consumer (reaction on the body, buoyancy from the perturbed surface) exists yet. A column held by several bodies is credited whole to the one with most of it. The tags cost 12 bytes per cell and 16 per body per checkpoint, charged only when body_owners is non-zero; the evaluator now sets it for every ocean that has body colliders, so those oceans are charged 12 bytes per cell more. Run time of the extra work (one owner pass and one footprint scan per canonical step) was measured on a 720x720 second-order ocean (the hero-hires grid) with a body of 1600 cells, 4 threads, on a machine at load 9 to 10, five alternating runs of 8 steps (examples/ocean_bodies_profile.rs): 1.130 s per step without tags and 1.203 s with them (about 6%), but the runs overlap (the last pair is inverted), so the cost is between nothing and about 10%, not resolved on this loaded machine. The hero-hires scene itself was not run for this entry."
+    },
+    {
+      "name": "Recent steps kept by the 3D particle emitter, for the samples of a motion-blur shutter",
+      "evidence": [
+        "crates/sr-sim/src/particles3d.rs",
+        "crates/sr-sim/tests/particles3d_recent.rs",
+        "crates/sr-eval/examples/blur_profile.rs"
+      ],
+      "validation": "A motion-blurred frame asks the evaluator for the frame and then for the shutter's samples (the first, the last, then each in turn), so the emitter is asked for a step ahead and then for steps behind it; each request that went back across a step restored the last checkpoint (up to a second of fixed steps earlier) and replayed from it. The emitter now also keeps its latest fixed steps (a quarter of checkpointMemoryMiB at most, none unless that holds three states, counted together with the checkpoints) and restarts from the latest stored state at or before the target, whichever kind. examples/blur_profile.rs asks a scene the way the renderer's sub-frame source does (40 frames from 2 s, 16 samples, 180 degree shutter, 20000 particles, step 1/120 s, a collider floor and a rigid ball): the 16 shutter samples cost 25.0 s of wall time per 40 frames before and 9.3 s after (the same scene with one sample: 1.1 to 2.0 s), and the combined hash of the particle frames was equal before and after, in the first scene (6000 particles, step 1/24 s, whose samples all lie inside one step, 2.8 s) as in this one. Tests (3, particles3d_recent): a sample that goes back replays no step with the recent steps against about 300 windows without them, frames equal to those of an emitter that keeps nothing, any scrubbing order agrees with a fresh emitter, and checkpoints plus recent steps stay within the budget for budgets from 1 KiB to 256 MiB.",
+      "limits": "What remains is one partial step of every particle per distinct sample time (about 14 ms for 20000 particles on this loaded machine), which the exact frame at that instant needs; it grows with the number of samples. Measured on a loaded machine (load 8 to 14), only on this scene and on x86_64 Linux. No GPU render was run, and the sub-frame source of the renderer was imitated at the evaluator, not exercised."
+    },
+    {
+      "name": "Cavity of a body entering the water: waterImpulse@source and driver events in the ocean solver",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/impulse.rs",
+        "crates/sr-sim/tests/ocean_events.rs",
+        "crates/sr-eval/src/ocean/cavity.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/tests/water_entry.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/valid/ocean-entry.scene.xml"
+      ],
+      "validation": "The solver takes impulses from the driver per canonical step (Forcing::events, those whose instant lies in (T - dt, T] at the sample that ends the step at T, validated and applied among the substeps in order of time after authored impulses of the same instant) and a Cavity impulse kind that moves the wanted volume or 90% of what its central disc holds, whichever is less, so it is limited by the water layer and never an error for lack of water. waterImpulse source=body (OCN10 to OCN12 in Schematron and Rust, 4 new corpus documents, oracle agreement with 279 documents) makes the cavity of the first entry of a dynamic body listed in colliders: the instant from the lowest point of its poses at the two ends of each step, the place under its centre, the volume and radius from the water row of the cratering law with its mass, its density (mass over the volume of its closed surface), its downward speed and the ocean's gravity. 7 solver tests (ocean_events): wanted volume moved from the disc to the ring with all the water kept, the limit and the failure of a negative displace in the same case, a dry or unresolved place does nothing, a driver-given impulse equal bit for bit to the authored one at the same instant (orders 1 and 2, three instants), nothing before the instant and identical replay with and without checkpoints, errors for an impulse outside its step or at the first sample, and a driver that asks for nothing changes nothing. 6 evaluator tests (water_entry): nothing before the entry and a change at it with a depression at the entry point, all the water kept, the far wave of the cavity alone (the difference with and without it) growing with speed (0.0033, 0.0071, 0.0170 for 10, 20, 30 m/s) and with mass (0.0024, 0.0071, 0.0207 for 500, 2000, 8000 kg), no cavity for a body that starts in the water, enters outside the ocean or moves away, shallow water neither an error nor an emptied column, and the same water after scrubbing and on a fresh evaluator. sr-sim, sr-model and sr-eval: 628 passed, 0 failed, 7 ignored; clippy -D warnings and fmt clean.",
+      "limits": "The combined far wave, with the body's own occupancy, is not monotone in speed in these runs (0.0326, 0.0390, 0.0276 at 10, 20, 30 m/s in 100 m of water): cavity and occupancy have opposite signs near the entry point and partly cancel, so the cavity alone does not give a wave that grows with the energy; the horizontal reaction on the body is not here. Only the first entry of a body makes a cavity; the cavity forms at once, not over the law's formation time, and is applied at the entry instant for the body's pose at the step ends; a disc smaller than four cells is widened with its volume kept. The law is that of a crater in water, not a validated model of water entry, and the model is hydrostatic with no jet or spray. The CLI and GPU were not run for this entry."
+    },
+    {
+      "name": "Ejecta of a growing crater land on its ground: births clear of the surface and a limit of their own for penetration recovery",
+      "evidence": [
+        "crates/sr-sim/src/particles3d.rs",
+        "crates/sr-sim/tests/particles3d_recovery.rs",
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/tests/crater_ejecta_ground.rs",
+        "examples/cinematic-impact/impact-land.scene.xml"
+      ],
+      "validation": "With the ground as the collider of burst@crater ejecta the 3D particle solver stopped with 'more than 16 collisions in one particle step' at 1.6 s of the land impact. Every one of those contacts was at fraction 0 (no time advanced): the impact point lies about 0.1 m inside the surface, so ejecta were born buried and pushed under the one-sided sheet (a particle then chased a floor sinking at 11 m/s), and a particle between two steep facets of the crater was pushed out of each in turn by a factor of about 0.3 per push, needing about 25 pushes to reach the contact tolerance. Ejecta of a crater are now born clear of the surface along the geometric normal of the owner by their largest collision radius plus the contact tolerance, and the solver counts contacts at fraction 0 apart from the 16 that move time forward, with a limit of 64 and its own error ('more than 64 penetration recoveries in one particle step'). Scenes that worked keep their bits: a digest of the frames of 60 particles born overlapping both slopes of a trough (120 recoveries), recorded before the change, is equal after it. 3+1 evaluator tests (crater_ejecta_ground: 1000 particles over 80 segments from 1.6 to 5.5 s, none under the ground outside the crater, scrubbing identical, and the whole land scene of 4000 particles and 160 segments from 1.6 to 5.9 s with no error) and 3 solver tests (the digest, 50 recoveries in a step are fine, 1000 are an error that says so). The land scene now has colliders=ground on its ejecta and impact_scenes pass. sr-sim, sr-model and sr-eval: 688 passed, 0 failed, 11 ignored; clippy -D warnings and fmt clean.",
+      "limits": "With the default friction of 0 the ejecta slide about the crater's bowl instead of coming to rest: of 4000, 0, 761, 156 and 33 are below 0.5 m/s at 4.5, 5.0, 5.5 and 5.9 s (a followed particle oscillated in the bowl, slowest at its turning points), 889 below 3 m/s at 5.9 s, and none more than 5 m above the ground by then. The contact-tolerance separation was not changed for contacts at fraction 0. Not rendered: nothing was drawn, and no GPU run."
+    },
+    {
+      "name": "Depth response of the ocean surface (bedResponse) and the form drag of bodies on the water",
+      "evidence": [
+        "crates/sr-sim/src/ocean/lift.rs",
+        "crates/sr-sim/tests/ocean_lift.rs",
+        "crates/sr-sim/tests/ocean_push.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/tests/ocean_depth_filter.rs",
+        "schema/scene-render-1.1.xsd",
+        "tests/corpus/valid/ocean-depth-filtered-drag.scene.xml"
+      ],
+      "validation": "ocean@bedResponse = depthFiltered (default) or hydrostatic (the first version, bit for bit). A displacement of the bed (crater) or of fluid (a body's thickness) is attenuated by the depth of the water: 1/cosh(kh) for the bed (Kajiura 1963, read only as quoted) and cosh(k z0)/cosh(kh) for a volume at height z0 above the bed (derived by the engine, equal to the former at z0 = 0 and to 1 at z0 = h), by a radix-2 FFT over a window of the footprint and four depths, one kernel per body, the displaced volume kept by renormalising what falls on wet columns of the domain. 6 solver tests (ocean_lift) against numerical integration of the same transforms: a sphere of 2 m radius on the bed of 20 m of water gives 0.02367 m at the centre against 0.02427 m by quadrature (2.5%), a volume at the surface is not attenuated (to 1e-9) and the filter falls monotonically with the height of the volume, a Gaussian of 10 m in 2 m of water keeps its shape and one of 2 m in 20 m matches the integral within 4%, totals kept with dry columns, edges and both signs, identical with 1, 2 and 8 threads, bad input an error. 8 evaluator tests (ocean_depth_filter): the instant the same sphere appears the surface rises 3.00 m hydrostatic and 0.026 m filtered (theory 0.024 m), 0.255 m and 0.017 m at 0.5 s; lifted volume 33.9 m3 for a sphere of 33.5 m3; a body at the surface is attenuated 0.54 against 0.0085 on the bed; a crater 40 m across in 6 m of water is within 5% of its hydrostatic trough and one 6 m across in 40 m of water 6.7 times smaller; no body in the water is bit-identical in both modes; a sphere of 2 m radius crossing 20 m of water at 10 m depth raises the highest surface 8.69 m (20 m/s) and 5.52 m (50 m/s) hydrostatic and 0.177 m and 0.198 m filtered; replay and 1, 2, 8 threads identical. In the filtered mode bodies give the water a push (Forcing::pushes, Spec::body_push): the form drag (1/2) C_d A |U - u| (U - u) per unit density, C_d = bodyDrag, A the wet frontal area from the body's own surface, applied evenly over the substeps column by column never past the body's velocity, with each body credited exactly what was applied: 6 solver tests (ocean_push: the water gains what is given, the cap, replay bit for bit with and without checkpoints, errors) and 4 evaluator tests (the first step of a sphere in still water is 104.05 against 104.72 for (1/2) C_d pi a^2 U^2 dt, the push falls as the water follows the body, the bodies' credits add up to the water's, frontal areas of a box, its cuts and a sphere within 1%). On the impact-ocean scene as first rendered (no cavity; 1.5 m cells, the scene and the code of that commit) the highest surface at 2.5 s goes from 10.62 m at (42.8, 0.8) to 0.16 m at (41.2, 0.8); with the cavity and bodyCoupling full from 9.92 m to 9.48 m. Cost per step on a 720 x 720 ocean at load 8 to 12: one body 0.140 and 0.138 s, ten bodies 0.141 and 0.162 s, a crater 0.123 and 0.128 s (hydrostatic and filtered); moving bodies 0.187 and 0.139 s, 0.176 and 0.179 s. sr-sim, sr-model, sr-eval: 724 passed, 0 failed, 9 ignored; clippy -D warnings and fmt clean.",
+      "limits": "The filter is the response to an impulse; the propagation after it is that of shallow water, not dispersive; for a body in motion it is applied each canonical step, an approximation and not the solution for a moving source (not computed: only the stationary sphere is compared with theory, the moving ones are only shown to be far below the hydrostatic crest). The momentum kernel is that of the volume, a stand-in for the transfer function of a horizontal impulse, which was not derived. The form drag has one coefficient (default 1.0, an engine parameter; a real sphere is about 0.47), no added mass and no wake. The cavity of a water entry is not filtered, and is what remains of the crest on the impact-ocean scene with the cavity. A displacement wider than 1024 cells is not filtered. Kajiura (1963) was not read, only quoted literature; the generalisation to z0 is the engine's derivation. Timings under load, one machine. Tests that depend on the long-wave numbers of the first version set bedResponse=hydrostatic; OCN9 now says bodyDrag belongs to an ocean with colliders."
+    },
+    {
+      "name": "Splash event in the ocean solver",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/body.rs",
+        "crates/sr-sim/tests/ocean_splash.rs"
+      ],
+      "validation": "Forcing::splash gives the water a sparse list of cells per canonical step (volume taken from the cell, at most 90% of its water, and given in equal parts to its existing neighbours of the eight; momentum added to the cell unless it is left dry), applied when the step reaches its end among the events, to the water and not through any bed lift. 6 tests (ocean_splash): volume to the eight neighbours and momentum kept in the cell for both orders, the 90% limit with the rest dropped and all that is taken given, corner and edge neighbours, nothing before the end of the step and an identical replay with and without checkpoints, no splash bit-identical to none and a dry basin taking nothing, errors for a cell outside, twice, unsorted, negative or nonfinite.",
+      "limits": "The solver does not return what was dropped. The evaluator side that fills the splash from the particles is not here. Cost was not measured."
+    },
+    {
+      "name": "The cavity of a water entry forms over the law's time, in a wider ring",
+      "evidence": [
+        "crates/sr-sim/src/ocean/impulse.rs",
+        "crates/sr-sim/tests/ocean_events.rs",
+        "crates/sr-eval/src/ocean/cavity.rs",
+        "crates/sr-eval/tests/water_entry.rs"
+      ],
+      "validation": "The cavity of waterImpulse@source does not appear whole at the instant of entry: it grows over the law's formation time T = 0.8 sqrt(V^(1/3)/g) as a part for every canonical step (ImpulseKind::CavityPart { share, before }, the share that p(s) = 3 s^2 - 2 s^3 gives in the step, applied in the middle of the stretch of the step in which it forms, limited to 0.9 share / (1 - 0.9 rho before) of the water the disc holds so that the parts together take the 90% limit of one whole cavity), the parts adding up to the whole; and the ring that receives the water is at least four cells wide (impulse radius at least eight cells, volume kept). Evaluator unit tests: the parts of every step add up to 1 and to the whole amplitude for four starts, each inside its step, smooth growth, one step longer than T holds all of it. Solver tests (3 new in ocean_events): five parts of a fifth move the volume of the whole with all the water kept and the centre within 10%, greedy parts take the limit of one whole cavity to within 3% and empty no column, parts asked by the driver step by step equal the same parts authored (orders 1 and 2), a share that is not in (0, 1] is an error. On the impact-ocean scene (1.5 m cells, the scene and the kernel of that commit; bodyCoupling full, cavity, depthFiltered) the highest surface and lowest, instantaneous cavity against formed over time: 1.5 s: 3.98 m and -17.48 m against 0.48 m and -0.00 m; 1.6 s: 3.19 m and -17.75 m against 0.11 m and -0.80 m; 2.0 s: 1.52 m and -4.89 m against 1.12 m and -6.22 m; 2.5 s: 9.49 m at (0.8, 0.8) against 0.86 m at (24.8, -3.8); 3.5 s: 2.53 m against 2.33 m. The far wave of the cavity alone still grows with speed (0.0050, 0.0121, 0.0211 for 10, 20, 30 m/s) and with mass (0.0054, 0.0121, 0.0277 for 500, 2000, 8000 kg); replay identical.",
+      "limits": "The shape of the growth (smoothstep) is the engine's choice; the law gives only the formation time. The ring is smooth only at the resolution of the grid. A part is limited by the water it finds then, so parts together take less of a limited disc than one whole cavity would. The cavity is still a hydrostatic displacement with no jet or crown of spray. Acceptance tests of the impact scenes that expect the highest wave of the sea to grow with the mass (in_the_sea_the_wave_grows_with_the_mass: 6.41, 8.03, 7.30 m) and with the speed of a vertical plunge (5.43, 8.69, 7.81 m) fail with this change, where they passed with the cavity at once: the largest cavities are limited by the water layer and spread their water over wider rings, so the highest crest stops growing; the wave of the cavity far from it (the test of the crater alone and the far-field tests here) still grows."
+    },
+    {
+      "name": "Ejecta born on the surface the crater has by then; where the cavity limit binds",
+      "evidence": [
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/src/crater.rs",
+        "crates/sr-sim/src/surface.rs",
+        "crates/sr-sim/tests/surface3.rs",
+        "crates/sr-eval/tests/crater_ejecta_ground.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "Ejecta of a crater are launched from the nearest point of the owner's surface (sr_sim::surface::nearest) mapped by the crater as grown at the instant of each launch, clear of it by the collision radius. With the collision radius of the rocks the 4000 particles stand for, 0.17 m, 678 of 4000 ended below the ground; born only at the nearest point of the original surface 109 did; born on the grown surface none (test crater_ejecta_ground, at 2.0, 3.0 and 5.9 s); the default radius 0.5 m keeps its outcome (impact_scenes land: 11 passed, 1 ignored). The cavity limit measured on the impact-ocean scene on 3 m cells (the acceptance sweeps of impact_scenes, which replace the authored cell size of 1.5 m by 3 m; recorded as 1.5 m by mistake and corrected in the entry 'Corrections to the figures of the ocean entries') (60000, 90478, 270000 kg): the parts together wanted 266.5, 367.5, 862.3 and took 266.5, 326.4, 567.6; limited parts 0 of 24, 17 of 25, 28 of 29.",
+      "limits": "With a collision radius of 0.02 m about 1500 of 4000 still end below the ground, with the particle step 1/24 s and with 0.01 s alike: the collider is a mesh of 1 m facets whose chords differ from the true bowl and rim by more than that radius, so a particle born on the analytic surface can be under a facet and is pushed through it. The friction case of the 270000 kg rock (more than 16 collisions that advance time against a surface that accelerates) is not fixed."
+    },
+    {
+      "name": "The cavity of a water entry has the law's depth, not twice it",
+      "evidence": [
+        "crates/sr-eval/src/ocean/cavity.rs",
+        "srep-0000-cinematic-impact.md",
+        "schema/scene-render-1.1.xsd"
+      ],
+      "validation": "The disc emptied by the cavity of waterImpulse@source is sized so that its bowl profile has the law's depth as peak and holds the law's volume, R = sqrt(3V/(pi d)), instead of the law's radius, whose profile peaked at about twice the depth. On the impact-ocean scene on 3 m cells (the acceptance sweeps of impact_scenes; rocks of 60000, 90478, 270000 kg, 20 m of water) the parts wanted 266.6, 367.8, 862.2 and took all of it (limits 582.0, 704.9, 1152.3), none limited, where before 0 of 24, 17 of 25 and 28 of 29 were. The acceptance sweeps of the sea (both modes), which two of them failed with the former profile, all pass: highest wave by mass 4.72, 4.74, 8.22 m (before 6.41, 8.03, 7.30), by speed 4.17, 4.74, 7.52 m (before 4.49, 8.03, 8.70), vertical plunge by speed 4.53, 5.82, 8.07 m (before 5.43, 8.69, 7.81) and by mass 4.71, 5.82, 8.55 m; the wave of the crater alone unchanged (0.0057, 0.0124, 0.0210 by speed). water_entry, ocean_depth_filter and the cavity unit tests pass.",
+      "limits": "The wave by mass between the lightest and the authored rock is 4.72 against 4.74 m: growing, but within 0.5%. The cost was not changed (the cavity adds one impulse per step). The shape of the bowl is the crater element's, (1 - x^2)^2, not a measured profile of a water cavity."
+    },
+    {
+      "name": "Pressure of the water on a body credited per owner",
+      "evidence": [
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/body.rs",
+        "crates/sr-sim/tests/ocean_pressure.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/src/ocean.rs"
+      ],
+      "validation": "Forcing::lifts (what each body raises the bed by, sparse) and BodySample::pressure: per canonical step, -g h grad(raise) area dt over the lift and the ring around it, h at the end of the step, the gradient from the mean of the lift at the end and at the start. In a periodic basin of 64 x 64 cells of 6 m where a mound moves and nothing else changes the total momentum, the water gained 2.359, 4.857 (first order) and 2.857, 5.565 (second order) for 4 and 10 m/s, and the credit was 2.507, 5.158 and 2.876, 5.694: residuals 6.3%, 6.2%, 0.7%, 2.3% (tests ocean_pressure: residual under 8% first order and 3% second, bad lifts are errors, nothing credited without lifts). Evaluator test: a sphere of 2 m radius moving at 6 m/s in 6 m of water is credited pressure along the motion only, about 5% of the push.",
+      "limits": "An estimate by the continuous source term, not the flux difference of the scheme; with end-of-step depth. The 2 to 4% unowned momentum that Saturno measured with bodyCoupling=full in a closed basin was not reproduced here: the residual was measured on a periodic basin with a moving mound, not on that scene, and the credit is not yet added to the exchange. Cost not measured (the window of the lift and one column ring per body per step). Superseded by the entry 'Pressure credited as the exact bed source term of the scheme': the estimate was 49 to 65% of the term the scheme adds."
+    },
+    {
+      "name": "Pressure credited as the exact bed source term of the scheme",
+      "evidence": [
+        "crates/sr-sim/src/ocean/flux.rs",
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/src/ocean/body.rs",
+        "crates/sr-sim/tests/ocean_pressure.rs",
+        "crates/sr-eval/src/ocean/colliders.rs",
+        "crates/sr-eval/src/ocean.rs",
+        "crates/sr-sim/examples/ocean_bodies_profile.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "The flux sweeps accumulate, per interface between columns of different bed, the momentum the bed source term of the scheme (1/2 g [(r^2 - hr^2) - (l^2 - hl^2)]) gives the water, to the owner of the column lifted more of the two (wrap face of a periodic basin included), weighted per Runge-Kutta stage and reduced in row then band order; the sum is part of the state and of the checkpoint (32 bytes per owner). Forcing::lifts is now given in the hydrostatic response too. Tests (ocean_pressure, 5): the residual of the mound balance is under 1e-9 (about 1e-13 measured on a still mound; the estimate it replaces had 6.3%, 6.2%, 0.7%, 2.3%); the pressure of a step is the same when the step is computed from zero, from a checkpoint or after going back to 0, 0.3, 0.55 and 0.95 of the run, in orders 1 and 2, with and without checkpoints; it does not depend on 1, 2 or 8 threads, also on a 132 x 132 grid that runs in parallel, where the water does not notice the credit; without lifts nothing is credited and bad lifts are errors. Evaluator test (the ball of 16755.16 kg at 3 m/s in a closed basin of 160 m, 2 m cells, dt 0.05, full coupling, the scene of the balance Saturno measured), residual of (water - push - credit) over the water at 1, 2 and 3 s: hydrostatic 0.0000% in both orders; depthFiltered 0.0150, 0.0381, 0.0942% (order 1) and 0.0135, 0.0351, 0.0663% (order 2), the walls; without the credit 3.8, 3.1, 11.0% and 4.3, 4.1, 9.1% (hydrostatic, orders 1 and 2) and 10.7, 12.3, 14.6% and 10.6, 9.3, 10.1% (depthFiltered). Cost, step time at 720 x 720 cells (example ocean_bodies_profile, owners 0 / owners / owners with lifts), medians of five rounds, new over the code of d44a0d5: order 1 0.922, 0.962, 0.956; order 2 0.995, 0.988, 1.006, load1 between 5.6 and 11.5. Commit d685256, 2026-10-05. sr-sim, sr-eval and sr-model tests, fmt and clippy -D warnings pass.",
+      "limits": "The credit is the term of the scheme, with the reconstruction and its numerical diffusion, not the continuous -g h grad(raise); a bed variation that belongs to no owner (a crater) is not credited. It is credited and recorded, not applied to the body, in the coupled ocean as it stands. The residual of the depthFiltered balance, up to 0.094%, is what the walls give back and was not separated from the rest. The cost was measured on a loaded shared machine (load1 5.6 to 11.5) against the build of d44a0d5, a ratio under 1.01 everywhere and below 1 in some, i.e. noise; one resolution, one machine."
+    },
+    {
+      "name": "Phase budget: cost of the ocean side of the authored impact-ocean scene",
+      "evidence": [
+        "examples/cinematic-impact/impact-ocean.scene.xml"
+      ],
+      "validation": "The authored impact-ocean scene (192 x 192 m at 1.5 m cells over 20 m, second order, dt 1/24 s, the rock of 90478 kg at 100 m/s, the crater and the physics of the scene; lights removed, nothing drawn) evaluated frame by frame, 144 frames at 24 fps, on the CPU with a disposable program (not committed) that times each Evaluator::evaluate and reads the peak resident set from /proc; 3 runs of each variant, alternated (variants in order, three rounds), load1 noted at start and end of each run. Variants (all with the default bedResponse=depthFiltered unless said): 1 ocean without colliders; 2 colliders seabed only; 3 seabed and rock, bodyCoupling none; 4 buoyancy; 5 full; 6 full and the cavity (the authored scene); 7 as 6 with bedResponse=hydrostatic. Mean seconds per frame over the three runs (total of the evaluation, of which the ocean's own clock): 1-no-colliders: 0.0534 (0.0211); 2-bed-only: 0.0618 (0.0297); 3-bed+rock-none: 0.0647 (0.0622); 4-bed+rock-buoyancy: 0.0592 (0.0577); 5-bed+rock-full: 0.0569 (0.0554); 6-full+cavity: 0.058 (0.0565); 7-full+cavity-hydrostatic: 0.0567 (0.0553). Slowest frame per run: 1-no-colliders: [0.314, 0.278, 0.285] s at frame [43, 46]; 2-bed-only: [0.312, 0.293, 0.287] s at frame [43]; 3-bed+rock-none: [0.301, 0.304, 0.296] s at frame [42, 45]; 4-bed+rock-buoyancy: [0.276, 0.271, 0.265] s at frame [50]; 5-bed+rock-full: [0.275, 0.283, 0.281] s at frame [48, 55, 56]; 6-full+cavity: [0.287, 0.266, 0.289] s at frame [49, 51, 54]; 7-full+cavity-hydrostatic: [0.263, 0.297, 0.279] s at frame [48, 51]. Peak RSS (MiB): 1-no-colliders: 102; 2-bed-only: 105; 3-bed+rock-none: 114; 4-bed+rock-buoyancy: 109; 5-bed+rock-full: 113; 6-full+cavity: 113; 7-full+cavity-hydrostatic: 112. load1 over all runs 6.0 to 7.1.",
+      "limits": "Wall time of whole-frame evaluation on a shared machine with load1 between 6.0 and 7.1 throughout, so about 7 busy cores; the three runs of one variant differ by up to 6%, which is the size of the differences among variants 4 to 7 (0.0592, 0.0569, 0.0580, 0.0567 s/frame), so those are not told apart: neither full against buoyancy, nor the cavity, nor bedResponse hydrostatic against depthFiltered shows a cost at this size. Variant 3 (bodyCoupling none) is about 10% above them (0.0647 s/frame, runs 0.0673, 0.0645, 0.0623), and that was explained by counting: in variants 3 and 4 alike the ocean asks for 2.01 scene frames per frame, the rigid world answers 3.0 requests and runs 5.0 steps of 1/120 s per frame, with no checkpoint restore (the hypothesis that without a group it asks for instants the frame log lacks and steps more often is refuted: 5 steps per frame in both; the log answers 1 request per frame in the grouped variants and none in 3), and the ocean's bed driver is called once per frame in both. What differs is what a step costs while the rock is in contact with the deforming bed: 24.2 and 26.1 ms per step in frames 36 to 59 of variant 3 (120 steps) against 2.3 ms in frames 36 to 47 and 33.1 ms in frames 48 to 59 of variant 4 (60 steps in contact), the other frames 0.01 to 3 ms in both. With no coupling the rock is not slowed by the water, reaches the bed about half a second earlier and stays in contact with the crater for about twice as many frames. It is the rigid world's contact cost, not the ocean's. The slowest frames (42 to 56, 1.75 to 2.3 s into the scene) are those where the rock reaches the bed and the crater grows. The ocean's own clock includes the rigid world's steps that it pulls when it is grouped with it or reads the bodies (variants 3 to 7), so the total is the figure to compare. Evaluation only: no render, no GPU, no encode. 1.5 m cells and 20 m of water; the 720 x 720 grids of the other scenes were measured in the entries of the solver and the filter.",
+      "variants": {
+        "1-no-colliders": {
+          "s_per_frame_runs": [
+            0.0532,
+            0.0524,
+            0.0547
+          ],
+          "s_per_frame_mean": 0.0534,
+          "ocean_s_per_frame_mean": 0.0211,
+          "slowest_frame_s_runs": [
+            0.314,
+            0.278,
+            0.285
+          ],
+          "slowest_frame_at": [
+            43,
+            46
+          ],
+          "peak_rss_mib": 102,
+          "load1_range": [
+            6.33,
+            6.82
+          ]
+        },
+        "2-bed-only": {
+          "s_per_frame_runs": [
+            0.0634,
+            0.0614,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0618,
+          "ocean_s_per_frame_mean": 0.0297,
+          "slowest_frame_s_runs": [
+            0.312,
+            0.293,
+            0.287
+          ],
+          "slowest_frame_at": [
+            43
+          ],
+          "peak_rss_mib": 105,
+          "load1_range": [
+            6.12,
+            7.09
+          ]
+        },
+        "3-bed+rock-none": {
+          "s_per_frame_runs": [
+            0.0673,
+            0.0645,
+            0.0623
+          ],
+          "s_per_frame_mean": 0.0647,
+          "ocean_s_per_frame_mean": 0.0622,
+          "slowest_frame_s_runs": [
+            0.301,
+            0.304,
+            0.296
+          ],
+          "slowest_frame_at": [
+            42,
+            45
+          ],
+          "peak_rss_mib": 114,
+          "load1_range": [
+            6.03,
+            7.09
+          ]
+        },
+        "4-bed+rock-buoyancy": {
+          "s_per_frame_runs": [
+            0.0578,
+            0.0592,
+            0.0606
+          ],
+          "s_per_frame_mean": 0.0592,
+          "ocean_s_per_frame_mean": 0.0577,
+          "slowest_frame_s_runs": [
+            0.276,
+            0.271,
+            0.265
+          ],
+          "slowest_frame_at": [
+            50
+          ],
+          "peak_rss_mib": 109,
+          "load1_range": [
+            6.03,
+            6.85
+          ]
+        },
+        "5-bed+rock-full": {
+          "s_per_frame_runs": [
+            0.0582,
+            0.0569,
+            0.0557
+          ],
+          "s_per_frame_mean": 0.0569,
+          "ocean_s_per_frame_mean": 0.0554,
+          "slowest_frame_s_runs": [
+            0.275,
+            0.283,
+            0.281
+          ],
+          "slowest_frame_at": [
+            48,
+            55,
+            56
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.39,
+            6.74
+          ]
+        },
+        "6-full+cavity": {
+          "s_per_frame_runs": [
+            0.0595,
+            0.0581,
+            0.0564
+          ],
+          "s_per_frame_mean": 0.058,
+          "ocean_s_per_frame_mean": 0.0565,
+          "slowest_frame_s_runs": [
+            0.287,
+            0.266,
+            0.289
+          ],
+          "slowest_frame_at": [
+            49,
+            51,
+            54
+          ],
+          "peak_rss_mib": 113,
+          "load1_range": [
+            6.27,
+            6.74
+          ]
+        },
+        "7-full+cavity-hydrostatic": {
+          "s_per_frame_runs": [
+            0.058,
+            0.0581,
+            0.0541
+          ],
+          "s_per_frame_mean": 0.0567,
+          "ocean_s_per_frame_mean": 0.0553,
+          "slowest_frame_s_runs": [
+            0.263,
+            0.297,
+            0.279
+          ],
+          "slowest_frame_at": [
+            48,
+            51
+          ],
+          "peak_rss_mib": 112,
+          "load1_range": [
+            6.27,
+            7.03
+          ]
+        }
+      }
+    },
+    {
+      "name": "Corrections to the figures of the ocean entries, and the crest at 2.5 s re-measured",
+      "evidence": [
+        "examples/cinematic-impact/impact-ocean.scene.xml",
+        "crates/sr-eval/tests/impact_scenes.rs"
+      ],
+      "validation": "Correction: the cavity-limit figures (wanted 266.5, 367.5, 862.3 and the limits and amounts), the highest waves by mass and speed (6.41, 8.03, 7.30 m and 5.43, 8.69, 7.81 m with the first kernel; 4.72, 4.74, 8.22 m and 4.53, 5.82, 8.07 m with the kernel of the law's depth) and the numbers of the entries 'The cavity of a water entry has the law's depth, not twice it' and 'Ejecta born on the surface the crater has by then; where the cavity limit binds' were measured by the acceptance tests of impact_scenes, which run the sea on 3 m cells (coarse_sea replaces cellSize 1.5 by 3), and were written down as measured on 1.5 m cells; they are of 3 m cells. The only measurements on the authored 1.5 m cells in the earlier entries are the highest and lowest surface at 1.5, 1.6, 2.0, 2.5 and 3.5 s (entries on the cavity formed over time and on the depth response) and the cost table, each with the scene and the code of its own commit. Re-measured on the authored scene (1.5 m cells, 192 x 192 m, 20 m of water, second order, the rock of 90478 kg at 100 m/s and 60 degrees, bodyCoupling full, physics fixInternalEdges, lights removed), with the code of fa63e5d (the kernel of the law's depth, the cavity over the law's time), on 2026-10-05 with load1 10.3 before and 9.9 after (a loaded machine), by evaluating the frames in order up to 2.5 s with a disposable program: highest surface above the rest level at 2.5 s, 0.81 m at (32.2, -3.8) with the cavity and the depth response (lowest -4.50 m); 1.41 m at (21.8, -0.8) with the cavity and the hydrostatic response (lowest -4.66 m); without the cavity, 0.20 m at (18.8, -0.8) with the depth response and 1.24 m at (18.8, -8.2) with the hydrostatic one. The 0.86 m at (24.8, -3.8) of the entry on the cavity formed over time was measured with the first kernel and is superseded by 0.81 m.",
+      "limits": "One instant (2.5 s), one run each; the machine was loaded (load1 about 10), which does not change the values (the evaluation is deterministic) but makes the times meaningless. The comparison with the 10.62 m of the first render is not made: that scene had a different coupling and a different rigid world than the current one, and the current no-cavity hydrostatic value is 1.24 m."
+    },
+    {
+      "name": "The ocean takes what the ejecta bring; the sea acceptance by far wave; everything in one ocean; friction in the land scene",
+      "evidence": [
+        "crates/sr-eval/src/ocean.rs",
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/src/splash.rs",
+        "crates/sr-eval/tests/ejecta_splash.rs",
+        "crates/sr-eval/tests/impact_scenes.rs",
+        "examples/cinematic-impact/impact-land.scene.xml",
+        "tools/impact_sweeps.sh"
+      ],
+      "validation": "Splash, ocean side (613e87f, 4d91c1e, 2026-10-05): a closed basin keeps its water to 1e-9, the horizontal momentum in the ocean is the momentum in the log to 1e-6 before the waves reach the walls, an ocean driven directly by the log (sparse or every cell every step) is the same to the bit, a step given one late is another ocean; on a beach 3879 of 4000 ejecta stay on the ground and 121 (2.44 m3) fall in. Before 613e87f a time that was not on a canonical step failed with 'has not been computed' (the ocean asks for the splash of the next step, which the particles had not reached). Scheduling (6d3850d, 2026-10-05): an ocean that loads rigid bodies is run before the particles and now asks for the emitters it needs; before it, an ocean that read before any emitter had run was given nothing without saying so and its steps differed when computed again, and the particle driver read a rigid world that answered with a problem as one that stood still, which gave 3000 particles that differed by up to 12 m depending on the order of requests; both are errors now. Cost of the scheduling (3078153, 2026-10-05, load1 6 to 13, 144 frames at 24 fps, three alternated runs, the binary of b883ec5 against 3078153): the authored sea 0.0574, 0.0651, 0.0714 against 0.0579, 0.0591, 0.0621 s per frame, peak 108 to 109 against 109 to 112 MiB; the scene with everything on over 4 m of water and 3000 ejecta without and with splash 0.1187, 0.1112, 0.1058 and 0.1133, 0.1151, 0.1093 s per frame (11 fall in); over 1 m of water with 3000 ejecta 0.1242, 0.0994, 0.0986 against 0.0994, 0.0940, 0.0975 (1303 fall in) and with 21 000 ejecta 0.2298, 0.2185, 0.2172 against 0.1760, 0.1770, 0.1916 (9131 fall in), peak 133 and 132 MiB; the authored 20 m of water with the biggest rock (270 000 kg, 150 m/s, 60 degrees): 34 of 3000 fall in, 0.1635, 0.0969, 0.1011 against 0.1310, 0.0986, 0.1018. Sea acceptance (b1552ce, e22458b on fa63e5d, 2026-10-05): the two tests that asserted the highest surface by mass and by speed of a vertical plunge are replaced by the far wave in the ring 20 to 40 m, an order and no value; the highest surface by mass at 60 degrees was 6.41, 8.03, 7.30 m and by speed of a plunge 5.43, 8.69, 7.81 m with the first kernel, and 4.72, 4.74, 8.22 m and 4.53, 5.82, 8.07 m with the kernel of the law's depth (3 m cells). Land scene (e22458b, 2026-10-05): friction 0.7, restitution 0.15, radius 0.17 declared; 3748 of 4000 ejecta under 0.2 m/s at 5.9 s (7 with the solver's friction of zero and radius 0.5, measured 2026-10-04) and none through the ground (754 through it with radius 0.17 before 68e9dd2); the heaviest rock runs to 5.9 s (it stopped the particle solver at 2 s before 68e9dd2) with 1861 of 4000 at rest, none through the ground and 29 past its edge. The pressure credited to each body in the exchange record (1ba58cd, 2026-10-05; the entry 'The pressure of the exchange is recorded and balances the water'): the water's momentum against the impulse in a closed basin with a ball at 3 m/s, residual 3.8, 3.1, 11.0 % (hydrostatic) and 10.7, 12.3, 14.6 % (depth filter) without the pressure and 0.00 % and 0.01, 0.04, 0.09 % with it at 1, 2, 3 s. The first version of this record, of 388ffe0, made two sea tests fail because the pressure of a step was not the same on a replay (a defect of the solver, fixed on the ocean side in 09523ca and replaced by the exact credit of d685256).",
+      "limits": "The cost of the aggregation by cell and step, the read per step and the pull was not isolated: with many ejecta falling in the saving of the particles that are not simulated covers it. At most 34 of 3000 ejecta reach the surface of the authored 20 m sea, so the splash is exercised there only with a raised seabed. The cost runs were on a loaded shared machine (load1 6 to 13) and the first run of each pair was under load 12 to 13; the last two of each case are the ones read. The friction of 0.7 is the engine's choice, not a measurement. The pressure credit is recorded and not applied to the body; the residual after it is the exact one: 0.00 % in the hydrostatic response and 0.01, 0.04 and 0.09 % in the depth-filtered one at 1, 2 and 3 s, which is what the closed basin's walls give back (entry 'The pressure of the exchange is recorded and balances the water')."
+    },
+    {
+      "name": "The pressure of the exchange is recorded and balances the water",
+      "evidence": [
+        "crates/sr-eval/src/group.rs",
+        "crates/sr-eval/src/lib.rs",
+        "crates/sr-eval/tests/ocean_full.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "The offer about each body that the exchange keeps for a canonical step (Around) carries `pressure`, the bed source of the scheme credited to the body by d685256, next to `impulse`, and the two are compared bit for bit when a step is computed again (1ba58cd, 2026-10-05); Evaluator::around_into(ocean, step) (hidden, for tests) returns (owner, impulse, pressure) per body. Test the_water_has_the_momentum_the_exchange_says_the_body_gave_it_and_the_pressure_is_what_is_left (ocean_full, passes, 0.21 s): closed basin of 160 m with 2 m cells and 10 m of water, ball of 16755.16 kg at 3 m/s, bodyCoupling full, canonical step 0.05 s, first order; water momentum along x against the sum of the records 0 to the number of canonical steps that have ended by t (kg m/s), t = 1, 2, 3 s. Hydrostatic: water 48077.939, 46788.219, 48238.620; impulse 46232.511, 45347.480, 42914.554; pressure 1845.427, 1440.738, 5324.057; residual without the pressure 3.84, 3.08, 11.04 %, with it 0.000, 0.000, 0.008 kg m/s (0.00 %). Depth filter: water 17433.503, 25339.961, 29260.469; impulse 15564.265, 22220.064, 24978.359; pressure 1866.624, 3110.245, 4254.559; residual without 10.72, 12.31, 14.63 %, with it 2.613, 9.652, 27.550 kg m/s (0.01, 0.04, 0.09 %). The test asserts that the residual with the pressure is smaller than without and under 0.5 % of the water. Same scene and figures as the balance of the entry 'Pressure credited as the exact bed source term of the scheme' (there computed from the pushes of the exchange hook, 3.8, 3.1, 11.0 % and 10.7, 12.3, 14.6 % without the credit, 0.0000 % and 0.0150, 0.0381, 0.0942 % with it). Measured on 2026-10-05 at load1 about 9 (the results are deterministic and do not depend on the load).",
+      "limits": "The pressure is credited and recorded and is not applied to the body: the force on it is the push. First order and one canonical step (0.05 s), one scene, 2 m cells; the second order was measured in the entry of the exact credit (0.0135, 0.0351, 0.0663 % with the depth filter), not in this test. The residual in the depth-filtered response (up to 0.09 %) is what the walls give back and was not separated from the rest."
+    },
+    {
+      "name": "Light grids for the in-scattering of media",
+      "evidence": [
+        "crates/sr-gpu/src/volume_grid.wgsl",
+        "crates/sr-gpu/src/volume.rs",
+        "crates/sr-gpu/tests/light_grid.rs",
+        "srep-0000-cinematic-impact.md",
+        "tests/corpus/valid/volume-light-grid.scene.xml"
+      ],
+      "validation": "medium@lighting=\"grid\" lights a medium from per-light grids built once a frame (ce124c6 and the schema commit 89249df, 2026-10-04); the default exact path keeps its pixels (frame hashes of four plume variants identical before and after) and the 13 GPU tests of light_grid.rs pass on the NVIDIA adapter (the llvmpipe run passes them with the two long-march tests skipped on the software adapter). Accuracy against the exact march at 512 samples, 1280x720, plume region above the horizon, cell 1 and 64 dome directions, NVIDIA, 2026-10-04 with the shader of ce124c6, load not recorded: no ejecta 56.4 dB, max dE 1.50, mean 0.25; 100,000 ejecta fragments 47.8 dB, max dE 3.89, mean 0.48 (45.7 dB, max 4.89 with one centred visibility sample per node before eight jittered points were averaged; exact trace 2300 s against 55 s of grid trace plus 1.5 s of grid build). Area light near the volume 65, 53 and 43 dB (rectangle) and 66, 56 and 50 dB (sphere) at 60, 14 and 9 units. Cost: live hero scene at 3840x2160, t = 3.0, grid lighting, 8.76 s of trace and 1.46 s of grid build, 154.8 s wall, 2493 MiB peak RSS (2026-10-04, ce124c6 plus the empty-medium fix). A medium without density (a smoke before its source starts) needs no lattice (e144806, with a GPU test that fails without it). Optically thick cells (00874e2, reworded in ada81a6): note in stats.unsupported above optical depth 4 per cell; impact smoke at extinction 30000, 640x360, against an exact render of stepSize 0.05 at 32 samples: 34.6 dB, 40.2 and 41.0 dB after blurs of 2 and 4 px; the lines of the density voxels appear in the exact render too (row step 0.0089 exact, 0.0091 grid). Interpolating optical depth with the visibility kept separate (prototype, not committed, 2026-10-04): 35.0, 42.4 and 43.5 dB on the thick case, 55.8 and 47.7 dB on the thin plume without and with ejecta: not adopted, for a second march in the shader and a changed buffer layout. Earlier statement corrected: the stripes seen in the thick smoke with grid lighting were first read as an artefact of the grid because the comparison frame was 8 samples with denoising; at 512 samples the exact render shows them too.",
+      "limits": "Surfaces much thinner than a cell, area lights within about ten times their size of the medium and cells thicker than optical depth 4 are lit less accurately (SREP, Light grids). Spherical harmonics, per-tile grids and multiple scattering are not part of the grid. The 720p and UHD figures are single runs on a loaded machine."
+    },
+    {
+      "name": "Light through water and glass in the path tracer",
+      "evidence": [
+        "crates/sr-gpu/src/pathtrace.wgsl",
+        "crates/sr-gpu/src/pathtrace_water.wgsl",
+        "crates/sr-gpu/src/pathtrace.rs",
+        "crates/sr-gpu/tests/water_light.rs",
+        "srep-0000-cinematic-impact.md",
+        "RELEASE_NOTES.md"
+      ],
+      "validation": "Three commits (f112f63 2026-10-04; beb543e and c6195de 2026-10-05): the visible dome behind glass, Beer-Lambert absorption from attenuationColor and attenuationDistance, and a refracted shadow ray for surfaces under water. Before: the shadow ray of a surface under a transmissive plane stopped at the plane, so the sun reached nothing there (open floor 0.000 against 0.182 of the brute-force sun, 0.41 of the brute-force total light on the wet floor, 59 % of the frame's light lost, 14.6 dB), and a path that crossed glass and found nothing read black instead of the visible dome. After, against brute force (emissive copy of the light, 1024 samples, 24 bounces, 320x180, flat water 4 units over a floor, NVIDIA, c6195de, 2026-10-05, deterministic): sun 0.6037559 against 0.61266124, point 0.7277021 and sphere 0.7275377 against 0.77031016; closed form of a vertical sun over absorbing water within 1 % per channel; a submerged box's shadow 10 units long (refracted 9.9, straight 15.1); steep waves (amplitude 1.2, wavelength 10) never brighter than the dry floor and within 5 % of the flat sea; dome light through water with 4 bounces within 3 % of 24 bounces (test dome_light_through_water_does_not_depend_on_the_bounce_limit, c6195de, 2026-10-05; 57.0 dB and mean ratio 0.998 against a 24-bounce 1024-sample reference, prototype, 2026-10-04). Prototype figures of 2026-10-04 (working tree of c6195de, 1280x720, 256 samples against 2048, blurred PSNR): straight shadow ray with Fresnel and 1/eta^2 35.5 dB, refracted shadow ray 37.1 dB, with absorption in the shadow ray 43.8 dB against 30.1 dB without; trace cost 0.98 s, 1.02 s and 1.90 s for the current engine, the straight ray and the refracted ray at 256 samples (1.9 times). Image changes measured on 2026-10-04 with the prototype, not repeated on the commit: examples/cinematic-impact/impact.scene.xml (plume and ejecta removed, t = 2.0) mean brightness 0.00663 to 0.00909. Cost at 3840x2160 (transmissive copy of the ocean acceptance scene, t = 4.0, 2026-10-05): trace 0.49 s to 0.76 s, wall 8.0 s to 10.5 s, RSS 573 to 579 MiB; the hero scene (grid lighting) trace 8.66 s to 8.59 s, grid build 1.55 s to 1.44 s. The hero frame at 3840x2160 changes in 394 pixels (at most 28 code values, in x 1780-3029, y 1395-1616) because the whitewater spray is transmissive; with the whitewater removed it is identical (hash a08faf05c01c). Seven path-traced frames without transmissive materials are bit identical to before. Full NVIDIA sweep of 42 test binaries of sr-gpu and scene-render on c6195de: all pass; fmt and clippy --workspace exit 0; hero 1280x720 probe hash 953a7b382df31fd6c2bf49e646c9abb9dec4978807ff95e6df4b92328e5eaea1; water_light 14 of 14 on llvmpipe in 2018 s (before the references were sized to the adapter). Ocean frames with transmissive water (attenuation 20 m) at 1.0, 1.6, 2.5, 4.0 and 5.5 s were rendered for review (scratchpad of the session, not kept in the repository); the oval seen in the steep-camera frame is the water-surface cavity: the dry-bed crater is 215 x 175 px, the oval about 1075 px wide.",
+      "limits": "A camera under the water does not see the sun on the floor (pinned by a test); a second interface along the shadow ray is not followed; no caustics; the farSea plane of impact-ocean.scene.xml hides the bed when its water material is transmissive (not changed); wavy surfaces were tested at one amplitude and wavelength; point, spot and area lights were measured through flat water only."
+    },
+    {
+      "name": "Brute-force references sized to the adapter; software-adapter flakiness of two tests",
+      "evidence": [
+        "crates/sr-gpu/tests/water_light.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "d9aeb32 (2026-10-05): on a software adapter the three brute-force comparisons of water_light.rs render half-size frames at 1024 samples (tolerance: the stated one or four times the noise of the references' means, the noise measured from the reference pixels); SR_BRUTE_FORCE=full forces the full size on any adapter. llvmpipe, load average about 15: the three tests 370 s, the whole binary 597 s instead of 2018 s, 15 of 15 pass. Noise of the means 1.49 % (sun) and 2.56 % (point, sphere); errors 2.1 %, 10.0 % and 10.1 % against tolerances of 8 % and 15 %; the half-size reference of the point and sphere lights reads 5 % above the full-size one (0.810 against 0.770; 7 % at 512 samples, 0.826). NVIDIA numbers unchanged to the printed digits. Software-adapter stability (2026-10-05, llvmpipe, rustc 1.98.1, release profile identical in the two commits, binaries of 60a458c and b883ec5, one test per process with --exact --test-threads=1, interleaved): effect_costs layers_whose_content_changes_are_still_sampled_one_by_one failed 4 of 10 on 60a458c and 2 of 10 on b883ec5 at a mean load average of 7 (PSNR 39.1, 30.7, 36.0, 33.5 and 33.6, 30.9 against 40), 1 of 15 and 0 of 15 with LP_NUM_THREADS=1 at load 6.1; composite polygons_and_stars_lie_on_the_inscribed_ellipse 0 of 10 and 3 of 10 in the interleaved set (right vertex at x = 45 read black), 2 of 40 and 1 of 40 with the default threads at load 2.9, and 0 of 40 and 0 of 40 with LP_NUM_THREADS=1 at load 3.4 (base 2 of 50 and head 4 of 50 with the default threads, not significantly different). Raw logs: runs.jsonl, runs_poly.jsonl, runs_poly_t1.jsonl, runs_fx_t1.jsonl and the script run.py in the session scratchpad r5/ (not kept in the repository); the 2-minute gate for a load average below 4 passed in 2 of 10 rounds per cell, so most runs are marked loaded.",
+      "limits": "The conclusion (no regression between the two commits; polygons fails only with llvmpipe's multithreading; effect_costs fails under load and once with one llvmpipe thread (LP_NUM_THREADS=1)) holds for these two commits and this machine. The CPU-burner set was not run. Renders are deterministic, so repeated runs of one binary do not measure the references' noise; the tests measure it from the pixels."
     }
   ]
 }

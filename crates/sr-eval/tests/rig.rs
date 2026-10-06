@@ -158,3 +158,51 @@ fn unreadable_tracking_data_is_e17() {
     let Err(e) = Evaluator::new(&d, &EvalOptions::default()) else { panic!("expected E17") };
     assert!(e.diagnostics.iter().any(|x| x.code == "E17"), "{e}");
 }
+
+#[test]
+fn a_bone_is_a_source_for_links_and_expressions_in_either_order() {
+    // a bone is an element with an id and animatable properties: `b0.rotation` must read its animated
+    // value, not its static one, wherever the reading node sits in the document
+    let skeleton = r##"<skeleton id="rig"><bone id="b0" length="10"><animate property="rotation"><key time="0" value="0"/><key time="1" value="90"/></animate></bone></skeleton>"##;
+    let linked = r##"<group id="g" width="10" height="10"><link property="rotation" source="b0.rotation"/></group>"##;
+    let scripted = r##"<group id="h" width="10" height="10"><expression property="rotation">prop("b0.rotation") * 2</expression></group>"##;
+    for body in [format!("{skeleton}{linked}{scripted}"), format!("{linked}{scripted}{skeleton}")] {
+        let d = doc(&body, "");
+        let (half, full) = (eval(&d, 0.5), eval(&d, 1.0));
+        assert!((rot(node(&half, "g")) - 45.0).abs() < 1e-6, "link at 0.5 s: {}", rot(node(&half, "g")));
+        assert!((rot(node(&full, "g")) - 90.0).abs() < 1e-6, "link at 1 s: {}", rot(node(&full, "g")));
+        assert!((rot(node(&full, "h")) - 180.0).abs() < 1e-6, "expression at 1 s: {}", rot(node(&full, "h")));
+    }
+}
+
+#[test]
+fn a_two_bone_leg_reaches_its_target_under_any_ancestor_transform() {
+    // the group's own transform: translation and uniform scale were right; rotation, flips, skew and non-uniform
+    // scale are the ones a mirrored, tilted or sheared figure needs
+    for tf in [
+        r#"x="120" y="500""#,
+        r#"x="120" y="500" scaleX="2" scaleY="2""#,
+        r#"x="120" y="500" scaleY="-0.5""#,
+        r#"x="120" y="500" scaleX="0.6""#,
+        r#"x="120" y="500" rotation="20""#,
+        r#"x="120" y="500" skewX="30""#,
+        r#"x="120" y="500" scaleY="-1""#,
+        r#"x="120" y="500" scaleX="-1" rotation="35""#,
+    ] {
+        let d = doc(
+            &format!(
+                r##"<group id="g" {tf}>
+                  <shape id="goal" shape="ellipse" x="0" y="-40" width="6" height="6"/>
+                  <skeleton id="rig"><bone id="hip" x="0" y="-200" length="112"/><bone id="knee" parent="hip" x="112" length="108"/>
+                    <transformConstraint type="ik" target="goal" bendPositive="true"/></skeleton></group>"##
+            ),
+            "",
+        );
+        let f = eval(&d, 0.0);
+        let rig = node(&f, "rig");
+        let knee = rig.bones.iter().find(|b| &*b.id == "knee").unwrap();
+        let tip = knee.world.apply([knee.length, 0.0]);
+        let goal = pivot(node(&f, "goal"));
+        assert!(near(tip, goal, 1e-6), "{tf}: the tip is at {tip:?}, the goal at {goal:?}");
+    }
+}
