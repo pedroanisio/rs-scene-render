@@ -56,6 +56,10 @@ pub struct GeodesicScene {
     /// Rays per pixel, spread over it.
     pub samples: u32,
     pub star_seed: u32,
+    /// Factor on the radiance.
+    pub exposure: f32,
+    /// Encode the picture with the sRGB curve (working spaces that blend on encoded values).
+    pub encode_srgb: bool,
 }
 
 /// What a pass writes: the picture, or per-pixel numbers for checking the tracing.
@@ -93,6 +97,7 @@ struct Params {
     dz: [f32; 4],
     size: [f32; 4],
     misc: [u32; 4],
+    extra: [f32; 4],
 }
 
 fn v4(v: Vec3, w: f32) -> [f32; 4] {
@@ -225,6 +230,7 @@ impl GeodesicGpu {
             dz: v4(z, disk.intensity),
             size: [scene.size[0] as f32, scene.size[1] as f32, disk.contrast, disk.time],
             misc: [pattern, disk.seed, flags, scene.star_seed],
+            extra: [scene.exposure, f32::from(u8::from(scene.encode_srgb)), 0.0, 0.0],
         };
         let uniforms = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("geodesic-params"),

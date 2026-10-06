@@ -240,6 +240,7 @@ fn more_shadow_views_than_layers_render_without_a_validation_error() {
         ao: None,
         ssr: false,
         path: None,
+        geodesic: None,
     };
     let px = eng.render_now(&scene, None);
     assert_eq!(px.len(), 32 * 32);
@@ -427,6 +428,12 @@ fn every_kind_the_3d_pass_draws_reaches_the_3d_pass() {
         ("object3D", r#"<object3D id="n" primitive="sphere" radius="10" x="32" y="16"/>"#),
         ("particles3D", r#"<particles3D id="n" rate="50" lifetime="1" dt="0.05" x="32" y="16"/>"#),
         ("ocean", r#"<ocean id="n" width="8" depth="8" bottomDepth="2" x="32" y="16"/>"#),
+        ("blackHole", r#"<blackHole id="n" mass="1"/>"#),
+        // the disk comes first in the document so that it is the pass's first member
+        (
+            "accretionDisk",
+            r##"<accretionDisk id="n" blackHole="h" outerRadius="12" temperatureScale="6000"/><blackHole id="h" mass="1"/>"##,
+        ),
     ];
     let mut covered: Vec<&str> = cases.iter().map(|c| c.0).collect();
     let mut kinds: Vec<&str> = sr_eval::THREE_D_DRAWN.to_vec();

@@ -19,7 +19,8 @@ struct Params {
     dy: vec4<f32>,    // xyz second axis of the disk's plane, w = peak temperature (K)
     dz: vec4<f32>,    // xyz axis of the disk's spin, w = intensity
     size: vec4<f32>,  // width, height, pattern contrast, geometric time
-    misc: vec4<u32>,  // pattern (0 none, 1 clumps, 2 spiral), seed, flags, star seed
+    misc: vec4<u32>,  // pattern (0 none, 1 clumps, 2 spiral, 3 no disk), seed, flags, star seed
+    extra: vec4<f32>, // exposure, 1 to encode the output with the sRGB curve
 }
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -320,6 +321,19 @@ fn shade(d: vec3<f32>, pixel_angle: f32) -> Ray {
     return out;
 }
 
+fn srgb_encode1(v: f32) -> f32 {
+    let c = max(v, 0.0);
+    if (c <= 0.0031308) { return 12.92 * c; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+fn encode(c: vec3<f32>) -> vec3<f32> {
+    if (P.extra.y > 0.5) {
+        return vec3<f32>(srgb_encode1(c.r), srgb_encode1(c.g), srgb_encode1(c.b));
+    }
+    return c;
+}
+
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let x = f32((i << 1u) & 2u);
@@ -350,5 +364,5 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let d = normalize(P.fwd.xyz * focal + P.right.xyz * (px.x + j.x - half.x) + P.down.xyz * (px.y + j.y - half.y));
         sum += shade(d, 1.0 / focal).color;
     }
-    return vec4<f32>(sum / f32(count), 1.0);
+    return vec4<f32>(encode(sum / f32(count) * P.extra.x), 1.0);
 }

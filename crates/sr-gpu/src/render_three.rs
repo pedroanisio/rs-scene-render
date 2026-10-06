@@ -2335,6 +2335,121 @@ impl Renderer {
         run
     }
 
+    /// The black hole pass of a camera with `geodesics="true"`: the hole, its disk and the camera's
+    /// view as a [`crate::geodesic::GeodesicScene`]. `Ok(None)` when no camera asks for it (a black
+    /// hole is then not drawn, which is noted); an error when the pass cannot be drawn as asked.
+    #[allow(clippy::too_many_arguments)]
+    fn geodesic_scene(
+        g: &FrameGraph,
+        p: &Program,
+        members: &[usize],
+        cam: &CameraView,
+        ex: &CamExtras,
+        size: [u32; 2],
+        cam_size: [f32; 2],
+        unsupported: &mut Vec<String>,
+    ) -> Result<Option<crate::geodesic::GeodesicScene>, String> {
+        use crate::geodesic::{Disk, GeodesicScene, Pattern};
+        let wants = g.camera.is_some_and(|ci| flag(&attrs(&g.nodes[ci as usize]), "geodesics", false));
+        let holes: Vec<usize> = members.iter().copied().filter(|j| g.nodes[*j].kind == "blackHole").collect();
+        let Some(&hole) = holes.first() else {
+            return if wants { Err("camera geodesics=\"true\" needs a blackHole".into()) } else { Ok(None) };
+        };
+        if !wants {
+            unsupported
+                .push(format!("{}: a blackHole is drawn only by a camera with geodesics=\"true\"", g.nodes[hole].id));
+            return Ok(None);
+        }
+        if holes.len() > 1 {
+            return Err(format!("{}: a scene has one blackHole", g.nodes[holes[1]].id));
+        }
+        if let Some(other) = members.iter().find(|j| !matches!(g.nodes[**j].kind, "blackHole" | "accretionDisk")) {
+            let n = &g.nodes[*other];
+            return Err(format!(
+                "{}: a camera with geodesics=\"true\" draws a black hole and its disk only; the {} is not drawn",
+                n.id, n.kind
+            ));
+        }
+        let lights = doc_lights(p);
+        let h = &g.nodes[hole];
+        let a = attrs(h);
+        let mass = a.num("mass", 1.0) as f32;
+        if !(mass > 0.0 && mass.is_finite()) {
+            return Err(format!("{}: mass must be positive", h.id));
+        }
+        let centre = Self::world3(g, lights, hole, 0).transform_point3(Vec3::ZERO);
+        let distance = (cam.eye - centre).length();
+        if distance <= 3.0 * mass {
+            return Err(format!(
+                "{}: the camera is {distance} from the hole, within 3 mass ({}) where no observer is at rest",
+                h.id,
+                3.0 * mass
+            ));
+        }
+        let mut time_scale = 1.0;
+        let mut seed = 0u32;
+        let disk = members
+            .iter()
+            .copied()
+            .filter(|j| g.nodes[*j].kind == "accretionDisk")
+            .find(|j| attrs(&g.nodes[*j]).str("blackHole").as_deref().is_none_or(|id| id == &*h.id))
+            .map(|j| {
+                let d = &g.nodes[j];
+                let a = attrs(d);
+                time_scale = a.num("timeScale", 1.0) as f32;
+                seed = a.num("seed", 0.0) as u32;
+                let axis = Self::world3(g, lights, j, 0).transform_vector3(Vec3::NEG_Y);
+                Disk {
+                    inner: a.num("innerRadius", 6.0 * mass as f64) as f32,
+                    outer: a.num("outerRadius", 0.0) as f32,
+                    peak_kelvin: a.num("temperatureScale", 0.0) as f32,
+                    intensity: a.num("intensity", 1.0) as f32,
+                    contrast: a.num("contrast", 0.5) as f32,
+                    pattern: match a.str("angularPattern").as_deref() {
+                        Some("none") => Pattern::None,
+                        Some("spiral") => Pattern::Spiral,
+                        _ => Pattern::Clumps,
+                    },
+                    seed,
+                    axis,
+                    time: 0.0,
+                }
+            });
+        let disk = match disk {
+            Some(mut d) => {
+                if !(d.outer > d.inner && d.inner >= 6.0 * mass - 1e-4 * mass && d.peak_kelvin > 0.0) {
+                    return Err(format!(
+                        "{}: the disk needs innerRadius of at least 6 mass, outerRadius beyond it and a positive temperatureScale",
+                        h.id
+                    ));
+                }
+                d.time = (g.time as f32) * time_scale;
+                Some(d)
+            }
+            None => None,
+        };
+        let to_world = cam.view.inverse();
+        let scale = if cam_size[0] > 0.0 { size[0] as f32 / cam_size[0] } else { 1.0 };
+        let samples = attrs(&g.nodes[g.camera.expect("geodesics needs a camera") as usize])
+            .num("pathSamples", 16.0)
+            .clamp(1.0, 4096.0) as u32;
+        Ok(Some(GeodesicScene {
+            size,
+            eye: cam.eye,
+            right: to_world.transform_vector3(Vec3::X),
+            down: to_world.transform_vector3(Vec3::Y),
+            forward: to_world.transform_vector3(Vec3::Z),
+            focal_px: cam.focal_px * scale,
+            hole: centre,
+            mass,
+            disk,
+            samples,
+            star_seed: seed,
+            exposure: ex.exposure,
+            encode_srgb: false,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn three_run(
         &mut self,
@@ -2360,6 +2475,22 @@ impl Renderer {
         }
         let frame = [g.size[0] as f32, g.size[1] as f32];
         let (cam, ex, cam_size) = self.camera3(g, ctx.p, frame);
+        let geodesic = match Self::geodesic_scene(
+            g,
+            ctx.p,
+            &members,
+            &cam,
+            &ex,
+            space.size,
+            cam_size,
+            &mut plan.stats.unsupported,
+        ) {
+            Ok(scene) => scene,
+            Err(e) => {
+                plan.stats.errors.push(e);
+                return;
+            }
+        };
         let (mut lights, env) = self.lights3(plan, ctx);
         if lights.is_empty()
             && env.is_none()
@@ -2395,6 +2526,9 @@ impl Renderer {
         let mut splats = Vec::new();
         let mut volumes = Vec::new();
         for &j in &members {
+            if matches!(g.nodes[j].kind, "blackHole" | "accretionDisk") {
+                continue;
+            }
             let opacity = if iso_op > 0.0 { (g.nodes[j].world_opacity / iso_op) as f32 } else { 0.0 };
             if opacity <= 0.0 {
                 continue;
@@ -2446,6 +2580,7 @@ impl Renderer {
         if draws.is_empty()
             && splats.is_empty()
             && volumes.is_empty()
+            && geodesic.is_none()
             && !env.as_ref().map(|e| e.visible).unwrap_or(false)
         {
             return;
@@ -2470,6 +2605,10 @@ impl Renderer {
             ao: ex.ao,
             ssr: ex.ssr,
             path: None,
+            geodesic: geodesic.map(|mut scene| {
+                scene.encode_srgb = !self.working.linear;
+                scene
+            }),
         };
         let mut scene = scene;
         let limits = self.gpu.device.limits();

@@ -46,6 +46,7 @@ fn gpu_volume_transport_matches_analytic_slabs_and_overlapping_media() {
         ao: None,
         ssr: false,
         path: None,
+        geodesic: None,
     };
     let black = eng.upload_f16([1, 1], &[[0.0; 4]]).create_view(&Default::default());
     let smp = g.device.create_sampler(&Default::default());
@@ -1013,6 +1014,7 @@ fn shadow_march_dims_by_the_optical_depth_of_thin_dense_media_and_ignores_neglig
             ao: None,
             ssr: false,
             path: Some(PathOpts { samples: 1, bounces: 1, denoise: false }),
+            geodesic: None,
         };
         let data = pathtrace::build(&scene);
         let target = eng.target([4, 4]);

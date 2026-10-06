@@ -292,6 +292,8 @@ pub struct Scene3 {
     pub ssr: bool,
     /// Path trace instead of rasterising.
     pub path: Option<crate::pathtrace::PathOpts>,
+    /// Trace the geodesics of a black hole instead: nothing else of the scene is drawn.
+    pub geodesic: Option<crate::geodesic::GeodesicScene>,
 }
 
 /// Counters for statistics and tests.
@@ -464,6 +466,7 @@ pub struct ThreeEngine {
     bgl_ssr: wgpu::BindGroupLayout,
     /// Path-tracing pipelines, built on first use.
     pt: Option<crate::pathtrace::PtGpu>,
+    geodesic: Option<crate::geodesic::GeodesicGpu>,
     /// Depth and normal prepass pipelines (by culling).
     pre_pipes: [wgpu::RenderPipeline; 2],
     ssao_pipe: wgpu::RenderPipeline,
@@ -1007,6 +1010,7 @@ impl ThreeEngine {
             bgl_splat,
             bgl_ssr,
             pt: None,
+            geodesic: None,
             pre_pipes,
             ssao_pipe,
             ao_blur_pipe,
@@ -1442,6 +1446,12 @@ impl ThreeEngine {
         backdrop: Option<&wgpu::TextureView>,
         out: &wgpu::TextureView,
     ) -> Result<(), String> {
+        if let Some(geo) = &scene.geodesic {
+            let pass = self.geodesic.get_or_insert_with(|| crate::geodesic::GeodesicGpu::new(&self.device, FORMAT));
+            pass.render(&self.device, enc, geo, crate::geodesic::Output::Picture, None, out);
+            self.stats = Stats3::default();
+            return Ok(());
+        }
         let limits = self.device.limits();
         let path = scene.path.or_else(|| {
             (!scene.volumes.is_empty()).then_some(crate::pathtrace::PathOpts { samples: 4, bounces: 2, denoise: true })
@@ -2514,6 +2524,7 @@ mod tests {
             ao: None,
             ssr: false,
             path: None,
+            geodesic: None,
         };
         assert_eq!(engine.render_now(&scene, None).len(), 32 * 32);
         assert_eq!(engine.pipes.len(), 1, "one material and blend/culling configuration");

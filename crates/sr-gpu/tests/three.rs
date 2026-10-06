@@ -33,6 +33,7 @@ fn scene(draws: Vec<Draw3>, lights: Vec<Light3>) -> Scene3 {
         ao: None,
         ssr: false,
         path: None,
+        geodesic: None,
     }
 }
 

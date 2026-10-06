@@ -594,6 +594,7 @@ fn tiled_frames_equal_whole_frames_with_light_through_glass() {
         ao: None,
         ssr: false,
         path: Some(PathOpts { samples: 4, bounces: 2, denoise: false }),
+        geodesic: None,
     };
     assert!(pathtrace::limit_note(&scene, &g.device.limits()).is_none());
     let data = pathtrace::build(&scene);

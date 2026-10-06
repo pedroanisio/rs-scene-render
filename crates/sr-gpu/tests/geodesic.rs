@@ -14,7 +14,21 @@ fn camera(size: [u32; 2], eye: Vec3, hole: Vec3, mass: f32, focal_px: f32, disk:
     let forward = (hole - eye).normalize();
     let down = (Vec3::Y - forward * Vec3::Y.dot(forward)).normalize();
     let right = down.cross(forward);
-    GeodesicScene { size, eye, right, down, forward, focal_px, hole, mass, disk, samples: 1, star_seed: 0 }
+    GeodesicScene {
+        size,
+        eye,
+        right,
+        down,
+        forward,
+        focal_px,
+        hole,
+        mass,
+        disk,
+        samples: 1,
+        star_seed: 0,
+        exposure: 1.0,
+        encode_srgb: false,
+    }
 }
 
 fn disk(inner: f32, outer: f32, axis: Vec3) -> Disk {
