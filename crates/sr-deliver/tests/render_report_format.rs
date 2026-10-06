@@ -34,6 +34,8 @@ fn diagnostic_codes_map_to_the_registry() {
     assert_eq!(report_code(&d("SA01", Severity::Warning)), "SAFE-AREA");
     assert_eq!(report_code(&d("INERT-I2", Severity::Info)), "INERT-I2");
     assert_eq!(report_code(&d("E19", Severity::Info)), "X-rs-scene-render-E19");
+    assert_eq!(report_code(&d("INERT-I13", Severity::Info)), "INERT-I13");
+    assert_eq!(report_code(&d("MASK-MISS", Severity::Warning)), "MASK-MISS");
     assert_eq!(code::engine("RENDER"), "X-rs-scene-render-RENDER");
 }
 

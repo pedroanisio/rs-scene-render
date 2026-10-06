@@ -1507,7 +1507,7 @@ fn validate_warns_about_attributes_this_build_does_not_read() {
     let out = String::from_utf8_lossy(&v.stdout);
     assert_eq!(v.status.code(), Some(0), "{out}");
     // an attribute with no effect is information (SREP 18): shown, and not counted as a warning
-    assert!(out.contains("info[E19]") && out.contains("collapse"), "{out}");
+    assert!(out.contains("info[INERT-I9]") && out.contains("collapse"), "{out}");
     assert!(out.contains("0 warning(s), 1 info"), "{out}");
     assert_eq!(
         run(&["validate", "--deny-warnings", &f]).status.code(),
@@ -1517,7 +1517,7 @@ fn validate_warns_about_attributes_this_build_does_not_read() {
     let j = run(&["validate", "--format", "json", &f]);
     let v: serde_json::Value = serde_json::from_slice(&j.stdout).unwrap();
     let d = &v["files"][0]["diagnostics"][0];
-    assert!(d["code"] == "E19" && d["severity"] == "info", "{v}");
+    assert!(d["code"] == "INERT-I9" && d["severity"] == "info", "{v}");
 }
 
 #[test]
@@ -1530,7 +1530,7 @@ fn a_finding_that_changes_the_result_still_fails_deny_warnings() {
     );
     let v = run(&["validate", &f]);
     let out = String::from_utf8_lossy(&v.stdout);
-    assert!(out.contains("warning[E20]"), "{out}");
+    assert!(out.contains("warning[MASK-MISS]"), "{out}");
     assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
 }
 

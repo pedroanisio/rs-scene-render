@@ -1,4 +1,5 @@
-//! An attribute the schema accepts and this build does not read is reported (E19, a warning), not silently ignored.
+//! An attribute the schema accepts and has no effect is reported (SREP 18 and 34: `INERT-I9` to `INERT-I13`, information),
+//! and a mask that leaves nothing of its node is a warning (`MASK-MISS`); none is silently ignored.
 
 fn warnings(composition: &str, effects: &str) -> Vec<(String, String)> {
     let xml = format!(
@@ -12,7 +13,7 @@ fn warnings(composition: &str, effects: &str) -> Vec<(String, String)> {
 #[test]
 fn group_collapse_is_accepted_but_has_no_effect_and_says_so() {
     let w = warnings(r#"<group id="g" collapse="true" width="10" height="10"/>"#, "");
-    assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("collapse") && m.contains("no effect")), "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "INERT-I9" && m.contains("collapse") && m.contains("no effect")), "{w:?}");
     // the default, and a group that does not set it, are silent
     assert!(warnings(r#"<group id="g" collapse="false" width="10" height="10"/>"#, "").is_empty());
     assert!(warnings(r#"<group id="g" width="10" height="10"/>"#, "").is_empty());
@@ -23,9 +24,9 @@ fn selective_color_does_not_read_channel() {
     let fx = |attrs: &str| format!(r#"<effects><effect id="sc" type="selective-color" {attrs}/></effects>"#);
     let node = r#"<shape id="s" shape="rect" width="8" height="8" effects="sc"/>"#;
     let w = warnings(node, &fx(r#"hue="30" channel="red""#));
-    assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("channel")), "{w:?}");
-    // once (SREP 34 rule I10), not once for the effect type and once for the effect's own reading
-    assert_eq!(w.iter().filter(|(c, _)| c == "E19").count(), 1, "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "INERT-I10" && m.contains("channel")), "{w:?}");
+    // once (SREP 34 rule I10), not once more as an attribute the type does not read (I13)
+    assert_eq!(w.iter().filter(|(_, m)| m.contains("channel")).count(), 1, "{w:?}");
     assert!(warnings(node, &fx(r#"hue="30""#)).is_empty());
 }
 
@@ -38,7 +39,7 @@ fn a_mask_that_misses_its_node_is_reported() {
         )
     };
     let w = warnings(&shape(r#"<mask type="rect" x="500" y="300" width="300" height="400" mode="add"/>"#), "");
-    assert!(w.iter().any(|(c, m)| c == "E20" && m.contains("outside")), "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "MASK-MISS" && m.contains("outside")), "{w:?}");
     // local coordinates, an inverted mask, and a subtracting one that is outside are all fine
     assert!(warnings(&shape(r#"<mask type="rect" x="0" y="0" width="300" height="400" mode="add"/>"#), "").is_empty());
     assert!(
@@ -74,7 +75,7 @@ fn an_effect_source_with_opacity_zero_is_reported() {
             .collect::<Vec<_>>()
     };
     let w = warn(&nodes(r#"opacity="0""#));
-    assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("opacity")), "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "INERT-I11" && m.contains("opacity")), "{w:?}");
     assert!(warn(&nodes(r#"visible="false""#)).is_empty());
     assert!(warn(&nodes("")).is_empty());
 }
@@ -85,7 +86,7 @@ fn an_effect_attribute_its_type_does_not_read_is_reported_naming_it() {
     let fx = |attrs: &str| format!(r#"<effects><effect id="vig" type="vignette" {attrs}/></effects>"#);
     let node = r#"<shape id="s" shape="rect" width="8" height="8" effects="vig"/>"#;
     let w = warnings(node, &fx(r#"intensity="0.55""#));
-    let hit: Vec<_> = w.iter().filter(|(c, m)| c == "E19" && m.contains("@intensity")).collect();
+    let hit: Vec<_> = w.iter().filter(|(c, m)| c == "INERT-I13" && m.contains("@intensity")).collect();
     assert_eq!(hit.len(), 1, "{w:?}");
     assert!(
         hit[0].1.contains("@amount") && hit[0].1.contains("@radius") && hit[0].1.contains("@softness"),
@@ -97,5 +98,5 @@ fn an_effect_attribute_its_type_does_not_read_is_reported_naming_it() {
     assert!(warnings(node, &fx(r#"intensity="1""#)).is_empty(), "the default is not worth a warning");
     // a type with no list (a custom shader takes any parameter) is not checked
     let shader = r#"<effects><effect id="vig" type="shader" src="x.glsl" intensity="0.3"/></effects>"#;
-    assert!(!warnings(node, shader).iter().any(|(c, m)| c == "E19" && m.contains("@intensity")));
+    assert!(!warnings(node, shader).iter().any(|(c, m)| c == "INERT-I13" && m.contains("@intensity")));
 }

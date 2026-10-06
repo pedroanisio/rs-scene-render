@@ -406,3 +406,31 @@ fn a_block_leaving_the_frame_is_a_warning() {
     assert!((fit[0]["measured"].as_f64().unwrap() - 70.0).abs() < 1e-6, "{}", fit[0]);
     assert_eq!(strict, Some(1));
 }
+
+#[test]
+fn srep_0034_findings_reach_the_report() {
+    let d = dir("srep34");
+    let collapse = r##"<scene version="1.2">
+  <project width="64" height="48" fps="10" duration="1" background="#000000"/>
+  <composition><group id="g" collapse="true"><shape id="s" shape="rect" width="8" height="8"/></group></composition>
+</scene>"##;
+    let o = encode(&d, collapse, "collapse.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("collapse.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["INERT-I9"], "{r:#}");
+    assert_eq!(r["findings"][0]["node"], "g");
+    let miss = r##"<scene version="1.2">
+  <project width="64" height="48" fps="10" duration="1" background="#000000"/>
+  <composition><shape id="m" shape="rect" width="30" height="40" fill="#FF0000"><mask type="rect" x="50" y="0" width="30" height="40" mode="add"/></shape></composition>
+</scene>"##;
+    let o = encode(&d, miss, "miss.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("miss.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["MASK-MISS"], "{r:#}");
+    let f = &r["findings"][0];
+    assert_eq!(f["severity"], "warning");
+    assert_eq!(f["path"], "/scene/composition/shape/mask");
+    assert_eq!((f["measured"].as_f64(), f["unit"].as_str()), (Some(20.0), Some("px")), "{f}");
+}
