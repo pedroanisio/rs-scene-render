@@ -333,7 +333,8 @@ impl<'a> ReportWriter<'a> {
             return f;
         };
         let elements = || x.root_element().descendants().filter(roxmltree::Node::is_element);
-        let by_offset = at.offset.and_then(|o| elements().find(|n| n.range().start == o as usize));
+        // the innermost element whose source contains the offset: an element's own start, or one of its attributes
+        let by_offset = at.offset.and_then(|o| elements().filter(|n| n.range().contains(&(o as usize))).last());
         let element = if f.path.starts_with('/') {
             by_offset.filter(|n| sr_model::diag::element_path(*n) == f.path)
         } else {
