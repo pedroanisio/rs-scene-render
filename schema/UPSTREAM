@@ -62,4 +62,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - @materialOverride ids must name document materials (rule MOV2): the amendment in srep-0000-model-node-material-select.md (1cd2566).
   - object3D @animationClipTo, @animationBlend and @animationOffsetTo (blend two clips of an imported model): srep-0000-clip-blend.md (f8db796).
   - object3D and particles3D @parentJoint, transformConstraint @targetJoint (attach to a joint of an imported model): srep-0000-joint-sockets.md (5a588cf).
+  - E19 for key parameters the key's curve does not read, and for a default cubic-bezier key without handles: srep-0000-key-parameter-checks.md (d1a3b4a).
 The xsd and sch above differ from the vendored sha256 sums by these edits.

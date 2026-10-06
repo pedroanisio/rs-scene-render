@@ -3208,24 +3208,91 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
 /// segment that leaves with another curve, the attribute does nothing (E19, a warning).
 fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warnings: &mut Vec<Diagnostic>) {
     use m::Curve::*;
+    let curve_of = |k: &m::Key| k.interpolation.unwrap_or(default);
     for (i, k) in keys.iter().enumerate() {
-        let curve = k.interpolation.unwrap_or(default);
-        let mut note = |attr: &str, family: &str| {
-            warnings.push(Diagnostic::warning(
-                "E19",
-                format!(
-                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect on the {curve:?} curve, which does not read it (only {family} curves do)",
-                    i + 1
-                ),
-                k.loc,
-                who,
+        let curve = curve_of(k);
+        let found = std::cell::RefCell::new(Vec::<String>::new());
+        let note = |attr: &str, family: &str, why: &str| {
+            found.borrow_mut().push(format!(
+                "key {} of an animation on {who:?}: @{attr} is accepted but has no effect {why}, which does not read it (only {family} reads it)",
+                i + 1
             ))
         };
+        let on_curve = format!("on the {curve:?} curve");
         if k.overshoot.is_some() && !matches!(curve, BackIn | BackOut | BackInOut) {
-            note("overshoot", "back-*");
+            note("overshoot", "back-* curves", &on_curve);
         }
         if k.period.is_some() && !matches!(curve, ElasticIn | ElasticOut | ElasticInOut) {
-            note("period", "elastic-*");
+            note("period", "elastic-* curves", &on_curve);
+        }
+        // cubic-bezier reads @bezier, else the handles: this key's easeOut and the next key's easeIn
+        let cubic = curve == CubicBezier;
+        if k.bezier.is_some() && !cubic {
+            note("bezier", "the cubic-bezier curve", &on_curve);
+        }
+        // a key that takes cubic-bezier from the animation's default, starts a segment and says nothing about its
+        // handles gets the engine's default ones (rule C40 asks for them only when the key names the curve)
+        if cubic && k.interpolation.is_none() && k.bezier.is_none() && k.ease_out.is_none() {
+            if let Some(next) = keys.get(i + 1) {
+                if next.ease_in.is_none() {
+                    found.borrow_mut().push(format!(
+                        "key {} of an animation on {who:?}: the CubicBezier curve comes from defaultInterpolation and the key has no @bezier or easeOut/easeIn handles, so the engine's default handles (influence 1/3, speed 1) are used",
+                        i + 1
+                    ));
+                }
+            }
+        }
+        if k.ease_out.is_some() && !cubic {
+            note("easeOut", "the cubic-bezier curve", &on_curve);
+        } else if k.ease_out.is_some() && k.bezier.is_some() {
+            note("easeOut", "the cubic-bezier curve without @bezier", "on a key that has @bezier");
+        }
+        if k.ease_in.is_some() {
+            match i.checked_sub(1).map(|j| &keys[j]) {
+                None => note("easeIn", "the cubic-bezier curve of the segment that ends in the key", "on the first key, which no segment ends in"),
+                Some(prev) if curve_of(prev) != CubicBezier => {
+                    note("easeIn", "the cubic-bezier curve", &format!("on the {:?} curve of the key before it", curve_of(prev)))
+                }
+                Some(prev) if prev.bezier.is_some() => {
+                    note("easeIn", "the cubic-bezier curve without @bezier", "on a key that follows a key with @bezier")
+                }
+                Some(_) => {}
+            }
+        }
+        if curve != Steps {
+            if k.steps.is_some() {
+                note("steps", "the steps curve", &on_curve);
+            }
+            if k.step_position == m::StepPosition::Start {
+                note("stepPosition", "the steps curve", &on_curve);
+            }
+        }
+        if curve != Spring {
+            for (attr, set) in [
+                ("stiffness", k.stiffness.get() != 100.0),
+                ("damping", k.damping.get() != 10.0),
+                ("mass", k.mass.get() != 1.0),
+            ] {
+                if set {
+                    note(attr, "the spring curve", &on_curve);
+                }
+            }
+        }
+        // the tangent of a key is shaped by the segment before it as well as the one after
+        let tcb = curve == Tcb || i.checked_sub(1).is_some_and(|j| curve_of(&keys[j]) == Tcb);
+        if !tcb {
+            for (attr, set) in [
+                ("tension", k.tension.get() != 0.0),
+                ("continuity", k.continuity.get() != 0.0),
+                ("bias", k.bias.get() != 0.0),
+            ] {
+                if set {
+                    note(attr, "the tcb curve", &on_curve);
+                }
+            }
+        }
+        for message in found.into_inner() {
+            warnings.push(Diagnostic::warning("E19", message, k.loc, who));
         }
     }
 }
