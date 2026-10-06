@@ -1320,6 +1320,18 @@ impl Renderer {
         ctx.p.scene.project.motion_blur
     }
 
+    /// The `shutterAngle` of node `i` or of its nearest ancestor that sets one.
+    fn node_shutter_angle(g: &sr_eval::FrameGraph, i: usize) -> Option<f64> {
+        let mut k = Some(i);
+        while let Some(j) = k {
+            if let Some(AttrValue::Num(v)) = g.nodes[j].elem.get_attr("shutterAngle") {
+                return Some(v);
+            }
+            k = g.nodes[j].parent.map(|p| p as usize);
+        }
+        None
+    }
+
     /// Accumulates the node over the shutter. Returns false when it does not move enough to need it.
     #[allow(clippy::too_many_arguments)]
     fn motion_blur(
@@ -1342,7 +1354,8 @@ impl Renderer {
         }
         let pr = &ctx.p.scene.project;
         let fps = fps_of(ctx.p);
-        let angle = pr.shutter_angle;
+        // the node's own shutter angle, else the nearest ancestor's, else the project's
+        let angle = Self::node_shutter_angle(g, i).unwrap_or(pr.shutter_angle);
         if angle <= 0.0 {
             return false;
         }

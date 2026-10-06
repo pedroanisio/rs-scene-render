@@ -1592,6 +1592,12 @@
       <xs:annotation><xs:documentation>Transform parent outside the XML tree (After Effects parenting); shorthand for a transformConstraint type="parent".</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="shutterAngle">
+      <xs:annotation><xs:documentation>The shutter angle, in degrees, of this node's motion blur, instead of the project's: the nearest node up its parents that sets it, else project/@shutterAngle. 0 draws the node sharp; 360 blurs over the whole frame interval. Only where motion blur is on for the node.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double">
+        <xs:minInclusive value="0"/><xs:maxInclusive value="720"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="threeD" type="xs:boolean" default="false">
       <xs:annotation><xs:documentation>2.5D: place this 2D node in camera space at depth zDepth with rotationX/rotationY.</xs:documentation></xs:annotation>
     </xs:attribute>
