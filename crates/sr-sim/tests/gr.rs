@@ -162,6 +162,16 @@ fn single_precision_follows_double_precision() {
     for (r_obs, b, ingoing) in [(40.0, 7.0, true), (60.0, 15.0, true), (25.0, 9.0, false), (50.0, 5.0, true)] {
         let double = gr::trace(M, r_obs, b, ingoing, 0.7, 4);
         let single = gr::f32::trace(1.0, r_obs as f32, b as f32, ingoing, 0.7, 4);
+        println!(
+            "SINGLE b = {b}: phi_inf {:e} relative, crossings {:?}",
+            ((single.phi_inf as f64 - double.phi_inf) / double.phi_inf.max(1.0)).abs(),
+            single
+                .crossings
+                .iter()
+                .zip(&double.crossings)
+                .map(|(s, d)| (s.1 as f64 / d.1 - 1.0).abs())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(single.outcome, double.outcome, "b = {b}");
         assert_eq!(single.crossings.len(), double.crossings.len(), "b = {b}");
         assert!((single.phi_inf as f64 - double.phi_inf).abs() <= 1e-4 * double.phi_inf.max(1.0), "b = {b}");
