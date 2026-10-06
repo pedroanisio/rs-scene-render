@@ -44,7 +44,7 @@ struct Seen { dir: vec3<f32>, vis: vec3<f32> };
 
 // A light as a surface under a refracting surface sees it. `l` is the straight direction to the
 // light sample, `ldist` its distance. The shadow ray is refracted at the interface (found by trace,
-// refined once from the first guess) so that it leaves toward the light: `dir` is its direction at
+// refined until it settles) so that it leaves toward the light: `dir` is its direction at
 // the surface (what the BSDF is evaluated with) and `vis` carries everything the light loses on
 // the way: the blockers on both sides, the interface's tint, transmission and Fresnel
 // transmittance, the factor cos(theta_air) / cos(theta_water) that goes with the cross-section the
@@ -64,15 +64,34 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     var dir = l;
     var iface = first_interface(start, dir, ldist - 2e-2);
     if (!iface.found) { out.vis = vec3(select(1.0, visibility(start, l, ldist - 2e-2), shadows)); return out; }
-    let q0 = start + dir * iface.t;
+    // Find the point of the interface where the refracted ray from the surface leaves toward the
+    // light: refract at the point the current direction meets, trace the new direction, and repeat
+    // until the direction found at the point it meets is the one that was traced. The first steps go
+    // the whole way, which settles a flat interface at once; a step that made the agreement worse
+    // is halved from then on, because the whole step diverges where the surface bends more than
+    // the water is deep. A direction that is still more than 8 degrees from the
+    // one refracted at the point it meets gets no light, never a bright guess.
     var la = l;
-    if (!directional) { la = normalize(at_light - q0); }
-    let w = refract(-la, -iface.n, 1.0 / iface.ior);
-    if (dot(w, w) < 1e-8) { return out; }
-    dir = -normalize(w);
-    iface = first_interface(start, dir, ldist - 2e-2);
-    if (!iface.found) { return out; }
-    let q = start + dir * iface.t;
+    var q = start;
+    var agreement = 0.0;
+    var previous = -1.0;
+    var step = 1.0;
+    for (var it = 0u; it < 8u; it++) {
+        q = start + dir * iface.t;
+        if (!directional) { la = normalize(at_light - q); }
+        let w = refract(-la, -iface.n, 1.0 / iface.ior);
+        if (dot(w, w) < 1e-8) { return out; }
+        let next = -normalize(w);
+        agreement = dot(next, dir);
+        if (agreement > 0.99999) { break; }
+        // a step that made it worse is halved from then on
+        if (agreement < previous) { step = max(0.5 * step, 0.25); }
+        previous = agreement;
+        dir = normalize(dir + step * (next - dir));
+        iface = first_interface(start, dir, ldist - 2e-2);
+        if (!iface.found) { return out; }
+    }
+    if (agreement < 0.99) { return out; }
     var rest = 1e30;
     if (!directional) { let to = at_light - q; rest = length(to); la = to / max(rest, 1e-4); }
     let n_air = -iface.n;

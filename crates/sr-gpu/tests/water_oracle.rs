@@ -96,8 +96,7 @@ fn wall_red(r: &common::Rendered) -> (f32, usize) {
 /// inside it spreads over a cross-section of cos(theta_water), and the wall catches the part along
 /// its normal; the wall's diffuse lobe keeps what its own Fresnel term does not reflect. `view` is the
 /// direction from the wall to the viewer, in the water.
-fn wall_radiance_in_water(rad: f32, view: Vec3) -> f32 {
-    let up = Vec3::new(0.0, -1.0, 0.0);
+fn wall_radiance_in_water(rad: f32, view: Vec3, up: Vec3) -> f32 {
     let to_sun = -shines(-35.0, -50.0).normalize();
     let cos_air = to_sun.dot(up);
     let travel = refract(-to_sun, up, 1.0, ETA);
@@ -114,12 +113,16 @@ fn wall_radiance_in_water(rad: f32, view: Vec3) -> f32 {
 /// surface transmits), and the water is denser than the air by ETA, so the radiance seen from the
 /// air is ETA^2 smaller than the radiance in the water.
 fn expected_wall_red(rad: f32) -> f32 {
-    let up = Vec3::new(0.0, -1.0, 0.0);
+    expected_wall_red_through(rad, Vec3::new(0.0, -1.0, 0.0))
+}
+
+/// The same for a surface whose normal (on the air side) is `up`: flat, but tilted.
+fn expected_wall_red_through(rad: f32, up: Vec3) -> f32 {
     // the camera's ray, pitched 30 degrees below the horizon
     let eye = Vec3::new(0.0, 0.5, 0.866_025_4);
     let view = -refract(eye, up, 1.0, ETA);
     let camera_share = 1.0 - reflectance(eye.dot(-up), 1.0, ETA);
-    camera_share * wall_radiance_in_water(rad, view) / (ETA * ETA)
+    camera_share * wall_radiance_in_water(rad, view, up) / (ETA * ETA)
 }
 
 /// What a camera inside the water sees of the wall: the radiance in the water, with no interface
@@ -127,7 +130,7 @@ fn expected_wall_red(rad: f32) -> f32 {
 fn expected_wall_red_from_water(rad: f32) -> f32 {
     let pitch = 10f32.to_radians();
     let view = -Vec3::new(0.0, pitch.sin(), pitch.cos());
-    wall_radiance_in_water(rad, view)
+    wall_radiance_in_water(rad, view, Vec3::new(0.0, -1.0, 0.0))
 }
 
 /// A vertical wall under water is lit by the sun as physics says: the cosine at the wall (the
@@ -204,4 +207,131 @@ fn a_camera_under_the_water_sees_a_wall_lit_as_the_oracle_says() {
     let want = expected_wall_red_from_water(3.0);
     eprintln!("wall red from under the water {got} against the oracle {want}");
     assert!((got / want - 1.0).abs() < 0.04, "wall from under the water: {got} against the oracle {want}");
+}
+
+/// A flat water surface tilted by 15 degrees about the x axis is a flat interface with another
+/// normal: the same oracle with that normal applies, for the camera's ray, the sun's beam and the
+/// wall. The refraction point of the sun's ray from a wall point is still found.
+#[test]
+fn a_vertical_wall_under_a_tilted_surface_is_lit_as_the_oracle_says() {
+    let tilted = WATER.replace(r#"rotationX="-90""#, r#"rotationX="-75""#);
+    let Some(r) = render(&wall_in_water(SUN, &tilted)) else { return };
+    let (got, pixels) = wall_red(&r);
+    assert!(pixels > 400, "the wall is seen: {pixels} pixels");
+    let theta = (-75f32).to_radians();
+    let normal = Vec3::new(0.0, theta.sin(), -theta.cos());
+    let want = expected_wall_red_through(3.0, normal);
+    eprintln!("wall red under the tilted surface {got} against the oracle {want}");
+    assert!((got / want - 1.0).abs() < 0.05, "wall under a tilted surface: {got} against the oracle {want}");
+}
+
+// ---- a ridge in the surface: two flat facets that meet over the floor
+
+/// The water as two facets that meet in a ridge along the x axis at z = 0 and slope down from it at
+/// `theta` degrees: the right facet (z > 0) has the normal (0, -cos, sin), the left one (z < 0)
+/// (0, -cos, -sin). `facet` is 200 units wide along the slope.
+fn ridge(theta: f32) -> String {
+    let t = theta.to_radians();
+    let half = 100.0;
+    let (y, z) = (half * t.sin(), half * t.cos());
+    format!(
+        r##"<object3D id="waterRight" primitive="plane" width="400" height="200" y="{y}" z="{z}" rotationX="{}" material="waterMat"/>
+        <object3D id="waterLeft" primitive="plane" width="400" height="200" y="{y}" z="{}" rotationX="{}" material="waterMat"/>"##,
+        -(90.0 + theta),
+        -z,
+        -(90.0 - theta)
+    )
+}
+
+/// A diffuse floor 20 units below the ridge, seen from under the water by a camera that looks
+/// straight down over 30 units of z, lit by the sun alone.
+fn floor_under_a_ridge(theta: f32, sun: &str) -> String {
+    format!(
+        r##"<scene version="1.3"><project width="128" height="128" fps="10" duration="1" background="#101010"/>
+      <materials>
+        <material id="floorMat" baseColor="#808080" roughness="1" specular="0"/>
+        <material id="waterMat" baseColor="#FFFFFF" roughness="0.02" ior="{ETA}" doubleSided="true" transmission="1"/>
+      </materials>
+      <composition>
+        <camera id="camera" projection="orthographic" x="0" y="12" z="10" pitch="-90" orthoHeight="30" renderer="pathtrace" pathSamples="256" maxBounces="1" denoise="false"/>
+        <object3D id="floor" primitive="plane" width="400" height="400" y="20" rotationX="-90" material="floorMat"/>
+        {}
+      </composition>
+      <lights>{sun}</lights></scene>"##,
+        ridge(theta)
+    )
+}
+
+/// The irradiance factors the floor point at `z` (x does not matter) can get from the sun through
+/// the ridge, by the exact planar solution on the CPU: each facet refracts the sun into one
+/// direction (the sun is directional), the ray from the point along it meets the facet's plane
+/// somewhere, and that facet lights the point if the meeting is on its own side of the ridge. Each
+/// solution is T cos(theta_air) / cos(theta_water) times the floor's cosine with the refracted
+/// direction, with that direction (for the floor's Fresnel term). Over some floor two facets reach
+/// it, over some none.
+fn ridge_irradiance(theta: f32, z: f32) -> Vec<(f32, Vec3)> {
+    let t = theta.to_radians();
+    let to_sun = -shines(-35.0, -50.0).normalize();
+    let p = Vec3::new(0.0, 20.0, z);
+    let mut found = Vec::new();
+    for (normal, side) in [(Vec3::new(0.0, -t.cos(), t.sin()), 1.0f32), (Vec3::new(0.0, -t.cos(), -t.sin()), -1.0)] {
+        let cos_air = to_sun.dot(normal);
+        if cos_air <= 0.0 {
+            continue;
+        }
+        let toward_sun = -refract(-to_sun, normal, 1.0, ETA);
+        // the facet's plane: through the ridge (0, 0, 0) with this normal
+        let along = toward_sun.dot(normal);
+        let reach = -p.dot(normal) / along;
+        let meets = p + toward_sun * reach;
+        if reach > 0.0 && meets.z * side >= 0.0 {
+            let beam = (1.0 - reflectance(cos_air, 1.0, ETA)) * cos_air / along;
+            found.push((beam * toward_sun.dot(Vec3::new(0.0, -1.0, 0.0)), toward_sun));
+        }
+    }
+    found
+}
+
+/// The floor under a ridge in the surface is lit row by row as the facets' exact solution says: the
+/// light that reaches a floor point is refracted at the point of the surface where the refracted ray
+/// leaves toward the sun, found by following the ray from the floor, not at the point the straight
+/// ray toward the sun happens to meet. Over the floor between the two, the first guess is on one
+/// facet and the answer on the other. Where two facets reach the same point each sample takes one
+/// of them (one shadow ray a sample), so the pixel lies between the two; where none does the floor
+/// is dark.
+#[test]
+fn a_floor_under_a_ridge_is_lit_by_the_facet_whose_refraction_reaches_the_sun() {
+    let theta = 20.0;
+    let Some(r) = render(&floor_under_a_ridge(theta, SUN)) else { return };
+    let radiance = |(beam, dir): (f32, Vec3)| {
+        let view = Vec3::new(0.0, -1.0, 0.0);
+        let h = (dir + view).normalize();
+        let f = 0.04 + 0.96 * (1.0 - view.dot(h).clamp(0.0, 1.0)).powi(5);
+        (1.0 - f) * linear(0x80) / std::f32::consts::PI * 3.0 * beam
+    };
+    let (mut single, mut double, mut none) = (0, 0, 0);
+    // image row k covers z = 25 - (k + 0.5) * 30 / 128 (the camera looks down with +z up the image)
+    for k in (0..128).step_by(2) {
+        let z = 25.0 - (k as f32 + 0.5) * 30.0 / 128.0;
+        let got: f32 = (32..96).map(|x| r.px[k * 128 + x][0]).sum::<f32>() / 64.0;
+        let solutions: Vec<f32> = ridge_irradiance(theta, z).into_iter().map(radiance).collect();
+        match solutions.as_slice() {
+            [] => {
+                none += 1;
+                assert!(got < 0.003, "z {z:.2}: no facet reaches the sun, the floor is {got}");
+            }
+            [want] => {
+                single += 1;
+                assert!((got / want - 1.0).abs() < 0.04, "z {z:.2}: {got} against the facet's {want}");
+            }
+            [a, b] => {
+                // each sample takes one facet, so the pixel is between the two
+                double += 1;
+                let (low, high) = (a.min(*b), a.max(*b));
+                assert!(got > 0.96 * low && got < 1.04 * high, "z {z:.2}: {got} outside the facets' {low} to {high}");
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert!(single > 20 && double > 5, "the rows cover both kinds: {single} single, {double} double, {none} dark");
 }
