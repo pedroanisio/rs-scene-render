@@ -304,3 +304,132 @@ pub mod oracle {
         scale * r.powf(-0.75) * (1.0 - (r_in / r).sqrt()).powf(0.25)
     }
 }
+
+/// The image of a black hole with a disc, traced ray by ray on the CPU in double precision: the reference the
+/// shader of `sr-gpu` is compared with, pixel by pixel.
+///
+/// # The convention, shared with the shader
+///
+/// Both do the same sums, so that a difference of convention shows as a difference of image and not as
+/// physics:
+///
+/// - Scene axes are right-handed; the hole is at `hole`, the observer at `eye`, `M` is `mass`, and lengths are
+///   the scene's. The camera has the unit vectors `fwd`, `right` and `down` (`right x down = fwd`, so `down`
+///   points to the bottom of the image), a focal length `focal` in pixels, and `size = [width, height]`. The
+///   ray of pixel `(x, y)` goes through the centre of the pixel: `d = normalize(fwd * focal + right * (x + 0.5
+///   - width / 2) + down * (y + 0.5 - height / 2))`.
+/// - The ray lies in the plane of the observer, the hole and itself. With `n = (eye - hole) / r_o` (the unit
+///   vector from the hole to the observer, `r_o` the distance), `cos a = -d . n`, `perp = d + n cos a` and `sin
+///   a = |perp|`, the first basis vector of the plane is `e1 = n` and the second `e2 = perp / sin a` (any unit
+///   vector orthogonal to `n` when `sin a` is below 1e-6: the cross product of `n` with the x axis, or with the
+///   y axis if `|n.x| > 0.9`, normalized). The angle `phi` of the orbit equation grows from `e1` toward `e2`
+///   along the path traced from the camera outward, so the point of the ray at `phi` and radius `r` is
+///   `hole + r (cos(phi) e1 + sin(phi) e2)`.
+/// - The impact parameter is `b = max(r_o sin a / sqrt(1 - 2M / r_o), 1e-5)` and the ray goes in
+///   (`ingoing`) when `cos a > 0`.
+/// - The disc is thin, opaque and flat, with the unit axes `dx`, `dy` in its plane (`dx x dy = dz`) and `dz`
+///   its axis of spin; it spans `r_in <= r <= r_out`. The rays cross its plane where `phi = phi0 + k pi`,
+///   with `phi0` in `(0, pi]` the first angle at which the plane of the ray meets it: with `a = e1 . dz` and
+///   `c = e2 . dz`, `phi0 = atan2(-a, c)`, plus `pi` if it is negative, plus `pi` again if it is below
+///   1e-6; none exists when `a^2 + c^2 < 1e-12` (the planes coincide). Only the first four crossings (`k < 4`)
+///   are followed, and the pixel takes the first of them that is inside the disc.
+/// - The azimuth of the crossing in the disc is `psi = atan2(p . dy, p . dx)` with `p = cos(phi_k) e1 + sin(phi_k)
+///   e2` for `phi_k = phi0 + k pi`. The redshift is [`redshift`](super::redshift) with `h = (e1 x e2) . dz`.
+/// - A ray that escapes ends in the direction `cos(phi_inf) e1 + sin(phi_inf) e2`.
+///
+/// The tracer is serial and does no sum of more than one pixel, so the same arguments give the same bits.
+pub mod image {
+    use super::Outcome;
+
+    /// What a pixel shows.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Class {
+        /// The ray fell through the horizon: black.
+        Captured,
+        /// The ray escaped and met no disc: the sky in `direction`.
+        Background,
+        /// The ray crossed the disc: `r`, `psi`, `g` and `order` tell where and how.
+        Disk,
+    }
+
+    /// The camera: where it is, how it is turned, and its focal length in pixels.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Camera {
+        pub eye: [f64; 3],
+        pub hole: [f64; 3],
+        pub fwd: [f64; 3],
+        pub right: [f64; 3],
+        pub down: [f64; 3],
+        pub focal: f64,
+        pub size: [usize; 2],
+    }
+
+    /// The disc, flat and thin around the hole.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Disk {
+        pub r_in: f64,
+        pub r_out: f64,
+        pub dx: [f64; 3],
+        pub dy: [f64; 3],
+        pub dz: [f64; 3],
+    }
+
+    /// What one ray did.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Pixel {
+        pub class: Class,
+        /// For a background pixel, the direction at infinity; zero otherwise.
+        pub direction: [f64; 3],
+        /// For a ray that escaped, the angle swept; zero otherwise.
+        pub phi_inf: f64,
+        /// For a disc pixel, the radius, azimuth and redshift of the point seen, and which crossing it was
+        /// (0 is the first plane crossed); zero and none otherwise.
+        pub r: f64,
+        pub psi: f64,
+        pub g: f64,
+        pub order: Option<usize>,
+    }
+
+    impl Camera {
+        /// The camera of an observer at `distance` from a hole at the origin, `inclination` radians from the
+        /// spin axis of [`Disk::flat`] (the y axis; 0 looks down it, `pi / 2` is the plane of the disc) in the
+        /// plane of the x and y axes, looking at the hole, with the y axis up in the image and a vertical field
+        /// of view `fov_y`.
+        pub fn orbiting(distance: f64, inclination: f64, fov_y: f64, size: [usize; 2]) -> Camera {
+            let _ = (distance, inclination, fov_y, size);
+            todo!("the camera of an observer around the hole")
+        }
+
+        /// The unit direction of the ray of pixel `(x, y)`.
+        pub fn ray(&self, x: usize, y: usize) -> [f64; 3] {
+            let _ = (x, y);
+            todo!("the direction of a pixel")
+        }
+    }
+
+    impl Disk {
+        /// The disc in the plane of the x and z axes, `dx = x`, `dy = -z`, spinning about `y` (`dx x dy = y`).
+        pub fn flat(r_in: f64, r_out: f64) -> Disk {
+            let _ = (r_in, r_out);
+            todo!("the flat disc")
+        }
+    }
+
+    /// What the ray of direction `d` from the camera's eye does around a hole of mass `mass`, with or without a
+    /// disc.
+    pub fn trace_direction(camera: &Camera, mass: f64, disk: Option<&Disk>, d: [f64; 3]) -> Pixel {
+        let _ = (camera, mass, disk, d, Outcome::Captured);
+        todo!("the ray of a direction")
+    }
+
+    /// The ray of pixel `(x, y)`.
+    pub fn trace_pixel(camera: &Camera, mass: f64, disk: Option<&Disk>, x: usize, y: usize) -> Pixel {
+        trace_direction(camera, mass, disk, camera.ray(x, y))
+    }
+
+    /// Every pixel, by rows from the top.
+    pub fn render(camera: &Camera, mass: f64, disk: Option<&Disk>) -> Vec<Pixel> {
+        let [w, h] = camera.size;
+        (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| trace_pixel(camera, mass, disk, x, y)).collect()
+    }
+}
