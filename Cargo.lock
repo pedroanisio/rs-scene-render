@@ -2564,6 +2564,7 @@ dependencies = [
  "sr-geo",
  "sr-media",
  "sr-model",
+ "sr-sim",
  "sr-text",
  "sr-vector",
  "sr-volume",

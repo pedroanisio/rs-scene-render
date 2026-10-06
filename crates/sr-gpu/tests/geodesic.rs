@@ -474,3 +474,143 @@ fn the_same_seed_gives_the_same_pattern_and_another_seed_another() {
     let differ = a.iter().zip(&c).filter(|(p, q)| (p[0] - q[0]).abs() > 0.02 * p[0].max(0.01)).count();
     assert!(differ > 200, "another seed changes the pattern: {differ} pixels");
 }
+
+/// The axes of the disk's plane the pass derives from its spin axis, as unit vectors.
+fn plane_axes(axis: Vec3) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let z = axis.normalize();
+    let helper = if z.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let x = (helper - z * helper.dot(z)).normalize();
+    let y = z.cross(x);
+    (x.to_array().map(f64::from), y.to_array().map(f64::from), z.to_array().map(f64::from))
+}
+
+#[test]
+fn the_shader_agrees_with_the_cpu_reference_image_pixel_by_pixel() {
+    use sr_sim::gr::image::{self, Class};
+    let (mass, inclination) = (1.0f64, 75.0f64.to_radians());
+    let camera = image::Camera::orbiting(60.0, inclination, 40.0f64.to_radians(), [96, 60]);
+    let (dx, dy, dz) = plane_axes(Vec3::Y);
+    let reference_disk = image::Disk { r_in: 6.0, r_out: 16.0, dx, dy, dz };
+    let to_vec = |a: [f64; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
+    let scene = GeodesicScene {
+        size: [96, 60],
+        eye: to_vec(camera.eye),
+        right: to_vec(camera.right),
+        down: to_vec(camera.down),
+        forward: to_vec(camera.fwd),
+        focal_px: camera.focal as f32,
+        hole: Vec3::ZERO,
+        mass: mass as f32,
+        disk: Some(disk(6.0, 16.0, Vec3::Y)),
+        samples: 1,
+        star_seed: 0,
+        exposure: 1.0,
+        encode_srgb: false,
+    };
+    let (Some(crossings), Some(hits)) =
+        (render(&scene, Output::Crossings, None), render(&scene, Output::FirstHit, None))
+    else {
+        return;
+    };
+    let (mut class_flips, mut compared, mut worst_r, mut worst_g, mut worst_psi, mut worst_phi) =
+        (0, 0, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut by_class = [0usize; 3];
+    for y in 0..60usize {
+        for x in 0..96usize {
+            let want = image::trace_pixel(&camera, mass, Some(&reference_disk), x, y);
+            let (c, h) = (crossings[y * 96 + x], hits[y * 96 + x]);
+            let got = if h[3] >= 0.0 {
+                Class::Disk
+            } else if c[0] == 1.0 {
+                Class::Background
+            } else {
+                Class::Captured
+            };
+            if got != want.class {
+                class_flips += 1;
+                continue;
+            }
+            compared += 1;
+            match want.class {
+                Class::Disk => {
+                    by_class[2] += 1;
+                    assert_eq!(h[3] as usize, want.order.unwrap(), "which crossing at ({x},{y})");
+                    let er = (h[1] as f64 - want.r).abs() / want.r;
+                    let eg = (h[0] as f64 - want.g).abs() / want.g;
+                    let mut dpsi = (h[2] as f64 - want.psi).abs();
+                    dpsi = dpsi.min(std::f64::consts::TAU - dpsi);
+                    (worst_r, worst_g, worst_psi) = (worst_r.max(er), worst_g.max(eg), worst_psi.max(dpsi));
+                    assert!(
+                        er <= 2e-3 && eg <= 2e-3 && dpsi <= 2e-3,
+                        "disk pixel ({x},{y}): shader {h:?}, reference {want:?}"
+                    );
+                }
+                Class::Background => {
+                    by_class[1] += 1;
+                    let e = (c[1] as f64 - want.phi_inf).abs() / want.phi_inf.abs().max(1.0);
+                    worst_phi = worst_phi.max(e);
+                    assert!(e <= 2e-4, "escape angle at ({x},{y}): {} against {}", c[1], want.phi_inf);
+                }
+                Class::Captured => by_class[0] += 1,
+            }
+        }
+    }
+    println!(
+        "{compared} pixels agree in class ({} captured, {} background, {} disk), {class_flips} differ; worst relative error: escape angle {worst_phi:.2e}, disk radius {worst_r:.2e}, g {worst_g:.2e}, azimuth {worst_psi:.2e} rad",
+        by_class[0], by_class[1], by_class[2]
+    );
+    assert!(class_flips <= 6, "{class_flips} pixels differ in class (f32 against f64 at a boundary)");
+    assert!(by_class.iter().all(|n| *n > 100), "every class is present: {by_class:?}");
+}
+
+#[test]
+fn the_shader_matches_the_single_precision_reference_integrator_far_from_the_critical_curve() {
+    // the same arithmetic in the same order: for rays whose impact parameter is not within 5 % of the critical one
+    // (where an f32 rounding of the direction grows exponentially) the f32 reference and the shader differ only by
+    // how the GPU compiler contracts and rounds the operations
+    let mass = 1.0f32;
+    let axis = Vec3::new(0.2, -1.0, 0.1).normalize();
+    let eye = Vec3::new(-30.0, -12.0, -45.0);
+    let hole = Vec3::new(1.0, 0.5, 0.0);
+    let scene = camera([64, 40], eye, hole, mass, 150.0, Some(disk(6.0, 14.0, axis)));
+    let (Some(a), Some(b)) = (render(&scene, Output::Crossings, None), render(&scene, Output::MoreCrossings, None))
+    else {
+        return;
+    };
+    let r_obs = (eye - hole).length();
+    let critical = 27.0f32.sqrt();
+    let (mut worst, mut worst_far, mut worst_phi, mut within_1e6, mut total) = (0.0f64, 0.0f64, 0.0f64, 0usize, 0usize);
+    for y in 0..40u32 {
+        for x in 0..64u32 {
+            let f = ray_frame(&scene, axis, x, y);
+            if (f.b as f32 / critical - 1.0).abs() < 0.05 {
+                continue;
+            }
+            let reference = sr_sim::gr::f32::trace(mass, r_obs, f.b as f32, f.ingoing, f.phi0 as f32, 4);
+            let (sa, sb) = (a[(y * 64 + x) as usize], b[(y * 64 + x) as usize]);
+            assert_eq!((sa[0] == 1.0), reference.outcome == sr_sim::gr::Outcome::Escaped, "outcome at ({x},{y})");
+            if sa[0] == 1.0 {
+                worst_phi =
+                    worst_phi.max((sa[1] - reference.phi_inf).abs() as f64 / reference.phi_inf.abs().max(1.0) as f64);
+            }
+            let shader_r = [sa[2], sa[3], sb[0], sb[1]];
+            for (k, (_, r)) in reference.crossings.iter().enumerate() {
+                let e = ((shader_r[k] - r).abs() / r) as f64;
+                // beyond a few disk radii a ray is about to leave and the radius changes quickly with the angle
+                if *r <= 56.0 {
+                    worst = worst.max(e);
+                } else {
+                    worst_far = worst_far.max(e);
+                }
+                total += 1;
+                within_1e6 += usize::from(e <= 1e-6);
+            }
+        }
+    }
+    println!(
+        "{total} crossing radii against gr::f32::trace: {within_1e6} within 1e-6; worst {worst:.2e} up to 56 M, {worst_far:.2e} beyond; worst escape angle {worst_phi:.2e}"
+    );
+    assert!(total > 500);
+    assert!(worst <= 3e-5 && worst_phi <= 5e-6, "worst crossing radius {worst}, escape angle {worst_phi}");
+    assert!(worst_far <= 2e-4, "worst far crossing radius {worst_far}");
+}
