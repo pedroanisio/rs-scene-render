@@ -608,6 +608,28 @@ impl Host for ExprHost<'_, '_> {
             Var::TextTotal => V::Num(1.0),
             Var::Fps => V::Num(self.p.fps.as_f64()),
             Var::Duration => V::Num(self.p.duration),
+            Var::PointX | Var::PointY | Var::PointAngle | Var::PointU | Var::PointRandom => {
+                let Some((g, i)) = node.and_then(|n| n.point) else { return V::Undef };
+                let gen = &self.p.points[g as usize];
+                match v {
+                    Var::PointU => V::Num(gen.u(i)),
+                    Var::PointRandom => V::Num(gen.random(i)),
+                    _ => {
+                        // the sizes at this expression's time, read independently of the slot order
+                        let (p, comp_t, depth, memo) = (self.p, self.comp_t, self.depth, self.memo);
+                        let live = std::array::from_fn(|k| match gen.slots[k] {
+                            Some(s) => p.value_at(s, comp_t, depth + 1, memo).as_num().unwrap_or(gen.base[k]),
+                            None => gen.base[k],
+                        });
+                        let q = gen.point(i, live);
+                        V::Num(match v {
+                            Var::PointX => q.x,
+                            Var::PointY => q.y,
+                            _ => q.direction,
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -878,7 +900,20 @@ impl<'p> Frame<'p> {
             .then(&Affine::scale(sx, sy))
             .then(&Affine::translate(-ax, -ay));
         if let Some([dx, dy, r, s, o]) = node.copy {
-            aff = Affine::translate(dx, dy).then(&Affine::rotate(r)).then(&Affine::scale(s, s)).then(&aff);
+            let mut steps = Affine::translate(dx, dy).then(&Affine::rotate(r)).then(&Affine::scale(s, s));
+            // SREP 26: T(x, y) · R(θ) of the copy's point, before its step offsets
+            if let Some((g, i)) = node.point {
+                let gen = &p.points[g as usize];
+                if node.parent == Some(gen.node) {
+                    let live = std::array::from_fn(|k| match gen.slots[k] {
+                        Some(s) => self.values[s as usize].as_num().unwrap_or(gen.base[k]),
+                        None => gen.base[k],
+                    });
+                    let q = gen.point(i, live);
+                    steps = Affine::translate(q.x, q.y).then(&Affine::rotate(q.theta)).then(&steps);
+                }
+            }
+            aff = steps.then(&aff);
             opacity *= o;
         }
         if let Some(adj) = self.adjust[n as usize] {
