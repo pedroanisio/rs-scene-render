@@ -415,7 +415,9 @@ impl Emitter {
             }
         }
         self.frame = advance(&self.spec, &self.state, time.max(self.state.frame.time), driver, &mut work)?.frame;
-        self.frame.time = time;
+        // a time that is within rounding of the step it was taken to is that step's: the particles of the step were
+        // born as late as its end, and none of them may be younger than the frame it is in
+        self.frame.time = time.max(self.state.frame.time);
         Ok(&self.frame)
     }
 }
