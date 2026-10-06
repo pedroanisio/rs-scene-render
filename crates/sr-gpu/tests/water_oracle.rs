@@ -45,9 +45,14 @@ fn linear(srgb: u8) -> f32 {
 const ETA: f32 = 1.333;
 
 /// A diffuse wall of colour #CC2626 standing in water 16 units deep, seen by an orthographic camera
-/// from above the surface, under a sun (the only light). The wall is vertical: the surface under
+/// (8 units high, so that all its rays start on the same side of the surface) under a sun (the only
+/// light). The wall is vertical: the surface under
 /// the water that the horizontal floor of the other tests does not exercise.
 fn wall_in_water(sun: &str, water: &str) -> String {
+    wall_scene(sun, water, r#"x="0" y="-12" z="-20" pitch="-30" orthoHeight="8""#)
+}
+
+fn wall_scene(sun: &str, water: &str, camera: &str) -> String {
     format!(
         r##"<scene version="1.3"><project width="128" height="128" fps="10" duration="1" background="#101010"/>
       <materials>
@@ -56,7 +61,7 @@ fn wall_in_water(sun: &str, water: &str) -> String {
         <material id="waterMat" baseColor="#FFFFFF" roughness="0.02" ior="{ETA}" doubleSided="true" transmission="1"/>
       </materials>
       <composition>
-        <camera id="camera" projection="orthographic" x="0" y="-12" z="-20" pitch="-30" renderer="pathtrace" pathSamples="512" maxBounces="1" denoise="false"/>
+        <camera id="camera" projection="orthographic" {camera} renderer="pathtrace" pathSamples="512" maxBounces="1" denoise="false"/>
         <object3D id="floor" primitive="plane" width="400" height="400" y="20" rotationX="-90" material="floorMat"/>
         <object3D id="wall" primitive="plane" width="80" height="16" x="0" y="12" z="20" material="wallMat"/>
         {water}
@@ -86,13 +91,12 @@ fn wall_red(r: &common::Rendered) -> (f32, usize) {
     (red.iter().sum::<f32>() / red.len().max(1) as f32, red.len())
 }
 
-/// What the camera sees of the wall: the camera ray refracts into the water (the share the surface
-/// transmits), the wall reflects the irradiance that the sun's beam brings through the surface
-/// (its power per area of the interface is T cos(theta_air); inside it spreads over a cross-section
-/// of cos(theta_water), and the wall catches the part along its normal), and the water is denser
-/// than the air by ETA, so the radiance seen from the air is ETA^2 smaller than the radiance in the
-/// water.
-fn expected_wall_red(rad: f32) -> f32 {
+/// The radiance leaving the diffuse wall toward a viewer in the water, for a sun of irradiance
+/// `rad` on a surface facing it: the sun's beam power per area of the interface is T cos(theta_air),
+/// inside it spreads over a cross-section of cos(theta_water), and the wall catches the part along
+/// its normal; the wall's diffuse lobe keeps what its own Fresnel term does not reflect. `view` is the
+/// direction from the wall to the viewer, in the water.
+fn wall_radiance_in_water(rad: f32, view: Vec3) -> f32 {
     let up = Vec3::new(0.0, -1.0, 0.0);
     let to_sun = -shines(-35.0, -50.0).normalize();
     let cos_air = to_sun.dot(up);
@@ -101,14 +105,29 @@ fn expected_wall_red(rad: f32) -> f32 {
     let cos_water = to_sun_in_water.dot(up);
     let wall_normal = Vec3::new(0.0, 0.0, -1.0);
     let beam = (1.0 - reflectance(cos_air, 1.0, ETA)) * cos_air / cos_water * to_sun_in_water.dot(wall_normal).max(0.0);
+    let h = (to_sun_in_water + view).normalize();
+    let f = 0.04 + 0.96 * (1.0 - view.dot(h).clamp(0.0, 1.0)).powi(5);
+    (1.0 - f) * linear(0xCC) / std::f32::consts::PI * rad * beam
+}
+
+/// What a camera above the water sees of the wall: its ray refracts into the water (the share the
+/// surface transmits), and the water is denser than the air by ETA, so the radiance seen from the
+/// air is ETA^2 smaller than the radiance in the water.
+fn expected_wall_red(rad: f32) -> f32 {
+    let up = Vec3::new(0.0, -1.0, 0.0);
     // the camera's ray, pitched 30 degrees below the horizon
     let eye = Vec3::new(0.0, 0.5, 0.866_025_4);
     let view = -refract(eye, up, 1.0, ETA);
     let camera_share = 1.0 - reflectance(eye.dot(-up), 1.0, ETA);
-    // the wall's diffuse lobe keeps what its own Fresnel term does not reflect
-    let h = (to_sun_in_water + view).normalize();
-    let f = 0.04 + 0.96 * (1.0 - view.dot(h).clamp(0.0, 1.0)).powi(5);
-    camera_share * (1.0 - f) * linear(0xCC) / std::f32::consts::PI * rad * beam / (ETA * ETA)
+    camera_share * wall_radiance_in_water(rad, view) / (ETA * ETA)
+}
+
+/// What a camera inside the water sees of the wall: the radiance in the water, with no interface
+/// between them. Its ray is pitched 10 degrees below the horizontal.
+fn expected_wall_red_from_water(rad: f32) -> f32 {
+    let pitch = 10f32.to_radians();
+    let view = -Vec3::new(0.0, pitch.sin(), pitch.cos());
+    wall_radiance_in_water(rad, view)
 }
 
 /// A vertical wall under water is lit by the sun as physics says: the cosine at the wall (the
@@ -146,7 +165,7 @@ fn a_light_without_shadows_lights_a_wall_under_water_as_one_with() {
 /// side at 45 degrees (0.14, the critical angle is 48.6 degrees), not the 0.02 that the Schlick
 /// term gives when it is fed the cosine of the dense side. What the face reflects goes down to
 /// the box's other faces, which it meets at the same 45 degrees, and a second pass adds R^2 of
-/// it.
+/// it. The camera is in the water, so the radiance it sees is ETA^2 that of the lamp.
 #[test]
 fn a_ray_leaving_water_at_45_degrees_is_reflected_as_fresnel_says() {
     let scene = format!(
@@ -167,7 +186,22 @@ fn a_ray_leaving_water_at_45_degrees_is_reflected_as_fresnel_says() {
         (6..10).flat_map(|y| (6..10).map(move |x| (x, y))).map(|(x, y)| r.px[y * 16 + x][1]).sum::<f32>() / 16.0;
     let r45 = reflectance(std::f32::consts::FRAC_1_SQRT_2, ETA, 1.0);
     assert!((r45 - 0.1395).abs() < 1e-3, "the oracle: {r45}");
-    let want = (1.0 - r45) * (1.0 + r45 * r45);
+    // the radiance in the water is ETA^2 that of the air it looks at
+    let want = ETA * ETA * (1.0 - r45) * (1.0 + r45 * r45);
     eprintln!("radiance through the exit {centre} against the oracle {want}");
     assert!((centre / want - 1.0).abs() < 0.03, "exit at 45 degrees: {centre} against the oracle {want}");
+}
+
+/// The camera is under the water: it starts inside the denser medium, so the surfaces it sees are
+/// lit through the interface like those a camera in the air sees, and no interface lies between it
+/// and the wall: the radiance it sees is the radiance in the water, ETA^2 more than the camera in
+/// the air sees of the same wall.
+#[test]
+fn a_camera_under_the_water_sees_a_wall_lit_as_the_oracle_says() {
+    let Some(r) = render(&wall_scene(SUN, WATER, r#"x="0" y="6" z="-20" pitch="-10" orthoHeight="8""#)) else { return };
+    let (got, pixels) = wall_red(&r);
+    assert!(pixels > 400, "the wall is seen: {pixels} pixels");
+    let want = expected_wall_red_from_water(3.0);
+    eprintln!("wall red from under the water {got} against the oracle {want}");
+    assert!((got / want - 1.0).abs() < 0.04, "wall from under the water: {got} against the oracle {want}");
 }

@@ -4,7 +4,7 @@
 
 // ---------------------------------------------------------------- lights seen through a refracting surface
 
-struct Iface { found: bool, t: f32, n: vec3<f32>, ior: f32, trans: f32, tint: vec3<f32> };
+struct Iface { found: bool, t: f32, n: vec3<f32>, ior: f32, trans: f32, tint: vec3<f32>, entering: bool, sigma: vec3<f32> };
 
 fn fresnel_schlick(cosi: f32, eta: f32) -> f32 {
     let r0 = (1.0 - eta) / (1.0 + eta);
@@ -12,10 +12,12 @@ fn fresnel_schlick(cosi: f32, eta: f32) -> f32 {
 }
 
 // The first transmissive surface along the ray, stepping over everything else: its distance, its
-// normal facing the ray, its refractive index, transmission and tint.
+// normal facing the ray, its refractive index, transmission and tint, whether the ray enters the
+// medium it encloses, and that medium's absorption.
 fn first_interface(o: vec3<f32>, d: vec3<f32>, dist: f32) -> Iface {
     var out: Iface;
     out.found = false; out.t = 0.0; out.n = vec3(0.0, 1.0, 0.0); out.ior = 1.0; out.trans = 0.0; out.tint = vec3(1.0);
+    out.entering = true; out.sigma = vec3(0.0);
     var org = o; var remaining = dist; var travelled = 0.0;
     for (var step = 0u; step < 16u; step++) {
         let hit = trace(org, d, remaining);
@@ -27,6 +29,7 @@ fn first_interface(o: vec3<f32>, d: vec3<f32>, dist: f32) -> Iface {
                 let ng0 = normalize(cross(hit_position(hit, 1u) - p0, hit_position(hit, 2u) - p0));
                 out.found = true; out.t = travelled + hit.t; out.n = select(-ng0, ng0, dot(d, ng0) < 0.0);
                 out.ior = m.params.w; out.trans = m.params.z; out.tint = m.base.rgb;
+                out.entering = dot(d, ng0) < 0.0; out.sigma = m.attenuation.rgb;
                 return out;
             }
         }
@@ -44,8 +47,10 @@ struct Seen { dir: vec3<f32>, vis: vec3<f32> };
 // refined once from the first guess) so that it leaves toward the light: `dir` is its direction at
 // the surface (what the BSDF is evaluated with) and `vis` carries everything the light loses on
 // the way: the blockers on both sides, the interface's tint, transmission and Fresnel
-// transmittance, the factor cos(theta_air) / (cos(theta_water) eta^2) that goes with the solid
-// angle and the cross-section the interface changes, and the absorption along the path inside.
+// transmittance, the factor cos(theta_air) / cos(theta_water) that goes with the cross-section the
+// interface changes, and the absorption along the path inside. The radiance of the light is eta^2
+// larger in the water and the solid angle it subtends eta^2 smaller: they cancel, and the paths
+// that cross the interface carry the eta^2 themselves (see water_source).
 // The cosine between the surface and `dir` is not in it: the caller multiplies by it. `shadows`
 // is false for a light that casts none or a surface that receives none: the two blocker tests are
 // skipped, the refraction and the interface's losses are not. A path whose refinement finds no
@@ -81,9 +86,9 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     }
     let fresnel = fresnel_schlick(cos_air, 1.0 / iface.ior);
     // The beam's power per area of the interface is T cos_air; inside it spreads over a cross-section
-    // of cos_water, and the radiance carries 1 / eta^2. The cosine at the surface is the caller's.
+    // of cos_water. The cosine at the surface is the caller's.
     let cos_water = max(-dot(dir, iface.n), 1e-4);
-    let carried = inside_view * outside_view * iface.trans * (1.0 - fresnel) * cos_air / (cos_water * iface.ior * iface.ior);
+    let carried = inside_view * outside_view * iface.trans * (1.0 - fresnel) * cos_air / cos_water;
     out.dir = dir;
     out.vis = min(carried, 1.0) * iface.tint * exp(-sigma * iface.t);
     return out;

@@ -624,6 +624,7 @@ mod tests {
         for base in [plain.clone(), grid_source()] {
             let water = water_source(&base);
             assert!(water.contains("fn light_through(") && water.contains("inside = entering;"));
+            assert!(water.contains("thr *= eta * eta;") && water.contains("let probe = first_interface("));
             assert!(
                 water.contains("if (!entering && dot(t, t) >= 1e-8) { cosi"),
                 "the exit uses the cosine of the air side"
@@ -825,8 +826,9 @@ fn grid_source() -> String {
 }
 
 /// The shader for scenes with a transmissive material: the shader it is given (with or without
-/// light grids) plus the refracted shadow ray and the Fresnel term of a ray leaving the denser
-/// medium, which four small replacements hook in. Scenes
+/// light grids) plus the refracted shadow ray, the Fresnel term of a ray leaving the denser medium,
+/// the scaling of radiance across an interface and the start of a camera under the water, which a
+/// few small replacements hook in. Scenes
 /// without such a material keep the text, and so the compiled code, they had.
 fn water_source(base: &str) -> String {
     const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
@@ -846,10 +848,27 @@ fn water_source(base: &str) -> String {
              \x20           let r0 = (1.0 - eta) / (1.0 + eta);\n\
              \x20           let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
         )
-        .replace(SIGMA, &format!("{SIGMA}    var inside = false;\n"))
+        .replace(
+            SIGMA,
+            // a camera under the water starts inside the medium: the first transmissive surface
+            // straight up (the scene's up is -y) is met from the inside
+            &format!(
+                "{SIGMA}    var inside = false;\n\
+                 \x20   {{\n\
+                 \x20       let probe = first_interface(o, vec3(0.0, -1.0, 0.0), 1e30);\n\
+                 \x20       if (probe.found && !probe.entering) {{ inside = true; in_sigma = probe.sigma; }}\n\
+                 \x20   }}\n"
+            ),
+        )
         .replace(
             ENTER,
-            "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); inside = entering; }\n",
+            // radiance over eta^2 is the same on both sides of an interface: a path that goes
+            // from a medium of index n1 into one of index n2 carries (n1 / n2)^2
+            "                if (WATER) {\n\
+             \x20                   in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
+             \x20                   inside = entering;\n\
+             \x20                   thr *= eta * eta;\n\
+             \x20               }\n",
         )
         .replace(
             VISIBLE,

@@ -93,11 +93,13 @@ fn water_over_a_lamp(attenuation: &str, depth: f32) -> String {
 }
 
 /// The water absorbs by Beer-Lambert along the path inside it: after `attenuationDistance` units
-/// the light left is `attenuationColor`, per channel. Without the attributes it does not absorb.
+/// the light left is `attenuationColor`, per channel. Without the attributes it does not absorb. The
+/// lamp behind the pane is a submerged emitter: seen from the air it is 1 / eta^2 as bright.
 #[test]
 fn water_absorbs_by_beer_lambert_along_the_path() {
-    // reflection of the interface at normal incidence, as the tracer's Schlick term gives it
-    let transmitted = 1.0 - ((1.0 - 1.0 / 1.333f32) / (1.0 + 1.0 / 1.333)).powi(2);
+    // reflection of the interface at normal incidence, as the tracer's Schlick term gives it; the
+    // lamp is in the water, so the radiance seen from the air is 1 / eta^2 of the lamp's own
+    let transmitted = (1.0 - ((1.0 - 1.0 / 1.333f32) / (1.0 + 1.0 / 1.333)).powi(2)) / (1.333 * 1.333);
     let colour = [0x80u8, 0xC0, 0xE0];
     let attenuation = r##"attenuationColor="#80C0E0" attenuationDistance="4""##;
     let Some(plain) = render(&water_over_a_lamp("", 4.0)) else { return };
@@ -476,18 +478,6 @@ fn an_untouched_transmissive_object_leaves_the_picture_alone() {
     let (Some(a), Some(b)) = (render(&plain), render(&with_ball)) else { return };
     let db = common::psnr(&a.px, &b.px);
     assert!(db > 55.0, "the picture moved: {db:.1} dB");
-}
-
-/// The camera starts outside the denser medium and a path is "inside" only after it refracts in.
-/// A camera under the water therefore still finds its floor dark under the sun (documented limit),
-/// while the dome, which arrives by sampled paths, lights it.
-#[test]
-fn a_camera_under_the_water_does_not_yet_see_the_sun_on_the_floor() {
-    let sun = r##"<light id="sun" type="directional" color="#FFFFFF" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>"##;
-    let under = r#"x="0" y="2" z="-20" pitch="-8" fov="45""#;
-    let xml = seabed("plain", sun, "", under, SMALL, 16, 2).replace("{emission}", "1");
-    let Some(r) = render(&xml) else { return };
-    assert!(patch(&r, [75, 100, 175, 140]) < 0.01, "the floor under the sun, seen from under the water");
 }
 
 /// A sea with steep waves over a floor, lit by the sun and the dome; `waves` is the ocean's wave
