@@ -435,6 +435,16 @@ pub(crate) fn segments_of(cmds: &[PathCmd]) -> (Vec<Seg>, Vec<usize>, Vec<usize>
 /// The arc-length table of `segs`: [`SAMPLES`] points per segment on the true curve, as (drawn length, segment,
 /// parameter). The length runs on from one segment to the next; at the segments listed in `restart` it restarts
 /// from the segment's own first point, so a jump there adds no length. Returns the table and the total length.
+///
+/// Motion paths and the points of a repeat (SREP 26) share this measure, and differ in two places where the
+/// written rule for motion paths says otherwise than [`MotionPath`] does:
+///
+/// * a motion path passes no `restart`, so the jump from one subpath to the next counts as drawn length; the rule
+///   says jumps take none, and `along-path` restarts the table at every subpath, as SREP 26 says;
+/// * at an exact vertex [`MotionPath::sample`] takes the incoming segment's direction; the rule says the
+///   outgoing one, which `along-path` takes (and it gives zero-length segments no direction).
+///
+/// Which side moves is for the amendment of the motion-path rule; until then each follows its own contract.
 pub(crate) fn arc_table(segs: &[Seg], restart: &[usize]) -> (Vec<(f64, usize, f64)>, f64) {
     let mut table = Vec::with_capacity(segs.len() * SAMPLES + 1);
     let mut acc = 0.0;
