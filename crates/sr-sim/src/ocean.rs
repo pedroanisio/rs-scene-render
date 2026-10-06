@@ -279,6 +279,15 @@ struct Ends {
     next: Forcing,
 }
 
+/// A state the solver passed on its way to a later one, with its ends, kept for a frame that is asked for before
+/// the solver's own step: a reader that wants the water ahead of a frame steps the solver past it, and the next
+/// frame is then behind it.
+struct Near {
+    step: u64,
+    state: State,
+    ends: Option<Ends>,
+}
+
 /// Interpolated bed and body arrays of the current substep.
 #[derive(Default)]
 struct Scratch {
@@ -329,6 +338,9 @@ pub struct Ocean {
     every: u64,
     frame: Frame,
     ends: Option<Ends>,
+    near: Option<Near>,
+    /// What bodies gave the water in the last whole canonical step of the last seek.
+    exchanged: [f64; 2],
     last_substeps: u64,
 }
 impl Ocean {
@@ -442,6 +454,8 @@ impl Ocean {
             every: (1.0 / spec_dt).ceil().clamp(1.0, 1e12) as u64,
             frame,
             ends: None,
+            near: None,
+            exchanged: [0.0; 2],
             last_substeps: 0,
         })
     }
@@ -592,13 +606,25 @@ impl Ocean {
         while (target + 1) as f64 * self.spec.dt <= time {
             target += 1;
         }
-        let (mut k, mut state) =
-            if self.step <= target { (self.step, self.canonical.clone()) } else { (0, self.initial.clone()) };
+        // Start from the latest of the states at or before the target: the one the solver is at, the one it passed
+        // on its way ahead, a checkpoint, or the initial one. They are all the same states, so the frame does not
+        // depend on which one is used.
+        let (mut k, mut state, mut ends_at) = if self.step <= target {
+            (self.step, self.canonical.clone(), self.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone())))
+        } else {
+            (0, self.initial.clone(), None)
+        };
+        if let Some(near) = self.near.as_ref().filter(|n| n.step <= target && n.step > k) {
+            k = near.step;
+            state = near.state.clone();
+            ends_at = near.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone()));
+        }
         if let Some((step, checkpoint)) =
             self.checkpoints.iter().filter(|(step, _)| *step <= target && *step > k).max_by_key(|(step, _)| step)
         {
             k = *step;
             state = checkpoint.clone();
+            ends_at = None;
         }
         let mut work = Work { remaining: self.spec.max_work, substeps: 0 };
         // Reject impossible replays before entering the loop.
@@ -609,8 +635,8 @@ impl Ocean {
         let mut scratch = Scratch::default();
         let mut ends = match driver.as_deref_mut() {
             None => None,
-            Some(driver) => Some(match &self.ends {
-                Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
+            Some(driver) => Some(match ends_at {
+                Some((step, now, next)) if step == k => (now, next),
                 _ => {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
@@ -672,10 +698,24 @@ impl Ocean {
         }
         let mut frame = publish(&sampled, self.spec.dry_tolerance)?;
         frame.bed = frame_bed;
-        self.canonical = state;
-        self.step = target;
+        let ends = ends.map(|(now, next)| Ends { step: target, now, next });
+        self.exchanged = state.exchange;
+        if target >= self.step {
+            // forward: what the solver was at stays as the nearer state when none is kept, for the frames that
+            // will be asked for behind where it goes now
+            if self.near.is_none() && self.step < target {
+                let ends = self.ends.take();
+                self.near = Some(Near { step: self.step, state: std::mem::replace(&mut self.canonical, state), ends });
+            } else {
+                self.canonical = state;
+            }
+            self.step = target;
+            self.ends = ends;
+        } else {
+            // behind the solver: it keeps where it is, and this is the nearer state for the next frame
+            self.near = Some(Near { step: target, state, ends });
+        }
         self.frame = frame;
-        self.ends = ends.map(|(now, next)| Ends { step: target, now, next });
         self.last_substeps = work.substeps;
         Ok(&self.frame)
     }
@@ -688,7 +728,7 @@ impl Ocean {
     /// during the last whole canonical step this solver reached. It is the input
     /// for a reaction on the bodies; the bodies themselves are not touched.
     pub fn exchanged_impulse(&self) -> [f64; 2] {
-        self.canonical.exchange
+        self.exchanged
     }
     pub fn frame(&self) -> &Frame {
         &self.frame

@@ -34,7 +34,8 @@ fn body(seen: &mut Vec<(u64, [f64; 2])>) -> impl FnMut(f64, &mut Forcing) -> Res
 
 #[test]
 fn each_completed_step_offers_its_momentum_once_and_a_replay_offers_it_again_unchanged() {
-    // without checkpoints a backward seek replays from the start: every step is offered again
+    // without checkpoints a backward seek replays from the nearest state the solver passed or kept, so the steps
+    // from there are offered again
     for (order, checkpoints) in [(Order::First, 0), (Order::Second, 0), (Order::First, 1 << 20)] {
         let mut solver = ocean(order, checkpoints);
         let mut first = Vec::new();
@@ -60,7 +61,7 @@ fn each_completed_step_offers_its_momentum_once_and_a_replay_offers_it_again_unc
             assert_eq!(momentum.map(f64::to_bits), kept.map(f64::to_bits), "{order:?} replay of step {k}");
         }
         if checkpoints == 0 {
-            assert!(replay.len() >= 4, "the replay offered {} steps", replay.len());
+            assert!(!replay.is_empty(), "the replay offered no step");
         }
     }
 }

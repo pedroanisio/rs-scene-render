@@ -698,4 +698,67 @@ mod tests {
             }
         }
     }
+
+    /// The ball of the coupled-ocean tests in a closed basin, with a smoke that reads the rigid world in steps of 0.2 s.
+    fn with_smoke(order: &str) -> String {
+        format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="20" duration="4"/><composition>
+              <object3D id="ball" primitive="sphere" radius="2" segments="24" x="-10" y="0" z="1">
+                <rigidBody shape="sphere" mass="16755.16" velocityX="3" linearDamping="0" angularDamping="0"/>
+              </object3D>
+              <object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="2" dt="0.2" colliders="ball"><pyroSource radius="2" densityRate="1"/></pyro></object3D>
+              <ocean id="sea" bedResponse="hydrostatic" order="{order}" width="160" depth="160" cellSize="2" bottomDepth="10" dt="0.016666666666666666" boundary="closed" colliders="ball" bodyCoupling="full"/>
+            </composition>
+            <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"##
+        )
+    }
+
+    /// The canonical steps the ocean computed for each of the frames 0 to 30 at 20 a second, in the scene whose smoke
+    /// reads the rigid world a fifth of a second past each frame, and what the ocean of each frame looked like.
+    fn steps_per_frame(order: &str) -> (Vec<usize>, Vec<Vec<sim::Cell>>, f64) {
+        let doc = sr_model::load_str(&with_smoke(order), &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        OFFERS.with(|o| o.borrow_mut().clear());
+        let (mut seen, mut steps, mut seas) = (0, Vec::new(), Vec::new());
+        let started = std::time::Instant::now();
+        for k in 0..=30 {
+            let frame = ev.evaluate(k as f64 * 0.05);
+            assert!(
+                frame.problems.is_empty() && frame.failures.is_empty(),
+                "{:?} {:?}",
+                frame.problems,
+                frame.failures
+            );
+            let now = OFFERS.with(|o| o.borrow().len());
+            steps.push(now - seen);
+            seen = now;
+            seas.push(
+                frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().frame.cells.clone(),
+            );
+        }
+        (steps, seas, started.elapsed().as_secs_f64())
+    }
+
+    #[test]
+    fn an_ocean_that_is_stepped_ahead_for_a_reader_does_not_start_again_for_the_next_frame() {
+        for order in ["1", "2"] {
+            let (steps, seas, seconds) = steps_per_frame(order);
+            println!("STEPS order {order}: {steps:?}, {seconds:.3} s");
+            // a frame is three canonical steps on, and the smoke asks for twelve more past it: after the first
+            // frame no frame recomputes what it has already computed ahead
+            assert!(steps.iter().skip(1).all(|&s| s <= 8), "order {order}: {steps:?}");
+            // and what it shows is what an evaluator that was never stepped ahead computes from the start
+            for k in [7usize, 19, 30] {
+                let doc = sr_model::load_str(&with_smoke(order), &sr_model::LoadOptions::without_assets()).unwrap();
+                let fresh = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+                let frame = fresh.evaluate(k as f64 * 0.05);
+                let cells =
+                    &frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().frame.cells;
+                let bits = |c: &[sim::Cell]| {
+                    c.iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).map(f64::to_bits).collect::<Vec<_>>()
+                };
+                assert_eq!(bits(cells), bits(&seas[k]), "order {order}, frame {k}");
+            }
+        }
+    }
 }
