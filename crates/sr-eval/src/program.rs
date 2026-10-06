@@ -3296,15 +3296,6 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
             "<group> @collapse",
             "no effect in this build (non-isolated groups already share the frame's camera space)",
         ),
-        "effect" | "effectType"
-            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
-                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
-        {
-            note(
-                "selective-color @channel",
-                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
-            )
-        }
         _ => {}
     }
 }
