@@ -1090,6 +1090,7 @@ fn template(
         ignored_attribute(e, &mut *warnings);
         crate::pending::check(&*e, &mut *warnings);
         masks_that_miss(e, &mut *warnings);
+        crate::inert::unread_ik_extras(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);
             if !repeat_vars.contains(root) {
