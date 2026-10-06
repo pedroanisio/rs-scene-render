@@ -244,6 +244,29 @@ fn scene_inputs(
         if let Some(sr_model::element::AttrValue::Str(uri)) = e.get_attr("materialX") {
             discover(&uri, Some("mtlx"));
         }
+        // a baked volume names its frames by their digests in its manifest: they are inputs too
+        if let Some(volume) =
+            e.as_any().downcast_ref::<sr_model::model::VolumeAsset>().filter(|v| v.format.as_str() == "srvseq")
+        {
+            if let Resolved::Local(path) = resolve(&volume.src, base) {
+                match sr_volume::bake::BakedSequence::open(&path, None, sr_volume::bake::BakeLimits::default()) {
+                    Ok(bake) => {
+                        let mut seen = std::collections::BTreeSet::new();
+                        for frame in bake.frames().filter(|f| seen.insert(f.filename())) {
+                            imported.push(bake.directory().join(frame.filename()));
+                        }
+                    }
+                    // the manifest is an input itself, so a manifest that is not there yet is seen as missing
+                    Err(sr_volume::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        error = Some(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("{}: {e}", path.display()),
+                        ))
+                    }
+                }
+            }
+        }
         if let Some(inc) = e.as_any().downcast_ref::<sr_model::model::Include>() {
             if let Resolved::Local(path) = resolve(&inc.src, base) {
                 includes.push(path);
@@ -536,6 +559,45 @@ mod tests {
             assert!(inputs.contains(&dir.join(name)), "{name} missing from {inputs:?}");
         }
         assert!(!inputs.contains(&dir.join("frame-%d.obj")) && !inputs.contains(&dir.join("density-%d.srvol")));
+    }
+
+    #[test]
+    fn the_frames_of_a_baked_volume_are_incremental_inputs() {
+        use sr_volume::{
+            bake::{BakeLimits, BakeWriter},
+            SparseGrid, Transform, Volume,
+        };
+        let dir = scratch("baked-volume");
+        let field = |value: f32| {
+            let mut grid = SparseGrid::new(Transform::identity(), 0., 1).unwrap();
+            grid.set([0; 3], value).unwrap();
+            let mut volume = Volume::new();
+            volume.insert("density", grid).unwrap();
+            volume
+        };
+        let mut writer = BakeWriter::new(&dir.join("take"), 0., 10., BakeLimits::default()).unwrap();
+        writer.push(Some(&field(1.))).unwrap();
+        writer.push(Some(&field(2.))).unwrap();
+        let receipt = writer.finish().unwrap();
+        let path = dir.join("scene.xml");
+        let doc = load(
+            &path,
+            &format!(
+                r#"<scene version="1.3"><project width="8" height="8" fps="10" duration="1"/><assets><volume id="cache" src="take/manifest.srvseq" format="srvseq" sha256="{}"/></assets><composition/></scene>"#,
+                receipt.sha256
+            ),
+        );
+        let inputs = files(&path, &doc).unwrap();
+        assert!(inputs.contains(&dir.join("take/manifest.srvseq")), "{inputs:?}");
+        let frames: Vec<_> = std::fs::read_dir(dir.join("take"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "srvol"))
+            .collect();
+        assert_eq!(frames.len(), 2);
+        for frame in frames {
+            assert!(inputs.contains(&frame), "{} missing from {inputs:?}", frame.display());
+        }
     }
 
     #[test]
