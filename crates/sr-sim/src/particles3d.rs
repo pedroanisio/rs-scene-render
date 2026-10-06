@@ -584,6 +584,10 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                 Some(fell) => next.absorbed.push(fell),
                 None => next.frame.particles.push(p),
             }
+        } else if s.water.is_some() {
+            // it dies inside this step: it still falls into the water if it gets there first
+            let mut p = particle.clone();
+            next.absorbed.extend(motion(s, &mut p, lo, (death - lo).max(0.), d, work)?);
         }
     }
     for event in events {
@@ -610,6 +614,8 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                     Some(fell) => next.absorbed.push(fell),
                     None => next.frame.particles.push(p),
                 }
+            } else if s.water.is_some() {
+                next.absorbed.extend(motion(s, &mut p, event.time, (death - event.time).max(0.), d, work)?);
             }
             continue;
         }
@@ -638,6 +644,8 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                     Some(fell) => next.absorbed.push(fell),
                     None => next.frame.particles.push(p),
                 }
+            } else if s.water.is_some() {
+                next.absorbed.extend(motion(s, &mut p, event.time, (death - event.time).max(0.), d, work)?);
             }
         }
     }
