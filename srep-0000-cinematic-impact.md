@@ -980,8 +980,8 @@ drag is a rate of about 0.03 per second (computed from the drag law, not measure
 dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
 
 Ejecta falling into an ocean (`ocean@splash`). An ocean lists the emitters whose particles fall into it
-(OCN13: each throws out the ejecta of a crater, so its particles have a mass; an emitter belongs to one
-ocean). The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
+(OCN13: each throws out the ejecta of a crater, so its particles have a mass). An emitter belongs to one ocean,
+which the evaluator checks when the scene is evaluated, not the rule. The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
 covers): a particle whose centre crosses it downward inside the rectangle, before any contact it would make later
 in the segment, is removed there, and the driver is told which (instant, place, velocity, mass), for every fixed
 step, an empty list too, and again the same when a seek replays the step. The evaluator takes the plane from
@@ -1919,7 +1919,8 @@ crater uses the normal component. It warms the dust by `heat / (dust mass x spec
 (dust mass: its volume times the target density), at most `maxTemperature` kelvin: a declared
 physical cap (vaporisation), not a fallback, below the solver's limit of 50000 K. The solver
 derives the expansion from the heating, as an ideal gas at constant pressure, `(dT/dt)/T` in
-every cell heated, so there is no authored `expansion`; a sealed domain cannot sustain it, as
+every cell heated, so there is no authored `expansion`; a push (`velocityX` to `velocityZ` of an impulse,
+`velocityRateX` to `velocityRateZ` of a source) may be authored and is added to the cloud, in the volume's axes; a sealed domain cannot sustain it, as
 for any expansion. The literature gives ranges, not values, for the share of an impact's
 energy that goes into a plume (internal energy of target and body 0.70 to 0.91 of it at 5 to
 45 km/s in strong rock, O'Keefe and Ahrens 1977; ejecta kinetic energy 0.07 to 0.5 of it), and

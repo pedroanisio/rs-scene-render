@@ -136,3 +136,20 @@ fn the_same_lists_on_any_replay_and_the_survivors_do_not_depend_on_the_plane_the
     let mut with = Emitter::new(spec()).unwrap();
     assert_eq!(with.at(1.0, &mut Log::default()).unwrap().particles, before, "nothing has crossed by 1 s");
 }
+
+#[test]
+fn a_particle_that_crosses_the_plane_and_dies_in_the_same_step_is_told_too() {
+    // the crossing is at 1.0597 s and the step that holds it is (1.0, 1.1]: a lifetime of 1.03 from the birth at 0.05
+    // ends the particle at 1.08, after the crossing and inside that step
+    let mut emitter = Emitter::new(Spec { lifetime: 1.03, ..spec() }).unwrap();
+    let mut log = Log::default();
+    emitter.at(3.0, &mut log).unwrap();
+    let all: Vec<&Absorbed> = log.told.iter().flat_map(|(_, l)| l).collect();
+    assert_eq!(all.len(), 4, "x0 = 0, 1, 2, 3 reach the water before they die: {all:?}");
+    assert!(alive(&emitter).is_empty());
+    // one that dies before the water is not told
+    let mut early = Emitter::new(Spec { lifetime: 0.9, ..spec() }).unwrap();
+    let mut log = Log::default();
+    early.at(3.0, &mut log).unwrap();
+    assert!(log.told.iter().all(|(_, l)| l.is_empty()), "{:?}", log.told);
+}

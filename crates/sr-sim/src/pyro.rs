@@ -41,6 +41,8 @@ mod export;
 mod pockets;
 #[cfg(test)]
 mod sampling;
+#[cfg(test)]
+mod voxel_memory;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -48,10 +50,49 @@ pub enum Error {
     Invalid(&'static str),
     #[error("pyro resource limit: {0}")]
     Limit(&'static str),
-    #[error("pyro pressure solve did not converge (residual {0}); increase iterations or check sealed-domain expansion and collider motion")]
-    Pressure(f64),
+    /// What the scene's rigid world, a driver of the inputs, said when it could not answer.
+    #[error("pyro inputs: {0}")]
+    Driver(String),
+    #[error(
+        "pyro pressure solve did not converge (residual {residual}{}); increase iterations or check sealed-domain expansion and collider motion",
+        worst.map_or(String::new(), |w| format!(", largest at cell {:?} with {}", w.cell, w.value))
+    )]
+    Pressure { residual: f64, worst: Option<Worst> },
     #[error(transparent)]
     Volume(#[from] sr_volume::Error),
+}
+
+/// Where a pressure solve was furthest from its target: the cell and the residual there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Worst {
+    pub cell: [usize; 3],
+    pub value: f64,
+}
+
+/// The cell with the largest absolute value among `values` (a value that is not finite counts as the largest, the
+/// first of them), if any.
+fn worst_of(values: impl Iterator<Item = (usize, f64)>, cells: [usize; 3]) -> Option<Worst> {
+    let mut found: Option<(usize, f64)> = None;
+    for (k, v) in values {
+        let bigger = match found {
+            None => true,
+            Some((_, w)) if w.is_finite() => !v.is_finite() || v.abs() > w.abs(),
+            Some(_) => false,
+        };
+        if bigger {
+            found = Some((k, v));
+        }
+    }
+    found.map(|(k, value)| Worst { cell: coords(k, cells), value })
+}
+
+/// The fluid cell where the divergence of `state` is furthest from `target`: where the flow cannot be made to
+/// satisfy it, which is where the sealed or expanding region is.
+fn worst_divergence(state: &State, target: &[f64]) -> Option<Worst> {
+    let left = (0..target.len())
+        .filter(|k| !state.solid[*k])
+        .map(|k| (k, state.divergence_at(coords(k, state.cells)) - target[k]));
+    worst_of(left, state.cells)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,11 +559,20 @@ fn voxelize(
 ) -> Result<(Vec<bool>, Vec<SolidFaces>), Error> {
     let count = cells.iter().product();
     let mut solid = vec![false; count];
-    let mut faces = Vec::new();
+    let centre = |k: usize| world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
+    // the mask first, so that the list of faces is allocated once, at the size it is charged for
+    let mut solid_cells = 0usize;
     for (k, is_solid) in solid.iter_mut().enumerate() {
-        let p = world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
-        let Some(collider) = obstacles.iter().find(|o| o.shape.contains(p)) else { continue };
-        *is_solid = true;
+        let p = centre(k);
+        if obstacles.iter().any(|o| o.shape.contains(p)) {
+            *is_solid = true;
+            solid_cells += 1;
+        }
+    }
+    let mut faces = Vec::with_capacity(solid_cells);
+    for (k, _) in solid.iter().enumerate().filter(|(_, s)| **s) {
+        let p = centre(k);
+        let collider = obstacles.iter().find(|o| o.shape.contains(p)).expect("a cell of the mask is in a collider");
         let (mut low_velocity, mut high_velocity) = ([0.0; 3], [0.0; 3]);
         for (axis, (low_v, high_v)) in low_velocity.iter_mut().zip(&mut high_velocity).enumerate() {
             let mut low = p;
@@ -534,7 +584,6 @@ fn voxelize(
         }
         faces.push(SolidFaces { cell: k, low: low_velocity, high: high_velocity });
     }
-    faces.shrink_to_fit();
     Ok((solid, faces))
 }
 
@@ -1295,6 +1344,71 @@ fn neighbours(p: [usize; 3], dims: [usize; 3]) -> [Option<usize>; 6] {
     })
 }
 
+/// The vectors of a conjugate-gradient solve: the pressure, the residual, the preconditioned residual, the search
+/// direction and the operator applied to it.
+struct Vectors<'a> {
+    pressure: &'a mut [f64],
+    residual: &'a mut [f64],
+    z: &'a mut [f64],
+    direction: &'a mut [f64],
+    applied: &'a mut [f64],
+}
+
+/// The state a conjugate-gradient loop starts from and what it stops on.
+struct Cg<'a> {
+    tolerance: f64,
+    iterations: usize,
+    /// The inner product of the residual with the preconditioned residual, and the norm of the residual.
+    rz: f64,
+    current: f64,
+    from_squares: &'a dyn Fn(f64) -> f64,
+}
+
+/// The preconditioned conjugate-gradient loop of the pressure solve, the same for both preconditioners: what differs
+/// is how the inner product of two vectors is summed (`dot`) and how a step updates the pressure and the residual,
+/// preconditions it and sums the two reductions it needs (`step`, which returns `r.z` and `r.r`), each of which keeps
+/// the order of its own sums so that the bits of the result are those the solver has always had. The error is the residual the loop stopped on without converging (or at a non-positive curvature).
+fn conjugate_gradient<S>(
+    cg: Cg<'_>,
+    vectors: Vectors<'_>,
+    apply: &dyn Fn(&[f64], &mut [f64]),
+    dot: &dyn Fn(&[f64], &[f64]) -> f64,
+    mut step: S,
+    (profile, clock): (&mut StepProfile, &mut Instant),
+) -> Result<(f64, usize), f64>
+where
+    S: FnMut(f64, &mut [f64], &mut [f64], &mut [f64], &[f64], &mut [f64], &mut StepProfile, &mut Instant) -> (f64, f64),
+{
+    let Vectors { pressure, residual, z, direction, applied } = vectors;
+    let Cg { tolerance, iterations, mut rz, mut current, from_squares } = cg;
+    let mut used = 0;
+    loop {
+        profile.project_reduce += lap(clock);
+        if !(current > tolerance && used < iterations) {
+            break;
+        }
+        apply(direction, applied);
+        profile.project_apply += lap(clock);
+        let denom = dot(direction, applied);
+        profile.project_reduce += lap(clock);
+        if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
+            return Err(current);
+        }
+        let alpha = rz / denom;
+        let (next, squares) = step(alpha, pressure, residual, z, direction, applied, profile, clock);
+        current = from_squares(squares);
+        let beta = next / rz;
+        direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
+        profile.project_update += lap(clock);
+        rz = next;
+        used += 1;
+    }
+    if current > tolerance {
+        return Err(current);
+    }
+    Ok((current, used))
+}
+
 fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile) -> Result<StepReport, Error> {
     let (iterations, tolerance, solver) = (spec.pressure_iterations, spec.pressure_tolerance, spec.solver);
     let mut clock = Instant::now();
@@ -1376,27 +1490,21 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                 .collect();
             let mut direction = z.clone();
             let mut applied = vec![0.0; count];
-            let mut rz = inner(&residual, &z);
-            // Both folds below start from `Iterator::sum`'s identity and add in index
+            let rz = inner(&residual, &z);
+            // Both folds in `step` start from `Iterator::sum`'s identity and add in index
             // order, exactly like `inner`/`rms`; fusing them only shares the pass over
             // memory, since the two accumulation chains are independent.
-            let identity = std::iter::empty::<f64>().sum::<f64>();
-            let mut current = rms(&residual);
-            let mut used = 0;
+            let current = rms(&residual);
             profile.project_setup = lap(&mut clock);
-            loop {
-                profile.project_reduce += lap(&mut clock);
-                if !(current > tolerance && used < iterations) {
-                    break;
-                }
-                apply(&direction, &mut applied);
-                profile.project_apply += lap(&mut clock);
-                let denom = inner(&direction, &applied);
-                profile.project_reduce += lap(&mut clock);
-                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-                    return Err(Error::Pressure(current));
-                }
-                let alpha = rz / denom;
+            let identity = std::iter::empty::<f64>().sum::<f64>();
+            let step = |alpha: f64,
+                        pressure: &mut [f64],
+                        residual: &mut [f64],
+                        z: &mut [f64],
+                        direction: &[f64],
+                        applied: &mut [f64],
+                        profile: &mut StepProfile,
+                        clock: &mut Instant| {
                 pressure
                     .par_iter_mut()
                     .zip(residual.par_iter_mut())
@@ -1408,23 +1516,30 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                         *r -= alpha * applied[k];
                         *z = if diagonal[k] > 0.0 { *r / diagonal[k] } else { *r };
                     });
-                profile.project_update += lap(&mut clock);
+                profile.project_update += lap(clock);
                 let (mut next, mut squares) = (identity, identity);
-                for (r, z) in residual.iter().zip(&z) {
+                for (r, z) in residual.iter().zip(z.iter()) {
                     next += r * z;
                     squares += r * r;
                 }
-                current = from_squares(squares);
-                profile.project_reduce += lap(&mut clock);
-                let beta = next / rz;
-                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
-                profile.project_update += lap(&mut clock);
-                rz = next;
-                used += 1;
-            }
-            if current > tolerance {
-                return Err(Error::Pressure(current));
-            }
+                profile.project_reduce += lap(clock);
+                (next, squares)
+            };
+            let (_, used) = conjugate_gradient(
+                Cg { tolerance, iterations, rz, current, from_squares: &from_squares },
+                Vectors {
+                    pressure: &mut pressure,
+                    residual: &mut residual,
+                    z: &mut z,
+                    direction: &mut direction,
+                    applied: &mut applied,
+                },
+                &apply,
+                &inner,
+                step,
+                (profile, &mut clock),
+            )
+            .map_err(|current| Error::Pressure { residual: current, worst: worst_divergence(s, target) })?;
             (pressure, before, used)
         }
         PressureSolver::Multigrid => {
@@ -1446,11 +1561,10 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
             let mut applied = vec![0.0; count];
             profile.project_setup = lap(&mut clock);
             let [squares] = multigrid::blocked_sums(count, |k| [residual[k] * residual[k]]);
-            let mut current = from_squares(squares);
-            let mut used = 0;
+            let current = from_squares(squares);
             profile.project_reduce += lap(&mut clock);
             // A residual already within tolerance needs no preconditioner pass.
-            let (mut direction, mut rz) = if current > tolerance {
+            let (mut direction, rz) = if current > tolerance {
                 hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
                 profile.project_precondition += lap(&mut clock);
                 let [rz] = multigrid::blocked_sums(count, |k| [residual[k] * z[k]]);
@@ -1459,40 +1573,45 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
             } else {
                 (Vec::new(), 0.0)
             };
-            loop {
-                if !(current > tolerance && used < iterations) {
-                    break;
-                }
-                apply(&direction, &mut applied);
-                profile.project_apply += lap(&mut clock);
-                let [denom] = multigrid::blocked_sums(count, |k| [direction[k] * applied[k]]);
-                profile.project_reduce += lap(&mut clock);
-                if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-                    return Err(Error::Pressure(current));
-                }
-                let alpha = rz / denom;
+            let step = |alpha: f64,
+                        pressure: &mut [f64],
+                        residual: &mut [f64],
+                        z: &mut [f64],
+                        direction: &[f64],
+                        applied: &mut [f64],
+                        profile: &mut StepProfile,
+                        clock: &mut Instant| {
                 pressure.par_iter_mut().zip(residual.par_iter_mut()).enumerate().with_min_len(LIGHT).for_each(
                     |(k, (p, r))| {
                         *p += alpha * direction[k];
                         *r -= alpha * applied[k];
                     },
                 );
-                profile.project_update += lap(&mut clock);
-                hierarchy.precondition(&residual, &mut z, &mut applied, &mut scratch);
-                profile.project_precondition += lap(&mut clock);
+                profile.project_update += lap(clock);
+                // the preconditioner uses `applied` as scratch: the operator rewrites it before it is read
+                hierarchy.precondition(residual, z, applied, &mut scratch);
+                profile.project_precondition += lap(clock);
                 let [next, squares] =
                     multigrid::blocked_sums(count, |k| [residual[k] * z[k], residual[k] * residual[k]]);
-                current = from_squares(squares);
-                profile.project_reduce += lap(&mut clock);
-                let beta = next / rz;
-                direction.par_iter_mut().zip(z.par_iter()).with_min_len(LIGHT).for_each(|(d, z)| *d = z + beta * *d);
-                profile.project_update += lap(&mut clock);
-                rz = next;
-                used += 1;
-            }
-            if current > tolerance {
-                return Err(Error::Pressure(current));
-            }
+                profile.project_reduce += lap(clock);
+                (next, squares)
+            };
+            let dot = |a: &[f64], b: &[f64]| multigrid::blocked_sums(count, |k| [a[k] * b[k]])[0];
+            let (_, used) = conjugate_gradient(
+                Cg { tolerance, iterations, rz, current, from_squares: &from_squares },
+                Vectors {
+                    pressure: &mut pressure,
+                    residual: &mut residual,
+                    z: &mut z,
+                    direction: &mut direction,
+                    applied: &mut applied,
+                },
+                &apply,
+                &dot,
+                step,
+                (profile, &mut clock),
+            )
+            .map_err(|current| Error::Pressure { residual: current, worst: worst_divergence(s, target) })?;
             (pressure, before, used)
         }
     };
@@ -1537,7 +1656,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
         }
     };
     if !after.is_finite() || after > tolerance * 1.01 {
-        return Err(Error::Pressure(after));
+        return Err(Error::Pressure { residual: after, worst: worst_divergence(s, target) });
     }
     profile.project_finish = lap(&mut clock);
     Ok(StepReport { divergence_before: before, divergence_after: after, pressure_iterations: used })

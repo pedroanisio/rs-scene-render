@@ -2066,8 +2066,8 @@
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
     <xs:attribute name="crater" type="xs:IDREF"/>
-    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angle"><xs:annotation><xs:documentation>The launch angle above the tangent plane, degrees; the engine's default is 45. It is not an XSD default, so that it can be refused on a burst that is not from a crater (P3D9).</xs:documentation></xs:annotation><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angleSpread"><xs:annotation><xs:documentation>The half-width of the uniform spread of the launch angle, degrees; the engine's default is 15, with the same reason as `angle`. The angle and its spread stay between 0 and 90 together (P3D10).</xs:documentation></xs:annotation><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="particleEmitterType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -2260,7 +2260,8 @@
         Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
         the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
         stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
-        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        with the water, the same law along the motion of the body relative to the water. Default 1.0, the engine's: not an XSD default, so that
+        the attribute can be refused on an ocean without `colliders` (OCN9). It is an engine parameter, not a value from the impact literature; 0 gives
         undamped bobbing.
       </xs:documentation></xs:annotation>
     </xs:attribute>
@@ -2461,7 +2462,9 @@
       expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
       share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
       that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
-      `physics/@pixelsPerMeter`.
+      `physics/@pixelsPerMeter`. `velocityX`, `velocityY` and `velocityZ` of an impulse and `velocityRateX`, `velocityRateY`
+      and `velocityRateZ` of a source stay authorable with `crater`: the push is added to the cloud of the impact (in the
+      volume's axes) and is not derived from it.
     </xs:documentation></xs:annotation>
     <xs:attribute name="crater" type="xs:IDREF"/>
     <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
@@ -2554,7 +2557,8 @@
       for abs(x)&lt;1 (zero otherwise), displace along n by
       p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
       At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
-      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
+      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight) (CRT4, for a crater
+      without a `source`; the size of a crater from an impact is not in the document, so its envelope is checked when the crater is made).
       This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
       maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
       by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.

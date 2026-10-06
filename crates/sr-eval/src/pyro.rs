@@ -338,7 +338,12 @@ fn state_at<'r>(
             };
             if !fields.is_empty() || !colliders.is_empty() || craters {
                 if let Some(physics) = physics.as_deref_mut() {
+                    // a rigid world that could not answer is an error, not a world with no impact yet
+                    let before = frame.problems.len();
                     crate::sim::apply_physics(p, physics, Arc::make_mut(&mut frame), graphs, fields, t);
+                    if frame.problems.len() > before {
+                        return Err(pyro::Error::Driver(frame.problems[before..].join("; ")));
+                    }
                 }
             }
             // Conditions can omit the owner during part of its
@@ -354,7 +359,11 @@ fn state_at<'r>(
                             crate::sim::source_sample(p, node, time + dt + p.nodes[node as usize].start, at);
                         let mut next = crate::eval::evaluate_pose_with_clocks(p, next_t, &next_clocks);
                         if let Some(physics) = physics.as_deref_mut() {
+                            let before = next.problems.len();
                             crate::sim::apply_physics(p, physics, &mut next, graphs, fields, next_t);
+                            if next.problems.len() > before {
+                                return Err(pyro::Error::Driver(next.problems[before..].join("; ")));
+                            }
                         }
                         colliders::apply(&mut input, colliders, &frame, &next, id, dt)?;
                     }
