@@ -1069,8 +1069,9 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         nodes: Vec<FrameNode>,
         world: Vec<Option<(Affine, f64)>>,
         out_ix: Vec<Option<u32>>,
+        problems: Vec<String>,
     }
-    let mut out = Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n] };
+    let mut out = Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n], problems: Vec::new() };
 
     // depth-first, z-sorted, active nodes only
     #[allow(clippy::too_many_arguments)]
@@ -1162,6 +1163,11 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             joints: None,
             elem: node.elem.clone(),
         });
+        if node.name == "shape" {
+            if let Some(shape) = o.nodes.last_mut() {
+                crate::stroke_font::attach(p, shape, &mut o.problems);
+            }
+        }
         let own_box = node.box_size.map(|[w, h]| [resolve_len(w, bx[0], p.size), resolve_len(h, bx[1], p.size)]);
         let cbox = own_box.unwrap_or(bx);
         if node.layout.is_some() || node.children.iter().any(|&k| p.nodes[k as usize].align.is_some()) {
@@ -1304,7 +1310,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         transitions,
         camera,
         elements,
-        problems: Vec::new(),
+        problems: std::mem::take(&mut out.problems),
         failures: Vec::new(),
         sim_seconds: SimSeconds::default(),
         seed: p.seed,

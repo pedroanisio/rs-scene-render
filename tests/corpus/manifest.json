@@ -363,6 +363,12 @@
     "p3d9-orphan.scene.xml": [
       "P3D9"
     ],
+    "pen1.scene.xml": [
+      "PEN1"
+    ],
+    "pen2.scene.xml": [
+      "PEN2"
+    ],
     "pyc1-derived.scene.xml": [
       "PYC1"
     ],
@@ -756,6 +762,9 @@
     "v5-morph.scene.xml": [
       "V5"
     ],
+    "v5-stroke-text.scene.xml": [
+      "V5"
+    ],
     "v6-elements.scene.xml": [
       "V6"
     ],
@@ -848,6 +857,7 @@
     "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
+    "stroke-text.scene.xml": [],
     "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],

@@ -506,6 +506,8 @@ pub struct Program {
     /// Models read for joint sockets, and the joints each object is asked for.
     pub(crate) joint_models: crate::joints::Cache,
     pub(crate) joint_sockets: std::sync::OnceLock<crate::joints::Sockets>,
+    /// Stroke fonts read for `stroke-text` shapes.
+    pub(crate) stroke_fonts: crate::stroke_font::Cache,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -1367,6 +1369,13 @@ impl Builder {
                     .into_iter()
                     .flatten()
                 {
+                    let ns = &self.doc(ctx.doc).ns;
+                    let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                    self.assets.insert(key, (ctx.doc, r));
+                }
+            }
+            if name == "shape" {
+                if let Some(r) = attr_str(e, "strokeFont") {
                     let ns = &self.doc(ctx.doc).ns;
                     let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
                     self.assets.insert(key, (ctx.doc, r));
@@ -3185,6 +3194,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         mesh_sequence_cache: Default::default(),
         joint_models: Default::default(),
         joint_sockets: Default::default(),
+        stroke_fonts: Default::default(),
         base_dirs,
         safe_area,
         safe_enforce,

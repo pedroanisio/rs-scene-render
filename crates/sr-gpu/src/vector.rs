@@ -169,7 +169,8 @@ pub fn primitive(a: &Attrs, kind: &str, w: f64, h: f64) -> Result<Path, String> 
             0.0,
         ),
         "line" => shapes::line(w, h),
-        "path" => match a.str("path") {
+        // a stroke-text shape's outline is the path data the evaluator laid out (the `path` property)
+        "path" | "stroke-text" => match a.str("path") {
             Some(d) => Path::parse(&d).map_err(|e| e.to_string())?,
             None => return Err("shape=\"path\" needs @path".into()),
         },
@@ -279,7 +280,8 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
     let trimmed = ts > 0.0 || te < 1.0;
     let rule_ = rule(a.str("fillRule"), FillRule::NonZero);
     let box_rect = [0.0, 0.0, w, h];
-    let fill = a.paint("fill").and_then(|v| paint(&v, box_rect));
+    // stroke-text is open strokes: it has no inside to fill
+    let fill = if kind == "stroke-text" { None } else { a.paint("fill").and_then(|v| paint(&v, box_rect)) };
     let stroke_paint = a.paint("stroke").and_then(|v| paint(&v, box_rect));
     let sw = a.num("strokeWidth", 0.0);
     let style = Style {

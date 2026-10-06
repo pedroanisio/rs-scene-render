@@ -19,7 +19,7 @@
   </sch:pattern>
   <sch:pattern id="p1b">
     <sch:rule context="/scene[@version='1.0' or @version='1.1']">
-      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D/morph|.//object3D/joint|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
+      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D/morph|.//object3D/joint|assets/strokeFont|.//shape[@shape='stroke-text']|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
         documents before version="1.2" cannot use 1.2 elements or asset kinds; set version="1.2".</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -573,6 +573,12 @@
   <sch:pattern id="p67">
     <sch:rule context="object3D[@tracking]">
       <sch:assert id="TXT2" test="@primitive='text'">@tracking applies to object3D primitive="text".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p69">
+    <sch:rule context="shape[@shape='stroke-text']">
+      <sch:assert id="PEN1" test="@text and @strokeFont">shape="stroke-text" needs @text and @strokeFont.</sch:assert>
+      <sch:assert id="PEN2" test="not(@strokeFont) or /scene/assets/strokeFont[@id=current()/@strokeFont]">shape/@strokeFont must name a strokeFont asset.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p68">
