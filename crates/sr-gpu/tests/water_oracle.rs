@@ -138,3 +138,36 @@ fn a_light_without_shadows_lights_a_wall_under_water_as_one_with() {
     eprintln!("wall red without castShadow {got} against the oracle {want}");
     assert!((got / want - 1.0).abs() < 0.04, "wall under water, no shadows: {got} against the oracle {want}");
 }
+
+/// A camera inside a large water box (800 by 200 by 800, so that the ray meets the middle of the
+/// faces) looks up at the top face at 45 degrees from the vertical, and
+/// above it an emissive plane of radiance 1. What the ray meets at the face is the exit from the
+/// denser medium: the share it transmits is 1 - R with the exact Fresnel reflectance R of the dense
+/// side at 45 degrees (0.14, the critical angle is 48.6 degrees), not the 0.02 that the Schlick
+/// term gives when it is fed the cosine of the dense side. What the face reflects goes down to
+/// the box's other faces, which it meets at the same 45 degrees, and a second pass adds R^2 of
+/// it.
+#[test]
+fn a_ray_leaving_water_at_45_degrees_is_reflected_as_fresnel_says() {
+    let scene = format!(
+        r##"<scene version="1.3"><project width="16" height="16" fps="10" duration="1" background="#000000"/>
+      <materials>
+        <material id="waterMat" baseColor="#FFFFFF" roughness="0.02" ior="{ETA}" doubleSided="true" transmission="1"/>
+        <material id="lampMat" baseColor="#000000" roughness="1" specular="0" emissive="#FFFFFF" emissiveStrength="1"/>
+      </materials>
+      <composition>
+        <camera id="camera" x="0" y="0" z="0" pitch="45" fov="2" renderer="pathtrace" pathSamples="2048" maxBounces="1" denoise="false"/>
+        <object3D id="tank" primitive="box" width="800" height="200" depth="800" material="waterMat"/>
+        <object3D id="lamp" primitive="plane" width="4000" height="4000" y="-400" rotationX="-90" material="lampMat"/>
+      </composition>
+      <lights><light id="off" type="ambient" color="#000000" intensity="0"/></lights></scene>"##
+    );
+    let Some(r) = render(&scene) else { return };
+    let centre: f32 =
+        (6..10).flat_map(|y| (6..10).map(move |x| (x, y))).map(|(x, y)| r.px[y * 16 + x][1]).sum::<f32>() / 16.0;
+    let r45 = reflectance(std::f32::consts::FRAC_1_SQRT_2, ETA, 1.0);
+    assert!((r45 - 0.1395).abs() < 1e-3, "the oracle: {r45}");
+    let want = (1.0 - r45) * (1.0 + r45 * r45);
+    eprintln!("radiance through the exit {centre} against the oracle {want}");
+    assert!((centre / want - 1.0).abs() < 0.03, "exit at 45 degrees: {centre} against the oracle {want}");
+}

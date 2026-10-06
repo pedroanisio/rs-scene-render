@@ -624,6 +624,10 @@ mod tests {
         for base in [plain.clone(), grid_source()] {
             let water = water_source(&base);
             assert!(water.contains("fn light_through(") && water.contains("inside = entering;"));
+            assert!(
+                water.contains("if (!entering && dot(t, t) >= 1e-8) { cosi"),
+                "the exit uses the cosine of the air side"
+            );
             assert_eq!(
                 water.matches("light_through(p, ng, n, l, ls.w, in_sigma, lt.size.y > 0.5 && m.extra.z > 0.5)").count(),
                 1
@@ -821,16 +825,27 @@ fn grid_source() -> String {
 }
 
 /// The shader for scenes with a transmissive material: the shader it is given (with or without
-/// light grids) plus the refracted shadow ray, which three small replacements hook in. Scenes
+/// light grids) plus the refracted shadow ray and the Fresnel term of a ray leaving the denser
+/// medium, which four small replacements hook in. Scenes
 /// without such a material keep the text, and so the compiled code, they had.
 fn water_source(base: &str) -> String {
     const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
     const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const FRESNEL: &str = "            let cosi = clamp(dot(v, n), 0.0, 1.0);\n            let r0 = (1.0 - eta) / (1.0 + eta);\n            let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n            let t = refract(d, n, eta);\n";
     const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
-    for hook in [SIGMA, ENTER, VISIBLE] {
+    for hook in [SIGMA, ENTER, FRESNEL, VISIBLE] {
         assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
     }
     let hooked = base
+        // Schlick's term takes the cosine of the side the light goes to when it leaves the denser medium
+        .replace(
+            FRESNEL,
+            "            let t = refract(d, n, eta);\n\
+             \x20           var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
+             \x20           if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
+             \x20           let r0 = (1.0 - eta) / (1.0 + eta);\n\
+             \x20           let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
+        )
         .replace(SIGMA, &format!("{SIGMA}    var inside = false;\n"))
         .replace(
             ENTER,
