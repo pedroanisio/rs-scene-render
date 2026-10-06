@@ -462,6 +462,16 @@
     <xs:attribute name="max" type="xs:double"/>
     <xs:attribute name="delay" type="xs:double" default="0"/>
     <xs:attribute name="smoothing" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="follow" default="none">
+      <xs:annotation><xs:documentation>A follower of the delayed source: "exponential" is a first-order lag of time constant @timeConstant; "spring" is a damped spring with @stiffness, @damping and @mass (as the spring curve of a key), so it can overshoot and settle. Both are linear filters of the source's history, evaluated without state. Not applied together with @smoothing.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="none"/><xs:enumeration value="exponential"/><xs:enumeration value="spring"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="timeConstant" type="positiveDecimal" default="0.1"/>
+    <xs:attribute name="stiffness" type="positiveDecimal" default="100"/>
+    <xs:attribute name="damping" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="mass" type="positiveDecimal" default="1"/>
   </xs:complexType>
   <xs:group name="animationElements">
     <xs:choice>

@@ -409,6 +409,57 @@ pub struct LinkInst {
     pub delay: f64,
     /// Moving-average window in seconds.
     pub smoothing: f64,
+    /// The follower of the delayed source (applied when `smoothing` is 0).
+    pub follower: Option<Follower>,
+}
+
+/// A link's follower: the impulse response of a linear filter of unit gain, sampled at the midpoints of equal
+/// intervals of its window.
+#[derive(Debug, Clone)]
+pub struct Follower {
+    /// Seconds of history the response covers (it has decayed to 0.1 % after them).
+    pub window: f64,
+    /// Weights of the samples, newest first, summing to 1.
+    pub weights: Vec<f64>,
+}
+
+impl Follower {
+    /// First-order lag of time constant `t` (seconds).
+    pub fn exponential(t: f64) -> Follower {
+        Follower::sampled(1.0 / t, |u| (-u / t).exp() / t)
+    }
+
+    /// Damped spring `x'' = (k/m)(s - x) - (c/m) x'`: the response of the second-order system with natural frequency
+    /// `sqrt(k/m)` and damping ratio `c / (2 sqrt(k m))`.
+    pub fn spring(stiffness: f64, damping: f64, mass: f64) -> Follower {
+        let w0 = (stiffness / mass).sqrt();
+        let z = damping / (2.0 * (stiffness * mass).sqrt());
+        if (z - 1.0).abs() < 1e-6 {
+            Follower::sampled(w0, |u| w0 * w0 * u * (-w0 * u).exp())
+        } else if z < 1.0 {
+            let wd = w0 * (1.0 - z * z).sqrt();
+            Follower::sampled(z * w0, |u| w0 * w0 / wd * (-z * w0 * u).exp() * (wd * u).sin())
+        } else {
+            let r = (z * z - 1.0).sqrt();
+            let (p1, p2) = (-w0 * (z - r), -w0 * (z + r));
+            // the slower pole is p1: the response decays at its rate
+            Follower::sampled(-p1, |u| w0 * w0 * ((p1 * u).exp() - (p2 * u).exp()) / (p1 - p2))
+        }
+    }
+
+    /// `h` sampled at the midpoints of `n` equal intervals (480 a second, 16 to 2048) of a window of `ln(1000) / rate`
+    /// seconds, normalised.
+    fn sampled(rate: f64, h: impl Fn(f64) -> f64) -> Follower {
+        let window = 1000f64.ln() / rate;
+        let n = ((480.0 * window).ceil() as usize).clamp(16, 2048);
+        let dt = window / n as f64;
+        let mut weights: Vec<f64> = (0..n).map(|i| h((i as f64 + 0.5) * dt) * dt).collect();
+        let sum: f64 = weights.iter().sum();
+        if sum.is_finite() && sum.abs() > 1e-12 {
+            weights.iter_mut().for_each(|w| *w /= sum);
+        }
+        Follower { window, weights }
+    }
 }
 
 /// A transition window between nodes.
@@ -2723,6 +2774,40 @@ impl Builder {
                 }
             };
             if let Some(source) = source {
+                let smoothing = l.smoothing.get();
+                let (spring, lag) = ((l.stiffness.get(), l.damping.get(), l.mass.get()), l.time_constant.get());
+                let mut unread = |attr: &str, family: &str| {
+                    self.warnings.push(Diagnostic::warning(
+                        "E19",
+                        format!("link on {who}: @{attr} is accepted but has no effect without follow=\"{family}\", which reads it"),
+                        l.loc,
+                        who.as_str(),
+                    ))
+                };
+                if l.follow != m::Follow::Exponential && lag != 0.1 {
+                    unread("timeConstant", "exponential");
+                }
+                if l.follow != m::Follow::Spring {
+                    for (attr, set) in [("stiffness", spring.0 != 100.0), ("damping", spring.1 != 10.0), ("mass", spring.2 != 1.0)] {
+                        if set {
+                            unread(attr, "spring");
+                        }
+                    }
+                }
+                if l.follow != m::Follow::None && smoothing > 0.0 {
+                    self.warnings.push(Diagnostic::warning(
+                        "E19",
+                        format!("link on {who}: @follow is ignored because @smoothing is set; a link uses one or the other"),
+                        l.loc,
+                        who.as_str(),
+                    ));
+                }
+                let follower = match l.follow {
+                    _ if smoothing > 0.0 => None,
+                    m::Follow::None => None,
+                    m::Follow::Exponential => Some(Follower::exponential(lag)),
+                    m::Follow::Spring => Some(Follower::spring(spring.0, spring.1, spring.2)),
+                };
                 self.links.push(LinkInst {
                     source,
                     scale: l.scale,
@@ -2730,7 +2815,8 @@ impl Builder {
                     min: l.min,
                     max: l.max,
                     delay: l.delay,
-                    smoothing: l.smoothing.get(),
+                    smoothing,
+                    follower,
                 });
                 self.slots[slot as usize].link = Some((self.links.len() - 1) as u32);
             }

@@ -499,7 +499,20 @@ impl Program {
             }
         };
         let t0 = comp_t - link.delay;
-        let src = if link.smoothing > 0.0 {
+        let src = if let Some(follower) = &link.follower {
+            // the filter of the source's history: sum of weight x source at (t0 - age), the source holding its value
+            // from before time 0 (a constant source gives that constant)
+            let step = follower.window / follower.weights.len() as f64;
+            let mut acc: Option<Vec<f64>> = None;
+            for (i, w) in follower.weights.iter().enumerate() {
+                let c = sample((t0 - (i as f64 + 0.5) * step).max(0.0)).components().unwrap_or_default();
+                match &mut acc {
+                    None => acc = Some(c.iter().map(|x| x * w).collect()),
+                    Some(a) => a.iter_mut().zip(&c).for_each(|(x, y)| *x += y * w),
+                }
+            }
+            V::nums(&acc.unwrap_or_default())
+        } else if link.smoothing > 0.0 {
             let n = ((link.smoothing * self.fps.as_f64()).round() as usize).clamp(1, 240);
             let mut acc: Option<Vec<f64>> = None;
             for i in 0..n {
