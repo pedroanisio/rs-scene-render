@@ -1345,20 +1345,37 @@ impl Renderer {
             splats.push(SplatDraw { gpu, model: world * s.basis, opacity });
         }
         if let Some(model) = asset.model() {
-            // animation clip at the object's local time
-            let clip = a.str("animationClip").and_then(|c| {
+            // animation clip at the object's local time, blended toward a second clip by @animationBlend
+            let find = |c: &str| {
                 model
                     .animations
                     .iter()
                     .find(|x| x.name == c)
                     .or_else(|| c.parse::<usize>().ok().and_then(|k| model.animations.get(k)))
-            });
-            if let (Some(c), None) = (a.str("animationClip"), clip) {
-                plan.stats.errors.push(format!("{}: animation clip {c} not found", n.id));
-            }
-            let t = (n.local_time * a.num("animationSpeed", 1.0) + a.num("animationOffset", 0.0)) as f32;
-            let t = clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0);
-            let (locals, weights) = sr_3d::anim::pose(model, clip, t);
+            };
+            let named = |attr: &str, plan: &mut Plan| {
+                let want = a.str(attr)?;
+                let clip = find(&want);
+                if clip.is_none() {
+                    plan.stats.errors.push(format!("{}: animation clip {want} not found", n.id));
+                }
+                clip
+            };
+            let clip = named("animationClip", plan);
+            let clip_to = named("animationClipTo", plan);
+            let at = |clip: Option<&sr_3d::Animation>, offset: f64| {
+                let t = (n.local_time * a.num("animationSpeed", 1.0) + offset) as f32;
+                clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0)
+            };
+            let blend = a.num("animationBlend", 0.0).clamp(0.0, 1.0) as f32;
+            let (locals, weights) = sr_3d::anim::pose_blend(
+                model,
+                clip,
+                at(clip, a.num("animationOffset", 0.0)),
+                clip_to,
+                at(clip_to, a.num("animationOffsetTo", 0.0)),
+                blend,
+            );
             let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
             let variant = a.str("materialVariant");
             // `node`: only that node and what is under it, placed at the object's origin

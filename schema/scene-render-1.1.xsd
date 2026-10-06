@@ -2747,6 +2747,13 @@
     <xs:attribute name="animationClip" type="xs:string"/>
     <xs:attribute name="animationSpeed" type="xs:double" default="1"/>
     <xs:attribute name="animationOffset" type="xs:double" default="0"/>
+    <xs:attribute name="animationClipTo" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a second clip (by name or index, as @animationClip) the model is blended toward by @animationBlend. It plays at the object's time scaled by @animationSpeed plus @animationOffsetTo.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="animationBlend" type="unitDecimal" default="0">
+      <xs:annotation><xs:documentation>Weight of @animationClipTo, 0 to 1 (animatable): 0 is @animationClip alone, 1 is @animationClipTo alone, between them translation, scale and morph weights blend linearly and rotation along the shortest arc. A node a clip does not animate keeps its rest pose in that clip. Without @animationClipTo the weight blends toward the rest pose.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="animationOffsetTo" type="xs:double" default="0"/>
     <xs:attribute name="morphWeights" type="numberListType"/>
     <xs:attribute name="materialVariant" type="xs:string"/>
     <xs:attribute name="instances" type="xs:positiveInteger" default="1"/>

@@ -82,6 +82,49 @@ pub fn pose(model: &Model, anim: Option<&Animation>, t: f32) -> (Vec<Trs>, Vec<V
     (locals, weights)
 }
 
+/// The pose of `a` at `ta` seconds blended with the pose of `b` at `tb` by `w` (0: all `a`, 1: all `b`). Translation, scale
+/// and morph weights blend linearly and rotation along the shortest arc. A clip that does not animate a node leaves it at
+/// its rest pose in that clip; `None` is the rest pose throughout.
+pub fn pose_blend(
+    model: &Model,
+    a: Option<&Animation>,
+    ta: f32,
+    b: Option<&Animation>,
+    tb: f32,
+    w: f32,
+) -> (Vec<Trs>, Vec<Vec<f32>>) {
+    let (la, wa) = pose(model, a, ta);
+    if w <= 0.0 || w.is_nan() {
+        return (la, wa);
+    }
+    let (lb, wb) = pose(model, b, tb);
+    if w >= 1.0 {
+        return (lb, wb);
+    }
+    let locals = la
+        .iter()
+        .zip(&lb)
+        .map(|(x, y)| Trs {
+            t: x.t.lerp(y.t, w),
+            r: x.r.slerp(y.r, w).normalize(),
+            s: x.s.lerp(y.s, w),
+        })
+        .collect();
+    let weights = wa
+        .iter()
+        .zip(&wb)
+        .map(|(x, y)| {
+            if x.len() == y.len() {
+                x.iter().zip(y).map(|(p, q)| p + (q - p) * w).collect()
+            } else {
+                // clips that disagree on the morph count: the first clip's weights
+                x.clone()
+            }
+        })
+        .collect();
+    (locals, weights)
+}
+
 /// One primitive to draw: its model-space matrix and, when deformed, its vertices.
 pub struct DrawItem {
     pub node: usize,
