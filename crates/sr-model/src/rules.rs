@@ -562,6 +562,105 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// BH1 to BH8 and W03 to W05: a Schwarzschild black hole, its disk and the camera that traces geodesics.
+    fn black_hole(&mut self, n: Node, local: &str) {
+        let root = n.document().root_element();
+        let all = |name: &'static str| root.descendants().filter(move |d| d.is_element() && is(*d, name));
+        let number = |e: Node, k: &str, default: f64| {
+            e.attribute(k).map_or(default, |s| xpath_number(s.trim().strip_prefix('+').unwrap_or(s.trim())))
+        };
+        let geodesics = local == "camera" && n.attribute("geodesics") == Some("true");
+        match local {
+            "blackHole" | "accretionDisk" => {}
+            "camera" if n.has_attribute("geodesics") => {}
+            _ => return,
+        }
+        self.check(root.attribute("version") == Some("1.3"), n, "BH1", || {
+            "black holes require version=\"1.3\".".into()
+        });
+        match local {
+            "blackHole" => {
+                self.check(all("blackHole").count() == 1, n, "BH2", || {
+                    "version 1.3 has one blackHole per scene.".into()
+                });
+            }
+            "accretionDisk" => {
+                let hole =
+                    n.attribute("blackHole").and_then(|id| all("blackHole").find(|h| h.attribute("id") == Some(id)));
+                self.check(hole.is_some(), n, "BH3", || "an accretionDisk must name a blackHole.".into());
+                if let Some(hole) = hole {
+                    let (mass, outer) = (number(hole, "mass", f64::NAN), number(n, "outerRadius", f64::NAN));
+                    let inner = n.has_attribute("innerRadius").then(|| number(n, "innerRadius", f64::NAN));
+                    let ok = inner.is_none_or(|i| i >= 6.0 * mass) && outer > inner.unwrap_or(6.0 * mass);
+                    self.check(ok, n, "BH4", || {
+                        "the inner radius of an accretionDisk is at least 6 times the mass of its blackHole (the \
+                         innermost stable circular orbit), and the outer radius is beyond the inner one."
+                            .into()
+                    });
+                }
+            }
+            _ if geodesics => {
+                let hole = all("blackHole").next();
+                self.check(hole.is_some(), n, "BH5", || "a camera with geodesics=\"true\" needs a blackHole.".into());
+                const OTHER: [&str; 10] = [
+                    "object3D",
+                    "particles3D",
+                    "particleEmitter",
+                    "ocean",
+                    "fluid",
+                    "flock",
+                    "slime",
+                    "erosion",
+                    "pyro",
+                    "medium",
+                ];
+                self.check(!OTHER.iter().any(|name| all(name).next().is_some()), n, "BH6", || {
+                    "a camera with geodesics=\"true\" renders only the black hole, its disk and the 2D layers: no \
+                     object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may \
+                     be in the scene."
+                        .into()
+                });
+                if let Some(hole) = hole {
+                    let mass = number(hole, "mass", f64::NAN);
+                    let d2: f64 =
+                        ["x", "y", "z"].iter().map(|k| (number(n, k, 0.0) - number(hole, k, 0.0)).powi(2)).sum();
+                    self.check(d2 > 9.0 * mass * mass, n, "BH7", || {
+                        "a camera with geodesics=\"true\" must be farther than 3 times the mass of the blackHole from \
+                         it, the photon sphere."
+                            .into()
+                    });
+                }
+                self.check(
+                    all("camera").filter(|c| c.attribute("geodesics") == Some("true")).count() <= 1,
+                    n,
+                    "BH8",
+                    || "a scene has at most one camera with geodesics=\"true\".".into(),
+                );
+                if n.attribute("denoise") == Some("true") {
+                    self.warn(
+                        n,
+                        "W04",
+                        "a camera with geodesics=\"true\" does not denoise: pathSamples are antialiasing samples."
+                            .into(),
+                    );
+                }
+                if all("light").next().is_some() {
+                    self.warn(n, "W05", "lights are not used by a camera with geodesics=\"true\".".into());
+                }
+            }
+            _ => {}
+        }
+        if matches!(local, "blackHole" | "accretionDisk")
+            && !all("camera").any(|c| c.attribute("geodesics") == Some("true"))
+        {
+            self.warn(
+                n,
+                "W03",
+                "no camera has geodesics=\"true\", so the black hole and its disk are not rendered.".into(),
+            );
+        }
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -1527,6 +1626,8 @@ impl<'a> Eval<'a> {
             }
             _ => {}
         }
+
+        self.black_hole(n, local);
 
         // p9, p25 — layer
         if local == "layer" {

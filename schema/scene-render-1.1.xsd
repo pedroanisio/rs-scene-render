@@ -2154,6 +2154,55 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
   </xs:complexType>
 
+  <xs:complexType name="blackHoleType">
+    <xs:annotation><xs:documentation>
+      Version 1.3. A non-rotating, uncharged black hole in vacuum: the Schwarzschild solution, in units with G = c = 1,
+      so that the mass is a length of scene units and the horizon is at r_s = 2 `mass` (BH1). One per scene (BH2). It is
+      drawn by a camera with `geodesics="true"`; without it nothing is drawn (W03). Its place is the origin of the
+      Schwarzschild coordinates; nothing else about it is authored.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="mass" type="positiveDecimal" use="required"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="accretionDiskType">
+    <xs:annotation><xs:documentation>
+      Version 1.3. A geometrically thin, optically thick disk of gas on circular orbits in the equatorial plane of the
+      `blackHole` it names (BH3), from `innerRadius` to `outerRadius` in the Schwarzschild radial coordinate, scene
+      units. `innerRadius` is at least the innermost stable circular orbit, 6 `mass` (BH4), and is that when absent;
+      `outerRadius` is beyond it (BH4). Its temperature is the thin-disk profile with a zero-torque inner edge,
+      T(r) = `temperatureScale` f(r) / f(49/36 r_in), f(r) = (r_in / r)^(3/4) (1 - (r_in / r)^(1/2))^(1/4): `temperatureScale`,
+      in kelvin, is the local temperature at the peak, r = 49/36 r_in, before the shift of light. The gas orbits with
+      the angular velocity sqrt(`mass` / r^3) times `timeScale`, in radians per scene second, about the axis of the disk,
+      which is the scene's up, (0, -1, 0), turned by `rotationX`, `rotationY` and `rotation` (about z) degrees composed as
+      an object3D composes them, Rz Ry Rx; seen from above it turns counter-clockwise. The disk is centred on its
+      `blackHole` and has no place of its own. `angularPattern` is the azimuthal structure the gas carries and `seed` fixes it: `none` is a smooth
+      disk, `clumps` (the default) seeded azimuthal noise that rotates differentially, `spiral` seeded logarithmic spiral
+      arms; `contrast` is its amplitude, 0 to 1, and `intensity` scales the brightness. The disk is analytic,
+      a surface the rays meet, and is not made of particles.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="blackHole" type="xs:IDREF" use="required"/>
+    <xs:attribute name="innerRadius" type="positiveDecimal"/>
+    <xs:attribute name="outerRadius" type="positiveDecimal" use="required"/>
+    <xs:attribute name="temperatureScale" type="positiveDecimal" use="required"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="angularPattern" default="clumps">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="none"/><xs:enumeration value="clumps"/><xs:enumeration value="spiral"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="contrast" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="intensity" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="timeScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+  </xs:complexType>
   <xs:complexType name="oceanType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="waterImpulse" type="waterImpulseType"/><xs:element name="wave" type="oceanWaveType"/><xs:element name="whitewater" type="whitewaterType"/></xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
@@ -2806,6 +2855,20 @@
         <xs:enumeration value="raster"/><xs:enumeration value="pathtrace"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="geodesics" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        Version 1.3. true renders the scene by tracing each camera ray along a null geodesic of the Schwarzschild
+        spacetime of the scene's `blackHole` (BH5): the shadow, the lensed image of the background and of the
+        `accretionDisk`. This version renders only the black hole, its disk and the 2D background: any `object3D`,
+        `particles3D`, `particleEmitter`, `ocean`, `fluid`, `flock`, `slime`, `erosion`, `pyro` or `medium` in the scene is an
+        error (BH6), the camera is farther than 3 `mass` from the hole (BH7) and is the only one with geodesics (BH8); 2D
+        layers, text, shapes, effects and adjustments are allowed, and the image goes through the 2D chain. The camera's
+        distance to the hole is the radius of the static observer. `fov`, `roll`, `target`, `yaw` and `pitch` are those of any
+        camera and `pathSamples` is the number of antialiasing samples of a pixel; `denoise="true"` and lights are not
+        used (W04, W05). false (the default) is the camera there always was, and a `blackHole` or an `accretionDisk` with
+        it is not rendered (W03).
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="pathSamples" default="64">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType>
     </xs:attribute>
@@ -3254,6 +3317,8 @@
       <xs:element name="particleEmitter" type="particleEmitterType"/>
       <xs:element name="particles3D" type="particles3DType"/>
       <xs:element name="ocean" type="oceanType"/>
+      <xs:element name="blackHole" type="blackHoleType"/>
+      <xs:element name="accretionDisk" type="accretionDiskType"/>
       <xs:element name="flock" type="flockType"/>
       <xs:element name="fluid" type="fluidType"/>
       <xs:element name="slime" type="slimeType"/>

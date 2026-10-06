@@ -81,6 +81,8 @@ def ins_comp(xml):  # insert nodes at the start of <composition>
 def v10(body, extra_sections=""):
     return f'<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/>{extra_sections}<composition>{body}</composition></scene>\n'
 
+BLACKHOLE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><shape id="sky" shape="rect" x="0" y="0" width="64" height="64" fill="#000000"/><camera id="eye" x="0" y="0" z="-60" geodesics="true"/><blackHole id="hole" mass="1" x="0" y="0" z="0"/><accretionDisk id="disk" blackHole="hole" outerRadius="20" temperatureScale="6000"/></composition></scene>\n'
+
 # (name, expected codes, transform-or-document, asset codes the oracle cannot see)
 CASES = [
     ("solid-colliders-boil", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('primitive="clay"', 'primitive="clay" boil=" +12 " fingerprints=" +0.5 "')),
@@ -93,6 +95,17 @@ CASES = [
     ("crt2", ["CRT2"], lambda _: CRATER.replace('<crater ', '<crater/><crater ')),
     ("crt3", ["CRT3"], lambda _: CRATER.replace('end="2"', 'end="0"')),
     ("crt4", ["CRT4"], lambda _: CRATER.replace('rimWidth="1"', 'rimWidth="5"')),
+    ("bh1-version", ["BH1"], lambda _: BLACKHOLE.replace('version="1.3"', 'version="1.2"')),
+    ("bh2-two-holes", ["BH2"], lambda _: BLACKHOLE.replace('<accretionDisk', '<blackHole id="second" mass="2"/><accretionDisk')),
+    ("bh3-disk-target", ["BH3"], lambda _: BLACKHOLE.replace('blackHole="hole"', 'blackHole="eye"')),
+    ("bh4-inside-isco", ["BH4"], lambda _: BLACKHOLE.replace('<accretionDisk id="disk"', '<accretionDisk id="disk" innerRadius="5"')),
+    ("bh4-outer-not-beyond-inner", ["BH4"], lambda _: BLACKHOLE.replace('outerRadius="20"', 'outerRadius="6"')),
+    ("bh5-geodesics-without-hole", ["BH5"], lambda _: BLACKHOLE.replace('<blackHole id="hole" mass="1" x="0" y="0" z="0"/>', '').replace('<accretionDisk id="disk" blackHole="hole" outerRadius="20" temperatureScale="6000"/>', '')),
+    ("bh6-other-object", ["BH6"], lambda _: BLACKHOLE.replace('<blackHole', '<object3D id="ball" primitive="sphere" radius="1"/><blackHole')),
+    ("bh7-inside-photon-sphere", ["BH7"], lambda _: BLACKHOLE.replace('z="-60" geodesics', 'z="-2.5" geodesics')),
+    ("bh8-two-cameras", ["BH8"], lambda _: BLACKHOLE.replace('<blackHole', '<camera id="eye2" x="0" y="0" z="-80" geodesics="true"/><blackHole')),
+    ("bh6-fluid", ["BH6"], lambda _: BLACKHOLE.replace('<blackHole', '<ocean id="sea"/><blackHole')),
+    ("bh6-particles", ["BH6"], lambda _: BLACKHOLE.replace('<blackHole', '<particles3D id="dust" rate="1"/><blackHole')),
     ("crt4-envelope", ["CRT4"], lambda _: CRATER.replace('start="1"', 'influenceDepth="4" start="1"')),
     ("crt5", ["CRT5"], lambda _: CRATER.replace('type="static"', 'type="dynamic"')),
     ("crt6", ["CRT6"], lambda _: CRATER_IMPACT.replace('<crater ', '<crater depth="3" ')),
@@ -378,6 +391,9 @@ WARN_CASES = [
     ("a03-remote", ["A03"], sub('src="../media/clip.mp4"', 'src="https://cdn.example.com/clip.mp4"')),
     ("a04-sequence-hold", ["A04"], sub('first="1" last="5"', 'first="1" last="9" missingFrame="hold"')),
     ("w02-open-face", ["W02"], lambda _: PYRO.replace('width="8" height="8" depth="8" voxelSize="1"', 'width="64" height="64" depth="64" voxelSize="1" boundary="open"').replace('<pyroSource shape="sphere" radius="2"', '<pyroSource shape="sphere" y="-28" radius="2"')),
+    ("w04-denoise", ["W04"], lambda _: BLACKHOLE.replace('geodesics="true"', 'geodesics="true" denoise="true"')),
+    ("w05-lights", ["W05"], lambda _: BLACKHOLE.replace('</composition>', '</composition><lights><light id="sun" type="directional"/></lights>')),
+    ("w03-no-lens", ["W03"], lambda _: BLACKHOLE.replace(' geodesics="true"', '')),
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
 
@@ -402,6 +418,9 @@ VALID = {
     "physics-internal-edges": OCEAN_BUOYANCY.replace('<physics pixelsPerMeter="1"/>', '<physics pixelsPerMeter="1" fixInternalEdges="true"/>'),
     "crater-impact-influence-small": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" influenceDepth="5"'),
     "crater-impact-influence-large": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" influenceDepth="30"'),
+    "black-hole": BLACKHOLE,
+    "black-hole-without-disk": BLACKHOLE.replace('<accretionDisk id="disk" blackHole="hole" outerRadius="20" temperatureScale="6000"/>', ''),
+    "black-hole-disk-at-isco": BLACKHOLE.replace('<accretionDisk id="disk"', '<accretionDisk id="disk" innerRadius="6" seed="3" angularPattern="spiral" contrast="0.3" intensity="2" timeScale="0.5" rotationX="20" rotationY="5" rotation="-10"'),
     "crater-capture": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" capture="true"'),
     "ocean-splash": EJECTA_CRATER.replace('</composition>', '<ocean id="sea" width="16" depth="16" cellSize="1" splash="debris"/></composition>'),
     "particles3d-gas": PARTICLES3D.replace('<composition>', '<composition><object3D id="smoke" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" boundary="open"/></object3D>').replace('<particles3D id="dust"', '<particles3D id="dust" drag="1" gas="smoke"'),
