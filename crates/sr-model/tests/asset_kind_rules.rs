@@ -82,6 +82,6 @@ fn line_width_belongs_to_grid_generators() {
     };
     assert!(g("grid").is_empty(), "{:?}", g("grid"));
     for kind in ["checkerboard", "stripes", "fractal-noise"] {
-        assert!(g(kind).contains(&"R45".into()), "{kind}: {:?}", g(kind));
+        assert!(g(kind).contains(&"R47".into()), "{kind}: {:?}", g(kind));
     }
 }

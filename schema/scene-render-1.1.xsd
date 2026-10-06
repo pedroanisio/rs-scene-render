@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.1.3">
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.3.0">
   <xs:annotation>
     <xs:documentation>
       scene-render scene format 1.1. This schema is the interchange contract
-      shared by every scene-render engine (C, Rust, Python, JavaScript). Its
+      shared by every scene-render engine. Its
       canonical copy is sr-core/schema/; it changes only through an accepted
       SREP (sr-core/srep/). Every document valid under 1.0 is valid
       under 1.1 (with one exception: colour channels above 1, which 1.0 matched
@@ -93,6 +93,18 @@
   <xs:simpleType name="pointType">
     <xs:annotation><xs:documentation>"x,y" pair, e.g. a bezier handle or tangent.</xs:documentation></xs:annotation>
     <xs:restriction base="xs:string"><xs:pattern value="-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?,-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="connectorAnchorType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="auto"/><xs:enumeration value="center"/>
+      <xs:enumeration value="top"/><xs:enumeration value="right"/>
+      <xs:enumeration value="bottom"/><xs:enumeration value="left"/>
+      <xs:enumeration value="top-left"/><xs:enumeration value="top-right"/>
+      <xs:enumeration value="bottom-right"/><xs:enumeration value="bottom-left"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="pointListType">
+    <xs:list itemType="pointType"/>
   </xs:simpleType>
 
   <!-- ===================================================== length types -->
@@ -364,7 +376,6 @@
       colour, paint, path data, string). easeIn/easeOut are After Effects-style
       temporal handles "influence,speed" normalised to [0,1]; spatialIn/Out are
       motion-path tangents in pixels relative to the key value.
-      A key's interpolation governs the segment from that key to the next key.
     </xs:documentation></xs:annotation>
     <xs:attribute name="time" type="xs:double" use="required"/>
     <xs:attribute name="value" type="xs:string" use="required"/>
@@ -375,6 +386,11 @@
     <xs:attribute name="spatialIn" type="pointType"/>
     <xs:attribute name="spatialOut" type="pointType"/>
     <xs:attribute name="roving" type="xs:boolean" default="false"/>
+    <xs:attribute name="carry" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>On a key whose segment is a spring: start the spring with the velocity the previous
+      segment arrives at this key with (its rate of change at the end), instead of from rest, so a hit that follows another
+      keeps its momentum. Needs a previous key and a following key.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="steps" type="xs:positiveInteger"/>
     <xs:attribute name="stepPosition" default="end">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -392,9 +408,6 @@
     </xs:attribute>
     <xs:attribute name="period" type="positiveDecimal">
       <xs:annotation><xs:documentation>The ringing period of an elastic-in, elastic-out or elastic-in-out segment as a fraction of the segment (default 0.3; 0.45 for elastic-in-out). Read from the key the segment leaves.</xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="carry" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>On a key whose segment is a spring: start the spring with the velocity the previous segment arrives at this key with (its rate of change at the end), instead of from rest, so a hit that follows another keeps its momentum. Needs a previous key and a following key.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="marker" type="xs:IDREF">
       <xs:annotation><xs:documentation>Snap the key time to a marker; @time becomes an offset from it.</xs:documentation></xs:annotation>
@@ -421,7 +434,7 @@
       subset of ECMAScript expressions with these built-ins: time, frame, value,
       index, count, seed, param(name), prop("id.property"), propAtTime("id.property", t),
       valueAtTime(t), penner("curve", u),
-      wiggle(freq, amp[, octaves, ampMult]), noise(x[,y,z]), random([min,max]),
+      wiggle(freq, amp[, octaves, ampMult, t, hold]), noise(x[,y,z]), random([min,max]),
       loopIn/loopOut(type, n), linear/ease/easeIn/easeOut(t, t0, t1, v0, v1),
       clamp, lerp, smoothstep, spring(t, stiffness, damping, mass),
       audioAmplitude(trackId[, band]), beat(), markerTime(id), textIndex,
@@ -451,7 +464,9 @@
     <xs:attribute name="orientOffset" type="xs:double" default="0"/>
     <xs:attribute name="constantSpeed" type="xs:boolean" default="true"/>
     <xs:attribute name="additive" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>true: the path is an offset. The node's position is its own x and y (keys, link, expression) plus the path's point at the progress minus the path's first point, so the node starts where it would without the path. false: the path's point is the position.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>true: the path is an offset. The node's position is its own x and y (keys, link,
+      expression) plus the path's point at the progress minus the path's first point, so the node starts where it would
+      without the path. false: the path's point is the position.</xs:documentation></xs:annotation>
     </xs:attribute>
   </xs:complexType>
   <xs:complexType name="linkType">
@@ -470,7 +485,6 @@
     <xs:attribute name="delay" type="xs:double" default="0"/>
     <xs:attribute name="smoothing" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="follow" default="none">
-      <xs:annotation><xs:documentation>A follower of the delayed source: "exponential" is a first-order lag of time constant @timeConstant; "spring" is a damped spring with @stiffness, @damping and @mass (as the spring curve of a key), so it can overshoot and settle. Both are linear filters of the source's history, evaluated without state. Not applied together with @smoothing.</xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="none"/><xs:enumeration value="exponential"/><xs:enumeration value="spring"/>
       </xs:restriction></xs:simpleType>
@@ -569,7 +583,9 @@
     </xs:attribute>
     <xs:attribute name="target" type="xs:IDREF"/>
     <xs:attribute name="targetJoint" type="xs:string">
-      <xs:annotation><xs:documentation>With a @target that is an object3D drawing an imported model: the name of a node of that model whose pose is the target's transform (parent, copy-position, copy-rotation, copy-scale, copy-transform, look-at and distance).</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>With a @target that is an object3D drawing an imported model: the name of a node of
+      that model whose pose is the target's transform (parent, copy-position, copy-rotation, copy-scale, copy-transform,
+      look-at and distance).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="point" type="xs:string"/>
@@ -586,10 +602,13 @@
     <xs:attribute name="maxDistance" type="nonNegativeDecimal"/>
     <xs:attribute name="bendPositive" type="xs:boolean" default="true"/>
     <xs:attribute name="pole" type="xs:IDREF">
-      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: a node or bone whose position the middle joint bends toward; it replaces @bendPositive (which stays the choice when the pole lies on the line to the target).</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: a node or bone whose position the middle joint
+      bends toward; it replaces @bendPositive (which stays the choice when the pole lies on the line to the target).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="softness" type="unitDecimal" default="0">
-      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: the fraction of the chain's full reach, counted from its end, over which the reach eases toward full extension, so the chain does not snap straight as the target leaves its reach.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: the fraction of the chain's full reach, counted
+      from its end, over which the reach eases toward full extension, so the chain does not snap straight as the target
+      leaves its reach.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="progress" type="unitDecimal" default="0"/>
     <xs:attribute name="autoOrient" type="xs:boolean" default="false"/>
@@ -1005,21 +1024,6 @@
     </xs:attribute>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
-  <xs:complexType name="meshSequenceAssetType">
-    <xs:attribute name="id" type="xs:ID" use="required"/>
-    <xs:attribute name="src" type="volumeSourceType" use="required"/>
-    <xs:attribute name="format"><xs:simpleType><xs:restriction base="xs:string">
-      <xs:enumeration value="gltf"/><xs:enumeration value="glb"/><xs:enumeration value="obj"/><xs:enumeration value="ply"/>
-      <xs:enumeration value="usd"/><xs:enumeration value="usda"/><xs:enumeration value="usdc"/><xs:enumeration value="usdz"/><xs:enumeration value="fbx"/>
-    </xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="first" type="volumeFrameIndexType" use="required"/>
-    <xs:attribute name="last" type="volumeFrameIndexType" use="required"/>
-    <xs:attribute name="fps" type="fpsType" use="required"/>
-    <xs:attribute name="interpolation" type="meshSequenceInterpolationType" default="hold"/>
-    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
-    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attributeGroup ref="assetProvenance"/>
-  </xs:complexType>
   <xs:complexType name="slotType">
     <xs:annotation><xs:documentation>Overrides a Lottie slot (sid) or a named text/colour layer inside the animation.</xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:string" use="required"/>
@@ -1040,7 +1044,8 @@
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
   <xs:complexType name="strokeFontAssetType">
-    <xs:annotation><xs:documentation>A single-line font: glyphs as pen strokes. format="jhf" is the Hershey font file format; the n-th glyph of the file (counting from 0) is the character U+0020 + n. Drawn by shape="stroke-text". Version 1.2.</xs:documentation></xs:annotation>
+    <xs:annotation><xs:documentation>A single-line font: glyphs as pen strokes. format="jhf" is the Hershey font file
+    format; the n-th glyph of the file (counting from 0) is the character U+0020 + n. Version 1.2.</xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="src" type="xs:anyURI" use="required"/>
     <xs:attribute name="format" default="jhf">
@@ -1222,50 +1227,6 @@
     <xs:attribute name="object" type="xs:string"/>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
-  <xs:simpleType name="tileZoomType">
-    <xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="24"/></xs:restriction>
-  </xs:simpleType>
-  <xs:complexType name="tilesAssetType">
-    <xs:annotation><xs:documentation>
-      Map tiles: a PMTiles archive (@src) of vector (MVT) or raster (PNG, JPEG, WebP) tiles; or
-      an online tile service (@url, a template with {z}, {x} and {y}, or {s} for a subdomain),
-      whose tiles a resolve step, run before rendering, downloads for the views the document's
-      maps show into @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
-      @tileSize is the pixel size tiles are drawn at (default 512 for vector tiles, 256 for
-      raster); @minZoom and @maxZoom bound the zooms fetched from a service. @attribution is the tiles'
-      credit line.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="id" type="xs:ID" use="required"/>
-    <xs:attribute name="src" type="xs:anyURI"/>
-    <xs:attribute name="url" type="xs:string"/>
-    <xs:attribute name="cache" type="xs:anyURI"/>
-    <xs:attribute name="cacheSha256" type="sha256Type"/>
-    <xs:attribute name="tileSize" type="xs:positiveInteger"/>
-    <xs:attribute name="minZoom" type="tileZoomType" default="0"/>
-    <xs:attribute name="maxZoom" type="tileZoomType" default="19"/>
-    <xs:attribute name="attribution" type="xs:string"/>
-    <xs:attribute name="sha256" type="sha256Type"/>
-  </xs:complexType>
-  <xs:complexType name="basemapType">
-    <xs:annotation><xs:documentation>
-      A basemap from a tiles asset. Vector tiles are drawn with a MapLibre style (@mapStyle: a
-      style JSON file, or protomaps-light / protomaps-dark, the Protomaps basemap styles, the
-      default);
-      raster tiles are drawn as images, warped into the map's projection. Raster basemaps paint
-      beneath the map's vector content. @detail shifts the tile zoom (positive: finer tiles);
-      @labels="false" leaves out the style's text.
-    </xs:documentation></xs:annotation>
-    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
-    <xs:attribute name="id" type="xs:ID"/>
-    <xs:attribute name="tiles" type="xs:IDREF" use="required"/>
-    <xs:attribute name="mapStyle" type="xs:string"/>
-    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
-    <xs:attribute name="detail" type="xs:double" default="0"/>
-    <xs:attribute name="labels" type="xs:boolean" default="true"/>
-    <xs:attribute name="attribution" type="xs:boolean" default="true">
-      <xs:annotation><xs:documentation>Draws the tiles' credit (their @attribution, or the archive's) in the map's corner.</xs:documentation></xs:annotation>
-    </xs:attribute>
-  </xs:complexType>
   <xs:complexType name="featureStyleType">
     <xs:annotation><xs:documentation>
       Overrides the style of the features of a geoLayer whose key (the layer's @keyBy property)
@@ -1281,8 +1242,8 @@
   </xs:complexType>
   <xs:complexType name="geoLayerType">
     <xs:annotation><xs:documentation>
-      The features of a geo asset: polygons filled and stroked, lines and outlines stroked (drawn on
-      by @progress: each line or ring from its first vertex; the fill stays whole), points as dots. @filter keeps features whose property equals (prop=value) or
+      The features of a geo asset: polygons filled and stroked, lines and outlines stroked (drawn on by @progress: each line or
+      ring from its first vertex; the fill stays whole), points as dots. @filter keeps features whose property equals (prop=value) or
       differs from (prop!=value) a value. Choropleth: @fillBy names a numeric property mapped
       through @domain (data range by default) and @scale onto @palette (colours interpolated in
       sRGB; quantize picks one colour per equal step); features without a value use @noData.
@@ -1378,6 +1339,51 @@
     <xs:attribute name="rho" type="positiveDecimal" default="1.4142135623730951"/>
     <xs:attribute name="easing" type="curveType" default="ease-in-out"/>
   </xs:complexType>
+  <xs:simpleType name="tileZoomType">
+    <xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="24"/></xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="tilesAssetType">
+    <xs:annotation><xs:documentation>
+      Map tiles: a PMTiles archive (@src) of vector (MVT) or raster (PNG, JPEG, WebP) tiles; or
+      an online tile service (@url, a template with {z}, {x} and {y}, or {s} for a subdomain),
+      whose tiles a resolve step, run before rendering, downloads for the views the document's
+      maps show into @cache (a PMTiles archive pinned by @cacheSha256). Rendering never fetches tiles.
+      @sha256 pins @src. @tileSize is the pixel size tiles are drawn at (default 512 for vector
+      tiles, 256 for raster); @minZoom and @maxZoom (minZoom &lt;= maxZoom) bound the zooms fetched
+      from a service. @attribution is the tiles' credit line.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI"/>
+    <xs:attribute name="sha256" type="sha256Type"/>
+    <xs:attribute name="url" type="xs:string"/>
+    <xs:attribute name="cache" type="xs:anyURI"/>
+    <xs:attribute name="cacheSha256" type="sha256Type"/>
+    <xs:attribute name="tileSize" type="xs:positiveInteger"/>
+    <xs:attribute name="minZoom" type="tileZoomType" default="0"/>
+    <xs:attribute name="maxZoom" type="tileZoomType" default="19"/>
+    <xs:attribute name="attribution" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="basemapType">
+    <xs:annotation><xs:documentation>
+      A basemap from a tiles asset. Vector tiles are drawn with a MapLibre style (@mapStyle: a
+      style JSON file, or protomaps-light / protomaps-dark, the Protomaps basemap styles, the
+      default); raster tiles are drawn as images, warped into the map's projection. Raster
+      basemaps paint beneath all of the map's other content, its background included. @detail
+      shifts the tile zoom (positive: finer tiles); @labels="false" leaves out the style's text.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="tiles" type="xs:IDREF" use="required"/>
+    <xs:attribute name="mapStyle" type="xs:string"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="detail" type="xs:double" default="0"/>
+    <xs:attribute name="labels" type="xs:boolean" default="true"/>
+    <xs:attribute name="attribution" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>Draws the tiles' credit (their @attribution, or the archive's) in the map's corner.</xs:documentation></xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
   <xs:complexType name="mapAssetType">
     <xs:annotation><xs:documentation>
       A projected map drawn as vectors: geoLayer, graticule, route and pin children paint in
@@ -1413,64 +1419,45 @@
     <xs:attribute name="outlineWidth" type="nonNegativeDecimal" default="1"/>
     <xs:attribute name="precision" type="positiveDecimal" default="0.7071"/>
   </xs:complexType>
-  <!-- Local cinematic SREP, document version 1.3. -->
-  <xs:simpleType name="volumeChannelType">
-    <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z0-9_.\-]{1,64}"/></xs:restriction>
-  </xs:simpleType>
-  <!-- A printf placeholder such as %d is not itself a percent-encoded URI. -->
-  <xs:simpleType name="volumeSequencePatternType">
-    <xs:restriction base="xs:string"><xs:pattern value=".*(%[0-9]*d|#+).*"/></xs:restriction>
-  </xs:simpleType>
-  <xs:simpleType name="volumeSourceType"><xs:union memberTypes="xs:anyURI volumeSequencePatternType"/></xs:simpleType>
-  <xs:complexType name="volumeAssetType">
+  <xs:complexType name="pdfRegionType">
+    <xs:annotation><xs:documentation>
+      A box on the page, in the cache image's pixels (origin top-left, +y down). With @text, the resolve
+      step finds the occurrence-th match of the phrase in the page's text and writes x, y, width and
+      height; without it, the box is given by hand.
+    </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
-    <xs:attribute name="src" type="volumeSourceType" use="required"/>
-    <xs:attribute name="sha256" type="sha256Type"/>
-    <xs:attribute name="format" default="srvol"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="srvol"/><xs:enumeration value="srvseq"/><xs:enumeration value="openvdb"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="densityGrid" type="volumeChannelType" default="density"/>
-    <xs:attribute name="temperatureGrid" type="volumeChannelType"/>
-    <xs:attribute name="velocityGridX" type="volumeChannelType"/>
-    <xs:attribute name="velocityGridY" type="volumeChannelType"/>
-    <xs:attribute name="velocityGridZ" type="volumeChannelType"/>
-    <xs:attribute name="first" type="volumeFrameIndexType"/>
-    <xs:attribute name="last" type="volumeFrameIndexType"/>
-    <xs:attribute name="fps" type="fpsType"/>
-    <xs:attribute name="interpolation" type="volumeInterpolationType" default="hold"/>
-    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
-    <xs:attribute name="boundsMinX" type="xs:double"/>
-    <xs:attribute name="boundsMinY" type="xs:double"/>
-    <xs:attribute name="boundsMinZ" type="xs:double"/>
-    <xs:attribute name="boundsMaxX" type="xs:double"/>
-    <xs:attribute name="boundsMaxY" type="xs:double"/>
-    <xs:attribute name="boundsMaxZ" type="xs:double"/>
+    <xs:attribute name="text" type="xs:string"/>
+    <xs:attribute name="occurrence" type="xs:positiveInteger" default="1"/>
+    <xs:attribute name="x" type="xs:double" use="required"/>
+    <xs:attribute name="y" type="xs:double" use="required"/>
+    <xs:attribute name="width" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="height" type="nonNegativeDecimal" use="required"/>
   </xs:complexType>
-  <xs:simpleType name="volumeFrameIndexType"><xs:restriction base="xs:integer"><xs:minInclusive value="-2147483648"/><xs:maxInclusive value="2147483647"/></xs:restriction></xs:simpleType>
-  <xs:simpleType name="meshSequenceInterpolationType"><xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/></xs:restriction></xs:simpleType>
-  <xs:simpleType name="volumeInterpolationType">
-    <xs:annotation><xs:documentation>Version 1.3. Hold freezes a frame; linear blends scalar fields in asset-world coordinates. Advect requires all three velocityGrid components (VOL9): signed asset-world vectors in scene units/second, with matching component transforms per frame. Frozen endpoint midpoint traces precede density/kelvin blending. Numbered caches use object-local seconds; SRVSEQ uses composition seconds. Clamped or identical held endpoints freeze. Grid transforms locate samples without transforming velocity vectors. Assets and their channel references are immutable during rendering; channel names identify owned cache fields, not paths.</xs:documentation></xs:annotation>
-    <xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/><xs:enumeration value="advect"/></xs:restriction>
-  </xs:simpleType>
-  <xs:simpleType name="volumeMissingFrameType"><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="hold"/><xs:enumeration value="transparent"/></xs:restriction></xs:simpleType>
-  <xs:complexType name="mediumType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
-    <xs:attribute name="densityScale" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="extinction" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="albedo" type="colorType" default="#FFFFFFFF"/>
-    <xs:attribute name="anisotropy" default="0"><xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="-0.99"/><xs:maxInclusive value="0.99"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="emissionColor" type="colorType" default="#000000FF"/>
-    <xs:attribute name="emissionScale" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="blackbody" type="xs:boolean" default="false"/>
-    <xs:attribute name="temperatureScale" type="positiveDecimal" default="1"/>
-    <xs:attribute name="stepSize" type="positiveDecimal" default="1"/>
-    <xs:attribute name="maxSteps" default="2048"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="lighting" default="exact">
-      <xs:annotation><xs:documentation>Version 1.3. How the medium's in-scattering is lit by the path tracer: exact marches a shadow ray from every sample; grid reads transmittance and surface visibility from per-light grids built once per frame (see the cinematic impact SREP). The lightGrid* attributes apply only with grid (VOL10).</xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="exact"/><xs:enumeration value="grid"/></xs:restriction></xs:simpleType>
+  <xs:complexType name="pdfAssetType">
+    <xs:annotation><xs:documentation>
+      One page of a PDF, drawn as an image. The renderer never reads the PDF: it reads @cache and fails
+      unless its SHA-256 equals @cacheSha256. A resolve step, run before rendering, renders page @page at
+      @dpi over @background into the cache, writes width, height and cacheSha256, and resolves the
+      regions' text. @sha256 pins the source file.
+    </xs:documentation></xs:annotation>
+    <xs:sequence><xs:element name="region" type="pdfRegionType" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI" use="required"/>
+    <xs:attribute name="page" type="xs:positiveInteger" default="1"/>
+    <xs:attribute name="dpi" default="150">
+      <xs:simpleType><xs:restriction base="xs:double">
+        <xs:minInclusive value="18"/><xs:maxInclusive value="1200"/>
+      </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="lightGridCell" default="1"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="lightGridDomeDirections" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="512"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="lightGridMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="background" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="annotations" type="xs:boolean" default="false"/>
+    <xs:attribute name="cache" type="xs:anyURI" use="required"/>
+    <xs:attribute name="cacheSha256" type="sha256Type" use="required"/>
+    <xs:attribute name="width" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
+    <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+
   <xs:complexType name="assetsType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="image" type="imageAssetType"/>
@@ -1480,8 +1467,6 @@
       <xs:element name="text" type="textAssetType"/>
       <xs:element name="vector" type="vectorAssetType"/>
       <xs:element name="mesh" type="meshAssetType"/>
-      <xs:element name="meshSequence" type="meshSequenceAssetType"/>
-      <xs:element name="volume" type="volumeAssetType"/>
       <xs:element name="lottie" type="lottieAssetType"/>
       <xs:element name="font" type="fontAssetType"/>
       <xs:element name="strokeFont" type="strokeFontAssetType"/>
@@ -1494,6 +1479,9 @@
       <xs:element name="geo" type="geoAssetType"/>
       <xs:element name="tiles" type="tilesAssetType"/>
       <xs:element name="map" type="mapAssetType"/>
+      <xs:element name="pdf" type="pdfAssetType"/>
+      <xs:element name="meshSequence" type="meshSequenceAssetType"/>
+      <xs:element name="volume" type="volumeAssetType"/>
     </xs:choice>
   </xs:complexType>
 
@@ -1548,10 +1536,12 @@
     <xs:attribute name="uvScaleX" type="xs:double" default="1"/>
     <xs:attribute name="uvScaleY" type="xs:double" default="1"/>
     <xs:attribute name="unevenness" type="unitDecimal" default="0">
-      <xs:annotation><xs:documentation>Amount of procedural surface unevenness: a smooth noise fixed to the object that tilts the shading normal and varies the roughness, for a hand-made (clay) look. 0 is off.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Amount of procedural surface unevenness: a smooth noise fixed to the object that tilts the
+      shading normal and varies the roughness, for a hand-made (clay) look. 0 is off.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="unevennessScale" type="positiveDecimal" default="8">
-      <xs:annotation><xs:documentation>Size of the largest features of the unevenness, in scene units.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Size of the largest features of the unevenness, in scene units (pixels at the object's
+      scale).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="unevennessSeed" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="materialX" type="xs:anyURI"/>
@@ -1577,32 +1567,47 @@
     <xs:attribute name="skewX" type="xs:double" default="0"/>
     <xs:attribute name="skewY" type="xs:double" default="0"/>
   </xs:attributeGroup>
-  <xs:attributeGroup name="nodeAttributes">
+  <xs:attributeGroup name="nodeCoreAttributes">
+    <xs:annotation><xs:documentation>The attributes every node takes, with no placement: identity, visibility, time window, condition, motion blur and track matte. A connector takes only this group.</xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="tags" type="xs:NMTOKENS"/>
     <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>Local addition. true exempts this node and everything it contains from the safeArea enforce check (SA01); validate lists every node that carries it (SA02), so a deliberate placement outside the safe region is never silent.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>
+        true exempts this node and everything it contains (for a symbol: every instance of it, and what it draws)
+        from the safeArea enforce check (SA01); validate lists every node that carries it (SA02), so a deliberate
+        placement outside the safe region is never silent.
+      </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="z" type="xs:int" default="0"/>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="shutterAngle">
+      <xs:annotation><xs:documentation>The shutter angle, in degrees, of this node's motion blur, instead of the project's: the
+      nearest node up its parents that sets it, else project/@shutterAngle. 0 draws the node sharp; 360 blurs over the
+      whole frame interval. Only where motion blur is on for the node.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double">
+        <xs:minInclusive value="0"/><xs:maxInclusive value="720"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="startMarker" type="xs:IDREF"/>
     <xs:attribute name="endMarker" type="xs:IDREF"/>
     <xs:attribute name="condition" type="expressionString">
       <xs:annotation><xs:documentation>Node is rendered only when the expression is truthy (e.g. "param('showPrice')").</xs:documentation></xs:annotation>
     </xs:attribute>
+    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="matte" type="xs:IDREF">
+      <xs:annotation><xs:documentation>Track matte: any node whose alpha or luma gates this node. The matte node is not drawn itself unless matteVisible="true".</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="matteMode" type="matteModeType" default="alpha"/>
+    <xs:attribute name="matteVisible" type="xs:boolean" default="false"/>
+  </xs:attributeGroup>
+  <xs:attributeGroup name="nodeAttributes">
+    <xs:attributeGroup ref="nodeCoreAttributes"/>
     <xs:attribute name="parent" type="xs:IDREF">
       <xs:annotation><xs:documentation>Transform parent outside the XML tree (After Effects parenting); shorthand for a transformConstraint type="parent".</xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
-    <xs:attribute name="shutterAngle">
-      <xs:annotation><xs:documentation>The shutter angle, in degrees, of this node's motion blur, instead of the project's: the nearest node up its parents that sets it, else project/@shutterAngle. 0 draws the node sharp; 360 blurs over the whole frame interval. Only where motion blur is on for the node.</xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:double">
-        <xs:minInclusive value="0"/><xs:maxInclusive value="720"/>
-      </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="threeD" type="xs:boolean" default="false">
       <xs:annotation><xs:documentation>2.5D: place this 2D node in camera space at depth zDepth with rotationX/rotationY.</xs:documentation></xs:annotation>
@@ -1610,11 +1615,6 @@
     <xs:attribute name="zDepth" type="xs:double" default="0"/>
     <xs:attribute name="rotationX" type="xs:double" default="0"/>
     <xs:attribute name="rotationY" type="xs:double" default="0"/>
-    <xs:attribute name="matte" type="xs:IDREF">
-      <xs:annotation><xs:documentation>Track matte: any node whose alpha or luma gates this node. The matte node is not drawn itself unless matteVisible="true".</xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="matteMode" type="matteModeType" default="alpha"/>
-    <xs:attribute name="matteVisible" type="xs:boolean" default="false"/>
     <xs:attribute name="alignX">
       <xs:annotation><xs:documentation>Responsive anchoring: overrides x so the node's box aligns within alignTo.</xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string">
@@ -1745,18 +1745,18 @@
     <xs:attribute name="bullet" type="xs:boolean" default="false"/>
     <xs:attribute name="activateAt" type="xs:double" default="0"/>
   </xs:complexType>
+
   <xs:complexType name="rigidBody3DType">
     <xs:annotation><xs:documentation>
-      A rigid body in 3D on an object3D: the simulation moves the
-      object from its pose at physics@start (its position and rotations, in its parent's frame);
-      from then on the simulation, not its own attributes, places it (a kinematic body follows
-      its animation).
+      A rigid body in 3D on an object3D: the simulation moves the object from its pose at
+      physics@start (its position and rotations, in its parent's frame); from then on the
+      simulation, not its own attributes, places it (a kinematic body follows its animation).
       shape="auto" takes the primitive's own form (box, sphere, cylinder, cone, capsule; a plane
-      is a thin box) and the convex hull of any other mesh; convex-hull, trimesh (exact triangles,
-      for static and kinematic scenery) and decomposition (convex parts of a closed mesh) use the
-      object's triangles. Sizes follow the object's scale at the start. Velocities are pixels
-      per second in scene axes (y down, z away from the camera), angular velocities degrees per
-      second about the scene axes.
+      is a box one unit deep; text is a box) and the convex hull of the triangles of any other
+      primitive; convex-hull, trimesh (exact triangles, for static and kinematic scenery) and
+      decomposition (convex parts of a closed mesh) use the object's triangles. Sizes follow the
+      object's scale at the start. Velocities are pixels per second in scene axes (y down, z away
+      from the camera), angular velocities degrees per second about the scene axes.
     </xs:documentation></xs:annotation>
     <xs:attribute name="type" default="dynamic">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -1847,7 +1847,10 @@
     </xs:attribute>
     <xs:attribute name="presetDuration" type="positiveDecimal"/>
     <xs:attribute name="presetEase">
-      <xs:annotation><xs:documentation>The curve of a preset, in place of the preset's own (most use cubic-out, which is front-loaded: at 40 % of the duration it is 78 % done). Without @preset it has no effect.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>
+        The curve of a preset, in place of the preset's own (most use cubic-out, which is front-loaded: at 40 % of the
+        duration it is 78 % done). Without @preset it has no effect.
+      </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="linear"/><xs:enumeration value="quad-in"/><xs:enumeration value="quad-out"/>
         <xs:enumeration value="cubic-out"/><xs:enumeration value="expo-out"/><xs:enumeration value="back-out"/>
@@ -1964,7 +1967,9 @@
     <xs:attribute name="detail" type="xs:double" default="10"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mode" type="xs:NMTOKEN">
-      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag and wiggle-path: corner|smooth (wiggle-path smooth joins the wiggled points with a Catmull-Rom spline through them instead of straight lines); offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag and wiggle-path: corner|smooth
+      (wiggle-path smooth joins the wiggled points with a Catmull-Rom spline through them instead of straight lines);
+      offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="offsetX" type="xs:double" default="0"/>
     <xs:attribute name="offsetY" type="xs:double" default="0"/>
@@ -2027,7 +2032,7 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="resample" default="linear">
-      <xs:annotation><xs:documentation>The filter used where the layer is drawn larger than its source. linear: bilinear (the default). bicubic: Catmull-Rom, clamped to the range of the four nearest texels. mitchell: Mitchell-Netravali with B = C = 1/3, with the same clamp. Where the layer is drawn at or below its source size every layer uses trilinear mip filtering whatever @resample says.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>The filter used where the layer is drawn larger than its source. linear: bilinear (the default). bicubic: Catmull-Rom, with a clamp to the range of the four nearest texels. mitchell: Mitchell-Netravali with B = C = 1/3, with the same clamp. Where the layer is drawn at or below its source size every layer uses trilinear mip filtering whatever @resample says.</xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="linear"/><xs:enumeration value="bicubic"/><xs:enumeration value="mitchell"/>
       </xs:restriction></xs:simpleType>
@@ -2062,20 +2067,15 @@
         <xs:enumeration value="rect"/><xs:enumeration value="ellipse"/>
         <xs:enumeration value="rounded-rect"/><xs:enumeration value="polygon"/>
         <xs:enumeration value="star"/><xs:enumeration value="line"/>
-        <xs:enumeration value="path"/>
-        <xs:enumeration value="stroke-text"/>
+        <xs:enumeration value="path"/><xs:enumeration value="stroke-text"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
-    <xs:attribute name="width" type="positiveLengthType" use="required"/>
-    <xs:attribute name="height" type="positiveLengthType" use="required"/>
+    <xs:attribute name="width" type="positiveLengthType"/>
+    <xs:attribute name="height" type="positiveLengthType"/>
     <xs:attribute name="path" type="xs:string"/>
-    <xs:attribute name="text" type="xs:string">
-      <xs:annotation><xs:documentation>shape="stroke-text": the text, laid out in the strokeFont as open strokes in the font's order (a line feed, &amp;#10;, starts a line). Stroked only: fill is not used. trimMode="sequential" with trimEnd writes it on.</xs:documentation></xs:annotation>
-    </xs:attribute>
+    <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="strokeFont" type="xs:IDREF"/>
-    <xs:attribute name="fontSize" type="positiveDecimal" default="48">
-      <xs:annotation><xs:documentation>shape="stroke-text": the cap height in node units.</xs:documentation></xs:annotation>
-    </xs:attribute>
+    <xs:attribute name="fontSize" type="positiveDecimal" default="48"/>
     <xs:attribute name="fillRule" type="fillRuleType" default="nonzero"/>
     <xs:attribute name="radius" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="cornerRadii" type="numberListType">
@@ -2094,6 +2094,64 @@
     <xs:attributeGroup ref="strokeStyle"/>
     <xs:attributeGroup ref="trimPath"/>
     <xs:attributeGroup ref="strokeMarkers"/>
+    <xs:attribute name="region" type="xs:IDREF"/>
+    <xs:attribute name="regionLayer" type="xs:IDREF"/>
+    <xs:attribute name="regionPadding" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="connectorType">
+    <xs:annotation><xs:documentation>
+      A line between two nodes (or fixed points) that is recomputed every frame, so it stays attached
+      while they move. @from and @to name a group, layer, shape or instance; with anchor auto the line is
+      cut where it leaves the start node's box and enters the end node's box, less fromGap and toGap.
+      route straight, orthogonal (axis-aligned elbows) or curved (bend in degrees); @points are
+      waypoints. A connector has no box and no transform of its own.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="animate" type="animateType"/>
+      <xs:element name="expression" type="expressionType"/>
+      <xs:element name="mask" type="maskType"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeCoreAttributes"/>
+    <xs:attribute name="from" type="xs:IDREF"/>
+    <xs:attribute name="to" type="xs:IDREF"/>
+    <xs:attribute name="fromAnchor" type="connectorAnchorType" default="auto"/>
+    <xs:attribute name="toAnchor" type="connectorAnchorType" default="auto"/>
+    <xs:attribute name="fromX" type="lengthType"/>
+    <xs:attribute name="fromY" type="lengthType"/>
+    <xs:attribute name="toX" type="lengthType"/>
+    <xs:attribute name="toY" type="lengthType"/>
+    <xs:attribute name="fromGap" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="toGap" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="route" default="straight">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="straight"/><xs:enumeration value="orthogonal"/><xs:enumeration value="curved"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="points" type="pointListType"/>
+    <xs:attribute name="bend" default="30">
+      <xs:simpleType><xs:restriction base="xs:double">
+        <xs:minInclusive value="-90"/><xs:maxInclusive value="90"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="stroke" type="paintType" default="#FFFFFFFF"/>
+    <xs:attribute name="strokeWidth" type="nonNegativeDecimal" default="4"/>
+    <xs:attribute name="strokeCap" type="strokeCapType" default="butt"/>
+    <xs:attribute name="strokeJoin" type="strokeJoinType" default="miter"/>
+    <xs:attribute name="miterLimit" type="positiveDecimal" default="4"/>
+    <xs:attribute name="dash" type="numberListType"/>
+    <xs:attribute name="dashOffset" type="xs:double" default="0"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+    <xs:attributeGroup ref="trimPath"/>
+    <xs:attributeGroup ref="strokeMarkers"/>
+    <xs:attribute name="label" type="xs:IDREF"/>
+    <xs:attribute name="labelAt" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="labelOffset" type="xs:double" default="0"/>
+    <xs:attribute name="labelOrient" default="horizontal">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="horizontal"/><xs:enumeration value="along"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
   </xs:complexType>
 
   <xs:complexType name="burstType">
@@ -2101,30 +2159,6 @@
     <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
-  </xs:complexType>
-  <xs:complexType name="burst3DType">
-    <xs:annotation><xs:documentation>
-      A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
-      throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
-      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
-      (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
-      launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
-      render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed
-      and mass follow the ejecta scaling of Housen and Holsapple (2011) as the engine reads it, which has not been
-      checked against the paper; the launch angle, its spread, the launch time and the lopsidedness of an oblique
-      impact are the engine's own. `angle` is the launch angle above the tangent plane of the contact and
-      `angleSpread` the half-width of the uniform spread around it, in degrees; both stay within 0 to 90 together.
-      The ejecta of regolith and ice have no table row and are an error. Positions and velocities are in scene units
-      through `physics/@pixelsPerMeter`, and gravity, drag and colliders are those of the emitter. The crater's
-      pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="time" type="xs:double"/>
-    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
-    <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
-    <xs:attribute name="interval" type="positiveDecimal" default="1"/>
-    <xs:attribute name="crater" type="xs:IDREF"/>
-    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="particleEmitterType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -2211,509 +2245,21 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
   </xs:complexType>
 
-  <xs:complexType name="oceanType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="waterImpulse" type="waterImpulseType"/><xs:element name="wave" type="oceanWaveType"/><xs:element name="whitewater" type="whitewaterType"/></xs:choice>
-    <xs:attribute name="id" type="xs:ID" use="required"/>
-    <xs:attribute name="name" type="xs:string"/>
-    <xs:attribute name="x" type="xs:double" default="0"/>
-    <xs:attribute name="y" type="xs:double" default="0"/>
-    <xs:attribute name="z" type="xs:double" default="0"/>
-    <xs:attribute name="rotation" type="xs:double" default="0"/>
-    <xs:attribute name="rotationX" type="xs:double" default="0"/>
-    <xs:attribute name="rotationY" type="xs:double" default="0"/>
-    <xs:attribute name="start" type="xs:double" default="0"/>
-    <xs:attribute name="end" type="xs:double"/>
-    <xs:attribute name="condition" type="expressionString"/>
-    <xs:attribute name="parent" type="xs:IDREF"/>
-    <xs:attribute name="scaleX" type="xs:double" default="1"/>
-    <xs:attribute name="scaleY" type="xs:double" default="1"/>
-    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
-    <xs:attribute name="visible" type="xs:boolean" default="true"/>
-    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
-    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
-    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
-    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
-    <xs:attribute name="width" type="positiveDecimal" default="64"/>
-    <xs:attribute name="depth" type="positiveDecimal" default="64"/>
-    <xs:attribute name="cellSize" type="positiveDecimal" default="1"/>
-    <xs:attribute name="waterLevel" type="xs:double" default="0"/>
-    <xs:attribute name="bottomDepth" type="nonNegativeDecimal" default="10"/>
-    <xs:attribute name="gravity" type="positiveDecimal" default="9.81"/>
-    <xs:attribute name="damping" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
-    <xs:attribute name="dryTolerance" type="positiveDecimal" default="0.0000000001"/>
-    <xs:attribute name="initialVelocityX" type="xs:double" default="0"/>
-    <xs:attribute name="initialVelocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="bathymetryScale" type="xs:double" default="1"/>
-    <xs:attribute name="bathymetryOffset" type="xs:double" default="0"/>
-    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="surfaceMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="periodic"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="bathymetryEncoding" default="red"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="order" default="1"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="material" type="xs:IDREF"/>
-    <xs:attribute name="bathymetry" type="xs:IDREF"/>
-    <xs:attribute name="colliders" type="xs:IDREFS"/>
-    <xs:attribute name="splash" type="xs:IDREFS">
-      <xs:annotation><xs:documentation>
-        The particles3D emitters whose particles fall into this ocean: each must throw out the ejecta of a crater (a
-        `burst` with `crater`), whose particles have a mass (OCN13). Absent (the default) is the behaviour there always was.
-        A particle of a listed emitter whose centre crosses the ocean's rest level (`waterLevel`) downward inside its
-        domain is removed there, and what it brings is given to the water in the canonical step of the crossing, summed
-        by cell: the volume of the particle (its mass over the density of the crater's target) is taken out of the
-        cell's water and given equally to its eight neighbours, never more than 90 % of the cell's water, and its
-        horizontal momentum, divided by the density of the water, is added to the cell's. The water volume and the
-        horizontal momentum that is applied are conserved; the vertical momentum and the energy of the particle are not
-        (the shallow-water model has no vertical momentum), and a particle that has fallen in is gone, it does not sink.
-        The surface is the water's rest level, not the swell, and the ocean is taken at its pose when the emitter
-        starts. The deposit does not go through the depth filter of `bedResponse`. An emitter belongs to one ocean.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="bodyCoupling" default="none">
-      <xs:annotation><xs:documentation>
-        What the water does to the rigid bodies in `colliders`. `none` (the default) is the existing behaviour: a body
-        displaces the water and nothing acts on the body. `buoyancy` loads each rigid body with the weight of the water it
-        displaces (water density 1000 kg/m3, the ocean's gravity), upward through the centroid of the submerged volume
-        so that a tilted body is turned by it, and with a quadratic form drag on its vertical motion, scaled by
-        `bodyDrag`. A body floats if it is lighter than the water it displaces. The submerged part is measured against
-        the free surface under the body: the plane that the ocean fits, in the canonical step before the last one it has
-        completed, through the surface of the wet columns of the body's footprint (the water the body displaces stands
-        above the rest level while it is there, and the plane says so), and against the rest level, `waterLevel`, while
-        there is none; the body's own motion therefore moves the water it floats on, and the water carries the energy of
-        a bobbing body away, so a body with no drag settles. `full` adds the horizontal momentum the body gave the water in
-        that step, taken back as a force along the body's centre over one canonical step, so that the body and the water
-        keep their momentum together (to what is in flight, one step late); roll is not damped, there is no added mass,
-        and a body rides the rest level when the ocean has no water under it. The load is held for one rigid step and
-        evaluated halfway through it. A body so light that the waterline's stiffness times the step reaches 1.8 is an
-        error (lower `physics/@fixedStep` or raise the mass), not a damped motion. The rigid body must be a sphere, box,
-        cylinder, cone, capsule or closed mesh. The ocean and the bodies form a group (see the contract text): the ocean
-        is stepped before the rigid world, and the document cannot be baked into a physics cache.
-      </xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/><xs:enumeration value="full"/></xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="bedResponse" default="depthFiltered">
-      <xs:annotation><xs:documentation>
-        How the free surface answers what the objects in `colliders` do to the water: the bed that a crater moves and
-        the volume a body occupies. `depthFiltered` (the default) attenuates it by the depth of the water: a
-        displacement much narrower than the depth does little to the surface, as in linear water-wave theory, where an
-        instantaneous displacement of wavenumber k is carried to the surface by 1/cosh(k h) for the bed (Kajiura 1963;
-        read here only as quoted by the tsunami literature) and by cosh(k z0)/cosh(k h) for a volume at height z0 above the bed
-        (derived by the engine). The displaced volume is conserved. `hydrostatic` lifts the whole column by the
-        displacement, which is the long-wave answer, right when the displacement is much wider than the depth: the
-        behaviour of the first version, kept for comparison. With `depthFiltered` the horizontal momentum that a
-        body gives the water is also not the relaxation toward its velocity but the form drag of the body through
-        it, (1/2) C_d A |U - u| (U - u) per unit density (C_d is `bodyDrag`, U the body's velocity, u the mean
-        velocity of the water under it, A the area its wet part presents to that flow), spread as the lift of the
-        body is and never past its velocity. It has no effect without `colliders`.
-      </xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
-      <xs:annotation><xs:documentation>
-        Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
-        the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
-        stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
-        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
-        undamped bobbing.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-  </xs:complexType>
-  <xs:complexType name="waterImpulseType">
-    <xs:annotation><xs:documentation>
-      An impulse at an instant (`time`, `x`, `z`, `radius`, `amplitude`, `velocityX`, `velocityZ`, `type`), or the cavity
-      that a body makes of the water it enters: `source` names a dynamic rigidBody object that the ocean lists in
-      `colliders`, and nothing is authored about when, where or how big (none of the others may be given, and a body has
-      at most one). The entry is the first time the lowest point of the body crosses the ocean's rest level (`waterLevel`)
-      downward, found step by step from the body's poses, with the body moving down at that instant; a body that starts
-      in the water, or never reaches it, makes no cavity. The cavity is the transient crater of the scaling law of
-      Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
-      normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
-      law's volume and depth give the disc that is emptied (a bowl profile of the law's depth at its centre holding the law's volume), the water going to the ring around it
-      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). The cavity forms over the
-      law's formation time (0.8 times the square root of its volume's cube root over gravity), in a part for every
-      canonical step that grows smoothly from nothing to the whole (the shape of the growth is the engine's choice,
-      the law gives only the time); a ring or a disc narrower than four cells is widened, keeping the volume. The cavity is limited by the water layer: it takes at most 90% of the
-      water of its disc, and of any column in it, so it never exposes the bed and is never an error for lack of water; a
-      body that reaches the bed excavates the bed's crater (`crater@source`) instead. The body goes on raising the
-      columns it occupies, as before; the cavity is displacement in addition. Hydrostatic: no jet, no crown of
-      spray, no air; the law is that of a crater in water, not a validated model of water entry. The event is made at
-      the first entry only, for the owner's pose at that instant, and an entry outside the ocean makes nothing.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="source" type="xs:IDREF"/>
-    <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="x" type="xs:double" default="0"/>
-    <xs:attribute name="z" type="xs:double" default="0"/>
-    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
-    <xs:attribute name="amplitude" type="xs:double" default="1"/>
-    <xs:attribute name="velocityX" type="xs:double" default="0"/>
-    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="type" default="displace"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="displace"/><xs:enumeration value="add-water"/></xs:restriction></xs:simpleType></xs:attribute>
-  </xs:complexType>
-  <xs:complexType name="whitewaterType">
-    <xs:annotation><xs:documentation>Cinematic read-only water tracers. Births at ocean dt endpoints follow excess surface slope or Froude number. Foam follows water; spray is ballistic with drag and becomes foam on landing. Own budgets and full-u64 seed; at most one child per ocean.</xs:documentation></xs:annotation>
-    <xs:attribute name="emissionRate" type="nonNegativeDecimal" default="10"/>
-    <xs:attribute name="threshold" type="nonNegativeDecimal" default="0.5"/>
-    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="lifetime" type="positiveDecimal" default="3"/>
-    <xs:attribute name="sprayFraction" type="unitDecimal" default="0.4"/>
-    <xs:attribute name="launchSpeed" type="nonNegativeDecimal" default="3"/>
-    <xs:attribute name="drag" type="nonNegativeDecimal" default="0.1"/>
-    <xs:attribute name="radius" type="positiveDecimal" default="0.05"/>
-    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="end" type="nonNegativeDecimal"/>
-    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="foamMaterial" type="xs:IDREF"/>
-    <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
-  </xs:complexType>
-  <xs:complexType name="oceanWaveType">
-    <xs:attribute name="wavelength" type="positiveDecimal" default="16"/>
-    <xs:attribute name="amplitude" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="direction" type="xs:double" default="0"/>
-    <xs:attribute name="phase" type="xs:double"/>
-    <xs:attribute name="speed" type="nonNegativeDecimal"/>
-  </xs:complexType>
-
-  <xs:complexType name="particles3DType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burst3DType"/></xs:choice>
-    <xs:attribute name="id" type="xs:ID" use="required"/>
-    <xs:attribute name="name" type="xs:string"/>
-    <xs:attribute name="x" type="xs:double" default="0"/>
-    <xs:attribute name="y" type="xs:double" default="0"/>
-    <xs:attribute name="z" type="xs:double" default="0"/>
-    <xs:attribute name="rotation" type="xs:double" default="0"/>
-    <xs:attribute name="rotationX" type="xs:double" default="0"/>
-    <xs:attribute name="rotationY" type="xs:double" default="0"/>
-    <xs:attribute name="start" type="xs:double" default="0"/>
-    <xs:attribute name="end" type="xs:double"/>
-    <xs:attribute name="condition" type="expressionString"/>
-    <xs:attribute name="parent" type="xs:IDREF"/>
-    <xs:attribute name="parentJoint" type="xs:string">
-      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="scaleX" type="xs:double" default="1"/>
-    <xs:attribute name="scaleY" type="xs:double" default="1"/>
-    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
-    <xs:attribute name="visible" type="xs:boolean" default="true"/>
-    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
-    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
-    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
-    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
-    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
-    <xs:attribute name="rate" type="nonNegativeDecimal" default="10"/>
-    <xs:attribute name="emissionStart" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="lifetimeVariance" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="speed" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="speedVariance" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="drag" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="collisionRadius" type="nonNegativeDecimal" default="0.5"/>
-    <xs:attribute name="friction" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="trail" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="emissionEnd" type="nonNegativeDecimal"/>
-    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
-    <xs:attribute name="lifetime" type="positiveDecimal" default="2"/>
-    <xs:attribute name="emitterWidth" type="positiveDecimal" default="1"/>
-    <xs:attribute name="emitterHeight" type="positiveDecimal" default="1"/>
-    <xs:attribute name="emitterDepth" type="positiveDecimal" default="1"/>
-    <xs:attribute name="emitterRadius" type="positiveDecimal" default="1"/>
-    <xs:attribute name="size" type="positiveDecimal" default="1"/>
-    <xs:attribute name="collisionTolerance" type="positiveDecimal" default="0.001"/>
-    <xs:attribute name="velocityX" type="xs:double" default="0"/>
-    <xs:attribute name="velocityY" type="xs:double" default="0"/>
-    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="gravityX" type="xs:double" default="0"/>
-    <xs:attribute name="gravityY" type="xs:double" default="0"/>
-    <xs:attribute name="gravityZ" type="xs:double" default="0"/>
-    <xs:attribute name="rotation0X" type="xs:double" default="0"/>
-    <xs:attribute name="rotation0Y" type="xs:double" default="0"/>
-    <xs:attribute name="rotation0Z" type="xs:double" default="0"/>
-    <xs:attribute name="rotationVarianceX" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="rotationVarianceY" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="rotationVarianceZ" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="angularVelocityX" type="xs:double" default="0"/>
-    <xs:attribute name="angularVelocityY" type="xs:double" default="0"/>
-    <xs:attribute name="angularVelocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="angularVelocityVarianceX" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="angularVelocityVarianceY" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="angularVelocityVarianceZ" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="inheritedVelocityX" type="xs:double" default="0"/>
-    <xs:attribute name="inheritedVelocityY" type="xs:double" default="0"/>
-    <xs:attribute name="inheritedVelocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="directionX" type="xs:double" default="0"/>
-    <xs:attribute name="directionY" type="xs:double" default="-1"/>
-    <xs:attribute name="directionZ" type="xs:double" default="0"/>
-    <xs:attribute name="spread" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="360"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="scaleVariance" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxExclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="bounce" type="unitDecimal" default="0.5"/>
-    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxEvents" default="16384"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="segments" default="12"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="emitterMesh" type="xs:IDREF"/>
-    <xs:attribute name="mesh" type="xs:IDREF"/>
-    <xs:attribute name="material" type="xs:IDREF"/>
-    <xs:attribute name="sprite" type="xs:IDREF"/>
-    <xs:attribute name="forceFields" type="xs:IDREFS"/>
-    <xs:attribute name="colliders" type="xs:IDREFS"/>
-    <xs:attribute name="gas" type="xs:IDREF">
-      <xs:annotation><xs:documentation>
-        The object3D whose native pyro volume drags the particles along. Absent (the default) is the behaviour there
-        always was. The acceleration of a particle gains `drag` times the gas's velocity at its place and time, so
-        with the emitter's `drag` k the particle obeys p'' = k (u - v) plus gravity and fields: it is dragged by the gas
-        inside the volume's domain and by still air outside it, with the same coefficient (the gas fades to rest across
-        one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
-        is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
-        linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
-        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
-        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
-        and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
-        velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
-        so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="emitterShape" default="point"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="point"/><xs:enumeration value="box"/><xs:enumeration value="sphere"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="billboard"/><xs:enumeration value="streak"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="sizeEnd" type="nonNegativeDecimal"/>
-    <xs:attribute name="color" type="colorType" default="#FFFFFFFF"/>
-    <xs:attribute name="colorEnd" type="colorType"/>
-    <xs:attribute name="opacityEnd" type="unitDecimal"/>
-    <xs:attribute name="sizeCurve" type="curveType" default="linear"/>
-    <xs:attribute name="colorCurve" type="curveType" default="linear"/>
-  </xs:complexType>
-
-  <xs:attributeGroup name="pyroShape">
-    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="box"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
-    <xs:attribute name="width" type="positiveDecimal"/>
-    <xs:attribute name="height" type="positiveDecimal"/>
-    <xs:attribute name="depth" type="positiveDecimal"/>
-    <xs:attribute name="x" type="xs:double" default="0"/>
-    <xs:attribute name="y" type="xs:double" default="0"/>
-    <xs:attribute name="z" type="xs:double" default="0"/>
-    <xs:attribute name="rotation" type="xs:double" default="0"/>
-    <xs:attribute name="rotationX" type="xs:double" default="0"/>
-    <xs:attribute name="rotationY" type="xs:double" default="0"/>
-    <xs:attribute name="scaleX" type="xs:double" default="1"/>
-    <xs:attribute name="scaleY" type="xs:double" default="1"/>
-    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
-    <xs:attribute name="mesh" type="xs:IDREF"/>
-  </xs:attributeGroup>
-  <xs:attributeGroup name="pyroCrater">
-    <xs:annotation><xs:documentation>
-      A source or impulse that the impact of a crater causes. `crater` names a crater that grows from an impact
-      (`crater@source`); the smoke is derived from that impact and nothing is authored about when, where or how much:
-      the source is a sphere of the crater's radius at the impact point, active from the impact over the crater's
-      formation time (an impulse: at the impact), so shape, position, timing, density, temperature and expansion are
-      not given. The dust is `dustFraction` of the volume thrown out of the crater, injected as a volume fraction of
-      solids, spread over the cells the sphere covers that are not solid (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
-      `heatFraction` of (1/2) m U^2 sin(theta)^(3/2) for the body's mass m, speed U and angle theta from the surface;
-      it warms the dust by heat / (dust mass x `specificHeat`, J/(kg K)), at most `maxTemperature` kelvin, and the
-      expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
-      share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
-      that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
-      `physics/@pixelsPerMeter`.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="crater" type="xs:IDREF"/>
-    <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="dustFraction"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="specificHeat" type="positiveDecimal"/>
-    <xs:attribute name="maxTemperature"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
-  </xs:attributeGroup>
-  <xs:complexType name="pyroSourceType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
-    <xs:attributeGroup ref="pyroShape"/>
-    <xs:attributeGroup ref="pyroCrater"/>
-    <xs:attribute name="start" type="xs:double" default="0"/>
-    <xs:attribute name="end" type="xs:double"/>
-    <xs:attribute name="densityRate" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="temperatureRate" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="velocityRateX" type="xs:double" default="0"/>
-    <xs:attribute name="velocityRateY" type="xs:double" default="0"/>
-    <xs:attribute name="velocityRateZ" type="xs:double" default="0"/>
-    <xs:attribute name="expansion" type="xs:double" default="0"/>
-  </xs:complexType>
-  <xs:complexType name="pyroImpulseType">
-    <xs:attributeGroup ref="pyroShape"/>
-    <xs:attributeGroup ref="pyroCrater"/>
-    <xs:attribute name="time" type="nonNegativeDecimal"/>
-    <xs:attribute name="density" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="temperature" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="velocityX" type="xs:double" default="0"/>
-    <xs:attribute name="velocityY" type="xs:double" default="0"/>
-    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
-    <xs:attribute name="expansion" type="xs:double" default="0"/>
-  </xs:complexType>
-  <xs:complexType name="pyroType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/></xs:choice>
-    <xs:attribute name="colliders" type="xs:IDREFS"/>
-    <xs:attribute name="colliderThickness" type="positiveDecimal"/>
-    <xs:attribute name="forceFields" type="xs:IDREFS"/>
-    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
-    <xs:attribute name="width" type="positiveDecimal" use="required"/>
-    <xs:attribute name="height" type="positiveDecimal" use="required"/>
-    <xs:attribute name="depth" type="positiveDecimal" use="required"/>
-    <xs:attribute name="voxelSize" type="positiveDecimal" use="required"/>
-    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
-    <xs:attribute name="ambientTemperature" default="300"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="dissipation" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="cooling" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="buoyancy" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="vorticity" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="turbulence" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
-    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="checkpointMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-  </xs:complexType>
-
-  <xs:complexType name="fractureType">
-    <xs:annotation><xs:documentation>
-      Owned seeded closed-solid fracture. at is composition time, quantized to the first
-      physics boundary at or after that time when the source object participates.
-      Exactly one rigidBody supplies total mass, collision properties and inherited motion.
-      Exterior materials and attributes come from the frozen source surface; cut faces use
-      interiorMaterial, with planar UV repeats per scene unit given by interiorUvScale.
-      impulseX/Y/Z are the total directed world-scene impulse in kg*scene-unit/second,
-      distributed in proportion to piece mass. radialImpulse is a nonnegative total scalar
-      impulse, distributed by piece mass along the source-centroid-to-piece directions.
-      maxMemoryMiB bounds component geometry/reconstruction admission, not whole-process RSS.
-      Fracture is cinematic partitioning, not a material stress/failure calculation.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="interiorMaterial" type="xs:IDREF" use="required"/>
-    <xs:attribute name="interiorUvScale" type="positiveDecimal" default="1"/>
-    <xs:attribute name="impulseX" type="xs:double" default="0"/>
-    <xs:attribute name="impulseY" type="xs:double" default="0"/>
-    <xs:attribute name="impulseZ" type="xs:double" default="0"/>
-    <xs:attribute name="radialImpulse" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-  </xs:complexType>
-
-  <xs:complexType name="craterType">
-    <xs:annotation><xs:documentation>
-      Owned cinematic deformation in object-space scene units, after imported basis/node transforms.
-      Let p be the clamped eased fraction of local time from start to end; dimensions grow with p.
-      With outward unit n, h=dot(vertex-center,n), r=length(vertex-center-n*h), and B(x)=max(0,1-x*x)^2
-      for abs(x)&lt;1 (zero otherwise), displace along n by
-      p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
-      At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
-      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
-      This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
-      maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
-      by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.
-      Static and kinematic rigid surfaces are rebuilt at fixed physics substeps. Dynamic rigid bodies are rejected.
-      Particle collider references interpolate deformed world-space vertices over canonical particle dt intervals,
-      with continuous sphere/triangle contacts and barycentric boundary velocities. Particle geometry admission
-      also uses this memory allowance. Pyro collider references sample closed midpoint surfaces with
-      barycentric material velocities evaluated at MAC faces, reserving retained and step-local geometry
-      under both this allowance and the domain meshMemoryMiB. Crater planes retain a centred colliderThickness slab.
-
-      A crater may instead grow from an impact: `source` names the dynamic rigidBody object that makes it. The crater
-      begins at the first step in which that body, approaching the owner, pushes on it with more than twice its own
-      weight in one step, and centres on the impulse-weighted contact point with its axis along the normal of the owner's
-      surface at that point (centerX/Y/Z and normalX/Y/Z are then not read). The normal is the owner's own geometry: for
-      a mesh the corner normals of the triangle the point is on, interpolated, so that the same surface in finer or
-      coarser triangles gives the same axis; a sphere's radius direction; a box's face. The contact's normal only
-      chooses the side, and is used as it is for shapes that give no normal (capsule, cylinder, cone, convex). Radius, depth, rimHeight, rimWidth, start and end are derived and
-      so cannot be given; `curve` and `influenceDepth` and `maxMemoryMiB` keep their meaning. The crater is
-      Holsapple's scaling law (Annu. Rev. Earth Planet. Sci. 21:333, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18) with
-      the constants of the author's calculator note, applied to the body's mass and density, the speed of its approach
-      along that normal, `targetMaterial`, and gravity. The dependence of those constants on strength and
-      porosity is poorly constrained by the source, so `targetDensity` and `strength` override the table. A crater grows in
-      composition time from the impact over the law's formation time, and nothing is simulated before the impact.
-      Units: `physics/@pixelsPerMeter` converts scene units to metres for everything the law reads and gives;
-      `targetDensity` is kilograms per cubic metre, `strength` pascals, `gravity` metres per second squared (default:
-      the magnitude of the physics gravity, an error if that is zero). One impact makes one crater: later contacts of the
-      body neither start another nor change this one. A water layer over the owner is not treated: the crater is the
-      seabed's. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law is still applied to the
-      normal component, which keeps the size monotone in the angle, and no ricochet is modelled.
-    </xs:documentation></xs:annotation>
-    <xs:attribute name="id" type="xs:ID">
-      <xs:annotation><xs:documentation>
-        Names the crater so that what its impact causes can refer to it: with `source`, the consequences of the
-        impact (ejecta, smoke) name this crater instead of repeating its body and material.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="source" type="xs:IDREF"/>
-    <xs:attribute name="capture" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>
-        With `source`: the body that makes the crater is arrested by it. From the impact until its velocity relative to
-        the owner is zero, and only while its centre is inside the crater's rim radius (the law's, in the owner's frame
-        at the point of impact), the body loses velocity at a constant rate of U^2 / (2 d), `U` the body's speed at the
-        impact and `d` the crater's depth by the law, never more than stops it in the step, along minus its velocity
-        relative to the owner; its spin loses the same share. All of its kinetic energy leaves the body, which is what
-        the law spends digging the crater, and none can be added. It is a model of the engine, the mean force of a
-        penetration of depth `d` (kinetic energy over depth), not a published law: the projectile neither breaks up
-        nor buries itself, it stops and follows the floor of the pit. Without it (the default, the behaviour there
-        always was) the body keeps what the contact leaves it, which for a glancing impact is a body that rolls out
-        of the crater it made.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="targetMaterial">
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="water"/><xs:enumeration value="drySand"/><xs:enumeration value="drySoil"/>
-        <xs:enumeration value="wetSoil"/><xs:enumeration value="softRock"/><xs:enumeration value="hardRock"/>
-        <xs:enumeration value="regolith"/><xs:enumeration value="ice"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="targetDensity" type="positiveDecimal"/>
-    <xs:attribute name="strength" type="nonNegativeDecimal"/>
-    <xs:attribute name="gravity" type="positiveDecimal"/>
-    <xs:attribute name="centerX" type="xs:double" default="0"/>
-    <xs:attribute name="centerY" type="xs:double" default="0"/>
-    <xs:attribute name="centerZ" type="xs:double" default="0"/>
-    <xs:attribute name="normalX" type="xs:double" default="0"/>
-    <xs:attribute name="normalY" type="xs:double" default="0"/>
-    <xs:attribute name="normalZ" type="xs:double" default="-1"/>
-    <xs:attribute name="radius" type="positiveDecimal" default="50"/>
-    <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
-    <xs:attribute name="rimHeight" type="nonNegativeDecimal" default="2"/>
-    <xs:attribute name="rimWidth" type="positiveDecimal" default="10"/>
-    <xs:attribute name="influenceDepth" type="positiveDecimal"/>
-    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
-    <xs:attribute name="end" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="curve" default="ease-in-out"><xs:simpleType><xs:restriction base="xs:string">
-      <xs:enumeration value="linear"/><xs:enumeration value="ease-in"/><xs:enumeration value="ease-out"/><xs:enumeration value="ease-in-out"/><xs:enumeration value="step"/>
-    </xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-  </xs:complexType>
   <xs:complexType name="morphType">
-    <xs:annotation><xs:documentation>
-      With an object3D of primitive="mesh" and an imported model: the weight of one morph target of the model, by the
-      target's name (a glTF mesh's extras.targetNames, an FBX blend channel's name). It replaces that target's weight
-      from the clip or the rest pose, and wins over the same target in the object's @morphWeights. The weight animates.
-      Version 1.2.
-    </xs:documentation></xs:annotation>
+    <xs:annotation><xs:documentation>With an object3D of primitive="mesh" and an imported model: the weight of one morph
+    target of the model, by the target's name. It replaces that target's weight from the clip or the rest pose, and wins
+    over the same target in the object's @morphWeights. The weight animates. Version 1.2.</xs:documentation></xs:annotation>
     <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
     <xs:attribute name="name" type="xs:string" use="required"/>
     <xs:attribute name="weight" type="xs:double" default="0"/>
   </xs:complexType>
 
   <xs:complexType name="jointType">
-    <xs:annotation><xs:documentation>
-      With an object3D of primitive="mesh" and an imported model: poses one joint (a node by name) of the model. The
-      rotationX, rotationY and rotation (about z), in degrees and in that order, turn the joint in its own axes on
-      top of the clip's pose; they animate. lookAt then turns the joint so that its lookAxis points at the target
-      node, light or camera (the shortest turn, scaled by influence and limited to maxAngle degrees), without moving
-      the joint's parents. The first joint of that name in the model's node order is used. Version 1.2.
-    </xs:documentation></xs:annotation>
+    <xs:annotation><xs:documentation>With an object3D of primitive="mesh" and an imported model: poses one joint (a node by
+    name) of the model. rotationX, rotationY and rotation (about z), in degrees and in that order, turn the joint in its
+    own axes on top of the clip's pose; they animate. lookAt then turns the joint so that its lookAxis points at the target
+    node, light or camera (the shortest turn, scaled by influence and limited to maxAngle degrees), without moving the
+    joint's parents. The first joint of that name in the model's node order is used. Version 1.2.</xs:documentation></xs:annotation>
     <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
     <xs:attribute name="name" type="xs:string" use="required"/>
     <xs:attribute name="rotationX" type="xs:double" default="0"/>
@@ -2734,14 +2280,14 @@
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
-      <xs:element name="joint" type="jointType"/>
       <xs:element name="morph" type="morphType"/>
-      <xs:element name="blob" type="clayBlobType"/>
-      <xs:element name="rigidBody" type="rigidBody3DType"/>
+      <xs:element name="joint" type="jointType"/>
       <xs:element name="medium" type="mediumType"/>
       <xs:element name="pyro" type="pyroType"/>
       <xs:element name="crater" type="craterType"/>
       <xs:element name="fracture" type="fractureType"/>
+      <xs:element name="blob" type="clayBlobType"/>
+      <xs:element name="rigidBody" type="rigidBody3DType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
@@ -2757,37 +2303,6 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
-    <xs:attribute name="map" type="xs:IDREF">
-      <xs:annotation><xs:documentation>
-        primitive="map": the map asset as ground in the object's xy
-        plane, one map pixel per scene unit, draped with the map as drawn; @terrain (tiles of
-        elevation, Terrarium or Mapbox Terrain-RGB per @terrainEncoding) raises it toward the
-        camera (−z) by true height times @exaggeration on a grid of @resolution cells, and
-        @buildings extrudes the footprints of its vector basemap to their heights (in @material). Terrain and
-        buildings need a web-mercator map. primitive="globe": a sphere of @radius (poles on the
-        y axis, 0° longitude facing the camera) draped with the map's content drawn over the
-        whole world. @textureSize is the drape's size in pixels along a map's longer side, and a globe drape's height (its width
-        is twice that).
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="terrain" type="xs:IDREF"/>
-    <xs:attribute name="planetRadius" type="positiveDecimal" default="6378137">
-      <xs:annotation><xs:documentation>Version 1.3 globe relief: physical datum radius in metres. Radial scene displacement is elevationMetres * radius / planetRadius * exaggeration. Flat map terrain keeps its existing scale.</xs:documentation></xs:annotation>
-    </xs:attribute>
-    <xs:attribute name="terrainTileSize" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="terrainZoom"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="22"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="terrainMissing" default="error"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="zero"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="terrainMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="terrainEncoding" default="terrarium">
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="exaggeration" type="nonNegativeDecimal" default="1"/>
-    <xs:attribute name="buildings" type="xs:boolean" default="false"/>
-    <xs:attribute name="textureSize" default="2048">
-      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="64"/><xs:maxInclusive value="8192"/></xs:restriction></xs:simpleType>
-    </xs:attribute>
     <xs:attribute name="resolution" default="64">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType>
     </xs:attribute>
@@ -2795,17 +2310,24 @@
     <xs:attribute name="boil" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mesh" type="xs:IDREF"/>
-    <xs:attribute name="volume" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
     <xs:attribute name="node" type="xs:string">
-      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: draw only the node of that name and its descendants, placed so that the node's own origin is the object's origin (the node's transform within the model is dropped, the transforms below it are kept). The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: draw only the node of that name and its
+      descendants, placed so that the node's own origin is the object's origin (the node's transform within the model is
+      dropped, the transforms below it are kept). The first node of that name in the model's node order is used.
+      </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="materialOverride" type="xs:string">
-      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a space-separated list of imported-material-name:document-material-id pairs. Each primitive of the model whose material has that name is drawn with the document material instead. A material with no pair keeps its imported look. @material, when present, replaces every material and takes precedence.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a space-separated list of
+      imported-material-name:document-material-id pairs. Each primitive of the model whose material has that name is drawn with
+      the document material instead. A material with no pair keeps its imported look. @material, when present, replaces every
+      material and takes precedence.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="tracking" type="xs:double">
-      <xs:annotation><xs:documentation>Extra space after every character of primitive="text", in thousandths of an em of the text size (the object's height). Negative values tighten. Valid only with primitive="text".</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Extra space after every character of primitive="text", in thousandths of an em of the
+      text size (the object's height). Negative values tighten. Valid only with primitive="text".
+      </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
@@ -2826,7 +2348,11 @@
     <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
     <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
     <xs:attribute name="shadowCatcher" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>The surface draws no colour of its own: it is transparent where no light is blocked and black, with alpha up to @opacity, where the shadow casters block the light that would reach it, so that it darkens what is behind the 3D layer by the share of light taken away (ambient light counted). It casts no shadows and always receives them. The path tracer does not draw it.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>The surface draws no colour of its own. It is transparent where no light is
+      blocked and black, with alpha up to @opacity, where the shadow casters block the light that would reach it, so
+      that it darkens what is behind the 3D layer by the share of light that is taken away (ambient light counted). It
+      does not cast shadows.
+      </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
@@ -2835,22 +2361,63 @@
     <xs:attribute name="condition" type="expressionString"/>
     <xs:attribute name="parent" type="xs:IDREF"/>
     <xs:attribute name="parentJoint" type="xs:string">
-      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D
+      drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the
+      model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order
+      is used.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
     <xs:attribute name="animationClip" type="xs:string"/>
     <xs:attribute name="animationSpeed" type="xs:double" default="1"/>
     <xs:attribute name="animationOffset" type="xs:double" default="0"/>
     <xs:attribute name="animationClipTo" type="xs:string">
-      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a second clip (by name or index, as @animationClip) the model is blended toward by @animationBlend. It plays at the object's time scaled by @animationSpeed plus @animationOffsetTo.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a second clip (by name or index, as
+      @animationClip) the model is blended toward by @animationBlend. It plays at the object's time scaled by
+      @animationSpeed plus @animationOffsetTo.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="animationBlend" type="unitDecimal" default="0">
-      <xs:annotation><xs:documentation>Weight of @animationClipTo, 0 to 1 (animatable): 0 is @animationClip alone, 1 is @animationClipTo alone, between them translation, scale and morph weights blend linearly and rotation along the shortest arc. A node a clip does not animate keeps its rest pose in that clip. Without @animationClipTo the weight blends toward the rest pose.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Weight of @animationClipTo, 0 to 1 (animatable): 0 is @animationClip alone, 1 is
+      @animationClipTo alone, between them translation, scale and morph weights blend linearly and rotation along the
+      shortest arc. A node a clip does not animate keeps its rest pose in that clip. Without @animationClipTo the weight
+      blends toward the rest pose.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="animationOffsetTo" type="xs:double" default="0"/>
     <xs:attribute name="morphWeights" type="numberListType"/>
     <xs:attribute name="materialVariant" type="xs:string"/>
     <xs:attribute name="instances" type="xs:positiveInteger" default="1"/>
+    <xs:attribute name="map" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        primitive="map": the map asset as ground in the object's xy plane, one map pixel per scene
+        unit, draped with the map as drawn; @terrain (tiles of elevation, Terrarium or Mapbox
+        Terrain-RGB per @terrainEncoding) raises it toward the camera (−z) by true height times
+        @exaggeration on a grid of @resolution cells, and @buildings extrudes the footprints of its
+        first basemap's vector tiles to their heights. Terrain and buildings need a Web Mercator
+        map. primitive="globe": a sphere of @radius and @segments (poles on the y axis, 0° longitude
+        facing the camera) draped with the map's content drawn over the whole world. @material
+        dresses the ground, the globe and the buildings. @textureSize is the drape's resolution in
+        pixels along a map's longer side, and a globe drape's height (its width is twice that); it
+        does not change what the drape shows.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="terrain" type="xs:IDREF"/>
+    <xs:attribute name="terrainEncoding" default="terrarium">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="exaggeration" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="buildings" type="xs:boolean" default="false"/>
+    <xs:attribute name="textureSize" default="2048">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="64"/><xs:maxInclusive value="8192"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="planetRadius" type="positiveDecimal" default="6378137">
+      <xs:annotation><xs:documentation>Version 1.3 globe relief: physical datum radius in metres. Radial scene displacement is elevationMetres * radius / planetRadius * exaggeration. Flat map terrain keeps its existing scale.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="terrainTileSize" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainZoom"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="22"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainMissing" default="error"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="zero"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="terrainMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="volume" type="xs:IDREF"/>
   </xs:complexType>
 
   <xs:complexType name="shakeType">
@@ -2946,7 +2513,7 @@
     </xs:attribute>
     <xs:attribute name="isolate" type="xs:boolean" default="false"/>
     <xs:attribute name="collapse" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>Accepted, with no effect in this build (validate warns, E19). Groups that are not isolated already pass their 2.5D children straight through, so they share the frame's camera space; isolated groups (clip, mask, matte, effects or blend) draw their children in their own offscreen.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Accepted, with no effect (an inert attribute, reported as such: SREP 18, rule I9). A group that is not isolated passes its 2.5D children through, so they share the frame's camera space; an isolated group (clip, mask, matte, effects or blend) draws its children in its own offscreen.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="width" type="positiveLengthType"/>
     <xs:attribute name="height" type="positiveLengthType"/>
@@ -3033,6 +2600,39 @@
     <xs:attribute name="symbol" type="xs:NCName"/>
     <xs:attribute name="sha256" type="sha256Type"/>
   </xs:complexType>
+  <xs:complexType name="pointsType">
+    <xs:annotation><xs:documentation>
+      Generates the points on which a repeat places its copies: one copy per point, copy i on point i,
+      in the repeat's own space (pixels, +y down). type grid (columns x rows, centred on the origin),
+      along-path (count points at equal arc length along @path), scatter (count seeded points inside
+      width x height centred on the origin, or inside @path), vertices (one point per vertex of @path)
+      or list (the pairs of @at). Expressions inside the repeat read pointX, pointY, pointAngle, pointU
+      and pointRandom.
+    </xs:documentation></xs:annotation>
+    <xs:sequence>
+      <xs:element name="animate" type="animateType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="type" use="required">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="grid"/><xs:enumeration value="along-path"/>
+        <xs:enumeration value="scatter"/><xs:enumeration value="vertices"/>
+        <xs:enumeration value="list"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="columns" type="xs:positiveInteger" default="1"/>
+    <xs:attribute name="rows" type="xs:positiveInteger" default="1"/>
+    <xs:attribute name="spacingX" type="xs:double" default="100"/>
+    <xs:attribute name="spacingY" type="xs:double" default="100"/>
+    <xs:attribute name="count" type="xs:nonNegativeInteger"/>
+    <xs:attribute name="path" type="xs:string"/>
+    <xs:attribute name="fillRule" type="fillRuleType" default="nonzero"/>
+    <xs:attribute name="orient" type="xs:boolean" default="false"/>
+    <xs:attribute name="width" type="nonNegativeDecimal"/>
+    <xs:attribute name="height" type="nonNegativeDecimal"/>
+    <xs:attribute name="at" type="pointListType"/>
+    <xs:attribute name="seed" type="xs:unsignedLong"/>
+  </xs:complexType>
   <xs:complexType name="repeatType">
     <xs:annotation><xs:documentation>
       Generates copies of its children: @count copies, or one per item of the
@@ -3042,6 +2642,7 @@
       opacity - i*opacityStep and a start delay of i*timeStep (stagger).
     </xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="points" type="pointsType"/>
       <xs:group ref="nodeBehaviour"/>
       <xs:group ref="nodeChoice"/>
     </xs:choice>
@@ -3365,6 +2966,7 @@
       <xs:element name="sequence" type="sequenceType"/>
       <xs:element name="layer" type="layerType"/>
       <xs:element name="shape" type="shapeType"/>
+      <xs:element name="connector" type="connectorType"/>
       <xs:element name="object3D" type="object3DType"/>
       <xs:element name="camera" type="cameraType"/>
       <xs:element name="particleEmitter" type="particleEmitterType"/>
@@ -3394,7 +2996,11 @@
     <xs:attribute name="duration" type="durationType"/>
     <xs:attribute name="background" type="paintType" default="#00000000"/>
     <xs:attribute name="safeAreaForce" type="xs:boolean" default="false">
-      <xs:annotation><xs:documentation>Local addition. true exempts every instance of this symbol, and what it draws, from the safeArea enforce check (SA01), as @safeAreaForce on the instance does.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>
+        true exempts this node and everything it contains (for a symbol: every instance of it, and what it draws)
+        from the safeArea enforce check (SA01); validate lists every node that carries it (SA02), so a deliberate
+        placement outside the safe region is never silent.
+      </xs:documentation></xs:annotation>
     </xs:attribute>
   </xs:complexType>
   <xs:complexType name="symbolsType">
@@ -3412,7 +3018,7 @@
       white-balance (temperature/tint), exposure, hue-saturation, tonemap.
       shader: GLSL fragment at @src with param children as uniforms.
       selective-color: @hue (degrees) or @color (its hue) centres a window of width @tolerance; inside it @saturation
-      scales and @brightness adds; @amount mixes the result with the original. @channel is not read (warning E19).
+      scales and @brightness adds; @amount mixes the result with the original. @channel is not read.
       halftone: @size is the cell, @angle the screen's angle (default 0), @color the ink (default black) and
       @paint the ground between the dots (default white).
     </xs:documentation></xs:annotation>
@@ -3625,7 +3231,7 @@
     <xs:attribute name="x" type="xs:double" default="0"/>
     <xs:attribute name="y" type="xs:double" default="0"/>
     <xs:attribute name="z" type="xs:double" default="0">
-      <xs:annotation><xs:documentation>Depth of a radial field's centre, for 3D bodies.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Depth of a radial field's centre in pixels (scene z), for 3D bodies.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="forceX" type="xs:double" default="0"/>
     <xs:attribute name="forceY" type="xs:double" default="0"/>
@@ -3651,9 +3257,9 @@
       spring/distance/rope/hinge/slider/weld/motor join bodies a and b; pin ties
       body a to the world point x, y (b is not allowed) and is rigid unless
       stiffness is given. breakForce removes the constraint when exceeded.
-      Between 3D bodies (object3D rigidBody) the anchor is x, y, z;
-      hinge, motor and slider turn about or slide along axisX, axisY, axisZ (scene axes; z by
-      default for hinges and motors, x for sliders); ball is a ball-and-socket joint.
+      Between 3D bodies (object3D rigidBody) the anchor is x, y, z; hinge,
+      motor and slider turn about or slide along axisX, axisY, axisZ (scene axes; z by default for hinges and
+      motors, x for sliders); ball is a ball-and-socket joint.
     </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="type" use="required">
@@ -3701,6 +3307,14 @@
     </xs:attribute>
     <xs:attribute name="pixelsPerMeter" type="positiveDecimal" default="100"/>
     <xs:attribute name="solverIterations" type="xs:positiveInteger" default="8"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="bounds" default="none">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="none"/><xs:enumeration value="frame"/><xs:enumeration value="floor"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="cache" type="xs:anyURI"/>
+    <xs:attribute name="cacheSha256" type="sha256Type"/>
     <xs:attribute name="fixInternalEdges" type="xs:boolean" default="false">
       <xs:annotation><xs:documentation>
         For 3D bodies: fix the contacts that the edges between the triangles of a mesh make. A body that meets
@@ -3711,14 +3325,6 @@
         is off by default, which is the behaviour there always was.
       </xs:documentation></xs:annotation>
     </xs:attribute>
-    <xs:attribute name="start" type="xs:double" default="0"/>
-    <xs:attribute name="bounds" default="none">
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="none"/><xs:enumeration value="frame"/><xs:enumeration value="floor"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="cache" type="xs:anyURI"/>
-    <xs:attribute name="cacheSha256" type="sha256Type"/>
   </xs:complexType>
 
   <!-- ===================================================== tracking data -->
@@ -3818,35 +3424,6 @@
   <xs:simpleType name="audioRoleListType">
     <xs:list itemType="audioRoleType"/>
   </xs:simpleType>
-  <xs:complexType name="segmentType">
-    <xs:annotation><xs:documentation>
-      A span of the composition played by an output: from..to (seconds) or fromMarker..toMarker at
-      speed, or a timeRemap child mapping segment time (key/@time, from 0) to composition time
-      (key/@value) for ramps, freezes and reversals. The output plays its segments in document order;
-      a transition child joins this segment to the next one. audio says how the span's sound is fitted
-      to its duration: stretch keeps pitch, resample changes pitch with speed, mute is silence.
-      focusX and focusY (animatable in segment time) replace the layout's reframing focus for crop
-      and fit-blur.
-    </xs:documentation></xs:annotation>
-    <xs:choice minOccurs="0" maxOccurs="unbounded">
-      <xs:element name="timeRemap" type="timeRemapType"/>
-      <xs:element name="transition" type="transitionType"/>
-      <xs:element name="animate" type="animateType"/>
-    </xs:choice>
-    <xs:attribute name="id" type="xs:ID"/>
-    <xs:attribute name="from" type="xs:double"/>
-    <xs:attribute name="to" type="xs:double"/>
-    <xs:attribute name="fromMarker" type="xs:IDREF"/>
-    <xs:attribute name="toMarker" type="xs:IDREF"/>
-    <xs:attribute name="speed" type="positiveDecimal" default="1"/>
-    <xs:attribute name="audio" default="stretch">
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="stretch"/><xs:enumeration value="resample"/><xs:enumeration value="mute"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
-    <xs:attribute name="focusX" type="unitDecimal"/>
-    <xs:attribute name="focusY" type="unitDecimal"/>
-  </xs:complexType>
   <xs:complexType name="audioTrackType">
     <xs:annotation><xs:documentation>volume, pan and gain animate with nested animation elements (audio automation).</xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -3981,6 +3558,11 @@
         <xs:enumeration value="ttml"/><xs:enumeration value="itt"/><xs:enumeration value="scc"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="readingSpeed" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        Characters per second this track may reach; overrides accessibility/@readingSpeed.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="transcribe" type="xs:IDREF"/>
     <xs:attribute name="cache" type="xs:anyURI"/>
     <xs:attribute name="cacheSha256" type="sha256Type"/>
@@ -3995,6 +3577,14 @@
     </xs:attribute>
     <xs:attribute name="prompt" type="xs:string">
       <xs:annotation><xs:documentation>Text that primes the transcriber (names, spellings, vocabulary).</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="lineBreaks" default="greedy">
+      <xs:annotation><xs:documentation>greedy treats source newlines as spaces (legacy). source ends a line at each
+      cue newline; maxCharsPerLine, maxWordsPerLine and maxLines still apply. Blank source lines do not add empty caption
+      rows; one-word still pages each word.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="greedy"/><xs:enumeration value="source"/>
+      </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="mode" default="burn">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -4015,16 +3605,6 @@
     <xs:attribute name="style" type="xs:IDREF"/>
     <xs:attribute name="activeStyle" type="xs:IDREF"/>
     <xs:attribute name="activeColor" type="paintType"/>
-    <xs:attribute name="lineBreaks" default="greedy">
-      <xs:annotation><xs:documentation>
-        greedy treats source newlines as spaces (legacy). source ends a line at each
-        cue newline; maxCharsPerLine, maxWordsPerLine and maxLines still apply.
-        Blank source lines do not add empty caption rows; one-word still pages each word.
-      </xs:documentation></xs:annotation>
-      <xs:simpleType><xs:restriction base="xs:string">
-        <xs:enumeration value="greedy"/><xs:enumeration value="source"/>
-      </xs:restriction></xs:simpleType>
-    </xs:attribute>
     <xs:attribute name="maxWordsPerLine" type="xs:positiveInteger"/>
     <xs:attribute name="maxCharsPerLine" type="xs:positiveInteger" default="32"/>
     <xs:attribute name="maxLines" type="xs:positiveInteger" default="2"/>
@@ -4260,6 +3840,14 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="minContrast" type="positiveDecimal" default="4.5"/>
+    <xs:attribute name="legibilityCheck" default="off">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="off"/><xs:enumeration value="warn"/><xs:enumeration value="error"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="readingSpeed" type="positiveDecimal"/>
+    <xs:attribute name="minDisplayTime" type="nonNegativeDecimal" default="0.8333"/>
+    <xs:attribute name="minTextSize" type="lengthType"/>
   </xs:complexType>
   <xs:complexType name="metadataType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
@@ -4335,6 +3923,11 @@
         <xs:enumeration value="draft"/><xs:enumeration value="preview"/><xs:enumeration value="final"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="fontPolicy" default="system">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="system"/><xs:enumeration value="pinned"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
   </xs:complexType>
 
   <!-- ===================================================== outputs -->
@@ -4363,6 +3956,34 @@
     <xs:attribute name="uri" type="xs:anyURI" use="required"/>
     <xs:attribute name="credentials" type="xs:NMTOKEN"/>
   </xs:complexType>
+  <xs:complexType name="segmentType">
+    <xs:annotation><xs:documentation>
+      A span of the composition played by this output: from..to (seconds) or fromMarker..toMarker at speed,
+      or a timeRemap child mapping segment time (key/@time, from 0) to composition time (key/@value) for ramps,
+      freezes and reversals. The output plays its segments in document order. A transition child joins this
+      segment to the next one. audio says how the span's sound is fitted to its duration: stretch keeps pitch,
+      resample changes pitch with speed, mute is silence. focusX and focusY (animatable in segment time, by animate
+      children) replace the layout's reframing focus for crop and fit-blur.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="timeRemap" type="timeRemapType"/>
+      <xs:element name="transition" type="transitionType"/>
+      <xs:element name="animate" type="animateType"/>
+    </xs:choice>
+    <xs:attribute name="id" type="xs:ID"/>
+    <xs:attribute name="from" type="xs:double"/>
+    <xs:attribute name="to" type="xs:double"/>
+    <xs:attribute name="fromMarker" type="xs:IDREF"/>
+    <xs:attribute name="toMarker" type="xs:IDREF"/>
+    <xs:attribute name="speed" type="positiveDecimal" default="1"/>
+    <xs:attribute name="audio" default="stretch">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="stretch"/><xs:enumeration value="resample"/><xs:enumeration value="mute"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="focusX" type="unitDecimal"/>
+    <xs:attribute name="focusY" type="unitDecimal"/>
+  </xs:complexType>
   <xs:complexType name="outputType">
     <xs:annotation><xs:documentation>
       Several outputs render one scene into different placements. layout picks a
@@ -4379,12 +4000,7 @@
       <xs:element name="captionTrack" type="captionTrackType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID"/>
-    <xs:attribute name="audioTracks" type="xs:IDREFS">
-      <xs:annotation><xs:documentation>
-        With segments: the audioMix tracks this output plays. audioTracks, audioRoles and audioBuses
-        select together (a source matching any of them plays); with none of them, every source plays.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
+    <xs:attribute name="audioTracks" type="xs:IDREFS"/>
     <xs:attribute name="audioRoles" type="audioRoleListType"/>
     <xs:attribute name="audioBuses" type="xs:IDREFS"/>
     <xs:attribute name="overlay" type="xs:IDREF">
@@ -4392,11 +4008,7 @@
         A symbol drawn over the output's picture in output time (series tags, calls to action, end cards).
       </xs:documentation></xs:annotation>
     </xs:attribute>
-    <xs:attribute name="joinFade" type="nonNegativeDecimal" default="0.01">
-      <xs:annotation><xs:documentation>
-        Seconds of equal-power audio crossfade centred on each cut between segments.
-      </xs:documentation></xs:annotation>
-    </xs:attribute>
+    <xs:attribute name="joinFade" type="nonNegativeDecimal" default="0.01"/>
     <xs:attribute name="path" type="xs:anyURI" use="required"/>
     <xs:attribute name="codec" use="required">
       <xs:simpleType><xs:restriction base="xs:string">
@@ -4467,6 +4079,11 @@
     <xs:attribute name="representation" type="xs:NMTOKEN">
       <xs:annotation><xs:documentation>Preferred asset representation name for this output (e.g. "proxy" for drafts).</xs:documentation></xs:annotation>
     </xs:attribute>
+    <xs:attribute name="report" type="xs:anyURI">
+      <xs:annotation><xs:documentation>
+        Where to write this output's render report (scene-render-report/1), relative to the document.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
 
   <!-- ===================================================== root -->
@@ -4502,4 +4119,581 @@
       </xs:attribute>
     </xs:complexType>
   </xs:element>
+
+  <!-- ===================================================== volumetric and large-scale cinematic effects (SREP 40, scene version 1.3) -->
+  <xs:simpleType name="volumeChannelType">
+    <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z0-9_.\-]{1,64}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="volumeSequencePatternType">
+    <xs:restriction base="xs:string"><xs:pattern value=".*(%[0-9]*d|#+).*"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="volumeSourceType"><xs:union memberTypes="xs:anyURI volumeSequencePatternType"/></xs:simpleType>
+  <xs:simpleType name="volumeFrameIndexType"><xs:restriction base="xs:integer"><xs:minInclusive value="-2147483648"/><xs:maxInclusive value="2147483647"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="volumeMissingFrameType"><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="hold"/><xs:enumeration value="transparent"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="volumeInterpolationType">
+    <xs:annotation><xs:documentation>Version 1.3. Hold freezes a frame; linear blends scalar fields in asset-world coordinates. Advect requires all three velocityGrid components (VOL9): signed asset-world vectors in scene units/second, with matching component transforms per frame. Frozen endpoint midpoint traces precede density/kelvin blending. Numbered caches use object-local seconds; SRVSEQ uses composition seconds. Clamped or identical held endpoints freeze. Grid transforms locate samples without transforming velocity vectors. Assets and their channel references are immutable during rendering; channel names identify owned cache fields, not paths.</xs:documentation></xs:annotation>
+    <xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/><xs:enumeration value="advect"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="meshSequenceInterpolationType"><xs:restriction base="xs:string"><xs:enumeration value="hold"/><xs:enumeration value="linear"/></xs:restriction></xs:simpleType>
+  <xs:attributeGroup name="pyroShape">
+    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="box"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="width" type="positiveDecimal"/>
+    <xs:attribute name="height" type="positiveDecimal"/>
+    <xs:attribute name="depth" type="positiveDecimal"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="mesh" type="xs:IDREF"/>
+  </xs:attributeGroup>
+  <xs:attributeGroup name="pyroCrater">
+    <xs:annotation><xs:documentation>
+      A source or impulse that the impact of a crater causes. `crater` names a crater that grows from an impact
+      (`crater@source`); the smoke is derived from that impact and nothing is authored about when, where or how much:
+      the source is a sphere of the crater's radius at the impact point, active from the impact over the crater's
+      formation time (an impulse: at the impact), so shape, position, timing, density, temperature and expansion are
+      not given. The dust is `dustFraction` of the volume thrown out of the crater, injected as a volume fraction of
+      solids, spread over the cells the sphere covers that are not solid (so `medium@extinction` is extinction per unit volume fraction in these sources). The heat is
+      `heatFraction` of (1/2) m U^2 sin(theta)^(3/2) for the body's mass m, speed U and angle theta from the surface;
+      it warms the dust by heat / (dust mass x `specificHeat`, J/(kg K)), at most `maxTemperature` kelvin, and the
+      expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
+      share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
+      that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
+      `physics/@pixelsPerMeter`.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="dustFraction"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="specificHeat" type="positiveDecimal"/>
+    <xs:attribute name="maxTemperature"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:attributeGroup>
+  <xs:complexType name="volumeAssetType">
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="volumeSourceType" use="required"/>
+    <xs:attribute name="sha256" type="sha256Type"/>
+    <xs:attribute name="format" default="srvol"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="srvol"/><xs:enumeration value="srvseq"/><xs:enumeration value="openvdb"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="densityGrid" type="volumeChannelType" default="density"/>
+    <xs:attribute name="temperatureGrid" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridX" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridY" type="volumeChannelType"/>
+    <xs:attribute name="velocityGridZ" type="volumeChannelType"/>
+    <xs:attribute name="first" type="volumeFrameIndexType"/>
+    <xs:attribute name="last" type="volumeFrameIndexType"/>
+    <xs:attribute name="fps" type="fpsType"/>
+    <xs:attribute name="interpolation" type="volumeInterpolationType" default="hold"/>
+    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
+    <xs:attribute name="boundsMinX" type="xs:double"/>
+    <xs:attribute name="boundsMinY" type="xs:double"/>
+    <xs:attribute name="boundsMinZ" type="xs:double"/>
+    <xs:attribute name="boundsMaxX" type="xs:double"/>
+    <xs:attribute name="boundsMaxY" type="xs:double"/>
+    <xs:attribute name="boundsMaxZ" type="xs:double"/>
+  </xs:complexType>
+  <xs:complexType name="meshSequenceAssetType">
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="volumeSourceType" use="required"/>
+    <xs:attribute name="format"><xs:simpleType><xs:restriction base="xs:string">
+      <xs:enumeration value="gltf"/><xs:enumeration value="glb"/><xs:enumeration value="obj"/><xs:enumeration value="ply"/>
+      <xs:enumeration value="usd"/><xs:enumeration value="usda"/><xs:enumeration value="usdc"/><xs:enumeration value="usdz"/><xs:enumeration value="fbx"/>
+    </xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="first" type="volumeFrameIndexType" use="required"/>
+    <xs:attribute name="last" type="volumeFrameIndexType" use="required"/>
+    <xs:attribute name="fps" type="fpsType" use="required"/>
+    <xs:attribute name="interpolation" type="meshSequenceInterpolationType" default="hold"/>
+    <xs:attribute name="missingFrame" type="volumeMissingFrameType" default="error"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attributeGroup ref="assetProvenance"/>
+  </xs:complexType>
+  <xs:complexType name="mediumType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
+    <xs:attribute name="densityScale" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="extinction" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="albedo" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="anisotropy" default="0"><xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="-0.99"/><xs:maxInclusive value="0.99"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="emissionColor" type="colorType" default="#000000FF"/>
+    <xs:attribute name="emissionScale" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="blackbody" type="xs:boolean" default="false"/>
+    <xs:attribute name="temperatureScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="stepSize" type="positiveDecimal" default="1"/>
+    <xs:attribute name="maxSteps" default="2048"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lighting" default="exact">
+      <xs:annotation><xs:documentation>Version 1.3. How the medium's in-scattering is lit by the path tracer: exact marches a shadow ray from every sample; grid reads transmittance and surface visibility from per-light grids built once per frame (see the cinematic impact SREP). The lightGrid* attributes apply only with grid (VOL10).</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="exact"/><xs:enumeration value="grid"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="lightGridCell" default="1"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridDomeDirections" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="512"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="lightGridMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="particles3DType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burst3DType"/></xs:choice>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="condition" type="expressionString"/>
+    <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="parentJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="visible" type="xs:boolean" default="true"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
+    <xs:attribute name="rate" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="emissionStart" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="lifetimeVariance" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="speedVariance" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="drag" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="collisionRadius" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="friction" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="trail" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="emissionEnd" type="nonNegativeDecimal"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="lifetime" type="positiveDecimal" default="2"/>
+    <xs:attribute name="emitterWidth" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterHeight" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterDepth" type="positiveDecimal" default="1"/>
+    <xs:attribute name="emitterRadius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="size" type="positiveDecimal" default="1"/>
+    <xs:attribute name="collisionTolerance" type="positiveDecimal" default="0.001"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="gravityX" type="xs:double" default="0"/>
+    <xs:attribute name="gravityY" type="xs:double" default="0"/>
+    <xs:attribute name="gravityZ" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0X" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0Y" type="xs:double" default="0"/>
+    <xs:attribute name="rotation0Z" type="xs:double" default="0"/>
+    <xs:attribute name="rotationVarianceX" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="rotationVarianceY" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="rotationVarianceZ" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityY" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="angularVelocityVarianceX" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityVarianceY" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="angularVelocityVarianceZ" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="inheritedVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="inheritedVelocityY" type="xs:double" default="0"/>
+    <xs:attribute name="inheritedVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="directionX" type="xs:double" default="0"/>
+    <xs:attribute name="directionY" type="xs:double" default="-1"/>
+    <xs:attribute name="directionZ" type="xs:double" default="0"/>
+    <xs:attribute name="spread" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="360"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="scaleVariance" default="0"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxExclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="bounce" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxEvents" default="16384"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="segments" default="12"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="256"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="emitterMesh" type="xs:IDREF"/>
+    <xs:attribute name="mesh" type="xs:IDREF"/>
+    <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="sprite" type="xs:IDREF"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="gas" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        The object3D whose native pyro volume drags the particles along. Absent (the default) is the behaviour there
+        always was. The acceleration of a particle gains `drag` times the gas's velocity at its place and time, so
+        with the emitter's `drag` k the particle obeys p'' = k (u - v) plus gravity and fields: it is dragged by the gas
+        inside the volume's domain and by still air outside it, with the same coefficient (the gas fades to rest across
+        one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
+        is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
+        linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
+        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
+        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
+        and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
+        velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
+        so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="emitterShape" default="point"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="point"/><xs:enumeration value="box"/><xs:enumeration value="sphere"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="shape" default="sphere"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="sphere"/><xs:enumeration value="billboard"/><xs:enumeration value="streak"/><xs:enumeration value="mesh"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="sizeEnd" type="nonNegativeDecimal"/>
+    <xs:attribute name="color" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="colorEnd" type="colorType"/>
+    <xs:attribute name="opacityEnd" type="unitDecimal"/>
+    <xs:attribute name="sizeCurve" type="curveType" default="linear"/>
+    <xs:attribute name="colorCurve" type="curveType" default="linear"/>
+  </xs:complexType>
+  <xs:complexType name="burst3DType">
+    <xs:annotation><xs:documentation>
+      A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
+      throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
+      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
+      (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
+      launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
+      render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed
+      and mass follow the ejecta scaling of Housen and Holsapple (2011) as the engine reads it, which has not been
+      checked against the paper; the launch angle, its spread, the launch time and the lopsidedness of an oblique
+      impact are the engine's own. `angle` is the launch angle above the tangent plane of the contact and
+      `angleSpread` the half-width of the uniform spread around it, in degrees; both stay within 0 to 90 together.
+      The ejecta of regolith and ice have no table row and are an error. Positions and velocities are in scene units
+      through `physics/@pixelsPerMeter`, and gravity, drag and colliders are those of the emitter. The crater's
+      pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="time" type="xs:double"/>
+    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
+    <xs:attribute name="interval" type="positiveDecimal" default="1"/>
+    <xs:attribute name="crater" type="xs:IDREF"/>
+    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="oceanType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="waterImpulse" type="waterImpulseType"/><xs:element name="wave" type="oceanWaveType"/><xs:element name="whitewater" type="whitewaterType"/></xs:choice>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="condition" type="expressionString"/>
+    <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="scaleX" type="xs:double" default="1"/>
+    <xs:attribute name="scaleY" type="xs:double" default="1"/>
+    <xs:attribute name="scaleZ" type="xs:double" default="1"/>
+    <xs:attribute name="visible" type="xs:boolean" default="true"/>
+    <xs:attribute name="opacity" type="unitDecimal" default="1"/>
+    <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
+    <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="width" type="positiveDecimal" default="64"/>
+    <xs:attribute name="depth" type="positiveDecimal" default="64"/>
+    <xs:attribute name="cellSize" type="positiveDecimal" default="1"/>
+    <xs:attribute name="waterLevel" type="xs:double" default="0"/>
+    <xs:attribute name="bottomDepth" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="gravity" type="positiveDecimal" default="9.81"/>
+    <xs:attribute name="damping" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="dryTolerance" type="positiveDecimal" default="0.0000000001"/>
+    <xs:attribute name="initialVelocityX" type="xs:double" default="0"/>
+    <xs:attribute name="initialVelocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="bathymetryScale" type="xs:double" default="1"/>
+    <xs:attribute name="bathymetryOffset" type="xs:double" default="0"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="surfaceMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="closed"/><xs:enumeration value="open"/><xs:enumeration value="periodic"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="bathymetryEncoding" default="red"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="red"/><xs:enumeration value="terrarium"/><xs:enumeration value="mapbox"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="order" default="1"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="1"/><xs:enumeration value="2"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="material" type="xs:IDREF"/>
+    <xs:attribute name="bathymetry" type="xs:IDREF"/>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="splash" type="xs:IDREFS">
+      <xs:annotation><xs:documentation>
+        The particles3D emitters whose particles fall into this ocean: each must throw out the ejecta of a crater (a
+        `burst` with `crater`), whose particles have a mass (OCN13). Absent (the default) is the behaviour there always was.
+        A particle of a listed emitter whose centre crosses the ocean's rest level (`waterLevel`) downward inside its
+        domain is removed there, and what it brings is given to the water in the canonical step of the crossing, summed
+        by cell: the volume of the particle (its mass over the density of the crater's target) is taken out of the
+        cell's water and given equally to its eight neighbours, never more than 90 % of the cell's water, and its
+        horizontal momentum, divided by the density of the water, is added to the cell's. The water volume and the
+        horizontal momentum that is applied are conserved; the vertical momentum and the energy of the particle are not
+        (the shallow-water model has no vertical momentum), and a particle that has fallen in is gone, it does not sink.
+        The surface is the water's rest level, not the swell, and the ocean is taken at its pose when the emitter
+        starts. The deposit does not go through the depth filter of `bedResponse`. An emitter belongs to one ocean.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="bodyCoupling" default="none">
+      <xs:annotation><xs:documentation>
+        What the water does to the rigid bodies in `colliders`. `none` (the default) is the existing behaviour: a body
+        displaces the water and nothing acts on the body. `buoyancy` loads each rigid body with the weight of the water it
+        displaces (water density 1000 kg/m3, the ocean's gravity), upward through the centroid of the submerged volume
+        so that a tilted body is turned by it, and with a quadratic form drag on its vertical motion, scaled by
+        `bodyDrag`. A body floats if it is lighter than the water it displaces. The submerged part is measured against
+        the free surface under the body: the plane that the ocean fits, in the canonical step before the last one it has
+        completed, through the surface of the wet columns of the body's footprint (the water the body displaces stands
+        above the rest level while it is there, and the plane says so), and against the rest level, `waterLevel`, while
+        there is none; the body's own motion therefore moves the water it floats on, and the water carries the energy of
+        a bobbing body away, so a body with no drag settles. `full` adds the horizontal momentum the body gave the water in
+        that step, taken back as a force along the body's centre over one canonical step, so that the body and the water
+        keep their momentum together (to what is in flight, one step late); roll is not damped, there is no added mass,
+        and a body rides the rest level when the ocean has no water under it. The load is held for one rigid step and
+        evaluated halfway through it. A body so light that the waterline's stiffness times the step reaches 1.8 is an
+        error (lower `physics/@fixedStep` or raise the mass), not a damped motion. The rigid body must be a sphere, box,
+        cylinder, cone, capsule or closed mesh. The ocean and the bodies form a group (see the contract text): the ocean
+        is stepped before the rigid world, and the document cannot be baked into a physics cache.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="buoyancy"/><xs:enumeration value="full"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bedResponse" default="depthFiltered">
+      <xs:annotation><xs:documentation>
+        How the free surface answers what the objects in `colliders` do to the water: the bed that a crater moves and
+        the volume a body occupies. `depthFiltered` (the default) attenuates it by the depth of the water: a
+        displacement much narrower than the depth does little to the surface, as in linear water-wave theory, where an
+        instantaneous displacement of wavenumber k is carried to the surface by 1/cosh(k h) for the bed (Kajiura 1963;
+        read here only as quoted by the tsunami literature) and by cosh(k z0)/cosh(k h) for a volume at height z0 above the bed
+        (derived by the engine). The displaced volume is conserved. `hydrostatic` lifts the whole column by the
+        displacement, which is the long-wave answer, right when the displacement is much wider than the depth: the
+        behaviour of the first version, kept for comparison. With `depthFiltered` the horizontal momentum that a
+        body gives the water is also not the relaxation toward its velocity but the form drag of the body through
+        it, (1/2) C_d A |U - u| (U - u) per unit density (C_d is `bodyDrag`, U the body's velocity, u the mean
+        velocity of the water under it, A the area its wet part presents to that flow), spread as the lift of the
+        body is and never past its velocity. It has no effect without `colliders`.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
+      <xs:annotation><xs:documentation>
+        Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
+        the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
+        stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
+        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        undamped bobbing.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="waterImpulseType">
+    <xs:annotation><xs:documentation>
+      An impulse at an instant (`time`, `x`, `z`, `radius`, `amplitude`, `velocityX`, `velocityZ`, `type`), or the cavity
+      that a body makes of the water it enters: `source` names a dynamic rigidBody object that the ocean lists in
+      `colliders`, and nothing is authored about when, where or how big (none of the others may be given, and a body has
+      at most one). The entry is the first time the lowest point of the body crosses the ocean's rest level (`waterLevel`)
+      downward, found step by step from the body's poses, with the body moving down at that instant; a body that starts
+      in the water, or never reaches it, makes no cavity. The cavity is the transient crater of the scaling law of
+      Holsapple (1993) for water as a target, with the body's mass and density, the speed it enters at (the component
+      normal to the surface, from the displacement of its centre over the canonical step) and the ocean's gravity; the
+      law's volume and depth give the disc that is emptied (a bowl profile of the law's depth at its centre holding the law's volume), the water going to the ring around it
+      (`waterImpulse type="displace"` with a negative amplitude, conserving all the water). The cavity forms over the
+      law's formation time (0.8 times the square root of its volume's cube root over gravity), in a part for every
+      canonical step that grows smoothly from nothing to the whole (the shape of the growth is the engine's choice,
+      the law gives only the time); a ring or a disc narrower than four cells is widened, keeping the volume. The cavity is limited by the water layer: it takes at most 90% of the
+      water of its disc, and of any column in it, so it never exposes the bed and is never an error for lack of water; a
+      body that reaches the bed excavates the bed's crater (`crater@source`) instead. The body goes on raising the
+      columns it occupies, as before; the cavity is displacement in addition. Hydrostatic: no jet, no crown of
+      spray, no air; the law is that of a crater in water, not a validated model of water entry. The event is made at
+      the first entry only, for the owner's pose at that instant, and an entry outside the ocean makes nothing.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="time" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="1"/>
+    <xs:attribute name="amplitude" type="xs:double" default="1"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="type" default="displace"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="displace"/><xs:enumeration value="add-water"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="whitewaterType">
+    <xs:annotation><xs:documentation>Cinematic read-only water tracers. Births at ocean dt endpoints follow excess surface slope or Froude number. Foam follows water; spray is ballistic with drag and becomes foam on landing. Own budgets and full-u64 seed; at most one child per ocean.</xs:documentation></xs:annotation>
+    <xs:attribute name="emissionRate" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="threshold" type="nonNegativeDecimal" default="0.5"/>
+    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="lifetime" type="positiveDecimal" default="3"/>
+    <xs:attribute name="sprayFraction" type="unitDecimal" default="0.4"/>
+    <xs:attribute name="launchSpeed" type="nonNegativeDecimal" default="3"/>
+    <xs:attribute name="drag" type="nonNegativeDecimal" default="0.1"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="0.05"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="end" type="nonNegativeDecimal"/>
+    <xs:attribute name="maxParticles" default="10000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxWork" default="100000000"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="1000000000000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="foamMaterial" type="xs:IDREF"/>
+    <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
+  </xs:complexType>
+  <xs:complexType name="oceanWaveType">
+    <xs:attribute name="wavelength" type="positiveDecimal" default="16"/>
+    <xs:attribute name="amplitude" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="direction" type="xs:double" default="0"/>
+    <xs:attribute name="phase" type="xs:double"/>
+    <xs:attribute name="speed" type="nonNegativeDecimal"/>
+  </xs:complexType>
+  <xs:complexType name="pyroSourceType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/></xs:choice>
+    <xs:attributeGroup ref="pyroShape"/>
+    <xs:attributeGroup ref="pyroCrater"/>
+    <xs:attribute name="start" type="xs:double" default="0"/>
+    <xs:attribute name="end" type="xs:double"/>
+    <xs:attribute name="densityRate" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="temperatureRate" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="velocityRateX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityRateY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityRateZ" type="xs:double" default="0"/>
+    <xs:attribute name="expansion" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="pyroImpulseType">
+    <xs:attributeGroup ref="pyroShape"/>
+    <xs:attributeGroup ref="pyroCrater"/>
+    <xs:attribute name="time" type="nonNegativeDecimal"/>
+    <xs:attribute name="density" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="temperature" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="velocityX" type="xs:double" default="0"/>
+    <xs:attribute name="velocityY" type="xs:double" default="0"/>
+    <xs:attribute name="velocityZ" type="xs:double" default="0"/>
+    <xs:attribute name="expansion" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="pyroType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/></xs:choice>
+    <xs:attribute name="colliders" type="xs:IDREFS"/>
+    <xs:attribute name="colliderThickness" type="positiveDecimal"/>
+    <xs:attribute name="forceFields" type="xs:IDREFS"/>
+    <xs:attribute name="useForceFields" type="xs:boolean" default="true"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="height" type="positiveDecimal" use="required"/>
+    <xs:attribute name="depth" type="positiveDecimal" use="required"/>
+    <xs:attribute name="voxelSize" type="positiveDecimal" use="required"/>
+    <xs:attribute name="dt" type="positiveDecimal" default=".016666666666666666"/>
+    <xs:attribute name="ambientTemperature" default="300"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:maxInclusive value="50000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="dissipation" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="cooling" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="buoyancy" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="vorticity" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="turbulence" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
+    <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="checkpointMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="meshMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="fractureType">
+    <xs:annotation><xs:documentation>
+      Owned seeded closed-solid fracture. at is composition time, quantized to the first
+      physics boundary at or after that time when the source object participates.
+      Exactly one rigidBody supplies total mass, collision properties and inherited motion.
+      Exterior materials and attributes come from the frozen source surface; cut faces use
+      interiorMaterial, with planar UV repeats per scene unit given by interiorUvScale.
+      impulseX/Y/Z are the total directed world-scene impulse in kg*scene-unit/second,
+      distributed in proportion to piece mass. radialImpulse is a nonnegative total scalar
+      impulse, distributed by piece mass along the source-centroid-to-piece directions.
+      maxMemoryMiB bounds component geometry/reconstruction admission, not whole-process RSS.
+      Fracture is cinematic partitioning, not a material stress/failure calculation.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="interiorMaterial" type="xs:IDREF" use="required"/>
+    <xs:attribute name="interiorUvScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="impulseX" type="xs:double" default="0"/>
+    <xs:attribute name="impulseY" type="xs:double" default="0"/>
+    <xs:attribute name="impulseZ" type="xs:double" default="0"/>
+    <xs:attribute name="radialImpulse" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+  <xs:complexType name="craterType">
+    <xs:annotation><xs:documentation>
+      Owned cinematic deformation in object-space scene units, after imported basis/node transforms.
+      Let p be the clamped eased fraction of local time from start to end; dimensions grow with p.
+      With outward unit n, h=dot(vertex-center,n), r=length(vertex-center-n*h), and B(x)=max(0,1-x*x)^2
+      for abs(x)&lt;1 (zero otherwise), displace along n by
+      p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
+      At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
+      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
+      This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
+      maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
+      by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.
+      Static and kinematic rigid surfaces are rebuilt at fixed physics substeps. Dynamic rigid bodies are rejected.
+      Particle collider references interpolate deformed world-space vertices over canonical particle dt intervals,
+      with continuous sphere/triangle contacts and barycentric boundary velocities. Particle geometry admission
+      also uses this memory allowance. Pyro collider references sample closed midpoint surfaces with
+      barycentric material velocities evaluated at MAC faces, reserving retained and step-local geometry
+      under both this allowance and the domain meshMemoryMiB. Crater planes retain a centred colliderThickness slab.
+
+      A crater may instead grow from an impact: `source` names the dynamic rigidBody object that makes it. The crater
+      begins at the first step in which that body, approaching the owner, pushes on it with more than twice its own
+      weight in one step, and centres on the impulse-weighted contact point with its axis along the normal of the owner's
+      surface at that point (centerX/Y/Z and normalX/Y/Z are then not read). The normal is the owner's own geometry: for
+      a mesh the corner normals of the triangle the point is on, interpolated, so that the same surface in finer or
+      coarser triangles gives the same axis; a sphere's radius direction; a box's face. The contact's normal only
+      chooses the side, and is used as it is for shapes that give no normal (capsule, cylinder, cone, convex). Radius, depth, rimHeight, rimWidth, start and end are derived and
+      so cannot be given; `curve` and `influenceDepth` and `maxMemoryMiB` keep their meaning. The crater is
+      Holsapple's scaling law (Annu. Rev. Earth Planet. Sci. 21:333, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18) with
+      the constants of the author's calculator note, applied to the body's mass and density, the speed of its approach
+      along that normal, `targetMaterial`, and gravity. The dependence of those constants on strength and
+      porosity is poorly constrained by the source, so `targetDensity` and `strength` override the table. A crater grows in
+      composition time from the impact over the law's formation time, and nothing is simulated before the impact.
+      Units: `physics/@pixelsPerMeter` converts scene units to metres for everything the law reads and gives;
+      `targetDensity` is kilograms per cubic metre, `strength` pascals, `gravity` metres per second squared (default:
+      the magnitude of the physics gravity, an error if that is zero). One impact makes one crater: later contacts of the
+      body neither start another nor change this one. A water layer over the owner is not treated: the crater is the
+      seabed's. Below roughly 15 to 30 degrees from the surface real impacts ricochet; the law is still applied to the
+      normal component, which keeps the size monotone in the angle, and no ricochet is modelled.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID">
+      <xs:annotation><xs:documentation>
+        Names the crater so that what its impact causes can refer to it: with `source`, the consequences of the
+        impact (ejecta, smoke) name this crater instead of repeating its body and material.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="capture" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        With `source`: the body that makes the crater is arrested by it. From the impact until its velocity relative to
+        the owner is zero, and only while its centre is inside the crater's rim radius (the law's, in the owner's frame
+        at the point of impact), the body loses velocity at a constant rate of U^2 / (2 d), `U` the body's speed at the
+        impact and `d` the crater's depth by the law, never more than stops it in the step, along minus its velocity
+        relative to the owner; its spin loses the same share. All of its kinetic energy leaves the body, which is what
+        the law spends digging the crater, and none can be added. It is a model of the engine, the mean force of a
+        penetration of depth `d` (kinetic energy over depth), not a published law: the projectile neither breaks up
+        nor buries itself, it stops and follows the floor of the pit. Without it (the default, the behaviour there
+        always was) the body keeps what the contact leaves it, which for a glancing impact is a body that rolls out
+        of the crater it made.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="targetMaterial">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="water"/><xs:enumeration value="drySand"/><xs:enumeration value="drySoil"/>
+        <xs:enumeration value="wetSoil"/><xs:enumeration value="softRock"/><xs:enumeration value="hardRock"/>
+        <xs:enumeration value="regolith"/><xs:enumeration value="ice"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="targetDensity" type="positiveDecimal"/>
+    <xs:attribute name="strength" type="nonNegativeDecimal"/>
+    <xs:attribute name="gravity" type="positiveDecimal"/>
+    <xs:attribute name="centerX" type="xs:double" default="0"/>
+    <xs:attribute name="centerY" type="xs:double" default="0"/>
+    <xs:attribute name="centerZ" type="xs:double" default="0"/>
+    <xs:attribute name="normalX" type="xs:double" default="0"/>
+    <xs:attribute name="normalY" type="xs:double" default="0"/>
+    <xs:attribute name="normalZ" type="xs:double" default="-1"/>
+    <xs:attribute name="radius" type="positiveDecimal" default="50"/>
+    <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="rimHeight" type="nonNegativeDecimal" default="2"/>
+    <xs:attribute name="rimWidth" type="positiveDecimal" default="10"/>
+    <xs:attribute name="influenceDepth" type="positiveDecimal"/>
+    <xs:attribute name="start" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="end" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="curve" default="ease-in-out"><xs:simpleType><xs:restriction base="xs:string">
+      <xs:enumeration value="linear"/><xs:enumeration value="ease-in"/><xs:enumeration value="ease-out"/><xs:enumeration value="ease-in-out"/><xs:enumeration value="step"/>
+    </xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
+
 </xs:schema>

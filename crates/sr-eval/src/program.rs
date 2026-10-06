@@ -1088,6 +1088,7 @@ fn template(
     walk_mut(&mut scene, &mut |e| {
         let loc = e.loc();
         ignored_attribute(e, &mut *warnings);
+        crate::pending::check(&*e, &mut *warnings);
         masks_that_miss(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);
@@ -1522,7 +1523,8 @@ impl Builder {
             _ => None,
         };
         let shape_size = match n {
-            Node::Shape(s) => Some([s.width, s.height]),
+            // width and height are optional since SREP 17 (a region shape takes them from the page)
+            Node::Shape(s) => s.width.zip(s.height).map(|(w, h)| [w, h]),
             _ => None,
         };
         let (mut asset_size, mut asset_kind, mut fit) = (None, None, None);
@@ -3294,15 +3296,6 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
             "<group> @collapse",
             "no effect in this build (non-isolated groups already share the frame's camera space)",
         ),
-        "effect" | "effectType"
-            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
-                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
-        {
-            note(
-                "selective-color @channel",
-                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
-            )
-        }
         _ => {}
     }
 }
