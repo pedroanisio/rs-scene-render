@@ -45,6 +45,8 @@ OCEAN = '<scene version="1.3"><project width="64" height="64" fps="24" duration=
 
 GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
 
+MODEL_SELECT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><materials><material id="clay" baseColor="#C48A5A"/></materials><composition><object3D id="piece" primitive="mesh" mesh="set" node="Knight" materialOverride="stone:clay old:clay" x="32" y="32"/></composition></scene>\n'
+TEXT3D = '<scene version="1.1"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="title" primitive="text" text="HI" height="20" tracking="120" x="32" y="32"/></composition></scene>\n'
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
 
 FRACTURE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><materials><material id="interior" baseColor="#A06030"/></materials><composition><object3D id="rock" primitive="box" width="4" height="4" depth="4"><rigidBody mass="8"/><fracture at="1" pieces="8" seed="18446744073709551615" interiorMaterial="interior" radialImpulse="4"/></object3D></composition></scene>\n'
@@ -83,6 +85,10 @@ CASES = [
     ("crt3", ["CRT3"], lambda _: CRATER.replace('end="2"', 'end="0"')),
     ("crt4", ["CRT4"], lambda _: CRATER.replace('rimWidth="1"', 'rimWidth="5"')),
     ("crt5", ["CRT5"], lambda _: CRATER.replace('type="static"', 'type="dynamic"')),
+    ("mov1", ["MOV1"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay :clay"')),
+    ("mov2", ["MOV2"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay old:nosuch"')),
+    ("txt2", ["TXT2"], lambda _: TEXT3D.replace('primitive="text" text="HI"', 'primitive="box"')),
+    ("solid-colliders-tracking", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('<object3D id="letters" primitive="text" text="O"/>', '<object3D id="letters" primitive="text" text="O"><animate property="tracking"><key time="0" value="10"/></animate></object3D>')),
     ("msq1", ["MSQ1"], lambda _: MESH_SEQUENCE.replace('version="1.3"', 'version="1.2"')),
     ("msq2", ["MSQ2", "A04"], lambda _: MESH_SEQUENCE.replace('last="1"', 'last="-1"')),
     ("msq3", ["MSQ3"], lambda _: MESH_SEQUENCE.replace('first="0"', 'sha256="' + '0' * 64 + '" first="0"')),
@@ -338,6 +344,8 @@ VALID = {
     "openvdb": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-0.vdb" format="openvdb" temperatureGrid="temperature"').replace('<medium ', '<medium blackbody="true" '),
     "openvdb-sequence": VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/impact-%d.vdb" format="openvdb" first="0" last="1" interpolation="linear"'),
     "crater": CRATER,
+    "model-select": MODEL_SELECT,
+    "text3d-tracking": TEXT3D,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,
     "particles3d": PARTICLES3D,

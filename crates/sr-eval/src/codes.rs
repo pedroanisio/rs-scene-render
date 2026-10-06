@@ -19,7 +19,8 @@ pub const CODES: &[(&str, &str)] = &[
     ("E15", "A motion path's SVG data does not parse."),
     ("E17", "Tracking data or skin weights cannot be read or parsed (missing file, unknown format, binary FBX, bad rows, unknown bone)."),
     ("E18", "The composition expands into too many nodes: a repeat's @count, an object3D's @instances, or repeats and instances nested in each other."),
-    ("E19", "An attribute the schema accepts is not read by this build (warning; the document renders as if it were absent)."),
+    ("E19", "An attribute the schema accepts has no effect: this build does not read it, or the element or curve it is on does not (information, SREP 18 inert; the document renders as if it were absent)."),
     ("E20", "A mask lies entirely outside the box of the node it masks (warning): masks use the node's own coordinates, so the node shows nothing."),
+    ("E21", "A key takes cubic-bezier from the animation's defaultInterpolation and gives no handles (warning): the engine's default handles (influence 1/3, speed 1) are used."),
     ("E16", "A {{placeholder}} names no parameter or repeat variable (warning; the text is left unchanged)."),
 ];

@@ -140,6 +140,8 @@ pub struct Draw3 {
     pub opacity: f32,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// A shadow catcher: draws no colour of its own, only the darkening the shadow casters cause (SREP shadow-catcher).
+    pub shadow_catcher: bool,
 }
 
 impl Draw3 {
@@ -350,6 +352,8 @@ struct MaterialU {
     irid: [f32; 4],
     aniso: [f32; 4],
     uv: [f32; 4],
+    /// unevenness, feature size, seed (bits), unused
+    finish: [f32; 4],
     sampling: [[u32; 4]; 6],
     borders: [[f32; 4]; 6],
 }
@@ -420,6 +424,7 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
         irid: [m.iridescence, m.iridescence_ior, m.iridescence_thickness, m.occlusion_strength],
         aniso: [m.anisotropy, m.anisotropy_rotation, m.displacement_scale, bits as f32],
         uv: [m.uv_scale[0], m.uv_scale[1], m.separate_uvs as u32 as f32, 0.0],
+        finish: [m.unevenness, m.unevenness_scale.max(1e-6), f32::from_bits(m.unevenness_seed), 0.0],
         sampling: std::array::from_fn(|i| [maps[i].as_ref().and_then(|t| t.sampler).map_or(0, |s| s.flags()), 0, 0, 0]),
         borders: std::array::from_fn(|i| maps[i].as_ref().and_then(|t| t.sampler).map_or([0.0; 4], |s| s.border)),
     }
@@ -728,6 +733,7 @@ impl ThreeEngine {
         // depth and normal prepass for the screen-space effects: view normal + roughness, view
         // depth + reflectance
         let pre_pipe = |cull: bool| {
+            let _creation = crate::gpu::creation_lock();
             d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("three-prepass"),
                 layout: Some(&main_layout),
@@ -761,28 +767,31 @@ impl ThreeEngine {
             })
         };
         let pre_pipes = [pre_pipe(true), pre_pipe(false)];
-        let shadow_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("three-shadow"),
-            layout: Some(&main_layout),
-            vertex: wgpu::VertexState {
-                module: &main_mod,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                buffers: &[Some(vertex_layout())],
-            },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
-            }),
-            multisample: Default::default(),
-            fragment: None,
-            multiview_mask: None,
-            cache: None,
-        });
+        let shadow_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-shadow"),
+                layout: Some(&main_layout),
+                vertex: wgpu::VertexState {
+                    module: &main_mod,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(vertex_layout())],
+                },
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+                }),
+                multisample: Default::default(),
+                fragment: None,
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let ms = wgpu::MultisampleState { count: MSAA, ..Default::default() };
         let depth_state = |write: bool| wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
@@ -794,51 +803,58 @@ impl ThreeEngine {
         let target = |blend: Option<wgpu::BlendState>| {
             [Some(wgpu::ColorTargetState { format: FORMAT, blend, write_mask: wgpu::ColorWrites::ALL })]
         };
-        let dome_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("three-dome"),
-            layout: Some(&main_layout),
-            vertex: wgpu::VertexState {
-                module: &main_mod,
-                entry_point: Some("vs_full"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: Some(depth_state(false)),
-            multisample: ms,
-            fragment: Some(wgpu::FragmentState {
-                module: &main_mod,
-                entry_point: Some("fs_dome"),
-                compilation_options: Default::default(),
-                targets: &target(None),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let dome_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-dome"),
+                layout: Some(&main_layout),
+                vertex: wgpu::VertexState {
+                    module: &main_mod,
+                    entry_point: Some("vs_full"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(depth_state(false)),
+                multisample: ms,
+                fragment: Some(wgpu::FragmentState {
+                    module: &main_mod,
+                    entry_point: Some("fs_dome"),
+                    compilation_options: Default::default(),
+                    targets: &target(None),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let splat_layout = layout(&[&bgl_frame, &bgl_splat]);
-        let splat_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("three-splat"),
-            layout: Some(&splat_layout),
-            vertex: wgpu::VertexState {
-                module: &splat_mod,
-                entry_point: Some("vs_splat"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: Some(depth_state(false)),
-            multisample: ms,
-            fragment: Some(wgpu::FragmentState {
-                module: &splat_mod,
-                entry_point: Some("fs_splat"),
-                compilation_options: Default::default(),
-                targets: &target(Some(PREMUL)),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let splat_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-splat"),
+                layout: Some(&splat_layout),
+                vertex: wgpu::VertexState {
+                    module: &splat_mod,
+                    entry_point: Some("vs_splat"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(depth_state(false)),
+                multisample: ms,
+                fragment: Some(wgpu::FragmentState {
+                    module: &splat_mod,
+                    entry_point: Some("fs_splat"),
+                    compilation_options: Default::default(),
+                    targets: &target(Some(PREMUL)),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let post_layout = layout(&[&bgl_post]);
         let post = |entry: &str, format: wgpu::TextureFormat| {
+            let _creation = crate::gpu::creation_lock();
             d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&post_layout),
@@ -879,55 +895,62 @@ impl ThreeEngine {
             "three-ssr",
         );
         let ssr_layout = layout(&[&bgl_ssr]);
-        let ssr_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("three-ssr"),
-            layout: Some(&ssr_layout),
-            vertex: wgpu::VertexState {
-                module: &ssr_mod,
-                entry_point: Some("vs_ssr"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &ssr_mod,
-                entry_point: Some("fs_ssr"),
-                compilation_options: Default::default(),
-                targets: &[Some(FORMAT.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let ssr_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-ssr"),
+                layout: Some(&ssr_layout),
+                vertex: wgpu::VertexState {
+                    module: &ssr_mod,
+                    entry_point: Some("vs_ssr"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &ssr_mod,
+                    entry_point: Some("fs_ssr"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(FORMAT.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let under_pipe = post("fs_under", FORMAT);
         let dof_pipe = post("fs_dof", FORMAT);
         let tile_max_pipe = post("fs_tile_max", scalar);
         let tile_dilate_pipe = post("fs_tile_dilate", scalar);
         let depth_layout = layout(&[&bgl_depth]);
-        let depth_pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("three-depth-resolve"),
-            layout: Some(&depth_layout),
-            vertex: wgpu::VertexState {
-                module: &depth_mod,
-                entry_point: Some("vs_post"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &depth_mod,
-                entry_point: Some("fs_depth_resolve"),
-                compilation_options: Default::default(),
-                targets: &[Some(scalar.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let depth_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("three-depth-resolve"),
+                layout: Some(&depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &depth_mod,
+                    entry_point: Some("vs_post"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &depth_mod,
+                    entry_point: Some("fs_depth_resolve"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(scalar.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let sort_layout = layout(&[&bgl_sort]);
         let sort_pipes = ["cs_keys", "cs_hist", "cs_scan", "cs_scatter"].map(|e| {
+            let _creation = crate::gpu::creation_lock();
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(e),
                 layout: Some(&sort_layout),
@@ -1044,42 +1067,45 @@ impl ThreeEngine {
     fn pipe(&mut self, key: PipeKey) -> &wgpu::RenderPipeline {
         let (d, m, l) = (&self.device, &self.main_mod, &self.main_layout);
         self.pipes.entry(key).or_insert_with(|| {
-            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("three-main"),
-                layout: Some(l),
-                vertex: wgpu::VertexState {
-                    module: m,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(vertex_layout())],
-                },
-                // (b − a) × (c − a) points outward; after the projection's y flip those triangles wind counter-clockwise in NDC
-                primitive: wgpu::PrimitiveState {
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: if key.cull { Some(wgpu::Face::Back) } else { None },
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(!key.blend),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
-                fragment: Some(wgpu::FragmentState {
-                    module: m,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
-                        blend: if key.blend { Some(PREMUL) } else { None },
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
+            {
+                let _creation = crate::gpu::creation_lock();
+                d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("three-main"),
+                    layout: Some(l),
+                    vertex: wgpu::VertexState {
+                        module: m,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(vertex_layout())],
+                    },
+                    // (b − a) × (c − a) points outward; after the projection's y flip those triangles wind counter-clockwise in NDC
+                    primitive: wgpu::PrimitiveState {
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: if key.cull { Some(wgpu::Face::Back) } else { None },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(!key.blend),
+                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+                    fragment: Some(wgpu::FragmentState {
+                        module: m,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: FORMAT,
+                            blend: if key.blend { Some(PREMUL) } else { None },
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            }
         })
     }
 
@@ -1728,14 +1754,24 @@ impl ThreeEngine {
             let o = ObjectU {
                 model: dr.model.to_cols_array_2d(),
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
-                params: [dr.opacity, dr.receive_shadow as u32 as f32, 0.0, 0.0],
+                // the uniform part of the model matrix: scene units per unit of the mesh (for the unevenness noise)
+                params: [
+                    dr.opacity,
+                    (dr.receive_shadow || dr.shadow_catcher) as u32 as f32,
+                    dr.model.x_axis.truncate().length(),
+                    dr.shadow_catcher as u32 as f32,
+                ],
                 spacing: [0.0; 4],
             };
             let obj = pad(&mut obj_bytes, bytemuck::bytes_of(&o));
             let mat = pad(&mut mat_bytes, bytemuck::bytes_of(&material_u(&dr.material, &dr.maps)));
             let kind = if dr.material.transmission > 0.0 && !dr.material.unlit {
                 Kind::Transmissive
-            } else if dr.material.alpha_mode == AlphaMode::Blend || dr.opacity < 1.0 || dr.material.opacity < 1.0 {
+            } else if dr.shadow_catcher
+                || dr.material.alpha_mode == AlphaMode::Blend
+                || dr.opacity < 1.0
+                || dr.material.opacity < 1.0
+            {
                 Kind::Blend
             } else {
                 Kind::Opaque
@@ -1756,7 +1792,7 @@ impl ThreeEngine {
         let mut shadow_objs: Vec<(usize, u32, u32)> = Vec::new();
         for (v, &shadow_mat) in shadow_mats.iter().enumerate() {
             for (i, dr) in scene.draws.iter().enumerate() {
-                if dr.cast_shadow && dr.opacity > 0.0 {
+                if dr.cast_shadow && !dr.shadow_catcher && dr.opacity > 0.0 {
                     // Cached undeformed bounds are authoritative only without
                     // shader displacement. Other casters keep the full path.
                     if let MeshSrc::Cached(mesh) = &dr.mesh {
@@ -2394,6 +2430,7 @@ mod tests {
             opacity: 1.0,
             cast_shadow: false,
             receive_shadow: false,
+            shadow_catcher: false,
         };
         let mut scene = Scene3 {
             cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 32.0, 32.0),

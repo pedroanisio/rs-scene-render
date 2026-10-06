@@ -199,6 +199,7 @@ fn gpu_volume_transport_matches_analytic_slabs_and_overlapping_media() {
         opacity: 1.0,
         cast_shadow: true,
         receive_shadow: true,
+        shadow_catcher: false,
     });
     scene.volumes = vec![slab(0.7, [0.2, 0.0, 0.0], 0.0, 3.0)];
     let data = pathtrace::build(&scene);

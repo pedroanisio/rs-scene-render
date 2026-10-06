@@ -9,6 +9,7 @@
 pub mod access;
 pub mod audio;
 pub mod captions;
+pub mod ceiling;
 pub mod destinations;
 pub mod overlay;
 pub mod pipeline;
@@ -43,6 +44,9 @@ pub enum DeliverError {
     /// An accessibility check set to `error` failed.
     #[error("accessibility: {0}")]
     Accessibility(String),
+    /// The decoded audio is over the master's true-peak ceiling even after the correction.
+    #[error("audio ceiling: {0}")]
+    AudioCeiling(String),
     /// Upload or notification failed.
     #[error("destination {uri}: {message}")]
     Destination {

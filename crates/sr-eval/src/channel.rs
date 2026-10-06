@@ -24,6 +24,8 @@ struct K {
     tan_in: Option<Value>,
     /// Spatial Bézier for the segment starting at this key.
     spatial: Option<Box<MotionPath>>,
+    /// A spring segment that starts with the previous segment's velocity (`key/@carry`).
+    carry: bool,
 }
 
 /// A compiled keyframe channel.
@@ -96,7 +98,7 @@ impl Channel {
                 period: k.period.as_ref().map(|v| v.get()),
             };
             let ease = curve::resolve(k.interpolation.unwrap_or(spec.default), &params);
-            keys.push(K { t, v, ease, tan_out: None, tan_in: None, spatial: None });
+            keys.push(K { t, v, ease, tan_out: None, tan_in: None, spatial: None, carry: k.carry });
         }
         if keys.is_empty() {
             return Err("an animation needs at least one key".into());
@@ -210,6 +212,11 @@ impl Channel {
             return b.v.clone();
         }
         let u = ((t - a.t) / d).clamp(0.0, 1.0);
+        if let (Ease::Spring { stiffness, damping, mass }, true, true) = (a.ease, a.carry, i > 0) {
+            if a.spatial.is_none() {
+                return self.carried_spring(i, t, stiffness, damping, mass);
+            }
+        }
         let e = match a.ease {
             Ease::Spring { stiffness, damping, mass } => curve::spring_segment(t - a.t, d, stiffness, damping, mass),
             Ease::CatmullRom | Ease::Tcb => {
@@ -235,6 +242,27 @@ impl Channel {
             }
         }
         a.v.lerp(&b.v, e)
+    }
+
+    /// A spring segment released with the velocity the segment before it arrives with: the step response plus the
+    /// release response times that velocity, the residual at the next key spread linearly so it still lands there.
+    fn carried_spring(&self, i: usize, t: f64, stiffness: f64, damping: f64, mass: f64) -> Value {
+        let (a, b) = (&self.keys[i], &self.keys[i + 1]);
+        let d = b.t - a.t;
+        let tau = (t - a.t).clamp(0.0, d);
+        // the incoming velocity: the rate of change of the previous segment at its end
+        let h = (1e-3f64).min(0.1 * (a.t - self.keys[i - 1].t)).max(1e-9);
+        let (at_key, before) = (self.segment(i - 1, a.t), self.segment(i - 1, a.t - h));
+        let at = |tau: f64| -> Value {
+            let step = curve::spring(tau, stiffness, damping, mass);
+            let g = curve::spring_release(tau, stiffness, damping, mass) / h;
+            Value::weighted(&[(&a.v, 1.0 - step), (&b.v, step), (&at_key, g), (&before, -g)])
+        };
+        let x = at(tau);
+        let end = at(d);
+        let w = tau / d;
+        // x + (b - end) * w
+        Value::weighted(&[(&x, 1.0), (&b.v, w), (&end, -w)])
     }
 
     fn slope_value(&self, at_end: bool, dt: f64) -> Value {

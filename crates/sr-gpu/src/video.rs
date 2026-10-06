@@ -227,14 +227,17 @@ impl VideoEngine {
                 bind_group_layouts: groups,
                 immediate_size: 0,
             });
-            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(ep),
-                layout: Some(&layout),
-                module: &module,
-                entry_point: Some(ep),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            {
+                let _creation = crate::gpu::creation_lock();
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(ep),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some(ep),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            }
         };
         let reduce = compute(&[Some(&bgl0), Some(&bgl1)], "cs_reduce");
         let patch = compute(&[Some(&bgl0), None, Some(&bgl2)], "cs_patch");
@@ -589,31 +592,34 @@ fn full_pipeline(
     layout: &wgpu::PipelineLayout,
     fs: &str,
 ) -> wgpu::RenderPipeline {
-    d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(fs),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some("vs_full"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some(fs),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: resources::FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: Default::default(),
-        depth_stencil: None,
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    {
+        let _creation = crate::gpu::creation_lock();
+        d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(fs),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_full"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(fs),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: resources::FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
 }
 
 fn begin<'e>(enc: &'e mut wgpu::CommandEncoder, view: &'e wgpu::TextureView) -> wgpu::RenderPass<'e> {

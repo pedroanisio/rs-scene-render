@@ -238,6 +238,15 @@
     "geo3.scene.xml": [
       "GEO3"
     ],
+    "mov1.scene.xml": [
+      "MOV1"
+    ],
+    "mov2.scene.xml": [
+      "MOV2"
+    ],
+    "mov3.scene.xml": [
+      "MOV3"
+    ],
     "msq1.scene.xml": [
       "MSQ1"
     ],
@@ -631,6 +640,13 @@
       "P3D6",
       "PYRO8"
     ],
+    "solid-colliders-tracking.scene.xml": [
+      "P3D6",
+      "PYRO8"
+    ],
+    "txt2.scene.xml": [
+      "TXT2"
+    ],
     "v1-sections.scene.xml": [
       "V1"
     ],
@@ -692,6 +708,7 @@
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "model-select.scene.xml": [],
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],
@@ -701,6 +718,7 @@
     "pyro-mesh.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
+    "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
     "volume-sequence.scene.xml": [],

@@ -635,34 +635,41 @@ fn compositor_pipeline(
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x2],
     })];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(fragment),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some(if full_screen { "vs_full" } else { "vs_main" }),
-            buffers: if full_screen { &[] } else { &vertices },
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some(fragment),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: if fragment == "fs_mask_coverage" { wgpu::TextureFormat::R32Float } else { resources::FORMAT },
-                blend,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions {
-                constants: &[("SINGLE_FEATHERED_ELLIPSE", ellipse as u32 as f64)],
-                ..Default::default()
+    {
+        let _creation = crate::gpu::creation_lock();
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(fragment),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some(if full_screen { "vs_full" } else { "vs_main" }),
+                buffers: if full_screen { &[] } else { &vertices },
+                compilation_options: Default::default(),
             },
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(fragment),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: if fragment == "fs_mask_coverage" {
+                        wgpu::TextureFormat::R32Float
+                    } else {
+                        resources::FORMAT
+                    },
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("SINGLE_FEATHERED_ELLIPSE", ellipse as u32 as f64)],
+                    ..Default::default()
+                },
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
 }
 
 impl Renderer {
@@ -1827,7 +1834,8 @@ impl Renderer {
         for id in render_fx::effect_ids(&*n.elem) {
             let Some(e) = render_fx::find_effect(ctx.p, &id) else { continue };
             let a = Attrs { e: e as &dyn Element, props: render_fx::element_props(ctx.g, &id) };
-            let mut names: Vec<String> = a.str("source").into_iter().collect();
+            // a dependency for any type that is given a source, whether or not it reads it
+            let mut names: Vec<String> = crate::vector::quiet(|| a.str("source")).into_iter().collect();
             if e.r#type.as_str() == "shader" {
                 names.extend(crate::shader::param_map(e as &dyn Element).into_values());
             }

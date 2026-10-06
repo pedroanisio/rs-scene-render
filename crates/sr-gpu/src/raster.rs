@@ -239,6 +239,7 @@ impl Raster {
             immediate_size: 0,
         });
         let pipelines = std::array::from_fn(|i| {
+            let _creation = crate::gpu::creation_lock();
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("raster"),
                 layout: Some(&layout),

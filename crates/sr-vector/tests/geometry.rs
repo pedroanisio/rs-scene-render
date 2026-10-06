@@ -267,9 +267,9 @@ fn shape_modifiers() {
     modifiers::apply(&mut tw, &Modifier::Twist { amount: 90.0 }, &ctx);
     assert!((area(&tw[0].parts[0].0.flatten(0.05)) - 400.0).abs() < 40.0);
     let mut wg = sq();
-    modifiers::apply(&mut wg, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7 }, &ctx);
+    modifiers::apply(&mut wg, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false }, &ctx);
     let mut wg2 = sq();
-    modifiers::apply(&mut wg2, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7 }, &ctx);
+    modifiers::apply(&mut wg2, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false }, &ctx);
     assert_eq!(wg, wg2, "deterministic");
     let mut mg = sq();
     mg.push(Item::new(shapes::rect(50.0, 50.0, 20.0, 20.0, [0.0; 4])));
@@ -385,4 +385,34 @@ fn inverse_kinematics() {
     let poses = rig::world_poses(&two, &root);
     let skin = rig::Skin::new(&poses, &poses, &[50.0, 50.0], Xf::IDENTITY, Vec::new());
     assert!(skin.map(p(130.0, 110.0)).dist(p(130.0, 110.0)) < 1e-9);
+}
+
+#[test]
+fn wiggle_path_smooth_joins_the_same_points_with_curves() {
+    // a straight line of 200 units wiggled with 20 points: corner mode is a polyline, smooth a Catmull-Rom spline through them
+    let line = || vec![Item::new(shapes::line(200.0, 0.0))];
+    let ctx = modifiers::Ctx { center: p(100.0, 0.0), time: 0.0, tol: 0.01 };
+    let wiggle = |smooth: bool| {
+        let mut it = line();
+        modifiers::apply(&mut it, &Modifier::WigglePath { size: 6.0, detail: 10.0, frequency: 0.0, seed: 3, smooth }, &ctx);
+        it.remove(0).parts.remove(0).0
+    };
+    let (corner, smooth) = (wiggle(false), wiggle(true));
+    let (vc, vs) = (corner.contours()[0].v.clone(), smooth.contours()[0].v.clone());
+    assert_eq!(vc.len(), 20, "20 points at detail 10 over 200 units");
+    assert_eq!(vc, vs, "the same points, so the same wiggle");
+    // the largest turn between successive flattened segments: sharp in the polyline, gentle in the spline
+    let turn = |path: &Path| {
+        let q = &path.flatten(0.01)[0].pts;
+        q.windows(3)
+            .map(|w| {
+                let (a, b) = (w[1] - w[0], w[2] - w[1]);
+                (a.x * b.y - a.y * b.x).atan2(a.x * b.x + a.y * b.y).abs()
+            })
+            .fold(0.0, f64::max)
+    };
+    let (tc, ts) = (turn(&corner), turn(&smooth));
+    assert!(tc > 0.5 && ts < tc / 3.0, "corners turn {tc} rad, the spline {ts}");
+    // deterministic, and the curve passes through the points
+    assert_eq!(wiggle(true), wiggle(true));
 }

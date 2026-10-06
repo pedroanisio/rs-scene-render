@@ -252,6 +252,69 @@ fn imported_fracture_freezes_node_animation_and_authored_morph_weights() {
 }
 
 #[test]
+fn imported_fracture_freezes_two_clips_blended_by_animation_blend() {
+    use serde_json::json;
+    let dir = Fixture::new();
+    let mesh = sr_3d::prim::cuboid(2., 2., 2.);
+    let mut bytes = Vec::new();
+    let mut views = Vec::new();
+    let mut add = |values: Vec<f32>| {
+        let offset = bytes.len();
+        for v in values {
+            bytes.extend(v.to_le_bytes());
+        }
+        views.push(json!({"buffer":0,"byteOffset":offset,"byteLength":bytes.len()-offset}));
+    };
+    add(mesh.vertices.iter().flat_map(|v| v.pos).collect());
+    add(mesh.vertices.iter().flat_map(|v| v.normal).collect());
+    add(mesh.vertices.iter().flat_map(|v| [v.pos[0], 0., 0.]).collect());
+    add(vec![0., 2.]);
+    add(vec![0., 0., 0., 4., 0., 0.]);
+    add(vec![0., 0., 0., 8., 0., 0.]);
+    let offset = bytes.len();
+    for i in &mesh.indices {
+        bytes.extend(i.to_le_bytes());
+    }
+    views.push(json!({"buffer":0,"byteOffset":offset,"byteLength":bytes.len()-offset}));
+    let v = mesh.vertices.len();
+    let data = json!({"asset":{"version":"2.0"},"buffers":[{"uri":"shape.bin","byteLength":bytes.len()}],"bufferViews":views,
+      "accessors":[{"bufferView":0,"componentType":5126,"count":v,"type":"VEC3","min":[-1,-1,-1],"max":[1,1,1]},
+        {"bufferView":1,"componentType":5126,"count":v,"type":"VEC3"},
+        {"bufferView":2,"componentType":5126,"count":v,"type":"VEC3"},
+        {"bufferView":3,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[2]},
+        {"bufferView":4,"componentType":5126,"count":2,"type":"VEC3"},
+        {"bufferView":5,"componentType":5126,"count":2,"type":"VEC3"},
+        {"bufferView":6,"componentType":5125,"count":mesh.indices.len(),"type":"SCALAR"}],
+      "meshes":[{"weights":[0],"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":6,"targets":[{"POSITION":2}]}]}],
+      "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0,
+      "animations":[{"name":"move","samplers":[{"input":3,"output":4,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]},
+        {"name":"far","samplers":[{"input":3,"output":5,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]});
+    std::fs::write(dir.0.join("shape.gltf"), serde_json::to_vec(&data).unwrap()).unwrap();
+    std::fs::write(dir.0.join("shape.bin"), bytes).unwrap();
+    let xml = xml("scaleX=\"0.01\" scaleY=\"0.01\" scaleZ=\"0.01\" animationClip=\"move\" animationClipTo=\"far\" animationBlend=\"0.5\" morphWeights=\"0.5\"", "")
+        .replace("<materials>", "<assets><mesh id=\"source\" src=\"shape.gltf\"/></assets><materials>")
+        .replace("primitive=\"box\"", "primitive=\"mesh\" mesh=\"source\"");
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(dir.0.clone()) })
+        .unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let frame = ev.evaluate(1.);
+    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+    let split = frame.nodes[0].fracture.as_ref().unwrap();
+    let xs: Vec<_> = split
+        .geometry
+        .pieces
+        .iter()
+        .flat_map(|p| {
+            p.surfaces.iter().flat_map(move |s| s.mesh.vertices.iter().map(move |v| v.pos[0] as f64 + p.offset[0]))
+        })
+        .collect();
+    let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // translation at t = 1: 2 in "move", 4 in "far"; halfway 3, and the half morph stretches the cube to +-1.5
+    assert!((min - 1.5).abs() < 1e-5 && (max - 4.5).abs() < 1e-5, "frozen blended x bounds {min}..{max}");
+}
+
+#[test]
 fn fracture_samples_numbered_mesh_geometry_at_release() {
     let dir = Fixture::new();
     for (frame, width) in [(0, 2.), (1, 4.)] {

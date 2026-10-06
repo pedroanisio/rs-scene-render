@@ -222,9 +222,36 @@ pub fn adapters(opts: &GpuOptions) -> (Vec<wgpu::AdapterInfo>, Result<usize, Gpu
     (found, chosen)
 }
 
+/// Instance flags: the debug and validation layers the build config would turn on (debug builds) only when asked for with
+/// `SR_GPU_DEBUG=1` or `--debug-gpu`. They name every object through the Vulkan loader, which crashed under concurrent
+/// pipeline creation on llvmpipe, and a delivery does not need them.
+pub fn instance_flags() -> wgpu::InstanceFlags {
+    if debug_layers() {
+        wgpu::InstanceFlags::from_build_config()
+    } else {
+        wgpu::InstanceFlags::empty()
+    }
+}
+
+/// Whether the debug and validation layers are on (`SR_GPU_DEBUG` set to anything but empty or `0`; `--debug-gpu` sets it).
+/// With them on, object naming reaches the Vulkan loader from every buffer and texture creation, which is not serialised:
+/// a delivery therefore renders with one worker.
+pub fn debug_layers() -> bool {
+    std::env::var("SR_GPU_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The process-wide lock held while a device or a pipeline is created. Several renderers are created at once by a parallel
+/// delivery, and creating pipelines concurrently on a software adapter crashed the Vulkan loader; rendering takes no lock.
+pub fn creation_lock() -> std::sync::MutexGuard<'static, ()> {
+    CREATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn enumerate(backends: wgpu::Backends) -> Vec<wgpu::Adapter> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = backends;
+    desc.flags = instance_flags();
     let instance = wgpu::Instance::new(desc);
     pollster::block_on(instance.enumerate_adapters(backends))
 }
@@ -348,6 +375,7 @@ impl Gpu {
         // timestamp queries, where the adapter has them, so renders can report GPU time
         let features =
             adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let _creation = creation_lock();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("scene-render"),
             required_features: features,

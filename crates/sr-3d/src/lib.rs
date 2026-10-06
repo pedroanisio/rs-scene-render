@@ -128,6 +128,8 @@ pub struct Node {
     pub skin: Option<usize>,
     /// Default morph weights of the node's mesh.
     pub weights: Vec<f32>,
+    /// The names of the mesh's morph targets, in weight order (empty when the file names none).
+    pub morph_names: Vec<String>,
 }
 
 /// Joints and inverse bind matrices.

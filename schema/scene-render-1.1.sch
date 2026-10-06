@@ -19,7 +19,7 @@
   </sch:pattern>
   <sch:pattern id="p1b">
     <sch:rule context="/scene[@version='1.0' or @version='1.1']">
-      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
+      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D/morph|.//object3D/joint|assets/strokeFont|.//shape[@shape='stroke-text']|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
         documents before version="1.2" cannot use 1.2 elements or asset kinds; set version="1.2".</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -102,7 +102,7 @@
       <sch:assert id="P3D3" test="sum(@lifetimeVariance)&lt;$life and sum(@speedVariance)&lt;=sum(@speed) and (sum(@directionX)!=0 or $dy!=0 or sum(@directionZ)!=0) and (not(@emissionEnd) or number(@emissionEnd)&gt;=$start) and not(burst[not(number(@time)&gt;=$start)])">particles3D requires bounded variances, a nonzero direction, an ordered emission window and bursts at or after emissionStart.</sch:assert>
       <sch:assert id="P3D4" test="not(*[@property and not(@property='x' or @property='y' or @property='z' or @property='rotation' or @property='rotationX' or @property='rotationY' or @property='scaleX' or @property='scaleY' or @property='scaleZ' or @property='rate' or @property='opacity' or @property='size' or @property='sizeEnd' or @property='color' or @property='colorEnd' or @property='opacityEnd' or @property='trail')])">particles3D solver configuration is static; animate pose, rate or appearance instead.</sch:assert>
       <sch:assert id="P3D5" test="not(@colliders) or (count(str:tokenize(normalize-space(@colliders),' '))&lt;=4096 and count(str:tokenize(normalize-space(@colliders),' '))=count($colliders[@primitive='box' or @primitive='sphere' or @primitive='globe' or @primitive='plane' or @primitive='cylinder' or @primitive='cone' or @primitive='capsule' or @primitive='torus' or @primitive='mesh' or @primitive='text' or @primitive='extrude' or @primitive='clay']))">particles3D colliders must name at most 4096 distinct supported rigid surface objects.</sch:assert>
-      <sch:assert id="P3D6" test="not($colliders/*[@property='primitive' or @property='mesh' or @property='radius' or @property='width' or @property='height' or @property='depth' or @property='segments' or (@property='exaggeration' and ../@primitive='globe' and ../@terrain) or (../@primitive='text' and (@property='text' or @property='font' or @property='bevel')) or (../@primitive='extrude' and (@property='path' or @property='bevel')) or (../@primitive='clay' and (@property='resolution' or @property='fingerprints' or @property='seed' or @property='boil'))]) and not($colliders[@primitive='clay']/blob/*[@property]) and not($colliders[@primitive='clay' and number(translate(@boil,'+',''))&gt;0 and number(translate(@fingerprints,'+',''))&gt;0])">particles3D collider geometry must be static; animate its rigid pose instead.</sch:assert>
+      <sch:assert id="P3D6" test="not($colliders/*[@property='primitive' or @property='mesh' or @property='radius' or @property='width' or @property='height' or @property='depth' or @property='segments' or (@property='exaggeration' and ../@primitive='globe' and ../@terrain) or (../@primitive='text' and (@property='text' or @property='font' or @property='bevel' or @property='tracking')) or (../@primitive='extrude' and (@property='path' or @property='bevel')) or (../@primitive='clay' and (@property='resolution' or @property='fingerprints' or @property='seed' or @property='boil'))]) and not($colliders[@primitive='clay']/blob/*[@property]) and not($colliders[@primitive='clay' and number(translate(@boil,'+',''))&gt;0 and number(translate(@fingerprints,'+',''))&gt;0])">particles3D collider geometry must be static; animate its rigid pose instead.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-volume">
@@ -123,7 +123,7 @@
       <sch:let name="count" value="count(str:tokenize(normalize-space(@colliders),' '))"/>
       <sch:assert id="PYRO1" test="$nx&gt;=2 and $nx&lt;=1024 and $ny&gt;=2 and $ny&lt;=1024 and $nz&gt;=2 and $nz&lt;=1024 and $nx - round($nx)&lt;=0.00000001 and round($nx) - $nx&lt;=0.00000001 and $ny - round($ny)&lt;=0.00000001 and round($ny) - $ny&lt;=0.00000001 and $nz - round($nz)&lt;=0.00000001 and round($nz) - $nz&lt;=0.00000001">pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.</sch:assert>
       <sch:assert id="PYRO7" test="not(@colliders) or ($count &lt;= 4096 and $count = count($colliders[@primitive='box' or @primitive='sphere' or @primitive='globe' or @primitive='plane' or @primitive='cylinder' or @primitive='cone' or @primitive='capsule' or @primitive='torus' or @primitive='mesh' or @primitive='text' or @primitive='extrude' or @primitive='clay']))">pyro colliders must name at most 4096 distinct supported surface objects, including text, extrude and clay solids.</sch:assert>
-      <sch:assert id="PYRO8" test="not($colliders/*[@property='primitive' or @property='mesh' or @property='radius' or @property='width' or @property='height' or @property='depth' or @property='segments' or (@property='exaggeration' and ../@primitive='globe' and ../@terrain) or (../@primitive='text' and (@property='text' or @property='font' or @property='bevel')) or (../@primitive='extrude' and (@property='path' or @property='bevel')) or (../@primitive='clay' and (@property='resolution' or @property='fingerprints' or @property='seed' or @property='boil'))]) and not($colliders[@primitive='clay']/blob/*[@property]) and not($colliders[@primitive='clay' and number(translate(@boil,'+',''))&gt;0 and number(translate(@fingerprints,'+',''))&gt;0])">pyro collider geometry is static; animate its position, rotation or scale instead of shape parameters.</sch:assert>
+      <sch:assert id="PYRO8" test="not($colliders/*[@property='primitive' or @property='mesh' or @property='radius' or @property='width' or @property='height' or @property='depth' or @property='segments' or (@property='exaggeration' and ../@primitive='globe' and ../@terrain) or (../@primitive='text' and (@property='text' or @property='font' or @property='bevel' or @property='tracking')) or (../@primitive='extrude' and (@property='path' or @property='bevel')) or (../@primitive='clay' and (@property='resolution' or @property='fingerprints' or @property='seed' or @property='boil'))]) and not($colliders[@primitive='clay']/blob/*[@property]) and not($colliders[@primitive='clay' and number(translate(@boil,'+',''))&gt;0 and number(translate(@fingerprints,'+',''))&gt;0])">pyro collider geometry is static; animate its position, rotation or scale instead of shape parameters.</sch:assert>
     </sch:rule>
     <sch:rule context="pyroSource|pyroImpulse">
       <sch:assert id="PYRO5" test="(@shape='mesh' and /scene/assets/mesh[@id=current()/@mesh]) or (not(@shape='mesh') and not(@mesh))">a mesh pyro source must name a mesh asset; @mesh is valid only for shape=mesh.</sch:assert>
@@ -538,6 +538,23 @@
   <sch:pattern id="p66">
     <sch:rule context="shape[@markerStart[.!='none'] or @markerEnd[.!='none']]">
       <sch:assert id="C65" test="@shape='path' or @shape='line'">markers need an open outline: shape="path" or "line".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p67">
+    <sch:rule context="object3D[@tracking]">
+      <sch:assert id="TXT2" test="@primitive='text'">@tracking applies to object3D primitive="text".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p69">
+    <sch:rule context="shape[@shape='stroke-text']">
+      <sch:assert id="SFT1" test="@text and @strokeFont">shape="stroke-text" needs @text and @strokeFont.</sch:assert>
+      <sch:assert id="SFT2" test="not(@strokeFont) or /scene/assets/strokeFont[@id=current()/@strokeFont]">shape/@strokeFont must name a strokeFont asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p68">
+    <sch:rule context="object3D[@materialOverride]">
+      <sch:assert id="MOV1" test="count(str:tokenize(normalize-space(@materialOverride),' ')) &gt; 0 and count(str:tokenize(normalize-space(@materialOverride),' ')) = count(str:tokenize(normalize-space(@materialOverride),' ')[contains(.,':') and substring-before(.,':')!='' and substring-after(.,':')!=''])">@materialOverride is a space-separated list of name:id pairs.</sch:assert>
+      <sch:assert id="MOV2" test="not(str:tokenize(normalize-space(@materialOverride),' ')[not(substring-after(., ':') = current()/ancestor::scene/materials/material/@id)])">@materialOverride: each id after the colon must name a material.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

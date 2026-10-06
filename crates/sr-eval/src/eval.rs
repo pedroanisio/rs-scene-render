@@ -226,6 +226,10 @@ pub struct FrameNode {
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pose3: Option<[f64; 16]>,
+    /// For an object that draws an imported model and has joint sockets: each joint's frame in the object's own frame
+    /// (column-major, scene space), at the pose the object draws.
+    #[serde(skip)]
+    pub joints: Option<Arc<Vec<(String, [f64; 16])>>>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -456,7 +460,20 @@ impl Program {
             }
         };
         let t0 = comp_t - link.delay;
-        let src = if link.smoothing > 0.0 {
+        let src = if let Some(follower) = &link.follower {
+            // the filter of the source's history: sum of weight x source at (t0 - age), the source holding its value
+            // from before time 0 (a constant source gives that constant)
+            let step = follower.window / follower.weights.len() as f64;
+            let mut acc: Option<Vec<f64>> = None;
+            for (i, w) in follower.weights.iter().enumerate() {
+                let c = sample((t0 - (i as f64 + 0.5) * step).max(0.0)).components().unwrap_or_default();
+                match &mut acc {
+                    None => acc = Some(c.iter().map(|x| x * w).collect()),
+                    Some(a) => a.iter_mut().zip(&c).for_each(|(x, y)| *x += y * w),
+                }
+            }
+            V::nums(&acc.unwrap_or_default())
+        } else if link.smoothing > 0.0 {
             let n = ((link.smoothing * self.fps.as_f64()).round() as usize).clamp(1, 240);
             let mut acc: Option<Vec<f64>> = None;
             for i in 0..n {
@@ -557,6 +574,10 @@ impl Host for ExprHost<'_, '_> {
             Some(f) if self.comp_t == f.t => f.values[slot as usize].to_v(),
             _ => self.p.value_at(slot, self.comp_t, self.depth + 1, self.memo).to_v(),
         }
+    }
+
+    fn prop_at(&mut self, slot: u32, t: f64) -> V {
+        self.p.value_at(slot, t, self.depth + 1, self.memo).to_v()
     }
 
     fn value_at_time(&mut self, t: f64) -> V {
@@ -796,8 +817,15 @@ impl<'p> Frame<'p> {
                 }
             };
             let (pt, ang) = m.path.sample(prog, m.constant_speed);
-            x = pt[0];
-            y = pt[1];
+            if m.additive {
+                // an offset: how far the path has gone from its first point
+                let start = m.path.sample(0.0, m.constant_speed).0;
+                x += pt[0] - start[0];
+                y += pt[1] - start[1];
+            } else {
+                x = pt[0];
+                y = pt[1];
+            }
             if m.auto_orient {
                 rot += ang + m.orient_offset;
             }
@@ -1002,8 +1030,9 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         nodes: Vec<FrameNode>,
         world: Vec<Option<(Affine, f64)>>,
         out_ix: Vec<Option<u32>>,
+        problems: Vec<String>,
     }
-    let mut out = Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n] };
+    let mut out = Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n], problems: Vec::new() };
 
     // depth-first, z-sorted, active nodes only
     #[allow(clippy::too_many_arguments)]
@@ -1091,8 +1120,14 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             sim_image: None,
             sim_volume: None,
             pose3: None,
+            joints: None,
             elem: node.elem.clone(),
         });
+        if node.name == "shape" {
+            if let Some(shape) = o.nodes.last_mut() {
+                crate::stroke_font::attach(p, shape, &mut o.problems);
+            }
+        }
         let own_box = node.box_size.map(|[w, h]| [resolve_len(w, bx[0], p.size), resolve_len(h, bx[1], p.size)]);
         let cbox = own_box.unwrap_or(bx);
         if node.layout.is_some() || node.children.iter().any(|&k| p.nodes[k as usize].align.is_some()) {
@@ -1226,7 +1261,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         _ => background,
     };
 
-    FrameGraph {
+    let mut graph = FrameGraph {
         time: t,
         frame: libm::floor(t * p.fps.as_f64() + 1e-9) as i64,
         size: p.size,
@@ -1235,9 +1270,11 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         transitions,
         camera,
         elements,
-        problems: Vec::new(),
+        problems: std::mem::take(&mut out.problems),
         seed: p.seed,
-    }
+    };
+    crate::joints::attach(p, &mut graph);
+    graph
 }
 
 fn token_color(p: &Program, name: &str) -> Option<[f64; 4]> {

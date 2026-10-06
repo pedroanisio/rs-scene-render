@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long, global = true, env = "SR_THREADS", value_name = "N")]
     threads: Option<usize>,
 
+    /// Turn on the GPU debug and validation layers (they name every object through the Vulkan loader, and are off by
+    /// default: a delivery does not need them).
+    /// The environment variable SR_GPU_DEBUG (any value but empty or 0) does the same; the GPU layer reads it itself.
+    #[arg(long, global = true)]
+    debug_gpu: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -421,6 +427,7 @@ impl Out {
         let (label, color) = match d.severity {
             Severity::Error => ("error", AnsiColor::Red),
             Severity::Warning => ("warning", AnsiColor::Yellow),
+            Severity::Info => ("info", AnsiColor::Cyan),
         };
         let head = style(color, true);
         let bold = Style::new().bold();
@@ -447,11 +454,12 @@ impl Out {
     }
 
     fn summary(&mut self, file: &Path, report: &Report, deny_warnings: bool) -> std::io::Result<()> {
-        let (e, w) = (report.error_count(), report.warning_count());
+        let (e, w, i) = (report.error_count(), report.warning_count(), report.info_count());
         let ok = e == 0 && !(deny_warnings && w > 0);
         let (mark, st) =
             if ok { ("valid", style(AnsiColor::Green, true)) } else { ("invalid", style(AnsiColor::Red, true)) };
-        writeln!(self.w, "{st}{mark}{st:#} {}: {e} error(s), {w} warning(s)", file.display())
+        let info = if i > 0 { format!(", {i} info") } else { String::new() };
+        writeln!(self.w, "{st}{mark}{st:#} {}: {e} error(s), {w} warning(s){info}", file.display())
     }
 }
 
@@ -475,21 +483,52 @@ struct FileReport<'a> {
 /// per node carrying `safeAreaForce`, and how the frames were sampled.
 fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<String>) {
     let Ok(doc) = sr_model::load_str(text, opts) else { return (Vec::new(), Vec::new()) };
-    let ev = match sr_eval::Evaluator::new(&doc, &Default::default()) {
-        Ok(ev) => ev,
-        Err(report) => return (report.diagnostics, Vec::new()),
-    };
-    // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
-    let compiled = ev.warnings().to_vec();
-    if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
-        return (compiled, Vec::new());
+    // the document as authored, then each layout it declares: a layout has its own frame size, safe area and
+    // overrides, and render and encode check the one they are asked for
+    let layouts: Vec<Option<String>> = std::iter::once(None)
+        .chain(doc.scene.layouts.iter().flat_map(|l| l.layouts.iter()).map(|l| Some(l.id.clone())))
+        .collect();
+    let (mut found, mut info): (Vec<Diagnostic>, Vec<String>) = (Vec::new(), Vec::new());
+    for layout in layouts {
+        let eo = sr_eval::EvalOptions { layout: layout.clone(), ..Default::default() };
+        let tag = |mut d: Diagnostic| {
+            if let Some(l) = &layout {
+                d.message = format!("{} (layout {l})", d.message);
+            }
+            d
+        };
+        let ev = match sr_eval::Evaluator::new(&doc, &eo) {
+            Ok(ev) => ev,
+            Err(report) => {
+                found.extend(report.diagnostics.into_iter().map(tag));
+                continue;
+            }
+        };
+        // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
+        // a warning every layout shares is listed once
+        for d in ev.warnings().iter().cloned().map(tag) {
+            if !found.iter().any(|f| f.code == d.code && f.message == d.message) {
+                found.push(d);
+            }
+        }
+        if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
+            continue;
+        }
+        let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
+        for id in &out.forced {
+            let line = format!("info[SA02]: {id} forced outside the safe area");
+            if !info.contains(&line) {
+                info.push(line);
+            }
+        }
+        if let Some(n) = &out.note {
+            let line = format!("info: safe area audit {n}");
+            if !info.contains(&line) {
+                info.push(line);
+            }
+        }
+        found.extend(out.diagnostics(ev.program()).into_iter().map(tag));
     }
-    let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
-    let mut info: Vec<String> =
-        out.forced.iter().map(|id| format!("info[SA02]: {id} forced outside the safe area")).collect();
-    info.extend(out.note.as_ref().map(|n| format!("info: safe area audit {n}")));
-    let mut found = compiled;
-    found.extend(out.diagnostics(ev.program()));
     (found, info)
 }
 
@@ -648,8 +687,9 @@ fn bake_volume(args: BakeArgs, out: &mut Out) -> std::io::Result<ExitCode> {
         let doc = sr_model::load_file(&file, &LoadOptions::default()).map_err(|e| e.to_string())?;
         let ev = sr_eval::Evaluator::new(&doc, &sr_eval::EvalOptions { params, ..Default::default() })
             .map_err(|r| r.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
-        if !ev.warnings().is_empty() {
-            return Err(ev.warnings().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "));
+        let warned: Vec<_> = ev.warnings().iter().filter(|d| !d.is_info()).collect();
+        if !warned.is_empty() {
+            return Err(warned.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "));
         }
         let end = end.unwrap_or(ev.frame_count());
         eprintln!("Baking {object}: project frames {first}..{end} into {}", output.display());
@@ -907,8 +947,13 @@ fn eval(
         Ok(e) => e,
         Err(r) => return report_errors(out, &r),
     };
+    // JSON owns standard output: warnings go to standard error then, one line each
     for w in ev.warnings() {
-        out.diagnostic(file, &lines, w)?;
+        if matches!(format, EvalFormat::Json) {
+            eprintln!("{}[{}]: {}", w.severity, w.code, w.message);
+        } else {
+            out.diagnostic(file, &lines, w)?;
+        }
     }
     if bench {
         let n = ev.frame_count().max(1);
@@ -1078,7 +1123,8 @@ fn render(
     for w in doc.warnings().iter().chain(ev.warnings()) {
         out.diagnostic(file, &lines, w)?;
     }
-    let eval_warnings = ev.warnings().len();
+    // information (an inert attribute) is shown but never counts toward --strict
+    let eval_warnings = ev.warnings().iter().filter(|d| !d.is_info()).count();
     // content a safe area holds to its region, over the frames being rendered
     let safe = match (time, frames.is_empty() && bench) {
         (None, true) => sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration).diagnostics(ev.program()),
@@ -1555,7 +1601,9 @@ fn encode(
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
             Ok(r) => {
-                let problems = r.unsupported.len() + r.accessibility.len() + r.evaluation_warnings.len();
+                let problems = r.unsupported.len()
+                    + r.accessibility.len()
+                    + r.evaluation_warnings.iter().filter(|d| !d.is_info()).count();
                 if strict && problems > 0 {
                     eprintln!(
                         "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content, evaluator warnings or accessibility findings)",
@@ -1582,6 +1630,9 @@ fn encode(
                         )?;
                     }
                 }
+                if let Some(why) = &r.serial_because {
+                    writeln!(out.w, "  note: {why}")?;
+                }
                 if r.frames > 0 {
                     let [e, s, w, b] = r.stage_seconds;
                     writeln!(
@@ -1597,6 +1648,36 @@ fn encode(
                         .map(|l| format!("{l:.1} LUFS integrated"))
                         .unwrap_or_else(|| "too short for integrated loudness".into());
                     writeln!(out.w, "  audio: {l}, {tp:.1} dBTP true peak, mixed in {:.2} s", r.audio_seconds)?;
+                    if let Some(h) = &r.audio_ceiling {
+                        if h.passes.is_empty() {
+                            writeln!(
+                                out.w,
+                                "  audio ceiling: the AAC decodes to {:.2} dBTP, under the ceiling of {:.2}",
+                                h.first, h.ceiling
+                            )?;
+                        } else {
+                            let passes: Vec<String> = h
+                                .passes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| {
+                                    format!(
+                                        "pass {}: mixed down {:.2} dB, now {:.2} dBTP",
+                                        i + 1,
+                                        -p.gain_db,
+                                        p.decoded_true_peak
+                                    )
+                                })
+                                .collect();
+                            writeln!(
+                                out.w,
+                                "  audio ceiling: the AAC decodes to {:.2} dBTP over a ceiling of {:.2}; {}",
+                                h.first,
+                                h.ceiling,
+                                passes.join("; ")
+                            )?;
+                        }
+                    }
                 }
                 for u in &r.uploads {
                     writeln!(out.w, "  delivered to {u}")?;
@@ -1638,6 +1719,9 @@ fn process_cpu_seconds() -> Option<f64> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.debug_gpu {
+        std::env::set_var("SR_GPU_DEBUG", "1");
+    }
     // on WSL2 the GPU is reachable only through Mesa's D3D12 driver; Mesa reads these
     // variables when a GL display opens, so set them before any thread starts
     sr_gpu::gpu::prepare_environment();

@@ -3,7 +3,8 @@
 use std::cell::RefCell;
 use std::fmt;
 
-/// Severity of a [`Diagnostic`]. Errors make a document unusable; warnings do not.
+/// Severity of a [`Diagnostic`]. Errors make a document unusable; warnings do not; information reports something valid that
+/// has no effect on the result (an inert attribute): strict checks never count it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -11,6 +12,9 @@ pub enum Severity {
     Error,
     /// The document is valid but something deserves attention.
     Warning,
+    /// The document is valid and means what it says, only less than its author may have thought: a finding that changes
+    /// nothing in the result (SREP 18).
+    Info,
 }
 
 impl fmt::Display for Severity {
@@ -18,6 +22,7 @@ impl fmt::Display for Severity {
         f.write_str(match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Info => "info",
         })
     }
 }
@@ -156,9 +161,19 @@ impl Diagnostic {
         self
     }
 
+    /// An information diagnostic: valid, and with no effect on the result.
+    pub fn info(code: impl Into<String>, message: impl Into<String>, loc: Loc, path: impl Into<String>) -> Self {
+        Diagnostic { severity: Severity::Info, ..Self::warning(code, message, loc, path) }
+    }
+
     /// True for errors.
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
+    }
+
+    /// True for information.
+    pub fn is_info(&self) -> bool {
+        self.severity == Severity::Info
     }
 }
 
@@ -214,9 +229,14 @@ impl Report {
         self.diagnostics.iter().filter(|d| d.is_error()).count()
     }
 
-    /// Number of warnings.
+    /// Number of warnings (not information).
     pub fn warning_count(&self) -> usize {
-        self.diagnostics.len() - self.error_count()
+        self.diagnostics.iter().filter(|d| d.severity == Severity::Warning).count()
+    }
+
+    /// Number of information findings.
+    pub fn info_count(&self) -> usize {
+        self.diagnostics.iter().filter(|d| d.is_info()).count()
     }
 
     /// Distinct diagnostic codes, sorted.
@@ -240,6 +260,10 @@ impl fmt::Display for Report {
         for d in &self.diagnostics {
             writeln!(f, "{d}")?;
         }
-        write!(f, "{} error(s), {} warning(s)", self.error_count(), self.warning_count())
+        write!(f, "{} error(s), {} warning(s)", self.error_count(), self.warning_count())?;
+        match self.info_count() {
+            0 => Ok(()),
+            n => write!(f, ", {n} info"),
+        }
     }
 }

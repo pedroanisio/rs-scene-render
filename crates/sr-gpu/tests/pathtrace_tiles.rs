@@ -46,6 +46,7 @@ fn tiled_paths_match_whole_frame_at_edges_and_denoise_seams() {
             opacity: 1.0,
             cast_shadow: true,
             receive_shadow: true,
+            shadow_catcher: false,
         }],
         lights: vec![Light3 {
             kind: LightKind::Sphere,

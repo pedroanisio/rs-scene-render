@@ -393,6 +393,9 @@
     <xs:attribute name="period" type="positiveDecimal">
       <xs:annotation><xs:documentation>The ringing period of an elastic-in, elastic-out or elastic-in-out segment as a fraction of the segment (default 0.3; 0.45 for elastic-in-out). Read from the key the segment leaves.</xs:documentation></xs:annotation>
     </xs:attribute>
+    <xs:attribute name="carry" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>On a key whose segment is a spring: start the spring with the velocity the previous segment arrives at this key with (its rate of change at the end), instead of from rest, so a hit that follows another keeps its momentum. Needs a previous key and a following key.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="marker" type="xs:IDREF">
       <xs:annotation><xs:documentation>Snap the key time to a marker; @time becomes an offset from it.</xs:documentation></xs:annotation>
     </xs:attribute>
@@ -416,7 +419,8 @@
       Computes @property every frame; @property names an attribute the element's own type declares (or position,
       scale, anchor, skew): a text layer's text, for one, is not an animatable property. The language is a pure, side-effect-free
       subset of ECMAScript expressions with these built-ins: time, frame, value,
-      index, count, seed, param(name), prop("id.property"), valueAtTime(t),
+      index, count, seed, param(name), prop("id.property"), propAtTime("id.property", t),
+      valueAtTime(t), penner("curve", u),
       wiggle(freq, amp[, octaves, ampMult]), noise(x[,y,z]), random([min,max]),
       loopIn/loopOut(type, n), linear/ease/easeIn/easeOut(t, t0, t1, v0, v1),
       clamp, lerp, smoothstep, spring(t, stiffness, damping, mass),
@@ -446,6 +450,9 @@
     <xs:attribute name="autoOrient" type="xs:boolean" default="false"/>
     <xs:attribute name="orientOffset" type="xs:double" default="0"/>
     <xs:attribute name="constantSpeed" type="xs:boolean" default="true"/>
+    <xs:attribute name="additive" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>true: the path is an offset. The node's position is its own x and y (keys, link, expression) plus the path's point at the progress minus the path's first point, so the node starts where it would without the path. false: the path's point is the position.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="linkType">
     <xs:annotation><xs:documentation>
@@ -462,6 +469,16 @@
     <xs:attribute name="max" type="xs:double"/>
     <xs:attribute name="delay" type="xs:double" default="0"/>
     <xs:attribute name="smoothing" type="nonNegativeDecimal" default="0"/>
+    <xs:attribute name="follow" default="none">
+      <xs:annotation><xs:documentation>A follower of the delayed source: "exponential" is a first-order lag of time constant @timeConstant; "spring" is a damped spring with @stiffness, @damping and @mass (as the spring curve of a key), so it can overshoot and settle. Both are linear filters of the source's history, evaluated without state. Not applied together with @smoothing.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="none"/><xs:enumeration value="exponential"/><xs:enumeration value="spring"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="timeConstant" type="positiveDecimal" default="0.1"/>
+    <xs:attribute name="stiffness" type="positiveDecimal" default="100"/>
+    <xs:attribute name="damping" type="nonNegativeDecimal" default="10"/>
+    <xs:attribute name="mass" type="positiveDecimal" default="1"/>
   </xs:complexType>
   <xs:group name="animationElements">
     <xs:choice>
@@ -551,6 +568,9 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="target" type="xs:IDREF"/>
+    <xs:attribute name="targetJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @target that is an object3D drawing an imported model: the name of a node of that model whose pose is the target's transform (parent, copy-position, copy-rotation, copy-scale, copy-transform, look-at and distance).</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="point" type="xs:string"/>
     <xs:attribute name="influence" type="unitDecimal" default="1"/>
@@ -1013,6 +1033,15 @@
     </xs:attribute>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+  <xs:complexType name="strokeFontAssetType">
+    <xs:annotation><xs:documentation>A single-line font: glyphs as pen strokes. format="jhf" is the Hershey font file format; the n-th glyph of the file (counting from 0) is the character U+0020 + n. Drawn by shape="stroke-text". Version 1.2.</xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI" use="required"/>
+    <xs:attribute name="format" default="jhf">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jhf"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attributeGroup ref="assetProvenance"/>
+  </xs:complexType>
   <xs:complexType name="fontAssetType">
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="src" type="xs:anyURI" use="required"/>
@@ -1442,6 +1471,7 @@
       <xs:element name="volume" type="volumeAssetType"/>
       <xs:element name="lottie" type="lottieAssetType"/>
       <xs:element name="font" type="fontAssetType"/>
+      <xs:element name="strokeFont" type="strokeFontAssetType"/>
       <xs:element name="generator" type="generatorAssetType"/>
       <xs:element name="chart" type="chartAssetType"/>
       <xs:element name="audiogram" type="audiogramAssetType"/>
@@ -1504,6 +1534,13 @@
     <xs:attribute name="displacementScale" type="xs:double" default="0"/>
     <xs:attribute name="uvScaleX" type="xs:double" default="1"/>
     <xs:attribute name="uvScaleY" type="xs:double" default="1"/>
+    <xs:attribute name="unevenness" type="unitDecimal" default="0">
+      <xs:annotation><xs:documentation>Amount of procedural surface unevenness: a smooth noise fixed to the object that tilts the shading normal and varies the roughness, for a hand-made (clay) look. 0 is off.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="unevennessScale" type="positiveDecimal" default="8">
+      <xs:annotation><xs:documentation>Size of the largest features of the unevenness, in scene units.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="unevennessSeed" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="materialX" type="xs:anyURI"/>
   </xs:complexType>
   <xs:complexType name="materialsType">
@@ -1908,7 +1945,7 @@
     <xs:attribute name="detail" type="xs:double" default="10"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mode" type="xs:NMTOKEN">
-      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag: corner|smooth; offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag and wiggle-path: corner|smooth (wiggle-path smooth joins the wiggled points with a Catmull-Rom spline through them instead of straight lines); offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="offsetX" type="xs:double" default="0"/>
     <xs:attribute name="offsetY" type="xs:double" default="0"/>
@@ -2007,11 +2044,19 @@
         <xs:enumeration value="rounded-rect"/><xs:enumeration value="polygon"/>
         <xs:enumeration value="star"/><xs:enumeration value="line"/>
         <xs:enumeration value="path"/>
+        <xs:enumeration value="stroke-text"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="width" type="positiveLengthType" use="required"/>
     <xs:attribute name="height" type="positiveLengthType" use="required"/>
     <xs:attribute name="path" type="xs:string"/>
+    <xs:attribute name="text" type="xs:string">
+      <xs:annotation><xs:documentation>shape="stroke-text": the text, laid out in the strokeFont as open strokes in the font's order (a line feed, &amp;#10;, starts a line). Stroked only: fill is not used. trimMode="sequential" with trimEnd writes it on.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="strokeFont" type="xs:IDREF"/>
+    <xs:attribute name="fontSize" type="positiveDecimal" default="48">
+      <xs:annotation><xs:documentation>shape="stroke-text": the cap height in node units.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="fillRule" type="fillRuleType" default="nonzero"/>
     <xs:attribute name="radius" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="cornerRadii" type="numberListType">
@@ -2219,6 +2264,9 @@
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="condition" type="expressionString"/>
     <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="parentJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="scaleX" type="xs:double" default="1"/>
     <xs:attribute name="scaleY" type="xs:double" default="1"/>
     <xs:attribute name="scaleZ" type="xs:double" default="1"/>
@@ -2424,10 +2472,48 @@
     </xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
+  <xs:complexType name="morphType">
+    <xs:annotation><xs:documentation>
+      With an object3D of primitive="mesh" and an imported model: the weight of one morph target of the model, by the
+      target's name (a glTF mesh's extras.targetNames, an FBX blend channel's name). It replaces that target's weight
+      from the clip or the rest pose, and wins over the same target in the object's @morphWeights. The weight animates.
+      Version 1.2.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="weight" type="xs:double" default="0"/>
+  </xs:complexType>
+
+  <xs:complexType name="jointType">
+    <xs:annotation><xs:documentation>
+      With an object3D of primitive="mesh" and an imported model: poses one joint (a node by name) of the model. The
+      rotationX, rotationY and rotation (about z), in degrees and in that order, turn the joint in its own axes on
+      top of the clip's pose; they animate. lookAt then turns the joint so that its lookAxis points at the target
+      node, light or camera (the shortest turn, scaled by influence and limited to maxAngle degrees), without moving
+      the joint's parents. The first joint of that name in the model's node order is used. Version 1.2.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="lookAt" type="xs:IDREF"/>
+    <xs:attribute name="lookAxis" default="z">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="x"/><xs:enumeration value="minus-x"/><xs:enumeration value="y"/>
+        <xs:enumeration value="minus-y"/><xs:enumeration value="z"/><xs:enumeration value="minus-z"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="influence" type="unitDecimal" default="1"/>
+    <xs:attribute name="maxAngle" type="nonNegativeDecimal" default="180"/>
+  </xs:complexType>
+
   <xs:complexType name="object3DType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
+      <xs:element name="joint" type="jointType"/>
+      <xs:element name="morph" type="morphType"/>
       <xs:element name="blob" type="clayBlobType"/>
       <xs:element name="rigidBody" type="rigidBody3DType"/>
       <xs:element name="medium" type="mediumType"/>
@@ -2490,6 +2576,15 @@
     <xs:attribute name="volume" type="xs:IDREF"/>
     <xs:attribute name="text" type="xs:string"/>
     <xs:attribute name="font" type="xs:string"/>
+    <xs:attribute name="node" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: draw only the node of that name and its descendants, placed so that the node's own origin is the object's origin (the node's transform within the model is dropped, the transforms below it are kept). The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="materialOverride" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a space-separated list of imported-material-name:document-material-id pairs. Each primitive of the model whose material has that name is drawn with the document material instead. A material with no pair keeps its imported look. @material, when present, replaces every material and takes precedence.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="tracking" type="xs:double">
+      <xs:annotation><xs:documentation>Extra space after every character of primitive="text", in thousandths of an em of the text size (the object's height). Negative values tighten. Valid only with primitive="text".</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="depth" type="nonNegativeDecimal" default="10"/>
     <xs:attribute name="bevel" type="nonNegativeDecimal" default="0"/>
@@ -2508,16 +2603,29 @@
     <xs:attribute name="radius" type="positiveDecimal" default="50"/>
     <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
     <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="shadowCatcher" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>The surface draws no colour of its own: it is transparent where no light is blocked and black, with alpha up to @opacity, where the shadow casters block the light that would reach it, so that it darkens what is behind the 3D layer by the share of light taken away (ambient light counted). It casts no shadows and always receives them. The path tracer does not draw it.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
     <xs:attribute name="start" type="xs:double" default="0"/>
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="condition" type="expressionString"/>
     <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="parentJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
     <xs:attribute name="animationClip" type="xs:string"/>
     <xs:attribute name="animationSpeed" type="xs:double" default="1"/>
     <xs:attribute name="animationOffset" type="xs:double" default="0"/>
+    <xs:attribute name="animationClipTo" type="xs:string">
+      <xs:annotation><xs:documentation>With primitive="mesh" and an imported model: a second clip (by name or index, as @animationClip) the model is blended toward by @animationBlend. It plays at the object's time scaled by @animationSpeed plus @animationOffsetTo.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="animationBlend" type="unitDecimal" default="0">
+      <xs:annotation><xs:documentation>Weight of @animationClipTo, 0 to 1 (animatable): 0 is @animationClip alone, 1 is @animationClipTo alone, between them translation, scale and morph weights blend linearly and rotation along the shortest arc. A node a clip does not animate keeps its rest pose in that clip. Without @animationClipTo the weight blends toward the rest pose.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="animationOffsetTo" type="xs:double" default="0"/>
     <xs:attribute name="morphWeights" type="numberListType"/>
     <xs:attribute name="materialVariant" type="xs:string"/>
     <xs:attribute name="instances" type="xs:positiveInteger" default="1"/>

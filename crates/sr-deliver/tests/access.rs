@@ -317,7 +317,7 @@ fn output_caption_tracks_satisfy_the_caption_requirement() {
     for workers in [1, 2] {
         let report = caption_requirement(workers, true).unwrap();
         assert!(report.accessibility.is_empty());
-        assert_eq!(report.segments, workers);
+        assert_eq!(report.segments, expected_segments(workers));
     }
 }
 
@@ -522,6 +522,15 @@ fn regression_contrast_checks_all_times_even_with_a_later_layer() {
     }
 }
 
+/// The segments a delivery of `workers` workers makes: one when the GPU debug layers are on, which serialise the workers.
+fn expected_segments(workers: u32) -> u32 {
+    if sr_gpu::gpu::debug_layers() {
+        1
+    } else {
+        workers
+    }
+}
+
 /// Delivers a whole document as `workers` time segments at once.
 fn deliver_in(
     dir: &std::path::Path,
@@ -562,7 +571,7 @@ fn parallel_delivery_counts_flashes_across_its_segments() {
     let mut findings = Vec::new();
     for workers in [1, 2] {
         let r = deliver_in(&dir, "join-flash.xml", &xml, workers).unwrap();
-        assert_eq!(r.segments, workers, "the flash check must not force a serial render");
+        assert_eq!(r.segments, expected_segments(workers), "the flash check must not force a serial render");
         assert!(r.accessibility.iter().any(|m| m.contains("flashCheck")), "workers={workers}: {:?}", r.accessibility);
         findings.push(r.accessibility);
     }
@@ -590,7 +599,7 @@ fn parallel_delivery_judges_text_at_its_most_visible_over_the_whole_output() {
         for workers in [1, 2] {
             let r = deliver_in(&dir, "join-fade.xml", &xml, workers)
                 .unwrap_or_else(|e| panic!("group {group:?}, workers={workers}: {e}"));
-            assert_eq!(r.segments, workers, "the contrast check must not force a serial render");
+            assert_eq!(r.segments, expected_segments(workers), "the contrast check must not force a serial render");
             assert!(r.accessibility.is_empty(), "group {group:?}, workers={workers}: {:?}", r.accessibility);
         }
     }
@@ -617,7 +626,7 @@ fn parallel_delivery_reports_the_contrast_findings_of_serial_delivery() {
         let mut findings = Vec::new();
         for workers in [1, 2] {
             let r = deliver_in(&dir, "join-contrast.xml", &xml, workers).unwrap();
-            assert_eq!(r.segments, workers);
+            assert_eq!(r.segments, expected_segments(workers));
             assert!(
                 r.accessibility.iter().any(|m| m.contains("contrastCheck") && m.contains(" t ")),
                 "group {group:?}, workers={workers}: {:?}",
