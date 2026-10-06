@@ -19,7 +19,7 @@ libm = "0.2"
 sr-gpu = { path = "crates/sr-gpu" }
 sr-media = { path = "crates/sr-media" }
 sr-geo = { path = "crates/sr-geo" }
-sr-resolve = { path = "crates/sr-resolve" }
+sr-resolve = { path = "crates/sr-resolve", default-features = false }
 sr-audio = { path = "crates/sr-audio" }
 sr-deliver = { path = "crates/sr-deliver" }
 sr-vector = { path = "crates/sr-vector" }

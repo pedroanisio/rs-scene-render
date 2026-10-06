@@ -30,6 +30,8 @@
 //! `SR_RESOLVE_ROOT`), so a document cannot direct a provider's output elsewhere.
 
 pub mod doc;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 pub mod protocol;
 pub mod providers;
 
@@ -252,7 +254,7 @@ fn preflight_destinations(text: &str, document: &Path, base: &Path) -> Result<()
     let mut destinations: Vec<(PathBuf, String)> = Vec::new();
     for node in xml.descendants().filter(|n| n.is_element()) {
         let writable = match node.tag_name().name() {
-            "generated" => true,
+            "generated" | "pdf" => true,
             "tiles" => node.attribute("url").is_some(),
             "captionTrack" => node.attribute("transcribe").is_some(),
             _ => false,
@@ -642,6 +644,43 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
         out.push(r);
     }
 
+    // PDF pages and the boxes of their phrases (SREP 17), made here with no provider
+    let doc = load(&text)?;
+    let pdfs: Vec<m::PdfAsset> = doc
+        .scene
+        .assets
+        .iter()
+        .flat_map(|a| a.children.iter())
+        .filter_map(|c| match c {
+            m::AssetsChild::Pdf(p) if wanted(&p.id) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    for p in &pdfs {
+        let background = match doc.resolve_color(&p.background) {
+            Some(c) => [c.r, c.g, c.b, c.a].map(|v| (v as f64 * 255.0).round().clamp(0.0, 255.0) as u8),
+            None => {
+                out.push(error_row(
+                    &p.id,
+                    "pdf",
+                    PDF_PROVIDER,
+                    &p.cache,
+                    "the background colour does not resolve".into(),
+                ));
+                continue;
+            }
+        };
+        match settle_pdf(p, background, &base, o) {
+            Ok((r, pins)) => {
+                for (element, id, attr, value) in pins {
+                    text = doc::set_attr(&text, element, &id, attr, &value)?;
+                }
+                out.push(r);
+            }
+            Err(e) => out.push(error_row(&p.id, "pdf", PDF_PROVIDER, &p.cache, e)),
+        }
+    }
+
     // transcriptions, from the mix as it now plays: the composition's tracks in composition time, an
     // output's own tracks alone in output time
     let doc = load(&text)?;
@@ -758,10 +797,171 @@ pub fn resolve(path: &Path, o: &Options) -> Result<Vec<Resolution>, String> {
     }
     for id in &o.only {
         if !out.iter().any(|r| &r.id == id) {
-            return Err(format!("{id}: no generated asset or transcribed caption track has this id"));
+            return Err(format!("{id}: no generated asset, pdf asset or transcribed caption track has this id"));
         }
     }
     Ok(out)
+}
+
+/// The provider name pdf rows report: the resolve step renders pages itself.
+const PDF_PROVIDER: &str = "pdf";
+
+#[cfg(feature = "pdf")]
+/// What the sidecar of a pdf cache records: the request key and everything the step wrote into the document.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct PdfSidecar {
+    key: String,
+    sha256: String,
+    width: u32,
+    height: u32,
+    /// (region id, x, y, width, height) of the regions found by text.
+    regions: Vec<(String, f64, f64, f64, f64)>,
+}
+
+/// An attribute the step writes: (element, id, attribute, value).
+type Pin = (&'static str, String, &'static str, String);
+
+#[cfg(feature = "pdf")]
+/// Formats a pixel coordinate as the document records it (to 0.1 px, no trailing zeros).
+fn coord(v: f64) -> String {
+    let r = (v * 10.0).round() / 10.0;
+    let r = if r == 0.0 { 0.0 } else { r };
+    format!("{r}")
+}
+
+/// Brings one pdf asset up to date: checks the source against @sha256, renders the page and finds the regions'
+/// phrases when the cache does not answer this request, and returns what to write into the document.
+#[cfg(not(feature = "pdf"))]
+fn settle_pdf(_: &m::PdfAsset, _: [u8; 4], _: &Path, _: &Options) -> Result<(Resolution, Vec<Pin>), String> {
+    Err("this build of the resolve step has no PDF support (sr-resolve feature `pdf`)".into())
+}
+
+#[cfg(feature = "pdf")]
+fn settle_pdf(
+    p: &m::PdfAsset,
+    background: [u8; 4],
+    base: &Path,
+    o: &Options,
+) -> Result<(Resolution, Vec<Pin>), String> {
+    let mut r = Resolution {
+        id: p.id.clone(),
+        element: "pdf",
+        provider: PDF_PROVIDER.into(),
+        cache: p.cache.clone(),
+        status: Status::Error,
+        sha256: None,
+        message: String::new(),
+        notes: Vec::new(),
+    };
+    let src = match sr_model::assets::resolve(&p.src, base) {
+        sr_model::assets::Resolved::Local(path) => path,
+        sr_model::assets::Resolved::Remote(u) => return Err(format!("{u}: a remote PDF is not read")),
+    };
+    use sha2::Digest as _;
+    let bytes = std::fs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let src_sha = protocol::hex(&sha2::Sha256::digest(&bytes));
+    let pinned_src = p.sha256.as_ref().map(|s| s.to_string()).ok_or("a pdf asset pins its source with @sha256")?;
+    if !pinned_src.eq_ignore_ascii_case(&src_sha) {
+        return Err(format!("{}: SHA-256 {src_sha} differs from @sha256 {pinned_src}", src.display()));
+    }
+    let cache = local(&p.cache, base)?;
+    let queries: Vec<(String, String, u64)> =
+        p.regions.iter().filter_map(|g| g.text.clone().map(|t| (g.id.clone(), t, g.occurrence))).collect();
+    let key = {
+        let request = serde_json::json!({
+            "task": "pdf-page",
+            "renderer": "hayro 0.8",
+            "source": src_sha,
+            "page": p.page,
+            "dpi": p.dpi,
+            "background": background,
+            "annotations": p.annotations,
+            "regions": queries.iter().map(|(_, t, k)| (t, k)).collect::<Vec<_>>(),
+        });
+        protocol::hex(&sha2::Sha256::digest(request.to_string().as_bytes()))
+    };
+    let pins_of = |side: &PdfSidecar| -> Vec<Pin> {
+        let mut v: Vec<Pin> = vec![
+            ("pdf", p.id.clone(), "cacheSha256", side.sha256.clone()),
+            ("pdf", p.id.clone(), "width", side.width.to_string()),
+            ("pdf", p.id.clone(), "height", side.height.to_string()),
+        ];
+        for (id, x, y, w, h) in &side.regions {
+            v.push(("region", id.clone(), "x", coord(*x)));
+            v.push(("region", id.clone(), "y", coord(*y)));
+            v.push(("region", id.clone(), "width", coord(*w)));
+            v.push(("region", id.clone(), "height", coord(*h)));
+        }
+        v
+    };
+    let in_document = |side: &PdfSidecar| -> bool {
+        p.cache_sha256.to_string().eq_ignore_ascii_case(&side.sha256)
+            && p.width as u32 == side.width
+            && p.height as u32 == side.height
+            && side.regions.iter().all(|(id, x, y, w, h)| {
+                p.regions.iter().any(|g| {
+                    &g.id == id
+                        && coord(g.x) == coord(*x)
+                        && coord(g.y) == coord(*y)
+                        && coord(g.width.get()) == coord(*w)
+                        && coord(g.height.get()) == coord(*h)
+                })
+            })
+    };
+    // 1. the cache answers this request
+    let recorded: Option<PdfSidecar> =
+        std::fs::read(sidecar_path(&cache)).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(
+            |side: &PdfSidecar| side.key == key && file_sha256(&cache).ok().as_deref() == Some(side.sha256.as_str()),
+        );
+    if let (Some(side), false) = (&recorded, o.force) {
+        r.sha256 = Some(side.sha256.clone());
+        if in_document(side) {
+            r.status = Status::UpToDate;
+            return Ok((r, Vec::new()));
+        }
+        if o.check {
+            r.status = Status::Stale;
+            r.message = "the document's size, digest or regions differ from the cache's record".into();
+            return Ok((r, Vec::new()));
+        }
+        r.status = Status::Pinned;
+        return Ok((r, pins_of(side)));
+    }
+    if o.check {
+        r.status = Status::Stale;
+        r.message = if cache.is_file() {
+            "the cache was made from a different request".into()
+        } else {
+            "the cache is missing".into()
+        };
+        return Ok((r, Vec::new()));
+    }
+    // 2. render the page and find the phrases
+    let page = u32::try_from(p.page).map_err(|_| format!("page {} is out of range", p.page))?;
+    let image = pdf::render_page(&bytes, page, p.dpi, background, p.annotations).map_err(|e| e.to_string())?;
+    let mut regions = Vec::new();
+    if !queries.is_empty() {
+        let chars = pdf::page_chars(&bytes, page, p.dpi).map_err(|e| e.to_string())?;
+        for (id, phrase, occurrence) in &queries {
+            let occurrence = u32::try_from(*occurrence).unwrap_or(u32::MAX);
+            let [x, y, w, h] = pdf::find(&chars, phrase, occurrence).map_err(|e| format!("region {id}: {e}"))?;
+            regions.push((id.clone(), x, y, w, h));
+        }
+    }
+    let rgba = image::RgbaImage::from_raw(image.width, image.height, image.rgba)
+        .ok_or("the page image has the wrong number of pixels")?;
+    let mut png = Vec::new();
+    rgba.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    if let Some(dir) = cache.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    write_atomic(&cache, &png)?;
+    let sha = file_sha256(&cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    let side = PdfSidecar { key, sha256: sha.clone(), width: image.width, height: image.height, regions };
+    write_atomic(&sidecar_path(&cache), &serde_json::to_vec_pretty(&side).expect("json"))?;
+    r.sha256 = Some(sha);
+    r.status = Status::Made;
+    Ok((r, pins_of(&side)))
 }
 
 /// Every tile a document's maps show from the tiles asset `t` (frame by frame, at the zoom the

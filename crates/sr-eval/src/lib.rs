@@ -39,6 +39,7 @@ mod physcache;
 pub mod points;
 pub mod program;
 pub mod pyro;
+pub mod region;
 pub mod rig;
 pub mod rng;
 pub mod safe_area;
@@ -124,7 +125,8 @@ impl Evaluator {
             for failure in &rt.failures {
                 g.fail(failure.clone());
             }
-            // simulated bodies may have moved a connector's ends
+            // simulated bodies may have moved a region's layer or a connector's ends
+            region::resolve(&self.program, &mut g.nodes);
             connector::resolve(&self.program, &mut g.nodes);
         }
         g

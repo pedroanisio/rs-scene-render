@@ -91,7 +91,7 @@ fn background_and_content() {
     // an empty page is the background everywhere
     let empty = make_pdf(&[(PAGE, "")]);
     let e = pdf::render_page(&empty, 1, 72.0, [10, 200, 30, 255], false).unwrap();
-    assert!(e.rgba.chunks_exact(4).all(|p| p == [10, 200, 30, 255]));
+    assert!(e.rgba.as_chunks::<4>().0.iter().all(|p| *p == [10, 200, 30, 255]));
     // a filled rectangle at (20, 20)-(60, 40) in PDF space (y up) is at x 20..60, y 60..80 in pixels
     let filled = make_pdf(&[(PAGE, "0 0 1 rg 20 20 40 20 re f")]);
     let f = pdf::render_page(&filled, 1, 72.0, [255, 255, 255, 255], false).unwrap();
@@ -102,7 +102,7 @@ fn background_and_content() {
     // text draws dark pixels where it is set
     let text = make_pdf(&[(PAGE, &text_at(20.0, 50.0, "HELLO"))]);
     let t = pdf::render_page(&text, 1, 144.0, [255, 255, 255, 255], false).unwrap();
-    let dark = t.rgba.chunks_exact(4).filter(|p| p[0] < 128).count();
+    let dark = t.rgba.as_chunks::<4>().0.iter().filter(|p| p[0] < 128).count();
     assert!(dark > 50, "{dark} dark pixels");
     // a transparent background keeps the page's alpha
     let clear = pdf::render_page(&filled, 1, 72.0, [0, 0, 0, 0], false).unwrap();

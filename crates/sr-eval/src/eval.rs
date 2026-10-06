@@ -1289,7 +1289,8 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
     }
 
     crate::rig::post_pass(p, &mut out.nodes, t);
-    // connectors read their ends as drawn, once every pose is final
+    // shapes on pdf regions follow their layer, and connectors read their ends as drawn, once every pose is final
+    crate::region::resolve(p, &mut out.nodes);
     crate::connector::resolve(p, &mut out.nodes);
 
     let camera = out.nodes.iter().enumerate().rev().find(|(_, n)| n.kind == "camera" && n.draw).map(|(i, _)| i as u32);

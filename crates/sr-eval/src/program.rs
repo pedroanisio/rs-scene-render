@@ -551,6 +551,8 @@ pub struct Program {
     pub points: Vec<crate::points::Generator>,
     /// Connectors with the effective ids of their ends and label layer (SREP 16).
     pub connectors: Vec<crate::connector::ConnectorInst>,
+    /// Shapes placed on regions of pdf assets (SREP 17).
+    pub regions: Vec<crate::region::RegionInst>,
     /// Element targets.
     pub elements: Vec<ElemTarget>,
     /// Transitions.
@@ -1185,6 +1187,7 @@ struct Builder {
     points: Vec<crate::points::Generator>,
     /// Connectors, with the scope their `from` and `to` resolve in and those ids as written.
     connectors: Vec<(crate::connector::ConnectorInst, Arc<str>, [Option<String>; 2])>,
+    regions: Vec<crate::region::RegionInst>,
     params: HashMap<String, V>,
     assets: HashMap<Arc<str>, (u16, String)>,
     analysis_tracks: HashSet<String>,
@@ -1537,7 +1540,8 @@ impl Builder {
             _ => None,
         };
         let shape_size = match n {
-            // width and height are optional since SREP 17 (a region shape takes them from the page)
+            // width and height are optional since SREP 17: a region shape takes its size from the region every frame
+            // (sr_eval::region)
             Node::Shape(s) => s.width.zip(s.height).map(|(w, h)| [w, h]),
             _ => None,
         };
@@ -1566,6 +1570,7 @@ impl Builder {
                     m::AssetsChild::Code(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Formula(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Generated(x) => wh(x.width.map(|v| v as f64), x.height.map(|v| v as f64)),
+                    m::AssetsChild::Pdf(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     _ => None,
                 };
             }
@@ -1809,6 +1814,45 @@ impl Builder {
         let scope = self.nodes[idx as usize].scope.clone();
         let inst = crate::connector::ConnectorInst { id, from: None, to: None, label };
         self.connectors.push((inst, scope, [c.from.clone(), c.to.clone()]));
+    }
+
+    /// Registers every shape placed on a pdf region (SREP 17) with its region's box and its layer's effective id.
+    fn region_shapes(&mut self) {
+        for n in 0..self.nodes.len() {
+            let Node::Shape(s) = &*self.nodes[n].elem else { continue };
+            let (Some(region), Some(layer)) = (s.region.clone(), s.region_layer.clone()) else { continue };
+            let (doc, scope, id, loc) =
+                (self.nodes[n].doc, self.nodes[n].scope.clone(), self.nodes[n].id.clone(), s.loc);
+            let found = self.doc(doc).scene.assets.iter().flat_map(|a| a.children.iter()).find_map(|c| match c {
+                m::AssetsChild::Pdf(p) => p
+                    .regions
+                    .iter()
+                    .find(|g| g.id == region)
+                    .map(|g| ([g.x, g.y, g.width.get(), g.height.get()], [p.width as f64, p.height as f64])),
+                _ => None,
+            });
+            let Some((rect, page)) = found else {
+                self.diags.push(err(
+                    "E11",
+                    format!("{id:?}: @region {region:?} is not a region of a pdf asset"),
+                    loc,
+                    &*id,
+                ));
+                continue;
+            };
+            match self.resolve(&scope, &layer) {
+                Some(l) => {
+                    let layer = self.nodes[l as usize].id.clone();
+                    self.regions.push(crate::region::RegionInst { shape: id, layer, rect, page });
+                }
+                None => self.diags.push(err(
+                    "E11",
+                    format!("{id:?}: @regionLayer {layer:?} is not a node of the composition"),
+                    loc,
+                    &*id,
+                )),
+            }
+        }
     }
 
     /// Resolves the ends of every connector to the effective ids of their nodes, once all nodes exist.
@@ -3261,6 +3305,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         project_seed: scene.project.seed,
         points: Vec::new(),
         connectors: Vec::new(),
+        regions: Vec::new(),
         params: t.params,
         assets: HashMap::new(),
         analysis_tracks: HashSet::new(),
@@ -3270,6 +3315,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     b.transitions();
     b.resolve_links();
     b.connector_ends();
+    b.region_shapes();
     // the animated parts of every node exist before anything reads them: a link or expression may name a bone
     // or another part that sits later in the document
     for n in 0..b.nodes.len() as u32 {
@@ -3416,6 +3462,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         links: b.links,
         points: b.points,
         connectors: b.connectors.into_iter().map(|(c, _, _)| c).collect(),
+        regions: b.regions,
         elements: b.elements,
         transitions: b.transitions,
         markers,

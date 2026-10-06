@@ -1170,6 +1170,21 @@ impl Renderer {
                     }
                 }
             }
+            // a pdf page is its pinned cache image, display sRGB with straight alpha; the PDF is never read
+            AssetsChild::Pdf(pdf) => match sr_model::assets::resolve(&pdf.cache, &base) {
+                sr_model::assets::Resolved::Local(path) => {
+                    let t =
+                        self.image(path.clone(), m::ColorSpace::Srgb, m::Transfer::Auto, m::AlphaMode::Straight, false);
+                    if t.is_none() {
+                        plan.stats.errors.push(format!("{}: cannot read the page image {}", n.id, path.display()));
+                    }
+                    t
+                }
+                sr_model::assets::Resolved::Remote(u) => {
+                    plan.stats.errors.push(format!("{}: remote page image {u} is not fetched while rendering", n.id));
+                    None
+                }
+            },
             AssetsChild::ImageSequence(s) => {
                 let t = n.source_time.unwrap_or(0.0).max(0.0);
                 let count = ((s.last - s.first) / s.step as i64).max(0);

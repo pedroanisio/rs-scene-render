@@ -57,7 +57,9 @@ fn region_shape_rules() {
     assert_eq!(codes(r#"<shape id="s" shape="rect" region="g"/>"#), ["C67", "R52"]);
     assert_eq!(codes(r#"<shape id="s" shape="rect" region="g" regionLayer="L" parent="L"/>"#), ["C68"]);
     assert_eq!(
-        codes(r#"<shape id="s" shape="rect" region="g" regionLayer="L"><transformConstraint type="copy-position" target="L"/></shape>"#),
+        codes(
+            r#"<shape id="s" shape="rect" region="g" regionLayer="L"><transformConstraint type="copy-position" target="L"/></shape>"#
+        ),
         ["C68"]
     );
     // a region that is not one of a pdf's
@@ -76,12 +78,9 @@ fn c69_width_and_height_unless_on_a_region() {
 
 #[test]
 fn structure() {
-    for (attrs, body) in [
-        (r#" dpi="17""#, ""),
-        (r#" dpi="1201""#, ""),
-        (r#" page="0""#, ""),
-        (r#" annotations="maybe""#, ""),
-    ] {
+    for (attrs, body) in
+        [(r#" dpi="17""#, ""), (r#" dpi="1201""#, ""), (r#" page="0""#, ""), (r#" annotations="maybe""#, "")]
+    {
         let c = codes_of(&doc("1.2", attrs, body));
         assert!(!c.is_empty() && c.iter().all(|c| c.starts_with('S')), "{attrs} {body}: {c:?}");
     }
