@@ -64,37 +64,7 @@ impl Default for Config {
 /// The impact parameter of the ray that reaches a static observer at `r_obs` at the angle `alpha` (radians) to
 /// the direction of the hole: `r_obs sin(alpha) / sqrt(1 - 2M / r_obs)`.
 pub fn impact_parameter(mass: f64, r_obs: f64, alpha: f64) -> f64 {
-    let _ = (mass, r_obs, alpha);
-    todo!("the impact parameter of a ray seen by a static observer")
-}
-
-/// One step of `h` radians of the classical Runge-Kutta method on `(u, w)`, `w = du/dphi`.
-pub fn rk4_step(mass: f64, u: f64, w: f64, h: f64) -> (f64, f64) {
-    let _ = (mass, u, w, h);
-    todo!("one step of the classical Runge-Kutta method")
-}
-
-/// Follows the ray of impact parameter `b` that is at `r_obs` and goes in (`ingoing`) or out, with the step
-/// [`STEP`] and the budget [`MAX_STEPS`]; see [`trace_with`].
-pub fn trace(mass: f64, r_obs: f64, b: f64, ingoing: bool, phi0: f64, max_crossings: usize) -> Trace {
-    trace_with(Config::default(), mass, r_obs, b, ingoing, phi0, max_crossings)
-}
-
-/// Follows a ray from `r_obs` (`phi = 0`) until it is captured (`u >= 1/(2M)`) or has escaped (`u <= 0`), and
-/// records where it crosses the plane of the disc, which contains the direction `phi0` and every
-/// `phi0 + k pi`: only the crossings at `phi > 0` and no later than the escape are recorded, the first
-/// `max_crossings` of them, and the step that would pass one is shortened to land on it.
-pub fn trace_with(
-    config: Config,
-    mass: f64,
-    r_obs: f64,
-    b: f64,
-    ingoing: bool,
-    phi0: f64,
-    max_crossings: usize,
-) -> Trace {
-    let _ = (config, mass, r_obs, b, ingoing, phi0, max_crossings);
-    todo!("the integration of a ray")
+    r_obs * alpha.sin() / (1.0 - 2.0 * mass / r_obs).sqrt()
 }
 
 /// The redshift `g = nu_observed / nu_emitted` of light from an emitter on a circular orbit of radius `r`, in
@@ -102,40 +72,112 @@ pub fn trace_with(
 /// `Omega = sqrt(M / r^3)`. `h` is the component of the disc's axis on the normal to the plane of the ray,
 /// signed by the direction of the emitter's motion: `h = (e1 x e2) . axis`, with `e1` toward the observer and
 /// `e2` along the angle `phi` as it grows on the path traced from the camera outward. `h > 0` is a receding
-/// emitter (`g < sqrt(1 - 3M/r)`), `h < 0` an approaching one, and `h = 0` the gravitational shift alone.
+/// emitter (`g < sqrt(1 - 3M/r)`), `h < 0` an approaching one, and `h = 0` the gravitational shift alone. The
+/// orbit exists for `r > 3M` only; the stable ones are those beyond `6M`.
 pub fn redshift(mass: f64, r: f64, b: f64, h: f64) -> f64 {
-    let _ = (mass, r, b, h);
-    todo!("the redshift of an emitter in a circular orbit")
+    let omega = (mass / (r * r * r)).sqrt();
+    (1.0 - 3.0 * mass / r).sqrt() / (1.0 + omega * b * h)
 }
+
+/// The integrator, written once for both precisions: the arithmetic of the two is the same, operation by
+/// operation, in the order it is written.
+macro_rules! integrator {
+    ($t:ty) => {
+        /// One step of `h` radians of the classical Runge-Kutta method on `(u, w)`, `w = du/dphi`, for
+        /// `u'' = -u + 3 M u^2`. The acceleration is `-u + 3 * mass * u * u`, taken left to right; the
+        /// stages are `k1..k4` in that order, the half step is `0.5 * h` taken once, and the result is
+        /// `x + (h / 6) * (k1 + 2 * k2 + 2 * k3 + k4)` for each of `u` and `w`.
+        pub fn rk4_step(mass: $t, u: $t, w: $t, h: $t) -> ($t, $t) {
+            let acceleration = |u: $t| -u + 3.0 * mass * u * u;
+            let half = 0.5 * h;
+            let (k1u, k1w) = (w, acceleration(u));
+            let (u2, w2) = (u + half * k1u, w + half * k1w);
+            let (k2u, k2w) = (w2, acceleration(u2));
+            let (u3, w3) = (u + half * k2u, w + half * k2w);
+            let (k3u, k3w) = (w3, acceleration(u3));
+            let (u4, w4) = (u + h * k3u, w + h * k3w);
+            let (k4u, k4w) = (w4, acceleration(u4));
+            let sixth = h / 6.0;
+            (u + sixth * (k1u + 2.0 * k2u + 2.0 * k3u + k4u), w + sixth * (k1w + 2.0 * k2w + 2.0 * k3w + k4w))
+        }
+
+        /// Follows the ray of impact parameter `b` that is at `r_obs` and goes in (`ingoing`) or out, with
+        /// the step [`STEP`] and the budget [`MAX_STEPS`]; see `trace_with`.
+        pub fn trace(mass: $t, r_obs: $t, b: $t, ingoing: bool, phi0: $t, max_crossings: usize) -> Trace<$t> {
+            trace_with(Config::default(), mass, r_obs, b, ingoing, phi0, max_crossings)
+        }
+
+        /// Follows a ray from `r_obs` (`phi = 0`) until it is captured (`u >= 1/(2M)`) or has escaped
+        /// (`u <= 0`, and the angle it leaves at is found by a linear interpolation between the last two
+        /// steps), and records where it crosses the plane of the disc, which holds the angles `phi0 + k pi`
+        /// for `k < max_crossings`: only those at `phi > 0` and no later than the escape are recorded, and
+        /// the step that would pass one is shortened to land on it. A ray whose impact parameter is not
+        /// positive is radial, and ends at once. The step is rounded to the precision of the call.
+        pub fn trace_with(
+            config: Config,
+            mass: $t,
+            r_obs: $t,
+            b: $t,
+            ingoing: bool,
+            phi0: $t,
+            max_crossings: usize,
+        ) -> Trace<$t> {
+            let mut crossings = Vec::with_capacity(max_crossings.min(8));
+            if b.is_nan() || b <= 0.0 {
+                let outcome = if ingoing { Outcome::Captured } else { Outcome::Escaped };
+                return Trace { outcome, phi_inf: 0.0, crossings };
+            }
+            let pi = std::f64::consts::PI as $t;
+            let horizon_u = 1.0 / (2.0 * mass);
+            let step = config.step as $t;
+            let u0 = 1.0 / r_obs;
+            let first = 1.0 / (b * b) - u0 * u0 + 2.0 * mass * u0 * u0 * u0;
+            let w0 = if first > 0.0 { first.sqrt() } else { 0.0 };
+            let (mut u, mut w) = (u0, if ingoing { w0 } else { -w0 });
+            let target = |k: usize| phi0 + k as $t * pi;
+            let mut next = 0;
+            while next < max_crossings && target(next) <= 0.0 {
+                next += 1;
+            }
+            let mut phi: $t = 0.0;
+            for _ in 0..config.max_steps {
+                let (mut h, mut landing) = (step, false);
+                let ahead = target(next);
+                if next < max_crossings {
+                    if phi + h > ahead {
+                        h = ahead - phi;
+                        landing = true;
+                    } else if phi + h == ahead {
+                        landing = true;
+                    }
+                }
+                let (un, wn) = rk4_step(mass, u, w, h);
+                if un >= horizon_u {
+                    return Trace { outcome: Outcome::Captured, phi_inf: 0.0, crossings };
+                }
+                if un <= 0.0 {
+                    let phi_inf = phi + h * u / (u - un);
+                    return Trace { outcome: Outcome::Escaped, phi_inf, crossings };
+                }
+                phi = if landing { ahead } else { phi + h };
+                (u, w) = (un, wn);
+                if landing {
+                    crossings.push((phi, 1.0 / u));
+                    next += 1;
+                }
+            }
+            Trace { outcome: Outcome::Captured, phi_inf: 0.0, crossings }
+        }
+    };
+}
+
+integrator!(f64);
 
 /// The same arithmetic as the top level, in single precision, for comparing a shader with it.
 pub mod f32 {
-    use super::{Config, Trace};
+    use super::{Config, Outcome, Trace};
 
-    /// As [`super::rk4_step`].
-    pub fn rk4_step(mass: f32, u: f32, w: f32, h: f32) -> (f32, f32) {
-        let _ = (mass, u, w, h);
-        todo!("single precision")
-    }
-
-    /// As [`super::trace`].
-    pub fn trace(mass: f32, r_obs: f32, b: f32, ingoing: bool, phi0: f32, max_crossings: usize) -> Trace<f32> {
-        trace_with(Config::default(), mass, r_obs, b, ingoing, phi0, max_crossings)
-    }
-
-    /// As [`super::trace_with`]; the step is rounded to `f32`.
-    pub fn trace_with(
-        config: Config,
-        mass: f32,
-        r_obs: f32,
-        b: f32,
-        ingoing: bool,
-        phi0: f32,
-        max_crossings: usize,
-    ) -> Trace<f32> {
-        let _ = (config, mass, r_obs, b, ingoing, phi0, max_crossings);
-        todo!("single precision")
-    }
+    integrator!(f32);
 }
 
 /// The closed forms and the quadratures that the integration is checked against.

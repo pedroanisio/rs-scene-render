@@ -107,12 +107,14 @@ fn the_orbit_is_symmetric_in_phi() {
         assert_eq!(up.to_bits(), un.to_bits(), "u = {u}");
         assert_eq!(wp.to_bits(), (-wn).to_bits(), "u = {u}");
     }
-    // and the ray that comes in and goes out leaves at the angle it came: the first integral is even in w, so the
-    // angle swept going in to the turning point is the angle swept coming out
+    // and a ray from the turning point out sweeps half of what the whole ray does: the orbit is the same either way
     let b = 12.0 * M;
     let u_min = oracle::turning_point(M, b).unwrap();
-    let in_to_turn = gr::trace_with(fine(1e-3), M, 1.0 / u_min * 1.000_000_001, b, true, 0.0, 0);
-    assert_eq!(in_to_turn.outcome, Outcome::Escaped);
+    let out = gr::trace_with(fine(1e-3), M, (1.0 + 1e-12) / u_min, b, false, 0.0, 0);
+    assert_eq!(out.outcome, Outcome::Escaped);
+    let whole = 2.0 * out.phi_inf - std::f64::consts::PI;
+    let exact = oracle::deflection(M, b).unwrap();
+    assert!((whole - exact).abs() < 1e-5, "{whole} against {exact}");
 }
 
 #[test]
@@ -136,8 +138,8 @@ fn a_ray_far_from_the_hole_crosses_the_disc_where_a_straight_line_would() {
     let delta = (b / r_obs).asin();
     let traced = gr::trace(M, r_obs, b, true, phi0, 3);
     assert_eq!(traced.outcome, Outcome::Escaped);
-    assert_eq!(traced.crossings.len(), 3.min(traced.crossings.len()));
-    assert!(!traced.crossings.is_empty());
+    // the straight line sweeps pi - delta in all: only the first of the three planes is in front of it
+    assert_eq!(traced.crossings.len(), 1);
     for (phi, r) in &traced.crossings {
         let straight = b / (phi + delta).sin();
         assert!((r / straight - 1.0).abs() < 0.03, "phi {phi}: r {r} against {straight}");
