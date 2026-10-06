@@ -52,19 +52,22 @@ fn an_ordinary_shape_has_no_e22_whatever_defaults_the_schema_gives_its_pending_a
 }
 
 #[test]
-fn a_pending_attribute_on_a_typed_field_element_is_found_by_its_element_name() {
-    // output, project, accessibility and captionTrack are reached as fields, not through a child enum
-    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1" fontPolicy="pinned"/>
-            <composition/></scene>"##;
-    let w = evaluate(xml);
-    assert!(w.iter().any(|d| d.code == "E22"), "project/@fontPolicy: {w:?}");
-}
-
-#[test]
 fn an_implemented_srep_is_no_longer_reported_as_pending() {
-    // SREP 18: render reports
-    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
-            <output id="o" path="out/o.mp4" codec="h264" report="out/r.json"/><composition/></scene>"##;
-    let w = evaluate(xml);
-    assert!(w.iter().all(|d| d.code != "E22"), "output/@report: {w:?}");
+    // output, project, accessibility and captionTrack are reached as typed fields; no pending SREP has an attribute
+    // on one of them any more, and the implemented ones are not reported
+    for (what, xml) in [
+        (
+            "output/@report (SREP 18)",
+            r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
+            <output id="o" path="out/o.mp4" codec="h264" report="out/r.json"/><composition/></scene>"##,
+        ),
+        (
+            "project/@fontPolicy (SREP 21)",
+            r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1" fontPolicy="pinned"/>
+            <composition/></scene>"##,
+        ),
+    ] {
+        let w = evaluate(xml);
+        assert!(w.iter().all(|d| d.code != "E22"), "{what}: {w:?}");
+    }
 }
