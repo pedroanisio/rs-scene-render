@@ -839,7 +839,7 @@ fn water_source(base: &str) -> String {
                 "            if (WATER && inside && lt.size.y > 0.5 && m.extra.z > 0.5) {{\n\
                  \x20               // a surface under water (or glass): the light reaches it refracted\n\
                  \x20               let seen = light_through(p, ng, n, l, ls.w, in_sigma);\n\
-                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * rad * seen.vis;\n\
+                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * max(dot(n, seen.dir), 0.0) * rad * seen.vis;\n\
                  \x20               if (bounce > 0u) {{ c = min(c, vec3(20.0)); }}\n\
                  \x20               col += c;\n\
                  \x20               continue;\n\

@@ -44,8 +44,9 @@ struct Seen { dir: vec3<f32>, vis: vec3<f32> };
 // refined once from the first guess) so that it leaves toward the light: `dir` is its direction at
 // the surface (what the BSDF is evaluated with) and `vis` carries everything the light loses on
 // the way: the blockers on both sides, the interface's tint, transmission and Fresnel
-// transmittance, the radiance scale cos(theta_air) / eta^2 that goes with the solid angle the
-// interface changes, and the absorption along the path inside. A path whose refinement finds no
+// transmittance, the factor cos(theta_air) / (cos(theta_water) eta^2) that goes with the solid
+// angle and the cross-section the interface changes, and the absorption along the path inside.
+// The cosine between the surface and `dir` is not in it: the caller multiplies by it. A path whose refinement finds no
 // interface or no way out toward the light gets no light from it (vis = 0), never a bright guess.
 fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist: f32, sigma: vec3<f32>) -> Seen {
     var out: Seen;
@@ -73,7 +74,10 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     let inside_view = visibility(start, dir, iface.t - 2e-3);
     let outside_view = visibility(q + n_air * 1e-2, la, select(rest - 2e-2, 1e30, directional));
     let fresnel = fresnel_schlick(cos_air, 1.0 / iface.ior);
-    let carried = inside_view * outside_view * iface.trans * (1.0 - fresnel) * cos_air / (iface.ior * iface.ior);
+    // The beam's power per area of the interface is T cos_air; inside it spreads over a cross-section
+    // of cos_water, and the radiance carries 1 / eta^2. The cosine at the surface is the caller's.
+    let cos_water = max(-dot(dir, iface.n), 1e-4);
+    let carried = inside_view * outside_view * iface.trans * (1.0 - fresnel) * cos_air / (cos_water * iface.ior * iface.ior);
     out.dir = dir;
     out.vis = min(carried, 1.0) * iface.tint * exp(-sigma * iface.t);
     return out;
