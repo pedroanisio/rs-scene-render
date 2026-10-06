@@ -1376,9 +1376,14 @@ impl<'a> Eval<'a> {
             }
             // p11
             "repeat" => {
-                self.check(has("count") != has("over"), n, "C17", || {
-                    "repeat needs exactly one of @count or @over.".into()
-                });
+                // SREP 26: a `points` child is the third source of the copies (exactly one of @count, @over or a points child)
+                let points = n.children().any(|c| c.is_element() && c.tag_name().name() == "points");
+                self.check(
+                    usize::from(has("count")) + usize::from(has("over")) + usize::from(points) == 1,
+                    n,
+                    "C17",
+                    || "repeat needs exactly one of @count, @over or a points child.".into(),
+                );
                 let c18 =
                     !has("over") || contains(&self.sets.data, a("over")) || contains(&self.sets.list_params, a("over"));
                 self.check(c18, n, "C18", || "repeat/@over must name a data source or a list parameter.".into());
@@ -1747,7 +1752,7 @@ impl<'a> Eval<'a> {
         }
         // p65
         if local == "generator" && has("lineWidth") {
-            self.check(a("kind") == Some("grid"), n, "R45", || {
+            self.check(a("kind") == Some("grid"), n, "R47", || {
                 "@lineWidth is the line width of a grid generator.".into()
             });
         }

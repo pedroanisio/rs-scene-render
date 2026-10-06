@@ -45,7 +45,21 @@ fn every_document_matches_its_manifest() {
 fn corpus_covers_every_rule_and_structural_code() {
     let m = manifest();
     let covered: BTreeSet<&str> = m.values().flat_map(|s| s.values()).flatten().map(String::as_str).collect();
-    let mut missing: Vec<&str> = codes::SCH_ASSERTS.iter().map(|a| a.0).filter(|id| !covered.contains(id)).collect();
+    // Rules of accepted SREPs this engine does not implement yet (the rows of sr_eval::pending::PENDING): the
+    // schema carries them, the Rust mirror and the corpus do not. An SREP's rules leave this list with its row.
+    const PENDING_RULES: &[&str] = &[
+        // SREP 16, connectors
+        "C60", "C61", "C62", "C63", "C64", "R48-from", "R48-to", "R49", "R50", "V11",
+        // SREP 17, PDF pages and regions
+        "C66", "C67", "C68", "C69", "R51", "R52", "V9", // SREP 21, the pinned-font policy
+        "C70", "C71", "C72", "C73", // SREP 26, repeat points
+        "C74", "C75", "C76", "C77", "C78", "C79", "C80", "V10",
+    ];
+    let mut missing: Vec<&str> = codes::SCH_ASSERTS
+        .iter()
+        .map(|a| a.0)
+        .filter(|id| !covered.contains(id) && !PENDING_RULES.contains(id))
+        .collect();
     for c in ["S01", "S02", "S03", "S04", "S05", "S06", "S07", "S09", "S10", "A01", "A02", "A03", "A04", "W01", "W02"] {
         if !covered.contains(c) {
             missing.push(c);

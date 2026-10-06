@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scene version="1.2">
+<project width="640" height="360" fps="24" duration="1" background="#000000FF"/>
+<output id="still" path="out/frame_%04d.png" codec="png-sequence"/>
+<assets><pdf id="p" src="../assets/srep17-page.pdf" sha256="24b3936ddbdc63807929a186eef299c63cb1426f7fd127e4dd195cecc6760036" page="1" dpi="72" cache="../assets/srep17-page.png" cacheSha256="0000000000000000000000000000000000000000000000000000000000000000" width="200" height="100"><region id="rg" x="20" y="10" width="60" height="20"/></pdf></assets>
+<materials><material id="m-red" baseColor="#FF0000FF" unlit="true" doubleSided="true"/><material id="m-green" baseColor="#00FF00FF" unlit="true" doubleSided="true"/><material id="m-blue" baseColor="#0000FFFF" unlit="true" doubleSided="true"/><material id="m-yellow" baseColor="#FFFF00FF" unlit="true" doubleSided="true"/></materials>
+<composition>
+<layer id="l" asset="p" x="100" y="50" scaleX="2" scaleY="2"/>
+</composition>
+</scene>

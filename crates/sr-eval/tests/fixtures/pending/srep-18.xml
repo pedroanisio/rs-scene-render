@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scene version="1.2">
+<project width="640" height="360" fps="24" duration="1" background="#000000FF"/>
+<output id="still" path="out/frame_%04d.png" codec="png-sequence" report="out/report.json"/>
+<assets><image id="px" src="../assets/srep18-pixel.png" width="4" height="4" sha256="0000000000000000000000000000000000000000000000000000000000000000"/></assets>
+<materials><material id="m-red" baseColor="#FF0000FF" unlit="true" doubleSided="true"/><material id="m-green" baseColor="#00FF00FF" unlit="true" doubleSided="true"/><material id="m-blue" baseColor="#0000FFFF" unlit="true" doubleSided="true"/><material id="m-yellow" baseColor="#FFFF00FF" unlit="true" doubleSided="true"/></materials>
+<composition>
+<layer id="px-layer" asset="px" x="0" y="0"/>
+<shape id="inert-stroke" shape="rect" width="40" height="20" x="100" y="100" strokeWidth="2" fill="#FF0000FF"/>
+<shape id="never-drawn" shape="rect" width="40" height="20" x="300" y="100" start="5" fill="#0000FFFF"/>
+</composition>
+</scene>
