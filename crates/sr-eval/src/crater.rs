@@ -27,6 +27,8 @@ pub struct ImpactCrater {
     pub age: f64,
     pub duration: f64,
     pub spec: sr_3d::crater::Spec,
+    /// The volumes the ground has to add up to, with a mantle (`crater@mantle`); none without.
+    pub budget: Option<sr_3d::crater::Budget>,
     /// What the impact itself was, for what it causes besides the crater (smoke).
     pub(crate) cause: ImpactCause,
 }
@@ -99,6 +101,10 @@ pub(crate) struct CraterSource {
     pub(crate) influence_depth: Option<f64>,
     pub(crate) curve: Option<String>,
     pub(crate) max_bytes: usize,
+    /// Whether the ejecta come down as a mantle that is part of the ground (`crater@mantle`).
+    pub(crate) mantle: bool,
+    /// What the rim and the mantle put back, in volumes of the bowl (`crater@bulking`); none leaves it to the law's rim.
+    pub(crate) bulking: Option<f64>,
     /// The last impact worked out and its crater: the law reads the impact and the source and not the time, so a
     /// crater that is asked about again for the same impact (every rigid step, every frame) is not worked out again.
     memo: Memo,
@@ -165,6 +171,8 @@ impl CraterSource {
             max_bytes: (num(element, "maxMemoryMiB", 128.) as usize)
                 .checked_mul(1 << 20)
                 .ok_or("crater memory budget overflow")?,
+            mantle: text(element, "mantle").as_deref() == Some("true"),
+            bulking: element_number(element, "bulking"),
             memo: Memo::default(),
         })
     }
@@ -262,7 +270,14 @@ fn worked_out(source: &CraterSource, impact: &Impact3, age: f64) -> Result<Impac
         target_density: source.density.unwrap_or(source.material.table_density()),
         pixels_per_meter: source.pixels_per_meter,
     };
-    Ok(ImpactCrater { age, duration: law.duration, spec, cause })
+    // cubic object units to a metre cubed
+    let cubic = units.powi(3);
+    let budget = source.mantle.then_some(sr_3d::crater::Budget {
+        volume: law.volume * cubic,
+        ejecta: law.ejecta_volume * cubic,
+        bulking: source.bulking,
+    });
+    Ok(ImpactCrater { age, duration: law.duration, spec, budget, cause })
 }
 
 pub fn at(node: &FrameNode) -> Result<Option<Deformation>, String> {
@@ -285,7 +300,11 @@ pub(crate) fn from_impact(element: &dyn Element, impact: &ImpactCrater) -> Resul
     };
     let max_bytes =
         (num(element, "maxMemoryMiB", 128.) as usize).checked_mul(1 << 20).ok_or("crater memory budget overflow")?;
-    Ok(Deformation { kernel: sr_3d::crater::Crater::new(impact.spec)?, progress, max_bytes })
+    let kernel = match impact.budget {
+        Some(budget) => sr_3d::crater::Crater::conserving(impact.spec, budget)?,
+        None => sr_3d::crater::Crater::new(impact.spec)?,
+    };
+    Ok(Deformation { kernel, progress, max_bytes })
 }
 
 fn from_element_with(

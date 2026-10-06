@@ -243,3 +243,87 @@ fn material_names_follow_the_document_vocabulary() {
     }
     assert_eq!(Material::parse("granite"), None);
 }
+
+/// Where the ejecta of the authored rock (90 478 kg of 2700 kg/m3, 100 m/s at 60 degrees, soft rock) come down on level
+/// ground, with no drag, and the mantle they make there against the analytic one `t0 (R / r)^3`: a measurement, not a
+/// part of the model. Returns the crest radius and the landing radius and mass of each particle.
+fn landings(particles: usize, angle: f64, spread: f64) -> (f64, Vec<(f64, f64)>) {
+    use sr_sim::cratering::{crater, Impact, Target};
+    const G: f64 = 9.80665;
+    let theta = 60f64.to_radians();
+    let impact = Impact { mass: 90_478.0, density: 2700.0, normal_speed: 100.0 * theta.sin() };
+    let law =
+        crater(&impact, &Target { material: Material::SoftRock, density: None, strength: None, gravity: G }).unwrap();
+    let list = ejecta(&Spec {
+        material: Material::SoftRock,
+        body_radius: (3.0 * impact.mass / (4.0 * std::f64::consts::PI * impact.density)).cbrt(),
+        body_density: impact.density,
+        target_density: 2100.0,
+        impact_speed: 100.0,
+        velocity_direction: [theta.cos(), -theta.sin(), 0.0],
+        normal: [0.0, 1.0, 0.0],
+        crater_volume: law.volume,
+        crater_radius: law.radius,
+        crater_duration: law.duration,
+        particles,
+        seed: 20_261_006,
+        angle,
+        angle_spread: spread,
+    })
+    .unwrap();
+    let crest = law.rim_radius;
+    let landed = list
+        .iter()
+        .map(|p| {
+            let up = p.velocity[1];
+            let flight = if up > 0.0 { 2.0 * up / G } else { 0.0 };
+            let (x, z) = (p.position[0] + p.velocity[0] * flight, p.position[2] + p.velocity[2] * flight);
+            (x.hypot(z), p.mass)
+        })
+        .collect();
+    (crest, landed)
+}
+
+#[test]
+fn the_ballistic_landing_points_of_the_ejecta_make_a_mantle_that_is_measured_against_the_inverse_cube() {
+    for (angle, spread) in [(45.0, 15.0), (30.0, 10.0), (60.0, 10.0)] {
+        let (crest, landed) = landings(20_000, angle, spread);
+        let total: f64 = landed.iter().map(|l| l.1).sum();
+        let share = |lo: f64, hi: f64| {
+            landed.iter().filter(|l| l.0 >= lo * crest && l.0 < hi * crest).fold(0.0, |sum, l| sum + l.1) / total
+        };
+        let (inside, band, far) = (share(0.0, 1.0), share(1.0, 20.0), share(20.0, f64::INFINITY));
+        println!("LANDING {angle}/{spread}: crest {crest:.3} m; inside the crest {inside:.4}, 1 to 20 crest radii {band:.4}, beyond {far:.4}");
+        assert!((inside + band + far - 1.0).abs() < 1e-12);
+        // logarithmic bins from the crest to twenty crest radii: thickness is mass over the annulus' area
+        let bins = 12;
+        let edge = |i: usize| 20f64.powf(i as f64 / bins as f64);
+        let mut points = Vec::new();
+        for i in 0..bins {
+            let (lo, hi) = (edge(i), edge(i + 1));
+            let mass = share(lo, hi) * total;
+            let area = std::f64::consts::PI * crest * crest * (hi * hi - lo * lo);
+            if mass > 0.0 {
+                let r = (lo * hi).sqrt();
+                println!(
+                    "LANDING   r/R {r:6.2}: thickness {:.4e} against the cube {:.4e} (arbitrary scale)",
+                    mass / area,
+                    r.powi(-3)
+                );
+                points.push((r.ln(), (mass / area).ln()));
+            }
+        }
+        // least squares slope of log thickness against log radius
+        let n = points.len() as f64;
+        let (mx, my) = (points.iter().map(|p| p.0).sum::<f64>() / n, points.iter().map(|p| p.1).sum::<f64>() / n);
+        let slope = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>()
+            / points.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>();
+        // the analytic mantle's share of what lies between the crest and twenty crest radii in 1 to 2 and 2 to 4 crest radii
+        let analytic = |a: f64, b: f64| (1.0 / a - 1.0 / b) / (1.0 - 1.0 / 20.0);
+        println!(
+            "LANDING   slope {slope:.2} (the mantle is -3); share of the band in 1 to 2 R {:.3} against {:.3}, in 2 to 4 R {:.3} against {:.3}",
+            share(1.0, 2.0) / band, analytic(1.0, 2.0), share(2.0, 4.0) / band, analytic(2.0, 4.0)
+        );
+        assert!(slope.is_finite());
+    }
+}

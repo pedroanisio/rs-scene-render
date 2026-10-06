@@ -180,7 +180,8 @@ pub(crate) fn aggregate(
     let ocean = &emitter.ocean;
     let mut sums: std::collections::BTreeMap<(u64, u32), Entry> = Default::default();
     let units = pixels_per_meter.powi(3);
-    for a in list {
+    // what settled on the ground is not water's
+    for a in list.iter().filter(|a| !a.ground) {
         let local = ocean.to_local.transform_point3(DVec3::from(a.position));
         let velocity = ocean.to_local.transform_vector3(DVec3::from(a.velocity));
         let ix = (((local.x - ocean.origin[0]) / ocean.cell_size).floor().max(0.0) as usize).min(ocean.cells[0] - 1);

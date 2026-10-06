@@ -799,7 +799,9 @@ impl<'a> Eval<'a> {
                 });
                 let finite = n
                     .attributes()
-                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "capture" | "targetMaterial"))
+                    .filter(|a| {
+                        !matches!(a.name(), "curve" | "id" | "source" | "capture" | "mantle" | "targetMaterial")
+                    })
                     .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")
@@ -842,6 +844,12 @@ impl<'a> Eval<'a> {
                 );
                 self.check(!has("capture") || has("source"), n, "CRT9", || {
                     "crater capture belongs to a crater that grows from a source.".into()
+                });
+                self.check((!has("mantle") && !has("bulking")) || has("source"), n, "CRT10", || {
+                    "crater mantle and bulking belong to a crater that grows from a source.".into()
+                });
+                self.check(!has("bulking") || n.attribute("mantle") == Some("true"), n, "CRT11", || {
+                    "crater bulking belongs to a crater with a mantle (mantle=\"true\").".into()
                 });
                 self.check(
                     owner.is_none_or(|o| {

@@ -24,6 +24,7 @@ pub mod fields;
 pub mod flock;
 pub mod fluid;
 pub mod gr;
+pub mod granular;
 pub mod hydrostatics;
 pub mod ocean;
 pub mod particles;

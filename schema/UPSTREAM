@@ -25,7 +25,7 @@ The engine's differences from the canonical text are recorded in PALS-Notes/proj
 
 Added here, not in sr-core 1.3.0 (SREP 0 of this repository, the cinematic proposal, srep-0000-cinematic-impact.md):
 the elements blackHole and accretionDisk (blackHoleType, accretionDiskType; rules BH1 to BH8), camera/@geodesics,
-fracture/@source, fracture/@minImpulse and fracture/@energyFraction (rules FRX5 to FRX7) and ocean/@density; the
+fracture/@source, fracture/@minImpulse and fracture/@energyFraction (rules FRX5 to FRX7), ocean/@density, and crater/@mantle and crater/@bulking (rules CRT10 and CRT11); the
 rest of the cinematic families (OCN, P3D, CRT, PYC, PYRO, VOL, FRX, MSQ, GEO) is in sr-core 1.3.0 as released. A
 release of sr-core that takes these in replaces them; until then a vendoring keeps them (the merge of
 2026-10-06 was done by component: every top-level type, group and pattern that sr-core changed since the previous

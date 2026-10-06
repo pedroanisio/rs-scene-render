@@ -21,10 +21,51 @@ pub struct Spec {
     pub influence_depth: f64,
 }
 
+/// What the volumes of a crater are to add up to, in cubic object units: the bowl excavates `volume`, the ejecta that
+/// were thrown out come down outside the rim as a mantle of volume `ejecta`, and the rim holds the rest of what is
+/// put back, up to `bulking` times the volume (a pile of broken rock takes more room than the rock did). Without a
+/// `bulking` the rim keeps the height the spec gives it and the bulking is what that asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Budget {
+    pub volume: f64,
+    pub ejecta: f64,
+    pub bulking: Option<f64>,
+}
+
+/// The volumes of a grown crater: what the bowl takes out and what the rim and the mantle put back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Volumes {
+    pub bowl: f64,
+    pub rim: f64,
+    pub mantle: f64,
+}
+
+/// The shape of the bowl and the mantle outside the rim that a crater of `Crater::conserving` has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Profile {
+    /// The bowl is `(1 - x^2)^p`; 2 for a crater of `Crater::new`.
+    bowl_exponent: f64,
+    mantle: Option<Mantle>,
+}
+
+/// A mantle of thickness `thickness (R / r)^3` outside the rim crest `R`, joined to the rim by a smooth ramp over
+/// the rim's width and cut at `reach`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Mantle {
+    thickness: f64,
+    reach: f64,
+    /// Cubic units that it holds.
+    volume: f64,
+}
+
+/// How far, in crest radii, the mantle reaches before it is cut.
+const MANTLE_REACH: f64 = 20.;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Crater {
     spec: Spec,
     axis: DVec3,
+    profile: Profile,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +101,71 @@ impl Crater {
         }
         // Normalize without squaring potentially enormous authored components.
         let axis = (axis / max).normalize();
-        Ok(Self { spec, axis })
+        Ok(Self { spec, axis, profile: Profile { bowl_exponent: 2., mantle: None } })
+    }
+
+    /// A crater whose volumes add up (see [`Budget`]): the bowl is given the exponent that makes it excavate exactly
+    /// `budget.volume` with the depth and the radius of the spec (a deeper bowl, with the exponent 2 that keeps the
+    /// bump compact and smooth, when the volume is more than the bowl of that exponent holds), the rim has the volume that the bulking leaves
+    /// after the mantle (or the height of the spec), and the mantle is scaled to hold exactly `budget.ejecta`.
+    pub fn conserving(spec: Spec, budget: Budget) -> Result<Self, String> {
+        let Budget { volume, ejecta, bulking } = budget;
+        if !(volume.is_finite() && volume > 0. && ejecta.is_finite() && ejecta >= 0.)
+            || bulking.is_some_and(|b| !b.is_finite())
+        {
+            return Err(
+                "a crater's volume and ejecta must be finite, the volume positive and the ejecta not negative".into()
+            );
+        }
+        let pi = std::f64::consts::PI;
+        let mut spec = spec;
+        // the volume of the bowl, pi R^2 d / (p + 1), is the one asked for
+        let exponent = pi * spec.radius * spec.radius * spec.depth / volume - 1.;
+        let exponent = if exponent.is_finite() && exponent >= 2. {
+            exponent
+        } else {
+            spec.depth = 3. * volume / (pi * spec.radius * spec.radius);
+            2.
+        };
+        let ring = 32. * pi / 15. * spec.rim_width * spec.radius;
+        if let Some(b) = bulking {
+            let rim = b * volume - ejecta;
+            if rim < 0. {
+                return Err("the bulking leaves no room for the rim after the mantle".into());
+            }
+            spec.rim_height = rim / ring;
+        }
+        let mut crater = Crater::new(spec)?;
+        crater.profile.bowl_exponent = exponent;
+        let reach = MANTLE_REACH * spec.radius;
+        let unit = Mantle { thickness: 1., reach, volume: 0. }.volume_for(&crater);
+        let mantle = Mantle { thickness: if ejecta > 0. { ejecta / unit } else { 0. }, reach, volume: ejecta };
+        // the mantle sits on top of the rim: the envelope must still leave the map orientation-preserving
+        if spec.influence_depth * 0.5 < spec.depth.max(spec.rim_height + mantle.thickness) {
+            return Err("the influence depth of a crater with a mantle must be at least twice its depth and its rim and mantle together".into());
+        }
+        crater.profile.mantle = Some(mantle);
+        Ok(crater)
+    }
+
+    /// The volumes of the grown crater.
+    pub fn volumes(&self) -> Volumes {
+        let pi = std::f64::consts::PI;
+        Volumes {
+            bowl: pi * self.spec.radius * self.spec.radius * self.spec.depth / (self.profile.bowl_exponent + 1.),
+            rim: 32. * pi / 15. * self.spec.rim_height * self.spec.rim_width * self.spec.radius,
+            mantle: self.profile.mantle.map_or(0., |m| m.volume),
+        }
+    }
+
+    /// The thickness of the mantle at the rim crest, once it is as big as the crater is (zero without one).
+    pub fn mantle_thickness(&self) -> f64 {
+        self.profile.mantle.map_or(0., |m| m.thickness)
+    }
+
+    /// The distance from the axis beyond which the grown crater moves nothing.
+    pub fn reach(&self) -> f64 {
+        self.profile.mantle.map_or(self.spec.radius + self.spec.rim_width, |m| m.reach)
     }
 
     /// The dimensions this crater was made from; the axis is the one given, not normalised.
@@ -95,12 +200,18 @@ impl Crater {
         if radius == 0. || width == 0. {
             return Err("crater growth dimensions underflow".into());
         }
-        if r / radius >= 1. + width / radius {
+        let mantle = self.profile.mantle;
+        if r / radius >= 1. + width / radius && mantle.is_none_or(|m| r >= m.reach * progress) {
             return Ok(identity);
         }
-        let (bowl, bowl_derivative) = bump(r / radius);
+        let (bowl, bowl_derivative) = bowl(r / radius, self.profile.bowl_exponent);
         let (rim, rim_derivative) = bump((r - radius) / width);
-        let amount = (-self.spec.depth * bowl + self.spec.rim_height * rim) * progress;
+        // the mantle grows with the crater as the rest of it does: its crest and its width are the grown ones
+        let (heap, heap_derivative) = mantle.map_or((0., 0.), |m| {
+            let (shape, slope) = mantle_shape(r, radius, width);
+            (m.thickness * shape, m.thickness * slope)
+        });
+        let amount = (-self.spec.depth * bowl + self.spec.rim_height * rim + heap) * progress;
         // Cancel progress analytically instead of dividing two tiny dimensions.
         let derivative = |height: f64, scale: f64, slope: f64| {
             if slope == 0. || height == 0. {
@@ -110,7 +221,8 @@ impl Crater {
             }
         };
         let dr = -derivative(self.spec.depth, self.spec.radius, bowl_derivative)
-            + derivative(self.spec.rim_height, self.spec.rim_width, rim_derivative);
+            + derivative(self.spec.rim_height, self.spec.rim_width, rim_derivative)
+            + heap_derivative * progress;
         let (envelope, de) = bump(q);
         let gradient = self.axis * (amount / self.spec.influence_depth * de)
             + if r > 0. { radial / r * (dr * envelope) } else { DVec3::ZERO };
@@ -190,6 +302,34 @@ impl Crater {
     }
 }
 
+impl Mantle {
+    /// The cubic units that a mantle of unit thickness holds on `crater`: `2 pi` times the integral of `r (R / r)^3` times
+    /// the ramp, from where the ramp begins to the reach (Simpson's rule on 20 000 intervals).
+    fn volume_for(&self, crater: &Crater) -> f64 {
+        let (radius, width) = (crater.spec.radius, crater.spec.rim_width);
+        let (from, intervals) = (radius - width, 20_000);
+        let h = (self.reach - from) / intervals as f64;
+        let f = |r: f64| r * mantle_shape(r, radius, width).0;
+        let mut sum = f(from) + f(self.reach);
+        for i in 1..intervals {
+            sum += f(from + i as f64 * h) * if i % 2 == 1 { 4. } else { 2. };
+        }
+        2. * std::f64::consts::PI * sum * h / 3.
+    }
+}
+
+/// The mantle of unit thickness at distance `r` from the axis, for a crest at `radius` and a rim `width` wide, and its derivative:
+/// `(R / r)^3` outside the rim, brought to zero over the rim's width by a smoothstep that ends at the crest's outer edge.
+fn mantle_shape(r: f64, radius: f64, width: f64) -> (f64, f64) {
+    let u = (r - (radius - width)) / (2. * width);
+    if u <= 0. {
+        return (0., 0.);
+    }
+    let (ramp, slope) = if u >= 1. { (1., 0.) } else { (u * u * (3. - 2. * u), 6. * u * (1. - u) / (2. * width)) };
+    let cube = (radius / r).powi(3);
+    (cube * ramp, cube * (slope - 3. * ramp / r))
+}
+
 /// Compact C¹ bump and its derivative with respect to its argument.
 fn bump(x: f64) -> (f64, f64) {
     if x.abs() >= 1. {
@@ -197,6 +337,17 @@ fn bump(x: f64) -> (f64, f64) {
     }
     let a = 1. - x * x;
     (a * a, -4. * x * a)
+}
+/// The bowl's bump with the exponent `p`: [`bump`] for 2, where it keeps the bits it always had.
+fn bowl(x: f64, p: f64) -> (f64, f64) {
+    if p == 2. {
+        return bump(x);
+    }
+    if x.abs() >= 1. {
+        return (0., 0.);
+    }
+    let a = 1. - x * x;
+    (a.powf(p), -2. * p * x * a.powf(p - 1.))
 }
 fn normalize_or_missing(v: DVec3) -> Result<DVec3, String> {
     if v == DVec3::ZERO {
