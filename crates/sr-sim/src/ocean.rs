@@ -63,7 +63,12 @@ pub struct Spec {
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
     pub max_bytes: usize,
     pub checkpoint_bytes: usize,
-    /// Work units per seek: eight per cell for each impulse and each substep.
+    /// Work units per seek, charged by cell: per CFL substep 8 in first order and 24 in second (two stages, each
+    /// a reconstruction and a flux sweep); with a moving bed one more for the bed interpolated to the substep and,
+    /// when the bodies relax the water to their velocity (`bodies` without `body_push`), one more for their
+    /// thickness and velocity; 8 for each impulse, authored or asked for by the driver; 16 for each entry of a
+    /// splash; and one a cell for the samples of the bodies of each canonical step of a seek with `body_owners`, and one
+    /// for the tags of each stretch that is advanced with `body_owners` and without `body_push`.
     pub max_work: u64,
     /// The bed is supplied by a [`Driver`] at every canonical step and the solver
     /// is sampled with [`Ocean::at_driven`]. Charges 64 more bytes per cell: three bed vectors and what is kept of

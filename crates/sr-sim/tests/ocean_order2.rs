@@ -397,3 +397,43 @@ fn the_state_and_samples_kept_of_the_step_passed_count_against_resident_memory()
     assert!(make(wanted).is_ok());
     assert!(matches!(make(wanted - 1), Err(sr_sim::ocean::Error::Limit(_))));
 }
+
+/// The work a seek of a driven solver is charged, found as the smallest budget that lets it through.
+fn charged(spec: &Spec, until: f64) -> (u64, u64) {
+    let n = spec.cells[0] * spec.cells[1];
+    let make = |max_work: u64| {
+        let s = Spec { max_work, ..spec.clone() };
+        Ocean::new(s, vec![2.0; n], vec![Cell { depth: 2.0, velocity: [0.3, 0.0] }; n], vec![]).unwrap()
+    };
+    let flat = |_: f64, f: &mut sr_sim::ocean::Forcing| {
+        f.bed.fill(2.0);
+        Ok(())
+    };
+    let substeps = {
+        let mut ocean = make(u64::MAX / 2);
+        ocean.at_driven(until, &mut { flat }).unwrap();
+        ocean.last_seek_substeps()
+    };
+    let (mut low, mut high) = (0u64, 1u64 << 40);
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        match make(mid).at_driven(until, &mut { flat }) {
+            Ok(_) => high = mid,
+            Err(_) => low = mid,
+        }
+    }
+    (high, substeps)
+}
+
+#[test]
+fn the_work_a_seek_is_charged_is_the_documented_work_per_cell_and_substep() {
+    // per substep: 8 a cell in first order and 24 in second, and a cell more for the bed that is interpolated
+    for (order, per_cell) in [(Order::First, 8 + 1), (Order::Second, 24 + 1)] {
+        let s = Spec { moving_bed: true, ..spec([16, 12], order) };
+        let n = (s.cells[0] * s.cells[1]) as u64;
+        let (work, substeps) = charged(&s, 0.3);
+        assert!(substeps > 6, "{order:?}: {substeps} substeps");
+        println!("WORK {order:?}: {work} charged for {substeps} substeps of {n} cells");
+        assert_eq!(work, substeps * n * per_cell, "{order:?}");
+    }
+}
