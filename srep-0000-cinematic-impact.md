@@ -2577,11 +2577,72 @@ measured on the renderer.
 A renderer that does not meet them for the cases it can reach, within the error of its integration, is wrong; the
 integrator step and the number of steps are the renderer's and are written in its own section.
 
+**Reference implementation (`sr_sim::gr`).** The engine carries this physics as a CPU reference in double precision,
+`crates/sr-sim/src/gr.rs`, that the renderer is compared with and that no render calls. Lengths are the scene's and `G = c = 1`.
+
+*The integration.* Binet's equation is integrated in the angle `phi` with the classical fourth-order Runge-Kutta method on
+`(u, w = du/dphi)`, `w' = -u + 3 M u^2`, with a fixed step of 0.02 rad (`STEP`) and at most 4096 steps (`MAX_STEPS`), after which
+a ray that has neither been captured nor escaped is taken to be captured (it is circling the photon sphere). The ray starts at
+the observer's radius `r_o` with `u = 1/r_o` and `w = +-sqrt(max(1/b^2 - u^2 + 2 M u^3, 0))`, positive for a ray that goes in. It
+is captured when `u >= 1/(2M)` and has escaped when `u <= 0`, at the angle `phi_inf = phi + h u / (u - u_new)` of a linear
+interpolation across the last step. The planes of the disk are crossed at `phi0 + k pi`, `k < 4`, and the step that would pass one
+is shortened to land on it. The arithmetic is written in one order, so that a shader can do the same sums: the acceleration is
+`-u + 3 * M * u * u` taken left to right, the stages come in the order `k1` to `k4`, the half step `0.5 * h` is taken once and the
+result is `x + (h / 6) * (k1 + 2 k2 + 2 k3 + k4)`. The same code runs in single precision (`gr::f32`).
+
+*The camera and the ray of a pixel* (`gr::image`, the convention that the shader copies). The camera has the unit vectors `fwd`,
+`right` and `down` (`right x down = fwd`), a focal length `f` in pixels and the size `w x h`; the ray of pixel `(x, y)` is
+`d = normalize(fwd f + right (x + 0.5 - w/2) + down (y + 0.5 - h/2))`. With `n` the unit vector from the hole to the observer, `cos a
+= -d . n`, `perp = d + n cos a` and `sin a = |perp|`, the plane of the ray has the basis `e1 = n` and `e2 = perp / sin a` (any unit
+vector orthogonal to `n` when `sin a < 1e-6`), `phi` grows from `e1` toward `e2` along the path traced from the camera outward, the
+impact parameter is `b = max(r_o sin a / sqrt(1 - 2M/r_o), 1e-5)` and the ray goes in when `cos a > 0`. The plane of the disk, with the
+unit axes `dx`, `dy` (`dx x dy = dz`) and `dz` the axis of spin, is first met by the plane of the ray at `phi0` in `(0, pi]`:
+`phi0 = atan2(-e1 . dz, e2 . dz)`, plus `pi` if it is negative and plus `pi` again if it is below 1e-6; when `(e1 . dz)^2 + (e2 . dz)^2 <
+1e-12` the planes coincide and there is none. A pixel takes the first of the four crossings whose radius is within the disk, and then
+the azimuth `psi = atan2(p . dy, p . dx)` of `p = cos(phi_k) e1 + sin(phi_k) e2`, and the redshift
+`g = sqrt(1 - 3M/r) / (1 + Omega b h)` with `Omega = sqrt(M / r^3)` and `h = (e1 x e2) . dz`: it is the `g` of the paragraph on the disk, for
+`lambda = -b h`, because `e1 x e2` is the normal of the plane of the orbit oriented against the photon's motion. A ray that escapes ends
+in the direction `cos(phi_inf) e1 + sin(phi_inf) e2`. A difference of convention between a renderer and this reference shows as a
+difference of image and not as physics, which is why it is written here.
+
+*The closed forms* (`gr::oracle`), none run per pixel: the shadow `b_c = sqrt(27) M`, the horizon `2M`, the photon sphere `3M`, the
+last stable orbit `6M`, `Omega = sqrt(M/r^3)`, the smallest positive root `u_0` of `1/b^2 - u^2 + 2 M u^3` by bisection on `(0, 1/(3M))`, the
+exact deflection `2 integral_0^{u_0} du / sqrt(1/b^2 - u^2 + 2 M u^3) - pi` evaluated by Romberg quadrature of the form with `u = u_0 (1 - s^2)`, in
+which the radicand is `(u_0 - u) Q(u)`, `Q(u) = (1 - 2 M u_0)(u + u_0) - 2 M u^2`, and the integrand `2 sqrt(u_0) / sqrt(Q)` is smooth on `[0, 1]`,
+the weak-field series `4x + (15 pi/4) x^2 + (128/3) x^3 + (3465 pi/64) x^4`, `x = M/b`, Luminet's redshift
+`g = sqrt(1 - 3M/r) / (1 + Omega b sin(i) sin(alpha))` and the temperature of Shakura and Sunyaev `r^(-3/4) (1 - sqrt(r_in/r))^(1/4)` times a scale, zero
+at and inside `r_in`, with its maximum at `49/36 r_in`. The references are Luminet 1979 (Astron. Astrophys. 75, 228), Shakura and Sunyaev 1973
+(Astron. Astrophys. 24, 337), Darwin 1959 for the exact deflection as an elliptic integral and Chandrasekhar 1983 (The Mathematical Theory of Black
+Holes) for the same; the series coefficients are those of Keeton and Petters 2005 (Phys. Rev. D 72, 104006). None of them was read in preparing this text:
+they are cited from memory, the closed forms that need them are derived above, and what is checked is the quadrature of the integral and the
+integration against each other, which do not share code.
+
+*What was measured* (tests `gr` and `gr_image` of `sr-sim`, commits 5e33e9d, bc4e7d1 and c7fcc13, 2026-10-06; the results are deterministic and do not
+depend on the load). The impact parameter that separates capture from escape, found by bisection for a ray from `1e9 M`, is within a relative
+`9.7e-8`, `5.7e-9`, `3.5e-10` and `2.1e-11` of `sqrt(27) M` at the steps 0.08, 0.04, 0.02 and 0.01. The integrated deflection for a ray from `1e9 M` with
+the step `2e-4` is `0.590395778`, `0.236135975` and `0.041222440` at `b = 10`, `20` and `100 M` against `0.590395788`, `0.236135995` and `0.041222540` by quadrature (the
+`1e-7` at `100 M` is the part of the ray before `1e9 M`). At the step of the shader the angle at infinity is within `1.3e-7` of the quadrature for the impact
+parameters 5.3, 5.5, 6, 8, 10, 20 and 100 M (`7.2e-8` at 10 M), and the error at 10 M falls from `9.1e-7` to `7.2e-8` to `6.1e-9` as the step goes 0.04, 0.02, 0.01.
+The weak-field series leaves a residual of about `700 (M/b)^5`. Single against double precision, for four rays: at most `9.4e-7` relative in the angle at
+infinity and `1.4e-5` in the radius of a crossing (test `single_precision_follows_double_precision`). The image: on 256 x 160 pixels, with an equatorial camera at
+`40 M` and a focal length of 100 pixels, the shadow has the radius `12.915` px by area against `12.764` px from `b_c` (limit 0.5 px); the two sides of an
+inclined image have the same classes and radii, and `1/g + 1/g'` averages to `1/sqrt(1 - 3M/r)` to `1e-9`; in the column of the plane through the axis `g =
+sqrt(1 - 3M/r)` to `1e-12`; a 1280 x 720 image takes about 2.6 s of one core. The comparison of the shader with this reference, pixel by pixel, is the
+test of the renderer (`sr-gpu`, commits e4b1f85 for the tests and 99f4d2e for the shader, on the NVIDIA adapter, 2026-10-06, as its author reported it and not
+rerun in preparing this text). On 96 x 60 pixels the shader in single precision and this image agree on the class of 5760 of 5760 pixels (106 captured, 5084 of
+background, 570 of disk); the worst relative differences are 1.2e-5 in the angle of escape, 8.1e-6 in the radius of a point of the disk, 3.1e-6 in `g` and 1.3e-6 rad in
+the azimuth. Against `gr::f32::trace`, for the rays more than 5% from the critical curve, 2528 of 3186 radii of crossings agree to 1e-6 or better and the worst is 1.2e-5
+up to `56 M` (6.8e-5 beyond it, near the escape) and 1.4e-6 in the angle of escape: the GPU compiler contracts operations, so the same order of operations does not
+give the same single-precision bits. The shadow of an observer at `1e4 M` is 39.99 px for the 40 expected.
+
 **Limits.** The hole is Schwarzschild: no rotation, no charge, no frame dragging. The disk is analytic, geometrically thin,
 opaque and in steady circular motion: it has no vertical structure, no self-irradiation, no radial flow and no
 relativistic emissivity profile beyond the one above, and it is not made of particles. The scene has no other 3D object
 and no medium (BH6), so there is no light from or through anything but the disk. One hole and one geodesic camera. The
-observer is static at a finite radius `d`; a camera that moves or an observer in free fall is not modelled. None of the
+observer is static at a finite radius `d`; a camera that moves or an observer in free fall is not modelled. The reference integrates a
+ray in its own plane with a fixed step of 0.02 rad, so a ray that circles the photon sphere for more than 82 rad is taken to be captured, the exact
+deflection loses accuracy for `b` within a few per cent of `b_c` (the integral diverges there), `g` exists for `r > 3M` only, and the time of an
+image turns the pattern of the disk and nothing else: `r`, `psi` and `g` do not depend on it. None of the
 formulas of this section was checked against the papers it cites: they are derived in the text, the Schwarzschild
 quantities (Binet's equation, `b_c`, the weak-field deflection `4M/b`, `g`) are standard, and the numerical figures above
 are the check of the integrals. The inner edge `r_in = 6M` and the temperature of the disk are the engine's choices and not a
