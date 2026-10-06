@@ -250,8 +250,9 @@ impl FontLib {
         let asked = st.families.first().map(String::as_str).unwrap_or("sans-serif");
         let generic = GENERIC_FAMILIES.iter().any(|g| g.eq_ignore_ascii_case(asked));
         let pinned_as = self.pins.as_ref().and_then(|p| p.iter().find(|p| p.face == face)).map(|p| p.family.clone());
-        let family_ok =
-            generic || f.family.eq_ignore_ascii_case(asked) || pinned_as.is_some_and(|p| p.eq_ignore_ascii_case(asked));
+        let family_ok = generic
+            || f.family.eq_ignore_ascii_case(asked)
+            || pinned_as.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(asked));
         let weight = self.pins.as_ref().and_then(|p| p.iter().find(|p| p.face == face)).map_or(f.weight, |p| p.weight);
         let weight_ok = f.variable_weight || weight == st.weight;
         let slant_ok = f.italic == st.italic;
