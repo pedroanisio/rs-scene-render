@@ -450,6 +450,9 @@ pub struct Program {
     identity: Arc<()>,
     /// Imported animation frames live only as long as their compiled scene.
     pub(crate) mesh_sequence_cache: std::sync::Mutex<crate::mesh_sequence::Cache>,
+    /// Models read for joint sockets, and the joints each object is asked for.
+    pub(crate) joint_models: crate::joints::Cache,
+    pub(crate) joint_sockets: std::sync::OnceLock<crate::joints::Sockets>,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -3091,6 +3094,8 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
+        joint_models: Default::default(),
+        joint_sockets: Default::default(),
         base_dirs,
         safe_area,
         safe_enforce,

@@ -229,6 +229,10 @@ pub struct FrameNode {
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pose3: Option<[f64; 16]>,
+    /// For an object that draws an imported model and has joint sockets: each joint's frame in the object's own frame
+    /// (column-major, scene space), at the pose the object draws.
+    #[serde(skip)]
+    pub joints: Option<Arc<Vec<(String, [f64; 16])>>>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -1131,6 +1135,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             sim_volume: None,
             crater_impact: None,
             pose3: None,
+            joints: None,
             elem: node.elem.clone(),
         });
         let own_box = node.box_size.map(|[w, h]| [resolve_len(w, bx[0], p.size), resolve_len(h, bx[1], p.size)]);
@@ -1266,7 +1271,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         _ => background,
     };
 
-    FrameGraph {
+    let mut graph = FrameGraph {
         time: t,
         frame: libm::floor(t * p.fps.as_f64() + 1e-9) as i64,
         size: p.size,
@@ -1279,7 +1284,9 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         failures: Vec::new(),
         sim_seconds: SimSeconds::default(),
         seed: p.seed,
-    }
+    };
+    crate::joints::attach(p, &mut graph);
+    graph
 }
 
 fn token_color(p: &Program, name: &str) -> Option<[f64; 4]> {

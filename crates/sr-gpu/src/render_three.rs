@@ -172,18 +172,31 @@ fn pose3(a: &Attrs) -> Mat4 {
         * Mat4::from_rotation_z(deg("roll"))
 }
 
-/// The 3D parent of an element and its influence: `@parent`, else the target of a
-/// `transformConstraint type="parent"`.
-fn parent3(e: &dyn Element) -> Option<(String, f32)> {
+/// The 3D parent of an element, its influence and the joint of the parent's model the element is attached to:
+/// `@parent`, else the target of a `transformConstraint type="parent"`; `@parentJoint` (or the constraint's `@targetJoint`)
+/// names the joint.
+fn parent3(e: &dyn Element) -> Option<(String, f32, Option<String>)> {
+    let joint = |ea: &Attrs| ea.str("parentJoint").filter(|j| !j.is_empty());
     if let Some(AttrValue::Str(pid)) = e.get_attr("parent") {
-        return Some((pid.to_string(), 1.0));
+        return Some((pid.to_string(), 1.0, joint(&Attrs { e, props: None })));
     }
     sr_model::element::children(e).into_iter().find_map(|c| {
         let ca = Attrs { e: c, props: None };
         (c.element_name() == "transformConstraint" && ca.str("type").as_deref() == Some("parent"))
-            .then(|| ca.str("target").map(|t| (t, ca.num("influence", 1.0).clamp(0.0, 1.0) as f32)))
+            .then(|| {
+                let own = joint(&Attrs { e, props: None });
+                let at = ca.str("targetJoint").filter(|j| !j.is_empty()).or(own);
+                ca.str("target").map(|t| (t, ca.num("influence", 1.0).clamp(0.0, 1.0) as f32, at))
+            })
             .flatten()
     })
+}
+
+/// The frame of the joint `name` of the model drawn by object `id`, in the object's own frame (see `FrameNode::joints`).
+fn joint_frame(g: &FrameGraph, id: &str, name: &str) -> Option<Mat4> {
+    let n = g.nodes.iter().find(|n| &*n.id == id)?;
+    let (_, m) = n.joints.as_ref()?.iter().find(|(j, _)| j == name)?;
+    Some(Mat4::from_cols_array(&m.map(|v| v as f32)))
 }
 
 /// `m` blended with the identity by `w` (constraint influence).
@@ -215,7 +228,10 @@ impl Renderer {
                 continue;
             }
             let ca = Attrs { e: c, props: None };
-            if let Some(target) = ca.str("target").and_then(|t| Self::target_point(ctx.g, lights, &t)) {
+            let joint = ca.str("targetJoint");
+            if let Some(target) =
+                ca.str("target").and_then(|t| Self::target_joint_point(ctx.g, lights, &t, joint.as_deref()))
+            {
                 words.extend(target.to_array().map(|v| v.to_bits() as u64));
             }
         }
@@ -253,8 +269,13 @@ impl Renderer {
         if depth >= 32 {
             return None;
         }
-        let (pid, w) = parent3(e)?;
-        Some(toward(Self::world_of(g, lights, &pid, depth + 1)?, w))
+        let (pid, w, joint) = parent3(e)?;
+        let mut frame = Self::world_of(g, lights, &pid, depth + 1)?;
+        // a joint that cannot be found was reported by the evaluator: the element stays in the object's frame
+        if let Some(j) = joint.and_then(|j| joint_frame(g, &pid, &j)) {
+            frame *= j;
+        }
+        Some(toward(frame, w))
     }
 
     /// World matrix of the node or light `id`: objects, cameras and lights in 3D, other nodes as their 2D world.
@@ -285,6 +306,14 @@ impl Renderer {
     /// World position of a node for look-at and focus targets.
     fn target_point(g: &FrameGraph, lights: &[m::Light], id: &str) -> Option<Vec3> {
         Self::world_point(g, lights, id, 0)
+    }
+
+    /// The position of `id`, or of its joint `joint` when one is named and found.
+    fn target_joint_point(g: &FrameGraph, lights: &[m::Light], id: &str, joint: Option<&str>) -> Option<Vec3> {
+        match joint.and_then(|j| joint_frame(g, id, j)) {
+            Some(frame) => Some((Self::world_of(g, lights, id, 0)? * frame).transform_point3(Vec3::ZERO)),
+            None => Self::target_point(g, lights, id),
+        }
     }
 
     fn world_point(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Vec3> {
@@ -1995,7 +2024,8 @@ impl Renderer {
             let ca = Attrs { e: c, props: None };
             let kind = ca.str("type").unwrap_or_default();
             let w = ca.num("influence", 1.0).clamp(0.0, 1.0) as f32;
-            let target = ca.str("target").and_then(|t| Self::target_point(g, lights, &t));
+            let joint = ca.str("targetJoint");
+            let target = ca.str("target").and_then(|t| Self::target_joint_point(g, lights, &t, joint.as_deref()));
             let off = Vec3::new(ca.num("offsetX", 0.0) as f32, ca.num("offsetY", 0.0) as f32, 0.0);
             match (kind.as_str(), target) {
                 ("look-at", Some(t)) => {

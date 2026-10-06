@@ -551,6 +551,9 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="target" type="xs:IDREF"/>
+    <xs:attribute name="targetJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @target that is an object3D drawing an imported model: the name of a node of that model whose pose is the target's transform (parent, copy-position, copy-rotation, copy-scale, copy-transform, look-at and distance).</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="path" type="xs:string"/>
     <xs:attribute name="point" type="xs:string"/>
     <xs:attribute name="influence" type="unitDecimal" default="1"/>
@@ -2344,6 +2347,9 @@
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="condition" type="expressionString"/>
     <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="parentJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="scaleX" type="xs:double" default="1"/>
     <xs:attribute name="scaleY" type="xs:double" default="1"/>
     <xs:attribute name="scaleZ" type="xs:double" default="1"/>
@@ -2743,6 +2749,9 @@
     <xs:attribute name="end" type="xs:double"/>
     <xs:attribute name="condition" type="expressionString"/>
     <xs:attribute name="parent" type="xs:IDREF"/>
+    <xs:attribute name="parentJoint" type="xs:string">
+      <xs:annotation><xs:documentation>With a @parent (or a transformConstraint of type="parent") that is an object3D drawing an imported model: the name of a node of that model. The element is placed in that node's frame as the model's clips pose it, instead of in the object's own frame. The first node of that name in the model's node order is used.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="motionBlur" type="triStateType" default="inherit"/>
     <xs:attribute name="animationClip" type="xs:string"/>
     <xs:attribute name="animationSpeed" type="xs:double" default="1"/>
