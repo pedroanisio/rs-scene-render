@@ -341,3 +341,22 @@ fn the_source_is_found_inside_every_instance_of_a_symbol() {
     let alone = full(&Setup::default().evaluator());
     assert!(close(specs[0].radius, alone.radius, 1e-6));
 }
+
+#[test]
+fn once_the_crater_has_stopped_growing_the_law_is_not_worked_out_again_for_every_rigid_step() {
+    let ev = Setup::default().evaluator();
+    // the impact is at about 0.2 s and the crater is whole before 2 s; frames in order, as a film asks
+    for k in 0..=48 {
+        let _ = ground_crater(&ev, k as f64 / 24.0);
+    }
+    let (before, finished) = (sr_eval::crater::law_evaluations(), ground_crater(&ev, 2.0).1);
+    assert_eq!(finished, 1.0);
+    for k in 49..=120 {
+        let (_, progress) = ground_crater(&ev, k as f64 / 24.0);
+        assert_eq!(progress, 1.0);
+    }
+    let after = sr_eval::crater::law_evaluations();
+    println!("CRATER law evaluations: {before} by 2 s, {after} by 5 s");
+    // the world takes 5 rigid steps a frame and asks for the surface at each: nothing new to work out
+    assert_eq!(after, before, "{} more evaluations in 72 frames of a crater that does not change", after - before);
+}

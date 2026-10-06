@@ -1287,6 +1287,33 @@ in first order and 0.7 and 2.3% in second on the mound, commit fdfb0b0) and is r
 and with owners and lifts the ratio new over old is 0.922, 0.962 and 0.956 (first order) and 0.995, 0.988 and 1.006
 (second order), within the noise of a machine with load1 between 5.6 and 11.5 and under 2% where it is not.
 
+Against an exact solution (test `ocean_reference` of `sr-sim`). The only reference the wave of the ocean has outside the code is the
+linear shallow-water wave of a Gaussian hump on still water, which has a closed form: with `g = 10`, depth 10 m, `sigma = 8` m and an
+amplitude `A` of 1e-3 of the depth, the surface at 4 s is `A` times the integral of `s exp(-s^2/2) J0(s r/sigma) cos(c s t/sigma)` over `s`,
+`c = sqrt(g h)`, evaluated in the test by quadrature. In a closed basin of 160 m the largest error of the surface over the cells is, as a
+fraction of `A`, 6.9e-2, 4.4e-2 and 2.6e-2 in first order and 1.0e-2, 3.1e-3 and 9.3e-4 in second for 4, 8 and 16 cells to `sigma`, which is
+the observed order 0.70 in first order and 1.71 in second over the two halvings, and the basin keeps its water to 3.3e-14 (commit 166a7b3,
+2026-10-06; the results are deterministic; the test takes 15.8 s in release at a load of about 15). At 32 cells to `sigma` the second-order error
+is 3.9e-4 (order 1.27 from the step before), near the floor of a linear reference for a hump of 1e-3 of the depth, and was measured in a
+disposable program and not in the test. This checks the scheme's dissipation and order against an answer from outside the code; it does
+not check the wave of an impact, whose cavity, depth response and dispersion are not in it.
+
+Where the shallow-water wave stops being the wave of water (a declared limit). The solver propagates what it is given without
+dispersion, and real water at the depth `h` has `omega^2 = g k tanh(k h)`; a bed that rises is, in the linear theory of the surface at
+rest, attenuated by `1 / cosh(k h)` (Kajiura 1963; Hammack 1973; the problem of an initial surface hump is that of Cauchy and Poisson, solved for
+an axisymmetric hump by Kranzer and Keller 1959: all cited from memory and not read). The exact linear answer for the hump of the paragraph
+above with `g = 10`, `h = 10` m is the same integral with `cos(omega(k) t)` in place of `cos(c k t)`, and it was evaluated by a disposable program
+(2026-10-06, not in the repository; deterministic): for a hump of `sigma = 40` m (`sigma / h = 4`) at 20 s the leading crest is `0.1516 A` at
+`r = 214.5` m against `0.1568 A` at `220.5` m for the shallow-water wave, 3 % lower; for `sigma = 16` m (`sigma / h = 1.6`) at 8 s the largest
+excursion is a trough of `-0.1714 A` at `41.5` m where the shallow-water wave has a crest of `0.1568 A` at `88` m; for `sigma = 8` m
+(`sigma / h = 0.8`) it is a trough of `-0.2374 A` at `14` m at 4 s (against the crest at `44` m) and of `-0.1366 A` at `42.5` m at 8 s (against `0.1148 A` at
+`84` m). The same comparison for the surface response of a bed uplift (`1 / cosh(k h)`): the shallow-water peak `0.1467 A` at `91` m against a dispersive
+trough of `-0.1535 A` at `34` m for `sigma = 20` m. A hump whose width is a depth or less is therefore not a wave that the solver
+gets slightly wrong but one it does not have: its exact linear form is a dispersed train. The cavity of the 90 478 kg rock in 20 m of water has
+a radius of the order of the depth (an estimate, not measured here), so the far-wave heights of the sea sweeps below are properties of this
+model and are not predictions of what water would do; no figure of this section has been compared with any measurement of a real impact,
+and none is claimed to be.
+
 What a sphere crossing deep water makes. A sphere of 2 m radius at 10 m below the surface of 20 m of water,
 crossing at 20 and 50 m/s, raises the highest surface by 8.69 and 5.52 m in the hydrostatic mode and by 0.177 and
 0.198 m in the filtered one (commit 4308a71, 2026-10-04, test ocean_depth_filter). On the authored impact-ocean

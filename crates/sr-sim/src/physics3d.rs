@@ -514,6 +514,41 @@ pub struct World3 {
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
     watch_contacts_per_step: usize,
+    /// Whether the shapes of a frame's deforming surfaces are built ahead, in parallel.
+    prefetch: bool,
+    /// Shapes built ahead and not yet taken by their step, by body and revision.
+    prefetched: Vec<(usize, ColliderUpdate3, SharedShape)>,
+    /// How many steps took a shape that had been built ahead.
+    prefetch_hits: u64,
+}
+
+/// Whether a replacement surface can be built: within its memory budget, finite and with triangles that name its vertices.
+fn validate_update(update: &ColliderUpdate3, ppm: f64) -> Result<(), String> {
+    let bytes = ColliderUpdate3::required_bytes(update.vertices.len(), update.triangles.len())
+        .ok_or("deforming collider memory overflow")?;
+    if bytes > update.max_bytes {
+        return Err("deforming collider memory budget exceeded".into());
+    }
+    if update.vertices.len() < 3
+        || update.triangles.is_empty()
+        || update.vertices.iter().flatten().any(|v| !v.is_finite() || !(v / ppm).is_finite())
+        || update.triangles.iter().flatten().any(|&i| i as usize >= update.vertices.len())
+    {
+        return Err("invalid deforming collider vertices or triangles".into());
+    }
+    Ok(())
+}
+
+/// The shape of a deforming surface, in physics axes: the same one whichever thread builds it and whenever.
+fn build_shape(
+    vertices: &[[f64; 3]],
+    triangles: Vec<[u32; 3]>,
+    ppm: f64,
+    fix_internal_edges: bool,
+) -> Result<SharedShape, String> {
+    let vertices = vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
+    let flags = if fix_internal_edges { TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED } else { TriMeshFlags::empty() };
+    SharedShape::trimesh_with_flags(vertices, triangles, flags).map_err(|e| format!("invalid deforming collider: {e}"))
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -755,6 +790,9 @@ impl World3 {
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
             watch_contacts_per_step: WATCH_CONTACTS_PER_STEP,
+            prefetch: true,
+            prefetched: Vec::new(),
+            prefetch_hits: 0,
             fractures: Vec::new(),
             spec,
             params,
@@ -791,6 +829,19 @@ impl World3 {
     pub fn with_frame_log_budget(mut self, bytes: usize) -> Self {
         self.frame_log = FrameLog { budget: bytes, frames: BTreeMap::new(), bytes: 0 };
         self
+    }
+
+    /// Whether the shapes of the deforming surfaces of the steps of a frame are built ahead, in parallel, once an impact has
+    /// been noticed (the default), or each in its own step. The simulation is the same bit for bit either way.
+    pub fn with_surface_prefetch(mut self, on: bool) -> Self {
+        self.prefetch = on;
+        self.prefetched.clear();
+        self
+    }
+
+    /// How many steps have taken a surface built ahead.
+    pub fn prefetch_hits(&self) -> u64 {
+        self.prefetch_hits
     }
 
     /// Bytes charged for the frames held.
@@ -1196,6 +1247,17 @@ impl World3 {
         }
     }
 
+    /// The earliest impact any watch against body `k` has noticed (the first watch on a tie), which the owner is told.
+    fn impact_of(&self, k: usize) -> Option<Impact3> {
+        self.watches
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.owner == k)
+            .filter_map(|(w, _)| self.state.impacts[w].map(|i| (i.step, w, i)))
+            .min_by_key(|(step, w, _)| (*step, *w))
+            .map(|(_, _, i)| i)
+    }
+
     fn sync_colliders(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         // Validate every replacement before changing the world. Failure leaves
@@ -1205,41 +1267,30 @@ impl World3 {
             if !self.fracture_enabled(k) || !driver.enabled(t, k) {
                 continue;
             }
-            // the owner is told the earliest impact any watch against it has noticed (the first watch on a tie)
-            let impact = self
-                .watches
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| w.owner == k)
-                .filter_map(|(w, _)| self.state.impacts[w].map(|i| (i.step, w, i)))
-                .min_by_key(|(step, w, _)| (*step, *w))
-                .map(|(_, _, i)| i);
+            let impact = self.impact_of(k);
             let Some(update) = driver.surface(t, k, self.state.collider_revisions[k], impact.as_ref())? else {
                 continue;
             };
             if self.spec.bodies[k].kind == BodyKind::Dynamic {
                 return Err("deforming colliders require static or kinematic bodies".into());
             }
-            let bytes = ColliderUpdate3::required_bytes(update.vertices.len(), update.triangles.len())
-                .ok_or("deforming collider memory overflow")?;
-            if bytes > update.max_bytes {
-                return Err("deforming collider memory budget exceeded".into());
-            }
-            if update.vertices.len() < 3
-                || update.triangles.is_empty()
-                || update.vertices.iter().flatten().any(|v| !v.is_finite() || !(v / ppm).is_finite())
-                || update.triangles.iter().flatten().any(|&i| i as usize >= update.vertices.len())
-            {
-                return Err("invalid deforming collider vertices or triangles".into());
-            }
-            let vertices = update.vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
-            let flags = if self.spec.fix_internal_edges {
-                TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED
-            } else {
-                TriMeshFlags::empty()
+            validate_update(&update, ppm)?;
+            // a shape built ahead for this very surface is taken, and any other is built now
+            let ahead = self
+                .prefetched
+                .iter()
+                .position(|(body, built, _)| *body == k && built.revision == update.revision)
+                .filter(|&at| {
+                    self.prefetched[at].1.vertices == update.vertices
+                        && self.prefetched[at].1.triangles == update.triangles
+                });
+            let shape = match ahead {
+                Some(at) => {
+                    self.prefetch_hits += 1;
+                    self.prefetched.remove(at).2
+                }
+                None => build_shape(&update.vertices, update.triangles, ppm, self.spec.fix_internal_edges)?,
             };
-            let shape = SharedShape::trimesh_with_flags(vertices, update.triangles, flags)
-                .map_err(|e| format!("invalid deforming collider: {e}"))?;
             replacements.push((k, update.revision, shape));
         }
         let changed = !replacements.is_empty();
@@ -1259,6 +1310,54 @@ impl World3 {
             }
         }
         Ok(())
+    }
+
+    /// Builds ahead, on several threads, the shapes of the deforming surfaces that the steps up to `target` will install.
+    /// A surface is a function of its time once the impact that makes it is known, so what is built is what each step
+    /// would build for itself; a step takes the shape whose surface it finds equal. Only the impacts noticed already are
+    /// used (a frame in which one is noticed builds its shapes step by step), and any failure is left to the steps, which
+    /// meet it in their own order.
+    fn prefetch_surfaces(&mut self, target: u64, driver: &mut dyn Driver3) {
+        use rayon::prelude::*;
+        self.prefetched.clear();
+        if !self.prefetch || self.watches.is_empty() || target < self.state.step + 2 {
+            return;
+        }
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let mut revisions = self.state.collider_revisions.clone();
+        let mut updates: Vec<(usize, ColliderUpdate3)> = Vec::new();
+        for step in self.state.step + 1..=target {
+            // the surface of the step that ends at `t` is asked for at `t`
+            let t = self.spec.start + step as f64 * self.spec.step;
+            for (k, revision) in revisions.iter_mut().enumerate() {
+                let Some(impact) = self.impact_of(k) else { continue };
+                if !self.fracture_enabled(k) || !driver.enabled(t, k) || self.spec.bodies[k].kind == BodyKind::Dynamic {
+                    continue;
+                }
+                match driver.surface(t, k, *revision, Some(&impact)) {
+                    Ok(Some(update)) if validate_update(&update, ppm).is_ok() => {
+                        *revision = Some(update.revision);
+                        updates.push((k, update));
+                    }
+                    Ok(None) => {}
+                    _ => return,
+                }
+            }
+        }
+        if updates.len() < 2 {
+            return;
+        }
+        let fix = self.spec.fix_internal_edges;
+        let built: Result<Vec<_>, String> = updates
+            .into_par_iter()
+            .map(|(k, update)| {
+                let shape = build_shape(&update.vertices, update.triangles.clone(), ppm, fix)?;
+                Ok((k, update, shape))
+            })
+            .collect();
+        if let Ok(built) = built {
+            self.prefetched = built;
+        }
     }
 
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
@@ -1427,6 +1526,7 @@ impl World3 {
         if let Some(frame) = self.frame_log.frames.get(&target) {
             return frame.clone();
         }
+        self.prefetched.clear();
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
                 if cp.state.step > self.state.step || self.state.step > target {
@@ -1434,11 +1534,14 @@ impl World3 {
                 }
             }
         }
+        self.prefetch_surfaces(target, driver);
         while self.state.step < target {
             if let Err(error) = self.step_once(driver) {
+                self.prefetched.clear();
                 return Frame3 { errors: vec![error], ..Default::default() };
             }
         }
+        self.prefetched.clear();
         if let Err(error) = self.sync_colliders(self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
