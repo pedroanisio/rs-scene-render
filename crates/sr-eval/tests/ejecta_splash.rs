@@ -148,6 +148,23 @@ fn the_same_entries_in_any_order_from_a_fresh_evaluator_and_from_particles_that_
 }
 
 #[test]
+fn an_emitter_that_starts_later_gives_the_ocean_what_it_gives_at_the_same_instants_when_it_starts_at_once() {
+    // the burst is born after the impact, so the emitter's start before it moves nothing but the clock the particles
+    // are counted in; with a whole number of fixed steps in it the fixed steps are the same instants
+    let at_once = evaluator(&scene(60.0, "", ""));
+    let late = evaluator(&scene(60.0, r#"emissionStart="1""#, ""));
+    let (left_at_once, left_late) = (alive(&at_once, 7.0), alive(&late, 7.0));
+    assert_eq!(left_at_once, left_late, "the same particles fall");
+    let (volume, ..) = total(&late, 167);
+    let wanted = (4000 - left_late) as f64 / 4000.0 * 0.8 * crater_volume(&late);
+    println!("SPLASH starts at 1 s: {volume:.6} m3 against {wanted:.6}");
+    assert!((volume - wanted).abs() < 1e-9 * wanted, "{volume} against {wanted}");
+    for step in 0..=167u64 {
+        assert_eq!(late.splash_into("sea", step).unwrap(), at_once.splash_into("sea", step).unwrap(), "step {step}");
+    }
+}
+
+#[test]
 fn without_the_attribute_the_particles_are_as_they_were_and_with_it_they_are_fewer() {
     let with = evaluator(&scene(60.0, "", ""));
     let without = evaluator(&scene(60.0, "", "").replace(r#" splash="debris""#, ""));

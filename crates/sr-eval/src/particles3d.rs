@@ -575,7 +575,14 @@ impl Driver for SceneDriver<'_, '_> {
         let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
         let entries = match (list.is_empty(), density) {
             (true, _) => Vec::new(),
-            (false, Some(solid)) => crate::splash::aggregate(list, emitter, pixels_per_meter, solid, 1000.),
+            (false, Some(solid)) => crate::splash::aggregate(
+                list,
+                emitter,
+                self.p.nodes[self.node as usize].start,
+                pixels_per_meter,
+                solid,
+                1000.,
+            ),
             (false, None) => {
                 return Err(Error::Driver("particles fell into the water before their crater was known".into()))
             }
