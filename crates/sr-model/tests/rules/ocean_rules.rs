@@ -148,3 +148,28 @@ fn numeric_bathymetry_does_not_silently_ignore_an_image_layer_selection() {
     let primary = xml.replace(r#" layer="depth""#, "");
     assert!(!sr_model::validate_str(&primary, &sr_model::LoadOptions::without_assets()).has_errors());
 }
+
+#[test]
+fn whitewater_foam_can_be_drawn_as_particles_or_mixed_into_the_water_albedo() {
+    for mode in ["particles", "albedo"] {
+        let node = format!(r#"<ocean id="o"><whitewater foamMode="{mode}"/></ocean>"#);
+        assert!(codes(&node, "1.3").is_empty(), "{mode}: {:?}", codes(&node, "1.3"));
+    }
+    for mode in ["", "mix", "Albedo", "none"] {
+        let node = format!(r#"<ocean id="o"><whitewater foamMode="{mode}"/></ocean>"#);
+        assert!(codes(&node, "1.3").contains(&"S06".into()), "{mode:?}: {:?}", codes(&node, "1.3"));
+    }
+    // the mix's own attributes: a coverage radius over zero, an albedo and a roughness in 0 to 1
+    let all = r#"<ocean id="o"><whitewater foamMode="albedo" foamRadius="1.5" foamAlbedo="0.9" foamRoughness="0.8"/></ocean>"#;
+    assert!(codes(all, "1.3").is_empty(), "{:?}", codes(all, "1.3"));
+    for bad in [
+        r#"foamRadius="0""#,
+        r#"foamRadius="-1""#,
+        r#"foamAlbedo="1.5""#,
+        r#"foamAlbedo="-0.1""#,
+        r#"foamRoughness="2""#,
+    ] {
+        let node = format!(r#"<ocean id="o"><whitewater foamMode="albedo" {bad}/></ocean>"#);
+        assert!(codes(&node, "1.3").contains(&"S06".into()), "{bad}: {:?}", codes(&node, "1.3"));
+    }
+}

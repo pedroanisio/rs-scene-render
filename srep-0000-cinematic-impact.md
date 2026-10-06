@@ -3497,6 +3497,10 @@ Also includes `pyroShape`, inventoried below.
 | `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
+| `foamMode` | enumeration `particles`, `albedo` | Default `particles` |
+| `foamRadius` | positiveDecimal | Optional; absent (one cell) |
+| `foamAlbedo` | unitDecimal | Default `0.9` |
+| `foamRoughness` | unitDecimal | Default `0.8` |
 
 ### `craterType`
 

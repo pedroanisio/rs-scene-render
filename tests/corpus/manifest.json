@@ -942,6 +942,12 @@
     ],
     "whitewater-checkpoint-range.scene.xml": [
       "S06"
+    ],
+    "whitewater-foam-albedo-range.scene.xml": [
+      "S06"
+    ],
+    "whitewater-foam-mode.scene.xml": [
+      "S06"
     ]
   },
   "valid": {
@@ -1005,7 +1011,8 @@
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],
     "voxels.scene.xml": [],
-    "whitewater-checkpoint.scene.xml": []
+    "whitewater-checkpoint.scene.xml": [],
+    "whitewater-foam-albedo.scene.xml": []
   },
   "warnings": {
     "a03-remote.scene.xml": [
