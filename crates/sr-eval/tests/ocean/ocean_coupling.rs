@@ -270,7 +270,7 @@ fn colliders_that_are_neither_bed_nor_body_are_rejected_when_the_scene_loads() {
 #[test]
 #[ignore = "timing measurement"]
 fn ocean_replay_seconds_at_target_resolution() {
-    let full = include_str!("../../../examples/cinematic-impact/hero-hires.scene.xml");
+    let full = include_str!("../../../../examples/cinematic-impact/hero-hires.scene.xml");
     let a = full.find("<ocean").unwrap();
     let ocean = &full[a..full.find("</ocean>").unwrap() + "</ocean>".len()];
     let seabed = &full[full.find("<object3D id=\"seabed\"").unwrap()..];

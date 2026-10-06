@@ -3391,7 +3391,7 @@ timings are artistic, explicitly identified in scene metadata. It is a workload
 and integration example, not a validated scientific Chicxulub reconstruction or
 an accepted cinematic-quality film. The evaluator integration test exercises
 pre-impact, impact, late settling and reverse replay; production-size execution
-is practical with `cargo test --release -p sr-eval --test cinematic_impact`.
+is practical with `cargo test --release -p sr-eval --test crater cinematic_impact::`.
 The full encoded-sequence gate below remains independently required.
 
 Two further examples are written in physical units (`physics/@pixelsPerMeter="1"`, metres and
@@ -3401,7 +3401,7 @@ kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and 
 that hold 80 % of the crater's mass, are consequences of the contact) and
 [`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
 second-order ocean 20 m deep that carries it with `bodyCoupling="full"` and makes a crater in the
-seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
+seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test crater impact_scenes::` checks, with no GPU, that
 no effect has a time attribute, that nothing happens before the contact, that the crater, the dust, the
 heat in the dust and the ejecta (their mass, which is 0.8 of the crater's, and their reach) grow with speed,
 mass and angle, that an oblique impact carries the ejecta downrange, that the ocean's water volume is conserved to the last
@@ -3542,3 +3542,9 @@ without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.
+
+The integration tests of `sr-sim`, `sr-eval`, `sr-model`, `sr-3d` and `scene-render` are built as a few binaries, one for
+each area, and a test file that this document names (for example `crater_capture` or `impact_scenes`) is a module of the
+binary of its area: `crates/<crate>/tests/<area>/<file>.rs`, run with `cargo test -p <crate> --test <area> <file>::`. The
+tests that observe allocations (`crater_memory`, `terrain_memory`, `pyro_export_memory`, each with its own global
+allocator), the timing tests (`perf`) and the long ignored `hero_hires` keep binaries of their own.

@@ -6,8 +6,8 @@
 
 use glam::{DMat4, DVec3};
 
-const FLAT: &str = include_str!("fixtures/ring-flat.obj");
-const CLOSED: &str = include_str!("fixtures/ring-closed.obj");
+const FLAT: &str = include_str!("../fixtures/ring-flat.obj");
+const CLOSED: &str = include_str!("../fixtures/ring-closed.obj");
 
 struct Dir(std::path::PathBuf);
 impl Dir {
