@@ -1585,3 +1585,26 @@ fn encode_strict_accepts_posterize_time_on_a_node_that_starts_later() {
         String::from_utf8_lossy(&o.stderr)
     );
 }
+
+#[test]
+fn validate_checks_every_layout_the_document_declares() {
+    // a layout has its own frame size and safe area: a caption that is inside the project's safe area can cross the
+    // layout's, and only render and encode used to say so
+    let dir = std::env::temp_dir().join(format!("sr-cli-layouts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("l.scene.xml");
+    std::fs::write(
+        &file,
+        r##"<scene version="1.1"><project width="640" height="360" fps="10" duration="1" background="#000000" safeArea="sa-wide"/>
+<layouts><layout id="wide" width="640" height="360" safeArea="sa-wide"/><layout id="tall" width="360" height="640" safeArea="sa-tall"/></layouts>
+<safeAreas><safeArea id="sa-wide" preset="title-safe" enforce="error"/><safeArea id="sa-tall" preset="youtube-shorts" enforce="error"/></safeAreas>
+<composition/>
+<captions><captionTrack id="cc" language="en" mode="burn"><cue start="0" end="1" text="Hello there"/></captionTrack></captions></scene>"##,
+    )
+    .unwrap();
+    let f = file.display().to_string();
+    let v = run(&["validate", &f]);
+    let out = String::from_utf8_lossy(&v.stdout);
+    assert_eq!(v.status.code(), Some(1), "{out}");
+    assert!(out.contains("SA01") && out.contains("layout tall"), "{out}");
+}

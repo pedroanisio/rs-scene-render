@@ -483,21 +483,52 @@ struct FileReport<'a> {
 /// per node carrying `safeAreaForce`, and how the frames were sampled.
 fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<String>) {
     let Ok(doc) = sr_model::load_str(text, opts) else { return (Vec::new(), Vec::new()) };
-    let ev = match sr_eval::Evaluator::new(&doc, &Default::default()) {
-        Ok(ev) => ev,
-        Err(report) => return (report.diagnostics, Vec::new()),
-    };
-    // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
-    let compiled = ev.warnings().to_vec();
-    if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
-        return (compiled, Vec::new());
+    // the document as authored, then each layout it declares: a layout has its own frame size, safe area and
+    // overrides, and render and encode check the one they are asked for
+    let layouts: Vec<Option<String>> = std::iter::once(None)
+        .chain(doc.scene.layouts.iter().flat_map(|l| l.layouts.iter()).map(|l| Some(l.id.clone())))
+        .collect();
+    let (mut found, mut info): (Vec<Diagnostic>, Vec<String>) = (Vec::new(), Vec::new());
+    for layout in layouts {
+        let eo = sr_eval::EvalOptions { layout: layout.clone(), ..Default::default() };
+        let tag = |mut d: Diagnostic| {
+            if let Some(l) = &layout {
+                d.message = format!("{} (layout {l})", d.message);
+            }
+            d
+        };
+        let ev = match sr_eval::Evaluator::new(&doc, &eo) {
+            Ok(ev) => ev,
+            Err(report) => {
+                found.extend(report.diagnostics.into_iter().map(tag));
+                continue;
+            }
+        };
+        // what compiling warns about (an attribute this build does not read, a placeholder naming no parameter)
+        // a warning every layout shares is listed once
+        for d in ev.warnings().iter().cloned().map(tag) {
+            if !found.iter().any(|f| f.code == d.code && f.message == d.message) {
+                found.push(d);
+            }
+        }
+        if ev.program().safe_enforce == sr_eval::SafeEnforce::Off && doc.scene.captions.is_none() {
+            continue;
+        }
+        let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
+        for id in &out.forced {
+            let line = format!("info[SA02]: {id} forced outside the safe area");
+            if !info.contains(&line) {
+                info.push(line);
+            }
+        }
+        if let Some(n) = &out.note {
+            let line = format!("info: safe area audit {n}");
+            if !info.contains(&line) {
+                info.push(line);
+            }
+        }
+        found.extend(out.diagnostics(ev.program()).into_iter().map(tag));
     }
-    let out = sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration);
-    let mut info: Vec<String> =
-        out.forced.iter().map(|id| format!("info[SA02]: {id} forced outside the safe area")).collect();
-    info.extend(out.note.as_ref().map(|n| format!("info: safe area audit {n}")));
-    let mut found = compiled;
-    found.extend(out.diagnostics(ev.program()));
     (found, info)
 }
 
