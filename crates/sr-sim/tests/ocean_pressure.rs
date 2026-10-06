@@ -123,6 +123,27 @@ fn without_lifts_nothing_is_credited_and_bad_lifts_are_errors() {
     assert!(bad(Lift { owner: 0, columns: vec![(1, f64::NAN)] }));
 }
 
+#[test]
+fn a_column_is_lifted_once_by_a_body_and_a_repeated_one_is_an_error() {
+    let bad = |lifts: Vec<Lift>| {
+        let mut ocean = basin(Order::First);
+        ocean
+            .at_driven(0.2, &mut |_: f64, f: &mut Forcing| -> Result<(), Error> {
+                f.bed.fill(DEPTH);
+                f.occupancy.fill(0.0);
+                f.owner.fill(0);
+                f.lifts = lifts.clone();
+                Ok(())
+            })
+            .is_err()
+    };
+    // twice in one lift, and in two lifts of one body: the amounts would be added and the credit with them
+    assert!(bad(vec![Lift { owner: 0, columns: vec![(5, 0.5), (9, 0.5), (5, 0.5)] }]));
+    assert!(bad(vec![Lift { owner: 1, columns: vec![(5, 0.5)] }, Lift { owner: 1, columns: vec![(5, 0.25)] }]));
+    // the same column lifted by two bodies is two bodies' lifts, and the one that lifts it more owns it
+    assert!(!bad(vec![Lift { owner: 0, columns: vec![(5, 0.5)] }, Lift { owner: 1, columns: vec![(5, 0.25)] }]));
+}
+
 /// A driver of the moving mound that lists what it was offered with every completed step.
 fn mound_driver(speed: f64, offers: &mut Offers) -> impl FnMut(f64, &mut Forcing) -> Result<(), Error> + '_ {
     move |time, f| {

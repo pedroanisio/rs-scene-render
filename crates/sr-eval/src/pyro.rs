@@ -135,9 +135,7 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
     let craters = children(e).iter().any(|c| c.get_attr("crater").is_some());
     if craters {
         // the impact is on the composition clock, and so must the smoke be
-        let start = p.nodes[node as usize].start;
-        let composition = |x: f64| crate::sim::source_sample(p, node, x + start, x + start).0;
-        if [0.0, 1.0, 7.5].iter().any(|&x| composition(x) != x + start) {
+        if !crate::sim::composition_clock(p, node, p.nodes[node as usize].start) {
             return Err("smoke from a crater needs the composition clock".into());
         }
     }

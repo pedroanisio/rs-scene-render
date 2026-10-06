@@ -716,7 +716,14 @@ pub(crate) fn build(
     let hulls: Vec<crate::group::BodyHull> = bodies
         .iter()
         .zip(&specs)
-        .map(|(node, spec)| crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape))
+        .map(|(node, spec)| {
+            let hull = crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape);
+            if spec.kind == BodyKind::Dynamic {
+                hull
+            } else {
+                hull.fixed()
+            }
+        })
         .collect();
     let start = ph.map(|p| p.start).unwrap_or(0.0);
     let step = ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);

@@ -362,3 +362,22 @@ fn procedural_swell_has_authored_speed_and_preserves_water_and_the_solver_state(
     assert!((water.cells.iter().map(|c| c.depth).sum::<f64>() - 0.28).abs() < 1e-12);
     assert!(waves::apply(&s, &base, &[waves::Wave { wavelength: 1.0, ..w }]).is_err());
 }
+
+#[test]
+fn the_canonical_step_is_the_last_whole_step_that_has_ended_by_the_time() {
+    use sr_sim::ocean::canonical_step;
+    assert_eq!(canonical_step(0.0, 0.05), 0);
+    assert_eq!(canonical_step(0.049, 0.05), 0);
+    assert_eq!(canonical_step(0.05, 0.05), 1);
+    // 0.85 / 0.05 rounds up to 17, but 17 steps of 0.05 are more than 0.85: the step is 16
+    assert_eq!(0.85_f64 / 0.05, 17.0);
+    assert_eq!(canonical_step(0.85, 0.05), 16);
+    // and a time that is a tick by the product but not by the quotient is the tick
+    assert_eq!(canonical_step(17.0 * 0.05, 0.05), 17);
+    // every tick is the step it is named by, and a time before the next is that step
+    for k in 0..2000u64 {
+        let tick = k as f64 * 0.05;
+        assert_eq!(canonical_step(tick, 0.05), k, "tick {k}");
+        assert_eq!(canonical_step(tick + 0.0249, 0.05), k, "after tick {k}");
+    }
+}

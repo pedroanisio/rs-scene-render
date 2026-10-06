@@ -116,11 +116,7 @@ fn fall_setup(
     let ocean_index = *ocean;
     let ocean = &p.nodes[ocean_index];
     let own = &p.nodes[node as usize];
-    let identity = |index: u32| {
-        let start = p.nodes[index as usize].start;
-        let composition = |x: f64| crate::sim::source_sample(p, index, x + start, x + start).0;
-        [0.0, 1.0, 7.5].iter().all(|&x| composition(x) == x + start)
-    };
+    let identity = |index: u32| crate::sim::composition_clock(p, index, p.nodes[index as usize].start);
     if !identity(node) || !identity(ocean_index as u32) {
         return Err(format!("{id} and the ocean it falls into need the composition clock"));
     }
@@ -575,7 +571,14 @@ impl Driver for SceneDriver<'_, '_> {
         let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
         let entries = match (list.is_empty(), density) {
             (true, _) => Vec::new(),
-            (false, Some(solid)) => crate::splash::aggregate(list, emitter, pixels_per_meter, solid, 1000.),
+            (false, Some(solid)) => crate::splash::aggregate(
+                list,
+                emitter,
+                self.p.nodes[self.node as usize].start,
+                pixels_per_meter,
+                solid,
+                1000.,
+            ),
             (false, None) => {
                 return Err(Error::Driver("particles fell into the water before their crater was known".into()))
             }
@@ -700,23 +703,37 @@ impl Sims {
         ocean: &str,
         step: u64,
     ) -> Result<(), String> {
-        for n in g.nodes.iter().filter(|n| n.kind == "particles3D") {
-            let Some(node) = p.nodes.iter().position(|o| o.id == n.id).map(|o| o as u32) else { continue };
-            let listed = p.nodes.iter().any(|o| {
-                o.name == "ocean"
-                    && &*o.id == ocean
-                    && text(&*o.elem, "splash").is_some_and(|l| l.split_whitespace().any(|s| s == &*n.id))
-            });
-            if !listed {
-                continue;
-            }
-            let emitter = match self.runtime(p, graphs, n, node, splash) {
+        // the emitters the ocean lists, whether or not they are in this frame: one that has left the composition by
+        // now still threw what fell before it did
+        let listed: Vec<Arc<str>> = p
+            .nodes
+            .iter()
+            .filter(|o| o.name == "ocean" && &*o.id == ocean)
+            .filter_map(|o| text(&*o.elem, "splash"))
+            .flat_map(|l| l.split_whitespace().map(Arc::from).collect::<Vec<Arc<str>>>())
+            .collect();
+        for id in listed {
+            let Some(node) = p.nodes.iter().position(|o| o.id == id).map(|o| o as u32) else {
+                return Err(format!("ocean {ocean} lists {id} in splash and there is no such emitter"));
+            };
+            let own = &p.nodes[node as usize];
+            let n = match g.nodes.iter().find(|n| n.id == id) {
+                Some(n) => n.clone(),
+                None => {
+                    // not in this frame: the node as it is when it starts
+                    let frame = graphs.at(own.start + num(&*own.elem, "emissionStart", 0.));
+                    frame.nodes.iter().find(|n| n.id == id).cloned().ok_or_else(|| {
+                        format!("{id}, which falls into ocean {ocean}, is not in the composition when it starts")
+                    })?
+                }
+            };
+            let emitter = match self.runtime(p, graphs, &n, node, splash) {
                 Ok(rt) => rt.splash.clone(),
                 Err(error) => return Err(error.clone()),
             };
-            let emitter = emitter.ok_or_else(|| format!("{} falls into no ocean", n.id))?;
-            let until = emitter.needed_for(step, p.nodes[node as usize].start);
-            self.run(p, g.time, n, node, Some(until), false, graphs, fields, physics.as_deref_mut(), pyro, splash)?;
+            let emitter = emitter.ok_or_else(|| format!("{id} falls into no ocean"))?;
+            let until = emitter.needed_for(step, own.start);
+            self.run(p, g.time, &n, node, Some(until), false, graphs, fields, physics.as_deref_mut(), pyro, splash)?;
         }
         Ok(())
     }
