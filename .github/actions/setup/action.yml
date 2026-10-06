@@ -6,26 +6,11 @@ runs:
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy, rustfmt
-    - shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libegl1 libgl1-mesa-dri ffmpeg curl libheif-examples libheif-plugin-libde265 python3-venv python3-lxml fonts-dejavu-core fonts-dejavu-extra fonts-noto-color-emoji fonts-wqy-zenhei
-        # Fail at setup if HEVC decoding is unavailable, before building the workspace.
-        heif-convert crates/sr-media/tests/fixtures/still/p3-nclx.heic "$RUNNER_TEMP/hevc-check.png"
-        test -s "$RUNNER_TEMP/hevc-check.png"
-        # The HEIC tests skip where the decoder is missing; here that must be a failure.
-        echo "SR_REQUIRE_HEIC=1" >> "$GITHUB_ENV"
-        echo "SR_REQUIRE_GPU=1" >> "$GITHUB_ENV"
-        echo "SR_GPU_BACKEND=vulkan" >> "$GITHUB_ENV"
-        python3 -m venv --system-site-packages "$RUNNER_TEMP/evidence-python"
-        "$RUNNER_TEMP/evidence-python/bin/pip" install -r tools/evidence/requirements.txt
-        echo "$RUNNER_TEMP/evidence-python/bin" >> "$GITHUB_PATH"
-        icd=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
-        test -n "$icd"
-        echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
-        echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/runtime" >> "$GITHUB_ENV"
-        mkdir -m 700 -p "$RUNNER_TEMP/runtime"
-    - shell: bash
-      run: |
-        mkdir -p target/environment
-        { git rev-parse HEAD; rustc -Vv; uname -a; dpkg-query -W mesa-vulkan-drivers libvulkan1 ffmpeg libheif-examples libheif-plugin-libde265; python3 -m pip freeze; vulkaninfo --summary; } > target/environment/versions.txt 2>&1
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: 'true'
+        cache-workspace-crates: 'true'
+    - uses: ./.github/actions/runtime
+      with:
+        evidence: 'true'
+        heic: 'true'
