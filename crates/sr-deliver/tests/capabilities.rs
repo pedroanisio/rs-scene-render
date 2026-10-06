@@ -43,7 +43,12 @@ fn the_published_manifest_is_well_formed() {
     assert_eq!(m.format, FORMAT);
     assert_eq!(m.engine.name, "rs-scene-render");
     assert_eq!(m.engine.version, env!("CARGO_PKG_VERSION"), "the manifest names this release");
-    assert_eq!(m.schema, sr_model::SCHEMA_VERSION, "the manifest covers the schema this engine validates");
+    // the schema this engine vendors, as schema/UPSTREAM records its release
+    let upstream =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/UPSTREAM"))
+            .unwrap();
+    assert!(upstream.contains(&format!("release {},", m.schema)), "schema {} is not the vendored release", m.schema);
+    assert!(m.schema.starts_with(sr_model::SCHEMA_VERSION));
     let mut seen = std::collections::HashSet::new();
     for e in &m.entries {
         let c = Construct::parse(&e.construct).unwrap_or_else(|| panic!("{}: not a construct", e.construct));
@@ -113,4 +118,33 @@ fn approximate_constructs_are_sup_approx_and_unused_ones_nothing() {
     // an unsupported construct is not reported (the document could not use it), nor is anything the document lacks
     let none = r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><composition><shape id="s" shape="rect" width="4" height="4" radius="2"/></composition></scene>"#;
     assert!(findings(&test_manifest(), none).is_empty());
+}
+
+/// The note of a construct an accepted SREP adds and this engine does not implement yet.
+fn pending_note(srep: u32) -> String {
+    format!("SREP {srep} is accepted and not implemented by this engine yet")
+}
+
+#[test]
+fn every_pending_construct_is_listed_as_reported_and_nothing_else_is_pending() {
+    use sr_eval::pending::PENDING;
+    let m = manifest();
+    let listed = |construct: &str| m.entries.iter().find(|e| e.construct == construct);
+    let mut pending_constructs = Vec::new();
+    for p in PENDING {
+        let constructs =
+            p.elements.iter().map(|e| e.to_string()).chain(p.attributes.iter().map(|(e, a, _)| format!("{e}/@{a}")));
+        for c in constructs {
+            let e = listed(&c).unwrap_or_else(|| panic!("{c} (SREP {}) is not in capabilities.json", p.srep));
+            assert_eq!(e.status, Status::Reported, "{c}");
+            assert!(e.note.as_deref().is_some_and(|n| n.starts_with(&pending_note(p.srep))), "{c}: {:?}", e.note);
+            pending_constructs.push(c);
+        }
+    }
+    // an implemented SREP leaves both the table and the manifest
+    for e in &m.entries {
+        if e.note.as_deref().is_some_and(|n| n.contains("not implemented by this engine yet")) {
+            assert!(pending_constructs.contains(&e.construct), "{} is listed as pending but has no row", e.construct);
+        }
+    }
 }
