@@ -943,7 +943,6 @@ fn explain(code: Option<&str>, out: &mut Out) -> std::io::Result<ExitCode> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// `scene-render captions`: the caption dump of `sr_gpu::caption_dump` on standard output, one JSON document.
 fn captions(
     file: &Path,
@@ -991,6 +990,7 @@ fn captions(
     Ok(if dump.is_complete() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval(
     file: &Path,
     time: Option<f64>,
