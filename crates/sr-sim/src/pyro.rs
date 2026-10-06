@@ -48,6 +48,9 @@ pub enum Error {
     Invalid(&'static str),
     #[error("pyro resource limit: {0}")]
     Limit(&'static str),
+    /// What the scene's rigid world, a driver of the inputs, said when it could not answer.
+    #[error("pyro inputs: {0}")]
+    Driver(String),
     #[error("pyro pressure solve did not converge (residual {0}); increase iterations or check sealed-domain expansion and collider motion")]
     Pressure(f64),
     #[error(transparent)]
