@@ -55,6 +55,43 @@ fn spec(path: &Path, codec: Codec, input: InputFormat) -> EncodeSpec {
     }
 }
 
+#[test]
+fn svt_av1_two_pass_produces_and_consumes_statistics() {
+    if !have_ffmpeg() || !working_encoder("libsvtav1") {
+        eprintln!("FFmpeg with SVT-AV1 unavailable; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(&dir.path().join("two-pass.mp4"), Codec::Av1, InputFormat::Nv12);
+    s.height = 64;
+    s.bitrate = Some(100_000);
+    let log = dir.path().join("stats");
+    s.pass = Some((1, log.clone()));
+    let (_, encoder) = s.args().unwrap();
+    assert_eq!(encoder, "libsvtav1", "SVT-AV1 required for this regression");
+    encode(&s, 25);
+    let stats: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("stats"))
+        .collect();
+    assert!(!stats.is_empty(), "successful pass 1 must write statistics");
+    assert!(stats.iter().any(|p| std::fs::metadata(p).unwrap().len() > 0));
+    assert!(!s.path.exists(), "pass 1 must not publish output");
+    s.pass = Some((2, log));
+    encode(&s, 25);
+    assert_eq!(probe(&s.path).unwrap().video.unwrap().codec, "av1");
+    // A second pass must depend on its first pass's data, not silently encode independently.
+    for path in stats {
+        std::fs::remove_file(path).unwrap();
+    }
+    s.path = dir.path().join("missing-stats.mp4");
+    let mut e = Encoder::start(&s).unwrap();
+    let result = e.write(&frame(s.input, 0, s.width as usize, s.height as usize)).and_then(|_| e.finish());
+    assert!(result.is_err(), "pass 2 without statistics must fail");
+    assert!(!s.path.exists());
+}
+
 fn frame(input: InputFormat, k: u32, w: usize, h: usize) -> Vec<u8> {
     match input {
         InputFormat::Nv12 => {

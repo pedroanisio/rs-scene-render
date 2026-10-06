@@ -29,12 +29,14 @@ fn cell(s: &str) -> V {
     V::Str(s.into())
 }
 
-/// Splits delimited text into records (RFC 4180 quoting).
+/// Splits delimited text into records (RFC 4180 quoting). Plain blank lines
+/// are skipped; explicitly quoted empty records are retained.
 pub fn split_records(text: &str, delim: char) -> Result<Vec<Vec<String>>, String> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = String::new();
     let mut quoted = false;
+    let mut record_started = false;
     let mut chars = text.chars().peekable();
     let mut line = 1;
     while let Some(c) = chars.next() {
@@ -53,7 +55,9 @@ pub fn split_records(text: &str, delim: char) -> Result<Vec<Vec<String>>, String
             }
         } else if c == '"' && field.is_empty() {
             quoted = true;
+            record_started = true;
         } else if c == delim {
+            record_started = true;
             row.push(std::mem::take(&mut field));
         } else if c == '\n' || c == '\r' {
             if c == '\r' && chars.peek() == Some(&'\n') {
@@ -61,19 +65,21 @@ pub fn split_records(text: &str, delim: char) -> Result<Vec<Vec<String>>, String
             }
             line += 1;
             row.push(std::mem::take(&mut field));
-            if !(row.len() == 1 && row[0].is_empty()) {
+            if record_started {
                 rows.push(std::mem::take(&mut row));
             } else {
                 row.clear();
             }
+            record_started = false;
         } else {
+            record_started = true;
             field.push(c);
         }
     }
     if quoted {
         return Err(format!("unterminated quoted field (line {line})"));
     }
-    if !field.is_empty() || !row.is_empty() {
+    if record_started {
         row.push(field);
         rows.push(row);
     }
@@ -130,6 +136,28 @@ pub fn parse_list(s: &str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_empty_records_survive_line_endings_and_eof() {
+        for ending in ["", "\n", "\r\n", "\r"] {
+            let text = format!("name\n\"\"{ending}");
+            assert_eq!(split_records(&text, ',').unwrap(), vec![vec!["name".to_string()], vec![String::new()]]);
+            for format in [DataSourceFormat::Csv, DataSourceFormat::Tsv] {
+                let rows = parse(format, &text).unwrap();
+                assert_eq!(rows.len(), 1);
+                let V::Obj(row) = &rows[0] else { panic!("expected data row") };
+                assert_eq!(row["name"], V::Str("".into()));
+            }
+        }
+        assert_eq!(split_records("\"\"", ',').unwrap(), vec![vec![String::new()]]);
+        assert_eq!(split_records("\n\"\"\n\n\"\"\n", ',').unwrap(), vec![vec![String::new()], vec![String::new()]]);
+        assert_eq!(
+            split_records("\n\r\n\r", ',').unwrap(),
+            Vec::<Vec<String>>::new(),
+            "plain blank lines remain skipped"
+        );
+        assert_eq!(split_records("\"\",\"\"", ',').unwrap(), vec![vec![String::new(), String::new()]]);
+    }
 
     #[test]
     fn formats() {

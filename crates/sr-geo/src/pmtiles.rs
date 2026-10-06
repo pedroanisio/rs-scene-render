@@ -342,7 +342,13 @@ fn read_at(f: &mut File, size: u64, off: u64, len: u64) -> Result<Vec<u8>, Strin
         Some(end) if end <= size => {}
         _ => return Err(format!("{len} bytes at offset {off} are beyond the end of the archive ({size} bytes)")),
     }
-    let mut b = vec![0u8; len as usize];
+    // Apply the same encoded-byte ceiling as decompression before allocating
+    // an archive-controlled section, even when it fits within a large file.
+    if len > MAX_DECOMPRESSED {
+        return Err(format!("section exceeds {MAX_DECOMPRESSED}-byte limit"));
+    }
+    let len = usize::try_from(len).map_err(|_| "section length exceeds address space")?;
+    let mut b = vec![0u8; len];
     f.seek(SeekFrom::Start(off)).and_then(|_| f.read_exact(&mut b)).map_err(|e| e.to_string())?;
     Ok(b)
 }

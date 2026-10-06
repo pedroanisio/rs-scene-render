@@ -623,6 +623,9 @@ impl EncodeSpec {
                 s(&mut a, &["-preset", &svt.to_string()]);
                 rate_control(&mut a, "-crf", crf);
                 let mut params = vec![format!("keyint={gop}")];
+                if let Some((p, log)) = &self.pass {
+                    s(&mut a, &["-pass", &p.to_string(), "-passlogfile", &log.display().to_string()]);
+                }
                 if let Some(m) = &self.hdr.mastering_display {
                     params.push(format!("mastering-display={m}"));
                 }

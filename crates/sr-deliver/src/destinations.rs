@@ -267,6 +267,7 @@ fn curl_with_deadline(
 }
 
 fn join(base: &str, name: &str) -> String {
+    let name = uri_encode(name, true);
     if base.ends_with('/') {
         format!("{base}{name}")
     } else {
@@ -524,6 +525,19 @@ pub fn deliver_all(
 mod tests {
     use super::*;
 
+    #[test]
+    fn remote_filenames_are_one_encoded_url_path_component() {
+        let name = "my film#take?100%[1] café.mp4";
+        let encoded = "my%20film%23take%3F100%25%5B1%5D%20caf%C3%A9.mp4";
+        for base in ["https://example.test/upload", "https://example.test/upload/", "sftp://user@example.test/upload"] {
+            assert_eq!(join(base, name), format!("{}/{encoded}", base.trim_end_matches('/')));
+        }
+        assert_eq!(
+            join("https://example.test/already%20encoded/", "plain.mp4"),
+            "https://example.test/already%20encoded/plain.mp4"
+        );
+    }
+
     #[cfg(unix)]
     fn curl_fixture(name: &str, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -533,6 +547,74 @@ mod tests {
         std::fs::write(&tool, format!("#!/usr/bin/env python3\n{script}\n")).unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
         tool
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn uploads_preserve_special_filenames_in_remote_locations() {
+        const CHILD: &str = "SR_TEST_ENCODED_FILENAMES";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let dir = PathBuf::from(dir);
+            let file = dir.join("my film#take?100%[1] café.mp4");
+            std::fs::write(&file, b"rendered bytes").unwrap();
+            let encoded = "my%20film%23take%3F100%25%5B1%5D%20caf%C3%A9.mp4";
+            for (kind, base) in [
+                (m::DestinationKind::HttpPut, "https://example.test/upload/"),
+                (m::DestinationKind::AzureBlob, "https://example.test/upload"),
+                (m::DestinationKind::Sftp, "sftp://user@example.test/upload"),
+            ] {
+                let destination = m::Destination {
+                    loc: Default::default(),
+                    kind,
+                    uri: base.into(),
+                    credentials: Some("encoded_filenames".into()),
+                };
+                assert_eq!(
+                    upload(&destination, std::slice::from_ref(&file), &dir).unwrap(),
+                    vec![format!("{}/{encoded}", base.trim_end_matches('/'))]
+                );
+            }
+            // An explicit single-file HTTP destination owns its filename.
+            let destination = m::Destination {
+                loc: Default::default(),
+                kind: m::DestinationKind::HttpPut,
+                uri: "https://example.test/explicit%20name.mp4".into(),
+                credentials: None,
+            };
+            assert_eq!(upload(&destination, &[file], &dir).unwrap(), vec![destination.uri]);
+            return;
+        }
+        let tool = curl_fixture(
+            "encoded-filenames",
+            r#"import sys
+from urllib.parse import urlsplit, unquote
+config = sys.stdin.read()
+url = next(line[7:-1] for line in config.splitlines() if line.startswith('url = "'))
+parts = urlsplit(url)
+assert parts.fragment == '', url
+assert parts.query in ('', 'sig=test'), url
+assert unquote(parts.path).rsplit('/', 1)[1] in ('my film#take?100%[1] café.mp4', 'explicit name.mp4'), url
+assert ' ' not in url, url
+"#,
+        );
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "destinations::tests::uploads_preserve_special_filenames_in_remote_locations",
+                "--test-threads=1",
+            ])
+            .env(CHILD, tool.parent().unwrap())
+            .env("SR_CURL", &tool)
+            .env("SR_CREDENTIALS_ENCODED_FILENAMES_AZURE_SAS", "sig=test")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(tool.parent().unwrap()).unwrap();
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 
     #[test]
