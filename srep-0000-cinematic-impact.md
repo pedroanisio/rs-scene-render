@@ -2011,9 +2011,23 @@ instant asked for (in the cases tried, smoke with a `dt` of 0.2 s read the rigid
 dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
 loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
 
-Every member of a group runs on the composition clock (the ocean's local time is the
-composition time less its start, with no remapping), because the exchange is indexed by it. The
-rigid world's frame memory, checkpoints and the log together
+Every member of a group runs on one clock, and it may be any clock that stretches time the same
+way everywhere: a `group`'s `timeScale` and `timeOffset`, nested or not (a clock the engine finds as
+`scale * t + offset` of the composition's), or the composition's own. The ocean, every body of the 3D
+world (the world is one, so a body the ocean does not carry counts too) and every smoke volume and
+particle system that collides with a body of the world must run on that same clock, and one that does not
+is an error that names it and the ocean whose clock it differs from; a remap, a loop, a freeze or a clip's
+rate on the way is not a uniform clock and is refused. The ocean's local time is the
+group's time less its `start`, because the exchange is indexed by it, and the rigid world runs on the group's time
+(`physics@start`, the steps of `fixedStep`, the force fields' windows and the ocean's `dt` are in it): a scene in a
+group of `timeScale` 0.5 at composition time `T` is, bit for bit, the scene without the group at `T / 2`
+(and at `2 T` for a scale of 2; the tests compare the ball, the water cells and the particles, for scales of
+0.3, 0.5, 0.8, 1.5 and 2, for nested groups and for a late-starting group, in any order of requests and
+from a fresh evaluator). The world starts at the composition time at which the group's clock reads its
+start; a clock that puts that before the composition begins (a negative `timeOffset` against a world that
+starts at zero) is an error, since the scene cannot be asked about before it. Not covered: smoke from a crater
+and particles that fall into an ocean keep requiring the composition clock, as does a 2D rigid world, which
+stays on the composition's time whatever the group does. The rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
