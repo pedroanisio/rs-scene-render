@@ -305,7 +305,7 @@ impl Func {
             "valueAtTime" => (ValueAtTime, 1, 1),
             "propAtTime" => (PropAt, 2, 2),
             "penner" => (Penner, 2, 2),
-            "wiggle" => (Wiggle, 2, 5),
+            "wiggle" => (Wiggle, 2, 6),
             "noise" => (Noise, 1, 3),
             "random" => (Random, 0, 2),
             "loopIn" => (LoopIn, 0, 2),
@@ -1258,6 +1258,11 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             let t = match args.get(4) {
                 Some(v) => v.num(),
                 None => host.var(Var::Time).num(),
+            };
+            // `hold`: the wiggle is held for that many seconds at a time (animating on twos or threes)
+            let t = match args.get(5).map(V::num) {
+                Some(h) if h > 0.0 && h.is_finite() => libm::floor(t / h + 1e-9) * h,
+                _ => t,
             };
             let (seed, channel) = (host.noise_seed(), host.noise_channel());
             let value = host.var(Var::Value);
