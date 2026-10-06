@@ -4,6 +4,10 @@
 //! The audit evaluates the frames it is given, at most [`MAX_FRAMES`] of them; a longer range is sampled with the
 //! safe-area audit's frame choice ([`sr_eval::safe_area::sample_times`]: window edges, key times and a grid), and
 //! [`Outcome::note`] says so. Findings never change pixels.
+//!
+//! Overflow is told apart by what it costs: text that reaches past its box but is drawn whole, inside the frame,
+//! loses nothing; text clipped to its box (`overflow="clip"`), or whose block leaves the frame, is cut. The delivery
+//! reports the first as information and the second as a warning, so that only lost content fails `--strict`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -48,6 +52,9 @@ pub struct TextFit {
     pub loc: Loc,
     /// Lines reaching past the box, in px of the text box at the size drawn (`TXT-FIT`).
     pub overflow: Option<Span>,
+    /// The frames where overflowing text is lost: clipped to its box (`overflow="clip"`), measured as the overflow in
+    /// px of the box; or with its block reaching out of the frame, measured in px of the frame.
+    pub lost: Option<Span>,
     /// Characters dropped (`TXT-CUT`).
     pub dropped: Option<Span>,
 }
@@ -59,6 +66,39 @@ pub struct Outcome {
     pub found: Vec<TextFit>,
     /// `sampled N of M frames`, when the audit did not look at every frame.
     pub note: Option<String>,
+}
+
+/// How far the laid-out lines of text node `n` reach out of the frame `[0, frame]`, in frame px: 0 when the block
+/// stays inside. The lines are placed as the renderer places the text: through the layer's content placement (its
+/// fit into the layer box) and the node's world transform.
+pub fn outside_frame(lay: &sr_text::Layout, n: &sr_eval::FrameNode, box_size: [f64; 2], frame: [f64; 2]) -> f64 {
+    let [aw, ah] = box_size;
+    // asset box -> layer local, as the renderer's content placement does
+    let local = |p: [f64; 2]| -> [f64; 2] {
+        let Some(c) = n.content else { return p };
+        let [x0, y0, x1, y1] = c.dest;
+        let [u0, v0, u1, v1] = c.uv;
+        let du = (u1 - u0).abs().max(1e-9) * (u1 - u0).signum();
+        let dv = (v1 - v0).abs().max(1e-9) * (v1 - v0).signum();
+        let (sx, sy) = ((x1 - x0) / (du * aw.max(1e-9)), (y1 - y0) / (dv * ah.max(1e-9)));
+        [x0 - u0 * aw * sx + p[0] * sx, y0 - v0 * ah * sy + p[1] * sy]
+    };
+    let mut out = 0.0f64;
+    for l in &lay.lines {
+        let [x, y, w, h] = l.rect;
+        if w <= 0.0 && h <= 0.0 {
+            continue;
+        }
+        for c in [[x, y], [x + w, y], [x, y + h], [x + w, y + h]] {
+            let q = n.world.apply(local(c));
+            out = out.max(-q[0]).max(q[0] - frame[0]).max(-q[1]).max(q[1] - frame[1]);
+        }
+    }
+    if out > 1e-6 {
+        out
+    } else {
+        0.0
+    }
 }
 
 /// Audits the text layers drawn at `times` (composition seconds, ascending).
@@ -102,10 +142,15 @@ pub fn check(ev: &Evaluator, times: &[f64]) -> Outcome {
             }
             let next = found.len();
             let (_, f) = found.entry(n.id.to_string()).or_insert_with(|| {
-                (next, TextFit { id: n.id.to_string(), loc: n.elem.loc(), overflow: None, dropped: None })
+                (next, TextFit { id: n.id.to_string(), loc: n.elem.loc(), overflow: None, lost: None, dropped: None })
             });
             if lay.overflow > 0.0 {
                 Span::note(&mut f.overflow, lay.overflow, t);
+                let clipped = if lay.clip { lay.overflow } else { 0.0 };
+                let outside = outside_frame(&lay, n, lay.size, g.size);
+                if clipped > 0.0 || outside > 0.0 {
+                    Span::note(&mut f.lost, clipped.max(outside), t);
+                }
             }
             if lay.dropped > 0 {
                 Span::note(&mut f.dropped, lay.dropped as f64, t);

@@ -1402,7 +1402,9 @@ fn run_delivery(
     Ok(())
 }
 
-/// `TXT-FIT` and `TXT-CUT` for the text layers drawn at `times` (SREP 18; the measures of SREP 20 rule 6).
+/// `TXT-FIT` and `TXT-CUT` for the text layers drawn at `times` (SREP 18; the measures of SREP 20 rule 6). `TXT-FIT`
+/// is information when the text is drawn whole inside the frame, and a warning when it is cut (clipped to its box, or
+/// out of the frame).
 fn text_fit_findings(ev: &Evaluator, times: &[f64]) -> Vec<crate::render_report::Finding> {
     use crate::render_report::{code, Finding};
     let audit = sr_gpu::text_audit::check(ev, times);
@@ -1413,15 +1415,32 @@ fn text_fit_findings(ev: &Evaluator, times: &[f64]) -> Vec<crate::render_report:
             x.at = Some(crate::render_report::At { offset: Some(f.loc.offset), id: Some(f.id.clone()) });
             x
         };
-        if let Some(s) = &f.overflow {
-            out.push(at(Finding::node(
+        // text drawn whole inside the frame loses nothing: information, which --strict does not count; text clipped
+        // to its box or reaching out of the frame is cut: a warning
+        match (&f.lost, &f.overflow) {
+            (Some(l), _) => out.push(at(Finding::node(
                 code::TXT_FIT,
                 sr_model::Severity::Warning,
                 &f.id,
-                format!("text {:?} reaches {:.1} px past its box at the size drawn{sampled}", f.id, s.worst),
+                format!(
+                    "text {:?} is cut: it reaches {:.1} px past its box (clipped) or out of the frame{sampled}",
+                    f.id, l.worst
+                ),
+            )
+            .at_time(l.time[0], l.time[1])
+            .measuring(l.worst, Some(0.0), "px"))),
+            (None, Some(s)) => out.push(at(Finding::node(
+                code::TXT_FIT,
+                sr_model::Severity::Info,
+                &f.id,
+                format!(
+                    "text {:?} reaches {:.1} px past its box at the size drawn, drawn whole inside the frame{sampled}",
+                    f.id, s.worst
+                ),
             )
             .at_time(s.time[0], s.time[1])
-            .measuring(s.worst, Some(0.0), "px")));
+            .measuring(s.worst, Some(0.0), "px"))),
+            (None, None) => {}
         }
         if let Some(s) = &f.dropped {
             out.push(at(Finding::node(

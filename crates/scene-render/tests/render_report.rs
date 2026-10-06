@@ -215,7 +215,8 @@ fn text_that_overflows_its_box_is_reported_with_the_overflow() {
     check_shape(&r);
     let find = |code: &str| r["findings"].as_array().unwrap().iter().find(|f| f["code"] == code).cloned();
     let fit = find("TXT-FIT").unwrap_or_else(|| panic!("no TXT-FIT: {r:#}"));
-    assert_eq!(fit["severity"], "warning");
+    // drawn whole inside the frame: nothing is lost, so it is information
+    assert_eq!(fit["severity"], "info");
     assert_eq!(fit["node"], "tall");
     // three 30 px lines in a 50 px box
     assert!((fit["measured"].as_f64().unwrap() - 40.0).abs() < 1e-6, "{fit}");
@@ -316,10 +317,10 @@ fn strict_counts_every_finding_at_warning_or_error_and_no_information() {
     // information only (INERT-I2, INERT-I8): --strict passes
     let o = encode_args(&d, REPORT_SCENE, &["--strict"]);
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
-    // a TXT-FIT warning, which a report lists, fails --strict with or without a report
+    // a TXT-FIT warning (text clipped to its box), which a report lists, fails --strict with or without a report
     let scene = r##"<scene version="1.2">
   <project width="200" height="120" fps="10" duration="1" background="#000000"/>
-  <assets><text id="t" text="a&#10;b&#10;c" width="180" height="50" size="20" lineHeight="1.5" font="DejaVu Sans"/></assets>
+  <assets><text id="t" text="a" width="180" height="20" size="20" lineHeight="1.5" overflow="clip" font="DejaVu Sans"/></assets>
   <composition><layer id="tall" asset="t"/></composition>
 </scene>"##;
     let o = encode_args(&d, scene, &["--strict"]);
@@ -342,4 +343,66 @@ fn encode_args(dir: &Path, scene: &str, extra: &[&str]) -> Output {
     let mut args = vec!["encode", file.to_str().unwrap(), "-o", frames.to_str().unwrap(), "--end", "0.2"];
     args.extend_from_slice(extra);
     run(&args)
+}
+
+/// The TXT-FIT findings of `scene`'s report, encoded over 0.2 s, and whether `--strict` passed.
+fn txt_fit(name: &str, scene: &str) -> (Vec<Value>, Option<i32>) {
+    let d = dir(name);
+    let o = encode(&d, scene, "r.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("r.json"));
+    check_shape(&r);
+    let fit = r["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "TXT-FIT").cloned().collect();
+    (fit, encode_args(&d, scene, &["--strict"]).status.code())
+}
+
+#[test]
+fn a_sub_pixel_line_box_overhang_is_information_and_passes_strict() {
+    // the films' case: size 64 in a 76 px box, the default lineHeight 1.2 makes a 76.8 px line box
+    let (fit, strict) = txt_fit(
+        "overhang",
+        r##"<scene version="1.2">
+  <project width="400" height="200" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="121" width="258" height="76" size="64" align="end" wrap="none" font="DejaVu Sans"/></assets>
+  <composition><layer id="seats" asset="t" x="40" y="40"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "info");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 0.8).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(0));
+}
+
+#[test]
+fn text_clipped_to_its_box_is_a_warning_and_fails_strict() {
+    // one 30 px line in a 20 px box with overflow="clip": no character is dropped, but 10 px of the line are cut
+    let (fit, strict) = txt_fit(
+        "clipped",
+        r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a" width="180" height="20" size="20" lineHeight="1.5" overflow="clip" font="DejaVu Sans"/></assets>
+  <composition><layer id="clipped" asset="t" x="10" y="10"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "warning");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 10.0).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(1));
+}
+
+#[test]
+fn a_block_leaving_the_frame_is_a_warning() {
+    // three 30 px lines in a 50 px box placed at y = 100 of a 120 px frame: the block ends at 190, 70 px out
+    let (fit, strict) = txt_fit(
+        "off-frame",
+        r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a&#10;b&#10;c" width="180" height="50" size="20" lineHeight="1.5" font="DejaVu Sans"/></assets>
+  <composition><layer id="low" asset="t" y="100"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "warning");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 70.0).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(1));
 }
