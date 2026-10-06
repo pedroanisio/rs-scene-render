@@ -160,3 +160,20 @@ fn bad_input_is_an_error_and_too_wide_a_displacement_is_left_alone() {
     assert!(!depth_response([wide, 1], 1.0, 1.0, 0.0, &field, &mut out, &|_| true).unwrap());
     assert_eq!(out, field);
 }
+
+#[test]
+fn a_depth_that_no_window_can_hold_is_an_error_and_never_an_overflow() {
+    let n = 8;
+    let field = vec![1.0; n * n];
+    let window = sr_sim::ocean::lift::MAX_WINDOW as f64;
+    for depth in [window * 1.5, 1e9, 1e300, f64::MAX] {
+        let mut out = vec![0.0; n * n];
+        let dense = depth_response([n, n], 1.0, depth, 0.0, &field, &mut out, &|_| true);
+        assert!(matches!(dense, Err(sr_sim::ocean::Error::Invalid(_))), "depth {depth}: {dense:?}");
+        let sparse = sr_sim::ocean::lift::depth_response_sparse([n, n], 1.0, depth, 0.0, &field, &|_| true);
+        assert!(matches!(sparse, Err(sr_sim::ocean::Error::Invalid(_))), "depth {depth}: {sparse:?}");
+    }
+    // the deepest water a window holds, in cells, is accepted
+    let mut out = vec![0.0; n * n];
+    assert!(depth_response([n, n], 1.0, window, 0.0, &field, &mut out, &|_| true).is_ok());
+}
