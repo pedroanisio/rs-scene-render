@@ -99,6 +99,32 @@ pub(crate) struct CraterSource {
     pub(crate) influence_depth: Option<f64>,
     pub(crate) curve: Option<String>,
     pub(crate) max_bytes: usize,
+    /// The last impact worked out and its crater: the law reads the impact and the source and not the time, so a
+    /// crater that is asked about again for the same impact (every rigid step, every frame) is not worked out again.
+    memo: Memo,
+}
+
+/// What [`CraterSource`] remembers of the impact it last worked out. A copy of a source remembers nothing and two
+/// sources are equal whatever they remember.
+#[derive(Default)]
+pub(crate) struct Memo(std::sync::Mutex<Option<(Impact3, ImpactCrater)>>);
+
+impl Clone for Memo {
+    fn clone(&self) -> Memo {
+        Memo::default()
+    }
+}
+
+impl PartialEq for Memo {
+    fn eq(&self, _: &Memo) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Memo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Memo")
+    }
 }
 
 impl CraterSource {
@@ -139,6 +165,7 @@ impl CraterSource {
             max_bytes: (num(element, "maxMemoryMiB", 128.) as usize)
                 .checked_mul(1 << 20)
                 .ok_or("crater memory budget overflow")?,
+            memo: Memo::default(),
         })
     }
 }
@@ -167,8 +194,33 @@ fn axis_and_closing_speed(impact: &Impact3, surface: &Shape3) -> Result<([f64; 3
     Ok((axis, closing))
 }
 
+thread_local! {
+    static LAW_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has worked out the law of an impact's crater: the count a test reads to see that a crater
+/// that does not change is not worked out again.
+#[doc(hidden)]
+pub fn law_evaluations() -> u64 {
+    LAW_EVALUATIONS.with(|c| c.get())
+}
+
 /// The crater `impact` makes, `age` seconds after it.
 pub(crate) fn impact_crater(source: &CraterSource, impact: &Impact3, age: f64) -> Result<ImpactCrater, String> {
+    let mut memo = source.memo.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((known, grown)) = memo.as_ref() {
+        if known == impact {
+            // the same impact: what differs with the time is the age and nothing else
+            return Ok(ImpactCrater { age, ..grown.clone() });
+        }
+    }
+    LAW_EVALUATIONS.with(|c| c.set(c.get() + 1));
+    let grown = worked_out(source, impact, age)?;
+    *memo = Some((*impact, grown.clone()));
+    Ok(grown)
+}
+
+fn worked_out(source: &CraterSource, impact: &Impact3, age: f64) -> Result<ImpactCrater, String> {
     let (axis, closing) = axis_and_closing_speed(impact, &source.surface)?;
     let impactor =
         Impact { mass: source.mass, density: source.source_density, normal_speed: closing / source.pixels_per_meter };
