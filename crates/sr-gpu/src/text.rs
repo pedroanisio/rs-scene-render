@@ -1277,9 +1277,11 @@ pub fn outline_polygons(
     text: &str,
     family: Option<&str>,
     size: f64,
+    tracking: f64,
     tol: f64,
 ) -> Vec<Vec<[f64; 2]>> {
     // a font that fails to load is reported when the document's text is drawn
     let _ = register_fonts(tc, p);
-    sr_text::extrusion::outline_polygons(tc.lib(), text, family, size, tol, usize::MAX).unwrap_or_default()
+    sr_text::extrusion::outline_polygons_tracked(tc.lib(), text, family, size, tracking, tol, usize::MAX)
+        .unwrap_or_default()
 }

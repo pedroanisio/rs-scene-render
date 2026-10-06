@@ -31,6 +31,39 @@ fn field(value: f32) -> Volume {
 }
 
 #[test]
+fn identical_baked_endpoints_share_one_decode_and_one_frame_budget() {
+    let dir = Temp::new();
+    let volume = field(1.);
+    let budget = volume.bytes();
+    let mut writer = BakeWriter::new(&dir.0.join("repeated"), 0., 10., BakeLimits::default()).unwrap();
+    writer.push(Some(&volume)).unwrap();
+    writer.push(Some(&volume)).unwrap();
+    let receipt = writer.finish().unwrap();
+    let archive = BakedSequence::open(&receipt.manifest, None, BakeLimits::default()).unwrap();
+    let pair = archive.load(0.05, Interpolation::Linear, budget).unwrap();
+    assert!(std::sync::Arc::ptr_eq(pair.first.as_ref().unwrap(), pair.second.as_ref().unwrap()));
+    for timed in [false, true] {
+        let mut calls = 0;
+        let mut load = |frame: &sr_volume::bake::BakedFrame| {
+            calls += 1;
+            frame.read(archive.directory(), BakeLimits::default().frame)
+        };
+        let pair = if timed {
+            let result = archive.load_timed_with(0.05, Interpolation::Linear, budget, &mut load).unwrap();
+            // Sharing storage must preserve the distinct sample times for advection.
+            assert_eq!(result.elapsed, [0.05, -0.05]);
+            result.frames
+        } else {
+            archive.load_with(0.05, Interpolation::Linear, budget, &mut load).unwrap()
+        };
+        assert_eq!(calls, 1);
+        assert_eq!(pair.blend, 0.5);
+        assert!(std::sync::Arc::ptr_eq(pair.first.as_ref().unwrap(), pair.second.as_ref().unwrap()));
+    }
+    assert!(archive.load(0.05, Interpolation::Linear, budget - 1).is_err());
+}
+
+#[test]
 fn archive_round_trips_deduplicates_and_seeks_on_composition_time() {
     let dir = Temp::new();
     let root = dir.0.join("take");

@@ -139,6 +139,26 @@ impl Default for KeyParams {
     }
 }
 
+/// The position of the curve called `name` (as `interpolation` writes it) among all curves.
+pub fn index_of(name: &str) -> Option<usize> {
+    Curve::ALL.iter().position(|c| c.to_string() == name)
+}
+
+/// The names of all curves.
+pub fn names() -> impl Iterator<Item = String> {
+    Curve::ALL.iter().map(|c| c.to_string())
+}
+
+/// The progress of the curve at position `index` of all curves at `u`, with the parameters a key without any has; a spring
+/// is the progress over a segment of one second (the other curves need no duration; the splines have no neighbours here and
+/// are linear).
+pub fn progress_by_index(index: usize, u: f64) -> f64 {
+    match resolve(Curve::ALL.get(index).copied().unwrap_or(Curve::Linear), &KeyParams::default()) {
+        Ease::Spring { stiffness, damping, mass } => spring_segment(u, 1.0, stiffness, damping, mass),
+        other => other.apply(u),
+    }
+}
+
 /// Resolves a schema curve with key parameters into an [`Ease`].
 pub fn resolve(c: Curve, k: &KeyParams) -> Ease {
     use Penner::*;
@@ -472,6 +492,28 @@ pub fn spring(tau: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
         let r1 = -w0 * (zeta - s);
         let r2 = -w0 * (zeta + s);
         1.0 - (r2 * libm::exp(r1 * tau) - r1 * libm::exp(r2 * tau)) / (r2 - r1)
+    }
+}
+
+/// Response of a damped spring at rest on its target (zero displacement) to a unit velocity at `tau` seconds: the
+/// part of a spring segment that an initial velocity adds (`x = target + (start - target)(1 - step) + v0 * release`).
+pub fn spring_release(tau: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
+    if tau <= 0.0 {
+        return 0.0;
+    }
+    let (k, c, m) = (stiffness.max(1e-9), damping.max(0.0), mass.max(1e-9));
+    let w0 = libm::sqrt(k / m);
+    let zeta = c / (2.0 * libm::sqrt(k * m));
+    if zeta < 1.0 - 1e-9 {
+        let wd = w0 * libm::sqrt(1.0 - zeta * zeta);
+        libm::exp(-zeta * w0 * tau) * libm::sin(wd * tau) / wd
+    } else if zeta <= 1.0 + 1e-9 {
+        tau * libm::exp(-w0 * tau)
+    } else {
+        let s = libm::sqrt(zeta * zeta - 1.0);
+        let r1 = -w0 * (zeta - s);
+        let r2 = -w0 * (zeta + s);
+        (libm::exp(r1 * tau) - libm::exp(r2 * tau)) / (r1 - r2)
     }
 }
 

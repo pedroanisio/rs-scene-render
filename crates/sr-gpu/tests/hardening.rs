@@ -231,6 +231,7 @@ fn more_shadow_views_than_layers_render_without_a_validation_error() {
             opacity: 1.0,
             cast_shadow: true,
             receive_shadow: true,
+            shadow_catcher: false,
         }],
         lights,
         env: None,

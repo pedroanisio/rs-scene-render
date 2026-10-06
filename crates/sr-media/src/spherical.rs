@@ -4,6 +4,7 @@
 //! box is rebuilt with the new boxes and chunk offsets move when `moov`
 //! precedes the media data.
 
+use std::io::Write;
 use std::path::Path;
 
 /// Projection written into the file.
@@ -58,8 +59,9 @@ fn parse(data: &[u8]) -> Result<Vec<Mp4Box>, String> {
         } else if size == 0 {
             size = (data.len() - i) as u64;
         }
-        let end = i + size as usize;
-        if size < hdr as u64 || end > data.len() {
+        let size = usize::try_from(size).map_err(|_| "box size exceeds address space")?;
+        let end = i.checked_add(size).filter(|&end| end <= data.len()).ok_or("box exceeds input")?;
+        if size < hdr {
             return Err(format!("bad box {}", String::from_utf8_lossy(&typ)));
         }
         let payload = &data[i + hdr..end];
@@ -148,6 +150,7 @@ fn shift_offsets(b: &mut Mp4Box, delta: i64) {
 
 /// Writes V1 and V2 spherical metadata into an MP4/MOV file in place.
 pub fn inject(path: &Path, projection: Projection, stereo: Stereo) -> Result<(), String> {
+    let permissions = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.permissions();
     let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let top = parse(&data)?;
     // byte ranges of the top-level boxes
@@ -181,6 +184,8 @@ pub fn inject(path: &Path, projection: Projection, stereo: Stereo) -> Result<(),
         Stereo::TopBottom => Some("top-bottom"),
         Stereo::LeftRight => Some("left-right"),
     };
+    let c = trak.children.as_mut().ok_or("empty trak")?;
+    c.retain(|b| !(&b.typ == b"uuid" && b.head.starts_with(&V1_UUID)));
     if projection == Projection::Equirectangular {
         let xmp = format!(
             "<?xml version=\"1.0\"?><rdf:SphericalVideo xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns:GSpherical=\"http://ns.google.com/videos/1.0/spherical/\"><GSpherical:Spherical>true</GSpherical:Spherical><GSpherical:Stitched>true</GSpherical:Stitched><GSpherical:StitchingSoftware>scene-render</GSpherical:StitchingSoftware><GSpherical:ProjectionType>equirectangular</GSpherical:ProjectionType>{}</rdf:SphericalVideo>",
@@ -188,8 +193,6 @@ pub fn inject(path: &Path, projection: Projection, stereo: Stereo) -> Result<(),
         );
         let mut p = V1_UUID.to_vec();
         p.extend_from_slice(xmp.as_bytes());
-        let c = trak.children.as_mut().ok_or("empty trak")?;
-        c.retain(|b| !(&b.typ == b"uuid" && b.head.starts_with(&V1_UUID)));
         c.push(leaf(b"uuid", p));
     }
     // V2: st3d + sv3d in the visual sample entry
@@ -229,9 +232,12 @@ pub fn inject(path: &Path, projection: Projection, stereo: Stereo) -> Result<(),
             out.extend_from_slice(&data[*s..*e]);
         }
     }
-    let tmp_path = path.with_extension("spherical.tmp");
-    std::fs::write(&tmp_path, &out).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, path).map_err(|e| e.to_string())
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut temporary =
+        tempfile::Builder::new().prefix(".scene-render-spherical-").tempfile_in(parent).map_err(|e| e.to_string())?;
+    temporary.write_all(&out).map_err(|e| e.to_string())?;
+    temporary.as_file().set_permissions(permissions).map_err(|e| e.to_string())?;
+    temporary.persist(path).map(|_| ()).map_err(|e| e.error.to_string())
 }
 
 /// Reads back (projection, stereo) from V2 boxes (tests and tools).

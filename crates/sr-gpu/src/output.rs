@@ -326,14 +326,17 @@ impl OutputStage {
             bind_group_layouts: &[Some(&blur_bgl)],
             immediate_size: 0,
         });
-        let blur_pipe = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("output blur"),
-            layout: Some(&blur_layout),
-            module: &blur_module,
-            entry_point: Some("cs_blur"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let blur_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("output blur"),
+                layout: Some(&blur_layout),
+                module: &blur_module,
+                entry_point: Some("cs_blur"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
         let blur_dirs = [[0i32, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]].map(|v| {
             let b = d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("output blur direction"),
@@ -366,14 +369,17 @@ impl OutputStage {
             bind_group_layouts: &[Some(&place_bgl)],
             immediate_size: 0,
         });
-        let place_pipe = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("place"),
-            layout: Some(&place_layout),
-            module: &module,
-            entry_point: Some("cs_place"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let place_pipe = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("place"),
+                layout: Some(&place_layout),
+                module: &module,
+                entry_point: Some("cs_place"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
         let samp = d.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -410,14 +416,17 @@ impl OutputStage {
     }
 
     fn compile_pack(&self, blocks: bool, constants: &[(&str, f64)]) -> wgpu::ComputePipeline {
-        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pack output"),
-            layout: Some(&self.pack_layout),
-            module: &self.pack_module,
-            entry_point: Some(if blocks { "cs_pack_nv12_blocks" } else { "cs_pack" }),
-            compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
-            cache: None,
-        })
+        {
+            let _creation = crate::gpu::creation_lock();
+            self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pack output"),
+                layout: Some(&self.pack_layout),
+                module: &self.pack_module,
+                entry_point: Some(if blocks { "cs_pack_nv12_blocks" } else { "cs_pack" }),
+                compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
+                cache: None,
+            })
+        }
     }
 
     fn pack_pipeline(&mut self, key: PackKey) -> wgpu::ComputePipeline {

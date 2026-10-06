@@ -76,3 +76,24 @@ fn an_effect_source_with_opacity_zero_is_reported() {
     assert!(warn(&nodes(r#"visible="false""#)).is_empty());
     assert!(warn(&nodes("")).is_empty());
 }
+
+#[test]
+fn an_effect_attribute_its_type_does_not_read_is_reported_naming_it() {
+    // effectType is one attribute bag: `intensity` is valid on a vignette, which reads amount, radius and softness
+    let fx = |attrs: &str| format!(r#"<effects><effect id="vig" type="vignette" {attrs}/></effects>"#);
+    let node = r#"<shape id="s" shape="rect" width="8" height="8" effects="vig"/>"#;
+    let w = warnings(node, &fx(r#"intensity="0.55""#));
+    let hit: Vec<_> = w.iter().filter(|(c, m)| c == "E19" && m.contains("@intensity")).collect();
+    assert_eq!(hit.len(), 1, "{w:?}");
+    assert!(
+        hit[0].1.contains("@amount") && hit[0].1.contains("@radius") && hit[0].1.contains("@softness"),
+        "{}",
+        hit[0].1
+    );
+    // the attributes it does read, the always-allowed ones, and one set to its default are silent
+    assert!(warnings(node, &fx(r#"amount="0.55" radius="700" softness="0.6" mix="0.5" enabled="true""#)).is_empty());
+    assert!(warnings(node, &fx(r#"intensity="1""#)).is_empty(), "the default is not worth a warning");
+    // a type with no list (a custom shader takes any parameter) is not checked
+    let shader = r#"<effects><effect id="vig" type="shader" src="x.glsl" intensity="0.3"/></effects>"#;
+    assert!(!warnings(node, shader).iter().any(|(c, m)| c == "E19" && m.contains("@intensity")));
+}

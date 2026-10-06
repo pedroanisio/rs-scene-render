@@ -514,7 +514,7 @@ pub fn from_transcript(json: &str) -> Result<Vec<Cue>, CaptionError> {
             .enumerate()
             .map(|(i, value)| {
                 serde_json::from_value::<TimedWord>(value.clone())
-                    .map(&word)
+                    .map(word)
                     .map_err(|e| err("transcript", i + 1, format!("word {}: {e}", i + 1)))
             })
             .collect::<Result<Vec<_>, _>>()?;

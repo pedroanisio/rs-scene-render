@@ -310,6 +310,12 @@
     "geo3.scene.xml": [
       "GEO3"
     ],
+    "mov1.scene.xml": [
+      "MOV1"
+    ],
+    "mov2.scene.xml": [
+      "MOV2"
+    ],
     "msq1.scene.xml": [
       "MSQ1"
     ],
@@ -407,6 +413,12 @@
     ],
     "p3d9-orphan.scene.xml": [
       "P3D9"
+    ],
+    "pen1.scene.xml": [
+      "PEN1"
+    ],
+    "pen2.scene.xml": [
+      "PEN2"
     ],
     "pyc1-derived.scene.xml": [
       "PYC1"
@@ -773,6 +785,13 @@
       "P3D6",
       "PYRO8"
     ],
+    "solid-colliders-tracking.scene.xml": [
+      "P3D6",
+      "PYRO8"
+    ],
+    "txt2.scene.xml": [
+      "TXT2"
+    ],
     "v1-sections.scene.xml": [
       "V1"
     ],
@@ -786,6 +805,15 @@
       "V4"
     ],
     "v5-elements.scene.xml": [
+      "V5"
+    ],
+    "v5-joint.scene.xml": [
+      "V5"
+    ],
+    "v5-morph.scene.xml": [
+      "V5"
+    ],
+    "v5-stroke-text.scene.xml": [
       "V5"
     ],
     "v6-elements.scene.xml": [
@@ -859,9 +887,12 @@
     "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
+    "joint.scene.xml": [],
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
+    "model-select.scene.xml": [],
+    "morph.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
     "ocean-depth-filtered-drag.scene.xml": [],
@@ -885,6 +916,8 @@
     "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
     "solid-colliders.scene.xml": [],
+    "stroke-text.scene.xml": [],
+    "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
     "volume-light-grid.scene.xml": [],

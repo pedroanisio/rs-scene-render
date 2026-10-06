@@ -369,27 +369,30 @@ impl Renderer {
                 bind_group_layouts: &[Some(&bgl)],
                 immediate_size: 0,
             });
-            let pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("flash-grid"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(resources::FORMAT.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let pipe = {
+                let _creation = crate::gpu::creation_lock();
+                d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("flash-grid"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(resources::FORMAT.into())],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
             (pipe, bgl)
         });
         let out = resources::create(&d, &self.bgl1, [48, 27], 1, "flash-grid");

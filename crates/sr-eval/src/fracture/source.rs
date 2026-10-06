@@ -41,20 +41,35 @@ pub(crate) fn load(
         if sr_3d::sequence::bytes(&model) > budget {
             return Err("fracture imported model exceeds budget".into());
         }
-        let clip_name = text("animationClip");
-        let clip = clip_name.as_ref().and_then(|name| {
+        let find = |name: &String| {
             model
                 .animations
                 .iter()
                 .find(|c| &c.name == name)
                 .or_else(|| name.parse::<usize>().ok().and_then(|i| model.animations.get(i)))
-        });
-        if clip_name.is_some() && clip.is_none() {
-            return Err("fracture animation clip not found".into());
+        };
+        let mut clips = Vec::new();
+        for attr in ["animationClip", "animationClipTo"] {
+            let name = text(attr);
+            let clip = name.as_ref().and_then(find);
+            if name.is_some() && clip.is_none() {
+                return Err("fracture animation clip not found".into());
+            }
+            clips.push(clip);
         }
-        let time = (n.local_time * value("animationSpeed", 1.) + value("animationOffset", 0.)) as f32;
-        let time = clip.map_or(0., |c| if c.duration > 0. { time.rem_euclid(c.duration) } else { 0. });
-        let (locals, weights) = sr_3d::anim::pose(&model, clip, time);
+        let at = |duration: Option<f32>, offset: &'static str| {
+            let time = (n.local_time * value("animationSpeed", 1.) + value(offset, 0.)) as f32;
+            duration.map_or(0., |d| if d > 0. { time.rem_euclid(d) } else { 0. })
+        };
+        let blend = value("animationBlend", 0.).clamp(0., 1.) as f32;
+        let (locals, weights) = sr_3d::anim::pose_blend(
+            &model,
+            clips[0],
+            at(clips[0].map(|c| c.duration), "animationOffset"),
+            clips[1],
+            at(clips[1].map(|c| c.duration), "animationOffsetTo"),
+            blend,
+        );
         let morph = match n.props.get("morphWeights") {
             Some(crate::Value::List(v)) => Some(v.iter().map(|v| *v as f32).collect::<Vec<_>>()),
             _ => match n.elem.get_attr("morphWeights") {

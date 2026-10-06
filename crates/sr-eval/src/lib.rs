@@ -27,6 +27,7 @@ pub mod expr;
 pub mod fracture;
 pub mod geo;
 mod group;
+mod joints;
 pub mod layout;
 pub mod mesh_sequence;
 pub mod ocean;
@@ -43,6 +44,7 @@ mod sim3d;
 pub mod solid;
 #[doc(hidden)]
 pub mod splash;
+pub mod stroke_font;
 pub mod terrain;
 pub mod value;
 
@@ -81,7 +83,7 @@ pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c s
 }
 
 pub use eval::{
-    Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, Props, SimSeconds, SkinWeights,
+    Affine, BonePose, ElementState, FrameGraph, FrameNode, FrameTransition, JointFrames, Props, SimSeconds, SkinWeights,
 };
 pub use physcache::PhysicsTrace;
 pub use program::{draws_in_3d, Analysis, EvalOptions, Program, THREE_D_DRAWN};

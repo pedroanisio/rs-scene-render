@@ -55,6 +55,103 @@ fn spec(path: &Path, codec: Codec, input: InputFormat) -> EncodeSpec {
     }
 }
 
+#[test]
+fn av1_two_pass_produces_and_consumes_statistics() {
+    if !have_ffmpeg() || (!working_encoder("libsvtav1") && !working_encoder("libaom-av1")) {
+        eprintln!("FFmpeg with a two-pass AV1 encoder unavailable; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(&dir.path().join("two-pass.mp4"), Codec::Av1, InputFormat::Nv12);
+    s.height = 64;
+    s.bitrate = Some(100_000);
+    let log = dir.path().join("stats");
+    s.pass = Some((1, log.clone()));
+    let (_, encoder) = s.args().unwrap();
+    assert!(matches!(encoder.as_str(), "libsvtav1" | "libaom-av1"));
+    encode(&s, 25);
+    let stats: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("stats"))
+        .collect();
+    assert!(!stats.is_empty(), "successful pass 1 must write statistics");
+    assert!(stats.iter().any(|p| std::fs::metadata(p).unwrap().len() > 0));
+    assert!(!s.path.exists(), "pass 1 must not publish output");
+    s.pass = Some((2, log));
+    encode(&s, 25);
+    assert_eq!(probe(&s.path).unwrap().video.unwrap().codec, "av1");
+    // A second pass must depend on its first pass's data, not silently encode independently.
+    for path in stats {
+        std::fs::remove_file(path).unwrap();
+    }
+    s.path = dir.path().join("missing-stats.mp4");
+    let mut e = Encoder::start(&s).unwrap();
+    let result = e.write(&frame(s.input, 0, s.width as usize, s.height as usize)).and_then(|_| e.finish());
+    assert!(result.is_err(), "pass 2 without statistics must fail");
+    assert!(!s.path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn av1_two_pass_checks_encoder_statistics_before_selection() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    if let Ok(mode) = std::env::var("SR_AV1_PROBE_TEST") {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = spec(&dir.path().join("out.mp4"), Codec::Av1, InputFormat::Nv12);
+        s.height = 64;
+        s.bitrate = Some(100_000);
+        s.pass = Some((1, dir.path().join("pass")));
+        if mode == "unsupported" {
+            assert!(s.args().is_err(), "an encoder that ignores pass flags must not be selected");
+        } else {
+            let expected = if mode == "modern" { "libsvtav1" } else { "libaom-av1" };
+            assert_eq!(s.args().unwrap().1, expected);
+            s.pass.as_mut().unwrap().0 = 2;
+            assert_eq!(s.args().unwrap().1, expected);
+        }
+        s.pass = None;
+        assert_eq!(s.args().unwrap().1, "libsvtav1", "single-pass SVT remains available");
+        let calls = std::fs::read_to_string(std::env::var("SR_AV1_PROBE_CALLS").unwrap()).unwrap_or_default();
+        assert_eq!(calls.lines().count(), 1, "two-pass capability is probed once");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ffmpeg = dir.path().join("ffmpeg");
+    std::fs::write(
+        &ffmpeg,
+        r#"#!/usr/bin/env python3
+import os, sys
+a = sys.argv[1:]
+codec = a[a.index('-c:v') + 1]
+mode = os.environ['SR_AV1_PROBE_TEST']
+if '-passlogfile' in a:
+    with open(os.environ['SR_AV1_PROBE_CALLS'], 'a') as f: f.write('probe\n')
+    path = a[a.index('-passlogfile') + 1] + '-0.log'
+    with open(path, 'w') as f: f.write('statistics' if mode == 'modern' else '')
+sys.exit(1 if codec == 'libaom-av1' and mode == 'unsupported' else 0)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for mode in ["fallback", "unsupported", "modern"] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "av1_two_pass_checks_encoder_statistics_before_selection", "--nocapture"])
+            .env("SR_FFMPEG", &ffmpeg)
+            .env("SR_AV1_PROBE_TEST", mode)
+            .env("SR_AV1_PROBE_CALLS", dir.path().join(format!("calls-{mode}")))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 fn frame(input: InputFormat, k: u32, w: usize, h: usize) -> Vec<u8> {
     match input {
         InputFormat::Nv12 => {

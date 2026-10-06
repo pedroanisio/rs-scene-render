@@ -134,8 +134,16 @@ fn srgb_luma(c: [f32; 3]) -> f32 {
 }
 
 /// What the tracer leaves out of `scene`.
-pub fn notes(_scene: &Scene3) -> Vec<String> {
-    Vec::new()
+pub fn notes(scene: &Scene3) -> Vec<String> {
+    let mut notes = Vec::new();
+    // the tracer has no per-point shading hook: the procedural unevenness of a material (a clay finish) is raster-only
+    if scene.draws.iter().any(|d| d.material.unevenness > 0.0 && !d.material.unlit) {
+        notes.push("material unevenness is not applied by the path tracer".to_string());
+    }
+    if scene.draws.iter().any(|d| d.shadow_catcher) {
+        notes.push("a shadow catcher is not drawn by the path tracer".to_string());
+    }
+    notes
 }
 
 /// Whether the tracer's scene buffers fit the device. Image working buffers are tiled;
@@ -250,7 +258,8 @@ pub fn build(scene: &Scene3) -> PtScene {
     let mut prototype_ids = std::collections::HashMap::new();
     let mut prototypes: Vec<Vec<Triangle>> = Vec::new();
     let mut instance_records = std::collections::HashMap::new();
-    for dr in &scene.draws {
+    // a shadow catcher has no colour of its own and the tracer cannot evaluate its darkening: it is left out (see `notes`)
+    for dr in scene.draws.iter().filter(|d| !d.shadow_catcher) {
         let m = &dr.material;
         let maps = std::array::from_fn(|slot| {
             dr.maps[slot].as_ref().map_or([0; 4], |texture| {
@@ -1037,6 +1046,7 @@ impl PtGpu {
             })
         };
         let compute = |entry: &str, l: &wgpu::PipelineLayout| {
+            let _creation = crate::gpu::creation_lock();
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(l),
@@ -1048,27 +1058,30 @@ impl PtGpu {
         };
         let trace = compute("cs_trace", &layout(&[&bgl0]));
         let atrous = compute("cs_atrous", &layout(&[&bgl0, &bgl_pair]));
-        let output = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("pathtrace-output"),
-            layout: Some(&layout(&[&bgl0, &bgl_fin])),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_out"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_out"),
-                compilation_options: Default::default(),
-                targets: &[Some(format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let output = {
+            let _creation = crate::gpu::creation_lock();
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("pathtrace-output"),
+                layout: Some(&layout(&[&bgl0, &bgl_fin])),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_out"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_out"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         PtGpu {
             bgl0,
             bgl_pair,
@@ -1099,6 +1112,7 @@ impl PtGpu {
                 immediate_size: 0,
             });
             let kernel = |entry: &str| {
+                let _creation = crate::gpu::creation_lock();
                 d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
                     layout: Some(&layout),
@@ -1125,6 +1139,7 @@ impl PtGpu {
         if grid {
             return self.trace_grid[lighting as usize].get_or_init(|| {
                 let g = self.grid_pipelines(d);
+                let _creation = crate::gpu::creation_lock();
                 d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("pathtrace-volumes-grid"),
                     layout: Some(&g.layout),
@@ -1144,17 +1159,20 @@ impl PtGpu {
                 bind_group_layouts: &[Some(&self.bgl0)],
                 immediate_size: 0,
             });
-            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("pathtrace-volumes"),
-                layout: Some(&layout),
-                module: &self.module,
-                entry_point: Some("cs_trace"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[("HAS_MEDIA", 1.0), ("MEDIUM_LIGHTING", lighting as u8 as f64)],
-                    ..Default::default()
-                },
-                cache: None,
-            })
+            {
+                let _creation = crate::gpu::creation_lock();
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pathtrace-volumes"),
+                    layout: Some(&layout),
+                    module: &self.module,
+                    entry_point: Some("cs_trace"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("HAS_MEDIA", 1.0), ("MEDIUM_LIGHTING", lighting as u8 as f64)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+            }
         })
     }
 
@@ -1196,6 +1214,7 @@ impl PtGpu {
                 });
                 &plain_layout
             };
+            let _creation = crate::gpu::creation_lock();
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("pathtrace-water"),
                 layout: Some(layout),

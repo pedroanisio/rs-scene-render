@@ -1,24 +1,26 @@
-# scene-render v0.1.2
+# scene-render v0.1.4
 
-Linux x86-64 update with quality tiers, incremental rendering, watch mode, GPU timing and fixes for rendering correctness and accessibility.
+Reliability fixes for incremental rendering, volume loading, media metadata, delivery and data parsing.
 
-- `watch` reloads changed image files, and `--changed-only` includes active transition types, parameters and static attributes in frame fingerprints.
-- Incremental renders retain strict validation: frames with unsupported content are rendered again so shader failures cannot disappear on a subsequent run.
-- Effect caches follow animated generator paints, including `paint2` and paint references nested inside assets.
-- Wide strokes, outlines and matte-choke preserve partial alpha. Wide gathers can cost more at large radii on translucent inputs; their cost grows with radius.
-- Caption burn-in and authored text layers have distinct contrast identities. A layer named `captions` receives normal contrast checks, and text covered by later layers is measured in the final picture.
-- Linux CI installs the HEVC decoder required by HEIC fixtures and checks decoding before building.
-- Quality tiers, incremental rendering, watch mode, GPU timing and performance comparisons are included from the changes since v0.1.1.
+- Delivery URLs escape filenames containing spaces, punctuation and Unicode.
+- Adjacent baked volume frames share decoded payloads; incremental rendering tracks baked payload changes and missing files.
+- Spherical MP4 metadata rejects invalid extended sizes, removes obsolete projection metadata and preserves permissions through secure temporary files.
+- AV1 two-pass encoding verifies SVT-AV1 statistics support and falls back to libaom-av1 when the installed FFmpeg build ignores pass flags. Builds with neither implementation report an error.
+- HEIF colour detection respects the primary image property associations.
+- PMTiles rejects oversized sections before allocating memory.
+- CSV and TSV preserve quoted empty records while skipping blank physical lines.
 
-Download the `linux-x86_64.tar.gz` archive and its `.sha256` file. Verify it with `sha256sum -c scene-render-v0.1.2-linux-x86_64.tar.gz.sha256`, extract it, and run `./scene-render --help` from the extracted directory. The archive contains the binary, README, license, and source commit identifier.
+The reliability fixes include regressions that failed before their implementation changes and passed afterward. Encoder checks include both modern and older FFmpeg builds. The release workflow runs workspace tests, Clippy, portability checks, evidence and performance checks before packaging and smoke-testing the validated binary. Numerical tests use optimized builds with debug assertions and overflow checks enabled. The smoke and fuzz checks reuse the same binaries built by the evidence job.
 
-The binary is built on Ubuntu 24.04 and requires Linux x86-64 with glibc 2.39 or newer. Rendering requires a Vulkan driver (Mesa software Vulkan also works); media decoding and encoding require FFmpeg and ffprobe 5.1 or newer. Install fonts appropriate to your scenes. On Ubuntu 24.04: `sudo apt install ffmpeg libvulkan1 mesa-vulkan-drivers fonts-dejavu-core`. HEIC decoding also requires `libheif-examples libheif-plugin-libde265`.
+This release also includes the mesh, path tracing, simulation and cinematic rendering changes accumulated since v0.1.2. These features require scene-specific visual review; this release does not establish production readiness for every cinematic workflow.
 
-Validation before the version bump: 637 Rust tests passed, with 4 benchmarks ignored, and 14 Python tests passed. Seven new regression tests failed before their fixes and passed afterward. Formatting, Clippy and golden comparisons passed without replacing references. The `still-formats` evidence case passed locally, including HEIC decoding. The release workflow smoke-tests validation, PNG rendering and a two-frame FFV1 encode using the release binary.
+Download the Linux x86-64 archive and checksum. Run `sha256sum -c scene-render-v0.1.4-linux-x86_64.tar.gz.sha256`, extract the archive, then run `./scene-render --help`. The archive includes the binary, README, license and source commit identifier.
+
+The binary requires Linux x86-64 with glibc 2.39 or newer, a Vulkan driver, FFmpeg and ffprobe 5.1 or newer, and suitable fonts. Mesa software Vulkan is supported. Ubuntu 24.04 dependencies: `sudo apt install ffmpeg libvulkan1 mesa-vulkan-drivers fonts-dejavu-core`. HEIC decoding additionally requires `libheif-examples libheif-plugin-libde265`.
 
 The distributed binary targets Linux x86-64. Windows and macOS portability checks do not establish rendering equivalence on those platforms. Evidence probes establish technical behavior; artistic quality still requires visual and temporal review.
 
-## After v0.1.2
+## Transmission rendering
 
 Image changes in the path tracer for scenes with transmissive materials (`transmission` above 0); scenes without one render the same bytes at the same speed.
 
@@ -27,4 +29,3 @@ Image changes in the path tracer for scenes with transmissive materials (`transm
 - Glass or water over nothing now shows the visible dome where it showed black, including the dome's reflection on water at the horizon.
 - The ocean's default spray is transmissive, so frames with whitewater change slightly around the spray (a UHD hero frame: 394 pixels, at most 28 code values).
 - Limits: a camera that starts under the water does not see the sun on the floor, caustics are not produced, and very steep waves can leave samples dark. See the cinematic impact SREP, "Light through water and glass".
-

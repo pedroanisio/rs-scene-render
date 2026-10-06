@@ -244,25 +244,31 @@ fn scene_inputs(
         if let Some(sr_model::element::AttrValue::Str(uri)) = e.get_attr("materialX") {
             discover(&uri, Some("mtlx"));
         }
-        // a baked volume names its frames by their digests in its manifest: they are inputs too
-        if let Some(volume) =
-            e.as_any().downcast_ref::<sr_model::model::VolumeAsset>().filter(|v| v.format.as_str() == "srvseq")
-        {
-            if let Resolved::Local(path) = resolve(&volume.src, base) {
-                match sr_volume::bake::BakedSequence::open(&path, None, sr_volume::bake::BakeLimits::default()) {
-                    Ok(bake) => {
-                        let mut seen = std::collections::BTreeSet::new();
-                        for frame in bake.frames().filter(|f| seen.insert(f.filename())) {
-                            imported.push(bake.directory().join(frame.filename()));
+        if let Some(volume) = e.as_any().downcast_ref::<sr_model::model::VolumeAsset>() {
+            if volume.format.as_str() == "srvseq" {
+                if let Resolved::Local(path) = resolve(&volume.src, base) {
+                    let sha = volume.sha256.map(|sha| sha.to_hex());
+                    match sr_volume::bake::BakedSequence::open(
+                        &path,
+                        sha.as_deref(),
+                        sr_volume::bake::BakeLimits::default(),
+                    ) {
+                        Ok(bake) => {
+                            // a frame file named more than once in the manifest is one input
+                            let mut seen = std::collections::BTreeSet::new();
+                            for frame in bake.frames().filter(|f| seen.insert(f.filename())) {
+                                imported.push(bake.directory().join(frame.filename()));
+                            }
                         }
-                    }
-                    // the manifest is an input itself, so a manifest that is not there yet is seen as missing
-                    Err(sr_volume::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        error = Some(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("{}: {e}", path.display()),
-                        ))
+                        // The manifest itself remains an input below. Creating a
+                        // missing manifest will trigger discovery of its frames.
+                        Err(sr_volume::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(message) => {
+                            error = Some(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("{}: {message}", path.display()),
+                            ));
+                        }
                     }
                 }
             }
@@ -546,6 +552,62 @@ impl Fingerprints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baked_volume_payloads_invalidate_incremental_frames_and_renderer_setup() {
+        use sr_volume::{
+            bake::{BakeLimits, BakeWriter},
+            SparseGrid, Transform, Volume,
+        };
+        let dir = scratch("baked-volume-inputs");
+        let mut grid = SparseGrid::new(Transform::identity(), 0., 1).unwrap();
+        grid.set([0; 3], 1.).unwrap();
+        let mut volume = Volume::new();
+        volume.insert("density", grid).unwrap();
+        let mut writer = BakeWriter::new(&dir.join("take"), 0., 10., BakeLimits::default()).unwrap();
+        writer.push(Some(&volume)).unwrap();
+        writer.push(Some(&volume)).unwrap();
+        let receipt = writer.finish().unwrap();
+        let xml = format!(
+            r#"<scene version="1.3"><project width="8" height="8" fps="10" duration="0.2"/><assets><volume id="smoke" src="take/manifest.srvseq" format="srvseq" sha256="{}"/></assets><composition><object3D id="cloud" primitive="volume" volume="smoke"/></composition></scene>"#,
+            receipt.sha256
+        );
+        let path = dir.join("scene.xml");
+        let doc = load(&path, &xml);
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let inputs = effective_files(&path, &doc, ev.program()).unwrap();
+        let bake = sr_volume::bake::BakedSequence::open(&receipt.manifest, None, BakeLimits::default()).unwrap();
+        let payload = bake.directory().join(bake.frames().next().unwrap().filename());
+        assert!(inputs.contains(&receipt.manifest));
+        assert_eq!(inputs.iter().filter(|p| **p == payload).count(), 1);
+        let frame = ev.evaluate_frame(0);
+        let fingerprint = Fingerprints::new(&xml, &doc, &inputs, "").frame(&xml, &frame);
+        let setup = setup_key(&xml, &inputs);
+        std::fs::remove_file(&payload).unwrap();
+        let missing_inputs = effective_files(&path, &doc, ev.program()).unwrap();
+        assert_eq!(missing_inputs, inputs, "missing payloads must remain watched so repairs are detected");
+        assert_ne!(fingerprint, Fingerprints::new(&xml, &doc, &missing_inputs, "").frame(&xml, &frame));
+        assert_ne!(setup, setup_key(&xml, &missing_inputs));
+        let missing_stamp = stamp(&payload);
+        volume.write(std::fs::File::create(&payload).unwrap()).unwrap();
+        assert_ne!(missing_stamp, stamp(&payload), "restoring a missing payload must wake watch");
+        assert_eq!(fingerprint, Fingerprints::new(&xml, &doc, &inputs, "").frame(&xml, &frame));
+    }
+
+    #[test]
+    fn missing_bake_manifests_remain_inputs_and_malformed_manifests_are_errors() {
+        let dir = scratch("missing-bake-manifest");
+        let path = dir.join("scene.xml");
+        let xml = format!(
+            r#"<scene version="1.3"><project width="8" height="8" fps="1" duration="1"/><assets><volume id="smoke" src="manifest.srvseq" format="srvseq" sha256="{}"/></assets><composition/></scene>"#,
+            "0".repeat(64)
+        );
+        let doc = load(&path, &xml);
+        let inputs = files(&path, &doc).unwrap();
+        assert_eq!(inputs, vec![dir.join("manifest.srvseq")]);
+        std::fs::write(dir.join("manifest.srvseq"), b"bad manifest").unwrap();
+        assert_eq!(files(&path, &doc).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn numbered_mesh_and_volume_frames_are_incremental_inputs() {

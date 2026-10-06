@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sr_model::diag::{Diagnostic, Loc};
+use sr_model::diag::{Diagnostic, Loc, Severity};
 use sr_model::element::{children, walk, walk_mut, AttrValue, Element};
 use sr_model::model::{self as m, Node};
 use sr_model::values::{Color, Fps, Length};
@@ -208,6 +208,8 @@ pub struct Motion {
     pub orient_offset: f64,
     /// Arc-length parameterisation.
     pub constant_speed: bool,
+    /// The path is an offset from the node's own position (`@additive`).
+    pub additive: bool,
     /// Slot of an animated `progress`, when present.
     pub progress: Option<u32>,
 }
@@ -409,6 +411,57 @@ pub struct LinkInst {
     pub delay: f64,
     /// Moving-average window in seconds.
     pub smoothing: f64,
+    /// The follower of the delayed source (applied when `smoothing` is 0).
+    pub follower: Option<Follower>,
+}
+
+/// A link's follower: the impulse response of a linear filter of unit gain, sampled at the midpoints of equal
+/// intervals of its window.
+#[derive(Debug, Clone)]
+pub struct Follower {
+    /// Seconds of history the response covers (it has decayed to 0.1 % after them).
+    pub window: f64,
+    /// Weights of the samples, newest first, summing to 1.
+    pub weights: Vec<f64>,
+}
+
+impl Follower {
+    /// First-order lag of time constant `t` (seconds).
+    pub fn exponential(t: f64) -> Follower {
+        Follower::sampled(1.0 / t, |u| (-u / t).exp() / t)
+    }
+
+    /// Damped spring `x'' = (k/m)(s - x) - (c/m) x'`: the response of the second-order system with natural frequency
+    /// `sqrt(k/m)` and damping ratio `c / (2 sqrt(k m))`.
+    pub fn spring(stiffness: f64, damping: f64, mass: f64) -> Follower {
+        let w0 = (stiffness / mass).sqrt();
+        let z = damping / (2.0 * (stiffness * mass).sqrt());
+        if (z - 1.0).abs() < 1e-6 {
+            Follower::sampled(w0, |u| w0 * w0 * u * (-w0 * u).exp())
+        } else if z < 1.0 {
+            let wd = w0 * (1.0 - z * z).sqrt();
+            Follower::sampled(z * w0, |u| w0 * w0 / wd * (-z * w0 * u).exp() * (wd * u).sin())
+        } else {
+            let r = (z * z - 1.0).sqrt();
+            let (p1, p2) = (-w0 * (z - r), -w0 * (z + r));
+            // the slower pole is p1: the response decays at its rate
+            Follower::sampled(-p1, |u| w0 * w0 * ((p1 * u).exp() - (p2 * u).exp()) / (p1 - p2))
+        }
+    }
+
+    /// `h` sampled at the midpoints of `n` equal intervals (480 a second, 16 to 2048) of a window of `ln(1000) / rate`
+    /// seconds, normalised.
+    fn sampled(rate: f64, h: impl Fn(f64) -> f64) -> Follower {
+        let window = 1000f64.ln() / rate;
+        let n = ((480.0 * window).ceil() as usize).clamp(16, 2048);
+        let dt = window / n as f64;
+        let mut weights: Vec<f64> = (0..n).map(|i| h((i as f64 + 0.5) * dt) * dt).collect();
+        let sum: f64 = weights.iter().sum();
+        if sum.is_finite() && sum.abs() > 1e-12 {
+            weights.iter_mut().for_each(|w| *w /= sum);
+        }
+        Follower { window, weights }
+    }
 }
 
 /// A transition window between nodes.
@@ -450,6 +503,11 @@ pub struct Program {
     identity: Arc<()>,
     /// Imported animation frames live only as long as their compiled scene.
     pub(crate) mesh_sequence_cache: std::sync::Mutex<crate::mesh_sequence::Cache>,
+    /// Models read for joint sockets, and the joints each object is asked for.
+    pub(crate) joint_models: crate::joints::Cache,
+    pub(crate) joint_sockets: std::sync::OnceLock<crate::joints::Sockets>,
+    /// Stroke fonts read for `stroke-text` shapes.
+    pub(crate) stroke_fonts: crate::stroke_font::Cache,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -1311,6 +1369,13 @@ impl Builder {
                     .into_iter()
                     .flatten()
                 {
+                    let ns = &self.doc(ctx.doc).ns;
+                    let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                    self.assets.insert(key, (ctx.doc, r));
+                }
+            }
+            if name == "shape" {
+                if let Some(r) = attr_str(e, "strokeFont") {
                     let ns = &self.doc(ctx.doc).ns;
                     let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
                     self.assets.insert(key, (ctx.doc, r));
@@ -2278,6 +2343,7 @@ impl Builder {
                         auto_orient: mp.auto_orient,
                         orient_offset: mp.orient_offset,
                         constant_speed: mp.constant_speed,
+                        additive: mp.additive,
                         progress,
                     });
                 }
@@ -2720,6 +2786,44 @@ impl Builder {
                 }
             };
             if let Some(source) = source {
+                let smoothing = l.smoothing.get();
+                let (spring, lag) = ((l.stiffness.get(), l.damping.get(), l.mass.get()), l.time_constant.get());
+                let mut unread = |attr: &str, family: &str| {
+                    self.warnings.push(Diagnostic::info(
+                        "E19",
+                        format!("link on {who}: @{attr} is accepted but has no effect without follow=\"{family}\", which reads it"),
+                        l.loc,
+                        who.as_str(),
+                    ))
+                };
+                if l.follow != m::Follow::Exponential && lag != 0.1 {
+                    unread("timeConstant", "exponential");
+                }
+                if l.follow != m::Follow::Spring {
+                    for (attr, set) in
+                        [("stiffness", spring.0 != 100.0), ("damping", spring.1 != 10.0), ("mass", spring.2 != 1.0)]
+                    {
+                        if set {
+                            unread(attr, "spring");
+                        }
+                    }
+                }
+                if l.follow != m::Follow::None && smoothing > 0.0 {
+                    self.warnings.push(Diagnostic::info(
+                        "E19",
+                        format!(
+                            "link on {who}: @follow is ignored because @smoothing is set; a link uses one or the other"
+                        ),
+                        l.loc,
+                        who.as_str(),
+                    ));
+                }
+                let follower = match l.follow {
+                    _ if smoothing > 0.0 => None,
+                    m::Follow::None => None,
+                    m::Follow::Exponential => Some(Follower::exponential(lag)),
+                    m::Follow::Spring => Some(Follower::spring(spring.0, spring.1, spring.2)),
+                };
                 self.links.push(LinkInst {
                     source,
                     scale: l.scale,
@@ -2727,7 +2831,8 @@ impl Builder {
                     min: l.min,
                     max: l.max,
                     delay: l.delay,
-                    smoothing: l.smoothing.get(),
+                    smoothing,
+                    follower,
                 });
                 self.slots[slot as usize].link = Some((self.links.len() - 1) as u32);
             }
@@ -3091,6 +3196,9 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
+        joint_models: Default::default(),
+        joint_sockets: Default::default(),
+        stroke_fonts: Default::default(),
         base_dirs,
         safe_area,
         safe_enforce,
@@ -3125,11 +3233,56 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     })
 }
 
+/// Whether `value` is the attribute's declared default (an attribute set to its default is not worth a warning).
+fn is_default(value: &AttrValue, default: Option<&str>) -> bool {
+    let Some(d) = default else { return false };
+    match value {
+        AttrValue::Num(x) => d.parse::<f64>().is_ok_and(|v| v == *x),
+        AttrValue::Bool(b) => d == if *b { "true" } else { "false" },
+        other => other.to_string() == d,
+    }
+}
+
+/// `effectType` is one attribute bag shared by every effect type, so the schema accepts any of its attributes on any type;
+/// each type reads a subset (`sr_model::effect_attrs`). An attribute set to a value other than its default on a type that
+/// does not read it does nothing, silently (E19, a warning): a vignette given `intensity` keeps the default `radius`.
+fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let Some(ty) = e.get_attr("type").map(|t| t.to_string()) else { return };
+    let Some(reads) = sr_model::effect_attrs::declared(&ty) else { return };
+    for decl in sr_model::xsd::COMPLEX_TYPES[e.xsd_type()].attrs {
+        if sr_model::effect_attrs::ALWAYS.contains(&decl.name) || reads.contains(&decl.name) {
+            continue;
+        }
+        let Some(value) = e.get_attr(decl.name) else { continue };
+        if is_default(&value, decl.default) {
+            continue;
+        }
+        let id = e.element_id().unwrap_or("");
+        let list = if reads.is_empty() {
+            "no attributes".to_string()
+        } else {
+            reads.iter().map(|r| format!("@{r}")).collect::<Vec<_>>().join(", ")
+        };
+        warnings.push(Diagnostic::info(
+            "E19",
+            format!(
+                "effect {id:?} of type {ty:?}: @{} is accepted but not read by this type, which reads {list}",
+                decl.name
+            ),
+            e.loc(),
+            id,
+        ));
+    }
+}
+
 /// Attributes the schema accepts that this build does not read: reported (E19, a warning) so that nothing is
 /// accepted silently and then ignored.
 fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    if matches!(e.element_name(), "effect" | "effectType") {
+        unread_effect_attributes(e, warnings);
+    }
     let mut note = |what: &str, why: &str| {
-        warnings.push(Diagnostic::warning(
+        warnings.push(Diagnostic::info(
             "E19",
             format!("{what} is accepted but has {why}"),
             e.loc(),
@@ -3158,24 +3311,118 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
 /// segment that leaves with another curve, the attribute does nothing (E19, a warning).
 fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warnings: &mut Vec<Diagnostic>) {
     use m::Curve::*;
+    let curve_of = |k: &m::Key| k.interpolation.unwrap_or(default);
     for (i, k) in keys.iter().enumerate() {
-        let curve = k.interpolation.unwrap_or(default);
-        let mut note = |attr: &str, family: &str| {
-            warnings.push(Diagnostic::warning(
+        let curve = curve_of(k);
+        let found = std::cell::RefCell::new(Vec::<(Severity, &str, String)>::new());
+        let note = |attr: &str, family: &str, why: &str| {
+            found.borrow_mut().push((
+                Severity::Info,
                 "E19",
                 format!(
-                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect on the {curve:?} curve, which does not read it (only {family} curves do)",
+                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect {why}, which does not read it (only {family} reads it)",
                     i + 1
                 ),
-                k.loc,
-                who,
             ))
         };
+        let on_curve = format!("on the {curve:?} curve");
         if k.overshoot.is_some() && !matches!(curve, BackIn | BackOut | BackInOut) {
-            note("overshoot", "back-*");
+            note("overshoot", "back-* curves", &on_curve);
         }
         if k.period.is_some() && !matches!(curve, ElasticIn | ElasticOut | ElasticInOut) {
-            note("period", "elastic-*");
+            note("period", "elastic-* curves", &on_curve);
+        }
+        // a carried spring needs a segment before it and a segment of its own
+        if k.carry && curve != Spring {
+            note("carry", "a spring segment", &on_curve);
+        } else if k.carry && i == 0 {
+            note(
+                "carry",
+                "a spring segment with a segment before it",
+                "on the first key, which has no segment before it",
+            );
+        } else if k.carry && i + 1 == keys.len() {
+            note("carry", "a spring segment", "on the last key, which starts no segment");
+        }
+        // cubic-bezier reads @bezier, else the handles: this key's easeOut and the next key's easeIn
+        let cubic = curve == CubicBezier;
+        if k.bezier.is_some() && !cubic {
+            note("bezier", "the cubic-bezier curve", &on_curve);
+        }
+        // a key that takes cubic-bezier from the animation's default, starts a segment and says nothing about its
+        // handles gets the engine's default ones (rule C40 asks for them only when the key names the curve)
+        if cubic && k.interpolation.is_none() && k.bezier.is_none() && k.ease_out.is_none() {
+            if let Some(next) = keys.get(i + 1) {
+                if next.ease_in.is_none() {
+                    // the default handles shape the motion: a warning, not an inert finding
+                    found.borrow_mut().push((
+                        Severity::Warning,
+                        "E21",
+                        format!(
+                            "key {} of an animation on {who:?}: the CubicBezier curve comes from defaultInterpolation and the key has no @bezier or easeOut/easeIn handles, so the engine's default handles (influence 1/3, speed 1) are used",
+                            i + 1
+                        ),
+                    ));
+                }
+            }
+        }
+        if k.ease_out.is_some() && !cubic {
+            note("easeOut", "the cubic-bezier curve", &on_curve);
+        } else if k.ease_out.is_some() && k.bezier.is_some() {
+            note("easeOut", "the cubic-bezier curve without @bezier", "on a key that has @bezier");
+        }
+        if k.ease_in.is_some() {
+            match i.checked_sub(1).map(|j| &keys[j]) {
+                None => note(
+                    "easeIn",
+                    "the cubic-bezier curve of the segment that ends in the key",
+                    "on the first key, which no segment ends in",
+                ),
+                Some(prev) if curve_of(prev) != CubicBezier => note(
+                    "easeIn",
+                    "the cubic-bezier curve",
+                    &format!("on the {:?} curve of the key before it", curve_of(prev)),
+                ),
+                Some(prev) if prev.bezier.is_some() => {
+                    note("easeIn", "the cubic-bezier curve without @bezier", "on a key that follows a key with @bezier")
+                }
+                Some(_) => {}
+            }
+        }
+        if curve != Steps {
+            if k.steps.is_some() {
+                note("steps", "the steps curve", &on_curve);
+            }
+            if k.step_position == m::StepPosition::Start {
+                note("stepPosition", "the steps curve", &on_curve);
+            }
+        }
+        if curve != Spring {
+            for (attr, set) in [
+                ("stiffness", k.stiffness.get() != 100.0),
+                ("damping", k.damping.get() != 10.0),
+                ("mass", k.mass.get() != 1.0),
+            ] {
+                if set {
+                    note(attr, "the spring curve", &on_curve);
+                }
+            }
+        }
+        // the tangent of a key is shaped by the segment before it as well as the one after
+        let tcb = curve == Tcb || i.checked_sub(1).is_some_and(|j| curve_of(&keys[j]) == Tcb);
+        if !tcb {
+            for (attr, set) in [
+                ("tension", k.tension.get() != 0.0),
+                ("continuity", k.continuity.get() != 0.0),
+                ("bias", k.bias.get() != 0.0),
+            ] {
+                if set {
+                    note(attr, "the tcb curve", &on_curve);
+                }
+            }
+        }
+        for (severity, code, message) in found.into_inner() {
+            warnings.push(Diagnostic { severity, ..Diagnostic::warning(code, message, k.loc, who) });
         }
     }
 }
@@ -3236,7 +3483,7 @@ fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagn
             }
         });
         if zero {
-            warnings.push(Diagnostic::warning(
+            warnings.push(Diagnostic::info(
                 "E19",
                 format!("effect source {id:?} has opacity 0, so it is accepted but contributes nothing; hide a map with visible=\"false\" and leave its opacity at 1"),
                 loc,

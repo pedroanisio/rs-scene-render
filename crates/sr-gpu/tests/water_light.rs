@@ -591,6 +591,7 @@ fn tiled_frames_equal_whole_frames_with_light_through_glass() {
         opacity: 1.0,
         cast_shadow: true,
         receive_shadow: true,
+        shadow_catcher: false,
     };
     let glass = MaterialParams {
         transmission: 1.0,

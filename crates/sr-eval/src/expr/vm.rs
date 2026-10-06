@@ -159,6 +159,11 @@ pub trait Host {
     fn prop(&mut self, slot: u32) -> V;
     /// Pre-expression value of this property at time `t`.
     fn value_at_time(&mut self, t: f64) -> V;
+    /// The full value of a resolved property slot at composition time `t`.
+    fn prop_at(&mut self, slot: u32, t: f64) -> V {
+        let _ = (slot, t);
+        V::Undef
+    }
     /// Template parameter or repeat variable.
     fn param(&mut self, name: &str) -> V;
     /// `loopIn`/`loopOut` over this property's keyframes.
@@ -232,6 +237,10 @@ pub trait Resolver {
 pub enum Func {
     Param,
     ValueAtTime,
+    /// `propAtTime("id.prop", t)`, compiled with the resolved slot as its first argument.
+    PropAt,
+    /// `penner("curve", u)`, compiled with the curve's index as its first argument.
+    Penner,
     Wiggle,
     Noise,
     Random,
@@ -294,7 +303,9 @@ impl Func {
         Some(match name {
             "param" => (Param, 1, 1),
             "valueAtTime" => (ValueAtTime, 1, 1),
-            "wiggle" => (Wiggle, 2, 5),
+            "propAtTime" => (PropAt, 2, 2),
+            "penner" => (Penner, 2, 2),
+            "wiggle" => (Wiggle, 2, 6),
             "noise" => (Noise, 1, 3),
             "random" => (Random, 0, 2),
             "loopIn" => (LoopIn, 0, 2),
@@ -357,6 +368,8 @@ pub const FUNCTION_NAMES: &[&str] = &[
     "param",
     "prop",
     "valueAtTime",
+    "propAtTime",
+    "penner",
     "wiggle",
     "noise",
     "random",
@@ -775,6 +788,38 @@ impl<'r> Compiler<'r> {
             }
             _ => {}
         }
+        // `propAtTime` and `penner` name their target with a literal: it is resolved here and passed as a number
+        let rewritten: Vec<Expr>;
+        let args = match name.as_str() {
+            "propAtTime" => {
+                if args.len() != 2 {
+                    return Err(CompileError { message: "propAtTime() takes two arguments".into(), offset: at });
+                }
+                let path = self.string_arg(args, 0, "propAtTime", at)?.to_string();
+                let slot = self.resolver.prop(&path).map_err(|m| CompileError { message: m, offset: at })?;
+                if !self.deps.contains(&slot) {
+                    self.deps.push(slot);
+                }
+                rewritten = vec![Expr::Num(slot as f64), args[1].clone()];
+                &rewritten[..]
+            }
+            "penner" => {
+                if args.len() != 2 {
+                    return Err(CompileError { message: "penner() takes two arguments".into(), offset: at });
+                }
+                let curve = self.string_arg(args, 0, "penner", at)?.to_string();
+                let Some(index) = crate::curve::index_of(&curve) else {
+                    let all: Vec<String> = crate::curve::names().collect();
+                    let hint = crate::suggest(&curve, all.iter().map(String::as_str))
+                        .map(|s| format!("; did you mean '{s}'?"))
+                        .unwrap_or_default();
+                    return Err(CompileError { message: format!("unknown curve {curve:?}{hint}"), offset: at });
+                };
+                rewritten = vec![Expr::Num(index as f64), args[1].clone()];
+                &rewritten[..]
+            }
+            _ => args,
+        };
         let Some((f, lo, hi)) = Func::lookup(&name) else {
             let hint = crate::suggest(&name, FUNCTION_NAMES.iter().copied())
                 .map(|s| format!("; did you mean '{s}'?"))
@@ -1204,6 +1249,8 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
     match f {
         Param => host.param(&args[0].to_js_string()),
         ValueAtTime => host.value_at_time(arg(args, 0)),
+        PropAt => host.prop_at(arg(args, 0) as u32, arg(args, 1)),
+        Penner => V::Num(crate::curve::progress_by_index(arg(args, 0) as usize, arg(args, 1))),
         Wiggle => {
             let (freq, amp) = (arg(args, 0), &args[1]);
             let octaves = args.get(2).map(V::num).unwrap_or(1.0).clamp(1.0, 16.0) as u32;
@@ -1211,6 +1258,11 @@ fn call(f: Func, args: &[V], site: u32, host: &mut dyn Host) -> V {
             let t = match args.get(4) {
                 Some(v) => v.num(),
                 None => host.var(Var::Time).num(),
+            };
+            // `hold`: the wiggle is held for that many seconds at a time (animating on twos or threes)
+            let t = match args.get(5).map(V::num) {
+                Some(h) if h > 0.0 && h.is_finite() => libm::floor(t / h + 1e-9) * h,
+                _ => t,
             };
             let (seed, channel) = (host.noise_seed(), host.noise_channel());
             let value = host.var(Var::Value);

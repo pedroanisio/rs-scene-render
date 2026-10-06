@@ -211,6 +211,7 @@ struct Sets<'a> {
     assets: HashSet<&'a str>,
     text_assets: HashSet<&'a str>,
     font_assets: HashSet<&'a str>,
+    stroke_font_assets: HashSet<&'a str>,
     mesh_assets: HashSet<&'a str>,
     mesh_sequences: HashSet<&'a str>,
     sequence_colliders: HashSet<&'a str>,
@@ -321,7 +322,7 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             s.pyro_volumes.insert(id);
         }
         let procedural_motion = object.children().any(|child| match object.attribute("primitive") {
-            Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel")),
+            Some("text") => matches!(child.attribute("property"), Some("text" | "font" | "bevel" | "tracking")),
             Some("extrude") => matches!(child.attribute("property"), Some("path" | "bevel")),
             Some("clay") => {
                 matches!(child.attribute("property"), Some("resolution" | "fingerprints" | "seed" | "boil"))
@@ -364,6 +365,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.text_assets.insert(i);
             } else if is(a, "font") {
                 s.font_assets.insert(i);
+            } else if is(a, "strokeFont") {
+                s.stroke_font_assets.insert(i);
             } else if is(a, "mesh") {
                 s.mesh_assets.insert(i);
             } else if is(a, "meshSequence") {
@@ -861,10 +864,13 @@ impl<'a> Eval<'a> {
                     self.version_1_0(n);
                 }
                 // p1b
-                let v5 = kids(n, "assets").any(|s| s.children().any(|c| is(c, "tiles")))
+                let v5 = kids(n, "assets").any(|s| s.children().any(|c| is(c, "tiles") || is(c, "strokeFont")))
                     || n.descendants().any(|d| {
                         is(d, "basemap")
                             || (is(d, "rigidBody") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                            || (is(d, "morph") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                            || (is(d, "joint") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                            || (is(d, "shape") && d.attribute("shape") == Some("stroke-text"))
                             || (is(d, "object3D") && matches!(d.attribute("primitive"), Some("map" | "globe")))
                     })
                     || kids(n, "output").any(|o| {
@@ -889,6 +895,17 @@ impl<'a> Eval<'a> {
                 self.check(a("shape") != Some("path") || has("path"), n, "C3", || {
                     "shape shape=\"path\" requires @path.".into()
                 });
+                if a("shape") == Some("stroke-text") {
+                    self.check(has("text") && has("strokeFont"), n, "PEN1", || {
+                        "shape=\"stroke-text\" needs @text and @strokeFont.".into()
+                    });
+                    self.check(
+                        !has("strokeFont") || self.sets.stroke_font_assets.contains(&v("strokeFont").as_str()),
+                        n,
+                        "PEN2",
+                        || "shape/@strokeFont must name a strokeFont asset.".into(),
+                    );
+                }
                 // p66
                 let marked = ["markerStart", "markerEnd"].iter().any(|k| a(k).is_some_and(|v| v != "none"));
                 self.check(!marked || matches!(a("shape"), Some("path" | "line")), n, "C65", || {
@@ -1340,6 +1357,29 @@ impl<'a> Eval<'a> {
                 self.check(a("primitive") != Some("text") || has("text"), n, "C7", || {
                     "object3D primitive=\"text\" requires @text.".into()
                 });
+                // p68
+                if let Some(pairs) = a("materialOverride") {
+                    let ok = pairs.split_whitespace().count() > 0
+                        && pairs
+                            .split_whitespace()
+                            .all(|t| t.split_once(':').is_some_and(|(o, w)| !o.is_empty() && !w.is_empty()));
+                    self.check(ok, n, "MOV1", || {
+                        "@materialOverride is a space-separated list of name:id pairs.".into()
+                    });
+                    // each id (the text after the first ':') names a material of the document
+                    let named = pairs
+                        .split_whitespace()
+                        .all(|t| self.sets.materials.contains(t.split_once(':').map_or("", |(_, id)| id)));
+                    self.check(named, n, "MOV2", || {
+                        "@materialOverride: each id after the colon must name a material.".into()
+                    });
+                }
+                // p67
+                if has("tracking") {
+                    self.check(a("primitive") == Some("text"), n, "TXT2", || {
+                        "@tracking applies to object3D primitive=\"text\".".into()
+                    });
+                }
                 self.check(a("primitive") != Some("extrude") || has("path"), n, "C8", || {
                     "object3D primitive=\"extrude\" requires @path.".into()
                 });
@@ -1826,7 +1866,7 @@ impl<'a> Eval<'a> {
             });
         }
         // p62
-        if local == "pattern" && has("asset") {
+        if local == "pattern" && parent_is("paints") {
             self.check(contains(&self.sets.image_assets, a("asset")), n, "R42", || {
                 "pattern/@asset must name an image asset: a pattern tiles an image.".into()
             });

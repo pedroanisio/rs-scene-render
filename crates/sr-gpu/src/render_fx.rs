@@ -238,8 +238,8 @@ fn reach(e: &m::Effect, a: &Attrs) -> f64 {
     if UNBOUNDED.contains(&kind) {
         return f64::INFINITY;
     }
-    let r = a.num("radius", 4.0);
-    let sz = a.num("size", 1.0);
+    // read for every type; what a type uses is in its declared attributes (sr_model::effect_attrs)
+    let (r, sz) = crate::vector::quiet(|| (a.num("radius", 4.0), a.num("size", 1.0)));
     match kind {
         // radius is the standard deviation: reach four of them
         "blur" | "glow" | "bloom" | "halation" | "unsharp-mask" | "inner-glow" | "inner-shadow" => r * 4.0,
@@ -731,6 +731,7 @@ impl Renderer {
         scale: f64,
         height: f64,
     ) -> Vec<[f32; 4]> {
+        crate::vector::note_read(a.e, "lights");
         let Some(AttrValue::Tokens(ids)) = a.e.get_attr("lights") else { return Vec::new() };
         let Some(lights) = ctx.p.scene.lights.as_ref() else { return Vec::new() };
         ids.iter()
@@ -1101,7 +1102,9 @@ impl Renderer {
         };
         let grads: HashMap<String, fx::Stops> = attrs
             .iter()
-            .flat_map(|a| [a.paint("paint"), a.str("source").map(|s| Value::PaintRef(s.into()))])
+            .flat_map(|a| {
+                crate::vector::quiet(|| [a.paint("paint"), a.str("source").map(|s| Value::PaintRef(s.into()))])
+            })
             .flatten()
             .filter_map(|v| {
                 let key = match &v {
@@ -1156,7 +1159,7 @@ impl Renderer {
                 continue;
             }
             let source =
-                if a.str("source").is_some() && matches!(kind, "displacement-map" | "difference-key" | "shader") {
+                if matches!(kind, "displacement-map" | "difference-key" | "shader") && a.str("source").is_some() {
                     self.effect_source(plan, ctx, a, space, rect)
                 } else {
                     None
@@ -1253,7 +1256,7 @@ impl Renderer {
             effs.iter().map(|e| Attrs { e: *e as &dyn Element, props: element_props(g, &e.id) }).collect();
         let grads: HashMap<String, fx::Stops> = attrs
             .iter()
-            .filter_map(|a| a.paint("paint"))
+            .filter_map(|a| crate::vector::quiet(|| a.paint("paint")))
             .filter_map(|v| match &v {
                 Value::PaintRef(id) => self.gradient_value(ctx.p, g, &v).map(|s| (id.to_string(), s)),
                 _ => None,
@@ -1317,6 +1320,18 @@ impl Renderer {
         ctx.p.scene.project.motion_blur
     }
 
+    /// The `shutterAngle` of node `i` or of its nearest ancestor that sets one.
+    fn node_shutter_angle(g: &sr_eval::FrameGraph, i: usize) -> Option<f64> {
+        let mut k = Some(i);
+        while let Some(j) = k {
+            if let Some(AttrValue::Num(v)) = g.nodes[j].elem.get_attr("shutterAngle") {
+                return Some(v);
+            }
+            k = g.nodes[j].parent.map(|p| p as usize);
+        }
+        None
+    }
+
     /// Accumulates the node over the shutter. Returns false when it does not move enough to need it.
     #[allow(clippy::too_many_arguments)]
     fn motion_blur(
@@ -1339,7 +1354,8 @@ impl Renderer {
         }
         let pr = &ctx.p.scene.project;
         let fps = fps_of(ctx.p);
-        let angle = pr.shutter_angle;
+        // the node's own shutter angle, else the nearest ancestor's, else the project's
+        let angle = Self::node_shutter_angle(g, i).unwrap_or(pr.shutter_angle);
         if angle <= 0.0 {
             return false;
         }

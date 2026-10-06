@@ -218,7 +218,20 @@ impl BakedSequence {
         }
         let sequence =
             Sequence::new(0, self.entries.len() as i64 - 1, self.fps, interpolation, MissingFrame::Transparent)?;
-        let loader = |i: i64| self.entries[i as usize].as_ref().map(&mut loader).transpose();
+        // Different sample labels can reference the same immutable payload. Share
+        // its allocation while retaining the labels used for motion-aware timing.
+        let mut previous: Option<([u8; 32], Arc<Volume>)> = None;
+        let loader = |i: i64| {
+            let Some(frame) = self.entries[i as usize].as_ref() else { return Ok(None) };
+            if let Some((digest, volume)) = &previous {
+                if *digest == frame.digest {
+                    return Ok(Some(volume.clone()));
+                }
+            }
+            let volume = loader(frame)?;
+            previous = Some((frame.digest, volume.clone()));
+            Ok(Some(volume))
+        };
         if timed {
             sequence.load_timed(offset / self.fps, max_bytes, loader)
         } else {

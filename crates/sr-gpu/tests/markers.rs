@@ -128,3 +128,23 @@ fn a_closed_outline_has_no_ends_to_mark() {
     let Some(u) = render_times(&path(r#"trimEnd="0.5""#, closed, "#00FF00"), &[0.0]) else { return };
     assert_ne!(t.px, u.px, "a trimmed closed outline is open");
 }
+
+/// SREP 15: "`markerStart` applies at the first point of the drawn interval in path order, and `markerEnd` at the last,
+/// each only when the subpath holding that point is open."
+#[test]
+fn in_a_path_with_open_and_closed_subpaths_a_marker_needs_the_open_one() {
+    let closed = "M100 100 L200 100 L200 200 Z";
+    let open = "M300 100 L400 100 L400 200";
+    let pixels = |attrs: &str, d: &str| render_times(&path(attrs, d, "#00FF00"), &[0.0]).map(|r| r.px);
+    for (d, what, start_marks, end_marks) in [
+        (format!("{closed} {open}"), "closed first, open last", false, true),
+        (format!("{open} {closed}"), "open first, closed last", true, false),
+        (format!("{closed} M300 100 L400 100 Z"), "every subpath closed", false, false),
+    ] {
+        let Some(plain) = pixels("", &d) else { return };
+        let start = pixels(r#"markerStart="arrow""#, &d).unwrap();
+        let end = pixels(r#"markerEnd="arrow""#, &d).unwrap();
+        assert_eq!(start != plain, start_marks, "{what}: markerStart");
+        assert_eq!(end != plain, end_marks, "{what}: markerEnd");
+    }
+}

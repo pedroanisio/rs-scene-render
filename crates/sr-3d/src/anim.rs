@@ -82,6 +82,96 @@ pub fn pose(model: &Model, anim: Option<&Animation>, t: f32) -> (Vec<Trs>, Vec<V
     (locals, weights)
 }
 
+/// The pose of `a` at `ta` seconds blended with the pose of `b` at `tb` by `w` (0: all `a`, 1: all `b`). Translation, scale
+/// and morph weights blend linearly and rotation along the shortest arc. A clip that does not animate a node leaves it at
+/// its rest pose in that clip; `None` is the rest pose throughout.
+pub fn pose_blend(
+    model: &Model,
+    a: Option<&Animation>,
+    ta: f32,
+    b: Option<&Animation>,
+    tb: f32,
+    w: f32,
+) -> (Vec<Trs>, Vec<Vec<f32>>) {
+    let (la, wa) = pose(model, a, ta);
+    if w <= 0.0 || w.is_nan() {
+        return (la, wa);
+    }
+    let (lb, wb) = pose(model, b, tb);
+    if w >= 1.0 {
+        return (lb, wb);
+    }
+    let locals = la
+        .iter()
+        .zip(&lb)
+        .map(|(x, y)| Trs { t: x.t.lerp(y.t, w), r: x.r.slerp(y.r, w).normalize(), s: x.s.lerp(y.s, w) })
+        .collect();
+    let weights = wa
+        .iter()
+        .zip(&wb)
+        .map(|(x, y)| {
+            if x.len() == y.len() {
+                x.iter().zip(y).map(|(p, q)| p + (q - p) * w).collect()
+            } else {
+                // clips that disagree on the morph count: the first clip's weights
+                x.clone()
+            }
+        })
+        .collect();
+    (locals, weights)
+}
+
+/// The rotation of angles (degrees) about x, then y, then z of the frame being turned: `Rz · Ry · Rx`, as an object's own
+/// `rotationX`, `rotationY` and `rotation` compose.
+pub fn euler_degrees(x: f32, y: f32, z: f32) -> Quat {
+    Quat::from_rotation_z(z.to_radians())
+        * Quat::from_rotation_y(y.to_radians())
+        * Quat::from_rotation_x(x.to_radians())
+}
+
+/// A rotation added to a joint's local rotation, in the joint's own axes (`locals[node].r · extra`).
+pub fn pose_joint(locals: &mut [Trs], node: usize, extra: Quat) {
+    if let Some(l) = locals.get_mut(node) {
+        l.r = (l.r * extra).normalize();
+    }
+}
+
+/// Turns a joint so that its `axis` (a unit vector in the joint's own frame) points at `target` (a point in the model's
+/// own space): the shortest rotation, scaled by `influence` (0 to 1) and limited to `max_angle` radians, applied in the
+/// world about the joint and expressed back in the local rotation, so the joint's parents are not moved. A target at the
+/// joint, or an axis already on target, leaves the joint as it is.
+pub fn look_at(
+    model: &Model,
+    locals: &mut [Trs],
+    node: usize,
+    target: Vec3,
+    axis: Vec3,
+    influence: f32,
+    max_angle: f32,
+) {
+    let world = model.world_matrices(locals);
+    let Some(w) = world.get(node) else { return };
+    let (_, world_rot, position) = w.to_scale_rotation_translation();
+    let want = target - position;
+    let forward = world_rot * axis.normalize_or_zero();
+    if want.length_squared() < 1e-12 || forward.length_squared() < 0.5 {
+        return;
+    }
+    let turn = Quat::from_rotation_arc(forward, want.normalize());
+    let mut turn = Quat::IDENTITY.slerp(turn, influence.clamp(0.0, 1.0));
+    let (turn_axis, angle) = turn.to_axis_angle();
+    if angle > max_angle {
+        turn = Quat::from_axis_angle(turn_axis, max_angle.max(0.0));
+    }
+    let parent_rot = match model.nodes[node].parent {
+        Some(p) => world[p].to_scale_rotation_translation().1,
+        None => Quat::IDENTITY,
+    };
+    // world rotation turn · (parent · local) = parent · local' → local' = parent⁻¹ · turn · parent · local
+    let local = &mut locals[node];
+    local.r = (parent_rot.inverse() * turn * parent_rot * local.r).normalize();
+}
+
 /// One primitive to draw: its model-space matrix and, when deformed, its vertices.
 pub struct DrawItem {
     pub node: usize,

@@ -24,6 +24,14 @@ fn a_pattern_paint_tiles_an_image_asset_and_nothing_else() {
 }
 
 #[test]
+fn pattern_rule_matches_only_paint_children_even_in_invalid_documents() {
+    let outside = codes("", r#"<pattern id="bad" asset="grid"/>"#);
+    assert!(!outside.contains(&"R42".into()), "{outside:?}");
+    let missing = codes(r#"<paints><pattern id="bad"/></paints>"#, "");
+    assert!(missing.contains(&"R42".into()), "{missing:?}");
+}
+
+#[test]
 fn an_emitter_asset_is_an_image() {
     let n = |asset: &str| format!(r#"<particleEmitter id="e" emitterAsset="{asset}"/>"#);
     let ok = codes("", &n("pic"));

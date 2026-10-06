@@ -315,6 +315,39 @@ pub fn working_encoder(name: &str) -> bool {
     ok
 }
 
+// Older FFmpeg SVT wrappers accept generic pass flags without forwarding them.
+// A successful process alone cannot establish two-pass support.
+fn svt_two_pass_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let Ok(dir) = tempfile::tempdir() else { return false };
+        let log = dir.path().join("stats");
+        let ok = Command::new(crate::ffmpeg())
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=s=64x64:r=25"])
+            .args([
+                "-frames:v",
+                "25",
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                "12",
+                "-b:v",
+                "100k",
+                "-pass",
+                "1",
+                "-passlogfile",
+            ])
+            .arg(log)
+            .args(["-f", "null", "-"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        ok && std::fs::read_dir(dir.path())
+            .is_ok_and(|files| files.flatten().any(|entry| entry.metadata().is_ok_and(|m| m.is_file() && m.len() > 0)))
+    })
+}
+
 /// The encoder a codec uses under a hardware preference.
 pub fn choose_encoder(codec: Codec, hw: Hardware) -> Result<String, MediaError> {
     let (hw_base, software): (&str, &[&str]) = match codec {
@@ -373,7 +406,7 @@ fn preset_rank(p: &str) -> usize {
 /// scale: 4 to 13 windows a film with both tools on (departures up to 1.4), at most 2 with noise
 /// substitution off (up to 0.22), none with both off (up to 0.14). The overall error is no higher
 /// without them. Noise substitution does the same damage at 256 and 320 kb/s.
-fn compressed_audio_args(codec: &str, bitrate: u64) -> Vec<String> {
+pub fn compressed_audio_args(codec: &str, bitrate: u64) -> Vec<String> {
     if codec.starts_with("pcm") {
         return Vec::new();
     }
@@ -465,6 +498,15 @@ impl EncodeSpec {
         // SVT-AV1 needs frames of at least 64×64
         if encoder == "libsvtav1" && (self.width < 64 || self.height < 64) && working_encoder("libaom-av1") {
             encoder = "libaom-av1".into();
+        }
+        if encoder == "libsvtav1" && self.pass.is_some() && !svt_two_pass_available() {
+            if working_encoder("libaom-av1") {
+                encoder = "libaom-av1".into();
+            } else {
+                return Err(MediaError::Invalid(
+                    "this FFmpeg build cannot produce SVT-AV1 two-pass statistics; install FFmpeg with SVT-AV1 two-pass support or libaom-av1".into(),
+                ));
+            }
         }
         let vaapi = encoder.ends_with("_vaapi");
         if vaapi {
@@ -623,6 +665,9 @@ impl EncodeSpec {
                 s(&mut a, &["-preset", &svt.to_string()]);
                 rate_control(&mut a, "-crf", crf);
                 let mut params = vec![format!("keyint={gop}")];
+                if let Some((p, log)) = &self.pass {
+                    s(&mut a, &["-pass", &p.to_string(), "-passlogfile", &log.display().to_string()]);
+                }
                 if let Some(m) = &self.hdr.mastering_display {
                     params.push(format!("mastering-display={m}"));
                 }

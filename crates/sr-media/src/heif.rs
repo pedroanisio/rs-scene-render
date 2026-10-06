@@ -56,8 +56,50 @@ fn colr(p: &[u8]) -> Option<Colr> {
     }
 }
 
+/// None means the table cannot be read; an empty list means a readable table
+/// assigns no properties to this item. These cases must not share a fallback.
+fn primary_associations(ipma: &[u8], primary: u32) -> Option<Vec<usize>> {
+    let version = *ipma.first()?;
+    if version > 1 {
+        return None;
+    }
+    let flags = *ipma.get(3)?;
+    let count = u32::from_be_bytes(ipma.get(4..8)?.try_into().ok()?);
+    let mut offset = 8;
+    let mut indices = Vec::new();
+    for _ in 0..count {
+        let item = if version == 0 {
+            let bytes = ipma.get(offset..offset + 2)?;
+            offset += 2;
+            u32::from(u16::from_be_bytes(bytes.try_into().ok()?))
+        } else {
+            let bytes = ipma.get(offset..offset + 4)?;
+            offset += 4;
+            u32::from_be_bytes(bytes.try_into().ok()?)
+        };
+        let count = *ipma.get(offset)?;
+        offset += 1;
+        for _ in 0..count {
+            let index = if flags & 1 != 0 {
+                let bytes = ipma.get(offset..offset + 2)?;
+                offset += 2;
+                usize::from(u16::from_be_bytes(bytes.try_into().ok()?) & 0x7fff)
+            } else {
+                let byte = *ipma.get(offset)?;
+                offset += 1;
+                usize::from(byte & 0x7f)
+            };
+            if item == primary {
+                indices.push(index);
+            }
+        }
+    }
+    Some(indices)
+}
+
 /// The `colr` properties of the primary item: ICC first, then `nclx`. When
 /// the associations cannot be read, the first `colr` of the property container.
+/// Readable associations are authoritative, even when the primary has no profile.
 pub fn colour(file: &[u8]) -> Vec<Colr> {
     let Some((_, meta)) = boxes(file).into_iter().find(|(k, _)| k == b"meta") else { return Vec::new() };
     let children = boxes(meta.get(4..).unwrap_or(&[]));
@@ -69,48 +111,19 @@ pub fn colour(file: &[u8]) -> Vec<Colr> {
     let props = boxes(iprp);
     let ipco: Vec<([u8; 4], &[u8])> =
         props.iter().find(|(k, _)| k == b"ipco").map(|(_, p)| boxes(p)).unwrap_or_default();
-    let mut indices = Vec::new();
-    if let (Some(primary), Some((_, ipma))) = (primary, props.iter().find(|(k, _)| k == b"ipma")) {
-        let (version, flags) = (ipma.first().copied().unwrap_or(0), ipma.get(3).copied().unwrap_or(0));
-        let mut o = 4;
-        let n = ipma.get(4..8).map(|b| u32::from_be_bytes(b.try_into().unwrap())).unwrap_or(0);
-        o += 4;
-        for _ in 0..n {
-            let item = if version < 1 {
-                let v = ipma.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as u32);
-                o += 2;
-                v
-            } else {
-                let v = ipma.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
-                o += 4;
-                v
-            };
-            let Some(item) = item else { break };
-            let Some(&count) = ipma.get(o) else { break };
-            o += 1;
-            for _ in 0..count {
-                let index = if flags & 1 != 0 {
-                    let v = ipma.get(o..o + 2).map(|b| (u16::from_be_bytes([b[0], b[1]]) & 0x7fff) as usize);
-                    o += 2;
-                    v
-                } else {
-                    let v = ipma.get(o).map(|b| (b & 0x7f) as usize);
-                    o += 1;
-                    v
-                };
-                if let Some(i) = index.filter(|_| item == primary) {
-                    indices.push(i);
-                }
-            }
-        }
-    }
+    let indices = primary.and_then(|id| {
+        let (_, ipma) = props.iter().find(|(k, _)| k == b"ipma")?;
+        primary_associations(ipma, id)
+    });
     let mut out: Vec<Colr> = indices
-        .iter()
+        .as_ref()
+        .into_iter()
+        .flatten()
         .filter_map(|&i| ipco.get(i.checked_sub(1)?))
         .filter(|(k, _)| k == b"colr")
         .filter_map(|(_, p)| colr(p))
         .collect();
-    if out.is_empty() {
+    if indices.is_none() {
         out.extend(ipco.iter().filter(|(k, _)| k == b"colr").filter_map(|(_, p)| colr(p)).take(1));
     }
     out.sort_by_key(|c| matches!(c, Colr::Nclx(..)));
@@ -126,6 +139,53 @@ mod tests {
         v.extend(kind);
         v.extend(payload);
         v
+    }
+
+    fn primary_file(properties: &[Vec<u8>], associations: Option<&[u8]>) -> Vec<u8> {
+        let mut props = bx(b"ipco", &properties.concat());
+        if let Some(associations) = associations {
+            props.extend(bx(b"ipma", associations));
+        }
+        let meta = bx(b"meta", &[vec![0; 4], bx(b"pitm", &[0, 0, 0, 0, 0, 2]), bx(b"iprp", &props)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    #[test]
+    fn readable_primary_associations_never_borrow_a_thumbnail_colour_profile() {
+        let thumb = bx(b"colr", b"nclx\0\x0c\0\x0d\0\x06\x80");
+        let main = bx(b"ispe", &[0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 16]);
+        for associations in [
+            // Both items are associated; the primary has only image dimensions.
+            &[0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 1, 0x81, 0, 2, 1, 0x82][..],
+            // The primary explicitly has no properties.
+            &[0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 1, 0x81, 0, 2, 0][..],
+            // A readable table omits the primary entirely.
+            &[0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0x81][..],
+        ] {
+            let file = primary_file(&[thumb.clone(), main.clone()], Some(associations));
+            assert!(colour(&file).is_empty(), "primary without colr must not inherit thumbnail P3");
+        }
+        let unsupported = bx(b"colr", b"unknown");
+        let file = primary_file(&[thumb, unsupported], Some(&[0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 1, 0x81, 0, 2, 1, 0x82]));
+        assert!(colour(&file).is_empty(), "an unsupported primary colr is not a thumbnail association");
+    }
+
+    #[test]
+    fn primary_profiles_support_wide_item_ids_and_property_indices() {
+        let thumb = bx(b"colr", b"profTHUMBNAIL");
+        let main = bx(b"colr", b"profPRIMARY");
+        let associations = [1, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 1, 0x80, 1, 0, 0, 0, 2, 1, 0x80, 2];
+        let file = primary_file(&[thumb, main], Some(&associations));
+        assert_eq!(colour(&file), vec![Colr::Icc(b"PRIMARY".to_vec())]);
+    }
+
+    #[test]
+    fn missing_or_unreadable_associations_retain_the_profile_fallback() {
+        let profile = bx(b"colr", b"profFALLBACK");
+        for associations in [None, Some(&[][..]), Some(&[0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 1][..])] {
+            let file = primary_file(std::slice::from_ref(&profile), associations);
+            assert_eq!(colour(&file), vec![Colr::Icc(b"FALLBACK".to_vec())]);
+        }
     }
 
     #[test]

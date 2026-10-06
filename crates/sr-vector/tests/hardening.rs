@@ -136,7 +136,11 @@ fn star_points_and_ridges_and_wiggle_detail_are_clamped() {
     assert_eq!(items[0].parts[0].0.contours()[0].v.len(), 4 * 2 * modifiers::MAX_RIDGES as usize);
 
     let mut items = square();
-    modifiers::apply(&mut items, &Modifier::WigglePath { size: 1.0, detail: 2e5, frequency: 1.0, seed: 1 }, &CTX);
+    modifiers::apply(
+        &mut items,
+        &Modifier::WigglePath { size: 1.0, detail: 2e5, frequency: 1.0, seed: 1, smooth: false },
+        &CTX,
+    );
     let n: usize = items[0].parts[0].0.flatten(0.1).iter().map(|q| q.pts.len()).sum();
     assert!(n <= modifiers::MAX_WIGGLE_POINTS, "{n}");
 }

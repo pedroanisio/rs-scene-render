@@ -172,18 +172,31 @@ fn pose3(a: &Attrs) -> Mat4 {
         * Mat4::from_rotation_z(deg("roll"))
 }
 
-/// The 3D parent of an element and its influence: `@parent`, else the target of a
-/// `transformConstraint type="parent"`.
-fn parent3(e: &dyn Element) -> Option<(String, f32)> {
+/// The 3D parent of an element, its influence and the joint of the parent's model the element is attached to:
+/// `@parent`, else the target of a `transformConstraint type="parent"`; `@parentJoint` (or the constraint's `@targetJoint`)
+/// names the joint.
+fn parent3(e: &dyn Element) -> Option<(String, f32, Option<String>)> {
+    let joint = |ea: &Attrs| ea.str("parentJoint").filter(|j| !j.is_empty());
     if let Some(AttrValue::Str(pid)) = e.get_attr("parent") {
-        return Some((pid.to_string(), 1.0));
+        return Some((pid.to_string(), 1.0, joint(&Attrs { e, props: None })));
     }
     sr_model::element::children(e).into_iter().find_map(|c| {
         let ca = Attrs { e: c, props: None };
         (c.element_name() == "transformConstraint" && ca.str("type").as_deref() == Some("parent"))
-            .then(|| ca.str("target").map(|t| (t, ca.num("influence", 1.0).clamp(0.0, 1.0) as f32)))
+            .then(|| {
+                let own = joint(&Attrs { e, props: None });
+                let at = ca.str("targetJoint").filter(|j| !j.is_empty()).or(own);
+                ca.str("target").map(|t| (t, ca.num("influence", 1.0).clamp(0.0, 1.0) as f32, at))
+            })
             .flatten()
     })
+}
+
+/// The frame of the joint `name` of the model drawn by object `id`, in the object's own frame (see `FrameNode::joints`).
+fn joint_frame(g: &FrameGraph, id: &str, name: &str) -> Option<Mat4> {
+    let n = g.nodes.iter().find(|n| &*n.id == id)?;
+    let (_, m) = n.joints.as_ref()?.iter().find(|(j, _)| j == name)?;
+    Some(Mat4::from_cols_array(&m.map(|v| v as f32)))
 }
 
 /// `m` blended with the identity by `w` (constraint influence).
@@ -215,7 +228,10 @@ impl Renderer {
                 continue;
             }
             let ca = Attrs { e: c, props: None };
-            if let Some(target) = ca.str("target").and_then(|t| Self::target_point(ctx.g, lights, &t)) {
+            let joint = ca.str("targetJoint");
+            if let Some(target) =
+                ca.str("target").and_then(|t| Self::target_joint_point(ctx.g, lights, &t, joint.as_deref()))
+            {
                 words.extend(target.to_array().map(|v| v.to_bits() as u64));
             }
         }
@@ -253,8 +269,13 @@ impl Renderer {
         if depth >= 32 {
             return None;
         }
-        let (pid, w) = parent3(e)?;
-        Some(toward(Self::world_of(g, lights, &pid, depth + 1)?, w))
+        let (pid, w, joint) = parent3(e)?;
+        let mut frame = Self::world_of(g, lights, &pid, depth + 1)?;
+        // a joint that cannot be found was reported by the evaluator: the element stays in the object's frame
+        if let Some(j) = joint.and_then(|j| joint_frame(g, &pid, &j)) {
+            frame *= j;
+        }
+        Some(toward(frame, w))
     }
 
     /// World matrix of the node or light `id`: objects, cameras and lights in 3D, other nodes as their 2D world.
@@ -285,6 +306,14 @@ impl Renderer {
     /// World position of a node for look-at and focus targets.
     fn target_point(g: &FrameGraph, lights: &[m::Light], id: &str) -> Option<Vec3> {
         Self::world_point(g, lights, id, 0)
+    }
+
+    /// The position of `id`, or of its joint `joint` when one is named and found.
+    fn target_joint_point(g: &FrameGraph, lights: &[m::Light], id: &str, joint: Option<&str>) -> Option<Vec3> {
+        match joint.and_then(|j| joint_frame(g, id, j)) {
+            Some(frame) => Some((Self::world_of(g, lights, id, 0)? * frame).transform_point3(Vec3::ZERO)),
+            None => Self::target_point(g, lights, id),
+        }
     }
 
     fn world_point(g: &FrameGraph, lights: &[m::Light], id: &str, depth: u32) -> Option<Vec3> {
@@ -546,6 +575,9 @@ impl Renderer {
             anisotropy_rotation: (a.num("anisotropyRotation", 0.0) as f32).to_radians(),
             dispersion: a.num("dispersion", 0.0) as f32,
             normal_scale: a.num("normalScale", 1.0) as f32,
+            unevenness: a.num("unevenness", 0.0) as f32,
+            unevenness_scale: a.num("unevennessScale", 8.0) as f32,
+            unevenness_seed: a.num("unevennessSeed", 0.0) as u32,
             displacement_scale: a.num("displacementScale", 0.0) as f32,
             uv_scale: [a.num("uvScaleX", 1.0) as f32, a.num("uvScaleY", 1.0) as f32],
             ..Default::default()
@@ -682,10 +714,11 @@ impl Renderer {
         }
         let key = match kind.as_str() {
             "text" => format!(
-                "text|{}|{:?}|{:?}|{depth}|{bevel}",
+                "text|{}|{:?}|{:?}|{depth}|{bevel}|{}",
                 n.text.as_deref().or(a.str("text").as_deref()).unwrap_or(""),
                 a.str("font"),
-                hh
+                hh,
+                a.num("tracking", 0.0)
             ),
             "extrude" => format!("extrude|{}|{depth}|{bevel}", a.str("path").unwrap_or_default()),
             other => format!("{other}|{r}|{segs}|{w}|{hh:?}|{depth}"),
@@ -714,7 +747,15 @@ impl Renderer {
                 let text = n.text.as_deref().map(str::to_string).or(a.str("text")).unwrap_or_default();
                 let size = hh.unwrap_or(100.0) as f64;
                 let mut tc = std::mem::take(&mut self.text);
-                let polys = crate::text::outline_polygons(&mut tc, ctx.p, &text, a.str("font").as_deref(), size, 0.25);
+                let polys = crate::text::outline_polygons(
+                    &mut tc,
+                    ctx.p,
+                    &text,
+                    a.str("font").as_deref(),
+                    size,
+                    a.num("tracking", 0.0),
+                    0.25,
+                );
                 self.text = tc;
                 let mut polys: Vec<Vec<glam::Vec2>> = polys
                     .into_iter()
@@ -1244,8 +1285,99 @@ impl Renderer {
                         opacity,
                         cast_shadow: flag(&attrs(n), "castShadow", true),
                         receive_shadow: flag(&attrs(n), "receiveShadow", true),
+                        shadow_catcher: false,
                     });
                 }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Applies the `<joint>` children of object `n` to the model's local transforms: each joint's rotation offsets, then
+    /// each look-at (ordered by depth in the model's hierarchy). Unknown joints and targets are reported.
+    fn pose_joints(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        n: &FrameNode,
+        model: &sr_3d::Model,
+        locals: &mut [sr_3d::Trs],
+        world: Mat4,
+    ) {
+        struct Aim {
+            node: usize,
+            target: String,
+            axis: Vec3,
+            influence: f32,
+            max_angle: f32,
+        }
+        let mut aims: Vec<Aim> = Vec::new();
+        let report = |plan: &mut Plan, msg: String| {
+            if !plan.stats.unsupported.contains(&msg) {
+                plan.stats.unsupported.push(msg);
+            }
+        };
+        for (k, c) in
+            sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "joint").enumerate()
+        {
+            let ca = Attrs { e: c, props: None };
+            let Some(name) = ca.str("name") else { continue };
+            let Some(node) = model.nodes.iter().position(|x| x.name == name) else {
+                let names: Vec<&str> = model.nodes.iter().map(|x| x.name.as_str()).filter(|x| !x.is_empty()).collect();
+                report(plan, format!("{}: joint {name} is no node of the model (it has: {})", n.id, names.join(", ")));
+                continue;
+            };
+            let key = format!("{}/joint[{k}]", n.id);
+            let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
+            let value = |attr: &str| {
+                props.and_then(|p| p.get(attr)).and_then(sr_eval::Value::as_num).unwrap_or_else(|| ca.num(attr, 0.0))
+                    as f32
+            };
+            let turn = sr_3d::anim::euler_degrees(value("rotationX"), value("rotationY"), value("rotation"));
+            sr_3d::anim::pose_joint(locals, node, turn);
+            if let Some(target) = ca.str("lookAt") {
+                let axis = match ca.str("lookAxis").as_deref() {
+                    Some("x") => Vec3::X,
+                    Some("minus-x") => Vec3::NEG_X,
+                    Some("y") => Vec3::Y,
+                    Some("minus-y") => Vec3::NEG_Y,
+                    Some("minus-z") => Vec3::NEG_Z,
+                    _ => Vec3::Z,
+                };
+                let influence = ca.num("influence", 1.0) as f32;
+                let max_angle = (ca.num("maxAngle", 180.0) as f32).to_radians();
+                aims.push(Aim { node, target, axis, influence, max_angle });
+            }
+        }
+        if aims.is_empty() {
+            return;
+        }
+        let depth = |mut k: usize| {
+            let mut d = 0;
+            while let Some(p) = model.nodes[k].parent {
+                k = p;
+                d += 1;
+            }
+            d
+        };
+        aims.sort_by_key(|a| depth(a.node));
+        // model space to scene space: the object's world, the axis conversion and, with `node`, the selection
+        let select = match n.elem.get_attr("node").map(|v| v.to_string()) {
+            Some(name) => {
+                model.nodes.iter().position(|x| x.name == name).map(|k| model.world_matrices(locals)[k].inverse())
+            }
+            None => None,
+        }
+        .unwrap_or(Mat4::IDENTITY);
+        let to_scene = world * model.basis * select;
+        let lights = doc_lights(ctx.p);
+        for aim in aims {
+            match Self::target_point(ctx.g, lights, &aim.target) {
+                Some(t) => {
+                    let target = to_scene.inverse().transform_point3(t);
+                    sr_3d::anim::look_at(model, locals, aim.node, target, aim.axis, aim.influence, aim.max_angle);
+                }
+                None => report(plan, format!("{}: joint look-at target {} not found", n.id, aim.target)),
             }
         }
     }
@@ -1264,6 +1396,9 @@ impl Renderer {
     ) {
         let a = attrs(n);
         let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
+        // a shadow catcher draws only the darkening of the casters and casts no shadow itself
+        let catcher = flag(&a, "shadowCatcher", false);
+        let cast = cast && !catcher;
         let doc_mat = match a.str("material") {
             Some(id) => {
                 let m = self.document_material(plan, ctx, &id);
@@ -1304,6 +1439,7 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: catcher,
                 });
             }
             return;
@@ -1328,29 +1464,172 @@ impl Renderer {
             splats.push(SplatDraw { gpu, model: world * s.basis, opacity });
         }
         if let Some(model) = asset.model() {
-            // animation clip at the object's local time
-            let clip = a.str("animationClip").and_then(|c| {
+            // animation clip at the object's local time, blended toward a second clip by @animationBlend
+            let find = |c: &str| {
                 model
                     .animations
                     .iter()
                     .find(|x| x.name == c)
                     .or_else(|| c.parse::<usize>().ok().and_then(|k| model.animations.get(k)))
-            });
-            if let (Some(c), None) = (a.str("animationClip"), clip) {
-                plan.stats.errors.push(format!("{}: animation clip {c} not found", n.id));
-            }
-            let t = (n.local_time * a.num("animationSpeed", 1.0) + a.num("animationOffset", 0.0)) as f32;
-            let t = clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0);
-            let (locals, weights) = sr_3d::anim::pose(model, clip, t);
+            };
+            let named = |attr: &str, plan: &mut Plan| {
+                let want = a.str(attr)?;
+                let clip = find(&want);
+                if clip.is_none() {
+                    plan.stats.errors.push(format!("{}: animation clip {want} not found", n.id));
+                }
+                clip
+            };
+            let clip = named("animationClip", plan);
+            let clip_to = named("animationClipTo", plan);
+            let at = |clip: Option<&sr_3d::Animation>, offset: f64| {
+                let t = (n.local_time * a.num("animationSpeed", 1.0) + offset) as f32;
+                clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0)
+            };
+            let blend = a.num("animationBlend", 0.0).clamp(0.0, 1.0) as f32;
+            let (mut locals, weights) = sr_3d::anim::pose_blend(
+                model,
+                clip,
+                at(clip, a.num("animationOffset", 0.0)),
+                clip_to,
+                at(clip_to, a.num("animationOffsetTo", 0.0)),
+                blend,
+            );
+            // `<joint>`: pose offsets in the joint's own axes, then look-at, parents before children
+            self.pose_joints(plan, ctx, n, model, &mut locals, world);
             let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
             let variant = a.str("materialVariant");
+            // `node`: only that node and what is under it, placed at the object's origin
+            let selected = match a.str("node") {
+                Some(name) => match model.nodes.iter().position(|x| x.name == name) {
+                    Some(k) => Some((k, model.world_matrices(&locals)[k].inverse())),
+                    None => {
+                        plan.stats.errors.push(format!("{}: node {name} not found in the model", n.id));
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let under = |mut k: usize, root: usize| loop {
+                if k == root {
+                    break true;
+                }
+                match model.nodes[k].parent {
+                    Some(p) => k = p,
+                    None => break false,
+                }
+            };
+            // `materialOverride`: imported material name -> document material id
+            let overrides: Vec<(String, String)> = a
+                .str("materialOverride")
+                .map(|s| {
+                    s.split_whitespace()
+                        .filter_map(|pair| pair.split_once(':'))
+                        .map(|(old, new)| (old.to_string(), new.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // an imported name that matches no material of the model has no effect: say so, with the names there are
+            for (old, _) in &overrides {
+                if !model.materials.iter().any(|m| &m.name == old) {
+                    let names: Vec<&str> = model.materials.iter().map(|m| m.name.as_str()).collect();
+                    let msg = format!(
+                        "{}: materialOverride names {old}, which is no material of the model (it has: {})",
+                        n.id,
+                        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+                    );
+                    if !plan.stats.unsupported.contains(&msg) {
+                        plan.stats.unsupported.push(msg);
+                    }
+                }
+            }
+            // `<morph name weight>`: the named targets take their weights over the clip's and over `morphWeights`
+            let (weights, morph) = {
+                let mut named: Vec<(String, f32)> = Vec::new();
+                for (k, c) in sr_model::element::children(&*n.elem)
+                    .into_iter()
+                    .filter(|c| c.element_name() == "morph")
+                    .enumerate()
+                {
+                    let ca = Attrs { e: c, props: None };
+                    let Some(name) = ca.str("name") else { continue };
+                    let key = format!("{}/morph[{k}]", n.id);
+                    let value = n
+                        .parts
+                        .iter()
+                        .find(|p| *p.key == key)
+                        .and_then(|p| p.props.get("weight"))
+                        .and_then(sr_eval::Value::as_num)
+                        .unwrap_or_else(|| ca.num("weight", 0.0));
+                    named.push((name, value as f32));
+                }
+                if named.is_empty() {
+                    (weights, morph)
+                } else {
+                    let mut by_node = weights;
+                    for (ni, w) in by_node.iter_mut().enumerate() {
+                        if let Some(over) = &morph {
+                            *w = over.clone();
+                        }
+                        for (name, value) in &named {
+                            if let Some(slot) = model.nodes[ni].morph_names.iter().position(|x| x == name) {
+                                if slot < w.len() {
+                                    w[slot] = *value;
+                                }
+                            }
+                        }
+                    }
+                    for (name, _) in &named {
+                        if !model.nodes.iter().any(|nd| nd.morph_names.iter().any(|x| x == name)) {
+                            let known: Vec<&str> =
+                                model.nodes.iter().flat_map(|nd| nd.morph_names.iter().map(String::as_str)).collect();
+                            let msg = if known.is_empty() {
+                                format!("{}: morph {name} cannot be set: the model has no named morph targets", n.id)
+                            } else {
+                                format!(
+                                    "{}: morph {name} names no morph target of the model (it has: {})",
+                                    n.id,
+                                    known.join(", ")
+                                )
+                            };
+                            if !plan.stats.unsupported.contains(&msg) {
+                                plan.stats.unsupported.push(msg);
+                            }
+                        }
+                    }
+                    (by_node, None)
+                }
+            };
             for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
+                if selected.as_ref().is_some_and(|(root, _)| !under(item.node, *root)) {
+                    continue;
+                }
                 let prim = &model.primitives[item.prim];
                 let mi = variant
                     .as_ref()
                     .and_then(|v| prim.variants.iter().find(|(name, _)| name == v).map(|(_, m)| *m))
                     .or(prim.material);
-                let imported = if doc_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
+                // @material replaces every material; a pair of @materialOverride replaces the ones it names
+                let item_mat = match &doc_mat {
+                    Some(m) => Some(m.clone()),
+                    None => {
+                        let name = mi.and_then(|k| model.materials.get(k)).map(|m| m.name.as_str());
+                        match overrides.iter().find(|(old, _)| Some(old.as_str()) == name) {
+                            Some((_, id)) => {
+                                let m = self.document_material(plan, ctx, id);
+                                if m.is_none() {
+                                    let e = format!("{}: material {id} not found", n.id);
+                                    if !plan.stats.errors.contains(&e) {
+                                        plan.stats.errors.push(e);
+                                    }
+                                }
+                                m
+                            }
+                            None => None,
+                        }
+                    }
+                };
+                let imported = if item_mat.is_none() { mi.and_then(|k| model.materials.get(k)) } else { None };
                 let mkey = format!("{key}#{}#material{:?}", item.prim, imported.map(|_| mi));
                 let mesh = match self.three_engine().meshes.get(&mkey) {
                     Some(m) => m.clone(),
@@ -1364,7 +1643,7 @@ impl Renderer {
                         m
                     }
                 };
-                let (material, maps) = match &doc_mat {
+                let (material, maps) = match &item_mat {
                     Some((p, m)) => (p.clone(), m.clone()),
                     None => {
                         let mi = variant
@@ -1424,12 +1703,16 @@ impl Renderer {
                 };
                 draws.push(Draw3 {
                     mesh: src,
-                    model: world * model.basis * item.matrix,
+                    model: world
+                        * model.basis
+                        * selected.as_ref().map_or(Mat4::IDENTITY, |(_, inv)| *inv)
+                        * item.matrix,
                     material,
                     maps,
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: catcher,
                 });
             }
         }
@@ -1532,6 +1815,7 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: false,
                 });
             }
         }
@@ -1755,6 +2039,7 @@ impl Renderer {
                     opacity: alpha,
                     cast_shadow: t.cast_shadow,
                     receive_shadow: t.receive_shadow,
+                    shadow_catcher: false,
                 });
             }
         }
@@ -1888,7 +2173,8 @@ impl Renderer {
             let ca = Attrs { e: c, props: None };
             let kind = ca.str("type").unwrap_or_default();
             let w = ca.num("influence", 1.0).clamp(0.0, 1.0) as f32;
-            let target = ca.str("target").and_then(|t| Self::target_point(g, lights, &t));
+            let joint = ca.str("targetJoint");
+            let target = ca.str("target").and_then(|t| Self::target_joint_point(g, lights, &t, joint.as_deref()));
             let off = Vec3::new(ca.num("offsetX", 0.0) as f32, ca.num("offsetY", 0.0) as f32, 0.0);
             match (kind.as_str(), target) {
                 ("look-at", Some(t)) => {
@@ -2011,27 +2297,30 @@ impl Renderer {
                 bind_group_layouts: &[Some(&bgl)],
                 immediate_size: 0,
             });
-            let pipe = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("sphere"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(resources::FORMAT.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let pipe = {
+                let _creation = crate::gpu::creation_lock();
+                d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("sphere"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(resources::FORMAT.into())],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
             let smp = d.create_sampler(&wgpu::SamplerDescriptor {
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,

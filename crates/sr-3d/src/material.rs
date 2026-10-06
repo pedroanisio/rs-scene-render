@@ -48,6 +48,10 @@ pub struct MaterialParams {
     pub uv_scale: [f32; 2],
     /// Imported geometry carries independently transformed coordinates per map.
     pub separate_uvs: bool,
+    /// Procedural surface unevenness (a clay finish): amount, feature size in scene units, noise seed.
+    pub unevenness: f32,
+    pub unevenness_scale: f32,
+    pub unevenness_seed: u32,
 }
 
 impl Default for MaterialParams {
@@ -85,6 +89,9 @@ impl Default for MaterialParams {
             displacement_scale: 0.0,
             uv_scale: [1.0, 1.0],
             separate_uvs: false,
+            unevenness: 0.0,
+            unevenness_scale: 8.0,
+            unevenness_seed: 0,
         }
     }
 }
