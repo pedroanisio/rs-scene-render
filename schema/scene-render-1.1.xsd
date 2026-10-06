@@ -419,7 +419,8 @@
       Computes @property every frame; @property names an attribute the element's own type declares (or position,
       scale, anchor, skew): a text layer's text, for one, is not an animatable property. The language is a pure, side-effect-free
       subset of ECMAScript expressions with these built-ins: time, frame, value,
-      index, count, seed, param(name), prop("id.property"), valueAtTime(t),
+      index, count, seed, param(name), prop("id.property"), propAtTime("id.property", t),
+      valueAtTime(t), penner("curve", u),
       wiggle(freq, amp[, octaves, ampMult]), noise(x[,y,z]), random([min,max]),
       loopIn/loopOut(type, n), linear/ease/easeIn/easeOut(t, t0, t1, v0, v1),
       clamp, lerp, smoothstep, spring(t, stiffness, damping, mass),

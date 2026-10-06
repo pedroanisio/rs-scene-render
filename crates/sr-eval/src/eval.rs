@@ -615,6 +615,10 @@ impl Host for ExprHost<'_, '_> {
         }
     }
 
+    fn prop_at(&mut self, slot: u32, t: f64) -> V {
+        self.p.value_at(slot, t, self.depth + 1, self.memo).to_v()
+    }
+
     fn value_at_time(&mut self, t: f64) -> V {
         match self.slot {
             Some(s) => self.p.channels_at(s, t).to_v(),

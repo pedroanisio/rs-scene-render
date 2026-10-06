@@ -68,4 +68,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - object3D child element morph (a morph target by name; version 1.2, gated by V5): srep-0000-morph-by-name.md (3e998d3).
   - object3D child element joint (pose and aim a joint of an imported model; version 1.2, gated by V5): srep-0000-joint-pose.md (74bac5a).
   - key/@carry (a spring segment released with the previous segment's velocity): srep-0000-spring-carry.md (928d95c).
+  - expression built-ins penner() and propAtTime(): srep-0000-expression-penner-prop-at.md (9d6cdbd).
 The xsd and sch above differ from the vendored sha256 sums by these edits.
