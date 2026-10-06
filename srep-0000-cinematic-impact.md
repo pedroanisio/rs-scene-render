@@ -403,6 +403,31 @@ errors. The cache decoder and renderer both bound file bytes, brick counts and
 cached storage; schema validation alone cannot establish these data-dependent
 limits.
 
+**Cells of negligible density are skipped, and bricks are found through a
+directory** (the skip: commits 574d621 and 2afdecd; the directory: 73f9535 and
+eb45dd7; 2026-10-04; each pair is one change on two branches). The in-volume shadow
+march does not sample cells that cannot matter. A per-volume map of 4-voxel cells,
+built on the CPU, marks the cells whose readable voxels could add more than 1e-10 to
+the optical depth along any ray (the largest density times density scale times
+extinction times the longest path in the domain; about 300 times under half an ulp of
+an f32 near 1), and the march jumps over the others. It is a bound, not zero, so the
+transmittance is unchanged at its resolution. Media with a second frame or advection
+and grids with a non-negligible background are marched as before, and the primary
+march is untouched. A voxel read finds its brick through a table with one row index
+for each possible brick position, packed beside the record, when the grid's bricks
+span at most 2^20 positions (at most 4 MiB, counted in the volume's memory); a larger
+extent keeps the binary search, and the velocity and second-frame grids have no
+directory. Only the lookup changes: the trilinear arithmetic is untouched. Frozen
+plume, 1280 x 720, trace seconds (original, cell skip alone, both changes): sun only
+5.76, 2.68, 1.14; step 3 6.94, 4.14, 1.40; dome only 19.56, 12.39, 3.75; full 26.82,
+15.32, 4.66; the frame's PNG hash is identical in all four, in each stage. The commit
+messages do not record the adapter or the load of these timings. Tests (unit tests of
+`crates/sr-gpu/src/volume.rs`): `skip_map_clears_only_cells_whose_readable_voxels_are_negligible`,
+`the_skipped_density_shrinks_with_extinction_density_scale_and_domain` (a thin, very
+dense medium has no negligible density at 1e-6; no extinction makes every cell
+negligible), `media_with_a_second_frame_or_a_nonzero_background_are_not_skipped` and
+`brick_directory_covers_the_bricks_and_gives_way_to_the_search_when_too_large`.
+
 #### Light grids
 
 `lighting="exact"` (the default) marches a shadow ray from every in-scattering
@@ -2484,6 +2509,25 @@ projection. Filter halos cover every denoising pass; tile edges must not become
 image edges. Peak image working-buffer allocation is bounded independently of
 frame area. Geometry/texture limits remain separately validated and reported.
 
+**Render statistics and the probe.** The statistics of a render say where a
+frame's time goes (commit 7e6fcb3, 2026-10-04): `sim_rigid_seconds`,
+`sim_ocean_seconds`, `sim_smoke_seconds` and `sim_particles_seconds`,
+`draw_prep_seconds`, `volume_prep_seconds` and, for the path tracer,
+`pt_assemble_seconds`, `pt_bvh_seconds` and `pt_pack_seconds`. With `--stats` the
+passes are timed by GPU timestamp queries, the path tracer's under `pathtrace trace`
+and `pathtrace denoise` in `gpu.passes` (absent on an adapter without them, and the
+timing costs a little itself). All of it is additive and changes no pixel (test
+`crates/sr-gpu/tests/stage_times.rs`). `tools/probe_render.py` (commit ca85e5e,
+2026-10-04) renders single frames of a scene, optionally at another size (a copy of
+the scene is rendered; the scene's own file is never edited), through the shared GPU
+queue, and writes a JSON report: the stage seconds, the GPU milliseconds by pass,
+the wall seconds of the render process alone (queue wait excluded), its peak resident
+memory and the sha256 of the frame, which tells two builds' pixels apart. A failed
+render or a missing statistics line is an error, never a partial result; the report
+logic has unit tests (`tools/tests/test_probe_render.py`). What the probe reports is
+a measurement on one machine at one load, not a promise (ledger: "Render stage
+timings, render probe and reflected-volume tests").
+
 ### Light through water and glass (path tracer)
 
 Materials with `transmission` above 0 refract in the path tracer. Three
@@ -3391,6 +3435,22 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   and with mass (test `impact_scenes`, commit e22458b, 2026-10-05, deterministic). A slow impact in physical
   units is a cold cloud.
 
+A simulation that is authored but cannot run (a resource limit, a solver error) is an
+error of the frame, never a note that lets the render succeed without what was asked
+for (commit 91e9013, 2026-10-04). The evaluator's frame graph carries `failures`, the
+part of its problems that are such simulations (smoke, ocean, 3D particles, fracture,
+and the crater and collider limits of a rigid body); the renderer reports each as an
+error with its cause, drops the derived messages for a node whose simulation failed
+(the old "volume primitive requires @volume" and "ocean evaluation produced no
+surface"), and keeps authorised fallbacks as notes. The command line prints every
+error and the notes when it exits on one, and delivery reports all of them. `render`
+(with and without `--strict`), `render --bench` and `encode` exit 1 with the cause and
+write no image for these scenes, and a failure found when the world is built is
+reported at every time, also before the simulation's own start. Test:
+`crates/scene-render/tests/solver_failures.rs`, seven cases (smoke, the ocean's solver
+and its surface, 3D particles, a crater's draw vertices, a rigid crater's collider,
+fracture), four commands each.
+
 The accompanying conformance suite must cover all of the following:
 
 - Valid minimal examples for each new element, every enum branch, default
@@ -3412,6 +3472,12 @@ The accompanying conformance suite must cover all of the following:
   anisotropic), cameras inside the volume, surfaces inside the domain, overlapping
   media, advected and multi-frame media, tiled against whole frames, determinism,
   memory and node-count errors, and the measured limits above (VOL10 included).
+- Render statistics that add no pixel, the probe's report logic, the skip of
+  negligible cells (which cells, how the bound moves with extinction, density scale
+  and domain, which media are marched in full), the brick directory and its fallback to
+  the search, and the unchanged frame of a frozen plume with both.
+- A simulation that cannot run failing every render command with its cause and no
+  partial image, at every time.
 - Pyro divergence reduction, source timing, cooling/dissipation, obstacles,
   forward/backward seeking and cache/live equivalence.
 - 3D particles' z motion, distribution, lifetime/cap behavior, delayed birth,
