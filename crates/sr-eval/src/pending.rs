@@ -31,7 +31,6 @@ pub const PENDING: &[Pending] = &[
         elements: &["pdf", "region"],
         attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", Some("0"))],
     },
-    Pending { srep: 18, what: "render reports", elements: &[], attributes: &[("output", "report", None)] },
     Pending {
         srep: 19,
         what: "legibility checks for video text and captions",

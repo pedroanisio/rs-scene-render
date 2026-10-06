@@ -248,3 +248,22 @@ fn several_outputs_need_an_id_in_the_report_path() {
         assert!(codes(&r).is_empty(), "{r:#}");
     }
 }
+
+#[test]
+fn srep_0018_report_through_output_report() {
+    // output/@report, relative to the document, written after rendering without any command-line flag
+    let d = dir("attribute");
+    let scene = REPORT_SCENE.replace(
+        "<composition>",
+        r#"<output id="frames" path="frames/f_%04d.png" codec="png-sequence" end="0.2" report="reports/frames.json"/>
+  <composition>"#,
+    );
+    let file = d.join("case.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let o = run(&["encode", file.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("reports/frames.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["INERT-I2", "INERT-I8"], "{r:#}");
+    assert_eq!(r["output"]["id"], "frames");
+}
