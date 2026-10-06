@@ -12,4 +12,5 @@ mod impacts3;
 mod internal_edges;
 mod sim;
 mod surface3;
+mod surface_prefetch;
 mod watch_flood;
