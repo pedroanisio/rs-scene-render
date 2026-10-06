@@ -40,7 +40,11 @@ fn first_interface(o: vec3<f32>, d: vec3<f32>, dist: f32) -> Iface {
     return out;
 }
 
-struct Seen { dir: vec3<f32>, vis: vec3<f32> };
+// What a surface sees of a light through the interface above it: the direction of the light at the
+// surface (`dir`) and everything it loses except the media between them (`vis`), and the two legs
+// of the path the media must be crossed along: `inside` units from the surface along `dir` to the
+// interface point `q`, then `outside` units from `q` along `la` toward the light.
+struct Seen { dir: vec3<f32>, vis: vec3<f32>, inside: f32, q: vec3<f32>, la: vec3<f32>, outside: f32 };
 
 // A light as a surface under a refracting surface sees it. `l` is the straight direction to the
 // light sample, `ldist` its distance. The shadow ray is refracted at the interface (found by trace,
@@ -57,7 +61,7 @@ struct Seen { dir: vec3<f32>, vis: vec3<f32> };
 // interface or no way out toward the light gets no light from it (vis = 0), never a bright guess.
 fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist: f32, sigma: vec3<f32>, shadows: bool) -> Seen {
     var out: Seen;
-    out.dir = l; out.vis = vec3(0.0);
+    out.dir = l; out.vis = vec3(0.0); out.inside = 0.0; out.q = p + ng * 1e-2; out.la = l; out.outside = ldist - 2e-2;
     let start = p + ng * 1e-2;
     let directional = ldist > 1e20;
     let at_light = start + l * min(ldist, 1e6);
@@ -109,6 +113,60 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     let cos_water = max(-dot(dir, iface.n), 1e-4);
     let carried = inside_view * outside_view * iface.trans * (1.0 - fresnel) * cos_air / cos_water;
     out.dir = dir;
+    out.inside = iface.t;
+    out.q = q + n_air * 1e-2;
+    out.la = la;
+    out.outside = select(rest - 2e-2, 1e30, directional);
     out.vis = min(carried, 1.0) * iface.tint * exp(-sigma * iface.t);
     return out;
+}
+
+// ---------------------------------------------------------------- media in absorbing water
+
+struct Transport { color: vec3<f32>, trans: vec3<f32>, open: f32 };
+
+// volume_transport for a ray inside absorbing water (`sigma` per unit, per channel): the light the
+// media add at a distance is dimmed by the water between there and the ray's origin, not by the whole
+// ray at once, and the water absorbs across the gaps between the media too. `open` is the media's own
+// transmittance (the coverage the pass reports). The march follows volume_transport step by step;
+// with `sigma` zero it gives the same colour and transmittance.
+fn water_transport(o: vec3<f32>, d: vec3<f32>, distance: f32, sigma_water: vec3<f32>) -> Transport {
+    var color = vec3(0.0); var trans = vec3(1.0); var open = 1.0; var cursor = 0.0;
+    for (var boundary = 0u; boundary <= pp.media.y * 2u; boundary++) {
+        var next = distance; var step = 1e30; var occupied = false;
+        for (var i = 0u; i < pp.media.y; i++) {
+            let base = volume_base(i); let interval = volume_interval(base, o, d, distance);
+            if (interval.y <= interval.x || interval.y <= cursor) { continue; }
+            if (interval.x > cursor) { next = min(next, interval.x); }
+            else { next = min(next, interval.y); step = min(step, tverts[base + 12u].w); occupied = true; }
+        }
+        if (next <= cursor) { break; }
+        if (occupied) {
+            let n = max(1u, u32(ceil((next - cursor) / step))); let ds = (next - cursor) / f32(n);
+            for (var k = 0u; k < n; k++) {
+                let point = o + d * (cursor + (f32(k) + 0.5) * ds);
+                var sigma = 0.0; var source = vec3(0.0);
+                for (var i = 0u; i < pp.media.y; i++) {
+                    let base = volume_base(i); let density = volume_density(base, point);
+                    if (density <= 0.0) { continue; }
+                    let extinction = density * tverts[base + 5u].w;
+                    sigma += extinction; source += density * volume_emission(base, point);
+                    let albedo = tverts[base + 6u];
+                    if (MEDIUM_LIGHTING && any(albedo.rgb > vec3(0.0))) { source += extinction * albedo.rgb * volume_incident(point, -d, albedo.w, tverts[base + 13u].y > 0.5); }
+                }
+                let total = vec3(sigma) + sigma_water;
+                let optical_depth = total * ds;
+                let attenuation = exp(-optical_depth);
+                var weight = ds * (vec3(1.0) - 0.5 * optical_depth + optical_depth * optical_depth / 6.0);
+                let exact = (vec3(1.0) - attenuation) / max(total, vec3(1e-30));
+                weight = select(weight, exact, optical_depth > vec3(1e-3));
+                color += trans * source * weight; trans *= attenuation; open *= exp(-sigma * ds);
+            }
+        } else {
+            trans *= exp(-sigma_water * min(next - cursor, 1e4));
+        }
+        cursor = next;
+        if (cursor >= distance) { break; }
+    }
+    return Transport(color, trans, open);
 }

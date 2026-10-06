@@ -335,3 +335,136 @@ fn a_floor_under_a_ridge_is_lit_by_the_facet_whose_refraction_reaches_the_sun() 
     }
     assert!(single > 20 && double > 5, "the rows cover both kinds: {single} single, {double} double, {none} dark");
 }
+
+// ---- smoke in the water
+
+/// A cache whose density is 1 everywhere (the volume asset's bounds cut a slab out of it).
+fn uniform_cache() -> std::path::PathBuf {
+    let mut cache = sr_volume::Volume::new();
+    cache.insert("density", sr_volume::SparseGrid::new(sr_volume::Transform::identity(), 1.0, 0).unwrap()).unwrap();
+    let path = common::fixtures().join("uniform_slab.srvol");
+    cache.write(std::fs::File::create(&path).unwrap()).unwrap();
+    path
+}
+
+const SLAB_EXTINCTION: f32 = 0.4;
+
+/// A diffuse floor under water, with a smoke slab in the water between them that only absorbs
+/// (no emission, albedo 0) 1.5 units thick, and the sun; `slab` false leaves the water clear.
+/// Seen by the camera of the wall tests, from above the water.
+fn floor_through_smoke(slab: bool) -> String {
+    let cache = uniform_cache();
+    let smoke = if slab {
+        format!(
+            r##"<object3D id="smoke" primitive="volume" volume="slab"><medium extinction="{SLAB_EXTINCTION}" albedo="#000000" stepSize="0.05" maxSteps="4096"/></object3D>"##
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="1" background="#101010"/>
+      <assets><volume id="slab" src="{}" boundsMinX="-25" boundsMinY="2" boundsMinZ="-30" boundsMaxX="25" boundsMaxY="3.5" boundsMaxZ="40"/></assets>
+      <materials>
+        <material id="floorMat" baseColor="#808080" roughness="1" specular="0"/>
+        <material id="waterMat" baseColor="#FFFFFF" roughness="0.02" ior="{ETA}" doubleSided="true" transmission="1"/>
+      </materials>
+      <composition>
+        <camera id="camera" projection="orthographic" x="0" y="-12" z="-20" pitch="-30" orthoHeight="8" renderer="pathtrace" pathSamples="512" maxBounces="1" denoise="false"/>
+        <object3D id="floor" primitive="plane" width="400" height="400" y="4" rotationX="-90" material="floorMat"/>
+        {WATER}
+        {smoke}
+      </composition>
+      <lights>{SUN}</lights></scene>"##,
+        cache.display()
+    )
+}
+
+/// Smoke between a floor and the water surface dims the sun on its way down through the water and
+/// the view on its way up: the light that reaches the floor crosses it along the refracted
+/// direction, which the shadow ray under water must follow (it stopped counting the smoke), and
+/// the camera's ray crosses it along its own refracted direction.
+#[test]
+fn smoke_in_the_water_dims_the_sun_and_the_view_of_a_floor() {
+    let (Some(clear), Some(smoky)) = (render(&floor_through_smoke(false)), render(&floor_through_smoke(true))) else {
+        return;
+    };
+    let up = Vec3::new(0.0, -1.0, 0.0);
+    let to_sun = -shines(-35.0, -50.0).normalize();
+    let sun_in_water = refract(-to_sun, up, 1.0, ETA);
+    let eye = Vec3::new(0.0, 0.5, 0.866_025_4);
+    let eye_in_water = refract(eye, up, 1.0, ETA);
+    // the slab is 1.5 units thick; a ray's path through it is 1.5 / |cos| of its angle to the vertical
+    let leg = |dir: Vec3| SLAB_EXTINCTION * 1.5 / dir.y.abs();
+    let want = (-(leg(sun_in_water) + leg(eye_in_water))).exp();
+    let mean = |r: &common::Rendered| {
+        let v: Vec<f32> = r.px.iter().map(|p| p[0]).filter(|v| *v > 0.003).collect();
+        assert!(v.len() > 1500, "the floor is seen: {} pixels", v.len());
+        v.iter().sum::<f32>() / v.len() as f32
+    };
+    let got = mean(&smoky) / mean(&clear);
+    eprintln!("floor through the smoke: {got} of the clear floor, expected {want}");
+    assert!((got / want - 1.0).abs() < 0.05, "the smoke dims the floor to {got} of the clear floor, expected {want}");
+}
+
+/// A camera inside absorbing water looks along a glowing, absorbing smoke slab: the radiance is the
+/// emission of each part of the slab, dimmed by the water between the camera and that part and by
+/// the smoke in front of it. The water's absorption must act on the light the smoke adds at the
+/// distance it adds it, not on the whole ray at once.
+#[test]
+fn glowing_smoke_seen_through_absorbing_water_is_dimmed_by_the_water_in_front_of_each_part() {
+    let cache = uniform_cache();
+    let scene = format!(
+        r##"<scene version="1.3"><project width="16" height="16" fps="10" duration="1" background="#000000"/>
+      <assets><volume id="slab" src="{}" boundsMinX="-50" boundsMinY="-50" boundsMinZ="10" boundsMaxX="50" boundsMaxY="50" boundsMaxZ="30"/></assets>
+      <materials>
+        <material id="waterMat" baseColor="#FFFFFF" roughness="0.02" ior="{ETA}" doubleSided="true" transmission="1" attenuationColor="#80C0E0" attenuationDistance="20"/>
+      </materials>
+      <composition>
+        <camera id="camera" x="0" y="3" z="0" fov="2" renderer="pathtrace" pathSamples="64" maxBounces="1" denoise="false"/>
+        <object3D id="water" primitive="plane" width="2000" height="2000" y="0" rotationX="-90" material="waterMat"/>
+        <object3D id="smoke" primitive="volume" volume="slab"><medium extinction="{SLAB_EXTINCTION}" albedo="#000000" emissionColor="#FFFFFF" emissionScale="0.5" stepSize="0.05" maxSteps="4096"/></object3D>
+      </composition>
+      <lights><light id="off" type="ambient" color="#000000" intensity="0"/></lights></scene>"##,
+        cache.display()
+    );
+    let Some(r) = render(&scene) else { return };
+    let centre = r.px[8 * 16 + 8];
+    for (c, value) in [0x80u8, 0xC0, 0xE0].iter().enumerate() {
+        let sigma = -linear(*value).ln() / 20.0;
+        // emission E per unit length: the integral of E exp(-k u) exp(-sigma (10 + u)) over the slab's 20 units
+        let total = SLAB_EXTINCTION + sigma;
+        let want = 0.5 * (-10.0 * sigma).exp() * (1.0 - (-total * 20.0).exp()) / total;
+        eprintln!("channel {c}: {} against {want}", centre[c]);
+        assert!((centre[c] / want - 1.0).abs() < 0.04, "channel {c}: {} against {want}", centre[c]);
+    }
+}
+
+/// A scene with a transmissive object compiles the shader of the water, whose march through media
+/// is a copy that takes the water's absorption into account. A camera in the air, with no
+/// absorbing water about, must see a medium exactly as it does without the object: the plain march
+/// runs there, and the copy gives the same colour and transmittance with no absorption.
+#[test]
+fn a_medium_looks_the_same_with_a_transmissive_object_in_the_scene() {
+    let cache = uniform_cache();
+    let scene = |glass: &str| {
+        format!(
+            r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="1" background="#000000"/>
+      <assets><volume id="slab" src="{}" boundsMinX="-4" boundsMinY="-4" boundsMinZ="6" boundsMaxX="4" boundsMaxY="4" boundsMaxZ="12"/></assets>
+      <materials>
+        <material id="glassMat" baseColor="#FFFFFF" roughness="0.02" ior="1.5" transmission="1" attenuationColor="#80C0E0" attenuationDistance="3"/>
+      </materials>
+      <composition>
+        <camera id="camera" x="0" y="0" z="0" fov="40" renderer="pathtrace" pathSamples="16" maxBounces="1" denoise="false"/>
+        <object3D id="smoke" primitive="volume" volume="slab"><medium extinction="0.3" albedo="#000000" emissionColor="#FFC080" emissionScale="0.4" stepSize="0.1" maxSteps="4096"/></object3D>
+        {glass}
+      </composition>
+      <lights><light id="off" type="ambient" color="#000000" intensity="0"/></lights></scene>"##,
+            cache.display()
+        )
+    };
+    let glass =
+        r##"<object3D id="ball" primitive="sphere" radius="1" segments="16" x="0" y="0" z="-8" material="glassMat"/>"##;
+    let (Some(plain), Some(with)) = (render(&scene("")), render(&scene(glass))) else { return };
+    assert!(plain.px.iter().any(|p| p[0] > 0.05), "the medium glows");
+    assert_eq!(plain.px, with.px, "a transmissive object elsewhere changes the medium's pixels");
+}
