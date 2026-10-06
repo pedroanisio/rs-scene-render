@@ -32,18 +32,6 @@ pub const PENDING: &[Pending] = &[
         attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", Some("0"))],
     },
     Pending {
-        srep: 19,
-        what: "legibility checks for video text and captions",
-        elements: &[],
-        attributes: &[
-            ("accessibility", "legibilityCheck", Some("off")),
-            ("accessibility", "readingSpeed", None),
-            ("accessibility", "minDisplayTime", Some("0.8333")),
-            ("accessibility", "minTextSize", None),
-            ("captionTrack", "readingSpeed", None),
-        ],
-    },
-    Pending {
         srep: 21,
         what: "the pinned-font policy",
         elements: &[],
