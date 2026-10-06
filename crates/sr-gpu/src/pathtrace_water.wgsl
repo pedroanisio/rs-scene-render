@@ -46,9 +46,11 @@ struct Seen { dir: vec3<f32>, vis: vec3<f32> };
 // the way: the blockers on both sides, the interface's tint, transmission and Fresnel
 // transmittance, the factor cos(theta_air) / (cos(theta_water) eta^2) that goes with the solid
 // angle and the cross-section the interface changes, and the absorption along the path inside.
-// The cosine between the surface and `dir` is not in it: the caller multiplies by it. A path whose refinement finds no
+// The cosine between the surface and `dir` is not in it: the caller multiplies by it. `shadows`
+// is false for a light that casts none or a surface that receives none: the two blocker tests are
+// skipped, the refraction and the interface's losses are not. A path whose refinement finds no
 // interface or no way out toward the light gets no light from it (vis = 0), never a bright guess.
-fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist: f32, sigma: vec3<f32>) -> Seen {
+fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist: f32, sigma: vec3<f32>, shadows: bool) -> Seen {
     var out: Seen;
     out.dir = l; out.vis = vec3(0.0);
     let start = p + ng * 1e-2;
@@ -56,7 +58,7 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     let at_light = start + l * min(ldist, 1e6);
     var dir = l;
     var iface = first_interface(start, dir, ldist - 2e-2);
-    if (!iface.found) { out.vis = vec3(visibility(start, l, ldist - 2e-2)); return out; }
+    if (!iface.found) { out.vis = vec3(select(1.0, visibility(start, l, ldist - 2e-2), shadows)); return out; }
     let q0 = start + dir * iface.t;
     var la = l;
     if (!directional) { la = normalize(at_light - q0); }
@@ -71,8 +73,12 @@ fn light_through(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, l: vec3<f32>, ldist:
     let n_air = -iface.n;
     let cos_air = dot(la, n_air);
     if (cos_air <= 1e-4 || dot(n, dir) <= 1e-4) { return out; }
-    let inside_view = visibility(start, dir, iface.t - 2e-3);
-    let outside_view = visibility(q + n_air * 1e-2, la, select(rest - 2e-2, 1e30, directional));
+    var inside_view = 1.0;
+    var outside_view = 1.0;
+    if (shadows) {
+        inside_view = visibility(start, dir, iface.t - 2e-3);
+        outside_view = visibility(q + n_air * 1e-2, la, select(rest - 2e-2, 1e30, directional));
+    }
     let fresnel = fresnel_schlick(cos_air, 1.0 / iface.ior);
     // The beam's power per area of the interface is T cos_air; inside it spreads over a cross-section
     // of cos_water, and the radiance carries 1 / eta^2. The cosine at the surface is the caller's.

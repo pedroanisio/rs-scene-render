@@ -123,3 +123,18 @@ fn a_vertical_wall_under_water_is_lit_as_the_oracle_says() {
     eprintln!("wall red {got} against the oracle {want}");
     assert!((got / want - 1.0).abs() < 0.04, "wall under water: {got} against the oracle {want}");
 }
+
+/// A light that does not cast shadows (the default of `light@castShadow`) still reaches a surface
+/// under water through the interface: only the two blocker tests are skipped, not the refraction,
+/// the Fresnel loss or the change of the beam's cross-section.
+#[test]
+fn a_light_without_shadows_lights_a_wall_under_water_as_one_with() {
+    let unshadowed = SUN.replace(r#" castShadow="true""#, "");
+    assert!(!unshadowed.contains("castShadow"));
+    let Some(r) = render(&wall_in_water(&unshadowed, WATER)) else { return };
+    let (got, pixels) = wall_red(&r);
+    assert!(pixels > 400, "the wall is seen: {pixels} pixels");
+    let want = expected_wall_red(3.0);
+    eprintln!("wall red without castShadow {got} against the oracle {want}");
+    assert!((got / want - 1.0).abs() < 0.04, "wall under water, no shadows: {got} against the oracle {want}");
+}
