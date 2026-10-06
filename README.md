@@ -2,7 +2,7 @@
 
 A deterministic, GPU-accelerated renderer for scene-render 1.1 documents: it validates an XML scene description, evaluates it frame by frame, composites it in linear light with wgpu, and encodes and delivers finished video, audio and stills. The command-line tool is `scene-render`.
 
-Linux x86-64 binaries and SHA-256 checksums are available on [GitHub Releases](https://github.com/pedroanisio/rs-scene-render/releases). See each release's notes for runtime requirements. Pushing a `v` tag matching the Cargo workspace version runs the complete CI suite before building, smoke-testing and publishing the binary through the release workflow.
+Linux x86-64 binaries and SHA-256 checksums are available on [GitHub Releases](https://github.com/pedroanisio/rs-scene-render/releases). See each release's notes for runtime requirements. Pushing a `v` tag matching the Cargo workspace version runs the complete CI suite before smoke-testing and publishing the validated binary through the release workflow. Manual release-workflow runs produce downloadable package artifacts for timing and review.
 
 A scene-render 1.1 document either loads into a typed, fully resolved Rust model or fails with every problem it contains, each carrying a stable code, a line and column, an element path and, where one exists, a fix. Every other crate reads only this model, so the renderer never sees an unvalidated attribute.
 
