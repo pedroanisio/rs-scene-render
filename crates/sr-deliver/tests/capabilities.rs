@@ -47,7 +47,10 @@ fn the_published_manifest_is_well_formed() {
     let upstream =
         std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/UPSTREAM"))
             .unwrap();
-    assert!(upstream.contains(&format!("release {},", m.schema)), "schema {} is not the vendored release", m.schema);
+    let named = upstream
+        .match_indices(&format!("release {}", m.schema))
+        .any(|(i, t)| !upstream[i + t.len()..].starts_with(|c: char| c.is_ascii_digit() || c == '.'));
+    assert!(named, "schema {} is not the vendored release in schema/UPSTREAM", m.schema);
     assert!(m.schema.starts_with(sr_model::SCHEMA_VERSION));
     let mut seen = std::collections::HashSet::new();
     for e in &m.entries {
