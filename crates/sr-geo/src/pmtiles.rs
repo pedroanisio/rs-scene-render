@@ -617,7 +617,9 @@ mod tests {
     #[test]
     fn decompression_is_capped() {
         use std::io::Write as _;
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        // best compression: the bomb stays small with every flate2 backend (hayro, in sr-resolve, selects zlib-rs,
+        // whose fast level stores a megabyte of zeros in more than 8 KiB)
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
         gz.write_all(&vec![0u8; 1 << 20]).unwrap();
         let bomb = gz.finish().unwrap();
         assert!(bomb.len() < 8192);
