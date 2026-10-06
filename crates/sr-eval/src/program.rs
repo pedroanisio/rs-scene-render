@@ -3147,6 +3147,8 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
             node.vis_end = Some(node.end.map_or(e, |x| x.max(e)));
         }
     }
+    // SREP 18, I8: nodes the windows above leave outside the composition
+    warnings.extend(crate::inert::never_drawn(&b.nodes, duration, scene.project.fps));
     let zs: Vec<i32> = b.nodes.iter().map(|n| n.z).collect();
     // an animated `z` (keys, expression or link) restacks its siblings every frame
     for i in 0..b.nodes.len() {

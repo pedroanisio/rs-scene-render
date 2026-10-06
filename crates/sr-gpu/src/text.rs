@@ -792,6 +792,20 @@ fn para_of(tc: &mut TextCache, cx: &mut Cx, t: &m::TextAsset) -> (Para, Decor, V
     (Para { runs, styles, opts }, decor, roles)
 }
 
+/// The layout a text asset is drawn with in this frame: its fonts, styles and the substitutions of its animators,
+/// as [`asset_drawing`] lays it out. For audits that measure text without drawing it (SREP 18 `TXT-FIT`, `TXT-CUT`).
+pub fn text_layout(tc: &mut TextCache, cx: &mut Cx, key: &str, t: &m::TextAsset) -> Arc<Layout> {
+    let failed = register_fonts(tc, cx.p);
+    cx.unsupported.extend(failed);
+    let (mut para, _, roles) = para_of(tc, cx, t);
+    let anims = {
+        let pre = cached_layout(tc, layout_key(key, &para), &para);
+        animators(tc, cx, &pre, &roles).0
+    };
+    substitutions(cx, &mut para, &anims);
+    cached_layout(tc, layout_key(key, &para), &para)
+}
+
 /// Draws a text or data-graphics asset in its own box (0, 0, width, height).
 pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild) -> Option<Result<Drawing, String>> {
     let failed = register_fonts(tc, cx.p);

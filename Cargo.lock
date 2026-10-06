@@ -2485,6 +2485,7 @@ version = "0.1.4"
 dependencies = [
  "image",
  "rayon",
+ "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "sha2",

@@ -20,6 +20,7 @@ pub mod safe_audit;
 
 pub mod shader;
 pub mod text;
+pub mod text_audit;
 pub mod three;
 pub mod types;
 pub mod vector;

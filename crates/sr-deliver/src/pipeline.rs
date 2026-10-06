@@ -44,6 +44,9 @@ pub struct Options {
     pub parallel: Parallel,
     /// Quality tier overriding the document's `project@quality`.
     pub quality: Option<m::ProjectQuality>,
+    /// Measure what only a render report reads (SREP 18): text that does not fit its box. The checks the document
+    /// asks for (accessibility, safe area) run either way.
+    pub report: bool,
 }
 
 /// How many time segments of a video output render and encode at once.
@@ -79,6 +82,7 @@ impl Default for Options {
             row: None,
             parallel: Parallel::default(),
             quality: None,
+            report: false,
         }
     }
 }
@@ -153,6 +157,12 @@ pub struct Report {
     pub segments: u32,
     /// Why the render ran with one worker although more were asked for or chosen (GPU debug layers on).
     pub serial_because: Option<String>,
+    /// The output time range rendered, seconds (after command-line overrides).
+    pub range: [f64; 2],
+    /// What the delivery found, for the render report (SREP 18): accessibility, safe area, caption and segment
+    /// warnings and, with [`Options::report`], text fit. Validation and evaluation diagnostics are in the
+    /// document and in `evaluation_warnings`.
+    pub findings: Vec<crate::render_report::Finding>,
 }
 
 /// An `<output>` element built from command-line settings.
@@ -468,20 +478,36 @@ impl Video<'_> {
                 }
             }
         }
-        // accessibility verdicts
-        let fail = |mode: &str, msg: String, report: &mut Report| {
+        // accessibility verdicts, also as render-report findings at the severity the check is set to
+        use crate::render_report::{code, Finding};
+        let fail = |mode: &str, msg: String, finding: Finding, report: &mut Report| {
             if mode == "error" && report.accessibility_error.is_none() {
                 report.accessibility_error = Some(msg.clone());
             }
+            let severity = if mode == "error" { sr_model::Severity::Error } else { sr_model::Severity::Warning };
+            report.findings.push(Finding { severity, ..finding });
             report.accessibility.push(msg);
         };
-        if let Some(msg) = judge.flash.as_ref().and_then(|d| d.verdict()) {
-            fail(&checks.flash, msg, report);
+        if let Some((msg, first)) = judge.flash.as_ref().and_then(|d| Some((d.verdict()?, d.first.unwrap_or(0.0)))) {
+            let finding =
+                Finding::scene(code::ACC_FLASH, sr_model::Severity::Warning, msg.clone()).at_time(first, first);
+            fail(&checks.flash, msg, finding, report);
         }
         let min_contrast = checks.min_contrast;
         for (id, (_, ratio, at)) in &judge.lowest {
             if *ratio < min_contrast {
-                fail(&checks.contrast, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
+                let msg = format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)");
+                let finding = match id {
+                    sr_gpu::ContrastTarget::Node(n) => {
+                        Finding::node(code::LEG_CONTRAST, sr_model::Severity::Warning, n, msg.clone())
+                    }
+                    sr_gpu::ContrastTarget::Captions => {
+                        Finding::scene(code::LEG_CONTRAST, sr_model::Severity::Warning, msg.clone())
+                    }
+                }
+                .at_time(*at, *at)
+                .measuring(*ratio, Some(min_contrast), "ratio");
+                fail(&checks.contrast, msg, finding, report);
             }
         }
     }
@@ -625,6 +651,32 @@ pub fn deliver(
     opts: &Options,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Report, DeliverError> {
+    let (report, outcome) = deliver_reporting(doc, output, gpu, opts, progress);
+    outcome.map(|()| report)
+}
+
+/// [`deliver`], keeping the report of a delivery that fails: what was measured before the error, for the render
+/// report (SREP 18), which is written whether or not the render succeeded.
+pub fn deliver_reporting(
+    doc: &sr_model::Document,
+    output: &m::Output,
+    gpu: Option<&Gpu>,
+    opts: &Options,
+    progress: &mut dyn FnMut(u64, u64),
+) -> (Report, Result<(), DeliverError>) {
+    let mut report = Report::default();
+    let outcome = run_delivery(doc, output, gpu, opts, progress, &mut report);
+    (report, outcome)
+}
+
+fn run_delivery(
+    doc: &sr_model::Document,
+    output: &m::Output,
+    gpu: Option<&Gpu>,
+    opts: &Options,
+    progress: &mut dyn FnMut(u64, u64),
+    report: &mut Report,
+) -> Result<(), DeliverError> {
     let started = Instant::now();
     let codec = Codec::parse(output.codec.as_str())
         .ok_or_else(|| DeliverError::Invalid(format!("unknown codec {}", output.codec.as_str())))?;
@@ -648,13 +700,17 @@ pub fn deliver(
     // audio, overlay and captions. Explicit segments retain their independent output clock.
     let effective_output = m::Output { start, end: Some(end), ..output.clone() };
     let output = &effective_output;
-    let mut report = Report {
+    *report = Report {
         path: resolve(&base, &output.path),
+        range: [start, end],
         fps,
         quality: opts.quality.unwrap_or(doc.scene.project.quality).as_str().to_string(),
         ..Default::default()
     };
-    report.warnings.extend(doc.warnings().iter().map(|d| format!("{}: {}", d.code, d.message)));
+    // information (inert attributes) is for validate and the render report, not a delivery warning
+    report
+        .warnings
+        .extend(doc.warnings().iter().filter(|d| !d.is_info()).map(|d| format!("{}: {}", d.code, d.message)));
     // audio first: the mix feeds the analysis table
     let t_audio = Instant::now();
     let mut scene_audio: Option<SceneAudio> = audio::mix_scene(&ev0, fps, representation.as_deref())?;
@@ -674,6 +730,13 @@ pub fn deliver(
     // captions in output time: with segments the composition's are mapped; the output's own tracks
     let captions = crate::captions::output_captions(p, output, segments.as_ref())?;
     report.warnings.extend(captions.warnings.iter().cloned());
+    report.findings.extend(captions.warnings.iter().map(|w| {
+        crate::render_report::Finding::scene(
+            crate::render_report::code::engine("CAPTION"),
+            sr_model::Severity::Warning,
+            w.clone(),
+        )
+    }));
     // Check once for the delivery, before workers start. Composition tracks and
     // output-owned tracks both satisfy the document's caption requirement.
     let requires_captions = p.scene.metadata.as_ref().is_some_and(|md| {
@@ -693,7 +756,15 @@ pub fn deliver(
     std::fs::create_dir_all(&tmp.0)?;
     let mut chapters = None;
     if let Some(tm) = &segments {
-        report.warnings.extend(empty_ends(&ev, tm));
+        let empty = empty_ends(&ev, tm);
+        report.findings.extend(empty.iter().map(|w| {
+            crate::render_report::Finding::scene(
+                crate::render_report::code::engine("SEGMENT-EMPTY"),
+                sr_model::Severity::Warning,
+                w.clone(),
+            )
+        }));
+        report.warnings.extend(empty);
         chapters = write_chapters(p, tm, start, end, &tmp)?;
     }
     // with segments the programme is the output's own mix in output time (its own tracks may be its
@@ -866,10 +937,24 @@ pub fn deliver(
         let (from, to) = (times.first().copied().unwrap_or(0.0), times.last().map(|t| t + 1.0 / fps).unwrap_or(0.0));
         let safe = sr_gpu::safe_audit::check(&ev, from, to);
         let diagnostics = safe.diagnostics(p);
+        report.findings.extend(safe.timed.iter().zip(&diagnostics).map(|(t, d)| {
+            crate::render_report::Finding::node(
+                crate::render_report::code::SAFE_AREA,
+                d.severity,
+                &t.finding.id,
+                d.message.clone(),
+            )
+            .at_time(t.t, t.t)
+            .measuring(t.finding.overshoot, Some(0.0), "px")
+        }));
         if diagnostics.iter().any(|d| d.is_error()) {
+            // the findings above carry them, with their nodes and times, into the render report
             return Err(DeliverError::Document(sr_model::Report { diagnostics }));
         }
         report.warnings.extend(diagnostics.iter().map(|d| format!("{}: {}", d.code, d.message)));
+        if opts.report {
+            report.findings.extend(text_fit_findings(&ev, &times));
+        }
         let n = times.len() as u64;
         let mut video = Video {
             ev: &ev,
@@ -953,12 +1038,12 @@ pub fn deliver(
             let mut done = 0;
             let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
-            video.run(&times, &mut report, &mut judge, |b| {
+            video.run(&times, report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
                 feeder.send(b)
             })?;
-            video.judge(judge, &times, &mut report);
+            video.judge(judge, &times, report);
             feeder.finish()?;
             report.frames = n;
             let duration = end - start;
@@ -1166,7 +1251,7 @@ pub fn deliver(
             report.unsupported = unsupported.into_iter().collect();
             // every chunk was rendered, so every chunk has been judged; text the workers could not
             // measure in place is measured by this thread's renderer
-            video.judge(judge, &times, &mut report);
+            video.judge(judge, &times, report);
             progress(n, n);
             spec.join(&parts, &tmp.join("segments.txt"))?;
             report.frames = n;
@@ -1177,12 +1262,12 @@ pub fn deliver(
             let mut done = 0;
             let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
-            video.run(&times, &mut report, &mut judge, |b| {
+            video.run(&times, report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
                 feeder.send(b)
             })?;
-            video.judge(judge, &times, &mut report);
+            video.judge(judge, &times, report);
             report.encoder = feeder.finish()?;
             report.frames = n;
             report.passes = 1;
@@ -1314,7 +1399,42 @@ pub fn deliver(
         report.uploads = crate::destinations::deliver_all(&dests, &report.files, output, &base)?;
     }
     report.seconds = started.elapsed().as_secs_f64();
-    Ok(report)
+    Ok(())
+}
+
+/// `TXT-FIT` and `TXT-CUT` for the text layers drawn at `times` (SREP 18; the measures of SREP 20 rule 6).
+fn text_fit_findings(ev: &Evaluator, times: &[f64]) -> Vec<crate::render_report::Finding> {
+    use crate::render_report::{code, Finding};
+    let audit = sr_gpu::text_audit::check(ev, times);
+    let sampled = audit.note.map(|n| format!(" ({n})")).unwrap_or_default();
+    let mut out = Vec::new();
+    for f in audit.found {
+        let at = |mut x: Finding| {
+            x.at = Some(crate::render_report::At { offset: Some(f.loc.offset), id: Some(f.id.clone()) });
+            x
+        };
+        if let Some(s) = &f.overflow {
+            out.push(at(Finding::node(
+                code::TXT_FIT,
+                sr_model::Severity::Warning,
+                &f.id,
+                format!("text {:?} reaches {:.1} px past its box at the size drawn{sampled}", f.id, s.worst),
+            )
+            .at_time(s.time[0], s.time[1])
+            .measuring(s.worst, Some(0.0), "px")));
+        }
+        if let Some(s) = &f.dropped {
+            out.push(at(Finding::node(
+                code::TXT_CUT,
+                sr_model::Severity::Warning,
+                &f.id,
+                format!("text {:?}: {} characters are not drawn (maxLines or overflow){sampled}", f.id, s.worst),
+            )
+            .at_time(s.time[0], s.time[1])
+            .measuring(s.worst, Some(0.0), "characters")));
+        }
+    }
+    out
 }
 
 /// Segments to render `output` in at once: 1 unless it is a single-pass video file whose frames

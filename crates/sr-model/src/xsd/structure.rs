@@ -44,16 +44,26 @@ struct Walker<'a, 'i> {
     diags: Vec<Diagnostic>,
     ids: HashMap<String, Node<'a, 'i>>,
     refs: Vec<IdRefUse<'a, 'i>>,
+    types: ElementTypes,
 }
 
 /// Every `xs:ID` value of a document with the element that carries it.
 pub type IdMap = HashMap<String, (String, Loc)>;
 
+/// The complex type each element was validated against, by node: the declarations (and so the attribute
+/// defaults) that apply to it. Elements the content model rejected have none.
+pub type ElementTypes = HashMap<roxmltree::NodeId, &'static ComplexType>;
+
 /// Validates the document structure against the XSD, appends diagnostics
 /// and returns the `xs:ID` values found.
 pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) -> IdMap {
+    validate_typed(doc, out).0
+}
+
+/// [`validate`], also returning the complex type of every element that has one.
+pub fn validate_typed(doc: &Document<'_>, out: &mut Vec<Diagnostic>) -> (IdMap, ElementTypes) {
     let root = doc.root_element();
-    let mut w = Walker { diags: Vec::new(), ids: HashMap::new(), refs: Vec::new() };
+    let mut w = Walker { diags: Vec::new(), ids: HashMap::new(), refs: Vec::new(), types: ElementTypes::new() };
     if root.tag_name().name() != ROOT_ELEMENT || root.tag_name().namespace().is_some() {
         w.diags.push(
             Diagnostic::error(
@@ -65,12 +75,13 @@ pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) -> IdMap {
             .with_help("wrap the document in <scene version=\"1.1\"> … </scene>"),
         );
         out.append(&mut w.diags);
-        return IdMap::new();
+        return (IdMap::new(), ElementTypes::new());
     }
     w.element(root, &COMPLEX_TYPES[ROOT_TYPE], 0);
     w.check_refs();
     out.append(&mut w.diags);
-    w.ids.into_iter().map(|(k, n)| (k, (n.tag_name().name().to_string(), Loc::of(n)))).collect()
+    let ids = w.ids.into_iter().map(|(k, n)| (k, (n.tag_name().name().to_string(), Loc::of(n)))).collect();
+    (ids, w.types)
 }
 
 fn qname(n: Node) -> String {
@@ -258,6 +269,7 @@ impl<'a, 'i> Walker<'a, 'i> {
             ));
             return;
         }
+        self.types.insert(n.id(), ct);
         self.attributes(n, ct);
         match ct.content {
             Content::Empty => {

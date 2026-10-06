@@ -13,10 +13,13 @@ pub mod ceiling;
 pub mod destinations;
 pub mod overlay;
 pub mod pipeline;
+pub mod render_report;
 pub mod segment_audio;
 pub mod segments;
 
-pub use pipeline::{adhoc_output, deliver, output_uses_3d, Options, Parallel, RenderAdapter, Report};
+pub use pipeline::{
+    adhoc_output, deliver, deliver_reporting, output_uses_3d, Options, Parallel, RenderAdapter, Report,
+};
 
 /// Delivery errors.
 #[derive(Debug, thiserror::Error)]
