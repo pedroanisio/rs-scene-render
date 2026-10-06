@@ -56,6 +56,8 @@ pub(crate) struct WaterAttrs {
     pub(crate) body_drag: f64,
     /// The rest level of its surface in its own axes.
     pub(crate) level: f64,
+    /// Its density, kilograms per cubic metre: 1000 when the document gives none, as the schema's default.
+    pub(crate) density: f64,
 }
 
 impl WaterAttrs {
@@ -64,6 +66,7 @@ impl WaterAttrs {
             gravity: num(e, "gravity", 9.81),
             body_drag: num(e, "bodyDrag", 1.0),
             level: num(e, "waterLevel", 0.0),
+            density: num(e, "density", 1000.0),
         }
     }
 }
@@ -164,7 +167,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         spec.body_push = built.pushes();
         Some(built)
     };
-    let entries = cavity::read(e, &collider_ids)?;
+    let entries = cavity::read(e, &collider_ids, water.density)?;
     let splash = text(e, "splash").map_or(0, |l| l.split_whitespace().count());
     if splash > 0 {
         // the driver gives what the particles bring at the sample that closes each canonical step
@@ -792,9 +795,9 @@ mod tests {
             super::WaterAttrs::of(e)
         };
         let plain = read("");
-        assert_eq!((plain.gravity, plain.body_drag, plain.level), (9.81, 1.0, 0.0));
-        let set = read(r#"colliders="b" gravity="3.7" bodyDrag="0.4" waterLevel="-2""#);
-        assert_eq!((set.gravity, set.body_drag, set.level), (3.7, 0.4, -2.0));
+        assert_eq!((plain.gravity, plain.body_drag, plain.level, plain.density), (9.81, 1.0, 0.0, 1000.0));
+        let set = read(r#"colliders="b" gravity="3.7" bodyDrag="0.4" waterLevel="-2" density="1030""#);
+        assert_eq!((set.gravity, set.body_drag, set.level, set.density), (3.7, 0.4, -2.0, 1030.0));
     }
 
     #[test]

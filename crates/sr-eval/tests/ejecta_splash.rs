@@ -185,6 +185,30 @@ fn an_ocean_first_computed_when_its_emitter_is_not_in_the_frame_is_given_what_th
 }
 
 #[test]
+fn the_momentum_the_ejecta_bring_is_per_unit_of_the_density_of_the_water_they_fall_into() {
+    let steps = 167;
+    let thousand = evaluator(&scene(60.0, "", ""));
+    let explicit = evaluator(&scene(60.0, "", r#"density="1000""#));
+    let sea_water = evaluator(&scene(60.0, "", r#"density="1030""#));
+    for ev in [&thousand, &explicit, &sea_water] {
+        let _ = alive(ev, 7.0);
+    }
+    let (v0, m0, ..) = total(&thousand, steps);
+    let (v1, m1, ..) = total(&explicit, steps);
+    let (v2, m2, ..) = total(&sea_water, steps);
+    // the default is 1000 to the bit, and the volume of the solid does not depend on the water
+    assert_eq!((v0.to_bits(), m0.map(f64::to_bits)), (v1.to_bits(), m1.map(f64::to_bits)));
+    assert!((v2 - v0).abs() < 1e-12 * v0, "{v2} against {v0}");
+    // a particle falling into water of density 1030 brings the same momentum per unit of a density 1030 times as large
+    for axis in 0..2 {
+        assert!(
+            (m2[axis] * 1030.0 - m0[axis] * 1000.0).abs() < 1e-9 * m0[axis].abs().max(1.0),
+            "{m2:?} against {m0:?}"
+        );
+    }
+}
+
+#[test]
 fn without_the_attribute_the_particles_are_as_they_were_and_with_it_they_are_fewer() {
     let with = evaluator(&scene(60.0, "", ""));
     let without = evaluator(&scene(60.0, "", "").replace(r#" splash="debris""#, ""));

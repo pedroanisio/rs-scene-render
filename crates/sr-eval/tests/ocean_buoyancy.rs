@@ -66,12 +66,17 @@ fn height(ev: &Evaluator, t: f64) -> f64 {
 
 /// The height of a ball's centre at which it displaces `mass` of water, by bisection on the cap volume.
 fn draft(r: f64, mass: f64) -> f64 {
+    draft_in(r, mass, RHO)
+}
+
+/// The same in water of density `rho`.
+fn draft_in(r: f64, mass: f64, rho: f64) -> f64 {
     use sr_sim::hydrostatics::{submerged_sphere, Surface};
     let (mut lo, mut hi) = (-r, r);
     for _ in 0..200 {
         let mid = 0.5 * (lo + hi);
         let v = submerged_sphere([0.0, mid, 0.0], r, &Surface { offset: 0.0, slope: [0.0, 0.0] }).volume;
-        if v > mass / RHO {
+        if v > mass / rho {
             hi = mid;
         } else {
             lo = mid;
@@ -166,4 +171,31 @@ fn such_a_document_cannot_be_baked_and_a_cache_cannot_serve_it() {
     let frame = Evaluator::new(&doc, &Default::default()).unwrap().evaluate(1.0);
     assert!(frame.failures.iter().any(|f| f.contains("physics cache cannot be combined")), "{:?}", frame.failures);
     std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn a_ball_floats_at_the_draft_the_density_of_the_water_gives() {
+    // sea water bears more of the weight on less of the ball: the draft is the volume of mass / density
+    let mut settled = Vec::new();
+    for density in [1000.0, 1030.0, 1100.0] {
+        let ocean = format!(r#"bodyCoupling="buoyancy" density="{density}""#);
+        let ev = Scene { ocean: Box::leak(ocean.into_boxed_str()), ..Scene::default() }.evaluator();
+        let got = height(&ev, 80.0);
+        let want = draft_in(1.0, 2094.0, density);
+        assert!((got - want).abs() < 0.03, "density {density}: at {got}, the displaced weight needs {want}");
+        settled.push(got);
+    }
+    // and the ball rides higher in the denser water, by what the drafts differ
+    assert!(settled[0] > settled[1] && settled[1] > settled[2], "{settled:?}");
+    assert!(((settled[0] - settled[1]) - (draft_in(1.0, 2094.0, 1000.0) - draft_in(1.0, 2094.0, 1030.0))).abs() < 0.03);
+}
+
+#[test]
+fn the_default_density_is_the_thousand_that_the_water_always_had_to_the_bit() {
+    let times = [3.0, 0.5, 2.0, 0.0, 1.25];
+    let without = Scene::default().evaluator();
+    let with = Scene { ocean: r#"bodyCoupling="buoyancy" density="1000""#, ..Scene::default() }.evaluator();
+    for &t in &times {
+        assert_eq!(height(&without, t).to_bits(), height(&with, t).to_bits(), "t = {t}");
+    }
 }
