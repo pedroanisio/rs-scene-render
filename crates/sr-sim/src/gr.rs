@@ -339,7 +339,7 @@ pub mod oracle {
 ///
 /// The tracer is serial and does no sum of more than one pixel, so the same arguments give the same bits.
 pub mod image {
-    use super::Outcome;
+    use super::{trace, Outcome};
 
     /// What a pixel shows.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -396,30 +396,110 @@ pub mod image {
         /// plane of the x and y axes, looking at the hole, with the y axis up in the image and a vertical field
         /// of view `fov_y`.
         pub fn orbiting(distance: f64, inclination: f64, fov_y: f64, size: [usize; 2]) -> Camera {
-            let _ = (distance, inclination, fov_y, size);
-            todo!("the camera of an observer around the hole")
+            let eye = [distance * inclination.sin(), distance * inclination.cos(), 0.0];
+            let fwd = scale(eye, -1.0 / distance);
+            // looking along the axis there is no up of the world to use: the image's top is then toward -z
+            let up = if inclination.sin().abs() < 1e-9 { [0.0, 0.0, -1.0] } else { [0.0, 1.0, 0.0] };
+            let right = unit(cross(fwd, up));
+            let down = scale(cross(right, fwd), -1.0);
+            let focal = 0.5 * size[1] as f64 / (0.5 * fov_y).tan();
+            Camera { eye, hole: [0.0; 3], fwd, right, down, focal, size }
         }
 
         /// The unit direction of the ray of pixel `(x, y)`.
         pub fn ray(&self, x: usize, y: usize) -> [f64; 3] {
-            let _ = (x, y);
-            todo!("the direction of a pixel")
+            let (dx, dy) = (x as f64 + 0.5 - 0.5 * self.size[0] as f64, y as f64 + 0.5 - 0.5 * self.size[1] as f64);
+            let d = std::array::from_fn(|i| self.fwd[i] * self.focal + self.right[i] * dx + self.down[i] * dy);
+            unit(d)
         }
     }
 
     impl Disk {
         /// The disc in the plane of the x and z axes, `dx = x`, `dy = -z`, spinning about `y` (`dx x dy = y`).
         pub fn flat(r_in: f64, r_out: f64) -> Disk {
-            let _ = (r_in, r_out);
-            todo!("the flat disc")
+            Disk { r_in, r_out, dx: [1.0, 0.0, 0.0], dy: [0.0, 0.0, -1.0], dz: [0.0, 1.0, 0.0] }
         }
     }
 
     /// What the ray of direction `d` from the camera's eye does around a hole of mass `mass`, with or without a
     /// disc.
     pub fn trace_direction(camera: &Camera, mass: f64, disk: Option<&Disk>, d: [f64; 3]) -> Pixel {
-        let _ = (camera, mass, disk, d, Outcome::Captured);
-        todo!("the ray of a direction")
+        let nothing =
+            Pixel { class: Class::Captured, direction: [0.0; 3], phi_inf: 0.0, r: 0.0, psi: 0.0, g: 0.0, order: None };
+        let to_eye = sub(camera.eye, camera.hole);
+        let r_o = dot(to_eye, to_eye).sqrt();
+        let e1 = scale(to_eye, 1.0 / r_o);
+        let cos_a = -dot(d, e1);
+        let perp = add(d, scale(e1, cos_a));
+        let sin_a = dot(perp, perp).sqrt();
+        let e2 = if sin_a > 1e-6 {
+            scale(perp, 1.0 / sin_a)
+        } else {
+            let helper = if e1[0].abs() > 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+            unit(cross(e1, helper))
+        };
+        let b = (r_o * sin_a / (1.0 - 2.0 * mass / r_o).sqrt()).max(1e-5);
+        // the first angle at which the plane of the ray meets the disc's, and none when they coincide
+        let phi0 = disk.map_or(1e30, |disk| {
+            let (a, c) = (dot(e1, disk.dz), dot(e2, disk.dz));
+            if a * a + c * c < 1e-12 {
+                return 1e30;
+            }
+            let mut phi0 = (-a).atan2(c);
+            if phi0 < 0.0 {
+                phi0 += std::f64::consts::PI;
+            }
+            if phi0 < 1e-6 {
+                phi0 += std::f64::consts::PI;
+            }
+            phi0
+        });
+        let traced = trace(mass, r_o, b, cos_a > 0.0, phi0, 4);
+        if let Some(disk) = disk {
+            if let Some((order, &(phi_k, r))) =
+                traced.crossings.iter().enumerate().find(|(_, (_, r))| *r >= disk.r_in && *r <= disk.r_out)
+            {
+                let p = add(scale(e1, phi_k.cos()), scale(e2, phi_k.sin()));
+                let psi = dot(p, disk.dy).atan2(dot(p, disk.dx));
+                let h = dot(cross(e1, e2), disk.dz);
+                let omega = (mass / (r * r * r)).sqrt();
+                let g = (1.0 - 3.0 * mass / r).max(0.0).sqrt() / (1.0 + omega * b * h);
+                return Pixel { class: Class::Disk, r, psi, g, order: Some(order), ..nothing };
+            }
+        }
+        match traced.outcome {
+            Outcome::Captured => nothing,
+            Outcome::Escaped => Pixel {
+                class: Class::Background,
+                direction: add(scale(e1, traced.phi_inf.cos()), scale(e2, traced.phi_inf.sin())),
+                phi_inf: traced.phi_inf,
+                ..nothing
+            },
+        }
+    }
+
+    fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+
+    fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn scale(a: [f64; 3], k: f64) -> [f64; 3] {
+        [a[0] * k, a[1] * k, a[2] * k]
+    }
+
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    }
+
+    fn unit(a: [f64; 3]) -> [f64; 3] {
+        scale(a, 1.0 / dot(a, a).sqrt())
     }
 
     /// The ray of pixel `(x, y)`.

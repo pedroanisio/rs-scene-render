@@ -27,18 +27,15 @@ fn the_camera_looks_at_the_hole_and_its_axes_are_orthonormal_and_right_handed() 
             c.right[2] * c.down[0] - c.right[0] * c.down[2],
             c.right[0] * c.down[1] - c.right[1] * c.down[0],
         ];
-        for i in 0..3 {
-            assert!((cross[i] - c.fwd[i]).abs() < 1e-14, "right x down is forward");
+        for (made, wanted) in cross.iter().zip(&c.fwd) {
+            assert!((made - wanted).abs() < 1e-14, "right x down is forward");
         }
         // it looks at the hole from the distance asked, the centre pixel straight at it
         let distance = (c.eye[0].powi(2) + c.eye[1].powi(2) + c.eye[2].powi(2)).sqrt();
         assert!((distance - 30.0 * M).abs() < 1e-12);
         let centre = c.ray(128, 80);
-        for i in 0..3 {
-            assert!(
-                (centre[i] - c.fwd[i]).abs() < 1e-15 && (c.eye[i] + 30.0 * c.fwd[i]).abs() < 1e-12,
-                "{inclination}"
-            );
+        for ((ray, fwd), eye) in centre.iter().zip(&c.fwd).zip(&c.eye) {
+            assert!((ray - fwd).abs() < 1e-15 && (eye + 30.0 * fwd).abs() < 1e-12, "{inclination}");
         }
     }
     // an equatorial camera has the spin axis up in the image
@@ -136,14 +133,25 @@ fn a_disc_seen_from_above_is_a_ring_and_the_hole_is_black_in_the_middle() {
     let disk = Disk::flat(6.0 * M, 20.0 * M);
     let middle = trace_pixel(&c, M, Some(&disk), 100, 100);
     assert_eq!(middle.class, Class::Captured);
-    // a ray at the shadow's edge and one far outside it: black, then the disc, then the sky
-    let classes: Vec<Class> = (101..201).map(|x| trace_pixel(&c, M, Some(&disk), x, 100).class).collect();
-    assert_eq!(classes[0], Class::Captured);
-    assert!(classes.contains(&Class::Disk) && *classes.last().unwrap() == Class::Background);
-    // the disc is one ring: the pixels of the disc along the radius are one run
-    let first = classes.iter().position(|c| *c == Class::Disk).unwrap();
-    let last = classes.iter().rposition(|c| *c == Class::Disk).unwrap();
-    assert!(classes[first..=last].iter().all(|c| *c == Class::Disk), "{classes:?}");
+    // along a radius: black in the middle, the disc as it is seen (the first crossing of its plane), the sky far out
+    let row: Vec<_> = (101..201).map(|x| trace_pixel(&c, M, Some(&disk), x, 100)).collect();
+    assert_eq!(row[0].class, Class::Captured);
+    assert_eq!(row.last().unwrap().class, Class::Background);
+    let first: Vec<_> = row.iter().filter(|p| p.order == Some(0)).collect();
+    assert!(first.len() > 15, "{} pixels of the disc as it is seen", first.len());
+    // those are one run, and the radius they show grows outward from the inner edge to the outer
+    let start = row.iter().position(|p| p.order == Some(0)).unwrap();
+    assert!(row[start..start + first.len()].iter().all(|p| p.order == Some(0)));
+    assert!(first.windows(2).all(|w| w[1].r > w[0].r), "the radius grows outward");
+    assert!(
+        first[0].r < 8.0 * M && first.last().unwrap().r > 18.0 * M,
+        "{} to {}",
+        first[0].r,
+        first.last().unwrap().r
+    );
+    // between the shadow and the disc as it is seen the rays that cross the disc's plane inside its inner edge go on
+    // and meet it again behind the hole, where light bent by the hole shows its far side: higher orders, not the sky
+    assert!(row.iter().any(|p| p.class == Class::Disk && p.order.is_some_and(|k| k >= 1)));
 }
 
 #[test]
