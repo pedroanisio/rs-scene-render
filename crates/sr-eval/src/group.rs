@@ -334,7 +334,7 @@ impl Group {
             }
             let attrs = crate::ocean::WaterAttrs::of(e);
             let water = Water {
-                density: 1000.0,
+                density: attrs.density,
                 gravity: attrs.gravity,
                 drag: attrs.body_drag,
                 pixels_per_meter: p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()),

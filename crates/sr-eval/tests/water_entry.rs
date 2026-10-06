@@ -10,10 +10,19 @@ struct Setup {
     depth: f64,
     source: &'static str,
     radius: f64,
+    /// Attributes added to the ocean.
+    attrs: &'static str,
 }
 impl Default for Setup {
     fn default() -> Self {
-        Setup { speed: 20.0, mass: 2000.0, depth: 12.0, source: r#"<waterImpulse source="rock"/>"#, radius: 2.0 }
+        Setup {
+            speed: 20.0,
+            mass: 2000.0,
+            depth: 12.0,
+            source: r#"<waterImpulse source="rock"/>"#,
+            radius: 2.0,
+            attrs: "",
+        }
     }
 }
 impl Setup {
@@ -23,13 +32,14 @@ impl Setup {
               <object3D id="rock" primitive="sphere" radius="{radius}" y="-8">
                 <rigidBody shape="sphere" mass="{mass}" velocityY="{speed}" restitution="0" linearDamping="0" angularDamping="0"/>
               </object3D>
-              <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="{depth}" dt="0.0416666666666667" boundary="closed" colliders="rock">{source}</ocean>
+              <ocean id="sea" bedResponse="hydrostatic" width="128" depth="128" cellSize="2" bottomDepth="{depth}" dt="0.0416666666666667" boundary="closed" colliders="rock" {attrs}>{source}</ocean>
             </composition><physics gravityY="0" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"#,
             radius = self.radius,
             mass = self.mass,
             speed = self.speed,
             depth = self.depth,
             source = self.source,
+            attrs = self.attrs,
         )
     }
     fn evaluator(&self) -> Evaluator {
@@ -162,4 +172,22 @@ fn scrubbing_gives_the_same_water() {
     let again = at(&ev, 2.0);
     assert!(same(&first, &again));
     assert!(same(&first, &at(&Setup::default().evaluator(), 2.0)), "an evaluator that did not scrub agrees");
+}
+
+#[test]
+fn the_cavity_is_the_one_the_law_makes_in_water_of_the_density_asked_for() {
+    let at_1000 = Setup::default().evaluator();
+    let explicit = Setup { attrs: r#"density="1000""#, ..Setup::default() }.evaluator();
+    let denser = Setup { attrs: r#"density="1100""#, ..Setup::default() }.evaluator();
+    let mut moved = 0.0f64;
+    for t in [1.5, 2.0, 3.0] {
+        let (a, b, c) = (at(&at_1000, t), at(&explicit, t), at(&denser, t));
+        // the density the water always had is the default, to the bit
+        assert!(same(&a, &b), "t = {t}");
+        for (x, y) in cells(&a).iter().zip(cells(&c)) {
+            moved = moved.max((x.depth - y.depth).abs());
+        }
+    }
+    // and another density is another target for the law of the crater: another cavity
+    assert!(moved > 1e-3, "the cavity in water of 1100 kg/m3 differs from that in water of 1000 by {moved}");
 }

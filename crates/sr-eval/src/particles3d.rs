@@ -154,6 +154,7 @@ fn fall_setup(
             cells: [(width / cell).round() as usize, (depth / cell).round() as usize],
             dt: num(e, "dt", 1. / 60.),
             start: ocean.start,
+            density: crate::ocean::WaterAttrs::of(e).density,
             to_local: world.inverse(),
         },
     };
@@ -577,7 +578,7 @@ impl Driver for SceneDriver<'_, '_> {
                 self.p.nodes[self.node as usize].start,
                 pixels_per_meter,
                 solid,
-                1000.,
+                emitter.ocean.density,
             ),
             (false, None) => {
                 return Err(Error::Driver("particles fell into the water before their crater was known".into()))

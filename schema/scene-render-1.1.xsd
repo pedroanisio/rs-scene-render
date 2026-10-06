@@ -2361,6 +2361,14 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="density" type="positiveDecimal" default="1000">
+      <xs:annotation><xs:documentation>
+        Density of the water, kilograms per cubic metre (default 1000, fresh water; sea water is about 1025). It is the density of the
+        weight of the water a body displaces (`bodyCoupling`), of the force the water gives back to it (the momentum the solver
+        exchanges is per unit density), of what the ejecta that fall into the ocean bring (`splash`: their momentum is divided by it),
+        and of the target of the cavity of a body that enters (`waterImpulse`). Without the attribute the water is 1000 kg/m3, as it was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
       <xs:annotation><xs:documentation>
         Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:

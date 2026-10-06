@@ -52,6 +52,8 @@ pub(crate) struct Ocean {
     /// Its canonical step, and the composition time of its local time zero.
     pub(crate) dt: f64,
     pub(crate) start: f64,
+    /// Its density, kilograms per cubic metre: what the momentum the particles bring is divided by.
+    pub(crate) density: f64,
     /// World to the ocean's own axes.
     pub(crate) to_local: DMat4,
 }
