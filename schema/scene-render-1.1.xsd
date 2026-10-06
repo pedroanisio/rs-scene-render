@@ -2349,8 +2349,9 @@
     <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
     <xs:attribute name="shadowCatcher" type="xs:boolean" default="false">
       <xs:annotation><xs:documentation>The surface draws no colour of its own. It is transparent where no light is
-      blocked and black, with alpha up to @opacity, where the shadow casters block all the light that would reach it, so
-      that it darkens what is behind the 3D layer by the share of light that is taken away. It does not cast shadows.
+      blocked and black, with alpha up to @opacity, where the shadow casters block the light that would reach it, so
+      that it darkens what is behind the 3D layer by the share of light that is taken away (ambient light counted). It
+      does not cast shadows.
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
@@ -3960,7 +3961,9 @@
       A span of the composition played by this output: from..to (seconds) or fromMarker..toMarker at speed,
       or a timeRemap child mapping segment time (key/@time, from 0) to composition time (key/@value) for ramps,
       freezes and reversals. The output plays its segments in document order. A transition child joins this
-      segment to the next one. animate children may animate focusX and focusY in segment time.
+      segment to the next one. audio says how the span's sound is fitted to its duration: stretch keeps pitch,
+      resample changes pitch with speed, mute is silence. focusX and focusY (animatable in segment time, by animate
+      children) replace the layout's reframing focus for crop and fit-blur.
     </xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="timeRemap" type="timeRemapType"/>
