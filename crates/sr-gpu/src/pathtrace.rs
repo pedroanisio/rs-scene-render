@@ -646,8 +646,23 @@ mod tests {
         let source = grid_source();
         assert_eq!(source.matches("fn volume_incident(").count(), 1, "one volume_incident");
         assert!(source.contains("fn volume_incident_exact("), "the exact function stays for other media");
+        // it is the plain function renamed, not a second copy that could drift from it
+        assert!(
+            !include_str!("volume_grid.wgsl").contains("fn volume_incident_exact("),
+            "the grid file does not carry its own copy of the exact lighting"
+        );
+        let body = |text: &str, name: &str| {
+            let start = text.find(name).expect("function");
+            let end = start + text[start..].find("\n}\n").expect("end of function");
+            text[start + name.len()..end].to_string()
+        };
+        assert_eq!(
+            body(&source, "fn volume_incident_exact("),
+            body(include_str!("volume.wgsl"), "fn volume_incident("),
+            "the exact function is the plain one"
+        );
         assert!(source.contains("tverts[base+13u].y>0.5,base)"), "the call that lights a domain passes the domain");
-        assert!(!source.contains("//@exact-incident"), "the markers are removed with the function between them");
+        assert!(!source.contains("//@exact-incident"), "the markers are removed");
         // everything outside the replaced span is the shader without grids
         let plain = include_str!("volume.wgsl");
         assert!(plain.matches("fn volume_incident(").count() == 1 && plain.contains("//@exact-incident-begin"));
@@ -818,7 +833,9 @@ fn grid_source() -> String {
     let volume = include_str!("volume.wgsl");
     let (a, b) = (volume.find(BEGIN).expect("incident begin marker"), volume.find(END).expect("incident end marker"));
     assert!(volume.matches(CALL).count() == 1, "one call lights a domain");
-    let shared = format!("{}{}", &volume[..a], &volume[b + END.len()..])
+    // the plain function stays, renamed: the grid's `volume_incident` falls back to it for a domain without grids
+    let exact = volume[a + BEGIN.len()..b].replacen("fn volume_incident(", "fn volume_incident_exact(", 1);
+    let shared = format!("{}{}{}", &volume[..a], exact, &volume[b + END.len()..])
         .replace(CALL, "volume_incident(point,-d,albedo.w,tverts[base+13u].y>0.5,base)");
     format!(
         "{}\n{}\n{}\n{}",
