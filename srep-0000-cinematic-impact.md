@@ -989,7 +989,7 @@ step, an empty list too, and again the same when a seek replays the step. The ev
 the ocean at its pose when the emitter starts (a function of the document; the ocean must have no scale and both
 must be on the composition clock), sums what fell by cell and by canonical step of the ocean (the volume is the
 mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
-velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
+velocity in the ocean's axes over the density of the water, `ocean@density`, in scene units) in the order of the particles' ids,
 and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
 entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
 overlap it, and a step the particles have not reached is an error that names it, never an empty splash. At the
@@ -1067,6 +1067,7 @@ replays from local time zero.
 | `colliders` | absent | Up to 4096 distinct `object3D` ids that move the bed or occupy the water (OCN6, OCN7); see the numerical contract. Absent leaves the bed fixed |
 | `bedResponse` | `depthFiltered` | `depthFiltered` or `hydrostatic`: how the surface answers what `colliders` do to the water; no effect without `colliders` |
 | `bodyCoupling` | `none` | `none`, `buoyancy` or `full`: what the water does to the rigid bodies in `colliders` (OCN8) |
+| `density` | 1000 | Density of the water in kg/m3: the weight of what a body displaces, the force the water gives back, the momentum the ejecta of `splash` bring (divided by it) and the target of the cavity of `waterImpulse` |
 | `bodyDrag` | 1.0 | Form-drag coefficient of a body in the water, vertical (with `bodyCoupling`) and horizontal (`depthFiltered`) (OCN9) |
 | `splash` | absent | Emitters of crater ejecta whose particles fall into this ocean (OCN13) |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
@@ -2052,7 +2053,7 @@ and date).
 
 Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
 first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
-weight of the water it displaces (density 1000 kg/m3 and the ocean's gravity) upward through the centroid of
+weight of the water it displaces (the density of the ocean, `ocean@density`, 1000 kg/m3 when it gives none, and the ocean's gravity) upward through the centroid of
 the submerged volume, which turns a tilted body, and with a quadratic form drag on its vertical motion,
 `-(1/2) rho C_d A |v| v`, `C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact
 literature) and `A` the area the submerged part presents from above, limited to what stops the body within a
@@ -3110,6 +3111,7 @@ Also includes `pyroShape`, inventoried below.
 | `bathymetry` | xs:IDREF | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
 | `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy, enumeration=full | Default `none` (the water does nothing to the bodies); `buoyancy` and `full` need `colliders` (OCN8) |
+| `density` | positiveDecimal | Default `1000`; density of the water, kilograms per cubic metre |
 | `bodyDrag` | nonNegativeDecimal | Optional, with `colliders` (OCN9); form-drag coefficient of the vertical motion of a body in the water (with `bodyCoupling`) and of its horizontal exchange with it (`bedResponse="depthFiltered"`), default `1.0` |
 | `bedResponse` | xs:string; enumeration=depthFiltered, enumeration=hydrostatic | Default `depthFiltered`; no effect without `colliders` |
 | `splash` | xs:IDREFS | Optional; absent; the particles3D emitters whose particles fall into this ocean, each throwing out the ejecta of a crater (OCN13) |

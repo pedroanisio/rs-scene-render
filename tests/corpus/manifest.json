@@ -329,6 +329,9 @@
     "msq4.scene.xml": [
       "MSQ4"
     ],
+    "ocean-density-zero.scene.xml": [
+      "S06"
+    ],
     "ocean-order.scene.xml": [
       "S06"
     ],
@@ -895,6 +898,7 @@
     "morph.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
+    "ocean-density.scene.xml": [],
     "ocean-depth-filtered-drag.scene.xml": [],
     "ocean-entry.scene.xml": [],
     "ocean-full.scene.xml": [],
