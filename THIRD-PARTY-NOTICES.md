@@ -46,6 +46,19 @@ whose licences ask for a notice. Crates linked as ordinary dependencies are list
   ```
 
   Original code copyright 2014 Foxit Software Inc. (http://www.foxitsoftware.com).
+- **Every crate the `pdf` feature adds to the build** (from `Cargo.lock`, licences as each crate declares them):
+
+  | Crates | Licence |
+  |---|---|
+  | hayro, hayro-interpret, hayro-syntax, hayro-ccitt, hayro-cmap, hayro-jbig2, hayro-jpeg2000, hayro-postscript | Apache-2.0 OR MIT |
+  | vello_cpu, vello_common, peniko, color, glifo, linebender_resource_handle, fearless_simd | Apache-2.0 OR MIT |
+  | skrifa, read-fonts, font-types, unicode-normalization, rustc-hash, guillotiere | MIT OR Apache-2.0 |
+  | pic-scale | BSD-3-Clause OR Apache-2.0 |
+  | brotli | BSD-3-Clause AND MIT |
+  | phf, phf_generator, phf_macros, phf_shared, synstructure | MIT |
+  | yoke, yoke-derive, zerofrom, zerofrom-derive | Unicode-3.0 |
+
+  Each crate's licence text ships in its source package.
 - **CGATS001Compat-v2-micro.icc** (CC0-1.0), from https://github.com/saucecontrol/Compact-ICC-Profiles, embedded by
   hayro-interpret.
 - **LAB.icc**, generated with LCMS2, embedded by hayro-interpret.
