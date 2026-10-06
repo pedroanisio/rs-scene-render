@@ -4108,6 +4108,34 @@ fn pack_draw_uniforms(draws: &[Draw], alignment: u32) -> (Vec<u8>, u32) {
     (bytes, stride)
 }
 
+/// A point `p` of the target (pixels, in the plane z = 0) placed in 2.5D: turned about `pivot` by `rotationX` then
+/// `rotationY`, moved to depth `zDepth`, and seen through the frame camera `proj`. Returns the clip coordinates (with
+/// the true w, so the rasteriser clips what lies behind the eye) and the pixel it lands on.
+fn project_25(
+    p: [f64; 2],
+    [z, rx, ry]: [f64; 3],
+    pivot: [f64; 2],
+    proj: &glam::Mat4,
+    size: [u32; 2],
+) -> ([f32; 4], [f64; 2]) {
+    let (mut vx, mut vy, mut vz) = (p[0] - pivot[0], p[1] - pivot[1], 0.0);
+    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
+    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
+    let ny = vy * cx + vz * sx;
+    vz = -vy * sx + vz * cx;
+    vy = ny;
+    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
+    let nx = vx * cy - vz * sy;
+    vz = vx * sy + vz * cy;
+    vx = nx;
+    let (px, py, pz) = (pivot[0] + vx, pivot[1] + vy, z + vz);
+    // through the frame camera (target px → frame → clip → target clip)
+    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
+    let wv = c.w.max(1e-3);
+    let (w, hh) = (size[0] as f64, size[1] as f64);
+    ([c.x, c.y, 0.0, c.w], [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh])
+}
+
 #[cfg(test)]
 mod draw_uniform_tests {
     use super::*;
@@ -4275,32 +4303,4 @@ mod draw_uniform_tests {
             assert!(empty.iter().all(|b| *b == 0));
         }
     }
-}
-
-/// A point `p` of the target (pixels, in the plane z = 0) placed in 2.5D: turned about `pivot` by `rotationX` then
-/// `rotationY`, moved to depth `zDepth`, and seen through the frame camera `proj`. Returns the clip coordinates (with
-/// the true w, so the rasteriser clips what lies behind the eye) and the pixel it lands on.
-fn project_25(
-    p: [f64; 2],
-    [z, rx, ry]: [f64; 3],
-    pivot: [f64; 2],
-    proj: &glam::Mat4,
-    size: [u32; 2],
-) -> ([f32; 4], [f64; 2]) {
-    let (mut vx, mut vy, mut vz) = (p[0] - pivot[0], p[1] - pivot[1], 0.0);
-    // rotationX > 0 turns the top edge away (+z), rotationY > 0 the right edge
-    let (sx, cx) = (libm::sin(rx.to_radians()), libm::cos(rx.to_radians()));
-    let ny = vy * cx + vz * sx;
-    vz = -vy * sx + vz * cx;
-    vy = ny;
-    let (sy, cy) = (libm::sin(ry.to_radians()), libm::cos(ry.to_radians()));
-    let nx = vx * cy - vz * sy;
-    vz = vx * sy + vz * cy;
-    vx = nx;
-    let (px, py, pz) = (pivot[0] + vx, pivot[1] + vy, z + vz);
-    // through the frame camera (target px → frame → clip → target clip)
-    let c = *proj * glam::Vec4::new(px as f32, py as f32, pz as f32, 1.0);
-    let wv = c.w.max(1e-3);
-    let (w, hh) = (size[0] as f64, size[1] as f64);
-    ([c.x, c.y, 0.0, c.w], [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh])
 }
