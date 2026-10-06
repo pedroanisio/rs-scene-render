@@ -75,6 +75,7 @@ fn a_particle_that_crosses_the_plane_inside_the_rectangle_is_taken_out_and_told_
         assert!((a.time - (0.05 + (10.0f64 / 9.80665).sqrt())).abs() < 1e-3, "{}", a.time);
         assert!(a.position[1].abs() < 2e-3, "on the plane: {:?}", a.position);
         assert_eq!(a.mass, 40.0);
+        assert!(!a.ground, "water, not ground");
         assert!((a.velocity[1] - 9.80665 * (a.time - 0.05)).abs() < 1e-3 && (a.velocity[0] - 2.0).abs() < 1e-9);
     }
     // the rest fell past the rectangle's edge and go on, below the plane

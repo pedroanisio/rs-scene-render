@@ -20,6 +20,9 @@ pub struct SimParticles3D {
 
 mod colliders;
 
+/// The speed, in metres a second, under which an ejecta particle that has hit the ground is at rest on it.
+const REST_SPEED: f64 = 0.5;
+
 /// The ejecta of the crater that `crater` names (the effective id of its owner): `count`
 /// particles, launched at `angle` degrees above the tangent plane, spread by `spread`.
 struct CraterBurst {
@@ -202,6 +205,16 @@ fn build(
             interval: num(c, "interval", 1.),
         })
         .collect();
+    // the ejecta of a crater that has a mantle come to rest in it: they are the ground there, not particles
+    let mantle =
+        children(e).into_iter().filter(|c| c.element_name() == "burst").filter_map(|c| text(c, "crater")).any(|id| {
+            p.nodes.iter().find(|o| *o.id == *id).is_some_and(|o| {
+                children(&*o.elem)
+                    .into_iter()
+                    .any(|c| c.element_name() == "crater" && text(c, "mantle").as_deref() == Some("true"))
+            })
+        });
+    let rest_speed = REST_SPEED * p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get());
     let spec = sim::Spec {
         seed: e.seed,
         start: number("emissionStart", 0.),
@@ -232,6 +245,7 @@ fn build(
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         water: fall.as_ref().map(|(water, _)| *water),
+        settle: mantle.then_some(rest_speed),
         max_work: number("maxWork", 100000000.) as u64,
     };
     let crater_bursts = children(e)
@@ -570,7 +584,7 @@ impl Driver for SceneDriver<'_, '_> {
         let Some((emitter, log, pixels_per_meter)) = self.splash else { return Ok(()) };
         // what they are made of: the target of the crater that threw them
         let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
-        let entries = match (list.is_empty(), density) {
+        let entries = match (list.iter().all(|a| a.ground), density) {
             (true, _) => Vec::new(),
             (false, Some(solid)) => crate::splash::aggregate(
                 list,

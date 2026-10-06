@@ -126,3 +126,41 @@ fn the_ejecta_of_the_biggest_crater_can_have_friction_and_land_on_a_surface_that
     ejecta(&ev, 1.7);
     assert_eq!(ejecta(&ev, 2.0).frame, again.frame, "scrubbing gives the same ejecta");
 }
+
+/// The same scene with the ejecta's crater given a mantle.
+fn with_mantle(count: usize, segments: usize) -> Evaluator {
+    let xml = scene(count, segments, "", 90478)
+        .replace(r#"<crater id="pit" source="impactor""#, r#"<crater id="pit" mantle="true" source="impactor""#);
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    Evaluator::new(&doc, &Default::default()).unwrap()
+}
+
+#[test]
+fn with_a_mantle_the_ejecta_that_come_to_rest_are_taken_out_and_the_replay_is_identical() {
+    let (plain, mantle) = (evaluator(1000, 80), with_mantle(1000, 80));
+    // in the air they are the same particles in number: nothing has landed before the rock does
+    let (a, b) = (ejecta(&plain, 1.6).frame.particles.len(), ejecta(&mantle, 1.6).frame.particles.len());
+    println!("EJECTA at 1.6 s: {a} without a mantle, {b} with one");
+    assert!(b <= a);
+    // later the ones that have come to rest on the ground have become the ground
+    let (a, b) = (ejecta(&plain, 5.5).frame.particles.len(), ejecta(&mantle, 5.5).frame.particles.len());
+    println!("EJECTA at 5.5 s: {a} without a mantle, {b} with one");
+    assert!(b < a, "{b} against {a}");
+    // almost none of those left is at rest on the ground: one caught at the top of a hop a few centimetres high is
+    // slow and near it without having settled
+    let resting = ejecta(&mantle, 5.5)
+        .frame
+        .particles
+        .iter()
+        .filter(|q| q.velocity.iter().map(|c| c * c).sum::<f64>().sqrt() < 0.5 && q.position[1] > -0.01)
+        .count();
+    println!("EJECTA slow and on the ground, of {b}: {resting}");
+    assert!(resting <= 5, "{resting}");
+    // scrubbing gives the same ones
+    let first = ejecta(&mantle, 3.0);
+    ejecta(&mantle, 1.7);
+    ejecta(&mantle, 4.4);
+    let again = ejecta(&mantle, 3.0);
+    assert_eq!(first.key, again.key);
+    assert_eq!(first.frame, again.frame);
+}

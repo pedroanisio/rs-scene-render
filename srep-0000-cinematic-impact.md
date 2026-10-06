@@ -1907,6 +1907,11 @@ ground is then `(bulking - 1) V`, to 1e-6 of `V` (test `crater` of `sr-3d`). The
 modelled: the law's radius is the final, apparent radius, and multiplying it by 1.2 to 1.3 would count the collapse twice. Off, which is the default,
 the ground is as it was, to the bit.
 
+The ejecta particles that come to rest on the ground are taken out where they lie (`particles3D` runs `Spec::settle`, 0.5 m a second relative to the surface, a choice and not a measurement) so
+that what they are made of is not counted twice, once as particles and once in the mantle; they are told to the ocean's coupling as ground, and only the water's take from it. For the authored
+rock 379 of 1000 ejecta have been taken out by 5.5 s, and 88 are in the air at 1.6 s in both runs. The mantle that the law's own volume gives, and not the footprint of the particles' landing
+points, is what the ground gets; comparing the two is a measurement, not a part of the model. Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
+
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
 `pi2 = g a / U^2` (no factor of 3.22) and `pi3 = Y / (rho U^2)`,

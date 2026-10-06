@@ -67,6 +67,10 @@ pub struct Spec {
     pub checkpoint_bytes: usize,
     /// Water that takes the particles that fall into it; none by default.
     pub water: Option<Water>,
+    /// Speed, relative to the surface, under which a particle that has just hit a surface is at rest there: it is
+    /// taken out where it lies and told to the driver as ground (`Absorbed::ground`), so that what it is made of
+    /// can be given to the ground it fell on. None by default: particles bounce on until they die.
+    pub settle: Option<f64>,
     /// Maximum emission events, accepted births, motion segments and curvature
     /// refinements in one seek.
     pub max_work: u64,
@@ -103,6 +107,7 @@ impl Default for Spec {
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
             water: None,
+            settle: None,
             max_work: 100_000_000,
         }
     }
@@ -118,7 +123,8 @@ pub struct Water {
     pub extent: [[f64; 2]; 2],
 }
 
-/// A particle that fell into the water: when, where and how fast it crossed, and what it was.
+/// A particle that fell into the water, or came to rest on the ground: when, where and how fast it crossed or
+/// settled, and what it was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Absorbed {
     pub id: u64,
@@ -127,6 +133,8 @@ pub struct Absorbed {
     pub velocity: [f64; 3],
     /// Kilograms; zero for a particle that came from no driver birth.
     pub mass: f64,
+    /// True for a particle that came to rest on a surface (`Spec::settle`), false for one that fell into the water.
+    pub ground: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -824,6 +832,7 @@ fn motion(
                             position,
                             velocity,
                             mass: p.mass,
+                            ground: false,
                         }));
                     }
                 }
@@ -888,6 +897,17 @@ fn motion(
         p.position = add(hit.position, scale(n, separation));
         if !finite(p.position) || !finite(p.velocity) {
             return Err(Error::Invalid("nonfinite collision response"));
+        }
+        // At rest on the surface: slower than the rest speed after the contact, relative to the surface.
+        if s.settle.is_some_and(|rest| length(add(p.velocity, scale(hit.velocity, -1.))) < rest) {
+            return Ok(Some(Absorbed {
+                id: p.id,
+                time: time + elapsed,
+                position: p.position,
+                velocity: p.velocity,
+                mass: p.mass,
+                ground: true,
+            }));
         }
         contact = (dot(add(p.velocity, scale(hit.velocity, -1.)), n).abs() < 1e-9).then_some((n, hit.velocity));
         time += elapsed;
