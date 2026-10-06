@@ -178,9 +178,20 @@ struct Seen {
     frames: usize,
     first: f64,
     last: f64,
-    chars: usize,
+    /// N, from the first drawn frame whose layout could be made; none while no layout has been made.
+    chars: Option<usize>,
     /// Smallest drawn size and the frames below the minimum: (smallest, first, last).
     small: Option<(f64, f64, f64)>,
+}
+
+impl Seen {
+    /// Records the characters of a layout of the text, `None` when no layout could be made at this frame: N is taken
+    /// from the first frame that has one, so a frame without a layout never leaves N at 0.
+    fn count(&mut self, chars: Option<usize>) {
+        if self.chars.is_none() {
+            self.chars = chars;
+        }
+    }
 }
 
 /// `LEG-SPEED`, `LEG-SHORT` and `LEG-SIZE` for the text layers drawn at `times` (composition seconds of the output's
@@ -219,14 +230,13 @@ pub fn text_findings(
             entry.frames += 1;
             entry.last = t;
             entry.loc = Some(n.elem.loc());
-            let need_layout = entry.frames == 1 || min_size.is_some();
+            let need_layout = entry.chars.is_none() || min_size.is_some();
             if !need_layout {
                 continue;
             }
-            let Some(lay) = sr_gpu::text_audit::layout_of(&mut tc, p, &g, n) else { continue };
-            if entry.frames == 1 {
-                entry.chars = characters(&lay.chars.iter().collect::<String>());
-            }
+            let lay = sr_gpu::text_audit::layout_of(&mut tc, p, &g, n);
+            entry.count(lay.as_ref().map(|l| characters(&l.chars.iter().collect::<String>())));
+            let Some(lay) = lay else { continue };
             if let Some(min) = min_size {
                 let [a, b, c, d, _, _] = n.world.0;
                 let world = (a * d - b * c).abs().sqrt();
@@ -249,14 +259,14 @@ pub fn text_findings(
         };
         let shown = v.frames as f64 / fps;
         let span = [v.first, v.last + 1.0 / fps];
-        if let Some(limit) = s.reading_speed {
-            let speed = v.chars as f64 / shown;
+        if let (Some(limit), Some(chars)) = (s.reading_speed, v.chars) {
+            let speed = chars as f64 / shown;
             if speed > limit {
                 out.push(at(Finding::node(
                     code::LEG_SPEED,
                     s.severity,
                     &id,
-                    format!("text {id:?}: {} characters drawn for {shown:.3} s, {speed:.1} characters per second (limit {limit})", v.chars),
+                    format!("text {id:?}: {} characters drawn for {shown:.3} s, {speed:.1} characters per second (limit {limit})", chars),
                 )
                 .at_time(span[0], span[1])
                 .measuring(speed, Some(limit), "cps")));
@@ -284,4 +294,23 @@ pub fn text_findings(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Seen;
+
+    #[test]
+    fn characters_come_from_the_first_frame_with_a_layout() {
+        let mut v = Seen::default();
+        // the first drawn frame has no layout: N is not taken as 0
+        v.count(None);
+        assert_eq!(v.chars, None);
+        v.count(Some(11));
+        assert_eq!(v.chars, Some(11));
+        // later frames do not change it
+        v.count(Some(3));
+        v.count(None);
+        assert_eq!(v.chars, Some(11));
+    }
 }

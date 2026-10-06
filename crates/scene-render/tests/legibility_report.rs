@@ -89,3 +89,29 @@ fn srep_0019_off() {
     let r = report("off", &scene(r#"legibilityCheck="off""#, "<composition/>", &track, (640, 360)));
     assert!(leg(&r).is_empty(), "{r:#}");
 }
+
+#[test]
+fn composition_captions_mapped_through_segments_are_measured() {
+    // SREP 19: every caption cue drawn in the output. With segments, the composition's cues are measured where the
+    // output shows them, in output time; a cue outside every segment is not shown and not measured.
+    let scene = format!(
+        r##"<scene version="1.2">
+  <project width="320" height="180" fps="10" duration="4" background="#000000"/>
+  <metadata><accessibility legibilityCheck="warn"/></metadata>
+  <output id="o" path="f_%04d.png" codec="png-sequence" report="r.json"><segment from="2" to="3"/></output>
+  <composition/>
+  <captions><captionTrack id="cc" language="en" mode="sidecar" readingSpeed="20">
+    <cue start="0" end="1" text="{THIRTY}"/>
+    <cue start="2" end="3" text="{THIRTY}"/>
+  </captionTrack></captions>
+</scene>"##
+    );
+    let r = report("segments", &scene);
+    let f = leg(&r);
+    assert_eq!(f.len(), 1, "only the cue the segment shows: {r:#}");
+    assert_eq!(f[0]["code"], "LEG-SPEED");
+    assert!((f[0]["measured"].as_f64().unwrap() - 30.0).abs() <= 0.1, "{}", f[0]);
+    // in output time: the segment starts the output at 0
+    assert_eq!(f[0]["time"][0].as_f64(), Some(0.0), "{}", f[0]);
+    assert_eq!(f[0]["time"][1].as_f64(), Some(1.0), "{}", f[0]);
+}
