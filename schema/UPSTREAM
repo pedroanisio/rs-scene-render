@@ -58,17 +58,21 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - object3D @node and @materialOverride on imported models (rule MOV1): srep-0000-model-node-material-select.md (2399e6f).
   - material @unevenness, @unevennessScale and @unevennessSeed (a clay finish on any mesh): srep-0000-material-unevenness.md (1f65d9e).
   - E19 for an effect attribute its type does not read (INERT-I13): the SREP 18 amendment, srep-0000-srep18-amendment-inert-rules.md (f199c27).
-  - object3D @shadowCatcher (a surface that draws only the shadow it receives): srep-0000-shadow-catcher.md (e4fea03).
-  - @materialOverride ids must name document materials (rule MOV2): the amendment in srep-0000-model-node-material-select.md (1cd2566).
-  - object3D @animationClipTo, @animationBlend and @animationOffsetTo (blend two clips of an imported model): srep-0000-clip-blend.md (f8db796).
-  - object3D and particles3D @parentJoint, transformConstraint @targetJoint (attach to a joint of an imported model): srep-0000-joint-sockets.md (5a588cf).
-  - E19 for key parameters the key's curve does not read, and for a default cubic-bezier key without handles: srep-0000-key-parameter-checks.md (d1a3b4a).
-  - link @follow, @timeConstant and the spring parameters (a spring or exponential follower): srep-0000-link-follower.md (91ca279).
-  - Diagnostics gain the `info` severity: inert findings (E19, the engine's INERT rules) are reported at `info` and strict checks (`--strict`, `--deny-warnings`) count errors and warnings only, as SREP 18 resolved (b629886). E20 (a mask that misses its node, MASK-MISS) and the new E21 (default cubic-bezier handles) stay warnings because they change the result.
-  - object3D child element morph (a morph target by name; version 1.2, gated by V5): srep-0000-morph-by-name.md (3e998d3).
-  - object3D child element joint (pose and aim a joint of an imported model; version 1.2, gated by V5): srep-0000-joint-pose.md (74bac5a).
-  - key/@carry (a spring segment released with the previous segment's velocity): srep-0000-spring-carry.md (928d95c).
-  - expression built-ins penner() and propAtTime(): srep-0000-expression-penner-prop-at.md (9d6cdbd).
-  - motionPath/@additive (the path as an offset): srep-0000-motion-path-additive.md (2ac2cce).
-  - shapeModifier/@mode="smooth" for wiggle-path (a Catmull-Rom spline through the wiggled points): srep-0000-wiggle-path-smooth.md (d639233).
+  - object3D @shadowCatcher (a surface that draws only the shadow it receives): srep-0000-shadow-catcher.md (d433f8c).
+  - @materialOverride ids must name document materials (rule MOV2): the amendment in srep-0000-model-node-material-select.md (6202724).
+  - object3D @animationClipTo, @animationBlend and @animationOffsetTo (blend two clips of an imported model): srep-0000-clip-blend.md (18be05b).
+  - object3D and particles3D @parentJoint, transformConstraint @targetJoint (attach to a joint of an imported model): srep-0000-joint-sockets.md (b7aea96).
+  - E19 for key parameters the key's curve does not read, and for a default cubic-bezier key without handles: srep-0000-key-parameter-checks.md (66e5ee7).
+  - link @follow, @timeConstant and the spring parameters (a spring or exponential follower): srep-0000-link-follower.md (9a9e62b).
+  - Diagnostics gain the `info` severity: inert findings (E19, the engine's INERT rules) are reported at `info` and strict checks (`--strict`, `--deny-warnings`) count errors and warnings only, as SREP 18 resolved (18be760). E20 (a mask that misses its node, MASK-MISS) and the new E21 (default cubic-bezier handles) stay warnings because they change the result.
+  - object3D child element morph (a morph target by name; version 1.2, gated by V5): srep-0000-morph-by-name.md (ade4326).
+  - object3D child element joint (pose and aim a joint of an imported model; version 1.2, gated by V5): srep-0000-joint-pose.md (da55bb7).
+  - key/@carry (a spring segment released with the previous segment's velocity): srep-0000-spring-carry.md (1d43c06).
+  - expression built-ins penner() and propAtTime(): srep-0000-expression-penner-prop-at.md (b43bea3).
+  - motionPath/@additive (the path as an offset): srep-0000-motion-path-additive.md (1d7cff7).
+  - shapeModifier/@mode="smooth" for wiggle-path (a Catmull-Rom spline through the wiggled points): srep-0000-wiggle-path-smooth.md (266929c).
+  - expression wiggle() hold argument (on-twos and stepped wiggles): srep-0000-expression-wiggle-hold.md (c209023).
+  - strokeFont asset and shape="stroke-text" (text drawn in stroke order from single-line fonts; rules SFT1, SFT2, gated by V5): srep-0000-stroke-text.md (f7c1395).
+  - node @shutterAngle (per-node motion-blur shutter): srep-0000-node-shutter-angle.md (bb20097).
+  - A pole target and a soft reach for two-bone IK: srep-0000-ik-pole-soft-reach.md (d7b1909).
 The xsd and sch above differ from the vendored sha256 sums by these edits.
