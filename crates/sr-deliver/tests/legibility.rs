@@ -108,10 +108,11 @@ fn srep_0019_size() {
     assert!(text_findings(&ev2, &s, &frames(10.0, 20), 10.0, [1920.0, 1080.0], [1920.0, 1080.0])
         .iter()
         .all(|f| f.code != "LEG-SIZE"));
-    let half = text_findings(&ev2, &s, &frames(10.0, 20), 10.0, [1920.0, 1080.0], [960.0, 540.0]);
+    // delivered at half the frame's size, the 24 px text is drawn at 12 px against 3vh of 540 px
+    let half = text_findings(&ev, &s, &frames(10.0, 20), 10.0, [1920.0, 1080.0], [960.0, 540.0]);
     let h: Vec<_> = half.iter().filter(|f| f.code == "LEG-SIZE").collect();
-    assert_eq!(h.len(), 1);
-    assert!((h[0].measured.unwrap() - 24.0).abs() < 1e-9 && (h[0].limit.unwrap() - 16.2).abs() < 1e-9);
+    assert_eq!(h.len(), 1, "{half:?}");
+    assert!((h[0].measured.unwrap() - 12.0).abs() < 1e-9 && (h[0].limit.unwrap() - 16.2).abs() < 1e-9, "{:?}", h[0]);
 }
 
 #[test]
