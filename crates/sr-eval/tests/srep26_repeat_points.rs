@@ -422,3 +422,13 @@ fn bad_path_data_is_an_error() {
     let Err(e) = Evaluator::new(&d, &EvalOptions::default()) else { panic!("bad path data compiled") };
     assert!(e.diagnostics.iter().any(|x| x.code == "E15"), "{e}");
 }
+
+#[test]
+fn a_count_past_the_node_budget_is_refused_before_points_are_made() {
+    let body = format!(
+        r#"<repeat id="r"><points type="along-path" path="M0,0 L10,0" count="1000000000000"/>{SQUARE}</repeat>"#
+    );
+    let d = load(&body);
+    let Err(e) = Evaluator::new(&d, &EvalOptions::default()) else { panic!("a trillion copies were accepted") };
+    assert!(e.diagnostics.iter().any(|x| x.code == "E18"), "{e}");
+}

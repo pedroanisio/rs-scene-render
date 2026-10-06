@@ -1799,6 +1799,12 @@ impl Builder {
         };
         let seed = p.seed.unwrap_or(self.project_seed);
         let count = p.count.unwrap_or(0);
+        // along-path and scatter make at most @count points: refuse a count past the node budget before
+        // generating any (grid is checked on columns x rows below, vertices and list are bounded by their data)
+        let counted = matches!(p.r#type, m::PointsKind::AlongPath | m::PointsKind::Scatter);
+        if counted && !self.room(count, p.loc, &who) {
+            return None;
+        }
         let layout = match p.r#type {
             m::PointsKind::Grid => Layout::Grid { columns: p.columns, rows: p.rows },
             m::PointsKind::AlongPath => Layout::Fixed(pt::along_path(&path(self)?, count, p.orient)),
