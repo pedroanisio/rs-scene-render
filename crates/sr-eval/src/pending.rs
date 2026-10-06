@@ -31,12 +31,6 @@ pub const PENDING: &[Pending] = &[
         elements: &["pdf", "region"],
         attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", Some("0"))],
     },
-    Pending {
-        srep: 21,
-        what: "the pinned-font policy",
-        elements: &[],
-        attributes: &[("project", "fontPolicy", Some("system"))],
-    },
     Pending { srep: 26, what: "repeat copies placed on generated points", elements: &["points"], attributes: &[] },
 ];
 

@@ -50,6 +50,10 @@ GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration=
 MORPH = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><composition><object3D id="piece" primitive="mesh" mesh="set" x="32" y="32"><morph name="smile" weight="0.8"><animate property="weight"><key time="0" value="0"/><key time="1" value="1"/></animate></morph></object3D></composition></scene>\n'
 JOINT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><composition><shape id="t" shape="rect" x="10" y="10" width="4" height="4" fill="#FFFFFF"/><object3D id="piece" primitive="mesh" mesh="set" x="32" y="32"><joint name="head" rotation="12" lookAt="t" lookAxis="z" influence="0.8" maxAngle="35"><animate property="rotationX"><key time="0" value="0"/><key time="1" value="10"/></animate></joint></object3D></composition></scene>\n'
 STROKE_TEXT = '<scene version="1.2"><project width="320" height="120" fps="24" duration="2"/><assets><strokeFont id="hand" src="../media/test.jhf"/></assets><composition><shape id="w" shape="stroke-text" text="HI AB" strokeFont="hand" fontSize="40" width="300" height="80" stroke="#FFFFFF" strokeWidth="3" strokeCap="round" trimMode="sequential"><animate property="trimEnd"><key time="0" value="0"/><key time="1" value="1"/></animate></shape></composition></scene>\n'
+PINNED_FONTS = ('<scene version="1.2"><project width="64" height="64" fps="10" duration="1" fontPolicy="pinned"/>'
+    '<assets><font id="inter" src="../media/inter.ttf" family="Inter" sha256="' + hashlib.sha256((MEDIA / "inter.ttf").read_bytes()).hexdigest() + '"/>'
+    '<text id="t" text="Hi" width="60" height="30" size="20" font="Inter" fallback="Inter"/></assets>'
+    '<composition><layer id="l" asset="t"/></composition></scene>\n')
 MODEL_SELECT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><materials><material id="clay" baseColor="#C48A5A"/></materials><composition><object3D id="piece" primitive="mesh" mesh="set" node="Knight" materialOverride="stone:clay old:clay" x="32" y="32"/></composition></scene>\n'
 TEXT3D = '<scene version="1.1"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="title" primitive="text" text="HI" height="20" tracking="120" x="32" y="32"/></composition></scene>\n'
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
@@ -115,6 +119,11 @@ CASES = [
     ("v5-joint", ["V5"], lambda _: JOINT.replace('version="1.2"', 'version="1.1"')),
     ("v5-morph", ["V5"], lambda _: MORPH.replace('version="1.2"', 'version="1.1"')),
     ("pen1", ["PEN1"], lambda _: STROKE_TEXT.replace(' strokeFont="hand"', '')),
+    # SREP 21: fontPolicy="pinned" (C70 to C73)
+    ("c70-font-file", ["C70"], lambda _: PINNED_FONTS.replace(' fallback="Inter"', ' fallback="Inter" fontFile="../media/inter.ttf"')),
+    ("c71-unpinned-asset", ["C71"], lambda _: re.sub(r' sha256="[0-9a-f]+"', '', PINNED_FONTS)),
+    ("c72-host-family", ["C72"], lambda _: PINNED_FONTS.replace('font="Inter"', 'font="Helvetica"')),
+    ("c73-host-fallback", ["C73"], lambda _: PINNED_FONTS.replace('fallback="Inter"', 'fallback="Inter, Arial"')),
     ("pen2", ["PEN2"], lambda _: STROKE_TEXT.replace('<strokeFont id="hand"', '<mesh id="hand"').replace('src="../media/test.jhf"', 'src="../media/robot.glb"')),
     ("v5-stroke-text", ["V5"], lambda _: STROKE_TEXT.replace('version="1.2"', 'version="1.1"')),
     ("mov1", ["MOV1"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay :clay"')),
@@ -408,6 +417,7 @@ VALID = {
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "model-select": MODEL_SELECT,
     "stroke-text": STROKE_TEXT,
+    "pinned-fonts": PINNED_FONTS,
     "morph": MORPH,
     "joint": JOINT,
     "text3d-tracking": TEXT3D,
