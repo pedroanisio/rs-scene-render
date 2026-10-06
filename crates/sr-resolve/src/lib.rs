@@ -833,7 +833,7 @@ fn coord(v: f64) -> String {
 /// phrases when the cache does not answer this request, and returns what to write into the document.
 #[cfg(not(feature = "pdf"))]
 fn settle_pdf(_: &m::PdfAsset, _: [u8; 4], _: &Path, _: &Options) -> Result<(Resolution, Vec<Pin>), String> {
-    Err("this build of the resolve step has no PDF support (sr-resolve feature `pdf`)".into())
+    Err("this build has no PDF support: build scene-render with `--features pdf` (Rust 1.92 or later)".into())
 }
 
 #[cfg(feature = "pdf")]

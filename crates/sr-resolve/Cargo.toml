@@ -28,9 +28,10 @@ hayro = { version = "0.8", default-features = false, features = ["embed-fonts", 
 unicode-normalization = { version = "0.1", optional = true }
 
 [features]
-default = ["pdf"]
-# The resolve step of pdf assets (SREP 17): page images and text regions. Without it, resolve reports every pdf asset
-# as an error and the renderer still draws pdf assets from their pinned caches.
+default = []
+# The resolve step of pdf assets (SREP 17): page images and text regions. Opt-in, because hayro needs Rust 1.92 and the
+# workspace's minimum is 1.90. Without it, resolve reports every pdf asset as an error; the renderer draws pdf assets
+# from their pinned caches either way.
 pdf = ["dep:hayro", "dep:unicode-normalization"]
 
 [[bin]]

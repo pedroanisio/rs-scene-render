@@ -13,9 +13,10 @@ name = "scene-render"
 path = "src/main.rs"
 
 [features]
-default = ["pdf"]
-# `scene-render resolve` for pdf assets (SREP 17; needs Rust 1.92). Without it the binary builds on Rust 1.90 and
-# reports pdf assets in `resolve` as errors; rendering them from their pinned caches needs no feature.
+default = []
+# `scene-render resolve` for pdf assets (SREP 17): opt-in (`--features pdf`), because it needs Rust 1.92 and the
+# workspace's minimum is 1.90. Without it `resolve` reports pdf assets as errors; rendering them from their pinned caches
+# needs no feature.
 pdf = ["sr-resolve/pdf"]
 
 [dependencies]

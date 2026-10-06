@@ -13,9 +13,10 @@ document. Rendering never runs it. It makes:
 
 | Feature | Default | What it adds | Toolchain |
 |---|---|---|---|
-| `pdf` | on | the resolve step of `pdf` assets: rendering one page and finding phrases on it | Rust 1.92 (hayro's minimum) |
+| `pdf` | off | the resolve step of `pdf` assets: rendering one page and finding phrases on it | Rust 1.92 (hayro's minimum) |
 
-Without `pdf` the crate builds with the workspace's Rust 1.90, and `resolve` reports every `pdf` asset as an error.
+The feature is opt-in (`cargo build -p scene-render --features pdf`) so that the default build keeps the workspace's
+minimum, Rust 1.90; without it `resolve` reports every `pdf` asset as an error.
 The renderer does not need the feature: it draws a `pdf` asset from its pinned cache image.
 
 ## Third-party code of the `pdf` feature
