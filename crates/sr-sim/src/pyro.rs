@@ -53,10 +53,46 @@ pub enum Error {
     /// What the scene's rigid world, a driver of the inputs, said when it could not answer.
     #[error("pyro inputs: {0}")]
     Driver(String),
-    #[error("pyro pressure solve did not converge (residual {0}); increase iterations or check sealed-domain expansion and collider motion")]
-    Pressure(f64),
+    #[error(
+        "pyro pressure solve did not converge (residual {residual}{}); increase iterations or check sealed-domain expansion and collider motion",
+        worst.map_or(String::new(), |w| format!(", largest at cell {:?} with {}", w.cell, w.value))
+    )]
+    Pressure { residual: f64, worst: Option<Worst> },
     #[error(transparent)]
     Volume(#[from] sr_volume::Error),
+}
+
+/// Where a pressure solve was furthest from its target: the cell and the residual there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Worst {
+    pub cell: [usize; 3],
+    pub value: f64,
+}
+
+/// The cell with the largest absolute value among `values` (a value that is not finite counts as the largest, the
+/// first of them), if any.
+fn worst_of(values: impl Iterator<Item = (usize, f64)>, cells: [usize; 3]) -> Option<Worst> {
+    let mut found: Option<(usize, f64)> = None;
+    for (k, v) in values {
+        let bigger = match found {
+            None => true,
+            Some((_, w)) if w.is_finite() => !v.is_finite() || v.abs() > w.abs(),
+            Some(_) => false,
+        };
+        if bigger {
+            found = Some((k, v));
+        }
+    }
+    found.map(|(k, value)| Worst { cell: coords(k, cells), value })
+}
+
+/// The fluid cell where the divergence of `state` is furthest from `target`: where the flow cannot be made to
+/// satisfy it, which is where the sealed or expanding region is.
+fn worst_divergence(state: &State, target: &[f64]) -> Option<Worst> {
+    let left = (0..target.len())
+        .filter(|k| !state.solid[*k])
+        .map(|k| (k, state.divergence_at(coords(k, state.cells)) - target[k]));
+    worst_of(left, state.cells)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1407,7 +1443,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                 let denom = inner(&direction, &applied);
                 profile.project_reduce += lap(&mut clock);
                 if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-                    return Err(Error::Pressure(current));
+                    return Err(Error::Pressure { residual: current, worst: worst_divergence(s, target) });
                 }
                 let alpha = rz / denom;
                 pressure
@@ -1436,7 +1472,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                 used += 1;
             }
             if current > tolerance {
-                return Err(Error::Pressure(current));
+                return Err(Error::Pressure { residual: current, worst: worst_divergence(s, target) });
             }
             (pressure, before, used)
         }
@@ -1481,7 +1517,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                 let [denom] = multigrid::blocked_sums(count, |k| [direction[k] * applied[k]]);
                 profile.project_reduce += lap(&mut clock);
                 if !denom.is_finite() || denom <= 0.0 || !rz.is_finite() {
-                    return Err(Error::Pressure(current));
+                    return Err(Error::Pressure { residual: current, worst: worst_divergence(s, target) });
                 }
                 let alpha = rz / denom;
                 pressure.par_iter_mut().zip(residual.par_iter_mut()).enumerate().with_min_len(LIGHT).for_each(
@@ -1504,7 +1540,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
                 used += 1;
             }
             if current > tolerance {
-                return Err(Error::Pressure(current));
+                return Err(Error::Pressure { residual: current, worst: worst_divergence(s, target) });
             }
             (pressure, before, used)
         }
@@ -1550,7 +1586,7 @@ fn project(s: &mut State, target: &[f64], spec: &Spec, profile: &mut StepProfile
         }
     };
     if !after.is_finite() || after > tolerance * 1.01 {
-        return Err(Error::Pressure(after));
+        return Err(Error::Pressure { residual: after, worst: worst_divergence(s, target) });
     }
     profile.project_finish = lap(&mut clock);
     Ok(StepReport { divergence_before: before, divergence_after: after, pressure_iterations: used })
