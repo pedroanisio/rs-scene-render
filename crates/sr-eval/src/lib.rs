@@ -19,6 +19,7 @@
 pub mod agents;
 pub mod channel;
 pub mod codes;
+pub mod connector;
 pub mod crater;
 pub mod curve;
 pub mod data;
@@ -123,6 +124,8 @@ impl Evaluator {
             for failure in &rt.failures {
                 g.fail(failure.clone());
             }
+            // simulated bodies may have moved a connector's ends
+            connector::resolve(&self.program, &mut g.nodes);
         }
         g
     }

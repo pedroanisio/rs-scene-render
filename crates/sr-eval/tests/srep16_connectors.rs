@@ -188,7 +188,8 @@ fn an_absent_end_draws_nothing() {
     let d = load(&format!("{R}{b}{}", conn("")));
     assert!(path(&frame(&d, 0.0), "c").is_none());
     // an absent ancestor too
-    let b = r##"<group id="gb" start="0.5"><shape id="B" shape="rect" x="460" y="150" width="80" height="60"/></group>"##;
+    let b =
+        r##"<group id="gb" start="0.5"><shape id="B" shape="rect" x="460" y="150" width="80" height="60"/></group>"##;
     let d = load(&format!("{R}{b}{}", conn("")));
     assert!(path(&frame(&d, 0.0), "c").is_none());
 }
@@ -250,9 +251,7 @@ fn label_sits_at_label_at_with_its_offset_along_the_normal() {
     let lab = lab.expect("label layer");
     assert!(near(lab.world.apply([20.0, 10.0]), [250.0, 190.0], EPS), "{:?}", lab.world.apply([20.0, 10.0]));
     // along: rotated with the direction, never upside down
-    let d = load(&format!(
-        "{R}{B}<connector id=\"c\" from=\"B\" to=\"R\" label=\"t\" labelOrient=\"along\"/>"
-    ));
+    let d = load(&format!("{R}{B}<connector id=\"c\" from=\"B\" to=\"R\" label=\"t\" labelOrient=\"along\"/>"));
     let g = frame(&d, 0.0);
     let l = g.nodes.iter().find(|n| &*n.id == "c").unwrap().connector.as_ref().unwrap().label.unwrap();
     assert!((l.angle - 0.0).abs() < 1e-9 || (l.angle - 360.0).abs() < 1e-9, "travel 180° reads as 0°: {l:?}");

@@ -1778,6 +1778,11 @@ impl Renderer {
                     h(&p.pos.iter().chain(&p.vel).flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>())
                 })
                 .unwrap_or(7),
+            // a connector's path follows its ends, which may move while it stays put
+            n.connector
+                .as_ref()
+                .map(|c| h(&c.path.iter().flat_map(|q| q.map(hf)).chain(c.bounds.map(hf)).collect::<Vec<u64>>()))
+                .unwrap_or(12),
         ])
     }
 
@@ -2409,6 +2414,20 @@ impl Renderer {
                         self.pattern_fills(plan, ctx, i, space, op, blend, seed, cmds, root_hash);
                     }
                     Err(e) => plan.stats.errors.push(format!("{}: {e}", n.id)),
+                }
+            }
+            "connector" => {
+                let clock = std::time::Instant::now();
+                let scale = Xf(space.xform.then(&n.world).0).max_scale().max(1e-6);
+                let tol = 0.05 / scale;
+                let scene = {
+                    let (p, g) = (ctx.p, ctx.g);
+                    let mut pf = |v: &Value, b: [f64; 4]| self.vector_paint(plan, p, g, v, b, &n.id);
+                    crate::vector::connector_scene(n, &mut pf, tol)
+                };
+                plan.stats.vector_seconds += clock.elapsed().as_secs_f64();
+                if !scene.cmds.is_empty() {
+                    self.emit_vector(plan, ctx, i, space, op, blend, seed, cmds, root_hash, scene);
                 }
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),

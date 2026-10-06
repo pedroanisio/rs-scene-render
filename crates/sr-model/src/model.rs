@@ -43,6 +43,15 @@ impl Node {
         }
     }
 
+    /// Builds one node element from an XML fragment such as `<layer id="l" asset="t"/>`, with the schema's
+    /// defaults applied. The fragment is not validated: the caller builds it from values the document already
+    /// passed validation with (the evaluator makes a connector's label layer this way).
+    pub fn from_fragment(xml: &str) -> Result<Node, ModelError> {
+        let doc = roxmltree::Document::parse(xml)
+            .map_err(|e| ModelError { message: format!("node fragment: {e}"), loc: Loc::default() })?;
+        Node::from_xml(doc.root_element())?.ok_or_else(|| ModelError::unexpected(doc.root_element()))
+    }
+
     /// The `i`-th child node.
     fn child_slot(&self, i: usize) -> Option<&Node> {
         self.child_nodes().nth(i)

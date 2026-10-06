@@ -59,7 +59,10 @@ fn ends_and_anchors() {
         (r#"<connector id="c" from="R" to="B" fromX="1"/>"#, "C62"),
         (r#"<connector id="c" from="R" to="B" toY="1"/>"#, "C62"),
         (r#"<connector id="c" from="R" to="B" route="curved" points="1,1"/>"#, "C63"),
-        (r#"<connector id="c" from="R" to="B"><animate property="x"><key time="0" value="1"/></animate></connector>"#, "C64"),
+        (
+            r#"<connector id="c" from="R" to="B"><animate property="x"><key time="0" value="1"/></animate></connector>"#,
+            "C64",
+        ),
         (r#"<connector id="c" from="R" to="B"><expression property="strokeWidth">2</expression></connector>"#, "C64"),
     ] {
         assert!(codes(body).contains(&rule.to_string()), "{body}: {:?}", codes(body));
@@ -77,13 +80,20 @@ fn r48_targets() {
     );
     // inside a repeat
     assert_eq!(
-        codes(r#"<repeat id="rp" count="2"><shape id="q" shape="rect" width="4" height="4"/></repeat><connector id="c" from="R" to="q"/>"#),
+        codes(
+            r#"<repeat id="rp" count="2"><shape id="q" shape="rect" width="4" height="4"/></repeat><connector id="c" from="R" to="q"/>"#
+        ),
         ["R48-to"]
     );
     // 2.5D, itself or an ancestor
-    assert_eq!(codes(r#"<shape id="d" shape="rect" width="4" height="4" threeD="true"/><connector id="c" from="d" to="B"/>"#), ["R48-from"]);
     assert_eq!(
-        codes(r#"<group id="g" threeD="true"><shape id="d" shape="rect" width="4" height="4"/></group><connector id="c" from="R" to="d"/>"#),
+        codes(r#"<shape id="d" shape="rect" width="4" height="4" threeD="true"/><connector id="c" from="d" to="B"/>"#),
+        ["R48-from"]
+    );
+    assert_eq!(
+        codes(
+            r#"<group id="g" threeD="true"><shape id="d" shape="rect" width="4" height="4"/></group><connector id="c" from="R" to="d"/>"#
+        ),
         ["R48-to"]
     );
     // a composition connector cannot reach into a symbol, nor a symbol connector out of it
@@ -109,13 +119,16 @@ fn r48_inside_a_symbol() {
 #[test]
 fn r49_nothing_is_positioned_by_a_connector() {
     let c = r#"<connector id="c" from="R" to="B"/>"#;
-    assert!(codes(&format!(r#"{c}<shape id="p" shape="rect" width="4" height="4" parent="c"/>"#)).contains(&"R49".to_string()));
+    assert!(codes(&format!(r#"{c}<shape id="p" shape="rect" width="4" height="4" parent="c"/>"#))
+        .contains(&"R49".to_string()));
     assert!(codes(&format!(
         r#"{c}<shape id="p" shape="rect" width="4" height="4"><transformConstraint type="copy-position" target="c"/></shape>"#
     ))
     .contains(&"R49".to_string()));
-    assert!(codes(&format!(r#"{c}<shape id="p" shape="rect" width="4" height="4"><link property="x" source="c.opacity"/></shape>"#))
-        .contains(&"R49".to_string()));
+    assert!(codes(&format!(
+        r#"{c}<shape id="p" shape="rect" width="4" height="4"><link property="x" source="c.opacity"/></shape>"#
+    ))
+    .contains(&"R49".to_string()));
     // a link from another node whose id merely starts with the connector's is fine
     assert!(!codes(&format!(
         r#"{c}<shape id="cc" shape="rect" width="4" height="4"/><shape id="p" shape="rect" width="4" height="4"><link property="x" source="cc.x"/></shape>"#

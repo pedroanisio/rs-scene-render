@@ -369,28 +369,10 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
         if sw <= 0.0 || outline.is_empty() {
             return;
         }
-        // markers sit at the ends of the drawn outline; the stroke stops short of them by their setback, and they are
-        // not dashed
-        let marked = (marker_start != Marker::None || marker_end != Marker::None)
-            .then(|| markers::apply(outline, marker_start, marker_end, a.num("markerSize", 4.0), &style, tol));
-        let outline = marked.as_ref().map_or(outline, |m| &m.outline[..]);
-        let dashed =
-            if dash.iter().any(|v| *v > 0.0) { measure::dash(outline, &dash, dash_off) } else { outline.to_vec() };
         let clip = position != "center";
         let st = Style { width: if clip { sw * 2.0 } else { sw }, ..style };
-        let mut polys = stroke::stroke(&dashed, &st, tol);
-        if let Some(m) = &marked {
-            // stroke and markers are one coverage: the polygons share the stroke's winding for the nonzero union
-            let flip = polys.iter().map(markers::area).find(|a| a.abs() > 1e-9).is_some_and(|a| a < 0.0);
-            for q in &m.fills {
-                let mut q = q.clone();
-                if flip {
-                    q.pts.reverse();
-                }
-                polys.push(q);
-            }
-            polys.extend(m.stroked.iter().cloned());
-        }
+        let ends = (marker_start, marker_end, a.num("markerSize", 4.0));
+        let polys = stroke_marked(outline, &style, &st, &dash, dash_off, ends, tol);
         if polys.is_empty() {
             return;
         }
@@ -419,6 +401,85 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
         }
     }
     Ok(scene)
+}
+
+/// Strokes the drawn `outline` with `stroke_style`, dashed by `dash` from `dash_off`, carrying the markers `ends`
+/// (start, end, size in stroke widths of `style`, SREP 15). Markers sit at the ends of the drawn outline; the stroke
+/// stops short of them by their setback, they are not dashed, and stroke and markers are one coverage.
+pub fn stroke_marked(
+    outline: &[Poly],
+    style: &Style,
+    stroke_style: &Style,
+    dash: &[f64],
+    dash_off: f64,
+    ends: (Marker, Marker, f64),
+    tol: f64,
+) -> Vec<Poly> {
+    let (start, end, size) = ends;
+    let marked =
+        (start != Marker::None || end != Marker::None).then(|| markers::apply(outline, start, end, size, style, tol));
+    let outline = marked.as_ref().map_or(outline, |m| &m.outline[..]);
+    let dashed = if dash.iter().any(|v| *v > 0.0) { measure::dash(outline, dash, dash_off) } else { outline.to_vec() };
+    let mut polys = stroke::stroke(&dashed, stroke_style, tol);
+    if let Some(m) = &marked {
+        // the polygons share the stroke's winding for the nonzero union
+        let flip = polys.iter().map(markers::area).find(|a| a.abs() > 1e-9).is_some_and(|a| a < 0.0);
+        for q in &m.fills {
+            let mut q = q.clone();
+            if flip {
+                q.pts.reverse();
+            }
+            polys.push(q);
+        }
+        polys.extend(m.stroked.iter().cloned());
+    }
+    polys
+}
+
+/// A connector's scene in connector space (SREP 16): its visible path, trimmed, stroked centred and carrying its
+/// markers. Empty when the connector draws nothing at this time.
+pub fn connector_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Scene {
+    let mut scene = Scene::default();
+    let Some(geom) = &n.connector else { return scene };
+    let a = Attrs { e: &*n.elem, props: Some(&n.props) };
+    let b = geom.bounds;
+    let Some(sp) = a.paint("stroke").and_then(|v| paint(&v, [b[0], b[1], b[2] - b[0], b[3] - b[1]])) else {
+        return scene;
+    };
+    let sw = a.num("strokeWidth", 4.0);
+    if sw <= 0.0 {
+        return scene;
+    }
+    let v = vec![Poly { pts: geom.path.iter().map(|q| p(q[0], q[1])).collect(), closed: false }];
+    let (ts, te, to) = (a.num("trimStart", 0.0), a.num("trimEnd", 1.0), a.num("trimOffset", 0.0));
+    let mode =
+        if a.str("trimMode").as_deref() == Some("sequential") { TrimMode::Sequential } else { TrimMode::Simultaneous };
+    let outline = if ts > 0.0 || te < 1.0 { measure::trim(&v, ts, te, to / 360.0, mode) } else { v };
+    if outline.iter().all(|q| q.pts.len() < 2) {
+        return scene;
+    }
+    let style = Style {
+        width: sw,
+        cap: match a.str("strokeCap").as_deref() {
+            Some("round") => Cap::Round,
+            Some("square") => Cap::Square,
+            _ => Cap::Butt,
+        },
+        join: match a.str("strokeJoin").as_deref() {
+            Some("round") => Join::Round,
+            Some("bevel") => Join::Bevel,
+            _ => Join::Miter,
+        },
+        miter_limit: a.num("miterLimit", 4.0),
+    };
+    let marker_of = |k: &str| a.str(k).map_or(Marker::None, |v| Marker::parse(&v));
+    let ends = (marker_of("markerStart"), marker_of("markerEnd"), a.num("markerSize", 4.0));
+    let dash = a.nums("dash").unwrap_or_default();
+    let polys = stroke_marked(&outline, &style, &style, &dash, a.num("dashOffset", 0.0), ends, tol);
+    if !polys.is_empty() {
+        scene.cmds.push(Cmd::Fill { polys, rule: FillRule::NonZero, paint: sp, opacity: 1.0 });
+    }
+    scene
 }
 
 /// Vector asset (primitive or SVG outline attributes) scene in its `w`×`h` space.

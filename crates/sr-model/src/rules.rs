@@ -107,6 +107,15 @@ const TOKEN_REF_ATTRS: [&str; 15] = [
     "specularColor",
 ];
 
+/// Rule ids of SREP 16 (connectors), as the schema editor numbered them for 1.2.0 (sr-core p70 and p71).
+mod connector_ids {
+    pub const VERSION: &str = "V11";
+    pub const FROM_TARGET: &str = "R48-from";
+    pub const TO_TARGET: &str = "R48-to";
+    pub const NOT_A_SOURCE: &str = "R49";
+    pub const LABEL: &str = "R50";
+}
+
 // ------------------------------------------------------------------ XPath helpers
 
 /// `number()` of a string, as libxml2 evaluates it: XPath 1.0 `Number`
@@ -565,6 +574,68 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// p71: a connector's ends, anchors, route, transform, targets and label (SREP 16).
+    fn connector(&mut self, n: Node) {
+        let a = |k: &str| n.attribute(k);
+        let has = |k: &str| n.attribute(k).is_some();
+        let c60 = (has("from") || (has("fromX") && has("fromY"))) && (has("to") || (has("toX") && has("toY")));
+        self.check(c60, n, "C60", || {
+            "a connector end needs a node (@from, @to) or a point (@fromX and @fromY, @toX and @toY).".into()
+        });
+        let keyword = |k: &str| a(k).is_some_and(|v| v != "auto");
+        let c61 = !(keyword("fromAnchor") && (has("fromX") || has("fromY")))
+            && !(keyword("toAnchor") && (has("toX") || has("toY")));
+        self.check(c61, n, "C61", || "an anchor keyword and an explicit anchor point exclude each other.".into());
+        let c62 = has("fromX") == has("fromY") && has("toX") == has("toY");
+        self.check(c62, n, "C62", || "@fromX and @fromY (and @toX and @toY) come together.".into());
+        self.check(!(a("route") == Some("curved") && has("points")), n, "C63", || {
+            "route=\"curved\" takes no @points.".into()
+        });
+        const TRANSFORM: [&str; 9] = ["x", "y", "rotation", "scaleX", "scaleY", "anchorX", "anchorY", "skewX", "skewY"];
+        let c64 = !kids(n, "animate").any(|k| k.attribute("property").is_some_and(|p| TRANSFORM.contains(&p)))
+            && !kids(n, "expression").any(|k| k.attribute("property").is_some_and(|p| p != "opacity"));
+        self.check(c64, n, "C64", || {
+            "a connector has no transform of its own: its geometry comes from its ends.".into()
+        });
+        // R48: a group, layer, shape or instance of the same composition or symbol, outside any repeat, not 2.5D
+        let scope = n.ancestors().skip(1).find(|x| is(*x, "symbol")).or_else(|| {
+            let root = n.document().root_element();
+            kids(root, "composition").next()
+        });
+        let target_ok = |id: &str| {
+            scope.is_some_and(|sc| {
+                sc.descendants().skip(1).any(|d| {
+                    d.attribute("id") == Some(id)
+                        && ["group", "layer", "shape", "instance"].iter().any(|k| is(d, k))
+                        && !d.ancestors().skip(1).any(|x| is(x, "repeat"))
+                        && !d.ancestors().any(|x| x.is_element() && x.attribute("threeD") == Some("true"))
+                })
+            })
+        };
+        for (attr, code, end) in
+            [("from", connector_ids::FROM_TARGET, "@from"), ("to", connector_ids::TO_TARGET, "@to")]
+        {
+            self.check(a(attr).is_none_or(target_ok), n, code, || {
+                format!(
+                    "{end} must name a group, layer, shape or instance in the same composition or symbol, outside any repeat and not 2.5D."
+                )
+            });
+        }
+        // R49: nothing may read its pose from a connector
+        let id = a("id").unwrap_or("");
+        let prefix = format!("{id}.");
+        let read = n.document().descendants().any(|d| {
+            (is(d, "transformConstraint") && d.attribute("target") == Some(id))
+                || (d.is_element() && d.attribute("parent") == Some(id))
+                || (is(d, "link") && d.attribute("source").is_some_and(|s| s.starts_with(&prefix)))
+        });
+        self.check(!read, n, connector_ids::NOT_A_SOURCE, || {
+            "nothing may be positioned by a connector (transform parent, constraint target, link source).".into()
+        });
+        let r50 = a("label").is_none_or(|l| self.sets.text_assets.contains(l));
+        self.check(r50, n, connector_ids::LABEL, || "@label must name a text asset.".into());
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -749,6 +820,10 @@ impl<'a> Eval<'a> {
                 self.check(!v5, n, "V5", || {
                     "documents before version=\"1.2\" cannot use 1.2 elements or asset kinds; set version=\"1.2\"."
                         .into()
+                });
+                // p70 (SREP 16)
+                self.check(!n.descendants().any(|d| is(d, "connector")), n, connector_ids::VERSION, || {
+                    "connector needs version=\"1.2\".".into()
                 });
                 // p75 (SREP 26)
                 let v10 =
@@ -1399,6 +1474,8 @@ impl<'a> Eval<'a> {
                     !has("over") || contains(&self.sets.data, a("over")) || contains(&self.sets.list_params, a("over"));
                 self.check(c18, n, "C18", || "repeat/@over must name a data source or a list parameter.".into());
             }
+            // p71 (SREP 16)
+            "connector" => self.connector(n),
             // p76 (SREP 26)
             "points" if parent_is("repeat") => {
                 let ty = a("type");
