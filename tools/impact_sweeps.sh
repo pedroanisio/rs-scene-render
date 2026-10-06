@@ -7,6 +7,7 @@
 # usage: tools/impact_sweeps.sh [test-name-filter]
 set -euo pipefail
 filter="${1:-}"
-CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" cargo test --release -p sr-eval --test impact_scenes -- \
+# SR_CARGO_PROFILE picks the build profile (release by default; ci for test runs without LTO).
+CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" cargo test --profile "${SR_CARGO_PROFILE:-release}" -p sr-eval --test impact_scenes -- \
     --nocapture --include-ignored --skip cost_of "$filter" 2>&1 |
     grep -E '^IMPACT|^test .*(FAILED|failed)|^test result|panicked'
