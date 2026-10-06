@@ -151,16 +151,26 @@ impl World3 {
                 continue;
             }
             let mut parts = Vec::with_capacity(e.fragments.len());
+            // The radial push is the pieces pushing each other: it adds no momentum. Each piece gets the same speed
+            // along the line from the source's centre of mass to its own, and the mass-weighted mean of those
+            // velocities, which is not zero unless the partition is symmetric, is taken off every piece.
+            let mut pushed = Vec::with_capacity(e.fragments.len());
+            let mut mean = Vec3::ZERO;
+            let source_mass = self.spec.bodies[e.source].mass;
             for p in &e.fragments {
                 let rb = &self.state.bodies[self.state.handles[p.body]];
                 let position =
                     *source.position() * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
                 let com = rb.mass_properties().local_mprops.world_com(&position);
                 let radial = (com - source.center_of_mass()).try_normalize().unwrap_or_default()
-                    * (e.radial_impulse / ppm / self.spec.bodies[e.source].mass);
+                    * (e.radial_impulse / ppm / source_mass);
+                mean += radial * (self.spec.bodies[p.body].mass / source_mass);
+                pushed.push((position, com, radial));
+            }
+            for (p, (position, com, radial)) in e.fragments.iter().zip(pushed) {
                 let velocity = source.velocity_at_point(com)
                     + vec3(flip(p.impulse).map(|x| x / ppm)) / self.spec.bodies[p.body].mass
-                    + radial;
+                    + (radial - mean);
                 let angular = source.angvel();
                 if !position.translation.is_finite()
                     || !position.rotation.is_finite()
