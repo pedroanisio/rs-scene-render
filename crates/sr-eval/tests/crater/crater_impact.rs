@@ -360,3 +360,49 @@ fn once_the_crater_has_stopped_growing_the_law_is_not_worked_out_again_for_every
     // the world takes 5 rigid steps a frame and asks for the surface at each: nothing new to work out
     assert_eq!(after, before, "{} more evaluations in 72 frames of a crater that does not change", after - before);
 }
+
+/// The volumes of the crater of the ground when it has grown: what the bowl takes out and what the rim and the mantle put back.
+fn volumes(ev: &Evaluator) -> sr_3d::crater::Volumes {
+    let frame = ev.evaluate(5.5);
+    assert!(frame.problems.is_empty() && frame.failures.is_empty(), "{:?} {:?}", frame.problems, frame.failures);
+    sr_eval::crater::at(node(&frame, "ground")).unwrap().expect("a crater element").kernel.volumes()
+}
+
+#[test]
+fn with_a_mantle_the_ground_the_crater_moves_adds_up_to_the_law_and_without_it_the_ground_is_as_it_was() {
+    let setup = Setup::default();
+    let wanted = law(&setup, (100.0f64.powi(2) + 2.0 * 9.80665 * 19.5).sqrt());
+    // as it was: the bowl and the rim of the kernel take out less than the law excavates (the bowl bump reaches the crest) and
+    // nothing of the ejecta is the ground's
+    let plain = volumes(&setup.evaluator());
+    println!(
+        "MANTLE as it was: bowl {:.3}, rim {:.3}, mantle {:.3} of V = {:.3}",
+        plain.bowl, plain.rim, plain.mantle, wanted.volume
+    );
+    assert_eq!(plain.mantle, 0.0);
+    assert!(
+        close(plain.bowl, 1.285 * wanted.volume, 0.1) && (plain.bowl - plain.rim) / wanted.volume < 0.99,
+        "{plain:?}"
+    );
+    // with the mantle: the bowl excavates the law's volume, the mantle holds the ejecta (0.8 of it), and the rim and the mantle
+    // put back the bulking times the volume, 1 to 1.3 as asked and, without one, what the law's own rim height asks for
+    for (extra, bulking) in [
+        (r#"mantle="true""#, None),
+        (r#"mantle="true" bulking="1""#, Some(1.0)),
+        (r#"mantle="true" bulking="1.3""#, Some(1.3)),
+    ] {
+        let ev = Setup { extra, ..Setup::default() }.evaluator();
+        let v = volumes(&ev);
+        println!("MANTLE {extra}: bowl {:.3}, rim {:.3}, mantle {:.3}", v.bowl, v.rim, v.mantle);
+        assert!(close(v.bowl, wanted.volume, 0.05), "{v:?} against {}", wanted.volume);
+        assert!(close(v.mantle, 0.8 * v.bowl, 1e-9), "{v:?}");
+        let back = (v.rim + v.mantle) / v.bowl;
+        match bulking {
+            Some(b) => assert!(close(back, b, 1e-6), "{back} against {b}"),
+            None => assert!(back > 1.1 && back < 1.2, "the law's rim and 0.8 of ejecta: {back}"),
+        }
+        // the depth and the crest are the law's, the bowl is shaped to hold its volume
+        let (spec, _) = ground_crater(&ev, 5.5);
+        assert!(close(spec.depth, wanted.depth, 0.05) && close(spec.radius, wanted.rim_radius, 0.05), "{spec:?}");
+    }
+}
