@@ -28,6 +28,9 @@ pub use key::volume_key;
 /// did, and all reductions stay serial and in index order.
 const HEAVY: usize = 256;
 const LIGHT: usize = 8192;
+/// A temperature that differs from ambient by less than this share of it is the rounding of the interpolation, not
+/// heat: the window that follows a plume does not count it as smoke.
+const HEAT_NOISE: f64 = 1e-9;
 
 #[cfg(test)]
 mod atomicity;
@@ -466,6 +469,10 @@ fn face_dims(mut dims: [usize; 3], axis: usize) -> [usize; 3] {
 pub struct State {
     cells: [usize; 3],
     origin: [f64; 3],
+    /// The origin the domain began with, and the whole cells it has moved by since (a window that follows its
+    /// plume): `origin` is always `base + window * h`, computed afresh, never accumulated.
+    base: [f64; 3],
+    window: [i64; 3],
     h: f64,
     ambient: f64,
     boundary: Boundary,
@@ -610,6 +617,77 @@ impl State {
     pub fn cells(&self) -> [usize; 3] {
         self.cells
     }
+    /// The domain minimum in scene units now: where the window is.
+    pub fn origin(&self) -> [f64; 3] {
+        self.origin
+    }
+    /// Whole cells the window has moved by since the domain began.
+    pub fn window(&self) -> [i64; 3] {
+        self.window
+    }
+    /// The velocity on the faces normal to `axis`, x-fastest, one more face than cells along that axis.
+    pub fn velocity_faces(&self, axis: usize) -> &[f64] {
+        &self.velocity[axis]
+    }
+
+    /// Whether the smoke is somewhere in cell `k`: it holds density, or it is warmer or cooler than ambient by
+    /// more than [`HEAT_NOISE`] of the ambient temperature. The interpolation of the advection leaves rounding
+    /// (299.99999999999994 K for 300 K) in air that nothing has touched, and that is not heat.
+    fn active(&self, k: usize) -> bool {
+        self.density[k] != 0.0 || (self.temperature[k] - self.ambient).abs() > HEAT_NOISE * self.ambient
+    }
+
+    /// This state with its window moved by `by` whole cells: the cell that was at `c + by` is at `c`, what
+    /// was kept is bit for bit what it was, and what comes in is the background (no density, ambient
+    /// temperature, air at rest). It is refused, and nothing changes, if a cell that would be left behind holds
+    /// smoke: the window never lets go of any.
+    fn shifted(&self, by: [i64; 3]) -> Result<State, Error> {
+        let n = self.cells.map(|n| n as i64);
+        if by.iter().zip(&n).any(|(b, n)| b.abs() >= *n) {
+            return Err(Error::Invalid("a window cannot move by its whole size or more"));
+        }
+        let count = self.density.len();
+        for k in 0..count {
+            let c = coords(k, self.cells).map(|v| v as i64);
+            // the cell that is left behind is the one whose new place `c - by` is outside the window
+            let left = (0..3).any(|a| !(0..n[a]).contains(&(c[a] - by[a])));
+            if left && self.active(k) {
+                return Err(Error::Invalid("the window cannot move: the cells it would leave behind hold smoke"));
+            }
+        }
+        let shift = |src: &[f64], dims: [usize; 3], fill: f64| -> Vec<f64> {
+            let size = dims.map(|d| d as i64);
+            let mut out = vec![fill; src.len()];
+            out.par_chunks_mut(dims[0]).enumerate().for_each(|(row, line)| {
+                let (y, z) = ((row % dims[1]) as i64, (row / dims[1]) as i64);
+                let (y, z) = (y + by[1], z + by[2]);
+                if !(0..size[1]).contains(&y) || !(0..size[2]).contains(&z) {
+                    return;
+                }
+                for (x, v) in line.iter_mut().enumerate() {
+                    let x = x as i64 + by[0];
+                    if (0..size[0]).contains(&x) {
+                        *v = src[index([x as usize, y as usize, z as usize], dims)];
+                    }
+                }
+            });
+            out
+        };
+        let window: [i64; 3] = std::array::from_fn(|a| self.window[a] + by[a]);
+        Ok(State {
+            cells: self.cells,
+            origin: std::array::from_fn(|a| self.base[a] + window[a] as f64 * self.h),
+            base: self.base,
+            window,
+            h: self.h,
+            ambient: self.ambient,
+            boundary: self.boundary,
+            density: shift(&self.density, self.cells, 0.0),
+            temperature: shift(&self.temperature, self.cells, self.ambient),
+            velocity: std::array::from_fn(|a| shift(&self.velocity[a], face_dims(self.cells, a), 0.0)),
+            solid: vec![false; count],
+        })
+    }
 
     /// Domain-space cell centres in the same x-fastest order as scalar fields.
     pub fn cell_centres(&self) -> impl ExactSizeIterator<Item = [f64; 3]> + '_ {
@@ -661,6 +739,8 @@ impl State {
         State {
             cells: self.cells,
             origin: self.origin,
+            base: self.base,
+            window: self.window,
             h: self.h,
             ambient: self.ambient,
             boundary: self.boundary,
@@ -989,6 +1069,8 @@ impl Simulation {
         let state = State {
             cells: s.cells,
             origin: s.origin,
+            base: s.origin,
+            window: [0; 3],
             h: s.voxel_size,
             ambient: s.ambient_temperature,
             boundary: s.boundary,
@@ -1002,6 +1084,14 @@ impl Simulation {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Move the window of the domain by `by` whole cells, toward the side the cells are numbered up to: the cell
+    /// that was at `c + by` is at `c`. What the window keeps is what it had to the bit and what it takes in is
+    /// the background of an open face. A move that would leave smoke behind is an error and changes nothing.
+    pub fn shift_window(&mut self, by: [i64; 3]) -> Result<(), Error> {
+        self.state = self.state.shifted(by)?;
+        Ok(())
     }
     pub fn time(&self) -> f64 {
         self.step as f64 * self.spec.dt
