@@ -62,6 +62,8 @@ pub struct Spec {
     pub dry_tolerance: f64,
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
     pub max_bytes: usize,
+    /// Bytes of checkpoints. The states of the last few steps of a seek, kept for the frames asked for among them
+    /// (at most 16, within a quarter of this budget), come on top of it.
     pub checkpoint_bytes: usize,
     /// Work units per seek, charged by cell: per CFL substep 8 in first order and 24 in second (two stages, each
     /// a reconstruction and a flux sweep); with a moving bed one more for the bed interpolated to the substep and,
@@ -361,6 +363,11 @@ pub struct Ocean {
     frame: Frame,
     ends: Option<Ends>,
     near: Option<Near>,
+    /// The states of the last few canonical steps of the last forward seek, by step, for the frames that are asked for
+    /// among them: a reader that looks a few steps past a frame makes the next frame start at one of these and not
+    /// again. Bounded by [`Ocean::recent_capacity`].
+    recent: Vec<(u64, State)>,
+    recent_capacity: usize,
     /// What bodies gave the water in the last whole canonical step of the last seek.
     exchanged: [f64; 2],
     last_substeps: u64,
@@ -464,6 +471,7 @@ impl Ocean {
         advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let spec_dt = spec.dt;
+        let (spec_checkpoint_bytes, spec_owners) = (spec.checkpoint_bytes, spec.body_owners);
         let checkpoint_capacity =
             (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 32 * spec.body_owners)).min(4096);
         Ok(Self {
@@ -479,6 +487,9 @@ impl Ocean {
             frame,
             ends: None,
             near: None,
+            recent: Vec::new(),
+            recent_capacity: (spec_checkpoint_bytes / 4 / (n * std::mem::size_of::<Q>() + 128 + 32 * spec_owners))
+                .min(16),
             exchanged: [0.0; 2],
             last_substeps: 0,
         })
@@ -507,6 +518,22 @@ impl Ocean {
 
     /// Keeps `state` as the checkpoint of `step` when the cadence asks for it,
     /// thinning the older ones when the budget is full.
+    /// Keeps `state`, the state of `step`, among the recent ones when it is within the last few steps of a seek to
+    /// `target`: a long seek would copy every state it passes.
+    fn keep_recent(&mut self, step: u64, target: u64, state: &State) {
+        if self.recent_capacity == 0 || target - step >= self.recent_capacity as u64 {
+            return;
+        }
+        let at = self.recent.partition_point(|(k, _)| *k < step);
+        if self.recent.get(at).is_some_and(|(k, _)| *k == step) {
+            return;
+        }
+        self.recent.insert(at, (step, state.clone()));
+        if self.recent.len() > self.recent_capacity {
+            self.recent.remove(0);
+        }
+    }
+
     fn remember(&mut self, step: u64, state: &State) {
         if self.checkpoint_capacity == 0 || step % self.every != 0 || self.checkpoints.iter().any(|(k, _)| *k == step) {
             return;
@@ -651,6 +678,11 @@ impl Ocean {
             state = near.state;
             ends_at = near.ends.map(|e| (e.step, e.now, e.next));
         }
+        if let Some((step, recent)) = self.recent.iter().rev().find(|(step, _)| *step <= target && *step > k) {
+            k = *step;
+            state = recent.clone();
+            ends_at = None;
+        }
         if let Some((step, checkpoint)) =
             self.checkpoints.iter().filter(|(step, _)| *step <= target && *step > k).max_by_key(|(step, _)| step)
         {
@@ -707,6 +739,7 @@ impl Ocean {
                 )?,
             }
             self.remember(k, &state);
+            self.keep_recent(k, target, &state);
         }
         let mut sampled = state.clone();
         let mut frame_bed = Vec::new();
