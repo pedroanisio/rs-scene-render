@@ -2575,9 +2575,15 @@ half-size frame that the 15 % margin absorbs: the measured errors are 2.1 % (sun
 and 10.0 % and 10.1 % (point and sphere); `SR_BRUTE_FORCE=full` forces the full size
 on any adapter and nothing reduces them on a GPU.
 
-Known limits. A camera that starts under the water, or a surface reached
-without a refraction into its medium, is not "inside": the sun does not reach
-it (a test pins this). The shadow ray follows the first transmissive interface;
+Known limits. A camera that starts under the water is placed inside the medium
+by a probe ray straight up (the scene's up is -y): the first transmissive surface
+it meets, seen from the inside, sets the medium, and a floor or wall the camera
+sees is lit by the sun through that surface (test
+`a_camera_under_the_water_sees_a_wall_lit_as_the_oracle_says`, `water_oracle.rs`).
+Where the probe finds no surface, or one that is not the boundary of the water the
+camera is in (a sloped bank, a lid, an overturning wave), the camera is treated as
+in air and the sun does not reach what it sees, as it does not reach a surface
+that a path reached without refracting into its medium. The shadow ray follows the first transmissive interface;
 a second interface along it (an overturning wave, layered media) is not
 followed, and where the refinement finds no way out toward the light (a steep
 wave, grazing light) the light contributes nothing there: those samples are
