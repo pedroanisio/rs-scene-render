@@ -1,7 +1,7 @@
 //! The window of a smoke that follows its plume: it moves by whole cells, what it keeps is bit for bit what it
 //! had, what it takes in is the background an open face gives, and it never lets go of smoke.
 
-use sr_sim::pyro::{Boundary, Inputs, Shape, Simulation, Source, Spec};
+use sr_sim::pyro::{Boundary, Impulse, Inputs, Shape, Simulation, Source, Spec};
 
 /// A 24-cell open domain of half-unit cells, with a column of hot smoke made in its middle.
 fn smoking() -> Simulation {
@@ -114,4 +114,232 @@ fn a_shift_that_would_let_go_of_smoke_is_refused_and_changes_nothing() {
     assert!(sim.shift_window([0, 0, -12]).is_err());
     assert!(sim.shift_window([30, 0, 0]).is_err(), "a shift past the whole window");
     assert_eq!(sim.state(), &before);
+}
+
+use sr_sim::pyro::{Follow, State, Timeline};
+
+/// A column of cells along y (the axis smoke rises along, toward negative y) that is `cells_y` tall and whose
+/// bottom face is at y = 8 whatever its height.
+fn column(cells_y: usize, follow: Option<Follow>) -> Spec {
+    Spec {
+        cells: [16, cells_y, 16],
+        origin: [-4.0, 8.0 - cells_y as f64 * 0.5, -4.0],
+        voxel_size: 0.5,
+        dt: 0.05,
+        boundary: Boundary::Open,
+        buoyancy: 6.0,
+        pressure_iterations: 500,
+        pressure_tolerance: 1e-8,
+        follow,
+        ..Spec::default()
+    }
+}
+
+/// A blob of smoke made in the first step 1.5 units above the bottom face of the first window, in air that
+/// everywhere accelerates upward (toward negative y) at 2 units a second squared, so that it rises as it is, a
+/// passive scalar in a uniform flow, with no stem behind it.
+fn blob(step: u64, _time: f64, _state: &State) -> Result<Inputs, sr_sim::pyro::Error> {
+    let impulse = Impulse {
+        shape: Shape::Sphere { center: [0.0, 6.5, 0.0], radius: 1.5 },
+        time: 0.0,
+        density: 1.0,
+        temperature: 0.0,
+        velocity: [0.0; 3],
+        expansion: 0.0,
+    };
+    Ok(Inputs {
+        impulses: if step == 0 { vec![impulse] } else { vec![] },
+        acceleration: [0.0, -2.0, 0.0],
+        ..Inputs::default()
+    })
+}
+
+fn run(spec: Spec, steps: u64) -> State {
+    let mut timeline = Timeline::new(spec, 64 << 20).unwrap();
+    timeline.at_with_state(steps as f64 * 0.05, &mut |s, t, st| blob(s, t, st)).unwrap().clone()
+}
+
+/// The smoke-weighted height of a state's cells, in scene units, and the smoke.
+fn centroid_y(st: &State) -> (f64, f64) {
+    let n = st.cells();
+    let (mut sum, mut mass) = (0.0, 0.0);
+    for y in 0..n[1] {
+        let row: f64 =
+            (0..n[2]).flat_map(|z| (0..n[0]).map(move |x| (x, z))).map(|(x, z)| st.density()[at(n, [x, y, z])]).sum();
+        sum += row * (st.origin()[1] + (y as f64 + 0.5) * 0.5);
+        mass += row;
+    }
+    (sum / mass, mass)
+}
+
+fn mass(st: &State) -> f64 {
+    st.density().iter().sum()
+}
+
+#[test]
+fn a_blob_that_rises_far_past_its_window_is_kept_when_the_window_may_let_go_of_its_thin_tail() {
+    let steps = 140;
+    let tall = run(column(640, None), steps);
+    let (tall_y, tall_mass) = centroid_y(&tall);
+    // a window of the same height that stays where it is cuts the blob off at its top
+    let fixed = run(column(80, None), steps);
+    assert!(mass(&fixed) < 0.2 * tall_mass, "the fixed window kept {} of {tall_mass}", mass(&fixed));
+    let loss = 1e-6;
+    let following = run(column(80, Some(Follow { margin: 4, loss })), steps);
+    let (y, kept) = centroid_y(&following);
+    assert!((kept - tall_mass).abs() < 0.03 * tall_mass, "kept {kept} of {tall_mass}");
+    assert!((y - tall_y).abs() < 1.0, "the blob is at {y} and not at {tall_y}");
+    // it moved a long way, four times its own height, and let go of a very small part of the smoke
+    assert!(-following.window()[1] >= 20, "window {:?}", following.window());
+    assert!(following.lost() > 0.0 && following.lost() < loss * tall_mass, "lost {}", following.lost());
+}
+
+#[test]
+fn a_loss_of_zero_lets_go_only_of_slabs_with_no_smoke_and_so_does_not_follow_a_blob_with_a_tail() {
+    let steps = 140;
+    let tall_mass = mass(&run(column(640, None), steps));
+    let following = run(column(80, Some(Follow { margin: 4, loss: 0.0 })), steps);
+    assert_eq!(following.lost(), 0.0, "no smoke is let go of");
+    // the numerical tail of the blob is never exactly zero, so the window cannot leave its rear and the blob goes
+    // out of the top face as it does with no follow
+    assert!(mass(&following) < 0.1 * tall_mass, "{} of {tall_mass}", mass(&following));
+}
+
+#[test]
+fn what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked() {
+    let loss = 1e-3;
+    let spec = column(80, Some(Follow { margin: 4, loss }));
+    let mut sim = Simulation::new(spec).unwrap();
+    let mut moves = 0;
+    for step in 0..140u64 {
+        let mut input = blob(step, step as f64 * 0.05, sim.state()).unwrap();
+        let (before, lost_before) = (mass(sim.state()), sim.state().lost());
+        let by = sim.follow(&input).unwrap();
+        if by != [0; 3] {
+            moves += 1;
+            input = blob(step, step as f64 * 0.05, sim.state()).unwrap();
+            let let_go = sim.state().lost() - lost_before;
+            let after = mass(sim.state());
+            assert!(
+                (after + let_go - before).abs() <= 1e-12 * before,
+                "step {step}: {after} + {let_go} against {before}"
+            );
+            assert!(let_go <= 1.5 * loss * before, "step {step}: let go of {let_go} of {before}");
+        }
+        sim.step(&input).unwrap();
+    }
+    assert!(moves >= 10, "the window moved {moves} times");
+}
+
+#[test]
+fn a_window_never_leaves_the_slab_of_a_source_that_is_acting_whatever_the_loss() {
+    // a source that makes smoke all the time at the bottom of the window, and a loss that would let go of almost
+    // everything: the window rises with the smoke as far as the source allows, and no farther
+    let spec = column(48, Some(Follow { margin: 4, loss: 0.5 }));
+    let mut sim = Simulation::new(spec).unwrap();
+    let source = Source {
+        shape: Shape::Sphere { center: [0.0, 6.5, 0.0], radius: 1.2 },
+        density_rate: 8.0,
+        temperature_rate: 600.0,
+        ..Source::default()
+    };
+    let mut rose = false;
+    for _ in 0..100 {
+        let input = Inputs { sources: vec![source.clone()], ..Inputs::default() };
+        sim.follow(&input).unwrap();
+        let state = sim.state();
+        let bottom = state.origin()[1] + state.cells()[1] as f64 * 0.5;
+        assert!(bottom > 6.5 + 1.2 - 0.5, "the window left the source behind: its bottom is at {bottom}");
+        rose |= state.window()[1] != 0;
+        sim.step(&input).unwrap();
+    }
+    assert!(rose, "the window did not move at all");
+}
+
+#[test]
+fn a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following() {
+    let make = |follow| Spec {
+        cells: [24, 24, 24],
+        origin: [-6.0, -6.0, -6.0],
+        voxel_size: 0.5,
+        dt: 0.05,
+        boundary: Boundary::Open,
+        buoyancy: 1.0,
+        pressure_iterations: 500,
+        pressure_tolerance: 1e-8,
+        follow,
+        ..Spec::default()
+    };
+    let input = |step: u64, _: f64, _: &State| {
+        let source = Source {
+            shape: Shape::Sphere { center: [0.0, 0.0, 0.0], radius: 1.0 },
+            density_rate: 2.0,
+            temperature_rate: 50.0,
+            ..Source::default()
+        };
+        Ok(Inputs { sources: if step < 4 { vec![source] } else { vec![] }, ..Inputs::default() })
+    };
+    let run = |follow: Option<Follow>| {
+        let mut timeline = Timeline::new(make(follow), 64 << 20).unwrap();
+        timeline.at_with_state(1.0, &mut |s, t, st| input(s, t, st)).unwrap().clone()
+    };
+    let (following, plain) = (run(Some(Follow { margin: 3, loss: 1e-6 })), run(None));
+    assert_eq!(following.window(), [0, 0, 0], "the window did not move");
+    assert_eq!(following, plain);
+}
+
+#[test]
+fn any_order_of_times_a_fresh_run_and_a_tight_budget_give_the_same_window_and_cells() {
+    let spec = column(80, Some(Follow { margin: 4, loss: 1e-6 }));
+    let one = Simulation::new(spec.clone()).unwrap().state().bytes();
+    let mut timeline = Timeline::new(spec.clone(), one * 2).unwrap();
+    let times = [6.5, 1.0, 5.0, 0.0, 6.5, 3.0];
+    let mut moved = false;
+    for &time in &times {
+        let got = timeline.at_with_state(time, &mut |s, t, st| blob(s, t, st)).unwrap().clone();
+        let mut fresh = Simulation::new(spec.clone()).unwrap();
+        for step in 0..(time / 0.05_f64).round() as u64 {
+            let mut input = blob(step, step as f64 * 0.05, fresh.state()).unwrap();
+            if fresh.follow(&input).unwrap() != [0; 3] {
+                input = blob(step, step as f64 * 0.05, fresh.state()).unwrap();
+            }
+            fresh.step(&input).unwrap();
+        }
+        assert_eq!(&got, fresh.state(), "time {time}");
+        moved |= got.window() != [0, 0, 0];
+    }
+    assert!(moved, "the window moved in this run");
+}
+
+#[test]
+fn a_window_with_smoke_at_both_faces_says_so_and_stays() {
+    // smoke fills the column from the bottom to the top: it is near both faces and cannot be moved from either
+    let mut sim = Simulation::new(column(16, Some(Follow { margin: 3, loss: 0.0 }))).unwrap();
+    let source = Source {
+        shape: Shape::Box { min: [-4.0, 4.0, -4.0], max: [4.0, 8.0, 4.0] },
+        density_rate: 1.0,
+        ..Source::default()
+    };
+    let full = Source { shape: Shape::Box { min: [-4.0, 0.0, -4.0], max: [4.0, 8.0, 4.0] }, ..source };
+    sim.step(&Inputs { sources: vec![full], ..Inputs::default() }).unwrap();
+    let before = sim.state().clone();
+    let (shift, blocked) = before.follow_decision(3, 0.0, 0.05, &[]);
+    assert_eq!(shift, [0, 0, 0]);
+    assert!(blocked[1], "smoke at both faces along y: blocked {blocked:?}");
+    assert_eq!(sim.follow(&Inputs::default()).unwrap(), [0, 0, 0]);
+    assert_eq!(sim.state(), &before);
+}
+
+#[test]
+fn a_follow_with_a_closed_domain_a_margin_that_leaves_no_middle_or_a_loss_out_of_range_is_refused() {
+    let mut spec = column(32, Some(Follow { margin: 4, loss: 0.0 }));
+    spec.boundary = Boundary::Closed;
+    assert!(Simulation::new(spec).is_err());
+    assert!(Simulation::new(column(32, Some(Follow { margin: 0, loss: 0.0 }))).is_err());
+    // 16 cells across: a margin of 8 leaves no cell between the two faces
+    assert!(Simulation::new(column(32, Some(Follow { margin: 8, loss: 0.0 }))).is_err());
+    assert!(Simulation::new(column(32, Some(Follow { margin: 7, loss: 0.0 }))).is_ok());
+    for loss in [-0.1, 1.5, f64::NAN] {
+        assert!(Simulation::new(column(32, Some(Follow { margin: 4, loss }))).is_err(), "loss {loss}");
+    }
 }
