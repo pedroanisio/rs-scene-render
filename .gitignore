@@ -4,3 +4,4 @@ _tmp/
 .agent-tasks/
 .claude/settings.json
 .repo/
+target*/
