@@ -1910,7 +1910,11 @@ the ground is as it was, to the bit.
 The ejecta particles that come to rest on the ground are taken out where they lie (`particles3D` runs `Spec::settle`, 0.5 m a second relative to the surface, a choice and not a measurement) so
 that what they are made of is not counted twice, once as particles and once in the mantle; they are told to the ocean's coupling as ground, and only the water's take from it. For the authored
 rock 379 of 1000 ejecta have been taken out by 5.5 s, and 88 are in the air at 1.6 s in both runs. The mantle that the law's own volume gives, and not the footprint of the particles' landing
-points, is what the ground gets; comparing the two is a measurement, not a part of the model. Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
+points, is what the ground gets; the comparison is a measurement and not a part of the model: for the authored rock, on level ground, with no drag and 20 000 particles, 84 to 86 % of the mass of the ejecta
+the engine launches (Housen and Holsapple) comes down inside the crest radius, back in the crater, and the rest lies between one and about three and a half crest radii, steeper than the inverse cube
+(log-log slope of the thickness -4.1 to -7.0 against -3, for launch angles 30, 45 and 60 degrees, `the_ballistic_landing_points_of_the_ejecta_make_a_mantle_that_is_measured_against_the_inverse_cube`
+in `sr-sim`); the analytic mantle, with all of its 0.8 V outside the rim and out to twenty crest radii, is therefore the law's statement of where the ejecta are in the final crater and not what these
+particles do, which is not corrected here. Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
