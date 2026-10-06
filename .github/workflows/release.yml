@@ -25,7 +25,6 @@ jobs:
       SR_GPU_BACKEND: vulkan
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
       - name: Check release version
         run: |
           python3 - <<'PY'
@@ -39,8 +38,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libvulkan1 mesa-vulkan-drivers fonts-dejavu-core
-      - name: Build
-        run: cargo build --locked --release -p scene-render
+      - uses: actions/download-artifact@v7
+        with:
+          name: validated-linux-tools
+          path: target/release
+      - name: Verify validated binary
+        run: |
+          test "$(cat target/release/COMMIT)" = "$GITHUB_SHA"
+          (cd target/release && sha256sum -c SHA256SUMS)
+          chmod +x target/release/scene-render
+          test "$(target/release/scene-render --version)" = "scene-render ${GITHUB_REF_NAME#v}"
       - name: Smoke test the release binary
         run: |
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"

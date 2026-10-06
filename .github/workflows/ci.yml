@@ -40,10 +40,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
-      - run: cargo build --locked --release -p scene-render
+      - run: cargo build --locked --release -p scene-render -p sr-fuzz
       - run: python3 tools/evidence.py target/evidence
       - run: python3 tools/evidence.py target/review --manifest tools/evidence/review.json --clips
         if: success() || failure()
+      - name: Record validated tools
+        if: success()
+        run: |
+          mkdir -p target/release-artifact
+          cp target/release/scene-render target/release/sr-fuzz target/release-artifact/
+          git rev-parse HEAD > target/release-artifact/COMMIT
+          (cd target/release-artifact && sha256sum scene-render sr-fuzz > SHA256SUMS)
+      - uses: actions/upload-artifact@v6
+        if: success()
+        with:
+          name: validated-linux-tools
+          path: target/release-artifact/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -92,7 +105,28 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
       - run: cargo test --release --test perf
-      - run: cargo build --release && target/release/scene-render eval tests/corpus/valid/kitchen-sink.scene.xml --bench
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: performance-rust-environment
+          path: target/environment/
+          if-no-files-found: warn
+  performance-smoke:
+    needs: evidence
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@v7
+        with:
+          name: validated-linux-tools
+          path: target/release
+      - name: Verify validated tools
+        run: |
+          test "$(cat target/release/COMMIT)" = "$GITHUB_SHA"
+          (cd target/release && sha256sum -c SHA256SUMS)
+          chmod +x target/release/scene-render target/release/sr-fuzz
+      - run: target/release/scene-render eval tests/corpus/valid/kitchen-sink.scene.xml --bench
       # smoke run: three transformed, feathered-mask image layers, rendered for a few frames
       - run: python3 tools/perf_layers.py /tmp/perf_layers && target/release/scene-render render /tmp/perf_layers/perf_layers.scene.xml --bench --frames 0..3
       # smoke run: four decoded 1080p60 layers, mixed audio, H.264 + AAC
@@ -111,7 +145,7 @@ jobs:
       # smoke run: 200 rigid bodies, two soft bodies and three emitters at 1080p
       - run: python3 tools/perf_physics.py /tmp/perf_physics --duration 2 && target/release/scene-render render /tmp/perf_physics/perf_physics.scene.xml --bench --frames 60..64
       # 10-minute smoke run of the parser, evaluator and expression compiler; the fuzzer accepts a longer --seconds for extended runs
-      - run: cargo run --release -p sr-fuzz -- --seconds 600
+      - run: target/release/sr-fuzz --seconds 600
       - uses: actions/upload-artifact@v6
         if: always()
         with:
