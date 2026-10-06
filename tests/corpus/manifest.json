@@ -213,6 +213,9 @@
     "crt3.scene.xml": [
       "CRT3"
     ],
+    "crt4-envelope.scene.xml": [
+      "CRT4"
+    ],
     "crt4.scene.xml": [
       "CRT4"
     ],
@@ -796,6 +799,8 @@
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
     "crater-capture.scene.xml": [],
+    "crater-impact-influence-large.scene.xml": [],
+    "crater-impact-influence-small.scene.xml": [],
     "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],

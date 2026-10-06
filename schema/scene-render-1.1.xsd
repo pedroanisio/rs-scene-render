@@ -2554,7 +2554,8 @@
       for abs(x)&lt;1 (zero otherwise), displace along n by
       p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
       At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
-      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
+      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight) (CRT4, for a crater
+      without a `source`; the size of a crater from an impact is not in the document, so its envelope is checked when the crater is made).
       This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
       maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
       by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.
