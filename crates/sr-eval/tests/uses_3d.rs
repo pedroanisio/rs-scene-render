@@ -16,6 +16,11 @@ const KINDS: &[(&str, &str)] = &[
     ("object3D", r#"<object3D id="b" primitive="sphere" radius="10"/>"#),
     ("particles3D", r#"<particles3D id="p" rate="5" lifetime="1" dt="0.1"/>"#),
     ("ocean", r#"<ocean id="sea" width="4" depth="6" bottomDepth="2"/>"#),
+    ("blackHole", r#"<blackHole id="h" mass="1"/>"#),
+    (
+        "accretionDisk",
+        r##"<blackHole id="h" mass="1"/><accretionDisk id="d" blackHole="h" outerRadius="12" temperatureScale="6000"/>"##,
+    ),
 ];
 
 #[test]

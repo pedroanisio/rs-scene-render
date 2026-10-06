@@ -403,6 +403,7 @@ fn tiled_frames_equal_whole_frames_in_grid_mode() {
         ao: None,
         ssr: false,
         path: Some(PathOpts { samples: 2, bounces: 2, denoise: false }),
+        geodesic: None,
     };
     assert!(pathtrace::limit_note(&scene, &g.device.limits()).is_none());
     let data = pathtrace::build(&scene);

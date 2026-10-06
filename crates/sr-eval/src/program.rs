@@ -517,7 +517,7 @@ pub struct Program {
 
 /// The element names the 3D pass draws. The renderer's 3D pass and the choice of GPU adapter both read this one list,
 /// so a kind added here is drawn and is also asked for an adapter that can run the pass.
-pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean"];
+pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean", "blackHole", "accretionDisk"];
 
 /// True when the 3D pass draws elements named `name` (see [`THREE_D_DRAWN`]).
 pub fn draws_in_3d(name: &str) -> bool {
