@@ -40,3 +40,12 @@ fn an_attribute_left_at_its_default_is_not_a_use() {
         <composition><shape id="s" shape="rect" width="10" height="10"/></composition></scene>"##;
     assert!(evaluate(xml).iter().all(|d| d.code != "E22"));
 }
+
+#[test]
+fn an_ordinary_shape_has_no_e22_whatever_defaults_the_schema_gives_its_pending_attributes() {
+    // regionPadding (SREP 17) has the default 0: reading the default is not a use
+    let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/><composition>
+        <shape id="s" shape="rect" width="10" height="10"/>
+        <shape id="p" shape="rect" width="10" height="10" regionPadding="0"/></composition></scene>"##;
+    assert!(evaluate(xml).iter().all(|d| d.code != "E22"));
+}

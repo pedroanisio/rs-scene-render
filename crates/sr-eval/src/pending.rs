@@ -29,7 +29,7 @@ pub const PENDING: &[Pending] = &[
         srep: 17,
         what: "PDF page assets and text-anchored regions",
         elements: &["pdf", "region"],
-        attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", None)],
+        attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", Some("0"))],
     },
     Pending { srep: 18, what: "render reports", elements: &[], attributes: &[("output", "report", None)] },
     Pending {
