@@ -10,8 +10,7 @@ fn channel(node: usize, path: Path, times: &[f32], values: &[f32]) -> Channel {
 
 fn model() -> Model {
     let node = |name: &str, parent| Node { name: name.into(), parent, weights: vec![0.0, 0.0], ..Default::default() };
-    let mut m = Model::default();
-    m.nodes = vec![node("root", None), node("arm", Some(0))];
+    let mut m = Model { nodes: vec![node("root", None), node("arm", Some(0))], ..Default::default() };
     m.nodes[1].local = Trs { t: Vec3::new(1.0, 0.0, 0.0), ..Default::default() };
     m
 }

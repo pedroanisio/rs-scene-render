@@ -69,7 +69,8 @@ pub fn parse_jhf(text: &str) -> Result<Font, String> {
         i += 8 + 2 * n;
         let v = |c: char| c as i32 - 'R' as i32;
         let (left, right) = (v(data[0]), v(data[1]));
-        let (mut strokes, mut run): (Vec<Vec<(i32, i32)>>, Vec<(i32, i32)>) = (Vec::new(), Vec::new());
+        let mut strokes = Vec::new();
+        let mut run: Vec<(i32, i32)> = Vec::new();
         for pair in data[2..].chunks(2) {
             if pair == [' ', 'R'] {
                 if run.len() >= 2 {

@@ -72,7 +72,7 @@ fn ball(doc: &sr_model::Document, t: f64) -> Option<(f32, f32)> {
     assert!(problems.is_empty(), "{problems:?}");
     let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
     for (i, p) in r.px.iter().enumerate() {
-        if p[3] > 0.5 && !(p[0] > p[1] + 0.2) {
+        if p[3] > 0.5 && p[0].partial_cmp(&(p[1] + 0.2)) != Some(std::cmp::Ordering::Greater) {
             sx += (i % 256) as f32;
             sy += (i / 256) as f32;
             n += 1.0;

@@ -132,6 +132,9 @@ pub struct ElementState {
     pub props: Props,
 }
 
+/// Named joint frames in column-major scene coordinates.
+pub type JointFrames = Vec<(String, [f64; 16])>;
+
 /// One node of the frame, in paint order.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FrameNode {
@@ -232,7 +235,7 @@ pub struct FrameNode {
     /// For an object that draws an imported model and has joint sockets: each joint's frame in the object's own frame
     /// (column-major, scene space), at the pose the object draws.
     #[serde(skip)]
-    pub joints: Option<Arc<Vec<(String, [f64; 16])>>>,
+    pub joints: Option<Arc<JointFrames>>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,

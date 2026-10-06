@@ -1382,6 +1382,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn object_draws_at(
         &mut self,
         plan: &mut Plan,
