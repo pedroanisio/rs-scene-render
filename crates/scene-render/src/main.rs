@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long, global = true, env = "SR_THREADS", value_name = "N")]
     threads: Option<usize>,
 
+    /// Turn on the GPU debug and validation layers (they name every object through the Vulkan loader, and are off by
+    /// default: a delivery does not need them).
+    /// The environment variable SR_GPU_DEBUG (any value but empty or 0) does the same; the GPU layer reads it itself.
+    #[arg(long, global = true)]
+    debug_gpu: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -1593,6 +1599,9 @@ fn encode(
                         )?;
                     }
                 }
+                if let Some(why) = &r.serial_because {
+                    writeln!(out.w, "  note: {why}")?;
+                }
                 if r.frames > 0 {
                     let [e, s, w, b] = r.stage_seconds;
                     writeln!(
@@ -1679,6 +1688,9 @@ fn process_cpu_seconds() -> Option<f64> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.debug_gpu {
+        std::env::set_var("SR_GPU_DEBUG", "1");
+    }
     // on WSL2 the GPU is reachable only through Mesa's D3D12 driver; Mesa reads these
     // variables when a GL display opens, so set them before any thread starts
     sr_gpu::gpu::prepare_environment();

@@ -519,34 +519,37 @@ impl FxEngine {
                 ("FUSED_2", key.fused[2] as f64),
                 ("FUSED_3", key.fused[3] as f64),
             ];
-            let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(entry.name()),
-                layout: Some(&self.layout),
-                vertex: wgpu::VertexState {
-                    module: &self.module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: frag_module,
-                    entry_point: Some(entry.name()),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: if matches!(entry, Entry::Custom(_)) { &[] } else { &constants },
-                        ..Default::default()
+            let p = {
+                let _creation = crate::gpu::creation_lock();
+                self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry.name()),
+                    layout: Some(&self.layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
                     },
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+                    fragment: Some(wgpu::FragmentState {
+                        module: frag_module,
+                        entry_point: Some(entry.name()),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: if matches!(entry, Entry::Custom(_)) { &[] } else { &constants },
+                            ..Default::default()
+                        },
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: FORMAT,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
             self.pipes.insert(key, p);
         }
         self.pipes.get(&key)

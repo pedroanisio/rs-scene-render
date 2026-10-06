@@ -151,6 +151,8 @@ pub struct Report {
     pub passes: u32,
     /// Time segments rendered and encoded at once (1 for a serial render).
     pub segments: u32,
+    /// Why the render ran with one worker although more were asked for or chosen (GPU debug layers on).
+    pub serial_because: Option<String>,
 }
 
 /// An `<output>` element built from command-line settings.
@@ -910,10 +912,19 @@ pub fn deliver(
         report.segments = 1;
         // llvmpipe already spreads one device over every core, so automatic parallelism would only add
         // devices competing for them; an explicit worker count is still honoured
-        let workers = if gpu.is_software() && matches!(opts.parallel, Parallel::Auto) {
+        let wanted_workers = if gpu.is_software() && matches!(opts.parallel, Parallel::Auto) {
             1
         } else {
             segment_count(output, codec, opts, &ev, end - start).min(n as usize)
+        };
+        // the debug layers name every object through the Vulkan loader, which is not safe from several devices at once
+        let workers = if sr_gpu::gpu::debug_layers() && wanted_workers > 1 {
+            report.serial_because = Some(format!(
+                "GPU debug layers are on (SR_GPU_DEBUG / --debug-gpu): rendering with 1 worker instead of {wanted_workers}, as their object naming is not safe from several devices at once"
+            ));
+            1
+        } else {
+            wanted_workers
         };
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed

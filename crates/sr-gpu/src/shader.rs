@@ -100,31 +100,34 @@ impl FxEngine {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipe = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("custom shader"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &self.module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipe = {
+            let _creation = crate::gpu::creation_lock();
+            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("custom shader"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &self.module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         CustomPipe { program: program.clone(), bgl, pipe }
     }
 
