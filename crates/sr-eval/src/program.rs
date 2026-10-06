@@ -1523,7 +1523,8 @@ impl Builder {
             _ => None,
         };
         let shape_size = match n {
-            Node::Shape(s) => Some([s.width, s.height]),
+            // width and height are optional since SREP 17 (a region shape takes them from the page)
+            Node::Shape(s) => s.width.zip(s.height).map(|(w, h)| [w, h]),
             _ => None,
         };
         let (mut asset_size, mut asset_kind, mut fit) = (None, None, None);
