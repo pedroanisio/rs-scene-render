@@ -1476,7 +1476,15 @@ impl Renderer {
                 let want = a.str(attr)?;
                 let clip = find(&want);
                 if clip.is_none() {
-                    plan.stats.errors.push(format!("{}: animation clip {want} not found", n.id));
+                    if attr == "animationClipTo" {
+                        // SREP 42 Semantics 4: reported, and the object blends toward the rest pose; the frame is drawn
+                        let m = format!("{}: animationClipTo: {}", n.id, sr_3d::anim::unknown_clip_to_rest(&want));
+                        if !plan.stats.unsupported.contains(&m) {
+                            plan.stats.unsupported.push(m);
+                        }
+                    } else {
+                        plan.stats.errors.push(format!("{}: animation clip {want} not found", n.id));
+                    }
                 }
                 clip
             };

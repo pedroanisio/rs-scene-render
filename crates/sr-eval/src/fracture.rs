@@ -23,6 +23,8 @@ pub struct Geometry {
     pub interior_material: String,
     /// Imported materials and texture payloads retained for exterior batches.
     pub model: Option<Arc<sr_3d::Model>>,
+    /// What freezing the source reported without failing (an unknown `animationClipTo`, SREP 42).
+    pub notes: Vec<String>,
 }
 #[derive(Debug)]
 pub struct SimFracture {
@@ -41,7 +43,8 @@ pub(crate) fn prepare(
 ) -> Result<Arc<Geometry>, String> {
     let value = |key, default| crate::sim::num(config, key, default);
     let budget = (value("maxMemoryMiB", 256.) as usize).checked_mul(1 << 20).ok_or("fracture memory overflow")?;
-    let (sources, model) = source::load(p, n, scale, budget)?;
+    let mut notes = Vec::new();
+    let (sources, model) = source::load(p, n, scale, budget, &mut notes)?;
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     let mut used = model.as_ref().map_or(0, |m| sr_3d::sequence::bytes(m));
@@ -104,5 +107,6 @@ pub(crate) fn prepare(
         pieces: output,
         interior_material: config.interior_material.to_string(),
         model,
+        notes,
     }))
 }
