@@ -184,12 +184,13 @@ const OPEN_FLOOR: [usize; 4] = [75, 15, 175, 65];
 const SMALL: [u32; 2] = [320, 180];
 
 /// How a brute-force comparison is sized. A discrete or integrated GPU renders 320x180 frames at
-/// 1024 samples per pixel. A software adapter (llvmpipe) takes half an hour for that, and the
-/// assertion needs far less: it compares the mean of a patch of the open floor, so the noise of the
-/// reference is that of one pixel divided by the square root of the pixels in the patch. The
-/// software path therefore renders half-size frames (the same view, the patch scaled with them) at
-/// 1024 samples; `SR_BRUTE_FORCE=full` forces the full size and samples on any adapter, and nothing
-/// reduces them on a GPU.
+/// 1024 samples per pixel. A software adapter (llvmpipe) takes half an hour for that and, even at
+/// the reduced size below, about ten minutes for the two comparisons (191 s and 428 s measured), so
+/// there they run only when asked: `SR_BRUTE_FORCE=1` renders half-size frames (the same view, the
+/// patch scaled with them) at 1024 samples, which the assertion allows because it compares the mean
+/// of a patch of the open floor, whose noise is that of one pixel divided by the square root of the
+/// pixels in the patch; `SR_BRUTE_FORCE=full` renders the full size and samples. A GPU always runs
+/// them at full size, whatever the setting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Brute {
     size: [u32; 2],
@@ -218,13 +219,24 @@ fn tolerance(stated: f32, wet_noise: f32, dry_noise: f32) -> f32 {
     stated.max(4.0 * wet_noise.hypot(dry_noise))
 }
 
-fn brute_force() -> Brute {
-    let software = common::gpu().is_some_and(|g| g.info.device_type == wgpu::DeviceType::Cpu);
-    if software && std::env::var("SR_BRUTE_FORCE").as_deref() != Ok("full") {
-        REDUCED
-    } else {
-        FULL
+/// The sizing of a brute-force comparison for an adapter that is a software one or not, and the value of
+/// `SR_BRUTE_FORCE`.
+fn brute_force_for(software: bool, setting: Option<&str>) -> Option<Brute> {
+    match (software, setting) {
+        (false, _) => Some(FULL),
+        (true, Some("full")) => Some(FULL),
+        (true, Some(asked)) if !asked.is_empty() => Some(REDUCED),
+        (true, _) => None,
     }
+}
+
+fn brute_force() -> Option<Brute> {
+    let software = common::gpu().is_some_and(|g| g.info.device_type == wgpu::DeviceType::Cpu);
+    let brute = brute_force_for(software, std::env::var("SR_BRUTE_FORCE").ok().as_deref());
+    if brute.is_none() {
+        eprintln!("skipping a brute-force comparison on a software adapter; SR_BRUTE_FORCE=1 runs it reduced, =full at full size");
+    }
+    brute
 }
 
 /// A light that exists only as emissive geometry (so brute-force paths find it) matching an analytic
@@ -269,7 +281,7 @@ fn region_noise(px: &[[f32; 4]], indices: &[usize]) -> (f32, f32) {
 /// found by paths that refract out of the water), each as wet over dry so the two lights'
 /// calibration cancels.
 fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, bounces: u32) -> Option<Wet> {
-    let brute = brute_force();
+    let brute = brute_force()?;
     let render = |water: &str, lights: &str, extra: &str, samples: u32, bounces: u32| {
         let xml = seabed(water, lights, extra, LOOKING_DOWN, brute.size, samples, bounces)
             .replace("{emission}", &emission.to_string());
@@ -680,4 +692,16 @@ fn the_brute_force_tolerance_follows_the_noise_of_its_references() {
     }
     let (mean, noise) = patch_noise(&px, 16, [0, 0, 16, 16]);
     assert!((mean - 1.0).abs() < 1e-5 && (noise - 0.1 / 16.0).abs() < 1e-3, "{mean} {noise}");
+}
+
+/// A software adapter takes about ten minutes for the two brute-force comparisons even at the reduced size
+/// (measured on llvmpipe: 191 s and 428 s), so they run there only when asked; a GPU always runs them.
+#[test]
+fn the_brute_force_comparisons_run_on_a_gpu_and_on_a_software_adapter_only_when_asked() {
+    assert_eq!(brute_force_for(false, None), Some(FULL), "a GPU renders the full size");
+    assert_eq!(brute_force_for(false, Some("1")), Some(FULL), "and the setting does not reduce it");
+    assert_eq!(brute_force_for(true, None), None, "a software adapter skips them unless asked");
+    assert_eq!(brute_force_for(true, Some("")), None, "an empty setting is not asking");
+    assert_eq!(brute_force_for(true, Some("1")), Some(REDUCED), "asked, it renders the reduced size");
+    assert_eq!(brute_force_for(true, Some("full")), Some(FULL), "or the full size on request");
 }
