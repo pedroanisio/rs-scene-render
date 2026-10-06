@@ -649,6 +649,7 @@ pub(crate) fn build(
             at: num(config, "at", 0.).max(ph.map_or(0., |p| p.start)),
             radial_impulse: num(config, "radialImpulse", 0.),
             fragments,
+            contact: None,
         });
         fractures.push(FractureNode { source, indices, geometry });
     }
