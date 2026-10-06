@@ -1591,8 +1591,40 @@ fn encode(
             .cloned()
             .collect(),
     };
+    // where each output's report goes, and the output as the document gives it, for a run that stops before rendering
+    let report_targets = |outputs: &[sr_model::model::Output]| -> Vec<(PathBuf, OutputInfo)> {
+        let (pw, ph) = doc.frame_size();
+        let mut t = Vec::new();
+        for o in outputs {
+            let info = OutputInfo {
+                id: o.id.clone(),
+                width: o.width.map_or(pw as u32, |w| w as u32),
+                height: o.height.map_or(ph as u32, |h| h as u32),
+                start: opts.start.unwrap_or(o.start),
+                end: opts.end.or(o.end).unwrap_or(doc.scene.project.duration.get()),
+            };
+            t.extend(render_report::report_path(&folder, o).map(|p| (p, info.clone())));
+            if let Some(rp) = report_to {
+                t.push((cli_report_path(rp, o.id.as_deref()), info));
+            }
+        }
+        t
+    };
+    // a render that stops on an error still writes its reports, with the error among the findings (SREP 18, 1.3)
+    let stop_early = |targets: Vec<(PathBuf, OutputInfo)>, message: String| {
+        let mut findings: Vec<Finding> = doc.warnings().iter().map(Finding::of_diagnostic).collect();
+        findings.push(Finding::scene(render_report::code::engine("DELIVERY"), Severity::Error, message));
+        for (rp, info) in targets {
+            write_render_report(&writer.report(info, findings.clone()), &rp);
+        }
+    };
     if outputs.is_empty() {
-        eprintln!("error: {} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
+        let message = format!("{} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
+        eprintln!("error: {message}");
+        if let Some(rp) = report_to {
+            let info = OutputInfo { id: None, width: 0, height: 0, start: 0.0, end: 0.0 };
+            stop_early(vec![(cli_report_path(rp, None), info)], message);
+        }
         return Ok(ExitCode::from(2));
     }
     // the adapter is chosen from the document: one that cannot run the 3D pass is skipped when an output draws in 3D
@@ -1608,6 +1640,7 @@ fn encode(
         }
         Err(e) => {
             eprintln!("error: {e}");
+            stop_early(report_targets(&outputs), e.to_string());
             return Ok(ExitCode::from(2));
         }
     };
@@ -1615,6 +1648,7 @@ fn encode(
         Ok(g) => g,
         Err(e) => {
             eprintln!("error: {e}");
+            stop_early(report_targets(&outputs), e.to_string());
             return Ok(ExitCode::from(2));
         }
     };
@@ -1681,9 +1715,12 @@ fn encode(
         if let Some(rp) = report_to {
             report_paths.push(cli_report_path(rp, o.id.as_deref()));
         }
-        let o_opts = sr_deliver::Options { report: !report_paths.is_empty(), ..opts.clone() };
+        // --strict counts every finding at warning or error (SREP 18: only information is left out), so it needs
+        // the measures a report has
+        let o_opts = sr_deliver::Options { report: !report_paths.is_empty() || strict, ..opts.clone() };
         let (r, outcome) = sr_deliver::deliver_reporting(&doc, o, gpu.as_ref(), &o_opts, &mut progress);
-        if !report_paths.is_empty() {
+        let mut counted = 0;
+        if !report_paths.is_empty() || strict {
             let mut findings: Vec<Finding> = doc.warnings().iter().map(Finding::of_diagnostic).collect();
             findings.extend(r.evaluation_warnings.iter().map(Finding::of_diagnostic));
             findings.extend(
@@ -1708,18 +1745,19 @@ fn encode(
             };
             let info = OutputInfo { id: o.id.clone(), width, height, start, end };
             let report = writer.report(info, findings);
+            counted = report.findings.iter().filter(|f| f.severity != Severity::Info).count();
             for rp in &report_paths {
                 failed |= !write_render_report(&report, rp);
             }
         }
         match outcome.map(|()| r) {
             Ok(r) => {
-                let problems = r.unsupported.len()
-                    + r.accessibility.len()
-                    + r.evaluation_warnings.iter().filter(|d| !d.is_info()).count();
-                if strict && problems > 0 {
+                // every finding of the output's report at warning or error severity: validation and evaluator
+                // warnings, unsupported content, accessibility and legibility, safe area, text fit, fonts, engine
+                // support; information (inert attributes) is not counted (SREP 18)
+                if strict && counted > 0 {
                     eprintln!(
-                        "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content, evaluator warnings or accessibility findings)",
+                        "error: --strict: {}: {counted} finding(s) at warning or error severity (the render report's findings; information is not counted)",
                         o.path
                     );
                     failed = true;

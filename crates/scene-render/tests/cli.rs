@@ -197,10 +197,13 @@ fn render_and_encode_surface_image_size_warnings() {
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(String::from_utf8_lossy(&o.stdout).contains("warning[A07]"));
     let pattern = dir.join("encode_%03d.png");
-    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json", "--strict"]);
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("A07")));
+    // a warning is a finding --strict counts (SREP 18: only information is left out)
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json", "--strict"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 fn no_gpu(o: &Output) -> bool {

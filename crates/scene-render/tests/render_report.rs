@@ -267,3 +267,79 @@ fn srep_0018_report_through_output_report() {
     assert_eq!(codes(&r), ["INERT-I2", "INERT-I8"], "{r:#}");
     assert_eq!(r["output"]["id"], "frames");
 }
+
+#[test]
+fn a_render_that_stops_before_rendering_still_writes_its_report() {
+    // SREP 18, 1.3: the adapter cannot be opened (no adapter has this name), the run exits 2, and the report is there
+    let d = dir("early-exit");
+    let file = d.join("case.scene.xml");
+    let scene = REPORT_SCENE.replace(
+        "<composition>",
+        r#"<output id="frames" path="frames/f_%04d.png" codec="png-sequence" end="0.2" report="reports/frames.json"/>
+  <composition>"#,
+    );
+    std::fs::write(&file, scene).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args(["encode", file.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .env("SR_GPU_ADAPTER", "no adapter is called this 7f3e")
+        .output()
+        .expect("binary runs");
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("reports/frames.json"));
+    check_shape(&r);
+    let errors: Vec<&Value> = r["findings"].as_array().unwrap().iter().filter(|f| f["severity"] == "error").collect();
+    assert_eq!(errors.len(), 1, "{r:#}");
+    assert_eq!(errors[0]["code"], "X-rs-scene-render-DELIVERY");
+    assert!(errors[0]["message"].as_str().unwrap().contains("no adapter is called this 7f3e"), "{}", errors[0]);
+    // the document's own findings are there too
+    assert!(codes(&r).contains(&"INERT-I2".to_string()), "{r:#}");
+    assert_eq!(r["output"]["id"], "frames");
+}
+
+#[test]
+fn no_matching_output_still_writes_the_requested_report() {
+    let d = dir("no-output");
+    let file = d.join("case.scene.xml");
+    std::fs::write(&file, REPORT_SCENE).unwrap();
+    let rp = d.join("r.json");
+    let o = run(&["encode", file.to_str().unwrap(), "--output", "missing", "--report", rp.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&rp);
+    check_shape(&r);
+    assert!(r["findings"].as_array().unwrap().iter().any(|f| f["code"] == "X-rs-scene-render-DELIVERY"), "{r:#}");
+}
+
+#[test]
+fn strict_counts_every_finding_at_warning_or_error_and_no_information() {
+    let d = dir("strict");
+    // information only (INERT-I2, INERT-I8): --strict passes
+    let o = encode_args(&d, REPORT_SCENE, &["--strict"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    // a TXT-FIT warning, which a report lists, fails --strict with or without a report
+    let scene = r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a&#10;b&#10;c" width="180" height="50" size="20" lineHeight="1.5" font="DejaVu Sans"/></assets>
+  <composition><layer id="tall" asset="t"/></composition>
+</scene>"##;
+    let o = encode_args(&d, scene, &["--strict"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--strict"));
+    let o = encode_args(&d, scene, &[]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "without --strict a warning does not fail: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// `encode` of `scene` to a frame sequence over 0.2 s, with `extra` arguments.
+fn encode_args(dir: &Path, scene: &str, extra: &[&str]) -> Output {
+    let file = dir.join("args.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let frames = dir.join("args/f_%04d.png");
+    let mut args = vec!["encode", file.to_str().unwrap(), "-o", frames.to_str().unwrap(), "--end", "0.2"];
+    args.extend_from_slice(extra);
+    run(&args)
+}
