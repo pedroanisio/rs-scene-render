@@ -592,13 +592,16 @@ pub fn plan_light_grid(volumes: &[VolumeDraw], lights: u32, dome: bool) -> Resul
         return Ok(None);
     }
     let extent = hi - lo;
-    let nodes: [u32; 3] = std::array::from_fn(|a| (extent[a] / spacing).ceil().max(1.0) as u32 + 1);
-    let count = nodes.iter().map(|n| u64::from(*n)).product::<u64>();
-    if count > MAX_GRID_NODES {
+    // counted in f64 and refused before any conversion: an absurd domain saturates a u32 axis and wraps a u64 product
+    let axes: [f64; 3] = std::array::from_fn(|a| (extent[a] / spacing).ceil().max(1.0) + 1.0);
+    let wanted = axes.iter().product::<f64>();
+    if wanted.is_nan() || wanted > MAX_GRID_NODES as f64 {
         return Err(format!(
-            "the volume light grid would have {count} nodes (at most {MAX_GRID_NODES}); raise lightGridCell"
+            "the volume light grid would have {wanted:.3e} nodes (at most {MAX_GRID_NODES}); raise lightGridCell"
         ));
     }
+    let nodes: [u32; 3] = axes.map(|n| n as u32);
+    let count = nodes.iter().map(|n| u64::from(*n)).product::<u64>();
     let (radiance, directional) = (radiance && dome, directional && dome);
     let scalar_slots = lights + if directional { directions } else { 0 };
     let rows_per_slot = count.div_ceil(4);
@@ -788,6 +791,16 @@ mod tests {
         assert!(draw(1.0, 0.0, None).with_light_grid(0, 64, 128).is_err());
         assert!(draw(1.0, 0.0, None).with_light_grid(1, 4, 128).is_err());
         assert!(draw(1.0, 0.0, None).with_light_grid(1, 64, 0).is_err());
+    }
+
+    #[test]
+    fn light_grid_of_an_absurd_domain_is_refused_and_does_not_wrap_its_node_count() {
+        // 8 units at voxel 2e-6 is 4e6 nodes an axis: the product, 6.4e19, wraps a u64 to a small number
+        let error = plan_light_grid(&[draw(2e-6, 0.0, Some((1, 64, 4096)))], 2, true).unwrap_err();
+        assert!(error.contains("raise lightGridCell"), "{error}");
+        // 8e9 nodes an axis do not fit a u32 either
+        let error = plan_light_grid(&[draw(1e-9, 0.0, Some((1, 64, 4096)))], 2, true).unwrap_err();
+        assert!(error.contains("raise lightGridCell"), "{error}");
     }
 
     #[test]

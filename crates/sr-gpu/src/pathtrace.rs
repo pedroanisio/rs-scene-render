@@ -624,7 +624,19 @@ mod tests {
         for base in [plain.clone(), grid_source()] {
             let water = water_source(&base);
             assert!(water.contains("fn light_through(") && water.contains("inside = entering;"));
-            assert_eq!(water.matches("light_through(p, ng, n, l, ls.w, in_sigma)").count(), 1);
+            assert!(water.contains("thr *= eta * eta;") && water.contains("let probe = first_interface("));
+            assert!(
+                water.contains("fn water_transport(")
+                    && water.contains("let seen = water_transport(o, d, hit.t, in_sigma);")
+            );
+            assert!(
+                water.contains("if (!entering && dot(t, t) >= 1e-8) { cosi"),
+                "the exit uses the cosine of the air side"
+            );
+            assert_eq!(
+                water.matches("light_through(p, ng, n, l, ls.w, in_sigma, lt.size.y > 0.5 && m.extra.z > 0.5)").count(),
+                1
+            );
             assert!(water.contains("fn volume_transmittance("), "shared code is kept");
         }
     }
@@ -818,28 +830,73 @@ fn grid_source() -> String {
 }
 
 /// The shader for scenes with a transmissive material: the shader it is given (with or without
-/// light grids) plus the refracted shadow ray, which three small replacements hook in. Scenes
+/// light grids) plus the refracted shadow ray, the Fresnel term of a ray leaving the denser medium,
+/// the scaling of radiance across an interface and the start of a camera under the water, which a
+/// few small replacements hook in. Scenes
 /// without such a material keep the text, and so the compiled code, they had.
 fn water_source(base: &str) -> String {
     const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
     const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const FRESNEL: &str = "            let cosi = clamp(dot(v, n), 0.0, 1.0);\n            let r0 = (1.0 - eta) / (1.0 + eta);\n            let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n            let t = refract(d, n, eta);\n";
+    const FOG: &str = "        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }\n        if (HAS_MEDIA) {\n";
     const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
-    for hook in [SIGMA, ENTER, VISIBLE] {
+    for hook in [SIGMA, ENTER, FRESNEL, FOG, VISIBLE] {
         assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
     }
     let hooked = base
-        .replace(SIGMA, &format!("{SIGMA}    var inside = false;\n"))
+        // Schlick's term takes the cosine of the side the light goes to when it leaves the denser medium
+        .replace(
+            FRESNEL,
+            "            let t = refract(d, n, eta);\n\
+             \x20           var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
+             \x20           if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
+             \x20           let r0 = (1.0 - eta) / (1.0 + eta);\n\
+             \x20           let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
+        )
+        // inside absorbing water the media's light is dimmed by the water in front of it, and the water
+        // absorbs across the gaps; elsewhere the march is the plain one
+        .replace(
+            FOG,
+            "        if (any(in_sigma > vec3(0.0))) {\n\
+             \x20           let seen = water_transport(o, d, hit.t, in_sigma);\n\
+             \x20           col += thr * seen.color;\n\
+             \x20           thr *= seen.trans;\n\
+             \x20           if (met == 0u) { alpha += (1.0 - alpha) * (1.0 - seen.open); }\n\
+             \x20       } else if (HAS_MEDIA) {\n",
+        )
+        .replace(
+            SIGMA,
+            // a camera under the water starts inside the medium: the first transmissive surface
+            // straight up (the scene's up is -y) is met from the inside
+            &format!(
+                "{SIGMA}    var inside = false;\n\
+                 \x20   {{\n\
+                 \x20       let probe = first_interface(o, vec3(0.0, -1.0, 0.0), 1e30);\n\
+                 \x20       if (probe.found && !probe.entering) {{ inside = true; in_sigma = probe.sigma; }}\n\
+                 \x20   }}\n"
+            ),
+        )
         .replace(
             ENTER,
-            "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); inside = entering; }\n",
+            // radiance over eta^2 is the same on both sides of an interface: a path that goes
+            // from a medium of index n1 into one of index n2 carries (n1 / n2)^2
+            "                if (WATER) {\n\
+             \x20                   in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
+             \x20                   inside = entering;\n\
+             \x20                   thr *= eta * eta;\n\
+             \x20               }\n",
         )
         .replace(
             VISIBLE,
             &format!(
-                "            if (WATER && inside && lt.size.y > 0.5 && m.extra.z > 0.5) {{\n\
+                "            if (WATER && inside) {{\n\
                  \x20               // a surface under water (or glass): the light reaches it refracted\n\
-                 \x20               let seen = light_through(p, ng, n, l, ls.w, in_sigma);\n\
-                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * rad * seen.vis;\n\
+                 \x20               let seen = light_through(p, ng, n, l, ls.w, in_sigma, lt.size.y > 0.5 && m.extra.z > 0.5);\n\
+                 \x20               var through = seen.vis;\n\
+                 \x20               if (HAS_MEDIA && m.extra.z > 0.5) {{\n\
+                 \x20                   through *= volume_transmittance(p + ng * 1e-2, seen.dir, seen.inside) * volume_transmittance(seen.q, seen.la, seen.outside);\n\
+                 \x20               }}\n\
+                 \x20               var c = thr * bsdf(s, n, v, seen.dir, light_lobes(lt)) * max(dot(n, seen.dir), 0.0) * rad * through;\n\
                  \x20               if (bounce > 0u) {{ c = min(c, vec3(20.0)); }}\n\
                  \x20               col += c;\n\
                  \x20               continue;\n\

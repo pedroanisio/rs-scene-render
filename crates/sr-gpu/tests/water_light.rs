@@ -93,11 +93,13 @@ fn water_over_a_lamp(attenuation: &str, depth: f32) -> String {
 }
 
 /// The water absorbs by Beer-Lambert along the path inside it: after `attenuationDistance` units
-/// the light left is `attenuationColor`, per channel. Without the attributes it does not absorb.
+/// the light left is `attenuationColor`, per channel. Without the attributes it does not absorb. The
+/// lamp behind the pane is a submerged emitter: seen from the air it is 1 / eta^2 as bright.
 #[test]
 fn water_absorbs_by_beer_lambert_along_the_path() {
-    // reflection of the interface at normal incidence, as the tracer's Schlick term gives it
-    let transmitted = 1.0 - ((1.0 - 1.0 / 1.333f32) / (1.0 + 1.0 / 1.333)).powi(2);
+    // reflection of the interface at normal incidence, as the tracer's Schlick term gives it; the
+    // lamp is in the water, so the radiance seen from the air is 1 / eta^2 of the lamp's own
+    let transmitted = (1.0 - ((1.0 - 1.0 / 1.333f32) / (1.0 + 1.0 / 1.333)).powi(2)) / (1.333 * 1.333);
     let colour = [0x80u8, 0xC0, 0xE0];
     let attenuation = r##"attenuationColor="#80C0E0" attenuationDistance="4""##;
     let Some(plain) = render(&water_over_a_lamp("", 4.0)) else { return };
@@ -236,11 +238,37 @@ fn emissive_sphere(centre: glam::Vec3, radius: f32) -> String {
 
 const NO_LIGHT: &str = r##"<light id="off" type="ambient" color="#000000" intensity="0"/>"##;
 
-/// How much light the wet floor keeps against the dry floor under one light, measured on the open
-/// floor: analytic light with the engine's shadow rays against brute force (an emissive copy of the
-/// light, found by paths that refract out of the water), each as wet over dry so the two lights'
-/// calibration cancels. Returns (analytic, brute force, relative noise of the brute-force ratio).
-fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, bounces: u32) -> Option<(f32, f32, f32)> {
+/// What one comparison against brute force found over one region: the analytic ratio of wet over
+/// dry, the brute-force one, and the relative noise of the brute-force ratio.
+#[derive(Clone, Copy, Debug)]
+struct Ratio {
+    got: f32,
+    want: f32,
+    noise: f32,
+}
+
+/// The two regions a comparison looks at: the open floor, and the box standing on it (its vertical
+/// faces and its top, picked out by their colour in the analytic wet frame).
+#[derive(Clone, Copy, Debug)]
+struct Wet {
+    floor: Ratio,
+    face: Ratio,
+}
+
+/// Mean and relative noise of the mean over the pixels at `indices`, from their spread.
+fn region_noise(px: &[[f32; 4]], indices: &[usize]) -> (f32, f32) {
+    let values: Vec<f32> = indices.iter().map(|i| lum(px[*i])).collect();
+    let n = values.len() as f32;
+    let mean = values.iter().sum::<f32>() / n;
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (n - 1.0);
+    (mean, variance.sqrt() / mean / n.sqrt())
+}
+
+/// How much light a floor and a box under water keep against the same scene dry, under one light:
+/// analytic light with the engine's shadow rays against brute force (an emissive copy of the light,
+/// found by paths that refract out of the water), each as wet over dry so the two lights'
+/// calibration cancels.
+fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, bounces: u32) -> Option<Wet> {
     let brute = brute_force();
     let render = |water: &str, lights: &str, extra: &str, samples: u32, bounces: u32| {
         let xml = seabed(water, lights, extra, LOOKING_DOWN, brute.size, samples, bounces)
@@ -251,10 +279,20 @@ fn wet_over_dry(analytic: &str, emissive: &str, emission: f32, water: &str, boun
     let wet = render(water, analytic, "", 128, 4)?;
     let dry_ref = render("", NO_LIGHT, emissive, brute.samples, bounces)?;
     let wet_ref = render(water, NO_LIGHT, emissive, brute.samples, bounces)?;
-    let ratio = |wet: &common::Rendered, dry: &common::Rendered| patch(wet, brute.floor) / patch(dry, brute.floor);
     let width = brute.size[0] as usize;
-    let noise = |r: &common::Rendered| patch_noise(&r.px, width, brute.floor).1;
-    Some((ratio(&wet, &dry), ratio(&wet_ref, &dry_ref), noise(&wet_ref).hypot(noise(&dry_ref))))
+    let [x0, y0, x1, y1] = brute.floor;
+    let floor: Vec<usize> = (y0..y1).flat_map(|y| (x0..x1).map(move |x| y * width + x)).collect();
+    // the box: red far above green in the analytic wet frame, away from the frame's edge
+    let face: Vec<usize> =
+        wet.px.iter().enumerate().filter(|(_, p)| p[0] > 2.0 * p[1] && p[0] > 0.01).map(|(i, _)| i).collect();
+    assert!(face.len() > 150, "the box is seen: {} pixels", face.len());
+    let ratio = |indices: &[usize]| {
+        let mean = |r: &common::Rendered| region_noise(&r.px, indices);
+        let (analytic_wet, analytic_dry) = (mean(&wet).0, mean(&dry).0);
+        let ((ref_wet, wet_noise), (ref_dry, dry_noise)) = (mean(&wet_ref), mean(&dry_ref));
+        Ratio { got: analytic_wet / analytic_dry, want: ref_wet / ref_dry, noise: wet_noise.hypot(dry_noise) }
+    };
+    Some(Wet { floor: ratio(&floor), face: ratio(&face) })
 }
 
 /// The sun reaches a floor under water: through the interface with the Fresnel loss, the change of
@@ -269,11 +307,17 @@ fn the_sun_lights_a_floor_under_water_as_brute_force_does() {
     let (distance, radius) = (500.0, 60.0);
     let omega = std::f32::consts::PI * radius * radius / (distance * distance);
     let lamp = emissive_sphere(-shines(yaw, pitch) * distance, radius);
-    let Some((got, want, noise)) = wet_over_dry(&analytic, &lamp, sun / omega, "plain", 24) else { return };
-    eprintln!("sun: wet over dry {got} against the brute force {want} (noise {noise})");
-    assert!(want > 0.3, "the reference keeps light under the water: {want}");
-    let limit = tolerance(0.08, noise, 0.0);
-    assert!((got / want - 1.0).abs() < limit, "wet over dry: {got} against the brute force {want} (within {limit})");
+    let Some(wet) = wet_over_dry(&analytic, &lamp, sun / omega, "plain", 24) else { return };
+    for (name, r) in [("floor", wet.floor), ("box", wet.face)] {
+        let Ratio { got, want, noise } = r;
+        eprintln!("sun {name}: wet over dry {got} against the brute force {want} (noise {noise})");
+        assert!(want > 0.3, "{name}: the reference keeps light under the water: {want}");
+        let limit = tolerance(0.08, noise, 0.0);
+        assert!(
+            (got / want - 1.0).abs() < limit,
+            "{name}: wet over dry {got} against the brute force {want} (within {limit})"
+        );
+    }
 }
 
 /// A point light and a sphere light reach the floor under the water as brute force sees them.
@@ -302,14 +346,17 @@ fn point_and_sphere_lights_reach_a_floor_under_water_as_brute_force_does() {
             ),
         ),
     ] {
-        let Some((got, want, noise)) = wet_over_dry(&light, &lamp, emission, "plain", 24) else { return };
-        eprintln!("{name}: wet over dry {got} against the brute force {want} (noise {noise})");
-        assert!(want > 0.3, "{name}: the reference keeps light under the water: {want}");
-        let limit = tolerance(0.15, noise, 0.0);
-        assert!(
-            (got / want - 1.0).abs() < limit,
-            "{name}: wet over dry {got} against the brute force {want} (within {limit})"
-        );
+        let Some(wet) = wet_over_dry(&light, &lamp, emission, "plain", 24) else { return };
+        for (region, r) in [("floor", wet.floor), ("box", wet.face)] {
+            let Ratio { got, want, noise } = r;
+            eprintln!("{name} {region}: wet over dry {got} against the brute force {want} (noise {noise})");
+            assert!(want > 0.3, "{name} {region}: the reference keeps light under the water: {want}");
+            let limit = tolerance(0.15, noise, 0.0);
+            assert!(
+                (got / want - 1.0).abs() < limit,
+                "{name} {region}: wet over dry {got} against the brute force {want} (within {limit})"
+            );
+        }
     }
 }
 
@@ -431,18 +478,6 @@ fn an_untouched_transmissive_object_leaves_the_picture_alone() {
     let (Some(a), Some(b)) = (render(&plain), render(&with_ball)) else { return };
     let db = common::psnr(&a.px, &b.px);
     assert!(db > 55.0, "the picture moved: {db:.1} dB");
-}
-
-/// The camera starts outside the denser medium and a path is "inside" only after it refracts in.
-/// A camera under the water therefore still finds its floor dark under the sun (documented limit),
-/// while the dome, which arrives by sampled paths, lights it.
-#[test]
-fn a_camera_under_the_water_does_not_yet_see_the_sun_on_the_floor() {
-    let sun = r##"<light id="sun" type="directional" color="#FFFFFF" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>"##;
-    let under = r#"x="0" y="2" z="-20" pitch="-8" fov="45""#;
-    let xml = seabed("plain", sun, "", under, SMALL, 16, 2).replace("{emission}", "1");
-    let Some(r) = render(&xml) else { return };
-    assert!(patch(&r, [75, 100, 175, 140]) < 0.01, "the floor under the sun, seen from under the water");
 }
 
 /// A sea with steep waves over a floor, lit by the sun and the dome; `waves` is the ocean's wave
