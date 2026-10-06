@@ -57,7 +57,10 @@ fn same(value: &AttrValue, default: &str) -> bool {
 
 /// Reports every use of a pending SREP's feature on `e` (one element; the caller walks the tree).
 pub fn check(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
-    let name = e.element_name();
+    // an element reached through a typed field (an output, the project, an accessibility block) is named by its
+    // complex type ("outputType"); one reached through a child enum is named by its element ("shape")
+    let raw = e.element_name();
+    let name = raw.strip_suffix("Type").unwrap_or(raw);
     for p in PENDING {
         let element_use = p.elements.contains(&name);
         let attribute_use = p.attributes.iter().find(|(el, attr, default)| {

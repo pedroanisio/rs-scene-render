@@ -49,3 +49,23 @@ fn an_ordinary_shape_has_no_e22_whatever_defaults_the_schema_gives_its_pending_a
         <shape id="p" shape="rect" width="10" height="10" regionPadding="0"/></composition></scene>"##;
     assert!(evaluate(xml).iter().all(|d| d.code != "E22"));
 }
+
+#[test]
+fn a_pending_attribute_on_a_typed_field_element_is_found_by_its_element_name() {
+    // output, project, accessibility and captionTrack are reached as fields, not through a child enum
+    for (what, xml) in [
+        (
+            "output/@report",
+            r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1"/>
+            <output id="o" path="out/o.mp4" codec="h264" report="out/r.json"/><composition/></scene>"##,
+        ),
+        (
+            "project/@fontPolicy",
+            r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="1" fontPolicy="pinned"/>
+            <composition/></scene>"##,
+        ),
+    ] {
+        let w = evaluate(xml);
+        assert!(w.iter().any(|d| d.code == "E22"), "{what}: {w:?}");
+    }
+}
