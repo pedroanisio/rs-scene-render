@@ -46,6 +46,8 @@ mod pockets;
 mod sampling;
 #[cfg(test)]
 mod voxel_memory;
+#[cfg(test)]
+mod window;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -829,9 +831,13 @@ impl State {
             out
         };
         let window: [i64; 3] = std::array::from_fn(|a| self.window[a] + by[a]);
+        let origin: [f64; 3] = std::array::from_fn(|a| self.base[a] + window[a] as f64 * self.h);
+        if (0..3).any(|a| !origin[a].is_finite() || origin[a] + 0.5 * self.h == origin[a]) {
+            return Err(Error::Invalid("the window has gone so far that the origin cannot represent a voxel centre"));
+        }
         Ok(State {
             cells: self.cells,
-            origin: std::array::from_fn(|a| self.base[a] + window[a] as f64 * self.h),
+            origin,
             base: self.base,
             window,
             lost: self.lost + lost,
@@ -1525,16 +1531,26 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &
     Ok(())
 }
 
+/// A number for the cell of space that cell `c` of a window moved by `window` cells is: 21 bits of each of its three
+/// coordinates counted from the domain's own origin.
+fn global_cell(c: [usize; 3], window: [i64; 3]) -> u64 {
+    let part = |a: usize| ((c[a] as i64 + window[a] + (1 << 20)) as u64) & 0x1f_ffff;
+    part(0) | part(1) << 21 | part(2) << 42
+}
+
 fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
     let count = s.density.len();
     let mut force = vec![[0.0; 3]; count];
     {
         let (temperature, ambient) = (&s.temperature, s.ambient);
+        let (cells, window, follows) = (s.cells, s.window, spec.follow.is_some());
         force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
+            // the noise of a window that moves belongs to the cell of space, not to the cell of the window
+            let key = if follows { global_cell(coords(k, cells), window) } else { k as u64 };
             for a in 0..3 {
                 f[a] = input.acceleration[a]
                     + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])
-                    + spec.turbulence * crate::rng::signed(spec.seed, k as u64, step * 3 + a as u64);
+                    + spec.turbulence * crate::rng::signed(spec.seed, key, step * 3 + a as u64);
             }
             f[1] -= spec.buoyancy * (temperature[k] - ambient);
         });
