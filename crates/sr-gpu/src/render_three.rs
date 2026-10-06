@@ -1256,6 +1256,7 @@ impl Renderer {
                         opacity,
                         cast_shadow: flag(&attrs(n), "castShadow", true),
                         receive_shadow: flag(&attrs(n), "receiveShadow", true),
+                        shadow_catcher: false,
                     });
                 }
             }
@@ -1276,6 +1277,9 @@ impl Renderer {
     ) {
         let a = attrs(n);
         let (cast, receive) = (flag(&a, "castShadow", true), flag(&a, "receiveShadow", true));
+        // a shadow catcher draws only the darkening of the casters and casts no shadow itself
+        let catcher = flag(&a, "shadowCatcher", false);
+        let cast = cast && !catcher;
         let doc_mat = match a.str("material") {
             Some(id) => {
                 let m = self.document_material(plan, ctx, &id);
@@ -1316,6 +1320,7 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: catcher,
                 });
             }
             return;
@@ -1498,6 +1503,7 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: catcher,
                 });
             }
         }
@@ -1600,6 +1606,7 @@ impl Renderer {
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,
+                    shadow_catcher: false,
                 });
             }
         }
@@ -1823,6 +1830,7 @@ impl Renderer {
                     opacity: alpha,
                     cast_shadow: t.cast_shadow,
                     receive_shadow: t.receive_shadow,
+                    shadow_catcher: false,
                 });
             }
         }

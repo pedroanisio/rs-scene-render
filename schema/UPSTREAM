@@ -58,4 +58,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - object3D @node and @materialOverride on imported models (rule MOV1): srep-0000-model-node-material-select.md (2399e6f).
   - material @unevenness, @unevennessScale and @unevennessSeed (a clay finish on any mesh): srep-0000-material-unevenness.md (1f65d9e).
   - E19 for an effect attribute its type does not read (INERT-I13): the SREP 18 amendment, srep-0000-srep18-amendment-inert-rules.md (f199c27).
+  - object3D @shadowCatcher (a surface that draws only the shadow it receives): srep-0000-shadow-catcher.md (e4fea03).
 The xsd and sch above differ from the vendored sha256 sums by these edits.

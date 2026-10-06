@@ -44,6 +44,7 @@ fn draw(eng: &ThreeEngine, p: &sr_3d::Primitive, at: Vec3, mat: MaterialParams) 
         opacity: 1.0,
         cast_shadow: true,
         receive_shadow: true,
+        shadow_catcher: false,
     }
 }
 

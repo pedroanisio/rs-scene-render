@@ -69,7 +69,7 @@ fn material_fragment(tex: texture_2d<f32>, uv: vec2<f32>, slot: u32) -> vec4<f32
 struct Object {
     model: mat4x4<f32>,
     normal: mat4x4<f32>,
-    // opacity, receive shadow, scene units per mesh unit, unused
+    // opacity, receive shadow, scene units per mesh unit, shadow catcher
     params: vec4<f32>,
     // unused xyz, light view index for shadow passes
     spacing: vec4<f32>,
@@ -279,6 +279,10 @@ struct Surface {
     occlusion: f32,
     specular_weight: f32,
 };
+
+fn luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
 
 fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     let ty = u32(li.pos.w);
@@ -543,13 +547,17 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     let s = surface(i, front);
     let mode = u32(mat.p1.x);
     if (mode == 1u && s.alpha < mat.p0.w) { discard; }
-    if (mat.p1.z > 0.5) {
+    let catcher = obj.params.w > 0.5;
+    if (mat.p1.z > 0.5 && !catcher) {
         // unlit
         let a = select(1.0, s.alpha, mode == 2u);
         o.color = vec4(s.albedo * a, a);
         return o;
     }
     var col = vec3(0.0);
+    // a shadow catcher compares the light that arrives (lit_sh) with the light that would arrive without casters (lit_un)
+    var lit_un = 0.0;
+    var lit_sh = 0.0;
     // screen-space ambient occlusion darkens the ambient and environment light only
     var ao = 1.0;
     if (fr.lens.z > 0.5) { ao = textureLoad(ao_tex, vec2<i32>(i.clip.xy), 0).r; }
@@ -575,6 +583,10 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
             sh = ao;
         }
         col += contribution * sh;
+        if (catcher) {
+            lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+            lit_sh += luma(contribution * sh);
+        }
     }
     // image-based lighting from the dome
     if (fr.params2.z > 0.5) {
@@ -591,11 +603,22 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
             ibl = ibl * (1.0 - fc) + env_sample(r, mat.p2.y * (fr.params2.w - 1.0)) * fc;
         }
         col += ibl;
+        if (catcher) {
+            lit_un += luma(ibl);
+            lit_sh += luma(ibl);
+        }
     }
     if (mat.p2.z > 0.0) {
         let nv = max(dot(s.n, s.v), 1e-3);
         let ft = vec3(1.0) - f_schlick(s.f0, s.f90, nv);
         col += transmission(s) * ft * mat.p2.z * (1.0 - s.metallic);
+    }
+    if (catcher) {
+        // black, with the share of light the casters take away as alpha (SREP shadow-catcher)
+        let kept = select(1.0, lit_sh / lit_un, lit_un > 1e-6);
+        let alpha = clamp(obj.params.x * (1.0 - kept), 0.0, 1.0);
+        o.color = vec4(0.0, 0.0, 0.0, alpha);
+        return o;
     }
     var em = mat.emissive.rgb * mat.emissive.w;
     if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * material_fragment(emissive_map, i.emissive_uv, 4u).rgb; }

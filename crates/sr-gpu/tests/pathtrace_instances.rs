@@ -36,6 +36,7 @@ fn repeated_prototypes_fit_without_triangle_expansion_and_match_expanded_pixels(
                 opacity: 1.,
                 cast_shadow: i % 2 == 0,
                 receive_shadow: true,
+                shadow_catcher: false,
             })
             .collect(),
         lights: Vec::new(),

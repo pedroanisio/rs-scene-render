@@ -140,6 +140,9 @@ pub fn notes(scene: &Scene3) -> Vec<String> {
     if scene.draws.iter().any(|d| d.material.unevenness > 0.0 && !d.material.unlit) {
         notes.push("material unevenness is not applied by the path tracer".to_string());
     }
+    if scene.draws.iter().any(|d| d.shadow_catcher) {
+        notes.push("a shadow catcher is not drawn by the path tracer".to_string());
+    }
     notes
 }
 
@@ -255,7 +258,8 @@ pub fn build(scene: &Scene3) -> PtScene {
     let mut prototype_ids = std::collections::HashMap::new();
     let mut prototypes: Vec<Vec<Triangle>> = Vec::new();
     let mut instance_records = std::collections::HashMap::new();
-    for dr in &scene.draws {
+    // a shadow catcher has no colour of its own and the tracer cannot evaluate its darkening: it is left out (see `notes`)
+    for dr in scene.draws.iter().filter(|d| !d.shadow_catcher) {
         let m = &dr.material;
         let maps = std::array::from_fn(|slot| {
             dr.maps[slot].as_ref().map_or([0; 4], |texture| {

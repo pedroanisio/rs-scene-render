@@ -140,6 +140,8 @@ pub struct Draw3 {
     pub opacity: f32,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// A shadow catcher: draws no colour of its own, only the darkening the shadow casters cause (SREP shadow-catcher).
+    pub shadow_catcher: bool,
 }
 
 impl Draw3 {
@@ -1791,7 +1793,12 @@ impl ThreeEngine {
                 model: dr.model.to_cols_array_2d(),
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
                 // the uniform part of the model matrix: scene units per unit of the mesh (for the unevenness noise)
-                params: [dr.opacity, dr.receive_shadow as u32 as f32, dr.model.x_axis.truncate().length(), 0.0],
+                params: [
+                    dr.opacity,
+                    (dr.receive_shadow || dr.shadow_catcher) as u32 as f32,
+                    dr.model.x_axis.truncate().length(),
+                    dr.shadow_catcher as u32 as f32,
+                ],
                 spacing: [0.0; 4],
                 padding: [[0.; 4]; 6],
             };
@@ -1802,7 +1809,11 @@ impl ThreeEngine {
             let mat = *material_slots.entry(bytes.to_vec()).or_insert_with(|| pad(&mut mat_bytes, bytes));
             let kind = if dr.material.transmission > 0.0 && !dr.material.unlit {
                 Kind::Transmissive
-            } else if dr.material.alpha_mode == AlphaMode::Blend || dr.opacity < 1.0 || dr.material.opacity < 1.0 {
+            } else if dr.shadow_catcher
+                || dr.material.alpha_mode == AlphaMode::Blend
+                || dr.opacity < 1.0
+                || dr.material.opacity < 1.0
+            {
                 Kind::Blend
             } else {
                 Kind::Opaque
@@ -1823,7 +1834,7 @@ impl ThreeEngine {
         let mut shadow_objs: Vec<(usize, u32, u32)> = Vec::new();
         for (v, &shadow_mat) in shadow_mats.iter().enumerate() {
             for (i, dr) in scene.draws.iter().enumerate() {
-                if dr.cast_shadow && dr.opacity > 0.0 {
+                if dr.cast_shadow && !dr.shadow_catcher && dr.opacity > 0.0 {
                     // Cached undeformed bounds are authoritative only without
                     // shader displacement. Other casters keep the full path.
                     if let MeshSrc::Cached(mesh) = &dr.mesh {
@@ -2522,6 +2533,7 @@ mod tests {
             opacity: 1.0,
             cast_shadow: false,
             receive_shadow: false,
+            shadow_catcher: false,
         };
         let mut scene = Scene3 {
             cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 32.0, 32.0),
@@ -2557,6 +2569,7 @@ mod tests {
                 opacity: 1.,
                 cast_shadow: false,
                 receive_shadow: false,
+                shadow_catcher: false,
             })
             .collect();
         for mode in 0..3 {

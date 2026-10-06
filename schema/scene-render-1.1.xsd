@@ -2734,6 +2734,9 @@
     <xs:attribute name="radius" type="positiveDecimal" default="50"/>
     <xs:attribute name="castShadow" type="xs:boolean" default="true"/>
     <xs:attribute name="receiveShadow" type="xs:boolean" default="true"/>
+    <xs:attribute name="shadowCatcher" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>The surface draws no colour of its own: it is transparent where no light is blocked and black, with alpha up to @opacity, where the shadow casters block the light that would reach it, so that it darkens what is behind the 3D layer by the share of light taken away (ambient light counted). It casts no shadows and always receives them. The path tracer does not draw it.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="visible" type="xs:boolean" default="true"/>
     <xs:attribute name="opacity" type="unitDecimal" default="1"/>
     <xs:attribute name="start" type="xs:double" default="0"/>

@@ -154,6 +154,7 @@ impl Renderer {
                             opacity,
                             cast_shadow: cast,
                             receive_shadow: receive,
+                            shadow_catcher: false,
                         });
                     }
                     Some(surface)
@@ -173,6 +174,7 @@ impl Renderer {
                 opacity,
                 cast_shadow: cast,
                 receive_shadow: receive,
+                shadow_catcher: false,
             });
         }
     }
