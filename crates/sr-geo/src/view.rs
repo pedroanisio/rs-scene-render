@@ -156,6 +156,13 @@ impl Map {
                 reach[1] = reach[1].max((b[0][1] - c[1]).abs()).max((b[1][1] - c[1]).abs());
             }
         }
+        // A conformal cone sends the pole opposite its parallels to infinity, so the whole sphere has no
+        // finite fit and the scale collapses (a default `lambert-conformal` map drew nothing). Without a
+        // `fit`, such a map shows at most a window of one equirectangular world round its centre.
+        if fit.is_empty() && kind == Kind::LambertConformal {
+            let window = std::f64::consts::PI * 150.0;
+            reach = [reach[0].min(window), reach[1].min(window)];
+        }
         let half = [(size[0] / 2.0 - padding).max(1.0), (size[1] / 2.0 - padding).max(1.0)];
         let k = (half[0] / reach[0].max(1e-9)).min(half[1] / reach[1].max(1e-9));
         if k.is_finite() && k > 0.0 {
