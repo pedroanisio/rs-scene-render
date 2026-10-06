@@ -459,12 +459,14 @@ fn grade(c3: vec3<f32>, uv: vec2<f32>, px: vec2<f32>) -> vec3<f32> {
             c = mix(c, unpre(g), v[0].x * g.a);
         }
         case 20u: { // selective colour: hue centre v0.x deg, tolerance v0.y, saturation v0.z, brightness v0.w; v1.x amount
-            var h = rgb2hsv(enc(c));
+            // every quantity is display-encoded (SREP 29 rule 2), the amount's mix with the original included
+            let e = enc(c);
+            var h = rgb2hsv(e);
             let d = abs(fract(h.x - v[0].x / 360.0 + 0.5) - 0.5);
             let w = 1.0 - smoothstep(v[0].y * 0.5, v[0].y * 0.5 + 0.05, d);
             h.y = clamp(h.y * mix(1.0, v[0].z, w), 0.0, 1.0);
             h.z = h.z + v[0].w * w;
-            c = mix(c, dec(hsv2rgb(h)), v[1].x);
+            c = dec(mix(e, hsv2rgb(h), v[1].x));
         }
         case 21u: { // film grain: v0 0.05·amount, _, frame, field scale (0: draw here); v1 strength, response
             // seeded-hash normals per sample, (y · width + x) · 3 + channel, seed in i.yz, the frame as the channel
