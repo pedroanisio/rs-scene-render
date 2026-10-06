@@ -1,5 +1,7 @@
 //! Text that does not fit its box (SREP 18 `TXT-FIT`) or loses characters to `maxLines` or `overflow`
-//! (`TXT-CUT`), measured on the layout each text layer is drawn with, at the size drawn (after `autoFit`).
+//! (`TXT-CUT`), measured on the layout each text layer is drawn with, at the size drawn (after `autoFit`); and the
+//! faces it is drawn with (SREP 21): characters no permitted face has (`FONT-GLYPH`), and faces other than the
+//! family, weight or style asked for (`FONT-SUB`).
 //!
 //! The audit evaluates the frames it is given, at most [`MAX_FRAMES`] of them; a longer range is sampled with the
 //! safe-area audit's frame choice ([`sr_eval::safe_area::sample_times`]: window edges, key times and a grid), and
@@ -58,6 +60,10 @@ pub struct TextFit {
     pub lost: Option<Span>,
     /// Characters dropped (`TXT-CUT`).
     pub dropped: Option<Span>,
+    /// Characters drawn as `.notdef`, with the first time each was seen (`FONT-GLYPH`).
+    pub missing: Vec<(char, f64)>,
+    /// Faces drawn instead of what a style asked for, with the first time each was seen (`FONT-SUB`).
+    pub substituted: Vec<(sr_text::font::Substitution, f64)>,
 }
 
 /// The findings, by layer in first-seen order, and how the frames were chosen.
@@ -144,13 +150,35 @@ pub fn check(ev: &Evaluator, times: &[f64]) -> Outcome {
                 continue;
             }
             let Some(lay) = layout_of(&mut tc, p, &g, n) else { continue };
-            if lay.overflow <= 0.0 && lay.dropped == 0 {
+            if lay.overflow <= 0.0 && lay.dropped == 0 && lay.missing.is_empty() && lay.substituted.is_empty() {
                 continue;
             }
             let next = found.len();
             let (_, f) = found.entry(n.id.to_string()).or_insert_with(|| {
-                (next, TextFit { id: n.id.to_string(), loc: n.elem.loc(), overflow: None, lost: None, dropped: None })
+                let (missing, substituted) = (Vec::new(), Vec::new());
+                (
+                    next,
+                    TextFit {
+                        id: n.id.to_string(),
+                        loc: n.elem.loc(),
+                        overflow: None,
+                        lost: None,
+                        dropped: None,
+                        missing,
+                        substituted,
+                    },
+                )
             });
+            for &c in &lay.missing {
+                if !f.missing.iter().any(|(m, _)| *m == c) {
+                    f.missing.push((c, t));
+                }
+            }
+            for s in &lay.substituted {
+                if !f.substituted.iter().any(|(m, _)| m == s) {
+                    f.substituted.push((s.clone(), t));
+                }
+            }
             if lay.overflow > 0.0 {
                 Span::note(&mut f.overflow, lay.overflow, t);
                 let clipped = if lay.clip { lay.overflow } else { 0.0 };

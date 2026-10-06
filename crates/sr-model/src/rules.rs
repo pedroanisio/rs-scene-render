@@ -565,6 +565,40 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// SREP 21 (pattern p74): with `project/@fontPolicy="pinned"`, every face comes from a font asset pinned by
+    /// `sha256`. C70 to C73, as their XPath tests read: no `@fontFile` anywhere; every font asset carries `@sha256`;
+    /// every `@font` value is the family of a font asset; every comma-separated `@fallback` family, space-normalised,
+    /// is the family of a font asset.
+    fn pinned_fonts(&mut self, scene: Node) {
+        let pinned = kids(scene, "project").any(|p| p.attribute("fontPolicy") == Some("pinned"));
+        if !pinned {
+            return;
+        }
+        let fonts: Vec<Node> = kids(scene, "assets").flat_map(|a| kids(a, "font")).collect();
+        let families: HashSet<&str> = fonts.iter().filter_map(|f| f.attribute("family")).collect();
+        let attrs =
+            |name: &'static str| scene.descendants().filter_map(move |d| d.attribute(name)).collect::<Vec<&str>>();
+        self.check(attrs("fontFile").is_empty(), scene, "C70", || {
+            "fontPolicy=\"pinned\": faces come from font assets, not @fontFile.".into()
+        });
+        self.check(fonts.iter().all(|f| f.attribute("sha256").is_some()), scene, "C71", || {
+            "fontPolicy=\"pinned\": every font asset carries @sha256.".into()
+        });
+        self.check(attrs("font").iter().all(|f| families.contains(f)), scene, "C72", || {
+            "fontPolicy=\"pinned\": every @font names the family of a font asset.".into()
+        });
+        let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let fallbacks_ok = attrs("fallback")
+            .iter()
+            .flat_map(|f| f.split(','))
+            // str:tokenize returns no empty tokens
+            .filter(|t| !t.is_empty())
+            .all(|t| families.iter().any(|fam| *fam == normalize(t)));
+        self.check(fallbacks_ok, scene, "C73", || {
+            "fontPolicy=\"pinned\": every @fallback family names a font asset.".into()
+        });
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -599,6 +633,10 @@ impl<'a> Eval<'a> {
         let v = |k: &str| n.attribute(k).unwrap_or("").to_string();
         let local = if n.tag_name().namespace().is_none() { n.tag_name().name() } else { "" };
         let parent_is = |name: &str| n.parent_element().is_some_and(|p| is(p, name));
+
+        if local == "scene" && n.parent_element().is_none() {
+            self.pinned_fonts(n);
+        }
 
         if local == "scene" && n.parent_element().is_none() && a("version") != Some("1.3") {
             let uses_volume = n.descendants().any(|d| {

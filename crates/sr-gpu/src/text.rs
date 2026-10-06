@@ -33,6 +33,9 @@ pub fn map_drape(
     mp: &m::MapAsset,
     frame: Option<(sr_geo::view::Map, sr_geo::view::View)>,
 ) -> Result<Drawing, String> {
+    // the faces labels may use (all of them, or only the document's under fontPolicy="pinned")
+    let failed = register_fonts(tc, cx.p);
+    cx.unsupported.extend(failed);
     map::map_drawing_as(tc, cx, mp, frame)
 }
 /// Paint resolution over a box (node-local x, y, w, h).
@@ -272,24 +275,31 @@ fn register_fonts(tc: &mut TextCache, p: &Program) -> Vec<String> {
         return Vec::new();
     }
     tc.font_assets.insert(String::new(), None);
+    // SREP 21: under fontPolicy="pinned" the faces are the document's font assets and nothing else
+    let pinned = p.fonts_pinned();
+    if pinned {
+        tc.lib = Some(FontLib::pinned());
+    }
     // fonts are referenced by text styles (fontAsset), never by layers, so they are not in the program's
     // asset table: read them from the documents themselves
     let mut found = Vec::new();
+    let mut faces = Vec::new();
     let docs = std::iter::once(&p.scene).chain(p.includes.iter().map(|i| &i.1));
     for (doc, scene) in docs.enumerate() {
         let base = p.base_dirs.get(doc).cloned().unwrap_or_default();
-        for c in scene.assets.iter().flat_map(|a| a.children.iter()) {
-            if let (AssetsChild::Font(f), Some(id)) = (c, c.id()) {
-                found.push((id.to_string(), resolve_path(&f.src, &base).map(|x| (x, f.collection_index as u32))));
-            }
+        for f in sr_eval::font_policy::font_assets(scene) {
+            let at = resolve_path(&f.src, &base).map(|x| (x, f.index));
+            found.push((f.id.clone(), at.clone()));
+            faces.push((f, at));
         }
     }
     let lib = tc.lib();
     let mut failed = Vec::new();
-    for (k, v) in &found {
-        if let Some((path, idx)) = v {
-            if lib.file(path, *idx).is_none() {
-                failed.push(format!("font asset {k}: {} is not a font this renderer can read", path.display()));
+    for (f, at) in &faces {
+        if let Some((path, idx)) = at {
+            let face = if pinned { lib.pin(path, *idx, &f.family, f.weight, f.italic) } else { lib.file(path, *idx) };
+            if face.is_none() {
+                failed.push(format!("font asset {}: {} is not a font this renderer can read", f.id, path.display()));
             }
         }
     }

@@ -119,21 +119,26 @@ struct TextSolid {
     bevel: f32,
 }
 fn text_geometry(p: &crate::Program, spec: TextSolid, budget: usize) -> Result<sr_3d::Primitive, String> {
-    let mut lib = sr_text::FontLib::new(true);
+    // SREP 21: under fontPolicy="pinned" only the document's font assets, never the host's fonts
+    let pinned = p.fonts_pinned();
+    let mut lib = if pinned { sr_text::FontLib::pinned() } else { sr_text::FontLib::new(true) };
     let mut remaining = budget;
     for (doc, scene) in std::iter::once(&p.scene).chain(p.includes.iter().map(|i| &i.1)).enumerate() {
-        for asset in scene.assets.iter().flat_map(|a| &a.children) {
-            if let sr_model::model::AssetsChild::Font(font) = asset {
-                let base = p.base_dirs.get(doc).map(|p| p.as_path()).unwrap_or_else(|| std::path::Path::new(""));
-                let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&font.src, base) else {
-                    return Err("text solid font requires a resolved local file".into());
-                };
-                let bytes = usize::try_from(std::fs::metadata(&path).map_err(|e| e.to_string())?.len())
-                    .map_err(|_| "text solid font size overflow")?;
-                remaining = remaining.checked_sub(bytes).ok_or("text solid font memory budget")?;
-                if lib.file(&path, font.collection_index as u32).is_none() {
-                    return Err(format!("text solid font cannot be decoded: {}", path.display()));
-                }
+        for font in crate::font_policy::font_assets(scene) {
+            let base = p.base_dirs.get(doc).map(|p| p.as_path()).unwrap_or_else(|| std::path::Path::new(""));
+            let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&font.src, base) else {
+                return Err("text solid font requires a resolved local file".into());
+            };
+            let bytes = usize::try_from(std::fs::metadata(&path).map_err(|e| e.to_string())?.len())
+                .map_err(|_| "text solid font size overflow")?;
+            remaining = remaining.checked_sub(bytes).ok_or("text solid font memory budget")?;
+            let face = if pinned {
+                lib.pin(&path, font.index, &font.family, font.weight, font.italic)
+            } else {
+                lib.file(&path, font.index)
+            };
+            if face.is_none() {
+                return Err(format!("text solid font cannot be decoded: {}", path.display()));
             }
         }
     }

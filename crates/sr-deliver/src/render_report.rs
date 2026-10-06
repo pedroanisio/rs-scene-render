@@ -42,6 +42,10 @@ pub mod code {
     pub const LEG_SHORT: &str = "LEG-SHORT";
     /// Drawn smaller than `minTextSize` (SREP 19).
     pub const LEG_SIZE: &str = "LEG-SIZE";
+    /// A face drawn instead of the family, weight or style asked for (SREP 21).
+    pub const FONT_SUB: &str = "FONT-SUB";
+    /// A character no permitted face has (SREP 21).
+    pub const FONT_GLYPH: &str = "FONT-GLYPH";
     /// The safe-area check (`safeArea/@enforce`).
     pub const SAFE_AREA: &str = "SAFE-AREA";
     /// Prefix of an inert-attribute finding: `INERT-I2`.

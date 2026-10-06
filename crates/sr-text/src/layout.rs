@@ -187,6 +187,11 @@ pub struct Layout {
     /// Characters dropped by `maxLines`, `overflow="clip"` or `overflow="ellipsis"`, counted in code points
     /// without line breaks (SREP 18 `TXT-CUT`).
     pub dropped: usize,
+    /// Characters no face available to the text has, drawn as the primary face's `.notdef`, in order of first
+    /// appearance (SREP 21 `FONT-GLYPH`).
+    pub missing: Vec<char>,
+    /// Faces drawn instead of the family, weight or style a style asked for (SREP 21 `FONT-SUB`).
+    pub substituted: Vec<crate::font::Substitution>,
     /// Content must be clipped to the box.
     pub clip: bool,
     /// Styles at the laid-out size.
@@ -335,6 +340,22 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
             lib.face_for(p, &styles[ch_style[i]], chars[i], o.emoji_color)
         })
         .collect();
+    for i in 0..n {
+        let c = chars[i];
+        if !crate::font::invisible(c) && !lib.covers(ch_face[i], c) && !out.missing.contains(&c) {
+            out.missing.push(c);
+        }
+    }
+    let mut used: Vec<usize> = ch_style.clone();
+    used.sort_unstable();
+    used.dedup();
+    for s in used {
+        if let Some(sub) = lib.substitution(&styles[s], primary[s].unwrap_or(any_face)) {
+            if !out.substituted.contains(&sub) {
+                out.substituted.push(sub);
+            }
+        }
+    }
     // bidi
     let default = match o.direction {
         Dir::Ltr => Some(Level::ltr()),

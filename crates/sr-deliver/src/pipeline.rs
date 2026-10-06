@@ -953,7 +953,7 @@ fn run_delivery(
         }
         report.warnings.extend(diagnostics.iter().map(|d| format!("{}: {}", d.code, d.message)));
         if opts.report {
-            report.findings.extend(text_fit_findings(&ev, &times));
+            report.findings.extend(text_fit_findings(&ev, &times, p.fonts_pinned()));
         }
         // SREP 19: reading speed, display time and text size, when accessibility/@legibilityCheck asks
         if let Some(s) = crate::legibility::Settings::of(p) {
@@ -1442,10 +1442,11 @@ fn run_delivery(
     Ok(())
 }
 
-/// `TXT-FIT` and `TXT-CUT` for the text layers drawn at `times` (SREP 18; the measures of SREP 20 rule 6). `TXT-FIT`
-/// is information when the text is drawn whole inside the frame, and a warning when it is cut (clipped to its box, or
-/// out of the frame).
-fn text_fit_findings(ev: &Evaluator, times: &[f64]) -> Vec<crate::render_report::Finding> {
+/// `TXT-FIT` and `TXT-CUT` for the text layers drawn at `times` (SREP 18; the measures of SREP 20 rule 6), and
+/// `FONT-GLYPH` and `FONT-SUB` (SREP 21; a missing glyph is an error under `fontPolicy="pinned"`, a warning under
+/// `system`). `TXT-FIT` is information when the text is drawn whole inside the frame, and a warning when it is cut
+/// (clipped to its box, or out of the frame).
+fn text_fit_findings(ev: &Evaluator, times: &[f64], pinned: bool) -> Vec<crate::render_report::Finding> {
     use crate::render_report::{code, Finding};
     let audit = sr_gpu::text_audit::check(ev, times);
     let sampled = audit.note.map(|n| format!(" ({n})")).unwrap_or_default();
@@ -1491,6 +1492,30 @@ fn text_fit_findings(ev: &Evaluator, times: &[f64]) -> Vec<crate::render_report:
             )
             .at_time(s.time[0], s.time[1])
             .measuring(s.worst, Some(0.0), "characters")));
+        }
+        let glyph_severity = if pinned { sr_model::Severity::Error } else { sr_model::Severity::Warning };
+        for (c, t) in &f.missing {
+            let policy = if pinned { "permitted by fontPolicy=\"pinned\"" } else { "available" };
+            out.push(at(Finding::node(
+                code::FONT_GLYPH,
+                glyph_severity,
+                &f.id,
+                format!(
+                    "text {:?}: no face {policy} has U+{:04X} {c:?}; it is drawn as .notdef{sampled}",
+                    f.id, *c as u32
+                ),
+            )
+            .at_time(*t, *t)
+            .measuring(*c as u32 as f64, None, "code point")));
+        }
+        for (s, t) in &f.substituted {
+            out.push(at(Finding::node(
+                code::FONT_SUB,
+                sr_model::Severity::Warning,
+                &f.id,
+                format!("text {:?}: {} is drawn with {}{sampled}", f.id, s.requested, s.drawn),
+            )
+            .at_time(*t, *t)));
         }
     }
     out
