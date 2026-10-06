@@ -1489,6 +1489,31 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
     }
 }
 
+/// Whether node `n`, whose local time zero is `start` on the composition clock, runs on that clock: its time is the
+/// composition's less `start`, with no remapping.
+pub(crate) fn composition_clock(p: &Program, n: u32, start: f64) -> bool {
+    [0.0, 1.0, 7.5].iter().all(|&x| source_sample(p, n, x + start, x + start).0 == x + start)
+}
+
+/// Steps the oceans of a frame, and pulls the particle emitters that fall into them as far as their steps need.
+#[allow(clippy::too_many_arguments)]
+fn apply_oceans(
+    ocean: &mut crate::ocean::Sims,
+    particles: &mut crate::particles3d::Sims,
+    pyro: &mut crate::pyro::Sims,
+    splash: &crate::splash::Log,
+    physics: Option<&mut PhysicsRt>,
+    p: &Program,
+    g: &mut FrameGraph,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+) {
+    let mut pull = |g: &FrameGraph, graphs: &mut Graphs<'_>, physics: Option<&mut PhysicsRt>, name: &str, step: u64| {
+        particles.advance(p, g, graphs, fields, physics, pyro, splash, name, step)
+    };
+    ocean.apply(p, g, graphs, fields, physics, splash, &mut pull);
+}
+
 pub(crate) fn linear_emitter_clock(p: &Program, n: u32) -> bool {
     use crate::program::Clock;
     let Some(parent) = p.nodes[n as usize].parent else { return true };
@@ -1817,17 +1842,17 @@ impl Runtime {
         let mut ocean_seconds = None;
         if grouped {
             let clock = std::time::Instant::now();
-            {
-                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
-                let mut pull = |g: &FrameGraph,
-                                graphs: &mut Graphs<'_>,
-                                physics: Option<&mut PhysicsRt>,
-                                ocean: &str,
-                                step: u64| {
-                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
-                };
-                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
-            }
+            apply_oceans(
+                &mut self.ocean,
+                &mut self.particles3d,
+                &mut self.pyro,
+                &self.splash,
+                self.physics.as_mut(),
+                p,
+                g,
+                &mut graphs,
+                fields,
+            );
             ocean_seconds = Some(clock.elapsed().as_secs_f64());
         }
         // ---- physics
@@ -1881,17 +1906,17 @@ impl Runtime {
         g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
         let clock = std::time::Instant::now();
         if ocean_seconds.is_none() {
-            {
-                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
-                let mut pull = |g: &FrameGraph,
-                                graphs: &mut Graphs<'_>,
-                                physics: Option<&mut PhysicsRt>,
-                                ocean: &str,
-                                step: u64| {
-                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
-                };
-                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
-            }
+            apply_oceans(
+                &mut self.ocean,
+                &mut self.particles3d,
+                &mut self.pyro,
+                &self.splash,
+                self.physics.as_mut(),
+                p,
+                g,
+                &mut graphs,
+                fields,
+            );
         }
         g.sim_seconds.ocean = ocean_seconds.unwrap_or_else(|| clock.elapsed().as_secs_f64());
         // ---- flocks and grid simulations

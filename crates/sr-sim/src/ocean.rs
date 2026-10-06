@@ -320,6 +320,21 @@ struct State {
     /// variation (`Spec::body_owners` elements, or none): [`BodySample::pressure`].
     pressure_by: Vec<[f64; 2]>,
 }
+/// The canonical step of a solver whose step is `dt` that holds `time`: the last whole step that has ended by it.
+/// Division can round a time immediately before a tick up to the tick's index (0.85 / 0.05 == 17, but 17 * 0.05 >
+/// 0.85), so the actual products are compared and an impulse never fires before its timestamp. Every reader of a
+/// solver's steps counts them with this.
+pub fn canonical_step(time: f64, dt: f64) -> u64 {
+    let mut step = (time / dt).floor() as u64;
+    while step > 0 && step as f64 * dt > time {
+        step -= 1;
+    }
+    while (step + 1) as f64 * dt <= time {
+        step += 1;
+    }
+    step
+}
+
 struct Work {
     remaining: u64,
     substeps: u64,
@@ -612,16 +627,7 @@ impl Ocean {
         if !quotient.is_finite() || quotient > (1_u64 << 48) as f64 {
             return Err(Error::Limit("timeline precision"));
         }
-        let mut target = quotient.floor() as u64;
-        // Division can round a time immediately before a tick up to the tick
-        // index (e.g. 0.85/0.05 == 17, but 17*0.05 > 0.85). Compare the actual
-        // canonical times so an impulse never fires before its timestamp.
-        while target > 0 && target as f64 * self.spec.dt > time {
-            target -= 1;
-        }
-        while (target + 1) as f64 * self.spec.dt <= time {
-            target += 1;
-        }
+        let target = canonical_step(time, self.spec.dt);
         // Start from the latest of the states at or before the target: the one the solver is at, the one it passed
         // on its way ahead, a checkpoint, or the initial one. They are all the same states, so the frame does not
         // depend on which one is used.

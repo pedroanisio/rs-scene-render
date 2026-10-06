@@ -84,13 +84,7 @@ impl Emitter {
     pub(crate) fn needed_until(&self, time: f64, own_start: f64) -> f64 {
         let (dt, local) = (self.ocean.dt, (time - self.ocean.start).max(0.0));
         // the step the solver counts the time in
-        let mut step = (local / dt).floor() as u64;
-        while step > 0 && step as f64 * dt > local {
-            step -= 1;
-        }
-        while (step + 1) as f64 * dt <= local {
-            step += 1;
-        }
+        let step = sr_sim::ocean::canonical_step(local, dt);
         self.needed_for(step, own_start)
     }
 

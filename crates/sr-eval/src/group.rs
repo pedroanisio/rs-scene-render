@@ -306,10 +306,11 @@ impl Group {
             if listed.is_empty() {
                 continue;
             }
+            let attrs = crate::ocean::WaterAttrs::of(e);
             let water = Water {
                 density: 1000.0,
-                gravity: num(e, "gravity", 9.81),
-                drag: num(e, "bodyDrag", 1.0),
+                gravity: attrs.gravity,
+                drag: attrs.body_drag,
                 pixels_per_meter: p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()),
             };
             let coupling = match (&injected, text(e, "bodyCoupling").as_deref()) {
@@ -320,8 +321,7 @@ impl Group {
                 _ => continue,
             };
             // the exchange is indexed by the ocean's own time: it must be the composition's
-            let composition = |x: f64| crate::sim::source_sample(p, index as u32, x, x).0;
-            if [0.0, 1.0, 7.5].iter().any(|&x| composition(x + n.start) != x + n.start) {
+            if !crate::sim::composition_clock(p, index as u32, n.start) {
                 return Err(format!("{}: an ocean that exchanges with rigid bodies needs the composition clock", n.id));
             }
             let dt = num(e, "dt", 1.0 / 60.0);
@@ -334,7 +334,7 @@ impl Group {
                 start: n.start,
                 bodies: listed,
                 slots,
-                water_level: num(e, "waterLevel", 0.0),
+                water_level: attrs.level,
                 coupling,
             });
         }
@@ -409,15 +409,8 @@ impl Group {
         let completed = if whole(per, 1e-9) && (nth - nth.round()).abs() < 1e-6 {
             nth.round() as u64 / per.round() as u64
         } else {
-            // canonical steps completed at `local`, the same rounding the ocean uses
-            let mut completed = (local / ocean.dt).floor() as u64;
-            while completed > 0 && completed as f64 * ocean.dt > local {
-                completed -= 1;
-            }
-            while (completed + 1) as f64 * ocean.dt <= local {
-                completed += 1;
-            }
-            completed
+            // canonical steps completed at `local`, counted as the ocean counts them
+            sr_sim::ocean::canonical_step(local, ocean.dt)
         };
         completed.checked_sub(1)
     }

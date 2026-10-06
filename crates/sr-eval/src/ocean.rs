@@ -47,9 +47,31 @@ pub(crate) type Pull<'a> =
 pub(crate) struct Sims {
     runtimes: HashMap<Arc<str>, Result<Runtime, String>>,
 }
+/// What an ocean says about its water, read once for the solver it builds and for the group it forms with bodies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WaterAttrs {
+    /// Metres per second squared.
+    pub(crate) gravity: f64,
+    /// The coefficient of form drag of the bodies in it.
+    pub(crate) body_drag: f64,
+    /// The rest level of its surface in its own axes.
+    pub(crate) level: f64,
+}
+
+impl WaterAttrs {
+    pub(crate) fn of(e: &dyn sr_model::element::Element) -> WaterAttrs {
+        WaterAttrs {
+            gravity: num(e, "gravity", 9.81),
+            body_drag: num(e, "bodyDrag", 1.0),
+            level: num(e, "waterLevel", 0.0),
+        }
+    }
+}
+
 fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     let sr_model::model::Node::Ocean(e) = &*n.elem else { unreachable!("ocean node") };
     let f = |k, d| num(e, k, d);
+    let water = WaterAttrs::of(e);
     let bytes = |k, d| (f(k, d) as usize).checked_mul(1 << 20).ok_or("ocean memory overflow".to_string());
     let width = f("width", 64.);
     let depth = f("depth", 64.);
@@ -60,7 +82,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         origin: [-width / 2., -depth / 2.],
         cell_size: dx,
         dt: f("dt", 1. / 60.),
-        gravity: f("gravity", 9.81),
+        gravity: water.gravity,
         damping: f("damping", 0.),
         dry_tolerance: f("dryTolerance", 1e-10),
         boundary: match text(e, "boundary").as_deref() {
@@ -81,12 +103,11 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
         return Err("ocean grid exceeds memory or cell budget".into());
     }
-    let bed =
-        bathymetry::load(p, n, &spec, f("waterLevel", 0.) + f("bottomDepth", 10.), bytes("meshMemoryMiB", 128.)?)?;
+    let bed = bathymetry::load(p, n, &spec, water.level + f("bottomDepth", 10.), bytes("meshMemoryMiB", 128.)?)?;
     let cells = bed
         .iter()
         .map(|b| {
-            let depth = (b - f("waterLevel", 0.)).max(0.);
+            let depth = (b - water.level).max(0.);
             Cell {
                 depth,
                 velocity: if depth > 0. { [f("initialVelocityX", 0.), f("initialVelocityZ", 0.)] } else { [0.; 2] },
@@ -132,10 +153,10 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             p,
             &collider_ids,
             &spec,
-            f("waterLevel", 0.),
+            water.level,
             bytes("meshMemoryMiB", 128.)?,
             text(e, "bedResponse").as_deref() != Some("hydrostatic"),
-            f("bodyDrag", 1.),
+            water.body_drag,
         )?;
         spec.moving_bed = true;
         spec.bodies = built.has_bodies();
@@ -754,5 +775,41 @@ mod tests {
                 assert_eq!(bits(cells), bits(&seas[k]), "order {order}, frame {k}");
             }
         }
+    }
+
+    #[test]
+    fn the_water_attributes_of_an_ocean_are_read_once_with_their_defaults() {
+        let xml = |attrs: &str| {
+            format!(
+                r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="1"/><composition><object3D id="b" primitive="sphere" radius="1"/><ocean id="sea" {attrs}/></composition></scene>"#
+            )
+        };
+        let read = |attrs: &str| {
+            let doc = sr_model::load_str(&xml(attrs), &sr_model::LoadOptions::without_assets()).unwrap();
+            let p = crate::program::build(&doc, &Default::default()).unwrap();
+            let sea = p.nodes.iter().find(|n| &*n.id == "sea").unwrap();
+            let sr_model::model::Node::Ocean(e) = &*sea.elem else { unreachable!() };
+            super::WaterAttrs::of(e)
+        };
+        let plain = read("");
+        assert_eq!((plain.gravity, plain.body_drag, plain.level), (9.81, 1.0, 0.0));
+        let set = read(r#"colliders="b" gravity="3.7" bodyDrag="0.4" waterLevel="-2""#);
+        assert_eq!((set.gravity, set.body_drag, set.level), (3.7, 0.4, -2.0));
+    }
+
+    #[test]
+    fn a_node_on_the_composition_clock_says_so_and_one_in_a_group_that_scales_time_does_not() {
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition>
+            <ocean id="plain" start="0.5" width="8" depth="8" cellSize="1"/>
+            <group id="slow" start="0.25" timeScale="2"><ocean id="scaled" width="8" depth="8" cellSize="1"/></group>
+        </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let p = crate::program::build(&doc, &Default::default()).unwrap();
+        let on = |id: &str| {
+            let i = p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32;
+            crate::sim::composition_clock(&p, i, p.nodes[i as usize].start)
+        };
+        assert!(on("plain"));
+        assert!(!on("scaled"));
     }
 }

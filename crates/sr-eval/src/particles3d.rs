@@ -116,11 +116,7 @@ fn fall_setup(
     let ocean_index = *ocean;
     let ocean = &p.nodes[ocean_index];
     let own = &p.nodes[node as usize];
-    let identity = |index: u32| {
-        let start = p.nodes[index as usize].start;
-        let composition = |x: f64| crate::sim::source_sample(p, index, x + start, x + start).0;
-        [0.0, 1.0, 7.5].iter().all(|&x| composition(x) == x + start)
-    };
+    let identity = |index: u32| crate::sim::composition_clock(p, index, p.nodes[index as usize].start);
     if !identity(node) || !identity(ocean_index as u32) {
         return Err(format!("{id} and the ocean it falls into need the composition clock"));
     }
