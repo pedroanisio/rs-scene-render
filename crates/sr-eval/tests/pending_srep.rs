@@ -6,7 +6,8 @@
 use sr_eval::{pending::PENDING, EvalOptions, Evaluator};
 
 fn evaluate(xml: &str) -> Vec<sr_model::diag::Diagnostic> {
-    let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}\n{xml}"));
+    let doc =
+        sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}\n{xml}"));
     let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap_or_else(|r| panic!("{r}"));
     ev.warnings().to_vec()
 }

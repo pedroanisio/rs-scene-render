@@ -44,7 +44,12 @@ pub const PENDING: &[Pending] = &[
             ("captionTrack", "readingSpeed", None),
         ],
     },
-    Pending { srep: 21, what: "the pinned-font policy", elements: &[], attributes: &[("project", "fontPolicy", Some("system"))] },
+    Pending {
+        srep: 21,
+        what: "the pinned-font policy",
+        elements: &[],
+        attributes: &[("project", "fontPolicy", Some("system"))],
+    },
     Pending { srep: 26, what: "repeat copies placed on generated points", elements: &["points"], attributes: &[] },
 ];
 
@@ -64,8 +69,7 @@ pub fn check(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     for p in PENDING {
         let element_use = p.elements.contains(&name);
         let attribute_use = p.attributes.iter().find(|(el, attr, default)| {
-            *el == name
-                && e.get_attr(attr).is_some_and(|v| default.is_none_or(|d| !same(&v, d)))
+            *el == name && e.get_attr(attr).is_some_and(|v| default.is_none_or(|d| !same(&v, d)))
         });
         let used = if element_use {
             Some(format!("<{name}>"))
