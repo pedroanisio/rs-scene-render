@@ -387,3 +387,76 @@ fn drawing_in_bands_changes_nothing() {
     assert!(whole.iter().any(|p| p[0] > 0.0), "the picture is not empty");
     assert!(whole == banded, "the bands differ from the whole frame");
 }
+
+/// A face-on disk of clumps from 6 M to 20 M, seen from 100 M, at geometric time `time`.
+fn clumpy(seed: u32, time: f32) -> GeodesicScene {
+    let mut d = disk(6.0, 20.0, Vec3::new(0.0, 0.0, -1.0));
+    d.pattern = Pattern::Clumps;
+    d.contrast = 0.8;
+    d.seed = seed;
+    d.time = time;
+    on_axis(100.0, 1.0, [64, 64], 330.0, Some(d))
+}
+
+/// The shader's integer hash, for the arms' phase.
+fn pcg(v: u32) -> u32 {
+    let s = v.wrapping_mul(747796405).wrapping_add(2891336453);
+    let word = ((s >> ((s >> 28) + 4)) ^ s).wrapping_mul(277803737);
+    (word >> 22) ^ word
+}
+
+#[test]
+fn the_pattern_of_the_disk_turns_at_the_keplerian_rate_of_each_radius() {
+    // spiral arms have a closed form: exp(1.5 c cos(m (psi - Omega t) + 3 ln(r / r_in) + phase)), so the
+    // brightness of a pixel at time t over its brightness at time 0 is known from its radius and azimuth
+    let (seed, contrast, time) = (4u32, 0.8f32, 40.0f32);
+    let spiral = |t: f32| {
+        let mut d = disk(6.0, 20.0, Vec3::new(0.0, 0.0, -1.0));
+        d.pattern = Pattern::Spiral;
+        d.contrast = contrast;
+        d.seed = seed;
+        d.time = t;
+        on_axis(100.0, 1.0, [64, 64], 330.0, Some(d))
+    };
+    let (Some(before), Some(after), Some(hits)) = (
+        render(&spiral(0.0), Output::Picture, None),
+        render(&spiral(time), Output::Picture, None),
+        render(&spiral(0.0), Output::FirstHit, None),
+    ) else {
+        return;
+    };
+    let arms = (2 + seed % 3) as f64;
+    let phase = std::f64::consts::TAU * ((pcg(seed + 11) >> 8) as f64 / 16777216.0);
+    let (mut checked, mut worst, mut turned) = (0, 0.0f64, 0.0f64);
+    for i in 0..64 * 64 {
+        if hits[i][3] < 0.0 {
+            continue;
+        }
+        let (r, psi) = (hits[i][1] as f64, hits[i][2] as f64);
+        let omega = (1.0 / (r * r * r)).sqrt();
+        let arg = |t: f64| arms * (psi - omega * t) + 3.0 * (r / 6.0).ln() + phase;
+        let expected = (1.5 * contrast as f64 * (arg(time as f64).cos() - arg(0.0).cos())).exp();
+        let measured = after[i][0] as f64 / before[i][0] as f64;
+        worst = worst.max((measured / expected - 1.0).abs());
+        turned = turned.max((expected - 1.0).abs());
+        checked += 1;
+    }
+    println!("{checked} pixels: the brightness ratio after {time} agrees with the arms' closed form to {worst:.2e} (largest change {turned:.2})");
+    assert!(checked > 1000);
+    assert!(turned > 0.5, "the pattern moves enough to tell: {turned}");
+    assert!(worst < 2e-3, "relative error of the turned pattern: {worst}");
+}
+
+#[test]
+fn the_same_seed_gives_the_same_pattern_and_another_seed_another() {
+    let (Some(a), Some(b), Some(c)) = (
+        render(&clumpy(5, 7.0), Output::Picture, None),
+        render(&clumpy(5, 7.0), Output::Picture, None),
+        render(&clumpy(6, 7.0), Output::Picture, None),
+    ) else {
+        return;
+    };
+    assert!(a == b, "the same seed and time give the same picture");
+    let differ = a.iter().zip(&c).filter(|(p, q)| (p[0] - q[0]).abs() > 0.02 * p[0].max(0.01)).count();
+    assert!(differ > 200, "another seed changes the pattern: {differ} pixels");
+}
