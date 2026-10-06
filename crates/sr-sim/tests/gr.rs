@@ -43,9 +43,11 @@ fn the_deflection_of_the_integration_is_the_exact_one_and_goes_to_four_m_over_b(
         let found = traced.phi_inf - std::f64::consts::PI;
         println!("DEFLECTION b = {b}: integration {found:.9}, quadrature {exact:.9}, 4M/b {:.9}", 4.0 * M / b);
         assert!((found - exact).abs() < 1e-5, "b = {b}: {found} against {exact}");
-        // the second order of the weak field accounts for what 4M/b leaves, to the third order in M/b
-        let second = oracle::weak_field_deflection_second_order(M, b);
-        assert!((exact - second).abs() < 40.0 * (M / b).powi(3), "b = {b}: {exact} against {second}");
+        // the weak-field series accounts for what 4M/b leaves, up to the fifth order in M/b
+        let series = oracle::weak_field_deflection_series(M, b);
+        let fifth = (exact - series).abs() * (b / M).powi(5);
+        println!("SERIES b = {b}: residual of the fourth-order series times (b/M)^5 = {fifth:.1}");
+        assert!(fifth < 3000.0, "b = {b}: {exact} against {series}");
     }
     // and the limit: the ratio to 4M/b goes to one as b grows
     let ratio = |b: f64| oracle::deflection(M, b).unwrap() / oracle::weak_field_deflection(M, b);

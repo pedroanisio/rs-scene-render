@@ -194,34 +194,77 @@ pub mod oracle {
 
     /// The radius of the shadow as the impact parameter that separates capture from escape, `sqrt(27) M`.
     pub fn shadow_radius(mass: f64) -> f64 {
-        let _ = mass;
-        todo!("the critical impact parameter")
+        27f64.sqrt() * mass
     }
 
     /// The radius of the innermost stable circular orbit, `6M`.
     pub fn isco(mass: f64) -> f64 {
-        let _ = mass;
-        todo!("the innermost stable circular orbit")
+        6.0 * mass
     }
 
     /// The angular velocity of a circular orbit of radius `r` for the distant observer, `sqrt(M / r^3)`.
     pub fn kepler_omega(mass: f64, r: f64) -> f64 {
-        let _ = (mass, r);
-        todo!("the Keplerian angular velocity")
+        (mass / (r * r * r)).sqrt()
     }
 
     /// The smallest positive `u` at which `1/b^2 - u^2 + 2 M u^3` vanishes, the turning point `1/r_min` of a ray
     /// of impact parameter `b`; none when `b` does not exceed the shadow's radius, because the ray is captured.
     pub fn turning_point(mass: f64, b: f64) -> Option<f64> {
-        let _ = (mass, b);
-        todo!("the turning point of a ray")
+        // P(u) = 1/b^2 - u^2 + 2 M u^3 is positive at 0, falls to a minimum at u = 1/(3M), where it is
+        // 1/b^2 - 1/(27 M^2): negative exactly when b exceeds the shadow's radius, and then it has one root
+        // between the two, found by bisection
+        let p = |u: f64| 1.0 / (b * b) - u * u + 2.0 * mass * u * u * u;
+        let (mut low, mut high) = (0.0, 1.0 / (3.0 * mass));
+        if b.is_nan() || b <= 0.0 || p(high) >= 0.0 {
+            return None;
+        }
+        for _ in 0..200 {
+            let mid = 0.5 * (low + high);
+            if p(mid) > 0.0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        Some(0.5 * (low + high))
     }
 
     /// The angle by which a ray from infinity to infinity is deflected, in radians, by quadrature of the first
     /// integral to 1e-12; none for a ray that is captured.
     pub fn deflection(mass: f64, b: f64) -> Option<f64> {
-        let _ = (mass, b);
-        todo!("the exact deflection")
+        let u_m = turning_point(mass, b)?;
+        // The ray sweeps 2 * integral of du / sqrt(P(u)) from 0 to u_m. P = (u_m - u) Q(u) with
+        // Q(u) = (1 - 2 M u_m)(u + u_m) - 2 M u^2, so with u = u_m (1 - s^2) the integrand is
+        // 2 sqrt(u_m) / sqrt(Q) on s in [0, 1]: smooth, with no cancellation near the turning point.
+        let k = 1.0 - 2.0 * mass * u_m;
+        let integrand = |s: f64| {
+            let u = u_m * (1.0 - s * s);
+            let q = k * (u + u_m) - 2.0 * mass * u * u;
+            2.0 * u_m.sqrt() / q.sqrt()
+        };
+        Some(2.0 * romberg(integrand, 0.0, 1.0) - std::f64::consts::PI)
+    }
+
+    /// Romberg's extrapolation of the trapezoid rule on `[a, b]`, to 1e-14 of the result or 2^20 intervals.
+    fn romberg(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+        let mut previous = vec![0.5 * (b - a) * (f(a) + f(b))];
+        for level in 1..=20 {
+            let n = 1usize << (level - 1);
+            let h = (b - a) / n as f64;
+            let mid: f64 = (0..n).map(|i| f(a + (i as f64 + 0.5) * h)).sum();
+            let mut row = Vec::with_capacity(level + 1);
+            row.push(0.5 * previous[0] + 0.5 * h * mid);
+            for j in 1..=level {
+                let factor = 4f64.powi(j as i32);
+                row.push((factor * row[j - 1] - previous[j - 1]) / (factor - 1.0));
+            }
+            let (new, old) = (row[level], previous[level - 1]);
+            previous = row;
+            if level >= 4 && (new - old).abs() <= 1e-14 * new.abs() {
+                break;
+            }
+        }
+        *previous.last().expect("a row")
     }
 
     /// The deflection in the weak field, `4M/b`.
@@ -234,19 +277,30 @@ pub mod oracle {
         4.0 * mass / b + 15.0 * std::f64::consts::PI / 4.0 * (mass / b) * (mass / b)
     }
 
+    /// The weak-field series to the fourth order in `M/b` (Keeton and Petters, 2005, from memory, and checked
+    /// against the quadrature): `4x + 15 pi/4 x^2 + 128/3 x^3 + 3465 pi/64 x^4`, `x = M/b`.
+    pub fn weak_field_deflection_series(mass: f64, b: f64) -> f64 {
+        let x = mass / b;
+        let pi = std::f64::consts::PI;
+        4.0 * x + 15.0 * pi / 4.0 * x * x + 128.0 / 3.0 * x * x * x + 3465.0 * pi / 64.0 * x * x * x * x
+    }
+
     /// The redshift `g` of Luminet (1979) of an emitter in a circular orbit of radius `r` seen from the
     /// inclination `inclination` (radians, the angle between the axis of the disc and the line of sight) at the
     /// angle `alpha` on the observer's sky (radians, positive where the disc recedes), for the ray of impact
     /// parameter `b`: `1 + z = (1 + Omega b sin(inclination) sin(alpha)) / sqrt(1 - 3M/r)`, `g = 1 / (1 + z)`.
     pub fn luminet_redshift(mass: f64, r: f64, b: f64, inclination: f64, alpha: f64) -> f64 {
-        let _ = (mass, r, b, inclination, alpha);
-        todo!("the redshift of Luminet")
+        let one_plus_z =
+            (1.0 + kepler_omega(mass, r) * b * inclination.sin() * alpha.sin()) / (1.0 - 3.0 * mass / r).sqrt();
+        1.0 / one_plus_z
     }
 
     /// The temperature of a thin disc of Shakura and Sunyaev around a hole with its inner edge at `r_in`, in
     /// units of `scale`: `scale r^(-3/4) (1 - sqrt(r_in / r))^(1/4)`, and zero at and inside `r_in`.
     pub fn disc_temperature(r: f64, r_in: f64, scale: f64) -> f64 {
-        let _ = (r, r_in, scale);
-        todo!("the temperature of the disc")
+        if r <= r_in {
+            return 0.0;
+        }
+        scale * r.powf(-0.75) * (1.0 - (r_in / r).sqrt()).powf(0.25)
     }
 }
