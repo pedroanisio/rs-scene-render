@@ -4,7 +4,7 @@
 //! and the ocean needs the body's pose at each of its steps. Neither can be replayed alone by
 //! asking the other again, since that would restore the other's checkpoints in turn. A group
 //! therefore passes what each needs through an immutable log: the ocean writes, once, the
-//! outcome of each canonical step, and the rigid world reads from it the load for each of its
+//! outcome of each canonical step (what the water offered about each body), and the rigid world reads from it the load for each of its
 //! own steps. Replaying either member reads the same records.
 //!
 //! The group is implicit: an ocean whose `colliders` list a rigid body forms one with the rigid
@@ -40,12 +40,6 @@ use crate::sim::{num, text};
 pub(crate) struct Exchange {
     /// Horizontal momentum per unit water density that the bodies gave the water.
     pub(crate) momentum: [f64; 2],
-}
-
-impl Record for Exchange {
-    fn same(&self, other: &Self) -> bool {
-        self.momentum.iter().zip(&other.momentum).all(|(a, b)| a.to_bits() == b.to_bits())
-    }
 }
 
 /// What the water offered about one body in a canonical step: where the body stands in it, the
@@ -150,8 +144,8 @@ pub(crate) type ReactionFn = Arc<dyn Fn(&Reaction) -> Option<Load3> + Send + Syn
 /// How the water loads a body.
 #[derive(Clone)]
 pub(crate) enum Coupling {
-    /// By the outcome an ocean wrote for a canonical step (the momentum bodies gave it). Nothing in a
-    /// document builds one yet: the ocean offers the momentum in total, not per body.
+    /// By the momentum the bodies gave the water in a canonical step, the sum of what the ocean offered about
+    /// each body in it. Nothing in a document builds one: a document couples by buoyancy.
     #[allow(dead_code)]
     Reaction(ReactionFn),
     /// By the weight of the water the body displaces below the ocean's rest surface.
@@ -263,8 +257,7 @@ pub(crate) struct GroupOcean {
 /// The rigid world and the oceans it exchanges with.
 #[derive(Clone)]
 pub(crate) struct Group {
-    log: Arc<Mutex<ExchangeLog<Exchange>>>,
-    /// What the water offered about each body, per ocean and canonical step.
+    /// What the water offered about each body, per ocean and canonical step: the one record of a step.
     around: Arc<Mutex<ExchangeLog<Around>>>,
     oceans: Arc<[GroupOcean]>,
     /// Seconds past a frame's time that something reads the rigid world.
@@ -352,7 +345,6 @@ impl Group {
             }
         }
         Ok(Some(Group {
-            log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
             around: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
             oceans: oceans.into(),
             reach,
@@ -370,13 +362,6 @@ impl Group {
         self.oceans.iter().position(|o| &*o.id == id)
     }
 
-    /// Record the outcome of canonical step `step` of ocean `ocean`. A replay of the step must
-    /// reproduce it exactly.
-    pub(crate) fn record(&self, ocean: usize, step: u64, exchange: Exchange) -> Result<Put, String> {
-        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
-        log.put(ocean as u32, step, &[exchange])
-    }
-
     /// What the water offered about each body in canonical step `step` of ocean `ocean`, once it has been computed:
     /// the momentum each gave the water and the pressure of the bed it raised, by body.
     pub(crate) fn around_at(&self, ocean: usize, step: u64) -> Option<Vec<Around>> {
@@ -388,6 +373,12 @@ impl Group {
     pub(crate) fn record_around(&self, ocean: usize, step: u64, around: &[Around]) -> Result<Put, String> {
         let mut log = self.around.lock().unwrap_or_else(|e| e.into_inner());
         log.put(ocean as u32, step, around)
+    }
+
+    /// Canonical steps the group holds a record of, over all its oceans.
+    #[cfg(test)]
+    pub(crate) fn recorded_steps(&self) -> usize {
+        self.around.lock().unwrap().len()
     }
 
     /// The canonical step of `ocean` whose outcome a rigid step that starts at composition time `t`
@@ -486,13 +477,14 @@ impl Group {
                 }
                 Coupling::Reaction(reaction) => {
                     let Some(step) = step else { continue };
-                    let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
-                    let Some([exchange]) = log.get(channel as u32, step) else {
+                    let log = self.around.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(offered) = log.get(channel as u32, step) else {
                         return Err(Self::not_computed(body, t, step, ocean, log.last_step(channel as u32)));
                     };
-                    let exchange = *exchange;
+                    // the momentum the bodies gave the water in the step is the sum of what each gave
+                    let momentum = offered.iter().fold([0.0; 2], |m, a| [m[0] + a.impulse[0], m[1] + a.impulse[1]]);
                     drop(log);
-                    (reaction)(&Reaction { ocean: channel, step, body, exchange, dt: ocean.dt })
+                    (reaction)(&Reaction { ocean: channel, step, body, exchange: Exchange { momentum }, dt: ocean.dt })
                 }
             };
             if let Some(load) = load {
@@ -639,6 +631,31 @@ mod tests {
         crate::sim::apply_physics(&ev.program, rt.physics.as_mut().unwrap(), &mut g, &mut graphs, &fields, t);
         rt.fields = Some(fields);
         g.problems[before..].to_vec()
+    }
+
+    #[test]
+    fn the_group_keeps_one_record_of_each_canonical_step_and_a_reaction_reads_the_bodies_in_it() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, [f64; 2])>::new()));
+        let log = seen.clone();
+        let coupling = Coupling::Reaction(Arc::new(move |r: &Reaction| {
+            log.lock().unwrap().push((r.step, r.exchange.momentum));
+            None
+        }));
+        let ev = evaluator(&scene(""), Some(coupling), None);
+        let _ = observe(&ev, 1.0);
+        let guard = ev.sim.as_ref().unwrap().lock().unwrap();
+        let group = guard.physics.as_ref().unwrap().group.as_ref().unwrap();
+        let steps = (0..200u64).filter(|&s| group.around_at(0, s).is_some()).count();
+        assert!(steps >= 20, "{steps} steps computed");
+        assert_eq!(group.recorded_steps(), steps, "one record of each canonical step");
+        // what a reaction is told is the sum of what the bodies gave the water in the step, as it was recorded
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|(_, m)| m[0] != 0.0), "the barge gives the water momentum");
+        for (step, momentum) in seen.iter() {
+            let around = group.around_at(0, *step).expect("the step was recorded");
+            let total = around.iter().fold([0.0; 2], |m, a| [m[0] + a.impulse[0], m[1] + a.impulse[1]]);
+            assert_eq!(momentum.map(f64::to_bits), total.map(f64::to_bits), "step {step}");
+        }
     }
 
     #[test]

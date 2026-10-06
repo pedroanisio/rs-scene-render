@@ -273,12 +273,6 @@ impl Sims {
                 let channel = group.as_ref().and_then(|group| group.channel(&id));
                 let mut bed_driver = |time: f64, forcing: &mut sim::Forcing| -> Result<(), sim::Error> {
                     // a step's outcome is written before anything reads the bodies it loads
-                    if let (Some(group), Some(channel), Some((step, momentum))) = (&group, channel, forcing.exchange) {
-                        group.record(channel, step, crate::group::Exchange { momentum }).map_err(|message| {
-                            *failure.borrow_mut() = Some(message);
-                            sim::Error::Invalid("ocean exchange diverged")
-                        })?;
-                    }
                     if let (Some(group), Some(channel), Some((step, _))) = (&group, channel, forcing.exchange) {
                         let around: Vec<crate::group::Around> = forcing.bodies.iter().map(Into::into).collect();
                         group.record_around(channel, step, &around).map_err(|message| {
