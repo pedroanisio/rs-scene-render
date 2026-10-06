@@ -4,9 +4,8 @@
   "schema": "1.3.0",
   "entries": [
     {"construct": "adjustment/@motionBlur=on", "status": "reported", "note": "an adjustment layer that moves is not motion blurred: it adjusts where it is at the frame time"},
+    {"construct": "camera/@renderer=pathtrace", "status": "approximate", "note": "the path tracer does not draw a shadow catcher (object3D/@shadowCatcher) and does not apply material/@unevenness; the raster renderer draws both"},
     {"construct": "connector", "status": "reported", "note": "SREP 16 is accepted and not implemented by this engine yet: the construct is ignored and reported (E22)"},
-    {"construct": "material/@unevenness", "status": "reported", "note": "with camera renderer=\"pathtrace\" only: the path tracer does not apply it; the raster renderer does"},
-    {"construct": "object3D/@shadowCatcher", "status": "reported", "note": "with camera renderer=\"pathtrace\" only: the path tracer does not draw a shadow catcher; the raster renderer does"},
     {"construct": "pattern", "status": "approximate", "note": "drawn as the project background and on shapes; on vector and text assets, captions and map drapes it is not drawn, and reported"},
     {"construct": "pdf", "status": "reported", "note": "SREP 17 is accepted and not implemented by this engine yet: the construct is ignored and reported (E22)"},
     {"construct": "points", "status": "reported", "note": "SREP 26 is accepted and not implemented by this engine yet: the construct is ignored and reported (E22)"},

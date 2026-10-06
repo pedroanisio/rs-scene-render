@@ -151,3 +151,25 @@ fn every_pending_construct_is_listed_as_reported_and_nothing_else_is_pending() {
         }
     }
 }
+
+#[test]
+fn a_raster_document_with_a_shadow_catcher_gets_no_sup_finding() {
+    // the shadow catcher and material unevenness are approximate only under the path tracer: a construct carries no
+    // condition, so the manifest names the path tracer itself, and a raster document is drawn exactly
+    let scene = |camera: &str| {
+        format!(
+            r#"<scene version="1.2"><project width="32" height="32" fps="1" duration="1"/><materials><material id="m" unevenness="0.4"/></materials>
+      <composition><camera id="c" {camera}/><object3D id="floor" primitive="plane" width="10" height="10" shadowCatcher="true" material="m"/></composition></scene>"#
+        )
+    };
+    assert!(findings(&manifest(), &scene("")).is_empty(), "default renderer (raster)");
+    assert!(findings(&manifest(), &scene(r#"renderer="raster""#)).is_empty());
+    let f = findings(&manifest(), &scene(r#"renderer="pathtrace""#));
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].code, "SUP-APPROX");
+    assert!(
+        f[0].message.contains("camera/@renderer=pathtrace") && f[0].message.contains("shadowCatcher"),
+        "{}",
+        f[0].message
+    );
+}
