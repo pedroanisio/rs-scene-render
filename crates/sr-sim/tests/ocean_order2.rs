@@ -379,3 +379,21 @@ fn numerical_failure_in_a_parallel_grid_reports_the_same_error_and_keeps_the_sta
         }
     }
 }
+
+/// What a solver with a moving bed and bodies charges per cell: the 256 of the plain one, the three bed vectors, the
+/// body vectors, and the state and the two samples that it keeps of the step it passed on its way ahead.
+const MOVING_BODIES_BYTES_PER_CELL: usize = 256 + 24 + 72 + (24 + 16 + 48);
+
+#[test]
+fn the_state_and_samples_kept_of_the_step_passed_count_against_resident_memory() {
+    let n = 40 * 40;
+    let cells = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; n];
+    let make = |max_bytes| {
+        let mut s = Spec { moving_bed: true, bodies: true, ..spec([40, 40], Order::First) };
+        s.max_bytes = max_bytes;
+        Ocean::new(s, vec![2.0; n], cells.clone(), vec![])
+    };
+    let wanted = n * MOVING_BODIES_BYTES_PER_CELL + 4096;
+    assert!(make(wanted).is_ok());
+    assert!(matches!(make(wanted - 1), Err(sr_sim::ocean::Error::Limit(_))));
+}

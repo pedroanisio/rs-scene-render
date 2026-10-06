@@ -349,9 +349,10 @@ fn the_driver_vectors_count_against_resident_memory() {
     let plain = n * 256 + 4096;
     assert!(make(false, plain).is_ok());
     assert!(matches!(make(true, plain), Err(Error::Limit(_))));
-    // Two bed vectors (the step's start and end) and the interpolated bed: 24 bytes per cell.
-    assert!(make(true, plain + 24 * n).is_ok());
-    assert!(matches!(make(true, plain + 24 * n - 1), Err(Error::Limit(_))));
+    // Two bed vectors (the step's start and end) and the interpolated bed: 24 bytes per cell; and the state and the
+    // bed vectors of the two ends that are kept of the step passed on the way ahead: 40 more.
+    assert!(make(true, plain + 64 * n).is_ok());
+    assert!(matches!(make(true, plain + 64 * n - 1), Err(Error::Limit(_))));
 }
 
 /// The authored impact crater, seen as a bed: radius 52 and depth 25 under a
@@ -588,11 +589,12 @@ fn body_vectors_are_charged_to_resident_memory() {
         let s = Spec { cells: [40, 40], moving_bed: true, bodies, max_bytes, ..Default::default() };
         Ocean::new(s, vec![1.0; n], cells.clone(), vec![])
     };
-    let moving = n * (256 + 24) + 4096;
+    let moving = n * (256 + 64) + 4096;
     assert!(make(false, moving).is_ok());
     assert!(matches!(make(true, moving), Err(Error::Limit(_))));
-    assert!(make(true, moving + 72 * n).is_ok());
-    assert!(matches!(make(true, moving + 72 * n - 1), Err(Error::Limit(_))));
+    // thickness and velocity of the two ends and of the interpolated sample (72), and of the two kept ends (48)
+    assert!(make(true, moving + 120 * n).is_ok());
+    assert!(matches!(make(true, moving + 120 * n - 1), Err(Error::Limit(_))));
 }
 
 /// Substeps a seek to `t` integrates after the solver has run on to 6 s, with room

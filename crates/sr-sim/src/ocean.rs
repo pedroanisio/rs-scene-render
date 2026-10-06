@@ -66,15 +66,16 @@ pub struct Spec {
     /// Work units per seek: eight per cell for each impulse and each substep.
     pub max_work: u64,
     /// The bed is supplied by a [`Driver`] at every canonical step and the solver
-    /// is sampled with [`Ocean::at_driven`]. Charges three more bed vectors per cell.
+    /// is sampled with [`Ocean::at_driven`]. Charges 64 more bytes per cell: three bed vectors and what is kept of
+    /// the step passed on the way ahead (a state and the bed vectors of its two ends).
     pub moving_bed: bool,
     /// The driver also fills the thickness and horizontal velocity of bodies in
     /// the water column, and the water's momentum relaxes toward theirs. Needs
-    /// `moving_bed`; charges 72 more bytes per cell.
+    /// `moving_bed`; charges 120 more bytes per cell.
     pub bodies: bool,
     /// With `bodies`: the driver also tags every occupied cell with the index of the body that
     /// holds most of it (`Forcing::owner`, below this count, at most 4096), and what each body
-    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 12 more
+    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 20 more
     /// bytes per cell and 16 per body in every checkpoint. Zero: nothing is tagged.
     pub body_owners: usize,
     /// With `body_owners`: bodies do not relax the water toward their own velocity; the driver gives
@@ -396,9 +397,11 @@ impl Ocean {
         let bytes = n
             .checked_mul(
                 256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
-                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
-                    + if spec.bodies { 72 } else { 0 }
-                    + if spec.body_owners > 0 { 12 } else { 0 }
+                    // three bed vectors (the two ends of a step and the interpolated one), and the state and
+                    // the bed vectors of the two ends that are kept of the step passed on the way ahead
+                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() + 24 + 16 } else { 0 }
+                    + if spec.bodies { 72 + 48 } else { 0 }
+                    + if spec.body_owners > 0 { 12 + 8 } else { 0 }
                     + if spec.body_push { 32 } else { 0 },
             )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
@@ -610,14 +613,24 @@ impl Ocean {
         // on its way ahead, a checkpoint, or the initial one. They are all the same states, so the frame does not
         // depend on which one is used.
         let (mut k, mut state, mut ends_at) = if self.step <= target {
-            (self.step, self.canonical.clone(), self.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone())))
+            // the ends are moved out of the cache unless they are kept as the nearer state's: a copy of the two
+            // samples held beside the cache would double what a seek charges
+            let keep = self.near.is_none() && self.step < target;
+            let ends = if keep {
+                self.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone()))
+            } else {
+                self.ends.take().map(|e| (e.step, e.now, e.next))
+            };
+            (self.step, self.canonical.clone(), ends)
         } else {
             (0, self.initial.clone(), None)
         };
-        if let Some(near) = self.near.as_ref().filter(|n| n.step <= target && n.step > k) {
+        if self.near.as_ref().is_some_and(|n| n.step <= target && n.step > k) {
+            // the nearer state is replaced when the seek is done, so it is moved out
+            let near = self.near.take().expect("checked");
             k = near.step;
-            state = near.state.clone();
-            ends_at = near.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone()));
+            state = near.state;
+            ends_at = near.ends.map(|e| (e.step, e.now, e.next));
         }
         if let Some((step, checkpoint)) =
             self.checkpoints.iter().filter(|(step, _)| *step <= target && *step > k).max_by_key(|(step, _)| step)
