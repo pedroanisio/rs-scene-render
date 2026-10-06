@@ -913,8 +913,13 @@ fn eval(
         Ok(e) => e,
         Err(r) => return report_errors(out, &r),
     };
+    // JSON owns standard output: warnings go to standard error then, one line each
     for w in ev.warnings() {
-        out.diagnostic(file, &lines, w)?;
+        if matches!(format, EvalFormat::Json) {
+            eprintln!("warning[{}]: {}", w.code, w.message);
+        } else {
+            out.diagnostic(file, &lines, w)?;
+        }
     }
     if bench {
         let n = ev.frame_count().max(1);
