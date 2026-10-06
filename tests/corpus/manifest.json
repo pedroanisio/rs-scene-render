@@ -750,6 +750,9 @@
     "v5-elements.scene.xml": [
       "V5"
     ],
+    "v5-morph.scene.xml": [
+      "V5"
+    ],
     "v6-elements.scene.xml": [
       "V6"
     ],
@@ -818,6 +821,7 @@
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
     "model-select.scene.xml": [],
+    "morph.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
     "ocean-depth-filtered-drag.scene.xml": [],

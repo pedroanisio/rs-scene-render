@@ -1451,6 +1451,55 @@ impl Renderer {
                     }
                 }
             }
+            // `<morph name weight>`: the named targets take their weights over the clip's and over `morphWeights`
+            let (weights, morph) = {
+                let mut named: Vec<(String, f32)> = Vec::new();
+                for (k, c) in sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "morph").enumerate() {
+                    let ca = Attrs { e: c, props: None };
+                    let Some(name) = ca.str("name") else { continue };
+                    let key = format!("{}/morph[{k}]", n.id);
+                    let value = n
+                        .parts
+                        .iter()
+                        .find(|p| *p.key == key)
+                        .and_then(|p| p.props.get("weight"))
+                        .and_then(sr_eval::Value::as_num)
+                        .unwrap_or_else(|| ca.num("weight", 0.0));
+                    named.push((name, value as f32));
+                }
+                if named.is_empty() {
+                    (weights, morph)
+                } else {
+                    let mut by_node = weights;
+                    for (ni, w) in by_node.iter_mut().enumerate() {
+                        if let Some(over) = &morph {
+                            *w = over.clone();
+                        }
+                        for (name, value) in &named {
+                            if let Some(slot) = model.nodes[ni].morph_names.iter().position(|x| x == name) {
+                                if slot < w.len() {
+                                    w[slot] = *value;
+                                }
+                            }
+                        }
+                    }
+                    for (name, _) in &named {
+                        if !model.nodes.iter().any(|nd| nd.morph_names.iter().any(|x| x == name)) {
+                            let known: Vec<&str> =
+                                model.nodes.iter().flat_map(|nd| nd.morph_names.iter().map(String::as_str)).collect();
+                            let msg = if known.is_empty() {
+                                format!("{}: morph {name} cannot be set: the model has no named morph targets", n.id)
+                            } else {
+                                format!("{}: morph {name} names no morph target of the model (it has: {})", n.id, known.join(", "))
+                            };
+                            if !plan.stats.unsupported.contains(&msg) {
+                                plan.stats.unsupported.push(msg);
+                            }
+                        }
+                    }
+                    (by_node, None)
+                }
+            };
             for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
                 if selected.as_ref().is_some_and(|(root, _)| !under(item.node, *root)) {
                     continue;

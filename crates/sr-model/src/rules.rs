@@ -735,6 +735,7 @@ impl<'a> Eval<'a> {
                     || n.descendants().any(|d| {
                         is(d, "basemap")
                             || (is(d, "rigidBody") && d.parent_element().is_some_and(|p| is(p, "object3D")))
+                            || (is(d, "morph") && d.parent_element().is_some_and(|p| is(p, "object3D")))
                             || (is(d, "object3D") && matches!(d.attribute("primitive"), Some("map" | "globe")))
                     })
                     || kids(n, "output").any(|o| {

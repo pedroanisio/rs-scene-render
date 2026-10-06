@@ -541,6 +541,7 @@ fn gltf_checked(path: &Path) -> Result<Model, String> {
                 .map(|w| w.to_vec())
                 .or_else(|| node.mesh().and_then(|me| me.weights().map(|w| w.to_vec())))
                 .unwrap_or_default(),
+            morph_names: node.mesh().map(|me| target_names(&me)).unwrap_or_default(),
         });
     }
     for node in g.nodes() {
@@ -1080,6 +1081,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
         // morph targets: one per blend channel, offsets by logical vertex
         let mut morphs: Vec<std::collections::HashMap<u32, (Vec3, Vec3)>> = Vec::new();
         let mut weights = Vec::new();
+        let mut names: Vec<String> = Vec::new();
         for bd in mesh.blend_deformers.iter() {
             for ch in bd.channels.iter() {
                 let Some(shape) = ch.target_shape.as_ref() else { continue };
@@ -1097,6 +1099,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
                 }
                 channel_of.insert(ch.element.element_id, (ni, morphs.len()));
                 morphs.push(offs);
+                names.push(ch.element.name.to_string());
                 weights.push(ch.weight as f32);
             }
         }
@@ -1172,6 +1175,7 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
             m.nodes[ni].skin = Some(m.skins.len() - 1);
         }
         m.nodes[ni].primitives = list;
+        m.nodes[ni].morph_names = names;
         m.nodes[ni].weights = weights;
     }
     for stack in scene.anim_stacks.iter() {
@@ -1245,6 +1249,15 @@ pub fn fbx(path: &Path) -> Result<Model, String> {
         m.animations.push(Animation { name: stack.element.name.to_string(), channels, duration: duration as f32 });
     }
     Ok(m)
+}
+
+/// The names of a glTF mesh's morph targets: `extras.targetNames`, the convention of Blender's and most exporters.
+fn target_names(mesh: &gltf::Mesh) -> Vec<String> {
+    let names = |extras: &gltf::json::Extras| -> Option<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(extras.as_ref()?.get()).ok()?;
+        v.get("targetNames")?.as_array()?.iter().map(|n| n.as_str().map(str::to_string)).collect()
+    };
+    names(mesh.extras()).unwrap_or_default()
 }
 
 /// A morph index with its (time, weight) keys.

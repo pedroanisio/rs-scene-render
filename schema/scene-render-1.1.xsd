@@ -2657,10 +2657,23 @@
     </xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
+  <xs:complexType name="morphType">
+    <xs:annotation><xs:documentation>
+      With an object3D of primitive="mesh" and an imported model: the weight of one morph target of the model, by the
+      target's name (a glTF mesh's extras.targetNames, an FBX blend channel's name). It replaces that target's weight
+      from the clip or the rest pose, and wins over the same target in the object's @morphWeights. The weight animates.
+      Version 1.2.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="weight" type="xs:double" default="0"/>
+  </xs:complexType>
+
   <xs:complexType name="object3DType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
+      <xs:element name="morph" type="morphType"/>
       <xs:element name="blob" type="clayBlobType"/>
       <xs:element name="rigidBody" type="rigidBody3DType"/>
       <xs:element name="medium" type="mediumType"/>
