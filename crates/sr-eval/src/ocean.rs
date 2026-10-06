@@ -34,8 +34,8 @@ struct Runtime {
     colliders: Option<colliders::Colliders>,
     /// Cavities of bodies that enter the water.
     entries: Vec<cavity::Entry>,
-    /// Whether particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
-    splash: bool,
+    /// How many particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
+    splash: usize,
 }
 /// Brings what the ocean named (first) needs of other solvers up to the ocean's canonical step (second): computes the
 /// particles that fall into it as far as that step needs, which they cannot do before the ocean has got to the step
@@ -144,8 +144,8 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         Some(built)
     };
     let entries = cavity::read(e, &collider_ids)?;
-    let splash = text(e, "splash").is_some();
-    if splash {
+    let splash = text(e, "splash").map_or(0, |l| l.split_whitespace().count());
+    if splash > 0 {
         // the driver gives what the particles bring at the sample that closes each canonical step
         spec.moving_bed = true;
     }
@@ -291,13 +291,22 @@ impl Sims {
                         tests::OFFERS.with(|o| o.borrow_mut().push((step, momentum, forcing.bodies.clone())));
                     }
                     // what the particles that fell into the ocean bring, at the sample that closes the step
-                    if let (true, Some((step, _))) = (*takes, forcing.exchange) {
+                    if let (true, Some((step, _))) = (*takes > 0, forcing.exchange) {
                         let read = match splash.read(&id, step) {
-                            Ok(read) if splash.knows(&id) => Ok(read),
+                            Ok(read) if splash.knows(&id, *takes) => Ok(read),
                             // the particles are not there yet: they are made known and computed to it now, which
                             // asks the rigid world for what the water has already given
-                            _ => pull(&*g, graphs, physics.as_deref_mut(), &id, step)
-                                .and_then(|()| splash.read(&id, step)),
+                            _ => pull(&*g, graphs, physics.as_deref_mut(), &id, step).and_then(|()| {
+                                if splash.knows(&id, *takes) {
+                                    splash.read(&id, step)
+                                } else {
+                                    // an empty read here would be nobody saying anything, not nothing falling
+                                    Err(format!(
+                                        "ocean {id} takes the splash of {} emitters and not all are known to it",
+                                        takes
+                                    ))
+                                }
+                            }),
                         }
                         .map_err(|message| {
                             *failure.borrow_mut() = Some(message);

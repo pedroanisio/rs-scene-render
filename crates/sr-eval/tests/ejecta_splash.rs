@@ -165,6 +165,26 @@ fn an_emitter_that_starts_later_gives_the_ocean_what_it_gives_at_the_same_instan
 }
 
 #[test]
+fn an_ocean_first_computed_when_its_emitter_is_not_in_the_frame_is_given_what_the_emitter_threw() {
+    // the emitter leaves the composition at 3 s, with ejecta still in the air: an ocean whose first frame is after it
+    // must not read that nothing fell because nobody said anything
+    let xml = scene(60.0, r#"end="3""#, "");
+    let early = evaluator(&xml);
+    let _ = sea(&early, 2.9);
+    let reference: Vec<_> = (0..=68u64).map(|s| early.splash_into("sea", s).unwrap()).collect();
+    assert!(reference.iter().any(|l| !l.is_empty()), "something has fallen in by 2.9 s");
+    let late = evaluator(&xml);
+    let frame = late.evaluate(3.5);
+    assert!(frame.problems.is_empty() && frame.failures.is_empty(), "{:?} {:?}", frame.problems, frame.failures);
+    for step in 0..=68u64 {
+        match late.splash_into("sea", step) {
+            Ok(list) => assert_eq!(list, reference[step as usize], "step {step}"),
+            Err(error) => panic!("step {step}: {error}"),
+        }
+    }
+}
+
+#[test]
 fn without_the_attribute_the_particles_are_as_they_were_and_with_it_they_are_fewer() {
     let with = evaluator(&scene(60.0, "", ""));
     let without = evaluator(&scene(60.0, "", "").replace(r#" splash="debris""#, ""));

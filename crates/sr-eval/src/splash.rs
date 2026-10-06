@@ -130,10 +130,10 @@ impl Log {
         inner.entries.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, entries)
     }
 
-    /// Whether an emitter that falls into `ocean` has made itself known: until one has, a read of the ocean's steps
-    /// would be empty because nobody had said anything, not because nothing fell.
-    pub(crate) fn knows(&self, ocean: &str) -> bool {
-        self.inner().emitters.iter().any(|e| &*e.ocean.id == ocean)
+    /// Whether the `listed` emitters that fall into `ocean` have all made themselves known: until they have, a read
+    /// of the ocean's steps would be empty because nobody had said anything, not because nothing fell.
+    pub(crate) fn knows(&self, ocean: &str, listed: usize) -> bool {
+        self.inner().emitters.iter().filter(|e| &*e.ocean.id == ocean).count() >= listed
     }
 
     /// What the particles give ocean `ocean` in its canonical step `step`, by cell in order of cell: the

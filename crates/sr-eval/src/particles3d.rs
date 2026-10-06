@@ -707,23 +707,37 @@ impl Sims {
         ocean: &str,
         step: u64,
     ) -> Result<(), String> {
-        for n in g.nodes.iter().filter(|n| n.kind == "particles3D") {
-            let Some(node) = p.nodes.iter().position(|o| o.id == n.id).map(|o| o as u32) else { continue };
-            let listed = p.nodes.iter().any(|o| {
-                o.name == "ocean"
-                    && &*o.id == ocean
-                    && text(&*o.elem, "splash").is_some_and(|l| l.split_whitespace().any(|s| s == &*n.id))
-            });
-            if !listed {
-                continue;
-            }
-            let emitter = match self.runtime(p, graphs, n, node, splash) {
+        // the emitters the ocean lists, whether or not they are in this frame: one that has left the composition by
+        // now still threw what fell before it did
+        let listed: Vec<Arc<str>> = p
+            .nodes
+            .iter()
+            .filter(|o| o.name == "ocean" && &*o.id == ocean)
+            .filter_map(|o| text(&*o.elem, "splash"))
+            .flat_map(|l| l.split_whitespace().map(Arc::from).collect::<Vec<Arc<str>>>())
+            .collect();
+        for id in listed {
+            let Some(node) = p.nodes.iter().position(|o| o.id == id).map(|o| o as u32) else {
+                return Err(format!("ocean {ocean} lists {id} in splash and there is no such emitter"));
+            };
+            let own = &p.nodes[node as usize];
+            let n = match g.nodes.iter().find(|n| n.id == id) {
+                Some(n) => n.clone(),
+                None => {
+                    // not in this frame: the node as it is when it starts
+                    let frame = graphs.at(own.start + num(&*own.elem, "emissionStart", 0.));
+                    frame.nodes.iter().find(|n| n.id == id).cloned().ok_or_else(|| {
+                        format!("{id}, which falls into ocean {ocean}, is not in the composition when it starts")
+                    })?
+                }
+            };
+            let emitter = match self.runtime(p, graphs, &n, node, splash) {
                 Ok(rt) => rt.splash.clone(),
                 Err(error) => return Err(error.clone()),
             };
-            let emitter = emitter.ok_or_else(|| format!("{} falls into no ocean", n.id))?;
-            let until = emitter.needed_for(step, p.nodes[node as usize].start);
-            self.run(p, g.time, n, node, Some(until), false, graphs, fields, physics.as_deref_mut(), pyro, splash)?;
+            let emitter = emitter.ok_or_else(|| format!("{id} falls into no ocean"))?;
+            let until = emitter.needed_for(step, own.start);
+            self.run(p, g.time, &n, node, Some(until), false, graphs, fields, physics.as_deref_mut(), pyro, splash)?;
         }
         Ok(())
     }
