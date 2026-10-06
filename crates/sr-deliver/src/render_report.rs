@@ -50,6 +50,8 @@ pub mod code {
     pub const SAFE_AREA: &str = "SAFE-AREA";
     /// Prefix of an inert-attribute finding: `INERT-I2`.
     pub const INERT_PREFIX: &str = "INERT-";
+    /// A mask that leaves nothing of its node (SREP 34).
+    pub const MASK_MISS: &str = "MASK-MISS";
 
     /// An engine-specific code: `X-rs-scene-render-<code>`.
     pub fn engine(code: &str) -> String {
@@ -154,9 +156,9 @@ impl Finding {
             path: if xpath { d.path.clone() } else { String::new() },
             node: None,
             time: None,
-            measured: None,
-            limit: None,
-            unit: None,
+            measured: d.measured.as_ref().map(|m| m.value),
+            limit: d.measured.as_ref().and_then(|m| m.limit),
+            unit: d.measured.as_ref().map(|m| m.unit.to_string()),
             message: d.message.clone(),
             at: Some(At {
                 offset: (d.loc.line > 0 || d.loc.offset > 0).then_some(d.loc.offset),
@@ -167,14 +169,15 @@ impl Finding {
 }
 
 /// The registry code of a diagnostic: structure and well-formedness errors are `XSD`, Schematron asserts `SCH-<id>`,
-/// missing or mismatched files `ASSET-MISSING`, safe-area findings `SAFE-AREA`, inert attributes keep their
-/// `INERT-<rule>`; every other code is this engine's own, `X-rs-scene-render-<code>`.
+/// missing or mismatched files `ASSET-MISSING`, safe-area findings `SAFE-AREA`, inert attributes and masks that miss
+/// their nodes keep their `INERT-<rule>` and `MASK-MISS`; every other code is this engine's own,
+/// `X-rs-scene-render-<code>`.
 pub fn report_code(d: &Diagnostic) -> String {
     let c = d.code.as_str();
     let structural = c == "XML" || (c.len() == 3 && c.starts_with('S') && c[1..].bytes().all(|b| b.is_ascii_digit()));
     if structural {
         code::XSD.into()
-    } else if c.starts_with(code::INERT_PREFIX) {
+    } else if c.starts_with(code::INERT_PREFIX) || c == code::MASK_MISS {
         c.into()
     } else if c == "A01" || c == "A02" || (c == "A04" && d.is_error()) {
         code::ASSET_MISSING.into()

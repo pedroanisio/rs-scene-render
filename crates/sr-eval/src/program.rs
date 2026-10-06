@@ -3249,12 +3249,16 @@ fn is_default(value: &AttrValue, default: Option<&str>) -> bool {
 
 /// `effectType` is one attribute bag shared by every effect type, so the schema accepts any of its attributes on any type;
 /// each type reads a subset (`sr_model::effect_attrs`). An attribute set to a value other than its default on a type that
-/// does not read it does nothing, silently (E19, a warning): a vignette given `intensity` keeps the default `radius`.
+/// does not read it does nothing, silently (SREP 34 `INERT-I13`, information): a vignette given `intensity` keeps the
+/// default `radius`. A selective-color `channel` is I10's, more specific, and not reported again here.
 fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     let Some(ty) = e.get_attr("type").map(|t| t.to_string()) else { return };
     let Some(reads) = sr_model::effect_attrs::declared(&ty) else { return };
     for decl in sr_model::xsd::COMPLEX_TYPES[e.xsd_type()].attrs {
         if sr_model::effect_attrs::ALWAYS.contains(&decl.name) || reads.contains(&decl.name) {
+            continue;
+        }
+        if ty == "selective-color" && decl.name == "channel" {
             continue;
         }
         let Some(value) = e.get_attr(decl.name) else { continue };
@@ -3268,7 +3272,7 @@ fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
             reads.iter().map(|r| format!("@{r}")).collect::<Vec<_>>().join(", ")
         };
         warnings.push(Diagnostic::info(
-            "E19",
+            sr_model::inert::I13,
             format!(
                 "effect {id:?} of type {ty:?}: @{} is accepted but not read by this type, which reads {list}",
                 decl.name
@@ -3279,15 +3283,15 @@ fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Attributes the schema accepts that this build does not read: reported (E19, a warning) so that nothing is
-/// accepted silently and then ignored.
+/// Attributes the schema accepts and nothing reads: reported (SREP 34 `INERT-I9`, `INERT-I10`, `INERT-I13`, information)
+/// so that nothing is accepted silently and then ignored.
 fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     if matches!(e.element_name(), "effect" | "effectType") {
         unread_effect_attributes(e, warnings);
     }
-    let mut note = |what: &str, why: &str| {
+    let mut note = |code: &str, what: &str, why: &str| {
         warnings.push(Diagnostic::info(
-            "E19",
+            code,
             format!("{what} is accepted but has {why}"),
             e.loc(),
             e.element_id().unwrap_or(""),
@@ -3295,15 +3299,27 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     };
     match e.element_name() {
         "group" if matches!(e.get_attr("collapse"), Some(AttrValue::Bool(true))) => note(
+            sr_model::inert::I9,
             "<group> @collapse",
             "no effect in this build (non-isolated groups already share the frame's camera space)",
         ),
+        "effect" | "effectType"
+            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
+                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
+        {
+            note(
+                sr_model::inert::I10,
+                "selective-color @channel",
+                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
+            )
+        }
         _ => {}
     }
 }
 
 /// A key's `overshoot` is read only by the `back-*` curves and its `period` only by the `elastic-*` ones: set on a
-/// segment that leaves with another curve, the attribute does nothing (E19, a warning).
+/// segment that leaves with another curve, the attribute does nothing (SREP 34 `INERT-I12`, information). The other key
+/// parameters a curve does not read are this engine's own finding, E19.
 fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warnings: &mut Vec<Diagnostic>) {
     use m::Curve::*;
     let curve_of = |k: &m::Key| k.interpolation.unwrap_or(default);
@@ -3311,9 +3327,10 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
         let curve = curve_of(k);
         let found = std::cell::RefCell::new(Vec::<(Severity, &str, String)>::new());
         let note = |attr: &str, family: &str, why: &str| {
+            let code = if matches!(attr, "overshoot" | "period") { sr_model::inert::I12 } else { "E19" };
             found.borrow_mut().push((
                 Severity::Info,
-                "E19",
+                code,
                 format!(
                     "key {} of an animation on {who:?}: @{attr} is accepted but has no effect {why}, which does not read it (only {family} reads it)",
                     i + 1
@@ -3423,7 +3440,9 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
 }
 
 /// Masks use the node's own coordinates: a rectangle or ellipse that adds to or intersects the node's shape and lies
-/// entirely outside the node's box leaves nothing of it, which looks like the node vanishing (E20, a warning).
+/// entirely outside the node's box leaves nothing of it, which looks like the node vanishing (SREP 34 `MASK-MISS`, a
+/// warning, measuring how far outside the box the mask lies). A feathered or expanded mask reaches that much further,
+/// and is reported only when even its reach misses the node.
 fn masks_that_miss(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     let num = |e: &dyn Element, name: &str| match e.get_attr(name) {
         Some(AttrValue::Num(v)) => Some(v),
@@ -3433,27 +3452,35 @@ fn masks_that_miss(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
     let (Some(w), Some(h)) = (num(e, "width"), num(e, "height")) else { return };
     for m in children(e).into_iter().filter(|c| c.element_name() == "mask") {
         let rect_like = matches!(m.get_attr("type").map(|t| t.to_string()).as_deref(), Some("rect" | "ellipse"));
-        let subtracts = matches!(m.get_attr("mode").map(|t| t.to_string()).as_deref(), Some("subtract" | "difference"));
+        // the modes that keep only what the mask covers; the default is intersect
+        let keeps = matches!(m.get_attr("mode").map(|t| t.to_string()).as_deref(), None | Some("add" | "intersect"));
         let inverted = matches!(m.get_attr("invert"), Some(AttrValue::Bool(true)));
         let (Some(mw), Some(mh)) = (num(m, "width"), num(m, "height")) else { continue };
-        if !rect_like || subtracts || inverted {
+        if !rect_like || !keeps || inverted {
             continue;
         }
+        let reach = num(m, "feather").unwrap_or(0.0).max(0.0) + num(m, "expansion").unwrap_or(0.0).max(0.0);
         let (x, y) = (num(m, "x").unwrap_or(0.0), num(m, "y").unwrap_or(0.0));
-        if x >= w || y >= h || x + mw <= 0.0 || y + mh <= 0.0 {
-            warnings.push(Diagnostic::warning(
-                "E20",
-                format!("a mask at ({x}, {y}) of {mw} x {mh} lies outside the node's {w} x {h} box: masks use the node's own coordinates"),
-                m.loc(),
-                e.element_id().unwrap_or(""),
-            ));
+        // how far the mask's box lies outside the node's, on the side that separates them
+        let gap = (x - w).max(y - h).max(-(x + mw)).max(-(y + mh));
+        if gap - reach >= 0.0 {
+            warnings.push(
+                Diagnostic::warning(
+                    sr_model::inert::MASK_MISS,
+                    format!("a mask at ({x}, {y}) of {mw} x {mh} lies outside the node's {w} x {h} box: masks use the node's own coordinates"),
+                    m.loc(),
+                    e.element_id().unwrap_or(""),
+                )
+                .with_measure(gap, Some(0.0), "px"),
+            );
         }
     }
 }
 
 /// A node named as the `source` of a displacement-map, difference-key or shader effect is drawn with its own opacity:
-/// at 0 it contributes nothing and the effect does nothing, silently (E19, a warning). `visible="false"` at opacity 1
-/// keeps a map off screen.
+/// at 0 for the whole of its window it contributes nothing and the effect does nothing, silently (SREP 34 `INERT-I11`,
+/// information). An opacity that is animated, linked or computed is not 0 for the whole window and is not reported.
+/// `visible="false"` at opacity 1 keeps a map off screen.
 fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagnostic>) {
     let mut sources: Vec<(String, Loc)> = Vec::new();
     walk(scene, &mut |e| {
@@ -3471,7 +3498,12 @@ fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagn
     for (id, loc) in sources {
         let mut zero = false;
         walk(scene, &mut |e| {
+            let driven = children(e).into_iter().any(|c| {
+                matches!(c.element_name(), "animate" | "expression" | "link")
+                    && c.get_attr("property").is_some_and(|p| p.to_string() == "opacity")
+            });
             if e.element_id() == Some(id.as_str())
+                && !driven
                 && matches!(e.get_attr("opacity"), Some(AttrValue::Num(v)) if v <= 0.0)
             {
                 zero = true;
@@ -3479,7 +3511,7 @@ fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagn
         });
         if zero {
             warnings.push(Diagnostic::info(
-                "E19",
+                sr_model::inert::I11,
                 format!("effect source {id:?} has opacity 0, so it is accepted but contributes nothing; hide a map with visible=\"false\" and leave its opacity at 1"),
                 loc,
                 id.as_str(),

@@ -310,6 +310,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                     loc,
                     path,
                     help: resolvable.then(|| "run `scene-render resolve` to make the cache and pin its digest".into()),
+                    measured: None,
                 });
                 continue;
             }

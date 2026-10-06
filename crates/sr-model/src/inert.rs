@@ -38,7 +38,21 @@ pub const I7: &str = "INERT-I7";
 /// evaluator).
 pub const I8: &str = "INERT-I8";
 
-/// The closed table of SREP 18: `(code, condition)`.
+/// `INERT-I9` (SREP 34): `group/@collapse="true"`, which has no effect.
+pub const I9: &str = "INERT-I9";
+/// `INERT-I10` (SREP 34): a selective-color effect's `channel` other than `rgb`, which it does not read.
+pub const I10: &str = "INERT-I10";
+/// `INERT-I11` (SREP 34): a displacement-map, difference-key or shader `source` with opacity 0 for its whole window.
+pub const I11: &str = "INERT-I11";
+/// `INERT-I12` (SREP 34): a key's `overshoot` or `period` on a curve that does not read it.
+pub const I12: &str = "INERT-I12";
+/// `INERT-I13` (SREP 34): an effect attribute its type does not read.
+pub const I13: &str = "INERT-I13";
+/// `MASK-MISS` (SREP 34): a rect or ellipse mask that adds or intersects and lies wholly outside its node's box, so
+/// the node shows nothing. A warning, not an inert finding: the mask has the strongest effect possible.
+pub const MASK_MISS: &str = "MASK-MISS";
+
+/// The closed table of SREP 18 and its amendment SREP 34: `(code, condition)`.
 pub const RULES: &[(&str, &str)] = &[
     (I1, "`stroke` is not transparent and `strokeWidth` is 0 or absent, so no stroke is drawn (information)."),
     (I2, "`strokeWidth` > 0 and `stroke` is transparent or absent, so no stroke is drawn (information)."),
@@ -48,6 +62,12 @@ pub const RULES: &[(&str, &str)] = &[
     (I6, "`matteMode` or `matteVisible` without `matte`, on a node (information)."),
     (I7, "`volume`, `mute` or `audioBus` on a layer whose asset has no sound: image, text, vector, code, formula, chart, generator or audiogram (information)."),
     (I8, "A node whose window lies wholly outside [0, project `duration`), so it is never drawn (information)."),
+    (I9, "`group` with `collapse=\"true\"`: the attribute has no effect (non-isolated groups already share the frame's camera space; isolated ones draw their children in their own offscreen) (information, SREP 34)."),
+    (I10, "An `effect` of type `selective-color` with `channel` other than `rgb`: the effect does not read `channel` (information, SREP 34)."),
+    (I11, "An `effect` of type `displacement-map`, `difference-key` or `shader` whose `source` names a node with opacity 0 for the whole of its window: it contributes nothing; `visible=\"false\"` at opacity 1 keeps a map off screen (information, SREP 34)."),
+    (I12, "A `key` with `overshoot` on a segment whose curve is not back-*, or `period` on one whose curve is not elastic-* (information, SREP 34)."),
+    (I13, "An `effect` carrying an attribute its `type` does not read (`id`, `type`, `enabled` and `mix` are read by every type) (information, SREP 34)."),
+    (MASK_MISS, "A `mask` of type rect or ellipse, mode add or intersect, not inverted, whose box lies entirely outside the box of the node it masks, in the node's own coordinates: the node shows nothing (warning, SREP 34; `measured` is how far outside, in pixels)."),
 ];
 
 /// Elements that draw a stroke from their own `stroke` and `strokeWidth` and carry the shape kinds of
