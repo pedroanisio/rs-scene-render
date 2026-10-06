@@ -72,8 +72,9 @@ fn the_error_of_the_integration_falls_as_the_fourth_power_of_the_step() {
     // the angle at the end is found by a linear interpolation, which is of the second order: the whole falls at
     // least as the square of the step, and the part the Runge-Kutta contributes is far below it
     assert!(e2 < e1 / 3.5 && e3 < e2 / 3.5, "{e1:e} {e2:e} {e3:e}");
-    // at the step of the shader the angle is good to a few parts in a thousand
-    assert!(error(gr::STEP) < 2e-3, "{:e}", error(gr::STEP));
+    // at the step of the shader the angle at infinity is good to 1e-6 (7.2e-8 measured here, and at most 1.3e-7 for
+    // impact parameters from 5.3 to 100 M, where the integral is known)
+    assert!(error(gr::STEP) < 1e-6, "{:e}", error(gr::STEP));
 }
 
 #[test]
