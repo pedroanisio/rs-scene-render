@@ -7,20 +7,36 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  validated-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 310
+    outputs:
+      run-id: ${{ steps.ci.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/release_ci.py
   validation:
+    needs: validated-ci
+    if: needs.validated-ci.outputs.run-id == ''
     uses: ./.github/workflows/ci.yml
   linux:
-    needs: validation
+    needs: [validated-ci, validation]
+    if: ${{ !cancelled() && needs.validated-ci.result == 'success' && (needs.validated-ci.outputs.run-id != '' || needs.validation.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
+      actions: read
     env:
       CARGO_BUILD_JOBS: 2
       SR_GPU_BACKEND: vulkan
@@ -48,6 +64,8 @@ jobs:
         with:
           name: validated-linux-tools
           path: target/release
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.validated-ci.outputs.run-id || github.run_id }}
       - name: Verify validated binary
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
