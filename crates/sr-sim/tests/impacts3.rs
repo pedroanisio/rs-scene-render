@@ -277,3 +277,30 @@ fn shapes_report_the_volume_they_enclose() {
     assert!(shape_volume(&Shape3::Sphere(0.0)).is_err());
     assert!(shape_volume(&Shape3::TriMesh(vec![[0.0; 3]], vec![[0, 1, 2]])).is_err());
 }
+
+#[test]
+fn with_two_sources_watched_against_one_owner_the_owner_is_told_the_earliest_impact() {
+    // the first watch's sphere falls from 0 and the second's from a lower start: the second one lands first
+    let mut w = world(
+        vec![
+            sphere([0.0; 3], [0.0, 200.0, 0.0], 2.0),
+            slab(upright([30.0, 100.0, 0.0]), [200.0, 10.0, 200.0]),
+            sphere([60.0, 40.0, 0.0], [0.0, 200.0, 0.0], 2.0),
+        ],
+        9.81,
+    )
+    .with_impact_watches(vec![
+        ImpactWatch { source: 0, owner: 1, min_impulse: 1.0 },
+        ImpactWatch { source: 2, owner: 1, min_impulse: 1.0 },
+    ])
+    .unwrap();
+    let mut driver = Watching::default();
+    let frame = w.frame_at(0.6, &mut driver);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let (first, second) = (frame.impacts[0].expect("the first lands"), frame.impacts[1].expect("the second lands"));
+    assert!(second.time < first.time, "{} {}", second.time, first.time);
+    // the surface is asked about the earlier of them, from the step after it, and about no other
+    let told: Vec<Impact3> = driver.told.iter().filter_map(|(_, i)| *i).collect();
+    assert!(told.iter().all(|i| *i == second || *i == first), "{told:?}");
+    assert_eq!(driver.told.last().unwrap().1, Some(second), "the earliest impact is the one the owner is told");
+}

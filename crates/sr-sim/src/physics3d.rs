@@ -848,7 +848,8 @@ impl World3 {
     /// state, so it is the same after any seek and in any fresh world; frames report it
     /// from the step after the one that resolved it (`Frame3::impacts`), and the owner's
     /// surface is asked about it (`Driver3::surface`). Watching changes nothing about the
-    /// simulation. Must be set before the first step.
+    /// simulation. An owner watched against several sources is told the earliest of the impacts they have
+    /// noticed. Must be set before the first step.
     pub fn with_impact_watches(mut self, watches: Vec<ImpactWatch>) -> Result<Self, String> {
         if self.state.step != 0 {
             return Err("impact watches must be set before the first step".into());
@@ -1196,7 +1197,15 @@ impl World3 {
             if !self.fracture_enabled(k) || !driver.enabled(t, k) {
                 continue;
             }
-            let impact = self.watches.iter().position(|w| w.owner == k).and_then(|w| self.state.impacts[w]);
+            // the owner is told the earliest impact any watch against it has noticed (the first watch on a tie)
+            let impact = self
+                .watches
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.owner == k)
+                .filter_map(|(w, _)| self.state.impacts[w].map(|i| (i.step, w, i)))
+                .min_by_key(|(step, w, _)| (*step, *w))
+                .map(|(_, _, i)| i);
             let Some(update) = driver.surface(t, k, self.state.collider_revisions[k], impact.as_ref())? else {
                 continue;
             };
