@@ -475,6 +475,28 @@ pub fn spring(tau: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
     }
 }
 
+/// Response of a damped spring at rest on its target (zero displacement) to a unit velocity at `tau` seconds: the
+/// part of a spring segment that an initial velocity adds (`x = target + (start - target)(1 - step) + v0 * release`).
+pub fn spring_release(tau: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
+    if tau <= 0.0 {
+        return 0.0;
+    }
+    let (k, c, m) = (stiffness.max(1e-9), damping.max(0.0), mass.max(1e-9));
+    let w0 = libm::sqrt(k / m);
+    let zeta = c / (2.0 * libm::sqrt(k * m));
+    if zeta < 1.0 - 1e-9 {
+        let wd = w0 * libm::sqrt(1.0 - zeta * zeta);
+        libm::exp(-zeta * w0 * tau) * libm::sin(wd * tau) / wd
+    } else if zeta <= 1.0 + 1e-9 {
+        tau * libm::exp(-w0 * tau)
+    } else {
+        let s = libm::sqrt(zeta * zeta - 1.0);
+        let r1 = -w0 * (zeta - s);
+        let r2 = -w0 * (zeta + s);
+        (libm::exp(r1 * tau) - libm::exp(r2 * tau)) / (r1 - r2)
+    }
+}
+
 /// Spring progress across a key segment of `duration` seconds, `tau` seconds
 /// in. The residual `1 − spring(duration)` is distributed linearly over the
 /// segment, so the value reaches the next key exactly at its time.

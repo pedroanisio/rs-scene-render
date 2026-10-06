@@ -3315,6 +3315,14 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
         if k.period.is_some() && !matches!(curve, ElasticIn | ElasticOut | ElasticInOut) {
             note("period", "elastic-* curves", &on_curve);
         }
+        // a carried spring needs a segment before it and a segment of its own
+        if k.carry && curve != Spring {
+            note("carry", "a spring segment", &on_curve);
+        } else if k.carry && i == 0 {
+            note("carry", "a spring segment with a segment before it", "on the first key, which has no segment before it");
+        } else if k.carry && i + 1 == keys.len() {
+            note("carry", "a spring segment", "on the last key, which starts no segment");
+        }
         // cubic-bezier reads @bezier, else the handles: this key's easeOut and the next key's easeIn
         let cubic = curve == CubicBezier;
         if k.bezier.is_some() && !cubic {

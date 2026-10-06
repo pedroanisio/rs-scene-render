@@ -393,6 +393,9 @@
     <xs:attribute name="period" type="positiveDecimal">
       <xs:annotation><xs:documentation>The ringing period of an elastic-in, elastic-out or elastic-in-out segment as a fraction of the segment (default 0.3; 0.45 for elastic-in-out). Read from the key the segment leaves.</xs:documentation></xs:annotation>
     </xs:attribute>
+    <xs:attribute name="carry" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>On a key whose segment is a spring: start the spring with the velocity the previous segment arrives at this key with (its rate of change at the end), instead of from rest, so a hit that follows another keeps its momentum. Needs a previous key and a following key.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="marker" type="xs:IDREF">
       <xs:annotation><xs:documentation>Snap the key time to a marker; @time becomes an offset from it.</xs:documentation></xs:annotation>
     </xs:attribute>
