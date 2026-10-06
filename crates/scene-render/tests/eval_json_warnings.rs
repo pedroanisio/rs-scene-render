@@ -29,8 +29,8 @@ fn json_output_parses_while_the_document_has_warnings() {
         .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", String::from_utf8_lossy(&o.stdout)));
     assert_eq!(v["frame"], 0);
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("warning[E19]") && err.contains("collapse"), "the warning is on stderr: {err}");
+    assert!(err.contains("info[E19]") && err.contains("collapse"), "the warning is on stderr: {err}");
     // the summary format still shows warnings with their source line, on standard output
     let s = run(&["--frame", "0"]);
-    assert!(String::from_utf8_lossy(&s.stdout).contains("warning[E19]"), "{}", String::from_utf8_lossy(&s.stdout));
+    assert!(String::from_utf8_lossy(&s.stdout).contains("info[E19]"), "{}", String::from_utf8_lossy(&s.stdout));
 }

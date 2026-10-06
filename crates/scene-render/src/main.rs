@@ -427,6 +427,7 @@ impl Out {
         let (label, color) = match d.severity {
             Severity::Error => ("error", AnsiColor::Red),
             Severity::Warning => ("warning", AnsiColor::Yellow),
+            Severity::Info => ("info", AnsiColor::Cyan),
         };
         let head = style(color, true);
         let bold = Style::new().bold();
@@ -453,11 +454,12 @@ impl Out {
     }
 
     fn summary(&mut self, file: &Path, report: &Report, deny_warnings: bool) -> std::io::Result<()> {
-        let (e, w) = (report.error_count(), report.warning_count());
+        let (e, w, i) = (report.error_count(), report.warning_count(), report.info_count());
         let ok = e == 0 && !(deny_warnings && w > 0);
         let (mark, st) =
             if ok { ("valid", style(AnsiColor::Green, true)) } else { ("invalid", style(AnsiColor::Red, true)) };
-        writeln!(self.w, "{st}{mark}{st:#} {}: {e} error(s), {w} warning(s)", file.display())
+        let info = if i > 0 { format!(", {i} info") } else { String::new() };
+        writeln!(self.w, "{st}{mark}{st:#} {}: {e} error(s), {w} warning(s){info}", file.display())
     }
 }
 
@@ -654,8 +656,9 @@ fn bake_volume(args: BakeArgs, out: &mut Out) -> std::io::Result<ExitCode> {
         let doc = sr_model::load_file(&file, &LoadOptions::default()).map_err(|e| e.to_string())?;
         let ev = sr_eval::Evaluator::new(&doc, &sr_eval::EvalOptions { params, ..Default::default() })
             .map_err(|r| r.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
-        if !ev.warnings().is_empty() {
-            return Err(ev.warnings().iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "));
+        let warned: Vec<_> = ev.warnings().iter().filter(|d| !d.is_info()).collect();
+        if !warned.is_empty() {
+            return Err(warned.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "));
         }
         let end = end.unwrap_or(ev.frame_count());
         eprintln!("Baking {object}: project frames {first}..{end} into {}", output.display());
@@ -916,7 +919,7 @@ fn eval(
     // JSON owns standard output: warnings go to standard error then, one line each
     for w in ev.warnings() {
         if matches!(format, EvalFormat::Json) {
-            eprintln!("warning[{}]: {}", w.code, w.message);
+            eprintln!("{}[{}]: {}", w.severity, w.code, w.message);
         } else {
             out.diagnostic(file, &lines, w)?;
         }
@@ -1089,7 +1092,8 @@ fn render(
     for w in doc.warnings().iter().chain(ev.warnings()) {
         out.diagnostic(file, &lines, w)?;
     }
-    let eval_warnings = ev.warnings().len();
+    // information (an inert attribute) is shown but never counts toward --strict
+    let eval_warnings = ev.warnings().iter().filter(|d| !d.is_info()).count();
     // content a safe area holds to its region, over the frames being rendered
     let safe = match (time, frames.is_empty() && bench) {
         (None, true) => sr_gpu::safe_audit::check(&ev, 0.0, ev.program().duration).diagnostics(ev.program()),
@@ -1577,7 +1581,9 @@ fn encode(
         };
         match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
             Ok(r) => {
-                let problems = r.unsupported.len() + r.accessibility.len() + r.evaluation_warnings.len();
+                let problems = r.unsupported.len()
+                    + r.accessibility.len()
+                    + r.evaluation_warnings.iter().filter(|d| !d.is_info()).count();
                 if strict && problems > 0 {
                     eprintln!(
                         "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content, evaluator warnings or accessibility findings)",

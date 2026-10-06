@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sr_model::diag::{Diagnostic, Loc};
+use sr_model::diag::{Diagnostic, Loc, Severity};
 use sr_model::element::{children, walk, walk_mut, AttrValue, Element};
 use sr_model::model::{self as m, Node};
 use sr_model::values::{Color, Fps, Length};
@@ -2777,7 +2777,7 @@ impl Builder {
                 let smoothing = l.smoothing.get();
                 let (spring, lag) = ((l.stiffness.get(), l.damping.get(), l.mass.get()), l.time_constant.get());
                 let mut unread = |attr: &str, family: &str| {
-                    self.warnings.push(Diagnostic::warning(
+                    self.warnings.push(Diagnostic::info(
                         "E19",
                         format!("link on {who}: @{attr} is accepted but has no effect without follow=\"{family}\", which reads it"),
                         l.loc,
@@ -2795,7 +2795,7 @@ impl Builder {
                     }
                 }
                 if l.follow != m::Follow::None && smoothing > 0.0 {
-                    self.warnings.push(Diagnostic::warning(
+                    self.warnings.push(Diagnostic::info(
                         "E19",
                         format!("link on {who}: @follow is ignored because @smoothing is set; a link uses one or the other"),
                         l.loc,
@@ -3246,7 +3246,7 @@ fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
         } else {
             reads.iter().map(|r| format!("@{r}")).collect::<Vec<_>>().join(", ")
         };
-        warnings.push(Diagnostic::warning(
+        warnings.push(Diagnostic::info(
             "E19",
             format!(
                 "effect {id:?} of type {ty:?}: @{} is accepted but not read by this type, which reads {list}",
@@ -3265,7 +3265,7 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
         unread_effect_attributes(e, warnings);
     }
     let mut note = |what: &str, why: &str| {
-        warnings.push(Diagnostic::warning(
+        warnings.push(Diagnostic::info(
             "E19",
             format!("{what} is accepted but has {why}"),
             e.loc(),
@@ -3297,11 +3297,15 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
     let curve_of = |k: &m::Key| k.interpolation.unwrap_or(default);
     for (i, k) in keys.iter().enumerate() {
         let curve = curve_of(k);
-        let found = std::cell::RefCell::new(Vec::<String>::new());
+        let found = std::cell::RefCell::new(Vec::<(Severity, &str, String)>::new());
         let note = |attr: &str, family: &str, why: &str| {
-            found.borrow_mut().push(format!(
-                "key {} of an animation on {who:?}: @{attr} is accepted but has no effect {why}, which does not read it (only {family} reads it)",
-                i + 1
+            found.borrow_mut().push((
+                Severity::Info,
+                "E19",
+                format!(
+                    "key {} of an animation on {who:?}: @{attr} is accepted but has no effect {why}, which does not read it (only {family} reads it)",
+                    i + 1
+                ),
             ))
         };
         let on_curve = format!("on the {curve:?} curve");
@@ -3321,9 +3325,14 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
         if cubic && k.interpolation.is_none() && k.bezier.is_none() && k.ease_out.is_none() {
             if let Some(next) = keys.get(i + 1) {
                 if next.ease_in.is_none() {
-                    found.borrow_mut().push(format!(
-                        "key {} of an animation on {who:?}: the CubicBezier curve comes from defaultInterpolation and the key has no @bezier or easeOut/easeIn handles, so the engine's default handles (influence 1/3, speed 1) are used",
-                        i + 1
+                    // the default handles shape the motion: a warning, not an inert finding
+                    found.borrow_mut().push((
+                        Severity::Warning,
+                        "E21",
+                        format!(
+                            "key {} of an animation on {who:?}: the CubicBezier curve comes from defaultInterpolation and the key has no @bezier or easeOut/easeIn handles, so the engine's default handles (influence 1/3, speed 1) are used",
+                            i + 1
+                        ),
                     ));
                 }
             }
@@ -3377,8 +3386,8 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
                 }
             }
         }
-        for message in found.into_inner() {
-            warnings.push(Diagnostic::warning("E19", message, k.loc, who));
+        for (severity, code, message) in found.into_inner() {
+            warnings.push(Diagnostic { severity, ..Diagnostic::warning(code, message, k.loc, who) });
         }
     }
 }
@@ -3439,7 +3448,7 @@ fn zero_opacity_sources(scene: &sr_model::model::Scene, warnings: &mut Vec<Diagn
             }
         });
         if zero {
-            warnings.push(Diagnostic::warning(
+            warnings.push(Diagnostic::info(
                 "E19",
                 format!("effect source {id:?} has opacity 0, so it is accepted but contributes nothing; hide a map with visible=\"false\" and leave its opacity at 1"),
                 loc,

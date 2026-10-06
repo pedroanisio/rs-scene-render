@@ -12,9 +12,18 @@ fn doc(default: &str, k1: &str, k2: &str) -> sr_model::Document {
     sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
 }
 
+/// The E19 findings: information (SREP 18), an attribute that has no effect.
 fn warned(d: &sr_model::Document) -> Vec<String> {
     let ev = Evaluator::new(d, &EvalOptions::default()).unwrap();
+    assert!(ev.warnings().iter().filter(|w| w.code == "E19").all(|w| w.is_info()), "E19 is information");
     ev.warnings().iter().filter(|w| w.code == "E19").map(|w| w.message.clone()).collect()
+}
+
+/// The E21 findings: warnings, the default handles shape the motion.
+fn defaulted(d: &sr_model::Document) -> Vec<String> {
+    let ev = Evaluator::new(d, &EvalOptions::default()).unwrap();
+    assert!(ev.warnings().iter().filter(|w| w.code == "E21").all(|w| w.severity == sr_model::Severity::Warning));
+    ev.warnings().iter().filter(|w| w.code == "E21").map(|w| w.message.clone()).collect()
 }
 
 fn says(d: &sr_model::Document, attr: &str, family: &str) -> bool {
@@ -67,17 +76,17 @@ fn spring_and_tcb_parameters_are_read_by_their_curves_only() {
 #[test]
 fn a_key_that_takes_cubic_bezier_from_the_default_without_handles_is_reported() {
     let said = |d: &sr_model::Document| {
-        warned(d).iter().any(|m| m.contains("defaultInterpolation") && m.contains("default handles"))
+        defaulted(d).iter().any(|m| m.contains("defaultInterpolation") && m.contains("default handles"))
     };
     assert!(said(&doc("cubic-bezier", "", "")), "no handles anywhere");
     assert!(!said(&doc("cubic-bezier", r#"bezier="0.2,0,0.2,1""#, "")));
     assert!(!said(&doc("cubic-bezier", r#"easeOut="0.3,1""#, "")));
     assert!(!said(&doc("cubic-bezier", "", r#"easeIn="0.3,1""#)), "the next key's easeIn is a handle of the segment");
     // the last key starts no segment; a key that names the curve is C40's business and not repeated here
-    assert_eq!(warned(&doc("cubic-bezier", r#"bezier="0.2,0,0.2,1""#, "")).len(), 0);
+    assert_eq!(defaulted(&doc("cubic-bezier", r#"bezier="0.2,0,0.2,1""#, "")).len(), 0);
     assert!(!said(&doc("linear", r#"interpolation="cubic-bezier" bezier="0.2,0,0.2,1""#, "")));
     // it is reported once, for the key that starts the segment
-    assert_eq!(warned(&doc("cubic-bezier", "", "")).len(), 1);
+    assert_eq!(defaulted(&doc("cubic-bezier", "", "")).len(), 1);
     // and it is only a warning: the animation still evaluates with the default handles
     let d = doc("cubic-bezier", "", "");
     let ev = Evaluator::new(&d, &EvalOptions::default()).unwrap();
