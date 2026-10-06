@@ -53,12 +53,17 @@ fn bounded_projections_keep_their_default_fit() {
 
 #[test]
 fn a_map_with_a_fit_is_not_floored() {
-    // the fit target decides the scale; the floor belongs to the whole-sphere default only
+    // the fit target decides the scale; the floor belongs to the whole-sphere default only: with a fit the floor is
+    // never above the fitted scale, so removing it changes nothing (the decision rests on this equality)
     let fit = box_20();
+    let view = View { lon: 0.0, lat: 50.0, zoom: 0.0, rotation: 0.0 };
     let (map, _) = Map::new(Kind::LambertConformal, None, [480.0, 360.0], &[&fit], 0.0, None);
-    assert!(map.base_scale > 100.0, "{}", map.base_scale);
-    let proj = map.projection(&View { lon: 0.0, lat: 50.0, zoom: 0.0, rotation: 0.0 });
-    let b = proj.project(&fit).bounds().unwrap();
-    // a 20 x 20 degree box is taller than wide on the cone: the fit fills the frame's height
-    assert!(b[1][1] - b[0][1] > 300.0 && b[1][0] - b[0][0] > 200.0, "the box fills the frame it was fitted to: {b:?}");
+    let mut without = map.clone();
+    without.min_scale = 0.0;
+    let bounds = |m: &Map| m.projection(&view).project(&fit).bounds().unwrap();
+    assert_eq!(bounds(&map), bounds(&without), "the floor changed a fitted map");
+    assert!(map.min_scale <= map.base_scale, "{} above {}", map.min_scale, map.base_scale);
+    // the fitted box (measured with the floor code in place): 244.5 x 338.1 px
+    let b = bounds(&map);
+    near([b[1][0] - b[0][0], b[1][1] - b[0][1]], [244.499, 338.100], "the fitted box");
 }
