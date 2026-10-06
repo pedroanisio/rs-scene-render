@@ -272,7 +272,7 @@ fn worked_out(source: &CraterSource, impact: &Impact3, age: f64) -> Result<Impac
     };
     // cubic object units to a metre cubed
     let cubic = units.powi(3);
-    let budget = source.mantle.then(|| sr_3d::crater::Budget {
+    let budget = source.mantle.then_some(sr_3d::crater::Budget {
         volume: law.volume * cubic,
         ejecta: law.ejecta_volume * cubic,
         bulking: source.bulking,
