@@ -41,6 +41,8 @@ mod export;
 mod pockets;
 #[cfg(test)]
 mod sampling;
+#[cfg(test)]
+mod voxel_memory;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -521,11 +523,20 @@ fn voxelize(
 ) -> Result<(Vec<bool>, Vec<SolidFaces>), Error> {
     let count = cells.iter().product();
     let mut solid = vec![false; count];
-    let mut faces = Vec::new();
+    let centre = |k: usize| world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
+    // the mask first, so that the list of faces is allocated once, at the size it is charged for
+    let mut solid_cells = 0usize;
     for (k, is_solid) in solid.iter_mut().enumerate() {
-        let p = world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5));
-        let Some(collider) = obstacles.iter().find(|o| o.shape.contains(p)) else { continue };
-        *is_solid = true;
+        let p = centre(k);
+        if obstacles.iter().any(|o| o.shape.contains(p)) {
+            *is_solid = true;
+            solid_cells += 1;
+        }
+    }
+    let mut faces = Vec::with_capacity(solid_cells);
+    for (k, _) in solid.iter().enumerate().filter(|(_, s)| **s) {
+        let p = centre(k);
+        let collider = obstacles.iter().find(|o| o.shape.contains(p)).expect("a cell of the mask is in a collider");
         let (mut low_velocity, mut high_velocity) = ([0.0; 3], [0.0; 3]);
         for (axis, (low_v, high_v)) in low_velocity.iter_mut().zip(&mut high_velocity).enumerate() {
             let mut low = p;
@@ -537,7 +548,6 @@ fn voxelize(
         }
         faces.push(SolidFaces { cell: k, low: low_velocity, high: high_velocity });
     }
-    faces.shrink_to_fit();
     Ok((solid, faces))
 }
 
