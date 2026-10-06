@@ -3314,7 +3314,33 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
                 "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
             )
         }
+        "shape" => unread_stroke_text_attributes(e, warnings),
         _ => {}
+    }
+}
+
+/// SREP 56: `text`, `strokeFont` and `fontSize` apply to `shape="stroke-text"` only; on another shape kind they have no
+/// effect, and a validator SHOULD report them as inert. SREP 56 names no rule of the SREP 18 table, so they are this
+/// engine's own information finding, E19, until an SREP assigns one. `fontSize` at its default (48) is not reported.
+fn unread_stroke_text_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let kind = e.get_attr("shape").map(|k| k.to_string()).unwrap_or_default();
+    if kind == "stroke-text" {
+        return;
+    }
+    let decls = sr_model::xsd::COMPLEX_TYPES[e.xsd_type()].attrs;
+    for name in ["text", "strokeFont", "fontSize"] {
+        let Some(value) = e.get_attr(name) else { continue };
+        if is_default(&value, decls.iter().find(|d| d.name == name).and_then(|d| d.default)) {
+            continue;
+        }
+        warnings.push(Diagnostic::info(
+            crate::inert::UNREAD,
+            format!(
+                "shape {kind:?}: @{name} is accepted but has no effect: only shape \"stroke-text\" reads it (SREP 56)"
+            ),
+            e.loc(),
+            e.element_id().unwrap_or(""),
+        ));
     }
 }
 
