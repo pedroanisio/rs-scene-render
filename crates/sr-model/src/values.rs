@@ -182,6 +182,12 @@ impl ParseValue for Vec<Color> {
     }
 }
 
+impl ParseValue for Vec<Point2> {
+    fn parse_value(s: &str) -> Result<Self, ValueError> {
+        s.split_whitespace().map(Point2::parse_value).collect()
+    }
+}
+
 impl fmt::Display for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

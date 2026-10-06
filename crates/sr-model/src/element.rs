@@ -97,6 +97,11 @@ impl ToAttr for Vec<Color> {
         AttrValue::Tokens(self.iter().map(|c| c.to_string()).collect())
     }
 }
+impl ToAttr for Vec<Point2> {
+    fn to_attr(&self) -> AttrValue {
+        AttrValue::Tokens(self.iter().map(|p| p.to_string()).collect())
+    }
+}
 impl ToAttr for Length {
     fn to_attr(&self) -> AttrValue {
         AttrValue::Length(*self)
