@@ -1,7 +1,7 @@
 //! Verification of the files a document references.
 //!
 //! Every attribute of type `xs:anyURI` that names an input (all of them
-//! except `output/@path`, `still/@path` and `destination/@uri`) must resolve
+//! except `output/@path`, `output/@report`, `still/@path` and `destination/@uri`) must resolve
 //! to an existing file. Where the document declares a digest — `@sha256` for
 //! `@src`, `@cacheSha256` for `@cache` — the file's SHA-256 must match it,
 //! which is what makes renders of generated media and transcriptions
@@ -31,7 +31,7 @@ const MAX_SEQUENCE_FRAMES: i128 = 1_000_000;
 pub const MAX_FRAME_DIGITS: usize = 64;
 
 /// Names of input-file attributes, derived from the schema: every `xs:anyURI`
-/// attribute except the output-side `path` and `uri`.
+/// attribute except the output-side `path`, `report` (SREP 18: where a render report is written) and `uri`.
 pub fn input_uri_attributes() -> &'static BTreeSet<&'static str> {
     static S: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
     S.get_or_init(|| {
@@ -40,7 +40,7 @@ pub fn input_uri_attributes() -> &'static BTreeSet<&'static str> {
             .flat_map(|c| c.attrs.iter())
             .filter(|a| root_builtin(a.ty) == Some(Builtin::AnyUri))
             .map(|a| a.name)
-            .filter(|n| !matches!(*n, "path" | "uri"))
+            .filter(|n| !matches!(*n, "path" | "report" | "uri"))
             .collect()
     })
 }
@@ -487,5 +487,6 @@ mod tests {
         assert!(input_uri_attributes().contains("src"));
         assert!(input_uri_attributes().contains("cache"));
         assert!(!input_uri_attributes().contains("path"));
+        assert!(!input_uri_attributes().contains("report"), "output/@report names a file the render writes");
     }
 }
