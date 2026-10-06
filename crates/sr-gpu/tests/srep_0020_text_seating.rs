@@ -25,6 +25,8 @@ fn doc(font: &str, text: &str, box_h: u32, attrs: &str) -> sr_model::Document {
     sr_model::load_str(&xml, &opts).unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
 }
 
+/// Writes the test font as `name` among the fixtures. Tests run at once: each writes its own file, so none reads a
+/// file another is rewriting.
 fn font(name: &str, m: Metrics) -> String {
     test_font::write(&fixtures(), name, "SREP Test", m);
     name.to_string()
@@ -70,7 +72,7 @@ fn column_runs(r: &Rendered) -> Vec<(u32, u32)> {
 
 #[test]
 fn srep_0020_text_top_middle_bottom() {
-    let f = font("srep20.ttf", Metrics::default());
+    let f = font("srep20-valign.ttf", Metrics::default());
     // ink rows 65–135, 140–210 and 215–285: pixel rows 65..=134, 140..=209, 215..=284
     for (valign, rows) in [("top", (65, 134)), ("middle", (140, 209)), ("bottom", (215, 284))] {
         let Some(r) = render(&doc(&f, "HH", 300, &format!(r#"verticalAlign="{valign}""#))) else { return };
@@ -80,7 +82,7 @@ fn srep_0020_text_top_middle_bottom() {
 
 #[test]
 fn srep_0020_text_lines() {
-    let f = font("srep20.ttf", Metrics::default());
+    let f = font("srep20-lines.ttf", Metrics::default());
     // baselines at y = 135, 285 and 435; each line inks 70 px above its baseline
     let Some(r) = render(&doc(&f, "HH&#10;HH&#10;HH", 450, r#"verticalAlign="top""#)) else { return };
     assert_eq!(row_runs(&r), [(65, 134), (215, 284), (365, 434)]);
@@ -88,7 +90,7 @@ fn srep_0020_text_lines() {
 
 #[test]
 fn srep_0020_text_align() {
-    let f = font("srep20.ttf", Metrics::default());
+    let f = font("srep20-align.ttf", Metrics::default());
     // ink columns 105–215, 245–355 and 385–495: two glyphs of 60 px advance, each inking 5–55 px of its advance
     for (align, x0) in [("start", 105), ("center", 245), ("end", 385)] {
         let Some(r) = render(&doc(&f, "HH", 300, &format!(r#"align="{align}""#))) else { return };
