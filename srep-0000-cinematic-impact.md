@@ -2628,7 +2628,12 @@ infinity and `1.4e-5` in the radius of a crossing (test `single_precision_follow
 `40 M` and a focal length of 100 pixels, the shadow has the radius `12.915` px by area against `12.764` px from `b_c` (limit 0.5 px); the two sides of an
 inclined image have the same classes and radii, and `1/g + 1/g'` averages to `1/sqrt(1 - 3M/r)` to `1e-9`; in the column of the plane through the axis `g =
 sqrt(1 - 3M/r)` to `1e-12`; a 1280 x 720 image takes about 2.6 s of one core. The comparison of the shader with this reference, pixel by pixel, is the
-test of the renderer and is written in its own section; it is not repeated here.
+test of the renderer (`sr-gpu`, commits e4b1f85 for the tests and 99f4d2e for the shader, on the NVIDIA adapter, 2026-10-06, as its author reported it and not
+rerun in preparing this text). On 96 x 60 pixels the shader in single precision and this image agree on the class of 5760 of 5760 pixels (106 captured, 5084 of
+background, 570 of disk); the worst relative differences are 1.2e-5 in the angle of escape, 8.1e-6 in the radius of a point of the disk, 3.1e-6 in `g` and 1.3e-6 rad in
+the azimuth. Against `gr::f32::trace`, for the rays more than 5% from the critical curve, 2528 of 3186 radii of crossings agree to 1e-6 or better and the worst is 1.2e-5
+up to `56 M` (6.8e-5 beyond it, near the escape) and 1.4e-6 in the angle of escape: the GPU compiler contracts operations, so the same order of operations does not
+give the same single-precision bits. The shadow of an observer at `1e4 M` is 39.99 px for the 40 expected.
 
 **Limits.** The hole is Schwarzschild: no rotation, no charge, no frame dragging. The disk is analytic, geometrically thin,
 opaque and in steady circular motion: it has no vertical structure, no self-irradiation, no radial flow and no
