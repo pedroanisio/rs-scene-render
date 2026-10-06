@@ -65,3 +65,24 @@ fn each_completed_step_offers_its_momentum_once_and_a_replay_offers_it_again_unc
         }
     }
 }
+
+#[test]
+fn a_frame_among_the_last_steps_of_a_seek_starts_from_the_state_kept_there_and_is_the_same_frame() {
+    // with no budget for checkpoints there is none for the recent states either, and the frame is the same
+    for (order, checkpoints) in [(Order::First, 0), (Order::First, 1 << 20), (Order::Second, 1 << 20)] {
+        let mut reference = ocean(order, checkpoints);
+        let wanted = reference.at_driven(0.9, &mut body(&mut Vec::new())).unwrap().clone();
+        let impulse = reference.exchanged_impulse();
+        let mut solver = ocean(order, checkpoints);
+        solver.at_driven(1.2, &mut body(&mut Vec::new())).unwrap();
+        // 0.9 s is the ninth step, among the last twelve of a seek to the twelfth: it starts there and takes none
+        let mut seen = Vec::new();
+        let got = solver.at_driven(0.9, &mut body(&mut seen)).unwrap().clone();
+        assert_eq!(got, wanted, "{order:?}");
+        assert_eq!(solver.exchanged_impulse().map(f64::to_bits), impulse.map(f64::to_bits), "{order:?}");
+        // the offers of a start are those of the step it starts at, and of no step before it
+        if checkpoints > 0 {
+            assert!(seen.iter().all(|(k, _)| *k == 9), "{order:?}: {seen:?}");
+        }
+    }
+}

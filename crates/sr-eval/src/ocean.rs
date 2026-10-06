@@ -760,8 +760,8 @@ mod tests {
             let (steps, seas, seconds) = steps_per_frame(order);
             println!("STEPS order {order}: {steps:?}, {seconds:.3} s");
             // a frame is three canonical steps on, and the smoke asks for twelve more past it: after the first
-            // frame no frame recomputes what it has already computed ahead
-            assert!(steps.iter().skip(1).all(|&s| s <= 8), "order {order}: {steps:?}");
+            // frame no frame computes more than the three that are new, and the offer at which it starts again
+            assert!(steps.iter().skip(1).all(|&s| s <= 4), "order {order}: {steps:?}");
             // and what it shows is what an evaluator that was never stepped ahead computes from the start
             for k in [7usize, 19, 30] {
                 let doc = sr_model::load_str(&with_smoke(order), &sr_model::LoadOptions::without_assets()).unwrap();
