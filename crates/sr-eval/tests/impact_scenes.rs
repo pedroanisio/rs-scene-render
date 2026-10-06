@@ -588,8 +588,9 @@ macro_rules! sea_tests {
             far_sweep($r, "speed", &asserted, &recorded, true);
         }
 
-        /// The highest surface anywhere is not a property of the far field: where the cavity forms over the law's time
-        /// and spreads in a wide ring, the largest rocks do not make a higher crest than the middle ones. Recorded.
+        /// The highest surface anywhere is recorded, not asserted: it is a property of the cavity's own ring and not of the
+        /// far field, and a pair of its sweeps can be a fraction of a per cent apart (4.72 and 4.74 m by mass at the time
+        /// of writing). Recorded for the speed and the mass of a plunge and of a rock at 60 degrees.
         #[test]
         #[ignore = "measurement: records the highest surface anywhere, asserts only that it ran"]
         fn in_the_sea_the_highest_surface_anywhere_is_recorded() {

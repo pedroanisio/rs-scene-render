@@ -390,6 +390,7 @@ VALID = {
     "crater-impact": CRATER_IMPACT,
     "pyro-crater": PYRO_CRATER,
     "ejecta-crater": EJECTA_CRATER,
+    "pyro-crater-push": PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource crater="pit" velocityRateY="-2"/>').replace('<pyroImpulse crater="pit" heatFraction="0.2"/>', '<pyroImpulse crater="pit" heatFraction="0.2" velocityX="1"/>'),
     "ocean-entry": OCEAN_ENTRY,
     "ocean-hydrostatic": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="hydrostatic" '),
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),

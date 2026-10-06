@@ -998,7 +998,7 @@ impl<'a> Eval<'a> {
                 let degrees = |k: &str, default: f64| a(k).map(xpath_number).unwrap_or(default);
                 let (angle, spread) = (degrees("angle", 45.), degrees("angleSpread", 15.));
                 self.check(!from_crater || (angle - spread >= 0. && angle + spread <= 90.), n, "P3D10", || {
-                    "the launch angle of a burst from a crater and its spread must stay between 0 and 90 degrees."
+                    "the launch angle of a burst from a crater (default 45) and its spread (default 15) must stay between 0 and 90 degrees."
                         .into()
                 });
             }

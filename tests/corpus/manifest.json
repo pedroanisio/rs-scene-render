@@ -824,6 +824,7 @@
     "particles3d.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
     "pyro-colliders.scene.xml": [],
+    "pyro-crater-push.scene.xml": [],
     "pyro-crater.scene.xml": [],
     "pyro-fields.scene.xml": [],
     "pyro-maccormack.scene.xml": [],
