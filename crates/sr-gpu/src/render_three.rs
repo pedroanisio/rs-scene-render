@@ -1391,6 +1391,20 @@ impl Renderer {
                         .collect()
                 })
                 .unwrap_or_default();
+            // an imported name that matches no material of the model has no effect: say so, with the names there are
+            for (old, _) in &overrides {
+                if !model.materials.iter().any(|m| &m.name == old) {
+                    let names: Vec<&str> = model.materials.iter().map(|m| m.name.as_str()).collect();
+                    let msg = format!(
+                        "{}: materialOverride names {old}, which is no material of the model (it has: {})",
+                        n.id,
+                        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+                    );
+                    if !plan.stats.unsupported.contains(&msg) {
+                        plan.stats.unsupported.push(msg);
+                    }
+                }
+            }
             for item in sr_3d::anim::draw_list(model, &locals, &weights, morph.as_deref()) {
                 if selected.as_ref().is_some_and(|(root, _)| !under(item.node, *root)) {
                     continue;

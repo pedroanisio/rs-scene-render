@@ -1219,6 +1219,13 @@ impl<'a> Eval<'a> {
                     self.check(ok, n, "MOV1", || {
                         "@materialOverride is a space-separated list of name:id pairs.".into()
                     });
+                    // each id (the text after the first ':') names a material of the document
+                    let named = pairs
+                        .split_whitespace()
+                        .all(|t| self.sets.materials.contains(t.split_once(':').map_or("", |(_, id)| id)));
+                    self.check(named, n, "MOV2", || {
+                        "@materialOverride: each id after the colon must name a material.".into()
+                    });
                 }
                 // p67
                 if has("tracking") {

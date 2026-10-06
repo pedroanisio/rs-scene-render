@@ -79,6 +79,20 @@ fn material_override_replaces_one_material_by_name() {
 fn material_takes_precedence_over_material_override() {
     let Some(r) = render(&scene(r#"material="blue" materialOverride="red:blue green:blue""#)) else { return };
     assert_eq!(dominant(r.at(150, 95)), 'b');
-    let Some(s) = render(&scene(r#"material="blue" materialOverride="green:red""#)) else { return };
+    let Some(s) = render(&scene(r#"material="blue" materialOverride="green:blue""#)) else { return };
     assert_eq!(dominant(s.at(45, 85)), 'b', "the override has no effect under @material");
+}
+
+#[test]
+fn an_override_naming_no_material_of_the_model_warns_and_lists_the_names() {
+    let Some(r) = render(&scene(r#"materialOverride="nosuch:blue red:blue""#)) else { return };
+    assert!(r.stats.errors.is_empty(), "{:?}", r.stats.errors);
+    let warned: Vec<_> = r.stats.unsupported.iter().filter(|m| m.contains("nosuch")).collect();
+    assert_eq!(warned.len(), 1, "one warning for the one unknown name: {:?}", r.stats.unsupported);
+    assert!(warned[0].contains("red") && warned[0].contains("green"), "it lists the model's materials: {}", warned[0]);
+    // the name that exists took effect
+    assert_eq!(dominant(r.at(150, 95)), 'b');
+    // no warning when every name exists
+    let Some(ok) = render(&scene(r#"materialOverride="red:blue""#)) else { return };
+    assert!(ok.stats.unsupported.iter().all(|m| !m.contains("materialOverride")), "{:?}", ok.stats.unsupported);
 }
