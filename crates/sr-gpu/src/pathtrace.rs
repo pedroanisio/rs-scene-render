@@ -1223,6 +1223,98 @@ pub fn render(
     render_timed(pt, d, enc, scene, data, opts, inputs, out, false);
 }
 
+/// The buffers of a pass that the light-grid kernels read, besides the grid itself.
+struct GridInputs<'a> {
+    verts: &'a wgpu::Buffer,
+    mats: &'a wgpu::Buffer,
+    nodes: &'a wgpu::Buffer,
+    lights: &'a wgpu::Buffer,
+    guide: &'a wgpu::Buffer,
+    /// A buffer for the accumulation binding, which the kernels do not use.
+    stand_in: &'a wgpu::Buffer,
+}
+
+/// Records the kernels that fill the light grids of `plan` into `group`, once before the tiles:
+/// one dispatch for each scalar slot (a light's or a dome direction's) and, for isotropic media
+/// under a dome, one for the pre-integrated radiance. `first` carries the pass's parameters, in
+/// which only the slot differs from one dispatch to the next.
+#[allow(clippy::too_many_arguments)]
+fn build_light_grids(
+    pt: &PtGpu,
+    d: &wgpu::Device,
+    enc: &mut wgpu::CommandEncoder,
+    timer: &mut Option<crate::fx::Timer>,
+    plan: &crate::volume::LightGridPlan,
+    group: &wgpu::BindGroup,
+    first: Params,
+    buffers: &GridInputs,
+    inputs: &PtInputs,
+) {
+    let params: Vec<Params> = (0..plan.scalar_slots)
+        .map(|slot| Params { size: [first.size[0], first.size[1], slot as f32, 0.0], ..first })
+        .collect();
+    let mut bytes = vec![0u8; params.len().max(1) * SLOT as usize];
+    for (k, sl) in params.iter().enumerate() {
+        let b = bytemuck::bytes_of(sl);
+        bytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
+    }
+    let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("pt-grid-params"),
+        contents: &bytes,
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let entries = |acc: &wgpu::Buffer| {
+        d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pathtrace-grid-build"),
+            layout: &pt.bgl0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &ubuf,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: buffers.verts.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: buffers.mats.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: buffers.nodes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: buffers.lights.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: buffers.guide.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
+                },
+            ],
+        })
+    };
+    let build = entries(buffers.stand_in);
+    let g = pt.grid_pipelines(d);
+    let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace light grid"));
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("pathtrace-light-grid"),
+        timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
+            query_set: &t.set,
+            beginning_of_pass_write_index: Some(a),
+            end_of_pass_write_index: Some(a + 1),
+        }),
+    });
+    cp.set_bind_group(1, group, &[]);
+    cp.set_pipeline(&g.light);
+    for slot in 0..plan.scalar_slots {
+        cp.set_bind_group(0, &build, &[(u64::from(slot) * SLOT) as u32]);
+        cp.dispatch_workgroups(plan.rows_per_slot.div_ceil(64), 1, 1);
+    }
+    if plan.radiance {
+        cp.set_pipeline(&g.dome);
+        cp.set_bind_group(0, &build, &[0]);
+        cp.dispatch_workgroups(plan.node_count().div_ceil(64), 1, 1);
+    }
+}
+
 /// [`render`], also reporting the CPU packing time and, with `time_gpu`, timestamp queries
 /// around each tile's trace and denoise passes (labels `pathtrace trace` / `pathtrace denoise`).
 #[allow(clippy::too_many_arguments)]
@@ -1363,70 +1455,15 @@ pub fn render_timed(
 
     // the grids are built once, before the tiles
     if let (Some(plan), Some(group)) = (&grid_plan, &grid_group) {
-        let first = make_base(&tiles[0]);
-        let params: Vec<Params> = (0..plan.scalar_slots)
-            .map(|slot| Params { size: [first.size[0], first.size[1], slot as f32, 0.0], ..first })
-            .collect();
-        let mut bytes = vec![0u8; params.len().max(1) * SLOT as usize];
-        for (k, sl) in params.iter().enumerate() {
-            let b = bytemuck::bytes_of(sl);
-            bytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
-        }
-        let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("pt-grid-params"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let entries = |acc: &wgpu::Buffer| {
-            d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pathtrace-grid-build"),
-                layout: &pt.bgl0,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &ubuf,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry { binding: 1, resource: tverts.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: mats.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: guide.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
-                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
-                    },
-                ],
-            })
+        let buffers = GridInputs {
+            verts: &tverts,
+            mats: &mats,
+            nodes: &nodes,
+            lights: &lights,
+            guide: &guide,
+            stand_in: &stand_in,
         };
-        let build = entries(&stand_in);
-        let g = pt.grid_pipelines(d);
-        let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace light grid"));
-        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pathtrace-light-grid"),
-            timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
-                query_set: &t.set,
-                beginning_of_pass_write_index: Some(a),
-                end_of_pass_write_index: Some(a + 1),
-            }),
-        });
-        cp.set_bind_group(1, group, &[]);
-        cp.set_pipeline(&g.light);
-        for slot in 0..plan.scalar_slots {
-            cp.set_bind_group(0, &build, &[(u64::from(slot) * SLOT) as u32]);
-            cp.dispatch_workgroups(plan.rows_per_slot.div_ceil(64), 1, 1);
-        }
-        if plan.radiance {
-            cp.set_pipeline(&g.dome);
-            cp.set_bind_group(0, &build, &[0]);
-            cp.dispatch_workgroups(plan.node_count().div_ceil(64), 1, 1);
-        }
+        build_light_grids(pt, d, enc, &mut timer, plan, group, make_base(&tiles[0]), &buffers, inputs);
     }
     for (tile_index, tile) in tiles.iter().enumerate() {
         enc.clear_buffer(&accum, 0, None);
