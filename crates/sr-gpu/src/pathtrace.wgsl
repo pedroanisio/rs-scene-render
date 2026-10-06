@@ -369,14 +369,40 @@ fn frame_of(n: vec3<f32>) -> mat3x3<f32> {
 /// Probability of sampling the specular lobe (else the cosine-weighted diffuse lobe): the share
 /// of the surface's reflectance that is specular at this view angle, so that a dielectric seen at
 /// a grazing angle (water, glossy paint) spends its samples where the energy is. Any value in
-/// (0, 1) gives an unbiased estimate; a surface with no diffuse lobe (a metal) takes 1.
+/// (0, 1) gives an unbiased estimate; a surface with no diffuse lobe (a metal) takes 1. The share
+/// is kept to 0.05 at the least and 0.999 at the most: the diffuse lobe of a dark dielectric at
+/// the horizon is a thousandth of its reflectance, and a cap of 0.95 gave it one sample in twenty,
+/// each a pixel's worth of dark among samples of the sky, which at a few samples a pixel were specks.
 fn p_spec(s: Surf, n: vec3<f32>, v: vec3<f32>) -> f32 {
     let lum = vec3(0.2126, 0.7152, 0.0722);
     let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
     let ls = dot(f, lum) * s.specw;
     let ld = dot((vec3(1.0) - f) * s.albedo, lum) * (1.0 - s.metallic) * (1.0 - s.trans);
     if (ld <= 0.0) { return 1.0; }
-    return clamp(ls / max(ls + ld, 1e-6), 0.05, 0.95);
+    return clamp(ls / max(ls + ld, 1e-6), 0.05, 0.999);
+}
+
+// Smith's masking of a GGX surface of alpha `a` for a direction whose cosine with the normal is `nv`.
+fn g1_smith(nv: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    return 2.0 * nv / (nv + sqrt(a2 + (1.0 - a2) * nv * nv));
+}
+
+// A normal from the distribution of the GGX normals visible from `v` (in the surface's frame, z
+// along the normal, v.z > 0), for two uniform numbers.
+fn sample_visible_normal(v: vec3<f32>, a: f32, u1: f32, u2: f32) -> vec3<f32> {
+    let vh = normalize(vec3(a * v.x, a * v.y, v.z));
+    let lensq = vh.x * vh.x + vh.y * vh.y;
+    let t1 = select(vec3(1.0, 0.0, 0.0), vec3(-vh.y, vh.x, 0.0) * inverseSqrt(lensq), lensq > 0.0);
+    let t2 = cross(vh, t1);
+    let r = sqrt(u1);
+    let phi = 2.0 * PI * u2;
+    let p1 = r * cos(phi);
+    var p2 = r * sin(phi);
+    let k = 0.5 * (1.0 + vh.z);
+    p2 = (1.0 - k) * sqrt(max(1.0 - p1 * p1, 0.0)) + k * p2;
+    let nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+    return normalize(vec3(a * nh.x, a * nh.y, max(nh.z, 0.0)));
 }
 
 fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -386,7 +412,8 @@ fn pdf_of(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     let nh = max(dot(n, h), 0.0);
     let vh = max(dot(v, h), 1e-4);
     let ps = p_spec(s, n, v);
-    return ps * d_ggx(nh, s.a) * nh / (4.0 * vh) + (1.0 - ps) * nl / PI;
+    // the specular lobe samples the normals visible from v: the density of l is G1(v) D(h) / (4 n.v)
+    return ps * g1_smith(dot(n, v), s.a) * d_ggx(nh, s.a) / (4.0 * max(dot(n, v), 1e-4)) + (1.0 - ps) * nl / PI;
 }
 
 fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -394,12 +421,10 @@ fn sample_dir(s: Surf, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let u1 = rnd();
     let u2 = rnd();
     if (rnd() < p_spec(s, n, v)) {
-        // GGX half vector
-        let a2 = s.a * s.a;
-        let ct = sqrt((1.0 - u1) / (1.0 + (a2 - 1.0) * u1));
-        let st = sqrt(max(1.0 - ct * ct, 0.0));
-        let ph = 2.0 * PI * u2;
-        let h = tbn * vec3(st * cos(ph), st * sin(ph), ct);
+        // a half vector among the GGX normals visible from v (Heitz 2018): near the horizon the
+        // normals that would turn the reflection below the surface are not drawn
+        let vl = vec3(dot(v, tbn[0]), dot(v, tbn[1]), max(dot(v, n), 1e-4));
+        let h = tbn * sample_visible_normal(vl, s.a, u1, u2);
         return reflect(-v, h);
     }
     let r = sqrt(u1);
