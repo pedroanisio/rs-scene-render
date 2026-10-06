@@ -102,7 +102,7 @@ fn i7_audio_attributes_on_a_layer_without_sound() {
     assert_eq!(codes(img, r#"<layer id="l" asset="img" volume="0.5"/>"#), ["INERT-I7"]);
     let f = findings(img, r#"<layer id="l" asset="img" volume="0.5" mute="true"/>"#);
     assert_eq!(f.len(), 1, "{f:?}");
-    let video = r#"<video id="v" src="a.mp4" width="10" height="10"/>"#;
+    let video = r#"<video id="v" src="a.mp4" width="10" height="10" fps="10" duration="1"/>"#;
     assert!(codes(video, r#"<layer id="l" asset="v" volume="0.5"/>"#).is_empty());
 }
 
