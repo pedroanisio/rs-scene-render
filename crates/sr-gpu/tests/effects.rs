@@ -942,12 +942,44 @@ fn selective_color_reads_color_and_amount() {
         by_color.at(8, 8),
         by_color.at(56, 8)
     );
-    // `amount` mixes the adjusted picture with the original
+    // `amount` mixes the adjusted picture with the original, in display-encoded values (SREP 29 rule 2.4): half way
+    // from blue (0, 0, 255) to white is (128, 128, 255) as displayed
     let half = shot(r##"color="#0000FF" amount="0.5""##).unwrap();
-    let s = sat(half.at(56, 8));
-    assert!(s > 0.3 && s < 0.7, "half the adjustment: {s} {:?}", half.at(56, 8));
+    assert_encoded(half.at(56, 8), [127.5, 127.5, 255.0], "half the adjustment");
     let none = shot(r##"color="#0000FF" amount="0""##).unwrap();
     assert!(sat(none.at(56, 8)) > 0.9, "{:?}", none.at(56, 8));
+}
+
+/// A linear-light pixel, display-encoded (sRGB) to 8-bit code values, within 1.5 levels of `want`.
+fn assert_encoded(p: [f32; 4], want: [f64; 3], what: &str) {
+    let got = [0, 1, 2].map(|i| sr_gpu::color::encode(sr_model::model::Transfer::Srgb, p[i] as f64) * 255.0);
+    assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.5), "{what}: got {got:?}, want {want:?} ({p:?})");
+}
+
+#[test]
+fn selective_color_amount_mixes_display_encoded_values() {
+    // SREP 29 rule 2: every quantity is in display-encoded colour; the result is mix(original, adjusted, amount).
+    // #B40000 inside a window on red, desaturated: adjusted (180, 180, 180); the original (180, 0, 0).
+    // Half way: (180, 90, 90) as displayed, not the linear-light mix (180, 131, 131); a quarter: (180, 45, 45).
+    // Green (0, 180, 0) is outside the window and stays as it is.
+    let shot = |amount: &str| {
+        let xml = format!(
+            r##"<scene version="1.1"><project width="64" height="16" fps="10" duration="1" background="#000000"/>
+<composition><group id="g" x="0" y="0" width="64" height="16" effects="sc">
+<shape id="r" shape="rect" x="0" y="0" width="32" height="16" fill="#B40000"/><shape id="v" shape="rect" x="32" y="0" width="32" height="16" fill="#00B400"/></group></composition>
+<effects><effect id="sc" type="selective-color" color="#FF0000" saturation="0" amount="{amount}"/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+        render(&d)
+    };
+    let Some(half) = shot("0.5") else { return };
+    assert!(problems(&half).is_empty(), "{:?}", problems(&half));
+    assert_encoded(half.at(8, 8), [180.0, 90.0, 90.0], "amount 0.5 on #B40000");
+    assert_encoded(half.at(56, 8), [0.0, 180.0, 0.0], "green is outside the window");
+    assert_encoded(shot("0.25").unwrap().at(8, 8), [180.0, 45.0, 45.0], "amount 0.25 on #B40000");
+    // the ends are unchanged by where the mix is done
+    assert_encoded(shot("1").unwrap().at(8, 8), [180.0, 180.0, 180.0], "amount 1");
+    assert_encoded(shot("0").unwrap().at(8, 8), [180.0, 0.0, 0.0], "amount 0");
 }
 
 #[test]
