@@ -1694,7 +1694,7 @@ impl<'a> Eval<'a> {
             });
         }
         // p62
-        if local == "pattern" && has("asset") {
+        if local == "pattern" && parent_is("paints") {
             self.check(contains(&self.sets.image_assets, a("asset")), n, "R42", || {
                 "pattern/@asset must name an image asset: a pattern tiles an image.".into()
             });
