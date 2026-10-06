@@ -152,3 +152,11 @@ fn label_offset_moves_the_label_along_the_normal() {
     let (ca, cb) = (white(&a), white(&b));
     assert!((cb[0] - ca[0]).abs() <= 1.0 && (cb[1] - ca[1] - 30.0).abs() <= 1.0, "{ca:?} -> {cb:?}");
 }
+
+#[test]
+fn group_box() {
+    // sr-core case srep-0016-group-box: green centre (290, 180), 220 x 6
+    let b = r##"<group id="B" x="460" y="150"><shape id="b1" shape="rect" width="60" height="60" x="-60" y="0" fill="#0000FFFF"/><shape id="b2" shape="rect" width="40" height="60" x="0" y="0" fill="#0000FFFF"/></group>"##;
+    let Some(r) = render(&scene(&format!("{R}{b}{}", conn("")))) else { return };
+    near(green_box(&r), [180.0, 177.0, 400.0, 183.0]);
+}

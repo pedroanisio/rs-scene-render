@@ -290,3 +290,13 @@ fn animated_gap_and_bend() {
     let p = path(&frame(&d, 0.5), "c").unwrap();
     ends(&p, [230.0, 180.0], [460.0, 180.0], EPS);
 }
+
+#[test]
+fn group_box_case_stops_at_the_rectangle_its_content_spans() {
+    // sr-core case srep-0016-group-box: B is a group at (460, 150) whose content spans x = -60 to 40 in its own
+    // space, so its box starts left of its origin and the line stops at x = 400, not 460
+    let b = r##"<group id="B" x="460" y="150"><shape id="b1" shape="rect" width="60" height="60" x="-60" y="0" fill="#0000FFFF"/><shape id="b2" shape="rect" width="40" height="60" x="0" y="0" fill="#0000FFFF"/></group>"##;
+    let d = load(&format!("{R}{b}{}", conn("")));
+    let p = path(&frame(&d, 0.0), "c").expect("drawn");
+    ends(&p, [180.0, 180.0], [400.0, 180.0], EPS);
+}
