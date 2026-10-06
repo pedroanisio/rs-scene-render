@@ -24,13 +24,31 @@ jobs:
       - run: python3 tools/check_release_hygiene.py --all
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --exclude sr-eval --exclude sr-sim --locked --no-fail-fast -- --test-threads=1
+      - run: cargo test --workspace --exclude sr-eval --exclude sr-sim --exclude sr-gpu --locked --no-fail-fast -- --test-threads=1
       - run: python3 -m unittest discover -s tools/tests -v
         if: always()
       - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-diagnostics
+          path: |
+            target/environment/
+            target/golden-output/
+          if-no-files-found: warn
+  gpu-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - run: python3 tools/gpu_shards.py ${{ matrix.shard }} 6
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: gpu-test-diagnostics-${{ matrix.shard }}
           path: |
             target/environment/
             target/golden-output/
