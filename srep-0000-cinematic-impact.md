@@ -1273,6 +1273,22 @@ is 3.9e-4 (order 1.27 from the step before), near the floor of a linear referenc
 disposable program and not in the test. This checks the scheme's dissipation and order against an answer from outside the code; it does
 not check the wave of an impact, whose cavity, depth response and dispersion are not in it.
 
+Where the shallow-water wave stops being the wave of water (a declared limit). The solver propagates what it is given without
+dispersion, and real water at the depth `h` has `omega^2 = g k tanh(k h)`; a bed that rises is, in the linear theory of the surface at
+rest, attenuated by `1 / cosh(k h)` (Kajiura 1963; Hammack 1973; the problem of an initial surface hump is that of Cauchy and Poisson, solved for
+an axisymmetric hump by Kranzer and Keller 1959: all cited from memory and not read). The exact linear answer for the hump of the paragraph
+above with `g = 10`, `h = 10` m is the same integral with `cos(omega(k) t)` in place of `cos(c k t)`, and it was evaluated by a disposable program
+(2026-10-06, not in the repository; deterministic): for a hump of `sigma = 40` m (`sigma / h = 4`) at 20 s the leading crest is `0.1516 A` at
+`r = 214.5` m against `0.1568 A` at `220.5` m for the shallow-water wave, 3 % lower; for `sigma = 16` m (`sigma / h = 1.6`) at 8 s the largest
+excursion is a trough of `-0.1714 A` at `41.5` m where the shallow-water wave has a crest of `0.1568 A` at `88` m; for `sigma = 8` m
+(`sigma / h = 0.8`) it is a trough of `-0.2374 A` at `14` m at 4 s (against the crest at `44` m) and of `-0.1366 A` at `42.5` m at 8 s (against `0.1148 A` at
+`84` m). The same comparison for the surface response of a bed uplift (`1 / cosh(k h)`): the shallow-water peak `0.1467 A` at `91` m against a dispersive
+trough of `-0.1535 A` at `34` m for `sigma = 20` m. A hump whose width is a depth or less is therefore not a wave that the solver
+gets slightly wrong but one it does not have: its exact linear form is a dispersed train. The cavity of the 90 478 kg rock in 20 m of water has
+a radius of the order of the depth (an estimate, not measured here), so the far-wave heights of the sea sweeps below are properties of this
+model and are not predictions of what water would do; no figure of this section has been compared with any measurement of a real impact,
+and none is claimed to be.
+
 What a sphere crossing deep water makes. A sphere of 2 m radius at 10 m below the surface of 20 m of water,
 crossing at 20 and 50 m/s, raises the highest surface by 8.69 and 5.52 m in the hydrostatic mode and by 0.177 and
 0.198 m in the filtered one (commit 4308a71, 2026-10-04, test ocean_depth_filter). On the authored impact-ocean
