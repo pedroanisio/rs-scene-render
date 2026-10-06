@@ -2524,8 +2524,8 @@
         one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
         is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
         linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
-        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
-        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
+        particles run before the smoke in the frame and ask it, in order, for the steps they need, so that it is simulated
+        once for each of its steps, and a smoke that fails fails the particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
         and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
         velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
         so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.

@@ -959,10 +959,11 @@ boundary, for an open volume and for a closed one), and not at all with `drag` z
 the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
 time the gas is the linear interpolation of the two smoke steps around the instant (a frame between two canonical steps takes the particle on by a partial segment of its step, which asks a handful of times per
 particle (two to five, counted in test `particles_gas`, commit 0c9df98, 2026-10-04) from the step's own context: no smoke step is simulated and no field fetched, so
-motion-blur samples add queries and no simulation). The smoke is simulated as far as the
-particles need, and first in the frame when a document names a gas (the others keep their order), so that the
-particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
-past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
+motion-blur samples add queries and no simulation). The particles run before the smoke in the
+frame and ask it, in order, for the steps they need, so that the smoke is simulated once for each of its steps (30 steps
+in 3 s for an impact scene whose ejecta are dragged by a smoke and fall into an ocean, where 69 were simulated when
+the smoke ran first, test `gas_and_splash`, commit 8c3ed9b, 2026-10-06) and the frame's own volume finds the step
+it is at among the states the particles kept; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
 evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
 (the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) and the two states the smoke keeps for them (the frame's own volume needs the step the readers started at, and the
 timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
@@ -2369,8 +2370,8 @@ of it); nothing breaks below the threshold or without an impact; the pieces are 
 requests, from a fresh world, and from a baked cache. In the block scene
 (`examples/cinematic-impact/impact-block.scene.xml`, the 90 478 kg rock at 100 m/s and 60 degrees against a
 583 200 kg granite block on a slab, 12 pieces) the block lies still until the rock reaches it, 1.49 s in, and the
-mean distance of its pieces from where the block stood, 1.5 s after, is 6.3, 10.5 and 14.5 m for rocks arriving at
-60, 100 and 150 m/s, and 7.4, 10.5 and 11.4 m for rocks of 30, 90 and 270 tonnes (test `impact_block`, commit 2c36ac0,
+mean distance of its pieces from where the block stood, at 3 s (1.5 s after the contact), is 6.3, 10.5 and 14.5 m for rocks arriving at
+60, 100 and 150 m/s, and 7.4, 10.5 and 11.4 m for rocks of 30, 90 and 270 tonnes (test `impact_block`, commit 2cf1fa2,
 2026-10-06, deterministic). These are orders of magnitude and directions, not predictions of a real impact.
 
 Limits, stated so that they are not mistaken for physics. The partition does not depend on where the impact was: the same
@@ -2803,7 +2804,9 @@ document asset access policy.
 ## Exact XSD attribute inventory
 
 This inventory records the executable XSD spelling, lexical type, requiredness
-and default for each cinematic element. “Optional; absent” means that XSD
+and default for each cinematic element, and, for the types that existed before this
+proposal (`object3DType`, `cameraType`), only the attributes it adds or whose values it
+extends; it does not claim to list every attribute of those types. “Optional; absent” means that XSD
 supplies no value; the behavioral sections above specify contextual defaults
 and semantic requirements. Named types refer to the shipped XSD definitions.
 Inline restrictions list their base and facets. Runtime and Schematron checks
@@ -3240,6 +3243,12 @@ existing definitions.
 | `textureSize` | xs:positiveInteger; minInclusive=64, maxInclusive=8192 | Default `2048` |
 | `resolution` | xs:positiveInteger; minInclusive=8, maxInclusive=256 | Default `64` |
 
+This table is not the whole of `object3DType`, and the inventory above makes no claim to be. The type also
+carries attributes that other changes added and that this proposal neither defines nor depends on: `shadowCatcher`
+(commit c737214), `node` and `materialOverride` (43d03ad), `tracking` (54dd99b), `map` and `buildings` (0f63bdc), and on
+`materialType` `unevenness` and `unevennessScale` (096f530). They are upstream's and are specified where they were
+added; reconciling the XSD with this document means checking the attributes listed here, not those.
+
 ### `blackHoleType`
 
 | Attribute | XSD type or inline restriction | Presence/default |
@@ -3416,8 +3425,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 169 assertions at
-commit fa63e5d, 66 of them in the cinematic families OCN, P3D, CRT, PYC, PYRO, VOL, FRX, MSQ and GEO). Inventory
+rule scorecard remain pending implementation reconciliation** (at commit 349d371 the Schematron has 228 assertions,
+counted by parsing the file: `grep -c` of `sch:assert` gives 237 because it also counts closing tags; 77 of them are in the
+cinematic families OCN 13, P3D 11, CRT 9, PYRO 8, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are the
+upstream's own: the rules R, C, V, MOV, PEN and TXT. At commit fa63e5d the file had 169, 66 in the cinematic families
+without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.

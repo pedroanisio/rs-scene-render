@@ -3217,6 +3217,144 @@
       ],
       "validation": "Commit 06d6596, 2026-10-06, NVIDIA RTX 6000 Ada. Before: at 8 samples without a denoiser, 517 of the 8000 pixels of a band of 160 x 50 along the horizon of the ocean acceptance scene (1280 x 720, t = 3.0) were more than 40 levels under the median, 217 with the scene's denoiser, 15 at 64 samples; the band's mean was the same, so it was variance. A plane 40000 wide under a grey dome (160 x 90, 15 rows under the horizon): 137 of 2400 pixels (5.7 %) more than 15 % under their row at 8 samples, 0 at 512. Visible normals alone left 53, the cap alone 92. After: 5 and 1 in the ocean band (0 at 64 samples), the band's mean 228.39 at 8 samples against 228.87 at 64 (the 64-sample frames of the two builds, 228.79 and 228.87); 8 of 2400 (0.33 %) in the plane. Oracle that keeps the lobe unbiased: the directional albedo (BRDF times the cosine over the hemisphere) by quadrature with no sampling, against the picture of a plane of roughness 0.06 (dark, glossy), 0.5 (bright, rough) and 0.25 (red) under a uniform dome at 256 samples, seven rows from the horizon down: the largest difference 0.4 % (0.1917 against 0.1926 at the first row; 0.1326 against 0.1329); dropping G1 from the density fails it (0.1868 against 0.1926). Eight frames against the build before (commit c7dba89), pixels differing of 921600 / largest difference in levels / mean difference in levels / image mean before and after / trace seconds before and after / sha256 after: plume both lights 430552 / 201 / 0.88 / 168.47 and 168.41 / 4.62 and 4.52 / c5756924eb0fe609; plume dome only 442240 / 203 / 1.01 / 164.57 and 164.49 / 3.76 and 3.69 / 0acc6a3d7b7dc71d; plume sun only 172555 / 1 / 0.19 / 71.222 and 71.223 / 1.00 and 0.96 / 524f6d0950558c71; dry floor both lights 732979 / 22 / 1.05 / 182.550 and 182.554 / 0.12 and 0.12 / be3f8c9a1617811c; dry floor sun only 77875 / 23 / 0.16 / 144.672 and 144.674 / 0.12 and 0.12 / 3e3d13ac3bfedb59; dry floor dome only 839336 / 22 / 1.58 / 116.779 and 116.787 / 0.09 and 0.09 / 36c2fec7b1634588; glass ball in air 101364 / 53 / 0.31 / 138.230 and 138.233 / 0.34 and 0.33 / 1235e3373a4501e4; hero 1280 x 720 t = 3.0 447584 / 201 / 1.03 / 166.23 and 166.17 / 10.22 and 10.14 / 24c6ab56703017611dd410948af73798116f35dfbdc0a232639cecd5e5a9b72e (it was 953a7b382df31fd6c2bf49e646c9abb9dec4978807ff95e6df4b92328e5eaea1; the hashes of the other seven before the change are identical on c7dba89 and on e19e541). Every mean moves by at most 0.04 %; the trace time is the same. The hero probe hash of the entry \"Light through water and glass in the path tracer\" belongs to its commit (c6195de) and is superseded by the one here. The brute-force comparisons of light through water, which also use this sampler, pass on the NVIDIA adapter (water_light 15, water_oracle 9) after the change, and the comparisons on a software adapter run only when asked (commit 487cf35: 191 s and 428 s of the 913 s of the file on llvmpipe).",
       "limits": "The path-traced frames of every scene change by noise (no bias measured: the means move by at most 0.04 %), so references taken before 2026-10-06 by hash do not match; the references of the eight frames above are the new ones. The brightest dark pixels at the horizon at 8 samples are not zero (5 of 8000 undenoised in the ocean band) and the first two rows under the horizon still hold 7 of the 8 specks of the plane test. The oracle covers a flat plane under a uniform dome, one dielectric of index 1.333, and no metal, clearcoat or transmission; the diffuse lobe's share keeps its lower bound of 0.05. Caustics are not produced (see the SREP, light through water)."
+    },
+    {
+      "name": "A crater whose size and time come from an impact: `crater@source`, by Holsapple's pi-group scaling law",
+      "evidence": [
+        "crates/sr-sim/src/cratering.rs",
+        "crates/sr-sim/src/physics3d.rs",
+        "crates/sr-sim/tests/cratering.rs",
+        "crates/sr-sim/tests/impacts3.rs",
+        "crates/sr-eval/src/crater.rs",
+        "crates/sr-eval/src/sim3d.rs",
+        "crates/sr-eval/src/physcache.rs",
+        "crates/sr-eval/tests/crater_impact.rs",
+        "crates/sr-eval/tests/crater_normal.rs",
+        "crates/sr-model/src/rules.rs",
+        "crates/sr-model/tests/crater.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/valid/crater-impact.scene.xml",
+        "tests/corpus/invalid/crt6.scene.xml",
+        "tests/corpus/invalid/crt7-material.scene.xml",
+        "tests/corpus/invalid/crt7-orphan.scene.xml",
+        "tests/corpus/invalid/crt8-self.scene.xml",
+        "tests/corpus/invalid/crt8-static.scene.xml",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "The size and time of a crater come from the impact of a body, with no radius, depth, time or place in the document. The law (Holsapple 1993, Eq. 18, eight materials, SI units) is a pure function in sr-sim (5c7e37e, 2026-10-04). Tests in cratering: the water crater equals 0.98 (g a / U^2)^(-3 mu / (2 + mu)) and the dry-sand one its own exponent, both to 1e-9 relative (water_in_the_gravity_regime_follows_the_published_efficiency, dry_sand_has_no_strength_and_follows_its_own_exponent); the strength limit (gravity 1e-9) to 1e-6 (strength_takes_over_when_gravity_is_negligible); the shape relations (rim 1.3 R, rim height 0.036 of the rim diameter, depth over radius 0.6/1.1, ejecta 0.8 V, duration 0.8 sqrt(V^(1/3)/g)) to 1e-12; for all eight materials every dimension grows with mass, speed and energy and shrinks with gravity, and the radius falls at 90, 60, 45, 30 and 15 degrees. A 40 m iron body at 20 km/s and 45 degrees in hard rock is asserted to give a crater between 300 and 5000 m across (the SREP records 0.8 km against 1.3 km). The rigid world notices the first impact (0adc000, 2026-10-04; tests in impacts3: the_impact_is_part_of_the_state_replay_and_restore_reproduce_it with the frame memory on and off, and an_impact_found_from_a_recorded_contact_list_is_the_impact_the_world_found, equal bit for bit). Schema attributes and rules CRT6 to CRT8 in the XSD, the Schematron and the Rust rules (8d0bada, 2026-10-04) with one valid and five invalid corpus fixtures, checked in the model tests. The evaluator (1c50495, 2026-10-04) is tested against the law in crater_impact: radius, depth and rim height within 3 % of the law at about 100.2 m/s, growth over the law's time, monotone in speed, mass and angle, the same physical crater at another pixelsPerMeter (1e-3), and live equal to a baked cache and any order of requests bit for bit. Later: the source is found inside symbol instances (638c33f, 2026-10-04); axis and normal speed come from the owner's surface, 86.63 m/s for the authored 86.60 on grounds of 8 to 160 segments (fe8287c, 2026-10-04, test crater_normal); the owner is told the earliest impact of several sources (f408b96, 2026-10-06). The results are deterministic.",
+      "limits": "One crater per element: the first qualifying contact defines it and later ones neither start another nor change it. The crater is circular, with no elongation or downrange shift for an oblique impact, and no ricochet is modelled; below roughly 15 to 30 degrees the law is applied to the normal component. A water layer above the owner is not treated. The ice and regolith rows are the least certain, and the constants are one author's table (a later table gives others, not mixed); strength and density are calibration inputs, overridable. The formation time is good to a factor of two. The ejecta volume is computed, nothing is deposited on the terrain. The 40 m comparison is an order of magnitude check against another law, not a validation of the size. No measured crater of a real impact was compared, and the tests check the code against the formulas, not the formulas against nature."
+    },
+    {
+      "name": "The rigid world records the contacts it resolves each step",
+      "evidence": [
+        "crates/sr-sim/src/physics3d.rs",
+        "crates/sr-sim/tests/contacts3.rs",
+        "crates/sr-sim/tests/impacts3.rs",
+        "crates/sr-sim/tests/watch_flood.rs",
+        "crates/sr-sim/tests/frames3.rs",
+        "crates/sr-eval/src/physcache.rs",
+        "crates/sr-eval/tests/physics_trace.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "World3::with_contact_log keeps, per fixed step, a Contact3 for each point the solver resolved: step, end-of-step time, the two bodies (indices, None for a Bounds3 slab, ordered last), the world-space point, the unit normal from the first body to the second, the normal impulse over the step and the second body's relative velocity before the step (779c08e, 2026-10-04). Tests (contacts3), oracle impulse = mass x closing speed: a 2 kg sphere on the floor gives one contact within 5%; a sphere on a triangle mesh sums to the same within 5%; an L-shaped prism split by V-HACD, 3 kg, within 8% (dc53f20, which also skips pairs of sleeping or fixed bodies and shows a sleeper woken by a landing, within 10%); head-on equal masses of 1 at 100 px/s share one contact of impulse 50 within 5%; an oblique impact has relative velocity equal to minus the launch velocity within 1e-6 and impulse 160 within 5%. Order is body pair then point, checked at every step; the record is equal bit for bit after a backward seek, in a fresh world, and when the frame memory answers (a9c9f1b); recording leaves the frames equal; limits are errors that repeat; with min_impulse 1.0 the resting sphere's more than 100 records fall below 10, all kept records unchanged, maximum impulse above 300. On top: ImpactWatch/Impact3 are found from the record and equal the live ones bit for bit (0adc000; impacts3: an_impact_found_from_a_recorded_contact_list_is_the_impact_the_world_found, replay from checkpoints with memory on and off); 909648b reads only the watched pairs (watch_flood: 1156 boxes, more than the 4096 points; limit settable); f408b96 tells the owner the earliest impact. SRPHYS04 (2e6db26) stores contacts as 96-byte records after the rows; physics_trace tests: the cache starts with SRPHYS04 and gives the same contacts and velocities as the live run (exact equality); a count promising more contacts than the file holds, or a contact naming an absent step, is an error. Cost, 779c08e: 0.005, 0.033, 0.124 ms a step for 10, 100, 400 resting spheres, 0.007, 0.044, 0.165 ms with the record; 128 bytes a Contact3. All checks are deterministic.",
+      "limits": "Only points with a positive impulse are listed, and with min_impulse above zero, or in the baked cache (impacts only: a pair pushing no more than twice the weight impulse is dropped), resting contact is not recorded. The commit says not verified: kinematic bodies' velocity before the step (Rapier's stored value), continuous collision detection impacts. The impulse is the total over a step, not a force or an instant; the impulse-to-momentum tolerances are 5 to 10%, set by the soft contact, not tighter. The record grows without bound unless old steps are discarded or limits (max_per_step, max_bytes) are set, and it is not kept for steps that exceed them. No measured cost of the cache bake of contacts alone is recorded beyond the 1.2 s bake of a cratering scene and 0.04 s identity check in 2e6db26."
+    },
+    {
+      "name": "The coupled group of the rigid world and an ocean, and the exchange log",
+      "evidence": [
+        "crates/sr-sim/src/exchange.rs",
+        "crates/sr-sim/src/physics3d.rs",
+        "crates/sr-sim/src/ocean.rs",
+        "crates/sr-sim/tests/exchange3.rs",
+        "crates/sr-sim/tests/ocean_exchange.rs",
+        "crates/sr-eval/src/group.rs",
+        "crates/sr-eval/src/sim.rs",
+        "crates/sr-eval/src/sim3d.rs",
+        "crates/sr-eval/tests/ocean_full.rs",
+        "crates/sr-eval/tests/ocean_buoyancy.rs",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "Exchange log, per-step load and the ocean's offer: af9823e, 2026-10-04; the coupled group in the evaluator: f3cdbae, 2026-10-04. The oracles are bit-for-bit determinism and the causal rule, not a closed form. exchange3: records_are_kept_by_channel_and_step_and_replayed_unchanged; a_replay_that_differs_is_an_error_to_the_last_bit (1 + EPSILON, -0.0 against 0.0 and a different count are divergence errors); the_log_has_a_budget_and_exceeding_it_is_an_error_that_stores_nothing; a_load_changes_a_bodys_momentum_by_its_impulse; a_driver_without_loads_gives_exactly_the_world_there_was; replay_from_a_checkpoint_reads_the_same_loads_and_gives_the_same_world (with and without frame memory); a_load_that_is_not_there_yet_is_an_error_and_the_world_goes_on_when_it_is. ocean_exchange: each_completed_step_offers_its_momentum_once_and_a_replay_offers_it_again_unchanged (steps 0 to 4 once each, bit-equal to the reported impulse, orders 1 and 2) and a_frame_among_the_last_steps_of_a_seek_starts_from_the_state_kept_there_and_is_the_same_frame (0b86cb7, 2026-10-06). Group tests in group.rs: a_group_with_no_load_changes_nothing; the_water_loads_the_body_it_carries_and_only_when_coupled (free barge within 1e-6 of -30 + 16, coupled moved by more than 0.5, opposite sign on the other side); any_order_of_frames_and_a_fresh_group_give_the_same_frames_bit_for_bit; a_member_replayed_from_its_checkpoints_reads_the_log_and_agrees_with_the_whole_group; a_reader_past_the_ocean_gets_an_error_naming_the_step_not_a_stand_in (needs step 11, reached step 10); the_group_steps_the_ocean_on_as_far_as_the_readers_reach; the_reach_is_the_longest_step_of_anything_that_reads_the_rigid_bodies (0.2 s). Later: 1ba58cd (2026-10-05) the pressure in the record; 2da245d (2026-10-06) one record per step, 21 for 21 computed steps where there were 42; 958d9d8 and 91c68b7 (2026-10-06) hulls only for bodies that forces move and a refactor with the bits unchanged. Balance through the group before the pressure of the exchange was credited (ocean_full, 90ce0f1, 2026-10-05, deterministic; the later entries on the pressure of the exchange measure it at 0.00 to 0.09 % of the water): worst error 13.2, 10.5 and 4.8 % for steps 0.1, 0.05 and 0.025 s, asserted to fall with the step and to be under 0.06 at 0.025 s.",
+      "limits": "The delay is one whole ocean step by design, so the momentum balance is off by what is in flight (the errors above, before the pressure was credited, are 13.2, 10.5 and 4.8 %, falling with the step, not zero). The group only forms when an ocean lists a rigid body, and a coupling is set by the tests or by the buoyancy and full modes; the group tests of group.rs use a sphere and a single scene. The extension of the ocean for smoke and particles is a tested safeguard that no scene tried has needed (the SREP says smoke with dt 0.2 s read no further than the ocean had reached). The log budget is 16 MiB and overflow is an error, not a drop; no measured size of a record per body was recorded here. A document with the coupling cannot be baked into a physics cache. No cost of the group was measured."
+    },
+    {
+      "name": "Smoke that the impact of a crater causes (`pyroSource@crater` and `pyroImpulse@crater`)",
+      "evidence": [
+        "crates/sr-sim/src/cratering.rs",
+        "crates/sr-sim/src/pyro.rs",
+        "crates/sr-sim/tests/pyro_heat.rs",
+        "crates/sr-sim/tests/cratering.rs",
+        "crates/sr-eval/src/crater.rs",
+        "crates/sr-eval/src/pyro.rs",
+        "crates/sr-eval/tests/crater_smoke.rs",
+        "crates/sr-model/src/rules.rs",
+        "crates/sr-model/tests/pyro_crater.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/manifest.json",
+        "tests/corpus/valid/pyro-crater.scene.xml",
+        "tests/corpus/invalid/pyc1-derived.scene.xml",
+        "tests/corpus/invalid/pyc2-orphan.scene.xml",
+        "tests/corpus/invalid/pyc3-time.scene.xml",
+        "tests/corpus/invalid/pyc4-authored.scene.xml",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "A pyroSource or pyroImpulse with crater naming a crater that grows from an impact emits the smoke the impact makes, with no time, place or amount authored. Engine and solver (c67ffba, 2026-10-04): cratering::smoke gives the dust as dustFraction of the volume thrown out, the heat as heatFraction of (1/2) m U^2 sin(theta)^(3/2), and the temperature rise as heat over dust mass times specificHeat, capped at maxTemperature (defaults 0.1, 0.01, 1000 J/(kg K), 5000 K); the solver derives the expansion of heated sources as an ideal gas at constant pressure, (dT/dt)/T. Tests: pyro_heat (7) checks the divergence against dT/(T dt) to 1e-7 relative, equality with an authored source of that expansion, one-shot impulses, refusal of an authored expansion on a heated source, unchanged unheated sources, and dust as a total over free cells (total 256 to 1e-9); cratering (5 smoke tests) checks dust, heat and rise against the formulas to 1e-12 relative, monotone growth with speed, mass and angle, rise under 20 K for a slow impact, the cap at 5000 and 1200 K, and the defaults. Schema (9c7af61, 2026-10-04): rules PYC1 to PYC4, tested by the 5 tests of pyro_crater, one valid and four invalid corpus files. Evaluator (968c277, 2026-10-04), 10 tests in crater_smoke: no dust before it; dust within 20 % of the law at 60, 100 and 150 m/s, growing with speed and mass; temperature rise above 0.5 and below 1.05 times the law's; heating changes the flow; an impulse fires once; any order, a fresh evaluator and a baked physics cache agree bit for bit; each symbol instance has its own smoke. Later fixes: a15a596 and 09ef11c (2026-10-04) make the dust a total over free cells, so with the ground as a collider the most dust is 0.0207 cubic metres for the law's 0.0219 where half was lost before; both runs are asserted within 20 %; fe8287c (2026-10-04) takes the crater axis from the surface normal (normal speed 86.63 m/s for the authored 86.6); 59af91a and 4fbc5be (2026-10-06) fail the smoke when the rigid world cannot answer and share the clock probe. In the impact_scenes test (commit e22458b, 2026-10-05, deterministic) the rise at 30, 60 and 90 degrees is 19.20, 19.07 and 19.08 K.",
+      "limits": "Only dust heated by the impact and spread through the crater volume is represented; the vapour, melt and shock wave that make a real fireball are not, and the defaults are not to be tuned to make fire. The share of an impact's energy that rises in smoke has no published value, so heatFraction, dustFraction and specificHeat are the engine's own and uncalibrated; the sin^(3/2) angle scaling is that of hydrocode runs, not a measurement here. In physical units a slow impact barely heats anything and a 20 km/s impact of 1500 kg heats its dust by only a few hundred kelvin (the test asserts between 100 and 5000 K; no exact value was recorded). The temperature rise is nearly flat in angle. The smoke needs the composition clock and a uniformly scaled volume, begins at the first smoke step after the impact, and a sealed domain cannot sustain the expansion. The ocean scene has no smoke from its crater. No timing was recorded for this item."
+    },
+    {
+      "name": "A fracture that an impact sets off: `fracture@source`",
+      "evidence": [
+        "crates/sr-sim/src/physics3d/fracture.rs",
+        "crates/sr-sim/src/physics3d.rs",
+        "crates/sr-sim/tests/fracture.rs",
+        "crates/sr-sim/tests/fracture_contact.rs",
+        "crates/sr-eval/src/sim3d.rs",
+        "crates/sr-eval/src/physcache.rs",
+        "crates/sr-eval/tests/fracture_contact.rs",
+        "crates/sr-eval/tests/impact_block.rs",
+        "crates/sr-model/src/rules.rs",
+        "crates/sr-model/tests/corpus.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/manifest.json",
+        "tests/corpus/invalid/frx5-source-self.scene.xml",
+        "tests/corpus/invalid/frx5-source-static.scene.xml",
+        "tests/corpus/invalid/frx6-push.scene.xml",
+        "tests/corpus/invalid/frx6-timed.scene.xml",
+        "tests/corpus/invalid/frx7-orphan.scene.xml",
+        "tests/corpus/valid/fracture-contact.scene.xml",
+        "tests/corpus/valid/fracture-contact-tuned.scene.xml",
+        "tools/build_corpus.py",
+        "examples/cinematic-impact/impact-block.scene.xml",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "A fracture can name the dynamic rigid body that breaks it (fracture@source, with minImpulse and energyFraction); the body breaks at the first impact of the source on it, found by the rigid world's impact watch, and nothing in the document says when. Commits 7989b29, 7eaf768, 2820484, cc5f69b, 2cf1fa2 and 14d7aea, all 2026-10-06. The push is one speed along every line out of the centre of mass, the mass-weighted mean taken off, with E = f * 1/2 mu v_n^2 (mu the reduced mass, v_n the closing speed). The mean removal is a fix: before 7989b29 an asymmetric partition (pieces of 1, 2 and 3 kg) gained momentum, and the_radial_impulse_adds_no_linear_momentum_to_an_asymmetric_partition failed with 'momentum added along 0: [-0.9867990671453821, -2.680415860774205, 1.8862159038238724e-17]'; after 7989b29 it asserts linear and angular momentum added under 1e-9. sr-sim fracture_contact: nothing breaks before the impact and the fracture fires on the step after it is noticed, no sooner; the pieces' momentum equals the target's to 1e-9 and the energy gained equals the closed form to 1e-6 of itself (90.000000 against 90.000000 in the SREP); a_weak_impact_and_no_impact_break_nothing (threshold 1e6, a projectile at rest); the_same_pieces_in_any_order_of_requests_and_from_a_fresh_world compares bits; a_contact_that_names_no_watch_of_the_body_is_refused. sr-eval fracture_contact has four tests (breaks at the impact and not before, 4 pieces of total mass 8 within 1e-9; weak or no impact; same pieces in any order of frames and from a baked cache; a fracture at a time is as it was), and a physcache test keeps the cache identity of a world with a fracture at a time. Schema: FRX5 to FRX7 in the Schematron and in rules.rs with five invalid and two valid corpus documents; build_corpus.py checks every document against lxml and the manifest lists 279 invalid and 47 valid documents (274 and 45 before). Block scene (impact_block, four tests): 12 pieces, mass within 1e-6 of 583200 kg, still until the contact, distance rising with speed and mass; mean distance of the pieces at 3 s 6.3, 10.5, 14.5 m for 60, 100, 150 m/s and 7.4, 10.5, 11.4 m for 30, 90, 270 t; deterministic.",
+      "limits": "The energy fraction 0.3 is the engine's value and has no published source. The push is a modelled quantity, not a measured one, and the block distances are orders of magnitude and directions, not predictions of a real impact. The partition does not depend on where the impact was; only the push (speed and masses) and the owner's spin tell cases apart. A piece does not break again (no second generation). The source is not part of the partition, and one that has penetrated the owner by more than a step's travel may overlap pieces until the solver pushes it out. The push adds E to energy the contact has already treated; the engine does not check that f is at most 1 - e^2 for the pair's restitution e. It is a cinematic cut, not a stress or toughness model. The spreads were measured on one scene. No cost figure and no counts of the whole test suite were recorded for these commits."
+    },
+    {
+      "name": "Smoke drags the particles that name it: `particles3D@gas`",
+      "evidence": [
+        "crates/sr-sim/src/pyro.rs",
+        "crates/sr-sim/tests/pyro_gas.rs",
+        "crates/sr-eval/src/particles3d.rs",
+        "crates/sr-eval/src/pyro.rs",
+        "crates/sr-eval/src/program.rs",
+        "crates/sr-eval/src/sim.rs",
+        "crates/sr-eval/tests/particles_gas.rs",
+        "crates/sr-eval/tests/gas_and_splash.rs",
+        "crates/sr-model/src/rules.rs",
+        "schema/scene-render-1.1.xsd",
+        "schema/scene-render-1.1.sch",
+        "tests/corpus/valid/particles3d-gas.scene.xml",
+        "tests/corpus/invalid/p3d11-gas.scene.xml",
+        "tests/corpus/manifest.json",
+        "tools/build_corpus.py",
+        "srep-0000-cinematic-impact.md"
+      ],
+      "validation": "An emitter that names a smoke volume with gas adds drag times the smoke's velocity at the particle's place and time to its acceleration, so the closed-form flight obeys p'' = k (u - v) plus gravity and fields; the gas is the linear interpolation of the two smoke steps around the instant. Commits fc3e462 (the gas copied out of a smoke step), a74cd40 (schema, rule P3D11, corpus), 0897b84 and 0c9df98 (evaluator; one gas context per canonical particle step), all 2026-10-04; later fixes fe207a9, 11b4a90 (2026-10-04) and 8c3ed9b (2026-10-06). Tests in pyro_gas: inside the domain the copy's velocity_at equals the state's own to the last bit, open and closed; outside it falls to rest across one cell (largest change in a thousandth of a cell under 0.005 of the face speed, exactly 0 beyond one cell, a non-finite point at rest); a copy does not follow the simulation. Tests in particles_gas: the particle follows the integral of k (u - v) against the gas's own history, read from a follower of drag 40, to within 3 % in velocity and position at 1.2, 1.5 and 2.0 s; without the reference, with drag 0, or 500 units away the bits are those of the document without it; the particle goes farther with the gas's speed and with the drag; any order of frames, a fresh evaluator and a smoke with checkpointMemoryMiB 1 give the same bits; a particle that leaves the volume only slows and never changes by more than k times the gas speed times the step; a frame between two canonical steps asks 1 to 8 queries and simulates no smoke step; a moving volume drags where it is; a failing or over-budget smoke fails the particles by name, 16 MiB refusing and 20 MiB admitting seventeen fields (14.3 MB) and two kept states (2.7 MB). Test gas_and_splash: ejecta dragged by a smoke that fall into an ocean simulate the smoke once per step (30 steps in 3 s where 69 had been, 8c3ed9b). Fixtures: valid/particles3d-gas.scene.xml and invalid/p3d11-gas.scene.xml. Cost (ignored test cost_of_the_gas_per_particle_step, release, one core, 20 000 particles, 25 steps): 0.77 s over naming the gas with no drag, 1.5 microseconds per particle step against 7 at first (0c9df98).",
+      "limits": "The coupling is linear in the relative velocity and one way: the particles do not push the gas. For 0.34 m rocks of 2100 kg/m3 at 50 m/s relative the quadratic drag is a rate of about 0.03 per second (computed from the drag law, not measured), so it moves dust-sized particles or an authored drag, not the ejecta of the impact scenes. The driver is asked one particle at a time, so the coupling is serial; the load of the machine at the cost measurement was not recorded, and 22 s for 100 000 particles over a 6 s film is an extrapolation, not measured. The agreement with the gas history was only checked on a pushed open box of 32 cells. After 8c3ed9b the particles run before the smoke, but the schema documentation and the SREP text still say the smoke is simulated before them."
     }
   ]
 }
