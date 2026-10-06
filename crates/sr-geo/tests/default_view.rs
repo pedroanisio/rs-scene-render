@@ -33,4 +33,12 @@ fn measure_default_sizes() {
         let [w, h] = box_pixels(kind);
         eprintln!("SIZE {kind:?} {w:.3} x {h:.3}");
     }
+    // the same box at the zooms authors used to work round the collapsed default (Lambert conformal)
+    for zoom in [0.0, 4.0, 6.0, 8.0, 9.0, 10.0, 11.0] {
+        let (map, c) = Map::new(Kind::LambertConformal, None, [480.0, 360.0], &[], 0.0, Some([0.0, 50.0]));
+        let proj = map.projection(&View { lon: c[0], lat: c[1], zoom, rotation: 0.0 });
+        let b = proj.project(&box_20()).bounds();
+        let (w, h) = b.map(|b| (b[1][0] - b[0][0], b[1][1] - b[0][1])).unwrap_or((0.0, 0.0));
+        eprintln!("ZOOM {zoom} base_scale {:.6} box {w:.3} x {h:.3}", map.base_scale);
+    }
 }
