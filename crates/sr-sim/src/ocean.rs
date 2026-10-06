@@ -199,7 +199,8 @@ pub struct SplashCell {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lift {
     pub owner: u32,
-    /// Columns and the height each is raised by (not negative); a column once.
+    /// Columns and the height each is raised by (not negative); a column once for a body, in all its lifts: a
+    /// column named twice is an error.
     pub columns: Vec<(u32, f64)>,
 }
 
@@ -561,6 +562,13 @@ impl Ocean {
                 }))
         {
             return Err(Error::Invalid("driver lift owner, columns or height"));
+        }
+        // a column once for a body: the amounts of a column are added to know whose it is
+        let mut raised: Vec<(u32, u32)> =
+            out.lifts.iter().flat_map(|l| l.columns.iter().map(|(c, _)| (l.owner, *c))).collect();
+        raised.sort_unstable();
+        if raised.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::Invalid("driver lift raises a column twice for one body"));
         }
         let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
         if columns > 2 * n {
