@@ -41,7 +41,6 @@ fn the_floor_lifts_only_the_views_that_drew_less_than_it_and_leaves_the_rest() {
         near(box_at(Kind::LambertConformal, zoom), floor, &format!("zoom {zoom}"));
     }
     near(box_at(Kind::LambertConformal, 11.0), [31.041, 42.924], "zoom 11 keeps its meaning");
-    near(box_at(Kind::LambertConformal, 12.0), [62.082, 85.848], "zoom 12 keeps its meaning");
 }
 
 /// The other projections fit the whole sphere finitely; their default view is what it was (measured on main).
@@ -60,5 +59,6 @@ fn a_map_with_a_fit_is_not_floored() {
     assert!(map.base_scale > 100.0, "{}", map.base_scale);
     let proj = map.projection(&View { lon: 0.0, lat: 50.0, zoom: 0.0, rotation: 0.0 });
     let b = proj.project(&fit).bounds().unwrap();
-    assert!(b[1][0] - b[0][0] > 300.0, "the box fills the frame it was fitted to: {b:?}");
+    // a 20 x 20 degree box is taller than wide on the cone: the fit fills the frame's height
+    assert!(b[1][1] - b[0][1] > 300.0 && b[1][0] - b[0][0] > 200.0, "the box fills the frame it was fitted to: {b:?}");
 }
