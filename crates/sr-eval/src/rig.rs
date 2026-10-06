@@ -715,7 +715,8 @@ fn node_ik(sc: &Scene, nodes: &mut [FrameNode], i: usize, a: &A, target: &Target
     if l1 < 1e-9 || l2 < 1e-9 {
         return;
     }
-    let d = rig::soft_reach((tp - j0).len(), l1, l2, a.num("softness", 0.0)).clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
+    let d =
+        rig::soft_reach((tp - j0).len(), l1, l2, a.num("softness", 0.0)).clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
     let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
     let pole = a.str("pole").and_then(|id| sc.find(nodes, &id)).and_then(|t| sc.pivot(nodes, &t, None));
     let sgn = rig::bend_sign(j0, tp, pole, a.bool("bendPositive", true));

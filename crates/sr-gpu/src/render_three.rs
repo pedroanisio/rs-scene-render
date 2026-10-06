@@ -1317,7 +1317,9 @@ impl Renderer {
                 plan.stats.unsupported.push(msg);
             }
         };
-        for (k, c) in sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "joint").enumerate() {
+        for (k, c) in
+            sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "joint").enumerate()
+        {
             let ca = Attrs { e: c, props: None };
             let Some(name) = ca.str("name") else { continue };
             let Some(node) = model.nodes.iter().position(|x| x.name == name) else {
@@ -1328,10 +1330,8 @@ impl Renderer {
             let key = format!("{}/joint[{k}]", n.id);
             let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
             let value = |attr: &str| {
-                props
-                    .and_then(|p| p.get(attr))
-                    .and_then(sr_eval::Value::as_num)
-                    .unwrap_or_else(|| ca.num(attr, 0.0)) as f32
+                props.and_then(|p| p.get(attr)).and_then(sr_eval::Value::as_num).unwrap_or_else(|| ca.num(attr, 0.0))
+                    as f32
             };
             let turn = sr_3d::anim::euler_degrees(value("rotationX"), value("rotationY"), value("rotation"));
             sr_3d::anim::pose_joint(locals, node, turn);
@@ -1363,7 +1363,9 @@ impl Renderer {
         aims.sort_by_key(|a| depth(a.node));
         // model space to scene space: the object's world, the axis conversion and, with `node`, the selection
         let select = match n.elem.get_attr("node").map(|v| v.to_string()) {
-            Some(name) => model.nodes.iter().position(|x| x.name == name).map(|k| model.world_matrices(locals)[k].inverse()),
+            Some(name) => {
+                model.nodes.iter().position(|x| x.name == name).map(|k| model.world_matrices(locals)[k].inverse())
+            }
             None => None,
         }
         .unwrap_or(Mat4::IDENTITY);
@@ -1543,7 +1545,11 @@ impl Renderer {
             // `<morph name weight>`: the named targets take their weights over the clip's and over `morphWeights`
             let (weights, morph) = {
                 let mut named: Vec<(String, f32)> = Vec::new();
-                for (k, c) in sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "morph").enumerate() {
+                for (k, c) in sr_model::element::children(&*n.elem)
+                    .into_iter()
+                    .filter(|c| c.element_name() == "morph")
+                    .enumerate()
+                {
                     let ca = Attrs { e: c, props: None };
                     let Some(name) = ca.str("name") else { continue };
                     let key = format!("{}/morph[{k}]", n.id);
@@ -1579,7 +1585,11 @@ impl Renderer {
                             let msg = if known.is_empty() {
                                 format!("{}: morph {name} cannot be set: the model has no named morph targets", n.id)
                             } else {
-                                format!("{}: morph {name} names no morph target of the model (it has: {})", n.id, known.join(", "))
+                                format!(
+                                    "{}: morph {name} names no morph target of the model (it has: {})",
+                                    n.id,
+                                    known.join(", ")
+                                )
                             };
                             if !plan.stats.unsupported.contains(&msg) {
                                 plan.stats.unsupported.push(msg);

@@ -27,7 +27,8 @@ fn debug_layers_force_one_worker_and_the_report_says_why() {
     };
     let (doc, _dir) = programme();
     let opts = sr_deliver::Options { parallel: sr_deliver::Parallel::Count(2), ..Default::default() };
-    let run = |gpu: &sr_gpu::Gpu| sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(gpu), &opts, &mut |_, _| {}).unwrap();
+    let run =
+        |gpu: &sr_gpu::Gpu| sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(gpu), &opts, &mut |_, _| {}).unwrap();
     std::env::remove_var("SR_GPU_DEBUG");
     let plain = run(&gpu);
     assert_eq!(plain.segments, 2, "two workers were asked for");

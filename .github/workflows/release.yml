@@ -24,7 +24,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
       SR_GPU_BACKEND: vulkan
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Check release version
         run: |
@@ -62,7 +62,7 @@ jobs:
           tar -C dist -czf "dist/$package.tar.gz" "$package"
           cd dist
           sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: scene-render-linux-x86_64
           path: |

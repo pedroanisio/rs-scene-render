@@ -28,7 +28,8 @@ pub(crate) fn sockets(p: &Program) -> Sockets {
         let constraints = || kids.iter().copied().filter(|c| c.element_name() == "transformConstraint");
         if let Some(joint) = text(e, "parentJoint") {
             let parent = text(e, "parent").or_else(|| {
-                constraints().find_map(|c| (text(c, "type").as_deref() == Some("parent")).then(|| text(c, "target")).flatten())
+                constraints()
+                    .find_map(|c| (text(c, "type").as_deref() == Some("parent")).then(|| text(c, "target")).flatten())
             });
             if let Some(parent) = parent {
                 want.entry(parent).or_default().insert(joint);
@@ -114,9 +115,16 @@ fn frames(p: &Program, n: &FrameNode, names: &[String], problems: &mut Vec<Strin
         let key = format!("{}/joint[{k}]", n.id);
         let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
         let angle = |attr: &str| {
-            props.and_then(|p| p.get(attr)).and_then(crate::Value::as_num).unwrap_or_else(|| crate::sim::num(c, attr, 0.)) as f32
+            props
+                .and_then(|p| p.get(attr))
+                .and_then(crate::Value::as_num)
+                .unwrap_or_else(|| crate::sim::num(c, attr, 0.)) as f32
         };
-        sr_3d::anim::pose_joint(&mut locals, node, sr_3d::anim::euler_degrees(angle("rotationX"), angle("rotationY"), angle("rotation")));
+        sr_3d::anim::pose_joint(
+            &mut locals,
+            node,
+            sr_3d::anim::euler_degrees(angle("rotationX"), angle("rotationY"), angle("rotation")),
+        );
     }
     let world = model.world_matrices(&locals);
     let select = match text(&*n.elem, "node") {

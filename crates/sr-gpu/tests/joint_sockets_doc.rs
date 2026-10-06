@@ -114,7 +114,6 @@ fn an_unknown_joint_is_reported_and_the_child_stays_in_the_objects_frame() {
     assert!(all.iter().any(|m| m.contains("nope")), "{all:?}");
 }
 
-
 #[test]
 fn a_parent_constraint_takes_the_joint_through_target_joint() {
     let doc = scene_with(

@@ -10,7 +10,8 @@ fn doc(mode: &str) -> sr_model::Document {
     <shapeModifier type="wiggle-path" size="8" detail="12" frequency="0" seed="4" {mode}/></shape>
 </composition></scene>"##
     );
-    sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: false, base_dir: None }).unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
+    sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: false, base_dir: None })
+        .unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
 }
 
 #[test]

@@ -8,7 +8,8 @@ fn x_at(expression: &str, t: f64) -> f64 {
   <shape id="s" shape="rect" x="100" width="10" height="10"><expression property="x">{expression}</expression></shape>
 </composition></scene>"#
     );
-    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}\n{xml}"));
+    let d =
+        sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}\n{xml}"));
     let f = Evaluator::new(&d, &EvalOptions::default()).unwrap_or_else(|r| panic!("{r}")).evaluate(t);
     f.nodes.iter().find(|n| &*n.id == "s").unwrap().world.apply([0.0, 0.0])[0]
 }

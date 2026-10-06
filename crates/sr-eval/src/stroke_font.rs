@@ -52,14 +52,20 @@ pub fn parse_jhf(text: &str) -> Result<Font, String> {
         }
         let record = glyphs.len() + 1;
         let field = |from: usize, len: usize| -> Result<usize, String> {
-            let t: String = s.get(from..from + len).ok_or_else(|| format!("record {record}: the file ends inside its header"))?.iter().collect();
+            let t: String = s
+                .get(from..from + len)
+                .ok_or_else(|| format!("record {record}: the file ends inside its header"))?
+                .iter()
+                .collect();
             t.trim().parse::<usize>().map_err(|_| format!("record {record}: {t:?} is not a number"))
         };
         let n = field(i + 5, 3)?;
         if n == 0 {
             return Err(format!("record {record}: a glyph has at least the margin pair"));
         }
-        let data: &[char] = s.get(i + 8..i + 8 + 2 * n).ok_or_else(|| format!("record {record}: the file ends inside its {n} pairs"))?;
+        let data: &[char] = s
+            .get(i + 8..i + 8 + 2 * n)
+            .ok_or_else(|| format!("record {record}: the file ends inside its {n} pairs"))?;
         i += 8 + 2 * n;
         let v = |c: char| c as i32 - 'R' as i32;
         let (left, right) = (v(data[0]), v(data[1]));
@@ -139,7 +145,9 @@ fn load(p: &Program, id: &str) -> Result<Arc<Font>, String> {
     let base = p.base_dirs.get(*doc as usize).cloned().unwrap_or_default();
     let path = match sr_model::assets::resolve(&src, &base) {
         sr_model::assets::Resolved::Local(path) => path,
-        sr_model::assets::Resolved::Remote(u) => return Err(format!("remote stroke font {u} is not fetched while rendering")),
+        sr_model::assets::Resolved::Remote(u) => {
+            return Err(format!("remote stroke font {u} is not fetched while rendering"))
+        }
     };
     let entry = p
         .stroke_fonts

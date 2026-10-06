@@ -13,13 +13,13 @@ jobs:
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.90.0
       - run: cargo check --workspace --all-targets --locked
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
       - run: python3 tools/check_release_hygiene.py --all
       - run: cargo fmt --all --check
@@ -27,7 +27,7 @@ jobs:
       - run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
       - run: python3 -m unittest discover -s tools/tests -v
         if: always()
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-diagnostics
@@ -38,13 +38,13 @@ jobs:
   evidence:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
       - run: cargo build --locked --release -p scene-render
       - run: python3 tools/evidence.py target/evidence
       - run: python3 tools/evidence.py target/review --manifest tools/evidence/review.json --clips
         if: success() || failure()
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: visual-evidence
@@ -58,7 +58,7 @@ jobs:
     # a fixture more than 15% slower fails (tools/perf_gate.py)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup
@@ -81,7 +81,7 @@ jobs:
       - if: steps.base.outputs.sha
         run: python3 tools/perf_gate.py "$RUNNER_TEMP/base/target/release/scene-render" target/release/scene-render --json target/perf-gate.json
       - if: always() && steps.base.outputs.sha
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: performance-gate
           path: target/perf-gate.json
@@ -89,7 +89,7 @@ jobs:
   performance:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
       - run: cargo test --release --test perf
       - run: cargo build --release && target/release/scene-render eval tests/corpus/valid/kitchen-sink.scene.xml --bench
@@ -112,7 +112,7 @@ jobs:
       - run: python3 tools/perf_physics.py /tmp/perf_physics --duration 2 && target/release/scene-render render /tmp/perf_physics/perf_physics.scene.xml --bench --frames 60..64
       # 10-minute smoke run of the parser, evaluator and expression compiler; the fuzzer accepts a longer --seconds for extended runs
       - run: cargo run --release -p sr-fuzz -- --seconds 600
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: performance-environment
@@ -123,11 +123,11 @@ jobs:
   oracle:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
       - run: python3 tools/build_corpus.py && git diff --exit-code tests/corpus
       - run: cargo build --release && python3 tools/oracle_diff.py 2000 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: oracle-environment
@@ -142,7 +142,7 @@ jobs:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --workspace --all-targets --locked
       - run: cargo test -p sr-model -p sr-eval -p sr-resolve --lib --locked

@@ -769,9 +769,12 @@ impl<'a> Eval<'a> {
                     self.check(has("text") && has("strokeFont"), n, "PEN1", || {
                         "shape=\"stroke-text\" needs @text and @strokeFont.".into()
                     });
-                    self.check(!has("strokeFont") || self.sets.stroke_font_assets.contains(&v("strokeFont").as_str()), n, "PEN2", || {
-                        "shape/@strokeFont must name a strokeFont asset.".into()
-                    });
+                    self.check(
+                        !has("strokeFont") || self.sets.stroke_font_assets.contains(&v("strokeFont").as_str()),
+                        n,
+                        "PEN2",
+                        || "shape/@strokeFont must name a strokeFont asset.".into(),
+                    );
                 }
                 // p66
                 let marked = ["markerStart", "markerEnd"].iter().any(|k| a(k).is_some_and(|v| v != "none"));

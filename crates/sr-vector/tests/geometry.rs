@@ -267,9 +267,17 @@ fn shape_modifiers() {
     modifiers::apply(&mut tw, &Modifier::Twist { amount: 90.0 }, &ctx);
     assert!((area(&tw[0].parts[0].0.flatten(0.05)) - 400.0).abs() < 40.0);
     let mut wg = sq();
-    modifiers::apply(&mut wg, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false }, &ctx);
+    modifiers::apply(
+        &mut wg,
+        &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false },
+        &ctx,
+    );
     let mut wg2 = sq();
-    modifiers::apply(&mut wg2, &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false }, &ctx);
+    modifiers::apply(
+        &mut wg2,
+        &Modifier::WigglePath { size: 2.0, detail: 50.0, frequency: 2.0, seed: 7, smooth: false },
+        &ctx,
+    );
     assert_eq!(wg, wg2, "deterministic");
     let mut mg = sq();
     mg.push(Item::new(shapes::rect(50.0, 50.0, 20.0, 20.0, [0.0; 4])));
@@ -394,7 +402,11 @@ fn wiggle_path_smooth_joins_the_same_points_with_curves() {
     let ctx = modifiers::Ctx { center: p(100.0, 0.0), time: 0.0, tol: 0.01 };
     let wiggle = |smooth: bool| {
         let mut it = line();
-        modifiers::apply(&mut it, &Modifier::WigglePath { size: 6.0, detail: 10.0, frequency: 0.0, seed: 3, smooth }, &ctx);
+        modifiers::apply(
+            &mut it,
+            &Modifier::WigglePath { size: 6.0, detail: 10.0, frequency: 0.0, seed: 3, smooth },
+            &ctx,
+        );
         it.remove(0).parts.remove(0).0
     };
     let (corner, smooth) = (wiggle(false), wiggle(true));
@@ -423,8 +435,26 @@ fn ik_pole_and_soft_reach() {
     let root = Xf::IDENTITY;
     let arm = || {
         vec![
-            rig::Bone { id: "a".into(), parent: None, x: 0.0, y: 0.0, rotation: 0.0, length: 10.0, scale_x: 1.0, scale_y: 1.0 },
-            rig::Bone { id: "b".into(), parent: Some(0), x: 10.0, y: 0.0, rotation: 0.0, length: 10.0, scale_x: 1.0, scale_y: 1.0 },
+            rig::Bone {
+                id: "a".into(),
+                parent: None,
+                x: 0.0,
+                y: 0.0,
+                rotation: 0.0,
+                length: 10.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
+            rig::Bone {
+                id: "b".into(),
+                parent: Some(0),
+                x: 10.0,
+                y: 0.0,
+                rotation: 0.0,
+                length: 10.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
         ]
     };
     let elbow = |b: &[rig::Bone]| rig::world_poses(b, &root)[1].origin();
@@ -433,7 +463,15 @@ fn ik_pole_and_soft_reach() {
     for (pole, side) in [(p(0.0, 30.0), 1.0), (p(30.0, 0.0), -1.0)] {
         for bend_positive in [true, false] {
             let mut b = arm();
-            rig::solve_ik_with(&mut b, &root, 1, target, bend_positive, 1.0, IkExtras { pole: Some(pole), softness: 0.0 });
+            rig::solve_ik_with(
+                &mut b,
+                &root,
+                1,
+                target,
+                bend_positive,
+                1.0,
+                IkExtras { pole: Some(pole), softness: 0.0 },
+            );
             let e = elbow(&b);
             let cross = (target.x) * (e.y) - (target.y) * (e.x);
             assert!(cross * side > 0.0, "pole {pole:?} bend_positive {bend_positive}: elbow {e:?}");
@@ -449,7 +487,10 @@ fn ik_pole_and_soft_reach() {
     assert_eq!(on, plain);
     // soft reach: continuous, never beyond the reach, identical to the hard solution when the target is near
     assert_eq!(rig::soft_reach(5.0, 10.0, 10.0, 0.3), 5.0);
-    assert!((rig::soft_reach(14.0, 10.0, 10.0, 0.3) - 14.0).abs() < 1e-12, "up to (1 - softness) of the reach nothing changes");
+    assert!(
+        (rig::soft_reach(14.0, 10.0, 10.0, 0.3) - 14.0).abs() < 1e-12,
+        "up to (1 - softness) of the reach nothing changes"
+    );
     let eased = rig::soft_reach(19.0, 10.0, 10.0, 0.3);
     assert!(eased < 19.0 && eased > 14.0, "{eased}");
     assert!(rig::soft_reach(1e6, 10.0, 10.0, 0.3) < 20.0);

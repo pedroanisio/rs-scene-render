@@ -19,7 +19,13 @@ fn the_environment_variable_takes_1_0_and_true() {
     let corpus =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid/kitchen-sink.scene.xml");
     for v in ["1", "0", "true"] {
-        let o = Command::new(exe).arg("validate").arg(&corpus).env("SR_GPU_DEBUG", v).env("NO_COLOR", "1").output().unwrap();
+        let o = Command::new(exe)
+            .arg("validate")
+            .arg(&corpus)
+            .env("SR_GPU_DEBUG", v)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
         assert_eq!(o.status.code(), Some(0), "SR_GPU_DEBUG={v}: {}", String::from_utf8_lossy(&o.stderr));
     }
 }

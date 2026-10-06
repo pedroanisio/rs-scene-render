@@ -2800,7 +2800,9 @@ impl Builder {
                     unread("timeConstant", "exponential");
                 }
                 if l.follow != m::Follow::Spring {
-                    for (attr, set) in [("stiffness", spring.0 != 100.0), ("damping", spring.1 != 10.0), ("mass", spring.2 != 1.0)] {
+                    for (attr, set) in
+                        [("stiffness", spring.0 != 100.0), ("damping", spring.1 != 10.0), ("mass", spring.2 != 1.0)]
+                    {
                         if set {
                             unread(attr, "spring");
                         }
@@ -2809,7 +2811,9 @@ impl Builder {
                 if l.follow != m::Follow::None && smoothing > 0.0 {
                     self.warnings.push(Diagnostic::info(
                         "E19",
-                        format!("link on {who}: @follow is ignored because @smoothing is set; a link uses one or the other"),
+                        format!(
+                            "link on {who}: @follow is ignored because @smoothing is set; a link uses one or the other"
+                        ),
                         l.loc,
                         who.as_str(),
                     ));
@@ -3332,7 +3336,11 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
         if k.carry && curve != Spring {
             note("carry", "a spring segment", &on_curve);
         } else if k.carry && i == 0 {
-            note("carry", "a spring segment with a segment before it", "on the first key, which has no segment before it");
+            note(
+                "carry",
+                "a spring segment with a segment before it",
+                "on the first key, which has no segment before it",
+            );
         } else if k.carry && i + 1 == keys.len() {
             note("carry", "a spring segment", "on the last key, which starts no segment");
         }
@@ -3365,10 +3373,16 @@ fn ignored_key_parameters(keys: &[m::Key], default: m::Curve, who: &str, warning
         }
         if k.ease_in.is_some() {
             match i.checked_sub(1).map(|j| &keys[j]) {
-                None => note("easeIn", "the cubic-bezier curve of the segment that ends in the key", "on the first key, which no segment ends in"),
-                Some(prev) if curve_of(prev) != CubicBezier => {
-                    note("easeIn", "the cubic-bezier curve", &format!("on the {:?} curve of the key before it", curve_of(prev)))
-                }
+                None => note(
+                    "easeIn",
+                    "the cubic-bezier curve of the segment that ends in the key",
+                    "on the first key, which no segment ends in",
+                ),
+                Some(prev) if curve_of(prev) != CubicBezier => note(
+                    "easeIn",
+                    "the cubic-bezier curve",
+                    &format!("on the {:?} curve of the key before it", curve_of(prev)),
+                ),
                 Some(prev) if prev.bezier.is_some() => {
                     note("easeIn", "the cubic-bezier curve without @bezier", "on a key that follows a key with @bezier")
                 }

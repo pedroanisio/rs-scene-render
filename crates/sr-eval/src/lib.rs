@@ -40,11 +40,11 @@ pub mod rig;
 pub mod rng;
 pub mod safe_area;
 pub mod sim;
-pub mod stroke_font;
 mod sim3d;
 pub mod solid;
 #[doc(hidden)]
 pub mod splash;
+pub mod stroke_font;
 pub mod terrain;
 pub mod value;
 

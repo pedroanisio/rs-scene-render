@@ -160,7 +160,8 @@ fn solve_ik_in(
         }
         2 => {
             let (a, l1, l2) = (joints[0], lens[0], lens[1]);
-            let d = soft_reach((target - a).len(), l1, l2, extras.softness).clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
+            let d =
+                soft_reach((target - a).len(), l1, l2, extras.softness).clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
             let base = (target - a).angle();
             let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
             let sgn = bend_sign(a, target, extras.pole, bend_positive);

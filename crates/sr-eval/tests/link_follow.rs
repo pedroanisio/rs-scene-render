@@ -50,7 +50,8 @@ fn the_spring_follower_overshoots_and_settles() {
     let d = doc(r#"follow="spring" stiffness="100" damping="4" mass="1""#);
     let (w0, z) = (10.0f64, 0.2f64);
     let wd = w0 * (1.0 - z * z).sqrt();
-    let step = |u: f64| 100.0 * (1.0 - (-z * w0 * u).exp() * ((wd * u).cos() + z / (1.0 - z * z).sqrt() * (wd * u).sin()));
+    let step =
+        |u: f64| 100.0 * (1.0 - (-z * w0 * u).exp() * ((wd * u).cos() + z / (1.0 - z * z).sqrt() * (wd * u).sin()));
     for u in [0.05, 0.15, 0.3, 0.6, 1.0, 2.0] {
         let got = b_at(&d, 1.0 + u);
         assert!((got - step(u)).abs() < 1.5, "u = {u}: {got} vs {}", step(u));

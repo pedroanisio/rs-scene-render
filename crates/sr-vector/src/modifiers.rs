@@ -95,8 +95,20 @@ fn spline_through(pts: &[P], closed: bool) -> Contour {
     let n = pts.len();
     let mut c = Contour { closed, ..Default::default() };
     for k in 0..n {
-        let prev = if k > 0 { pts[k - 1] } else if closed { pts[n - 1] } else { pts[k] };
-        let next = if k + 1 < n { pts[k + 1] } else if closed { pts[0] } else { pts[k] };
+        let prev = if k > 0 {
+            pts[k - 1]
+        } else if closed {
+            pts[n - 1]
+        } else {
+            pts[k]
+        };
+        let next = if k + 1 < n {
+            pts[k + 1]
+        } else if closed {
+            pts[0]
+        } else {
+            pts[k]
+        };
         let t = (next - prev) * (1.0 / 6.0);
         c.v.push(pts[k]);
         c.i.push(pts[k] - t);

@@ -20,7 +20,13 @@ fn x_at(d: &sr_model::Document, t: f64) -> f64 {
 }
 
 fn infos(d: &sr_model::Document) -> Vec<String> {
-    Evaluator::new(d, &EvalOptions::default()).unwrap().warnings().iter().filter(|w| w.is_info()).map(|w| w.message.clone()).collect()
+    Evaluator::new(d, &EvalOptions::default())
+        .unwrap()
+        .warnings()
+        .iter()
+        .filter(|w| w.is_info())
+        .map(|w| w.message.clone())
+        .collect()
 }
 
 /// Spring response (k = 100, c = 10, m = 1: w0 = 10, zeta = 0.5) of the displacement x - 0 starting at 100 with
@@ -37,7 +43,12 @@ fn analytic(u: f64, v0: f64) -> f64 {
 fn without_carry_the_spring_starts_from_rest_as_before() {
     let d = doc("", "");
     for u in [0.05, 0.2, 0.5, 1.0] {
-        assert!((x_at(&d, 1.0 + u) - analytic(u, 0.0)).abs() < 0.2, "u = {u}: {} vs {}", x_at(&d, 1.0 + u), analytic(u, 0.0));
+        assert!(
+            (x_at(&d, 1.0 + u) - analytic(u, 0.0)).abs() < 0.2,
+            "u = {u}: {} vs {}",
+            x_at(&d, 1.0 + u),
+            analytic(u, 0.0)
+        );
     }
     assert_eq!(x_at(&doc(r#"carry="false""#, ""), 1.3), x_at(&d, 1.3));
 }

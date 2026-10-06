@@ -44,7 +44,6 @@ fn model() -> String {
     )
 }
 
-
 fn scene(joints: &str, target: &str) -> sr_model::Document {
     std::fs::write(fixtures().join("joint-pose.gltf"), model()).unwrap();
     let xml = format!(
@@ -107,7 +106,8 @@ fn offset(b: (f32, f32)) -> (f32, f32) {
     (b.0 - 130.0, b.1 - 200.0)
 }
 
-const TARGET_ABOVE: &str = r##"<shape id="t" shape="rect" x="130" y="100" width="2" height="2" opacity="0" fill="#FFFFFF"/>"##;
+const TARGET_ABOVE: &str =
+    r##"<shape id="t" shape="rect" x="130" y="100" width="2" height="2" opacity="0" fill="#FFFFFF"/>"##;
 
 #[test]
 fn a_joint_without_a_pose_leaves_the_ball_on_its_axis() {
@@ -151,7 +151,10 @@ fn look_at_points_the_joints_axis_at_the_target() {
 
 #[test]
 fn influence_and_max_angle_limit_the_turn() {
-    let at = |attrs: &str| triangle(&scene(&format!(r#"<joint name="head" lookAt="t" lookAxis="x" {attrs}/>"#), TARGET_ABOVE), 0.0).unwrap();
+    let at = |attrs: &str| {
+        triangle(&scene(&format!(r#"<joint name="head" lookAt="t" lookAxis="x" {attrs}/>"#), TARGET_ABOVE), 0.0)
+            .unwrap()
+    };
     for (attrs, deg) in [(r#"influence="0.5""#, 45.0), (r#"maxAngle="30""#, 30.0), (r#"influence="0""#, 0.0)] {
         let (b, want) = (at(attrs), turned(deg));
         assert!((b.0 - want.0).abs() < 2.0 && (b.1 - want.1).abs() < 2.0, "{attrs}: {b:?} want {want:?}");

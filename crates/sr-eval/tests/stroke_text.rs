@@ -32,7 +32,13 @@ fn font_text(wrap: bool) -> String {
     }
     if wrap {
         // records wrapped at 20 characters, as the distribution wraps them at 72
-        out.join("").as_bytes().chunks(20).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join("\n") + "\n"
+        out.join("")
+            .as_bytes()
+            .chunks(20)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
     } else {
         out.join("\n") + "\n"
     }

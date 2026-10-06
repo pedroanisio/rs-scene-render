@@ -74,7 +74,12 @@ fn rotation_takes_the_shortest_arc_when_the_quaternions_have_opposite_signs() {
     let (m, (a, b)) = (model(), clips());
     // negating a quaternion is the same rotation: blending 80 degrees with the negated 100 degrees must give 90
     let mut flipped = b.clone();
-    flipped.channels[0] = channel(0, Path::Rotation, &[0.0, 1.0], &[(-Quat::from_rotation_z(1.7453292)).to_array(), (-Quat::from_rotation_z(1.7453292)).to_array()].concat());
+    flipped.channels[0] = channel(
+        0,
+        Path::Rotation,
+        &[0.0, 1.0],
+        &[(-Quat::from_rotation_z(1.7453292)).to_array(), (-Quat::from_rotation_z(1.7453292)).to_array()].concat(),
+    );
     let mut first = a.clone();
     first.channels[0] = channel(0, Path::Rotation, &[0.0, 1.0], &[quat(80.0), quat(80.0)].concat());
     let (l, _) = anim::pose_blend(&m, Some(&first), 0.0, Some(&flipped), 0.0, 0.5);

@@ -1071,7 +1071,8 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
         out_ix: Vec<Option<u32>>,
         problems: Vec<String>,
     }
-    let mut out = Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n], problems: Vec::new() };
+    let mut out =
+        Out { inst: Vec::new(), nodes: Vec::new(), world: vec![None; n], out_ix: vec![None; n], problems: Vec::new() };
 
     // depth-first, z-sorted, active nodes only
     #[allow(clippy::too_many_arguments)]

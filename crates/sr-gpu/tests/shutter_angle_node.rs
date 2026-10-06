@@ -10,7 +10,8 @@ fn doc(node: &str, group: &str) -> sr_model::Document {
           <shape id="s" shape="rect" y="16" width="8" height="8" fill="#FFFFFF" {node}><animate property="x"><key time="0" value="10"/><key time="1" value="110"/></animate></shape>
         </group></composition></scene>"##
     );
-    sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: false, base_dir: None }).unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
+    sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: false, base_dir: None })
+        .unwrap_or_else(|e| panic!("{e:?}\n{xml}"))
 }
 
 /// Width in pixels of the smear on the row through the square: columns with any ink.

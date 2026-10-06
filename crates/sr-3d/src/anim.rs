@@ -104,11 +104,7 @@ pub fn pose_blend(
     let locals = la
         .iter()
         .zip(&lb)
-        .map(|(x, y)| Trs {
-            t: x.t.lerp(y.t, w),
-            r: x.r.slerp(y.r, w).normalize(),
-            s: x.s.lerp(y.s, w),
-        })
+        .map(|(x, y)| Trs { t: x.t.lerp(y.t, w), r: x.r.slerp(y.r, w).normalize(), s: x.s.lerp(y.s, w) })
         .collect();
     let weights = wa
         .iter()
@@ -128,7 +124,9 @@ pub fn pose_blend(
 /// The rotation of angles (degrees) about x, then y, then z of the frame being turned: `Rz · Ry · Rx`, as an object's own
 /// `rotationX`, `rotationY` and `rotation` compose.
 pub fn euler_degrees(x: f32, y: f32, z: f32) -> Quat {
-    Quat::from_rotation_z(z.to_radians()) * Quat::from_rotation_y(y.to_radians()) * Quat::from_rotation_x(x.to_radians())
+    Quat::from_rotation_z(z.to_radians())
+        * Quat::from_rotation_y(y.to_radians())
+        * Quat::from_rotation_x(x.to_radians())
 }
 
 /// A rotation added to a joint's local rotation, in the joint's own axes (`locals[node].r · extra`).
@@ -142,7 +140,15 @@ pub fn pose_joint(locals: &mut [Trs], node: usize, extra: Quat) {
 /// own space): the shortest rotation, scaled by `influence` (0 to 1) and limited to `max_angle` radians, applied in the
 /// world about the joint and expressed back in the local rotation, so the joint's parents are not moved. A target at the
 /// joint, or an axis already on target, leaves the joint as it is.
-pub fn look_at(model: &Model, locals: &mut [Trs], node: usize, target: Vec3, axis: Vec3, influence: f32, max_angle: f32) {
+pub fn look_at(
+    model: &Model,
+    locals: &mut [Trs],
+    node: usize,
+    target: Vec3,
+    axis: Vec3,
+    influence: f32,
+    max_angle: f32,
+) {
     let world = model.world_matrices(locals);
     let Some(w) = world.get(node) else { return };
     let (_, world_rot, position) = w.to_scale_rotation_translation();
