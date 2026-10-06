@@ -416,3 +416,55 @@ fn wiggle_path_smooth_joins_the_same_points_with_curves() {
     // deterministic, and the curve passes through the points
     assert_eq!(wiggle(true), wiggle(true));
 }
+
+#[test]
+fn ik_pole_and_soft_reach() {
+    use sr_vector::rig::{self, IkExtras};
+    let root = Xf::IDENTITY;
+    let arm = || {
+        vec![
+            rig::Bone { id: "a".into(), parent: None, x: 0.0, y: 0.0, rotation: 0.0, length: 10.0, scale_x: 1.0, scale_y: 1.0 },
+            rig::Bone { id: "b".into(), parent: Some(0), x: 10.0, y: 0.0, rotation: 0.0, length: 10.0, scale_x: 1.0, scale_y: 1.0 },
+        ]
+    };
+    let elbow = |b: &[rig::Bone]| rig::world_poses(b, &root)[1].origin();
+    let target = p(10.0, 10.0);
+    // a pole on one side of the line root-target puts the elbow on that side; the other side flips it
+    for (pole, side) in [(p(0.0, 30.0), 1.0), (p(30.0, 0.0), -1.0)] {
+        for bend_positive in [true, false] {
+            let mut b = arm();
+            rig::solve_ik_with(&mut b, &root, 1, target, bend_positive, 1.0, IkExtras { pole: Some(pole), softness: 0.0 });
+            let e = elbow(&b);
+            let cross = (target.x) * (e.y) - (target.y) * (e.x);
+            assert!(cross * side > 0.0, "pole {pole:?} bend_positive {bend_positive}: elbow {e:?}");
+            let tipp = rig::tip(&rig::world_poses(&b, &root)[1], 10.0);
+            assert!(tipp.dist(target) < 1e-6, "the tip still reaches {tipp:?}");
+        }
+    }
+    // a pole on the line leaves the choice to bend_positive
+    let mut on = arm();
+    rig::solve_ik_with(&mut on, &root, 1, target, true, 1.0, IkExtras { pole: Some(p(20.0, 20.0)), softness: 0.0 });
+    let mut plain = arm();
+    rig::solve_ik(&mut plain, &root, 1, target, true, 1.0);
+    assert_eq!(on, plain);
+    // soft reach: continuous, never beyond the reach, identical to the hard solution when the target is near
+    assert_eq!(rig::soft_reach(5.0, 10.0, 10.0, 0.3), 5.0);
+    assert!((rig::soft_reach(14.0, 10.0, 10.0, 0.3) - 14.0).abs() < 1e-12, "up to (1 - softness) of the reach nothing changes");
+    let eased = rig::soft_reach(19.0, 10.0, 10.0, 0.3);
+    assert!(eased < 19.0 && eased > 14.0, "{eased}");
+    assert!(rig::soft_reach(1e6, 10.0, 10.0, 0.3) < 20.0);
+    let mut last = 0.0;
+    for k in 0..400 {
+        let r = rig::soft_reach(k as f64 * 0.1, 10.0, 10.0, 0.3);
+        assert!(r >= last, "monotone");
+        last = r;
+    }
+    // a target past the reach: the soft chain stays slightly bent where the hard one is straight
+    let far = p(25.0, 0.0);
+    let mut hard = arm();
+    rig::solve_ik(&mut hard, &root, 1, far, true, 1.0);
+    let mut soft = arm();
+    rig::solve_ik_with(&mut soft, &root, 1, far, true, 1.0, IkExtras { pole: None, softness: 0.3 });
+    assert!(hard[1].rotation.abs() < 1e-3, "{}", hard[1].rotation);
+    assert!(soft[1].rotation.abs() > 1.0, "{}", soft[1].rotation);
+}

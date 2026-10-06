@@ -60,20 +60,86 @@ fn aim(bones: &mut [Bone], worlds: &[Xf], root: &Xf, i: usize, angle: f64) {
     bones[i].rotation = (angle - parent_angle).to_degrees();
 }
 
+/// What an IK constraint adds to the plain two-bone solution.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct IkExtras {
+    /// A point (world) the middle joint bends toward: the side of the chain it lies on decides the bend, instead of
+    /// the constraint's `bend_positive`.
+    pub pole: Option<P>,
+    /// The fraction (0 to 1) of the chain's full reach, counted from its end, over which the distance to the target
+    /// eases toward full extension, so a chain does not snap straight as the target leaves its reach.
+    pub softness: f64,
+}
+
+/// The distance a two-bone chain of lengths `l1` and `l2` reaches for a target `d` away, with `softness` in 0 to 1:
+/// `d` while `d <= (1 - softness)(l1 + l2)`, then `s + e (1 - exp(-(d - s) / e))` with `s = (1 - softness)(l1 + l2)` and `e = softness (l1 + l2)`:
+/// continuous, with slope 1 where it starts, and never beyond the full reach.
+pub fn soft_reach(d: f64, l1: f64, l2: f64, softness: f64) -> f64 {
+    let reach = l1 + l2;
+    let e = softness.clamp(0.0, 1.0) * reach;
+    let s = reach - e;
+    if e <= 1e-12 || d <= s {
+        d
+    } else {
+        s + e * (1.0 - libm::exp(-(d - s) / e))
+    }
+}
+
+/// The sign of the bend of a two-bone chain whose root joint is at `a`, for a target and an optional pole: +1 or -1 as
+/// `bend_positive` says, or, with a pole not on the line from `a` to the target, the one that puts the middle joint on
+/// the pole's side of that line.
+pub fn bend_sign(a: P, target: P, pole: Option<P>, bend_positive: bool) -> f64 {
+    if let Some(q) = pole {
+        let (d, v) = (target - a, q - a);
+        let side = d.x * v.y - d.y * v.x;
+        if side.abs() > 1e-9 {
+            // the middle joint lies at `base - sgn * acos(..)`: on the side of sign `-sgn`
+            return if side > 0.0 { -1.0 } else { 1.0 };
+        }
+    }
+    if bend_positive {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
 /// Solves IK so the tip of bone `end` reaches `target` (world). Chains of
 /// two bones use the analytic solution with the bend side from
 /// `bend_positive`; longer chains use FABRIK; a single bone aims at the target.
 pub fn solve_ik(bones: &mut [Bone], root: &Xf, end: usize, target: P, bend_positive: bool, influence: f64) {
+    solve_ik_with(bones, root, end, target, bend_positive, influence, IkExtras::default())
+}
+
+/// [`solve_ik`] with a pole target and a soft reach (both apply to chains of two bones only).
+pub fn solve_ik_with(
+    bones: &mut [Bone],
+    root: &Xf,
+    end: usize,
+    target: P,
+    bend_positive: bool,
+    influence: f64,
+    extras: IkExtras,
+) {
     // The chain is solved in the skeleton's own space, where bone lengths are what the document says: under a
     // rotated, flipped, skewed or unevenly scaled ancestor the frame-space distances between joints are not the
     // lengths the analytic solution needs. The target is taken into that space, and the bones keep local values.
     if let Some(inv) = root.inverse() {
-        return solve_ik_in(bones, &Xf::IDENTITY, end, inv.apply(target), bend_positive, influence);
+        let extras = IkExtras { pole: extras.pole.map(|q| inv.apply(q)), ..extras };
+        return solve_ik_in(bones, &Xf::IDENTITY, end, inv.apply(target), bend_positive, influence, extras);
     }
-    solve_ik_in(bones, root, end, target, bend_positive, influence)
+    solve_ik_in(bones, root, end, target, bend_positive, influence, extras)
 }
 
-fn solve_ik_in(bones: &mut [Bone], root: &Xf, end: usize, target: P, bend_positive: bool, influence: f64) {
+fn solve_ik_in(
+    bones: &mut [Bone],
+    root: &Xf,
+    end: usize,
+    target: P,
+    bend_positive: bool,
+    influence: f64,
+    extras: IkExtras,
+) {
     let mut ch = chain(bones, end);
     let before = bones.to_vec();
     let worlds = world_poses(bones, root);
@@ -94,10 +160,10 @@ fn solve_ik_in(bones: &mut [Bone], root: &Xf, end: usize, target: P, bend_positi
         }
         2 => {
             let (a, l1, l2) = (joints[0], lens[0], lens[1]);
-            let d = (target - a).len().clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
+            let d = soft_reach((target - a).len(), l1, l2, extras.softness).clamp((l1 - l2).abs() + 1e-9, l1 + l2 - 1e-9);
             let base = (target - a).angle();
             let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
-            let sgn = if bend_positive { 1.0 } else { -1.0 };
+            let sgn = bend_sign(a, target, extras.pole, bend_positive);
             let a1 = base - sgn * libm::acos(cos_a);
             aim(bones, &worlds, root, ch[0], a1);
             let w2 = world_poses(bones, root);

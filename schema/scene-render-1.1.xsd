@@ -585,6 +585,12 @@
     <xs:attribute name="minDistance" type="nonNegativeDecimal"/>
     <xs:attribute name="maxDistance" type="nonNegativeDecimal"/>
     <xs:attribute name="bendPositive" type="xs:boolean" default="true"/>
+    <xs:attribute name="pole" type="xs:IDREF">
+      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: a node or bone whose position the middle joint bends toward; it replaces @bendPositive (which stays the choice when the pole lies on the line to the target).</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="softness" type="unitDecimal" default="0">
+      <xs:annotation><xs:documentation>type="ik" on a chain of two bones or joints: the fraction of the chain's full reach, counted from its end, over which the reach eases toward full extension, so the chain does not snap straight as the target leaves its reach.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="progress" type="unitDecimal" default="0"/>
     <xs:attribute name="autoOrient" type="xs:boolean" default="false"/>
   </xs:complexType>
