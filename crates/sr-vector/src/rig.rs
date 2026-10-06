@@ -73,7 +73,9 @@ pub struct IkExtras {
 
 /// The distance a two-bone chain of lengths `l1` and `l2` reaches for a target `d` away, with `softness` in 0 to 1:
 /// `d` while `d <= (1 - softness)(l1 + l2)`, then `s + e (1 - exp(-(d - s) / e))` with `s = (1 - softness)(l1 + l2)` and `e = softness (l1 + l2)`:
-/// continuous, with slope 1 where it starts, and never beyond the full reach.
+/// continuous, with slope 1 where it starts, and below the full reach for every `d` (SREP 54). Far beyond the reach
+/// the exponential underflows and the sum rounds to the reach itself, so the result is held to the largest number
+/// below it.
 pub fn soft_reach(d: f64, l1: f64, l2: f64, softness: f64) -> f64 {
     let reach = l1 + l2;
     let e = softness.clamp(0.0, 1.0) * reach;
@@ -81,7 +83,7 @@ pub fn soft_reach(d: f64, l1: f64, l2: f64, softness: f64) -> f64 {
     if e <= 1e-12 || d <= s {
         d
     } else {
-        s + e * (1.0 - libm::exp(-(d - s) / e))
+        (s + e * (1.0 - libm::exp(-(d - s) / e))).min(reach.next_down())
     }
 }
 
