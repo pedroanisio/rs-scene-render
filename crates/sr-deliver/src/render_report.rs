@@ -337,11 +337,13 @@ impl<'a> ReportWriter<'a> {
         let element = if f.path.starts_with('/') {
             by_offset.filter(|n| sr_model::diag::element_path(*n) == f.path)
         } else {
-            // an effective id names the element directly, or (inside an instance) ends with the element's own id
+            // the element where the finding was raised (a part such as a mask has no id of its own, and names its
+            // node), else the element an effective id names directly or (inside an instance) ends with
             let id = at.id.as_deref();
             let own = id.map(|i| i.rsplit('/').next().unwrap_or(i));
-            id.and_then(|i| elements().find(|n| n.attribute("id") == Some(i)))
-                .or_else(|| by_offset.filter(|n| own.is_none() || n.attribute("id") == own))
+            by_offset
+                .filter(|n| n.attribute("id").is_none_or(|i| Some(i) == own))
+                .or_else(|| id.and_then(|i| elements().find(|n| n.attribute("id") == Some(i))))
                 .or_else(|| own.and_then(|o| elements().find(|n| n.attribute("id") == Some(o))))
         };
         match element {
