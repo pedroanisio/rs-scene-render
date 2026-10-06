@@ -638,7 +638,24 @@ mod tests {
                 1
             );
             assert!(water.contains("fn volume_transmittance("), "shared code is kept");
+            assert!(
+                water.contains("let c = dielectric_crossing(")
+                    && water.contains("if (c.refracted) { inside = c.inside; }"),
+                "the water shader takes whether the path is inside from a refraction only, not from a reflection"
+            );
         }
+    }
+
+    /// The crossing of a dielectric surface is one function, called once from `radiance`, and its
+    /// body is not repeated in the loop.
+    #[test]
+    fn the_crossing_of_a_dielectric_surface_is_a_function_radiance_calls() {
+        let plain = include_str!("pathtrace.wgsl");
+        assert_eq!(plain.matches("fn dielectric_crossing(").count(), 1);
+        assert_eq!(plain.matches("dielectric_crossing(s, m, ").count(), 1, "called once");
+        assert_eq!(plain.matches("refract(d, n, eta)").count(), 1, "the refraction is in the function only");
+        let radiance = &plain[plain.find("fn radiance(").expect("radiance")..];
+        assert!(!radiance.contains("refract("), "radiance does not refract itself");
     }
 
     #[test]
@@ -646,8 +663,23 @@ mod tests {
         let source = grid_source();
         assert_eq!(source.matches("fn volume_incident(").count(), 1, "one volume_incident");
         assert!(source.contains("fn volume_incident_exact("), "the exact function stays for other media");
+        // it is the plain function renamed, not a second copy that could drift from it
+        assert!(
+            !include_str!("volume_grid.wgsl").contains("fn volume_incident_exact("),
+            "the grid file does not carry its own copy of the exact lighting"
+        );
+        let body = |text: &str, name: &str| {
+            let start = text.find(name).expect("function");
+            let end = start + text[start..].find("\n}\n").expect("end of function");
+            text[start + name.len()..end].to_string()
+        };
+        assert_eq!(
+            body(&source, "fn volume_incident_exact("),
+            body(include_str!("volume.wgsl"), "fn volume_incident("),
+            "the exact function is the plain one"
+        );
         assert!(source.contains("tverts[base+13u].y>0.5,base)"), "the call that lights a domain passes the domain");
-        assert!(!source.contains("//@exact-incident"), "the markers are removed with the function between them");
+        assert!(!source.contains("//@exact-incident"), "the markers are removed");
         // everything outside the replaced span is the shader without grids
         let plain = include_str!("volume.wgsl");
         assert!(plain.matches("fn volume_incident(").count() == 1 && plain.contains("//@exact-incident-begin"));
@@ -818,7 +850,9 @@ fn grid_source() -> String {
     let volume = include_str!("volume.wgsl");
     let (a, b) = (volume.find(BEGIN).expect("incident begin marker"), volume.find(END).expect("incident end marker"));
     assert!(volume.matches(CALL).count() == 1, "one call lights a domain");
-    let shared = format!("{}{}", &volume[..a], &volume[b + END.len()..])
+    // the plain function stays, renamed: the grid's `volume_incident` falls back to it for a domain without grids
+    let exact = volume[a + BEGIN.len()..b].replacen("fn volume_incident(", "fn volume_incident_exact(", 1);
+    let shared = format!("{}{}{}", &volume[..a], exact, &volume[b + END.len()..])
         .replace(CALL, "volume_incident(point,-d,albedo.w,tverts[base+13u].y>0.5,base)");
     format!(
         "{}\n{}\n{}\n{}",
@@ -836,22 +870,23 @@ fn grid_source() -> String {
 /// without such a material keep the text, and so the compiled code, they had.
 fn water_source(base: &str) -> String {
     const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
-    const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
-    const FRESNEL: &str = "            let cosi = clamp(dot(v, n), 0.0, 1.0);\n            let r0 = (1.0 - eta) / (1.0 + eta);\n            let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n            let t = refract(d, n, eta);\n";
+    const ENTER: &str = "        if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const CROSSED: &str = "            in_sigma = c.in_sigma;\n";
+    const FRESNEL: &str = "    let cosi = clamp(dot(v, n), 0.0, 1.0);\n    let r0 = (1.0 - eta) / (1.0 + eta);\n    let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n    let t = refract(d, n, eta);\n";
     const FOG: &str = "        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }\n        if (HAS_MEDIA) {\n";
     const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
-    for hook in [SIGMA, ENTER, FRESNEL, FOG, VISIBLE] {
+    for hook in [SIGMA, ENTER, CROSSED, FRESNEL, FOG, VISIBLE] {
         assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
     }
     let hooked = base
         // Schlick's term takes the cosine of the side the light goes to when it leaves the denser medium
         .replace(
             FRESNEL,
-            "            let t = refract(d, n, eta);\n\
-             \x20           var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
-             \x20           if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
-             \x20           let r0 = (1.0 - eta) / (1.0 + eta);\n\
-             \x20           let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
+            "    let t = refract(d, n, eta);\n\
+             \x20   var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
+             \x20   if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
+             \x20   let r0 = (1.0 - eta) / (1.0 + eta);\n\
+             \x20   let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
         )
         // inside absorbing water the media's light is dimmed by the water in front of it, and the water
         // absorbs across the gaps; elsewhere the march is the plain one
@@ -880,12 +915,14 @@ fn water_source(base: &str) -> String {
             ENTER,
             // radiance over eta^2 is the same on both sides of an interface: a path that goes
             // from a medium of index n1 into one of index n2 carries (n1 / n2)^2
-            "                if (WATER) {\n\
-             \x20                   in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
-             \x20                   inside = entering;\n\
-             \x20                   thr *= eta * eta;\n\
-             \x20               }\n",
+            "        if (WATER) {\n\
+             \x20           in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
+             \x20           inside = entering;\n\
+             \x20           thr *= eta * eta;\n\
+             \x20       }\n",
         )
+        // the path leaves the crossing inside the medium or not
+        .replace(CROSSED, &format!("{CROSSED}            if (c.refracted) {{ inside = c.inside; }}\n"))
         .replace(
             VISIBLE,
             &format!(
@@ -1206,6 +1243,98 @@ pub fn render(
     render_timed(pt, d, enc, scene, data, opts, inputs, out, false);
 }
 
+/// The buffers of a pass that the light-grid kernels read, besides the grid itself.
+struct GridInputs<'a> {
+    verts: &'a wgpu::Buffer,
+    mats: &'a wgpu::Buffer,
+    nodes: &'a wgpu::Buffer,
+    lights: &'a wgpu::Buffer,
+    guide: &'a wgpu::Buffer,
+    /// A buffer for the accumulation binding, which the kernels do not use.
+    stand_in: &'a wgpu::Buffer,
+}
+
+/// Records the kernels that fill the light grids of `plan` into `group`, once before the tiles:
+/// one dispatch for each scalar slot (a light's or a dome direction's) and, for isotropic media
+/// under a dome, one for the pre-integrated radiance. `first` carries the pass's parameters, in
+/// which only the slot differs from one dispatch to the next.
+#[allow(clippy::too_many_arguments)]
+fn build_light_grids(
+    pt: &PtGpu,
+    d: &wgpu::Device,
+    enc: &mut wgpu::CommandEncoder,
+    timer: &mut Option<crate::fx::Timer>,
+    plan: &crate::volume::LightGridPlan,
+    group: &wgpu::BindGroup,
+    first: Params,
+    buffers: &GridInputs,
+    inputs: &PtInputs,
+) {
+    let params: Vec<Params> = (0..plan.scalar_slots)
+        .map(|slot| Params { size: [first.size[0], first.size[1], slot as f32, 0.0], ..first })
+        .collect();
+    let mut bytes = vec![0u8; params.len().max(1) * SLOT as usize];
+    for (k, sl) in params.iter().enumerate() {
+        let b = bytemuck::bytes_of(sl);
+        bytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
+    }
+    let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("pt-grid-params"),
+        contents: &bytes,
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let entries = |acc: &wgpu::Buffer| {
+        d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pathtrace-grid-build"),
+            layout: &pt.bgl0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &ubuf,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: buffers.verts.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: buffers.mats.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: buffers.nodes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: buffers.lights.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: buffers.guide.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
+                },
+            ],
+        })
+    };
+    let build = entries(buffers.stand_in);
+    let g = pt.grid_pipelines(d);
+    let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace light grid"));
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("pathtrace-light-grid"),
+        timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
+            query_set: &t.set,
+            beginning_of_pass_write_index: Some(a),
+            end_of_pass_write_index: Some(a + 1),
+        }),
+    });
+    cp.set_bind_group(1, group, &[]);
+    cp.set_pipeline(&g.light);
+    for slot in 0..plan.scalar_slots {
+        cp.set_bind_group(0, &build, &[(u64::from(slot) * SLOT) as u32]);
+        cp.dispatch_workgroups(plan.rows_per_slot.div_ceil(64), 1, 1);
+    }
+    if plan.radiance {
+        cp.set_pipeline(&g.dome);
+        cp.set_bind_group(0, &build, &[0]);
+        cp.dispatch_workgroups(plan.node_count().div_ceil(64), 1, 1);
+    }
+}
+
 /// [`render`], also reporting the CPU packing time and, with `time_gpu`, timestamp queries
 /// around each tile's trace and denoise passes (labels `pathtrace trace` / `pathtrace denoise`).
 #[allow(clippy::too_many_arguments)]
@@ -1346,70 +1475,15 @@ pub fn render_timed(
 
     // the grids are built once, before the tiles
     if let (Some(plan), Some(group)) = (&grid_plan, &grid_group) {
-        let first = make_base(&tiles[0]);
-        let params: Vec<Params> = (0..plan.scalar_slots)
-            .map(|slot| Params { size: [first.size[0], first.size[1], slot as f32, 0.0], ..first })
-            .collect();
-        let mut bytes = vec![0u8; params.len().max(1) * SLOT as usize];
-        for (k, sl) in params.iter().enumerate() {
-            let b = bytemuck::bytes_of(sl);
-            bytes[k * SLOT as usize..k * SLOT as usize + b.len()].copy_from_slice(b);
-        }
-        let ubuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("pt-grid-params"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let entries = |acc: &wgpu::Buffer| {
-            d.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pathtrace-grid-build"),
-                layout: &pt.bgl0,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &ubuf,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry { binding: 1, resource: tverts.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: mats.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: acc.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: guide.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(inputs.env) },
-                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(inputs.sampler) },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: wgpu::BindingResource::TextureView(inputs.backdrop.unwrap_or(inputs.black)),
-                    },
-                ],
-            })
+        let buffers = GridInputs {
+            verts: &tverts,
+            mats: &mats,
+            nodes: &nodes,
+            lights: &lights,
+            guide: &guide,
+            stand_in: &stand_in,
         };
-        let build = entries(&stand_in);
-        let g = pt.grid_pipelines(d);
-        let stamp = timer.as_mut().and_then(|t| t.labelled_pair("pathtrace light grid"));
-        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pathtrace-light-grid"),
-            timestamp_writes: stamp.zip(timer.as_ref()).map(|(a, t)| wgpu::ComputePassTimestampWrites {
-                query_set: &t.set,
-                beginning_of_pass_write_index: Some(a),
-                end_of_pass_write_index: Some(a + 1),
-            }),
-        });
-        cp.set_bind_group(1, group, &[]);
-        cp.set_pipeline(&g.light);
-        for slot in 0..plan.scalar_slots {
-            cp.set_bind_group(0, &build, &[(u64::from(slot) * SLOT) as u32]);
-            cp.dispatch_workgroups(plan.rows_per_slot.div_ceil(64), 1, 1);
-        }
-        if plan.radiance {
-            cp.set_pipeline(&g.dome);
-            cp.set_bind_group(0, &build, &[0]);
-            cp.dispatch_workgroups(plan.node_count().div_ceil(64), 1, 1);
-        }
+        build_light_grids(pt, d, enc, &mut timer, plan, group, make_base(&tiles[0]), &buffers, inputs);
     }
     for (tile_index, tile) in tiles.iter().enumerate() {
         enc.clear_buffer(&accum, 0, None);

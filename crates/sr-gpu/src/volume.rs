@@ -500,20 +500,47 @@ fn pack_grid(out: &mut Vec<[f32; 4]>, grid: &sr_volume::SparseGrid) -> [f32; 4] 
     info
 }
 
-/// What a medium asks for with `lighting="grid"`.
+/// What a medium asks for with `lighting="grid"`. The lattice that serves every medium that asks is
+/// planned from the finest `cell` and the most `dome_directions` among them, within the strictest
+/// `memory_bytes` ([`plan_light_grid`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightGridRequest {
+    /// `lightGridCell`: the spacing of the lattice, in voxels of the medium's density grid; the
+    /// lattice's `spacing` is the smallest of these times the voxel's world size.
     pub cell: u32,
+    /// `lightGridDomeDirections`: how many fixed directions the dome is sampled in. They are the scalar
+    /// slots after the lights' when `directional`, where `cs_light_grid` computes slot `s` for the direction
+    /// `dome_direction(s - lights, dome_directions)`, and the directions `cs_dome_grid` averages when `radiance`.
     pub dome_directions: u32,
+    /// `lightGridMemoryMiB` in bytes: the most the buffer may take.
     pub memory_bytes: u64,
 }
 
-/// The world-space lattice and buffer layout of a pass's light grids.
+/// The world-space lattice and buffer layout of a pass's light grids. The buffer is `bytes / 16` rows of
+/// four `f32`, the `lgrid` array of `volume_grid.wgsl`, laid out by [`light_grid_buffer`] and read by that
+/// file's functions as follows (`head`, `dims` and `info` are the names the shader gives to rows 0, 1 and 2):
+///
+/// - row 0 is `origin` (xyz) and `spacing` (w): `head.xyz` and `head.w`, the lattice's corner and the
+///   distance between nodes, which `volume_grid_contains`, `volume_grid_transmittance` and
+///   `volume_grid_dome` divide a point's offset by to find its cell;
+/// - row 1 is `nodes` (xyz, as `u32` bits), the counts along each axis: `dims`; its w holds the flags,
+///   bit 0 `radiance` and bit 1 `directional`, which `volume_incident` reads to choose between the
+///   pre-integrated dome and the directional slots;
+/// - row 2 is `info`: x the first scalar row (4), y `rows_per_slot`, z `dome_directions`, w `lights`;
+/// - row 3, x, is the first row of the radiance grid ([`LightGridPlan::radiance_row`]);
+/// - from row 4, `scalar_slots` blocks of `rows_per_slot` rows: slot `s` starts at row
+///   `info.x + s * info.y`, and each row holds four consecutive nodes (x fastest, then y, then z) as the
+///   transmittance toward the light (or dome direction) times the surfaces' visibility, which
+///   `volume_grid_transmittance` interpolates trilinearly; `cs_light_grid` fills one row per thread;
+/// - after them, when `radiance`, one row per node (`rgb` the dome's radiance, w 1), which
+///   `volume_grid_dome` interpolates and `cs_dome_grid` fills one node per thread.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LightGridPlan {
+    /// World position of node (0, 0, 0): the lower corner of the union of the asking media's bounds.
     pub origin: [f32; 3],
     /// World distance between nodes.
     pub spacing: f32,
+    /// Nodes along x, y and z: the extent over `spacing`, rounded up, plus one.
     pub nodes: [u32; 3],
     /// Analytic lights, one scalar slot each; the dome's fixed directions follow when `directional`.
     pub lights: u32,
@@ -522,8 +549,11 @@ pub struct LightGridPlan {
     pub radiance: bool,
     /// One scalar slot per dome direction (a medium with anisotropic scattering asks for them).
     pub directional: bool,
+    /// Rows of one scalar slot: the node count over four, rounded up.
     pub rows_per_slot: u32,
+    /// `lights`, plus `dome_directions` when `directional`.
     pub scalar_slots: u32,
+    /// Size of the buffer: 4 header rows, the scalar slots, and the radiance rows when `radiance`.
     pub bytes: u64,
 }
 
@@ -532,6 +562,7 @@ impl LightGridPlan {
         self.nodes.iter().product()
     }
 
+    /// First row of the radiance grid, after the scalar slots.
     fn radiance_row(&self) -> u32 {
         4 + self.scalar_slots * self.rows_per_slot
     }
@@ -776,6 +807,31 @@ mod tests {
         // beside a medium with density, only that one is covered
         let plan = plan_light_grid(&[drawn, draw(1.0, 0.0, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
         assert_eq!(plan.nodes, [9, 9, 9]);
+    }
+
+    #[test]
+    fn the_light_grid_buffer_has_the_rows_the_shader_reads() {
+        // an isotropic medium under a dome, two lights: rows 0-3 as the documentation of LightGridPlan says
+        let plan = plan_light_grid(&[draw(1.0, 0.0, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        let rows = light_grid_buffer(&plan);
+        assert_eq!(rows.len() as u64 * 16, plan.bytes);
+        assert_eq!(rows[0], [plan.origin[0], plan.origin[1], plan.origin[2], plan.spacing]);
+        let bits = |row: [f32; 4]| row.map(f32::to_bits);
+        assert_eq!(
+            bits(rows[1]),
+            [plan.nodes[0], plan.nodes[1], plan.nodes[2], 0b01],
+            "the dome's radiance, no directions"
+        );
+        assert_eq!(bits(rows[2]), [4, plan.rows_per_slot, plan.dome_directions, plan.lights]);
+        assert_eq!(rows[3][0].to_bits(), 4 + plan.scalar_slots * plan.rows_per_slot, "the radiance follows the slots");
+        assert_eq!(plan.scalar_slots, 2, "one slot a light, none for the dome here");
+        assert_eq!(rows.len() as u32, rows[3][0].to_bits() + plan.node_count(), "one radiance row a node");
+        // anisotropic scattering asks for a slot per dome direction instead of the radiance
+        let aniso = plan_light_grid(&[draw(1.0, 0.5, Some((1, 64, 128)))], 2, true).unwrap().unwrap();
+        let rows = light_grid_buffer(&aniso);
+        assert_eq!(rows[1][3].to_bits(), 0b10);
+        assert_eq!(aniso.scalar_slots, 2 + 64);
+        assert_eq!(rows.len() as u32, 4 + aniso.scalar_slots * aniso.rows_per_slot, "no radiance rows");
     }
 
     #[test]

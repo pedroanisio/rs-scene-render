@@ -499,6 +499,49 @@ fn light_radiance(li: PLight, l: vec3<f32>, dist: f32) -> vec3<f32> {
 
 // ---------------------------------------------------------------- one path
 
+// What a path carries out of a smooth dielectric surface it has chosen to cross: the next ray, its
+// throughput, and the absorption of the medium it is now in; `refracted` says whether the path went
+// through (a reflection leaves the medium it is in unchanged). `inside` is set by the water shader,
+// which tracks whether the path is inside the medium, and only means something when `refracted`.
+struct Crossing {
+    d: vec3<f32>,
+    o: vec3<f32>,
+    thr: vec3<f32>,
+    in_sigma: vec3<f32>,
+    inside: bool,
+    refracted: bool,
+}
+
+// Fresnel picks reflection or refraction at a smooth dielectric surface the path crosses at `p`
+// (`n` on the side of the ray `v` comes from, `entering` when the ray goes into the denser medium).
+fn dielectric_crossing(
+    s: Surf, m: Mat, d_in: vec3<f32>, o_in: vec3<f32>, p: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+    entering: bool, thr_in: vec3<f32>, sigma_in: vec3<f32>,
+) -> Crossing {
+    var d = d_in;
+    var o = o_in;
+    var thr = thr_in;
+    var in_sigma = sigma_in;
+    var inside = false;
+    var refracted = false;
+    let eta = select(s.ior, 1.0 / s.ior, entering);
+    let cosi = clamp(dot(v, n), 0.0, 1.0);
+    let r0 = (1.0 - eta) / (1.0 + eta);
+    let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);
+    let t = refract(d, n, eta);
+    if (rnd() < fr || dot(t, t) < 1e-8) {
+        d = reflect(d, n);
+        o = p + n * 1e-3;
+    } else {
+        d = normalize(t);
+        o = p - n * 1e-3;
+        refracted = true;
+        thr *= s.albedo;
+        if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }
+    }
+    return Crossing(d, o, thr, in_sigma, inside, refracted);
+}
+
 fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
     let w = pp.size.x;
     let h = pp.size.y;
@@ -637,20 +680,11 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         if (s.trans > 0.0 && rnd() < s.trans) {
             ambient_diffuse = vec3(0.0);
             ambient_specular = vec3(1.0);
-            let eta = select(s.ior, 1.0 / s.ior, entering);
-            let cosi = clamp(dot(v, n), 0.0, 1.0);
-            let r0 = (1.0 - eta) / (1.0 + eta);
-            let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);
-            let t = refract(d, n, eta);
-            if (rnd() < fr || dot(t, t) < 1e-8) {
-                d = reflect(d, n);
-                o = p + n * 1e-3;
-            } else {
-                d = normalize(t);
-                o = p - n * 1e-3;
-                thr *= s.albedo;
-                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }
-            }
+            let c = dielectric_crossing(s, m, d, o, p, n, v, entering, thr, in_sigma);
+            d = c.d;
+            o = c.o;
+            thr = c.thr;
+            in_sigma = c.in_sigma;
             continue;
         }
         only_glass = false;
