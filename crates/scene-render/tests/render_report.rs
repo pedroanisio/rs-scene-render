@@ -434,3 +434,37 @@ fn srep_0034_findings_reach_the_report() {
     assert_eq!(f["path"], "/scene/composition/shape/mask");
     assert_eq!((f["measured"].as_f64(), f["unit"].as_str()), (Some(20.0), Some("px")), "{f}");
 }
+
+#[test]
+fn srep_0022_the_report_names_constructs_this_engine_does_not_draw_exactly() {
+    let d = dir("srep22");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 128, 255, 255])).save(d.join("tile.png")).unwrap();
+    // a pattern paint: listed as approximate in capabilities.json
+    let scene = r##"<scene version="1.2">
+  <project width="32" height="32" fps="10" duration="1" background="url(#tiles)"/>
+  <assets><image id="tile" src="tile.png" width="4" height="4"/></assets>
+  <paints><pattern id="tiles" asset="tile"/></paints>
+  <composition><shape id="s" shape="rect" width="8" height="8"/></composition>
+</scene>"##;
+    let o = encode(&d, scene, "r.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("r.json"));
+    check_shape(&r);
+    let sup: Vec<&Value> = r["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "SUP-APPROX").collect();
+    assert_eq!(sup.len(), 1, "{r:#}");
+    assert_eq!(sup[0]["severity"], "warning");
+    assert!(sup[0]["message"].as_str().unwrap().starts_with("pattern "), "{}", sup[0]["message"]);
+    assert_eq!(sup[0]["path"], "/scene/paints/pattern");
+    assert_eq!(sup[0]["node"], "tiles");
+}
+
+#[test]
+fn srep_0022_the_manifest_is_published_by_the_cli() {
+    let o = run(&["capabilities"]);
+    assert_eq!(o.status.code(), Some(0));
+    let printed: Value = serde_json::from_slice(&o.stdout).expect("JSON");
+    let file =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../capabilities.json")).unwrap();
+    assert_eq!(printed, serde_json::from_str::<Value>(&file).unwrap());
+    assert_eq!(printed["format"], "scene-render-capabilities/1");
+}

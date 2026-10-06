@@ -1,0 +1,116 @@
+//! SREP 22: the engine's capability manifest, `capabilities.json`, and the `SUP-*` findings a render report gets from
+//! it.
+
+use sr_deliver::capabilities::{findings, manifest, Construct, Entry, Manifest, Status, FORMAT, MANIFEST};
+
+/// Every complex type an element of this name is declared with, anywhere in the schema.
+fn element_types(name: &str) -> Vec<&'static sr_model::xsd::ComplexType> {
+    use sr_model::xsd::{Content, Particle, COMPLEX_TYPES};
+    let mut out = Vec::new();
+    fn walk(p: &Particle, name: &str, out: &mut Vec<usize>) {
+        match p {
+            Particle::Element { name: n, ty, .. } => {
+                if *n == name && !out.contains(ty) {
+                    out.push(*ty);
+                }
+            }
+            Particle::Seq { items, .. } | Particle::Choice { items, .. } => {
+                items.iter().for_each(|i| walk(i, name, out));
+            }
+        }
+    }
+    let mut idx = Vec::new();
+    for ct in COMPLEX_TYPES.iter() {
+        if let Content::Elements(p) = ct.content {
+            walk(p, name, &mut idx);
+        }
+    }
+    out.extend(idx.into_iter().map(|i| &COMPLEX_TYPES[i]));
+    out
+}
+
+/// Whether the schema has the construct: the element, the attribute on it, the value in the attribute's type.
+fn in_schema(c: &Construct) -> bool {
+    element_types(c.element).iter().any(|ct| match c.attribute {
+        None => true,
+        Some(a) => ct.attr(a).is_some_and(|d| c.value.is_none_or(|v| sr_model::xsd::simple::check(d.ty, v).is_ok())),
+    })
+}
+
+#[test]
+fn the_published_manifest_is_well_formed() {
+    let m = manifest();
+    assert_eq!(m.format, FORMAT);
+    assert_eq!(m.engine.name, "rs-scene-render");
+    assert_eq!(m.engine.version, env!("CARGO_PKG_VERSION"), "the manifest names this release");
+    assert_eq!(m.schema, sr_model::SCHEMA_VERSION, "the manifest covers the schema this engine validates");
+    let mut seen = std::collections::HashSet::new();
+    for e in &m.entries {
+        let c = Construct::parse(&e.construct).unwrap_or_else(|| panic!("{}: not a construct", e.construct));
+        assert!(in_schema(&c), "{}: not in the scene schema", e.construct);
+        assert_ne!(e.status, Status::Exact, "{}: an exact construct is not listed", e.construct);
+        assert!(seen.insert(&e.construct), "{}: listed twice", e.construct);
+    }
+    // entries are sorted by construct, so the file diffs cleanly
+    let names: Vec<&str> = m.entries.iter().map(|e| e.construct.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+    // the JSON carries no field outside the format
+    let v: serde_json::Value = serde_json::from_str(MANIFEST).unwrap();
+    let keys: std::collections::BTreeSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["engine", "entries", "format", "schema"].into_iter().collect());
+}
+
+#[test]
+fn constructs_parse_in_the_three_forms_only() {
+    let c = |s| Construct::parse(s);
+    assert_eq!(c("pattern"), Some(Construct { element: "pattern", attribute: None, value: None }));
+    assert_eq!(
+        c("layer/@frameBlend"),
+        Some(Construct { element: "layer", attribute: Some("frameBlend"), value: None })
+    );
+    assert_eq!(
+        c("layer/@frameBlend=optical-flow"),
+        Some(Construct { element: "layer", attribute: Some("frameBlend"), value: Some("optical-flow") })
+    );
+    for bad in ["", "a/b", "a/@", "a/@b=", "/@b", "a b"] {
+        assert_eq!(c(bad), None, "{bad:?}");
+    }
+}
+
+fn test_manifest() -> Manifest {
+    let entry = |construct: &str, status| Entry { construct: construct.into(), status, definition: None, note: None };
+    Manifest {
+        format: FORMAT.into(),
+        engine: sr_deliver::capabilities::Engine { name: "rs-scene-render".into(), version: "0.0.0".into() },
+        schema: "1.3".into(),
+        entries: vec![
+            entry("layer/@frameBlend=optical-flow", Status::Reported),
+            entry("pattern", Status::Approximate),
+            entry("shape/@radius", Status::Unsupported),
+        ],
+    }
+}
+
+#[test]
+fn srep_0022_reported() {
+    // a scene using a construct the manifest lists as reported: SUP-REPORTED naming the construct, once
+    let xml = r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><assets><video id="v" src="a.mp4" width="8" height="8" fps="1" duration="1"/></assets>
+      <composition><layer id="a" asset="v" frameBlend="optical-flow"/><layer id="b" asset="v" frameBlend="optical-flow"/><layer id="c" asset="v" frameBlend="frame-mix"/></composition></scene>"#;
+    let f = findings(&test_manifest(), xml);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!((f[0].code.as_str(), f[0].severity), ("SUP-REPORTED", sr_model::Severity::Warning));
+    assert!(f[0].message.contains("layer/@frameBlend=optical-flow"), "{}", f[0].message);
+    assert_eq!(f[0].path, "/scene/composition/layer[1]");
+}
+
+#[test]
+fn approximate_constructs_are_sup_approx_and_unused_ones_nothing() {
+    let xml = r##"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><paints><pattern id="p" asset="img"/></paints><composition/></scene>"##;
+    let f = findings(&test_manifest(), xml);
+    assert_eq!(f.iter().map(|f| f.code.as_str()).collect::<Vec<_>>(), ["SUP-APPROX"]);
+    // an unsupported construct is not reported (the document could not use it), nor is anything the document lacks
+    let none = r#"<scene version="1.2"><project width="8" height="8" fps="1" duration="1"/><composition><shape id="s" shape="rect" width="4" height="4" radius="2"/></composition></scene>"#;
+    assert!(findings(&test_manifest(), none).is_empty());
+}
