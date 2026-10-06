@@ -2498,9 +2498,52 @@ behaviours apply to them, none needing a schema attribute:
   surfaces in air are black. The dome reaches submerged surfaces by sampled paths
   and needs no such term.
 
-Scenes without a transmissive material render the same bytes at the same speed.
-The ocean's default spray (transmission .6) is such a material, so frames with
-whitewater are lit by this path.
+At commit c6195de scenes without a transmissive material rendered the same bytes
+at the same speed; the specular sampling below (commit 06d6596) changes every
+path-traced frame by noise, not by a bias. The ocean's default spray
+(transmission .6) is a transmissive material, so frames with whitewater are lit by
+this path.
+
+#### Specular sampling at grazing views
+
+The specular lobe of a surface draws its half vector among the GGX normals visible
+from the view (Heitz 2018), with the density `G1(v) D(h) / (4 n.v)` of the light
+direction, and the share of samples that go to the specular lobe is capped at
+0.999 (it was 0.95, with half vectors drawn from `D(h) cos`). Visible normals
+because a grazing view sent many drawn normals' reflections below the surface,
+where the path ends, and a dark glossy surface at the horizon (the `farSea` plane
+of the ocean scenes) showed dark specks at 8 samples per pixel; the cap because a
+dark dielectric's diffuse lobe is a thousandth of its reflectance there and was
+given one sample in twenty. Sampling visible normals and the cap together: in the
+ocean acceptance scene, in a band of 160 x 50 pixels along the horizon, the pixels
+more than 40 levels under the median were 517 at 8 samples without a denoiser and
+217 with the scene's, against 15 at 64 samples; they are 5 and 1 (0 at 64 samples),
+and the band's mean at 8 samples, 228.39, agrees with 228.87 at 64. The lobe stays
+unbiased: a quadrature of the BRDF times the cosine over the hemisphere, with no
+sampling, agrees with the picture of a plane under a uniform dome within 0.4 % for
+roughness 0.06, 0.25 and 0.5 at seven view angles from the horizon down, and
+dropping the masking term from the density fails it (test
+`crates/sr-gpu/tests/horizon_specks.rs`; ledger: "Specular sampling of the visible
+normals").
+
+Measured against the build before it (commit c7dba89), NVIDIA adapter, 2026-10-06,
+the seven frames of the path-traced identity set and the hero frame at 1280 x 720,
+t = 3.0:
+
+| frame | pixels differing of 921600 | largest difference (levels) | mean difference (levels) | image mean before, after | trace seconds before, after | sha256 after (first 16 digits) |
+|---|---|---|---|---|---|---|
+| plume, both lights | 430552 | 201 | 0.88 | 168.47, 168.41 | 4.62, 4.52 | c5756924eb0fe609 |
+| plume, dome only | 442240 | 203 | 1.01 | 164.57, 164.49 | 3.76, 3.69 | 0acc6a3d7b7dc71d |
+| plume, sun only | 172555 | 1 | 0.19 | 71.222, 71.223 | 1.00, 0.96 | 524f6d0950558c71 |
+| dry floor, both lights | 732979 | 22 | 1.05 | 182.550, 182.554 | 0.12, 0.12 | be3f8c9a1617811c |
+| dry floor, sun only | 77875 | 23 | 0.16 | 144.672, 144.674 | 0.12, 0.12 | 3e3d13ac3bfedb59 |
+| dry floor, dome only | 839336 | 22 | 1.58 | 116.779, 116.787 | 0.09, 0.09 | 36c2fec7b1634588 |
+| glass ball in air | 101364 | 53 | 0.31 | 138.230, 138.233 | 0.34, 0.33 | 1235e3373a4501e4 |
+| hero | 447584 | 201 | 1.03 | 166.23, 166.17 | 10.22, 10.14 | 24c6ab56703017611dd410948af73798116f35dfbdc0a232639cecd5e5a9b72e |
+
+Every mean moves by at most 0.04 %. The sha256 of the hero frame at 1280 x 720,
+t = 3.0 is, from commit 06d6596 (2026-10-06), `24c6ab56703017611dd410948af73798116f35dfbdc0a232639cecd5e5a9b72e`;
+it was `953a7b382df31fd6c2bf49e646c9abb9dec4978807ff95e6df4b92328e5eaea1`.
 
 Agreement with brute force (the light replaced by an emissive copy that paths
 find, 1024 samples, flat water 4 units over a diffuse floor, 320×180; commit
@@ -2521,7 +2564,8 @@ under water agrees with 24 bounces within 3 % (test
 `dome_light_through_water_does_not_depend_on_the_bounce_limit`, commit c6195de,
 2026-10-05, NVIDIA).
 
-On a software adapter the three brute-force comparisons render half-size frames
+On a software adapter the brute-force comparisons run only when asked (`SR_BRUTE_FORCE=1`; commit 487cf35, 2026-10-06,
+llvmpipe: the two comparisons take 191 s and 428 s, the whole test file 913 s); when asked they render half-size frames
 (the same view, the patch scaled with them) at 1024 samples, with the tolerance the
 test states or four times the noise of the references' means when that is larger
 (commit d9aeb32, 2026-10-05, llvmpipe at a load average of 15: the three tests take
@@ -2541,7 +2585,15 @@ dark, never bright. A textured transmissive surface uses its uniform base
 colour for the tint in the shadow ray. A smoke medium and refracting surfaces
 in one pass are lit independently: the shadow ray does not cross the medium.
 Caustics (light focused by the water surface) are not produced; flat water is
-the exact single-refraction case, a wavy sea an approximation. A transmissive
+the exact single-refraction case, a wavy sea an approximation. The sun that
+crosses a wavy surface is resolved by one refracted shadow ray per sample; the
+focusing of the waves is not modelled. Under steep waves a floor under water
+receives 0.581 of the light of the same floor dry by the analytic shadow ray,
+against 0.631 by brute force with an emissive sphere of 1024 samples (a gap of
+0.05, 8 %), and a point reached by two facets takes one facet per sample. Closing
+the gap needs the Jacobian of the refraction from the surface to the floor, or
+light tracing, and waits for an acceptance shot that shows the lit floor under
+waves. A transmissive
 plane that covers the whole sea (the `farSea` plane of `impact-ocean.scene.xml`, when its
 water material is transmissive)
 tints and hides everything below it as well.
