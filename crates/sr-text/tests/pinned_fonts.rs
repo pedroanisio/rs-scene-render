@@ -10,9 +10,15 @@ use test_font::Metrics;
 use sr_text::layout::{self, Opts, Para, Run};
 use sr_text::{FontLib, Style};
 
+/// The test font, written once for every test of this file (tests run at once, and a file rewritten while another
+/// test reads it would be read half-written).
 fn test_font() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("sr-text-srep21-{}", std::process::id()));
-    test_font::write(&dir, "srep21.ttf", "SREP Test", Metrics::default())
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("sr-text-srep21-{}", std::process::id()));
+        test_font::write(&dir, "srep21.ttf", "SREP Test", Metrics::default())
+    })
+    .clone()
 }
 
 /// A host face that has Latin-1 letters, pinned here as a document's second font asset would be.
