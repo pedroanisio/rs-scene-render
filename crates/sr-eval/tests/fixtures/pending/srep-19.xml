@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scene version="1.2">
+<project width="640" height="360" fps="24" duration="2" background="#000000FF"/>
+<metadata><accessibility legibilityCheck="off"/></metadata>
+<output id="still" path="out/frame_%04d.png" codec="png-sequence"/>
+<composition>
+</composition>
+<captions><captionTrack id="en" language="en-US" mode="sidecar" readingSpeed="20"><cue start="0" end="1" text="abcdefghijklmnopqrstuvwxyz1234"/></captionTrack></captions>
+</scene>

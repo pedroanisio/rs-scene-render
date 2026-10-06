@@ -1747,7 +1747,7 @@ impl<'a> Eval<'a> {
         }
         // p65
         if local == "generator" && has("lineWidth") {
-            self.check(a("kind") == Some("grid"), n, "R45", || {
+            self.check(a("kind") == Some("grid"), n, "R47", || {
                 "@lineWidth is the line width of a grid generator.".into()
             });
         }

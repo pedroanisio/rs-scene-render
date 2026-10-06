@@ -1088,6 +1088,7 @@ fn template(
     walk_mut(&mut scene, &mut |e| {
         let loc = e.loc();
         ignored_attribute(e, &mut *warnings);
+        crate::pending::check(&*e, &mut *warnings);
         masks_that_miss(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scene version="1.2">
+<project width="640" height="360" fps="24" duration="1" background="#000000FF"/>
+<output id="still" path="out/frame_%04d.png" codec="png-sequence"/>
+<materials><material id="m-red" baseColor="#FF0000FF" unlit="true" doubleSided="true"/><material id="m-green" baseColor="#00FF00FF" unlit="true" doubleSided="true"/><material id="m-blue" baseColor="#0000FFFF" unlit="true" doubleSided="true"/><material id="m-yellow" baseColor="#FFFF00FF" unlit="true" doubleSided="true"/></materials>
+<composition>
+<shape id="r" shape="rect" width="80" height="60" x="100" y="150" fill="#FF0000FF"></shape>
+<shape id="b" shape="rect" width="80" height="60" x="460" y="150" fill="#0000FFFF" start="0.5"></shape>
+<connector id="c" from="r" to="b" stroke="#00FF00FF" strokeWidth="6" strokeCap="butt"/>
+</composition>
+</scene>
