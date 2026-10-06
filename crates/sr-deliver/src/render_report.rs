@@ -46,6 +46,10 @@ pub mod code {
     pub const FONT_SUB: &str = "FONT-SUB";
     /// A character no permitted face has (SREP 21).
     pub const FONT_GLYPH: &str = "FONT-GLYPH";
+    /// A construct the engine draws approximately (SREP 22).
+    pub const SUP_APPROX: &str = "SUP-APPROX";
+    /// A construct the engine recognises and does not draw (SREP 22).
+    pub const SUP_REPORTED: &str = "SUP-REPORTED";
     /// The safe-area check (`safeArea/@enforce`).
     pub const SAFE_AREA: &str = "SAFE-AREA";
     /// Prefix of an inert-attribute finding: `INERT-I2`.

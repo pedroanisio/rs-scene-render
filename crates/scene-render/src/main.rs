@@ -391,6 +391,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print this engine's capability manifest (scene-render-capabilities/1, SREP 22): the constructs of the scene
+    /// format it does not draw exactly.
+    Capabilities,
     /// Describe a diagnostic code, or list every code.
     Explain {
         /// Code such as S06, C21 or R24-fill; omit to list all codes.
@@ -1729,6 +1732,8 @@ fn encode(
                     .map(|u| Finding::scene(render_report::code::engine("UNSUPPORTED"), Severity::Warning, u.clone())),
             );
             findings.extend(r.findings.iter().cloned());
+            // SREP 22: what this engine does not draw exactly, as the document uses it
+            findings.extend(sr_deliver::capabilities::findings(&sr_deliver::capabilities::manifest(), &text));
             if let Err(e) = &outcome {
                 findings.extend(render_report::error_findings(e));
             }
@@ -1980,6 +1985,7 @@ fn main() -> ExitCode {
             resolve(&file, &o, json, &mut out)
         }
         Command::Gpus { json } => gpus(json, &mut out),
+        Command::Capabilities => write!(out.w, "{}", sr_deliver::capabilities::MANIFEST).map(|()| ExitCode::SUCCESS),
         Command::Explain { code } => explain(code.as_deref(), &mut out),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "scene-render", &mut std::io::stdout());

@@ -8,6 +8,7 @@
 
 pub mod access;
 pub mod audio;
+pub mod capabilities;
 pub mod captions;
 pub mod ceiling;
 pub mod destinations;
