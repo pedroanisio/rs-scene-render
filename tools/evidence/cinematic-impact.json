@@ -1462,7 +1462,7 @@
     "tdd": {
       "bounds": "Two render comparisons failed before fix; both pass after using current vertex bounds.",
       "rigid": "Ball remained at y=4.000069 before integration; now rests in the excavated bowl and replays.",
-      "memory": "1 MiB crater caused a 16777216-byte allocation before fix; pre-tessellation rejection now passes allocation-observing test.",
+      "memory": "A 1 MiB crater caused a 16777216-byte allocation before the fix; the allocation-observing test passes with the pre-tessellation rejection.",
       "schema": "Missing CRT1-CRT5 corpus coverage failed before adding independently validated fixtures."
     },
     "test_counts": {
@@ -1536,7 +1536,7 @@
     "tdd": {
       "initial": "Missing deforming collider API and unchanged crater floor reproduced before integration.",
       "curved_flight": "Independent outgoing-velocity chord regression exhausted 16 contacts before refinement.",
-      "small_sphere": "Fast 0.001-radius sphere initially contacted at centre crossing with the wrong normal; geometric-distance refinement now passes. Unresolvable positive radii are explicitly rejected."
+      "small_sphere": "A fast 0.001-radius sphere initially contacted at centre crossing with the wrong normal; the test passes with the geometric-distance refinement. Unresolvable positive radii are explicitly rejected."
     },
     "logs": {
       "core": "/tmp/sr-crater-particle-core-final4.log",
