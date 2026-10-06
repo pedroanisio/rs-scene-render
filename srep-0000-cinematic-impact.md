@@ -1914,7 +1914,12 @@ points, is what the ground gets; the comparison is a measurement and not a part 
 the engine launches (Housen and Holsapple) comes down inside the crest radius, back in the crater, and the rest lies between one and about three and a half crest radii, steeper than the inverse cube
 (log-log slope of the thickness -4.1 to -7.0 against -3, for launch angles 30, 45 and 60 degrees, `the_ballistic_landing_points_of_the_ejecta_make_a_mantle_that_is_measured_against_the_inverse_cube`
 in `sr-sim`); the analytic mantle, with all of its 0.8 V outside the rim and out to twenty crest radii, is therefore the law's statement of where the ejecta are in the final crater and not what these
-particles do, which is not corrected here. Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
+particles do, which is not corrected here.
+
+Granular debris is a height field of deposit over the ground (`sr_sim::granular::Bed`) that relaxes to an angle of repose in a fixed order over sixteen neighbours, without making or losing
+volume; it is a module of the simulation and is not yet connected to any attribute or scene: no particle is deposited into it and no ground takes its height. A volume poured at one point of level
+ground piles into a cone whose flank, in each sector of 15 degrees, is within 2 degrees of the declared angle when the pile is ten cells of radius or more (34.1 to 35.6 degrees for 35, and 28.6 to 30.5, 23.7 to 25.5,
+38.3 to 40.6 and 34.5 to 35.6 for 30, 25, 40 and 35 at 10, 12, 12 and 20 cells), and up to about 5 degrees off for piles of 5 to 8 cells (26.2 to 30.0 degrees for 30 at 5 cells and 26.9 to 30.8 at 8). Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
