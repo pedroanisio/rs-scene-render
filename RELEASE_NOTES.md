@@ -29,5 +29,3 @@ Image changes in the path tracer for scenes with transmissive materials (`transm
 - Glass or water over nothing now shows the visible dome where it showed black, including the dome's reflection on water at the horizon.
 - The ocean's default spray is transmissive, so frames with whitewater change slightly around the spray (a UHD hero frame: 394 pixels, at most 28 code values).
 - Limits: a camera that starts under the water does not see the sun on the floor, caustics are not produced, and very steep waves can leave samples dark. See the cinematic impact SREP, "Light through water and glass".
-
-
