@@ -1942,7 +1942,7 @@
     <xs:attribute name="detail" type="xs:double" default="10"/>
     <xs:attribute name="seed" type="xs:unsignedLong"/>
     <xs:attribute name="mode" type="xs:NMTOKEN">
-      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag: corner|smooth; offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>merge: add|subtract|intersect|exclude; zig-zag and wiggle-path: corner|smooth (wiggle-path smooth joins the wiggled points with a Catmull-Rom spline through them instead of straight lines); offset-path join: miter|round|bevel.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="offsetX" type="xs:double" default="0"/>
     <xs:attribute name="offsetY" type="xs:double" default="0"/>

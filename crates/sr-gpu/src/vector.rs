@@ -233,6 +233,7 @@ fn modifier_of(a: &Attrs) -> Option<Modifier> {
             detail: a.num("detail", 10.0),
             frequency: a.num("frequency", 2.0),
             seed: a.num("seed", 0.0) as u64,
+            smooth: mode.as_deref() == Some("smooth"),
         },
         "merge" => Modifier::Merge {
             op: match mode.as_deref() {

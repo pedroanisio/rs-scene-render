@@ -206,7 +206,7 @@ Shapes, SVG, Lottie, path masks and deformers share one geometry kernel, `sr-vec
 - **zig-zag:** `ridges` per segment of height `size`, corner or smooth.
 - **twist:** rotates by up to `amount` degrees, growing with distance from the centre.
 - **round-corners:** rounds sharp corners to the radius in `amount`.
-- **wiggle-path:** displaces `detail` points per 100 px by up to `size`, moving at `frequency` per second from `seed`.
+- **wiggle-path:** displaces `detail` points per 100 px by up to `size`, moving at `frequency` per second from `seed`; `mode="smooth"` joins the displaced points with a Catmull-Rom spline through them (a hand-drawn line) instead of straight lines (`corner`, the default).
 - **merge:** combines the fills of the paths before it by coverage (`add`, `subtract`, `intersect`, `exclude`); strokes of merged shapes follow each operand's outline.
 - **trim:** removes `amount` percent from the end of the combined outline, shifted by `offset` degrees, `sequential` unless `mode="simultaneous"`.
 

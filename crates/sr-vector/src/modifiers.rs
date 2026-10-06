@@ -76,6 +76,8 @@ pub enum Modifier {
         detail: f64,
         frequency: f64,
         seed: u64,
+        /// Join the wiggled points with a smooth curve through them instead of straight lines.
+        smooth: bool,
     },
     Merge {
         op: MaskOp,
@@ -85,6 +87,22 @@ pub enum Modifier {
         offset: f64,
         mode: TrimMode,
     },
+}
+
+/// A Catmull-Rom spline through `pts` as a contour of cubic segments (the tangent at a point is a sixth of the chord of its
+/// neighbours; an open end uses itself as the missing neighbour).
+fn spline_through(pts: &[P], closed: bool) -> Contour {
+    let n = pts.len();
+    let mut c = Contour { closed, ..Default::default() };
+    for k in 0..n {
+        let prev = if k > 0 { pts[k - 1] } else if closed { pts[n - 1] } else { pts[k] };
+        let next = if k + 1 < n { pts[k + 1] } else if closed { pts[0] } else { pts[k] };
+        let t = (next - prev) * (1.0 / 6.0);
+        c.v.push(pts[k]);
+        c.i.push(pts[k] - t);
+        c.o.push(pts[k] + t);
+    }
+    c
 }
 
 /// Frame context of modifiers.
@@ -302,7 +320,7 @@ pub fn apply(items: &mut Vec<Item>, m: &Modifier, ctx: &Ctx) {
                 })
             });
         }
-        Modifier::WigglePath { size, detail, frequency, seed } => {
+        Modifier::WigglePath { size, detail, frequency, seed, smooth } => {
             map_paths(items, &mut |path| {
                 let polys = path.flatten(ctx.tol);
                 let mut out = Vec::new();
@@ -327,7 +345,11 @@ pub fn apply(items: &mut Vec<Item>, m: &Modifier, ctx: &Ctx) {
                     }
                     out.push(Poly { pts: w, closed: q.closed });
                 }
-                polys_to_path(&out)
+                if smooth {
+                    Path::from_contours(&out.iter().map(|q| spline_through(&q.pts, q.closed)).collect::<Vec<_>>())
+                } else {
+                    polys_to_path(&out)
+                }
             });
         }
         Modifier::Merge { op } => {
