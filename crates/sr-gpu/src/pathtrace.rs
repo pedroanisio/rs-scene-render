@@ -638,7 +638,24 @@ mod tests {
                 1
             );
             assert!(water.contains("fn volume_transmittance("), "shared code is kept");
+            assert!(
+                water.contains("let c = dielectric_crossing(")
+                    && water.contains("if (c.refracted) { inside = c.inside; }"),
+                "the water shader takes whether the path is inside from a refraction only, not from a reflection"
+            );
         }
+    }
+
+    /// The crossing of a dielectric surface is one function, called once from `radiance`, and its
+    /// body is not repeated in the loop.
+    #[test]
+    fn the_crossing_of_a_dielectric_surface_is_a_function_radiance_calls() {
+        let plain = include_str!("pathtrace.wgsl");
+        assert_eq!(plain.matches("fn dielectric_crossing(").count(), 1);
+        assert_eq!(plain.matches("dielectric_crossing(s, m, ").count(), 1, "called once");
+        assert_eq!(plain.matches("refract(d, n, eta)").count(), 1, "the refraction is in the function only");
+        let radiance = &plain[plain.find("fn radiance(").expect("radiance")..];
+        assert!(!radiance.contains("refract("), "radiance does not refract itself");
     }
 
     #[test]
@@ -853,22 +870,23 @@ fn grid_source() -> String {
 /// without such a material keep the text, and so the compiled code, they had.
 fn water_source(base: &str) -> String {
     const SIGMA: &str = "    var in_sigma = vec3(0.0);\n";
-    const ENTER: &str = "                if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
-    const FRESNEL: &str = "            let cosi = clamp(dot(v, n), 0.0, 1.0);\n            let r0 = (1.0 - eta) / (1.0 + eta);\n            let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n            let t = refract(d, n, eta);\n";
+    const ENTER: &str = "        if (WATER) { in_sigma = select(vec3(0.0), m.attenuation.rgb, entering); }\n";
+    const CROSSED: &str = "            in_sigma = c.in_sigma;\n";
+    const FRESNEL: &str = "    let cosi = clamp(dot(v, n), 0.0, 1.0);\n    let r0 = (1.0 - eta) / (1.0 + eta);\n    let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n    let t = refract(d, n, eta);\n";
     const FOG: &str = "        if (WATER && any(in_sigma > vec3(0.0))) { thr *= exp(-in_sigma * min(hit.t, 1e4)); }\n        if (HAS_MEDIA) {\n";
     const VISIBLE: &str = "            var visible = 1.0;\n            if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }";
-    for hook in [SIGMA, ENTER, FRESNEL, FOG, VISIBLE] {
+    for hook in [SIGMA, ENTER, CROSSED, FRESNEL, FOG, VISIBLE] {
         assert_eq!(base.matches(hook).count(), 1, "one place hooks in the refracted shadow ray: {hook}");
     }
     let hooked = base
         // Schlick's term takes the cosine of the side the light goes to when it leaves the denser medium
         .replace(
             FRESNEL,
-            "            let t = refract(d, n, eta);\n\
-             \x20           var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
-             \x20           if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
-             \x20           let r0 = (1.0 - eta) / (1.0 + eta);\n\
-             \x20           let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
+            "    let t = refract(d, n, eta);\n\
+             \x20   var cosi = clamp(dot(v, n), 0.0, 1.0);\n\
+             \x20   if (!entering && dot(t, t) >= 1e-8) { cosi = clamp(-dot(normalize(t), n), 0.0, 1.0); }\n\
+             \x20   let r0 = (1.0 - eta) / (1.0 + eta);\n\
+             \x20   let fr = r0 * r0 + (1.0 - r0 * r0) * pow(1.0 - cosi, 5.0);\n",
         )
         // inside absorbing water the media's light is dimmed by the water in front of it, and the water
         // absorbs across the gaps; elsewhere the march is the plain one
@@ -897,12 +915,14 @@ fn water_source(base: &str) -> String {
             ENTER,
             // radiance over eta^2 is the same on both sides of an interface: a path that goes
             // from a medium of index n1 into one of index n2 carries (n1 / n2)^2
-            "                if (WATER) {\n\
-             \x20                   in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
-             \x20                   inside = entering;\n\
-             \x20                   thr *= eta * eta;\n\
-             \x20               }\n",
+            "        if (WATER) {\n\
+             \x20           in_sigma = select(vec3(0.0), m.attenuation.rgb, entering);\n\
+             \x20           inside = entering;\n\
+             \x20           thr *= eta * eta;\n\
+             \x20       }\n",
         )
+        // the path leaves the crossing inside the medium or not
+        .replace(CROSSED, &format!("{CROSSED}            if (c.refracted) {{ inside = c.inside; }}\n"))
         .replace(
             VISIBLE,
             &format!(
