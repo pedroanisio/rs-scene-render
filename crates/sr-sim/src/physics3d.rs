@@ -463,7 +463,8 @@ struct ContactLog {
     bytes: usize,
 }
 
-/// Contact points one step may produce while a watched pair is still to be noticed.
+/// Contact points of the watched pairs one step may produce while a pair is still to be noticed, unless the world is
+/// told another limit ([`World3::with_watch_contacts_per_step`]).
 const WATCH_CONTACTS_PER_STEP: usize = 4096;
 
 /// Bookkeeping charged per retained step, on top of its contacts.
@@ -512,6 +513,7 @@ pub struct World3 {
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
+    watch_contacts_per_step: usize,
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -752,6 +754,7 @@ impl World3 {
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
+            watch_contacts_per_step: WATCH_CONTACTS_PER_STEP,
             fractures: Vec::new(),
             spec,
             params,
@@ -871,6 +874,17 @@ impl World3 {
         Ok(self.with_frame_log_budget(budget))
     }
 
+    /// The most contact points of the watched pairs that one step may produce while one of them is still to be
+    /// noticed (default 4096); more is an error. Only the pairs that are watched count. Must be set before the
+    /// first step.
+    pub fn with_watch_contacts_per_step(mut self, limit: usize) -> Result<Self, String> {
+        if self.state.step != 0 {
+            return Err("the contact limit of the watches must be set before the first step".into());
+        }
+        self.watch_contacts_per_step = limit;
+        Ok(self)
+    }
+
     /// The contacts resolved by step `step`, in a stable order: by body pair, then
     /// point, then impulse. `Some(&[])` for a step without contacts; `None` when
     /// recording is off, the step is not simulated yet in the current timeline (after a
@@ -924,6 +938,7 @@ impl World3 {
         motion: &[Option<Motion>],
         min_impulse: f64,
         max_per_step: usize,
+        only: Option<&[[usize; 2]]>,
     ) -> Result<Vec<Contact3>, String> {
         let st = &self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -953,6 +968,16 @@ impl World3 {
             let (a1, a2) = (index_of.get(slot1).copied().flatten(), index_of.get(slot2).copied().flatten());
             // Order the pair by body index, boundary slabs last; flip the normal with it.
             let swap = a1.unwrap_or(usize::MAX) > a2.unwrap_or(usize::MAX);
+            // the pairs that are looked for, when it is those only that matter: the others are not even read
+            if let Some(only) = only {
+                let key = [
+                    a1.unwrap_or(usize::MAX).min(a2.unwrap_or(usize::MAX)),
+                    a1.unwrap_or(usize::MAX).max(a2.unwrap_or(usize::MAX)),
+                ];
+                if !only.contains(&key) {
+                    continue;
+                }
+            }
             let (first, second) = if swap { ((a2, m2), (a1, m1)) } else { ((a1, m1), (a2, m2)) };
             let lever = |c: &Collider| c.position_wrt_parent().copied().unwrap_or(Pose::IDENTITY);
             let (pose1, pose2) = (m1.pose * lever(c1), m2.pose * lever(c2));
@@ -1020,7 +1045,15 @@ impl World3 {
             .filter(|(_, found)| found.is_none())
             .map(|(w, _)| w.min_impulse)
             .fold(f64::INFINITY, f64::min);
-        let contacts = self.collect_contacts(step, motion, threshold, WATCH_CONTACTS_PER_STEP)?;
+        // only the pairs that are watched and not yet noticed can be an impact
+        let pairs: Vec<[usize; 2]> = self
+            .watches
+            .iter()
+            .zip(&self.state.impacts)
+            .filter(|(_, found)| found.is_none())
+            .map(|(w, _)| [w.source.min(w.owner), w.source.max(w.owner)])
+            .collect();
+        let contacts = self.collect_contacts(step, motion, threshold, self.watch_contacts_per_step, Some(&pairs))?;
         if contacts.is_empty() {
             return Ok(());
         }
@@ -1344,7 +1377,7 @@ impl World3 {
             if let Some(log) = &self.contact_log {
                 let config = log.config;
                 noticed = self
-                    .collect_contacts(step, &motion, config.min_impulse, config.max_per_step)
+                    .collect_contacts(step, &motion, config.min_impulse, config.max_per_step, None)
                     .and_then(|c| self.store_contacts(step, c));
             }
             if noticed.is_ok() && pending {
