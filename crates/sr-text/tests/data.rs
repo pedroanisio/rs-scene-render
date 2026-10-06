@@ -562,3 +562,81 @@ fn a_preset_takes_the_curve_named_by_its_ease_attribute() {
     assert_eq!(animate::Ease::parse("linear"), Some(animate::Ease::Linear));
     assert_eq!(animate::Ease::parse("nonsense"), None);
 }
+
+#[test]
+fn caption_active_word_is_the_last_started_word_and_its_spans_cover_the_page() {
+    use captions::{active_spans, active_word};
+    // four words of two letters over 4 s: each word lasts exactly 1 s
+    let cue = captions::Cue { start: 0.0, end: 4.0, text: "aa bb\ncc dd".into(), ..Default::default() };
+    let page = captions::paginate_with_line_breaks(&[cue], None, 80, 2, false, captions::LineBreaks::Source).remove(0);
+    for preset in [CapPreset::Classic, CapPreset::Highlight, CapPreset::Karaoke, CapPreset::BoxedWord] {
+        for (t, want) in [(0.0, 0), (0.5, 0), (1.0, 1), (1.5, 1), (2.5, 2), (3.5, 3), (3.999, 3)] {
+            assert_eq!(active_word(preset, &page, t), Some(want), "{preset:?} at {t}");
+        }
+        assert_eq!(
+            active_spans(preset, &page),
+            [(0.0, 1.0, Some(0)), (1.0, 2.0, Some(1)), (2.0, 3.0, Some(2)), (3.0, 4.0, Some(3))],
+            "{preset:?}"
+        );
+    }
+    // one-word pages hold one word, current for the whole page
+    let one = captions::paginate_with_line_breaks(
+        &[captions::Cue { start: 0.0, end: 2.0, text: "aa bb".into(), ..Default::default() }],
+        None,
+        80,
+        2,
+        true,
+        captions::LineBreaks::Greedy,
+    );
+    assert_eq!(one.len(), 2);
+    assert_eq!(active_word(CapPreset::OneWord, &one[1], one[1].start), Some(0));
+    assert_eq!(active_spans(CapPreset::OneWord, &one[1]), [(one[1].start, one[1].end, Some(0))]);
+    // timed words that start after the cue: no word is current before the first one starts
+    let late = captions::Cue {
+        start: 0.0,
+        end: 3.0,
+        words: vec![
+            captions::Word { start: 0.5, end: 1.5, text: "aa".into(), emphasis: false },
+            captions::Word { start: 2.0, end: 3.0, text: "bb".into(), emphasis: false },
+        ],
+        ..Default::default()
+    };
+    let page = captions::paginate(&[late], None, 80, 2, false).remove(0);
+    assert_eq!(active_word(CapPreset::Highlight, &page, 0.25), None);
+    assert_eq!(active_word(CapPreset::Highlight, &page, 1.75), Some(0), "a word stays current through the gap");
+    assert_eq!(active_spans(CapPreset::Highlight, &page), [(0.0, 0.5, None), (0.5, 2.0, Some(0)), (2.0, 3.0, Some(1))]);
+    // the spans agree with active_word everywhere on the page
+    for preset in [CapPreset::Highlight, CapPreset::OneWord] {
+        for (a, b, w) in active_spans(preset, &page) {
+            for k in 0..10 {
+                let t = a + (b - a) * k as f64 / 10.0;
+                assert_eq!(active_word(preset, &page, t), w, "{preset:?} at {t}");
+            }
+        }
+    }
+    // a page that is never on screen has no spans
+    let empty = captions::Page { start: 1.0, end: 1.0, lines: page.lines.clone(), cue: 0 };
+    assert!(active_spans(CapPreset::Highlight, &empty).is_empty());
+}
+
+#[test]
+fn caption_presets_have_their_schema_names() {
+    for name in [
+        "classic",
+        "boxed-line",
+        "boxed-word",
+        "one-word",
+        "karaoke",
+        "highlight",
+        "pop",
+        "fade",
+        "bounce",
+        "slide",
+        "typewriter",
+        "enlarge",
+        "none",
+    ] {
+        assert_eq!(CapPreset::parse(name).name(), name);
+    }
+    assert_eq!(CapPreset::parse("no-such-preset").name(), "classic", "unknown names are classic");
+}
