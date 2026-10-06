@@ -113,3 +113,13 @@ fn a_face_other_than_the_one_asked_for_is_a_substitution() {
     let st = Style { file: Some((path, 0)), weight: 700, ..style(&["Anything"]) };
     assert!(lay(&mut lib, "Hi", st).substituted.is_empty());
 }
+
+#[test]
+fn a_pinned_library_without_faces_reports_every_character_missing() {
+    // a pinned document with no font assets: no face, so nothing (not even a .notdef) can be drawn, and each
+    // visible character is reported
+    let mut lib = FontLib::pinned();
+    let l = lay(&mut lib, "Hi é", style(&["sans-serif"]));
+    assert!(l.glyphs.is_empty());
+    assert_eq!(l.missing, ['H', 'i', 'é']);
+}

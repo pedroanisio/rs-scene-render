@@ -333,7 +333,16 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
     }
     // faces
     let primary: Vec<Option<usize>> = styles.iter().map(|s| lib.select(s)).collect();
-    let Some(any_face) = primary.iter().flatten().next().copied() else { return (out, false) };
+    let Some(any_face) = primary.iter().flatten().next().copied() else {
+        // no face at all (a pinned document without font assets): nothing can be drawn, not even a .notdef, and
+        // every visible character is missing (SREP 21 FONT-GLYPH)
+        for &c in &chars {
+            if !crate::font::invisible(c) && !out.missing.contains(&c) {
+                out.missing.push(c);
+            }
+        }
+        return (out, false);
+    };
     let ch_face: Vec<usize> = (0..n)
         .map(|i| {
             let p = primary[ch_style[i]].unwrap_or(any_face);
