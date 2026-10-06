@@ -2132,7 +2132,8 @@ zero radial contribution. These authored impulses may change total momentum.
 The source's one `<rigidBody>` provides total mass and collision parameters.
 **FRX1** gates version 1.3; **FRX2** requires one fracture and one rigid body on
 an object3D other than a plane, map or volume; **FRX3** resolves the interior
-material; **FRX4** rejects nonfinite numeric values. Runtime solid validation is
+material; **FRX4** rejects nonfinite numeric values; **FRX5** to **FRX7** belong to a
+fracture from an impact (below). Runtime solid validation is
 still required for the allowed primitive kinds and imported geometry. The five
 `fracture`/`frx1`–`frx4` corpus fixtures agree with the independent schema oracle.
 The NaN fixture additionally expects the existing Rust-only `W01` warning.
@@ -2323,6 +2324,64 @@ Remaining integration work includes broader animated-source collider parity,
 source-window search and nonuniform parent-transform adversarial coverage. Final
 native UHD impact sequence appearance, throughput and whole-process memory remain
 unverified.
+
+#### Fracture from an impact (`fracture@source`)
+
+A fracture whose time and push are the consequence of an impact rather than authored. `source` names the
+dynamic rigid-body object that breaks it; the owner is the body that breaks. Nothing in the document says when:
+the body breaks at the first impact of the source on it, found by the rigid world as for a crater from an impact
+(the same `ImpactWatch`, recorded in the world's state and in an SRPHYS04 cache, so a seek, a fresh world and a
+baked cache give the same bits). The fracture fires on the step after the impact is noticed: the pieces
+replace the body at the boundary that ends the step of the impact, with the velocity the body had after the
+contact, never before it. `at`, `radialImpulse` and `impulseX`, `impulseY`, `impulseZ` are derived, so giving any of them
+is **FRX6**; the source must be another object3D with a dynamic rigidBody (**FRX5**); `minImpulse` and
+`energyFraction` belong only to a fracture with a source (**FRX7**). The rest of the declaration (`pieces`, `seed`,
+`interiorMaterial`, `interiorUvScale`, `maxMemoryMiB`) keeps its meaning, and the pieces are the seeded partition of the
+document.
+
+| Attribute | Type; default | Contract |
+|---|---|---|
+| `source` | object3D ID; absent | The dynamic rigid body whose impact breaks the owner (FRX5) |
+| `minImpulse` | positive decimal; twice the source's weight in one step | Total normal impulse of the pair in one step, kg·scene-unit/second, below which nothing breaks (FRX7) |
+| `energyFraction` | decimal 0–1; engine value `0.3` | Part of the impact's relative kinetic energy that pushes the pieces apart (FRX7); no XSD default, so that a document that gives it without `source` is refused |
+
+The default threshold is the crater's: a body resting on its target pushes with its weight, so it breaks nothing,
+and an impact has to push with more than twice that in one step. A pair that rests, touches
+gently or never meets breaks nothing and the owner stays whole for the whole composition.
+
+The push is a modelled quantity, not a measured one. The relative kinetic energy of the impact is
+`E_rel = 1/2 mu v_n^2`, with `mu = m_s m_o / (m_s + m_o)` the reduced mass of source and owner and `v_n` the closing
+speed along the contact normal as the world noticed it. The fraction `f = energyFraction` of it, `E = f E_rel`, becomes
+the kinetic energy the pieces gain relative to the owner's centre of mass. Each piece gets a speed along the unit line from the
+owner's mass centre to its own, the same `s` for every piece; the mass-weighted mean of those velocities is removed so that the
+push adds no linear momentum, and the angular momentum about the centre of mass is not changed by it. With `d_i`
+the unit line of piece `i` and `dbar` the mass-weighted mean of the lines, `s = sqrt(2 E / sum_i m_i |d_i - dbar|^2)`.
+The value `0.3` has no published source: it is the engine's, declared here so that a document without
+it is defined, and a document that wants another says it. A piece whose centre is on the centre of mass has a zero line and
+is given only the mean's removal like the others. The pieces keep the velocity of the body after the contact at their
+own centres, so the momentum the contact solver left the owner passes through the fracture, and a spinning owner's pieces
+go on turning with it.
+
+Oracles, in the tests of `sr-sim` and `sr-eval` (`fracture_contact`, `impact_block`): the mass of the pieces is the mass of the owner;
+total linear and angular momentum of the pieces equal those of the intact owner in the same world, at the instant
+of the impact, to 1e-9; the kinetic energy gained is `E` (90.000000 against 90.000000 in the reference world, to a millionth
+of it); nothing breaks below the threshold or without an impact; the pieces are the same in any order of
+requests, from a fresh world, and from a baked cache. In the block scene
+(`examples/cinematic-impact/impact-block.scene.xml`, the 90 478 kg rock at 100 m/s and 60 degrees against a
+583 200 kg granite block on a slab, 12 pieces) the block lies still until the rock reaches it, 1.49 s in, and the
+mean distance of its pieces from where the block stood, 1.5 s after, is 6.3, 10.5 and 14.5 m for rocks arriving at
+60, 100 and 150 m/s, and 7.4, 10.5 and 11.4 m for rocks of 30, 90 and 270 tonnes (test `impact_block`, commit 2c36ac0,
+2026-10-06, deterministic). These are orders of magnitude and directions, not predictions of a real impact.
+
+Limits, stated so that they are not mistaken for physics. The partition does not depend on where the impact was: the same
+seeded cuts come out wherever the rock lands, and only the push (which depends on the speed and the masses, not on the point)
+and the spin of the owner tell them apart. A piece does not break again (no second generation: the world rejects chained ownership, and the pieces are not
+objects of the document). The source is not part of the partition and goes on
+with the velocity the contact gave it; at the boundary the pieces appear where the owner was and a source that has penetrated
+the owner by more than a step's travel may overlap pieces and be pushed out by the solver. The push adds `E` to the kinetic energy
+that the contact has already treated: the total energy after the fracture is not more than before the impact only if `f` is at
+most the share the contact dissipated (`1 - e^2` for a restitution `e` of the pair), which the engine does not check. The fracture
+is the cinematic cut of this section, not a stress or toughness model.
 
 #### Mesh sequences (implemented; importer hardening pending)
 
@@ -3066,6 +3125,9 @@ Also includes `pyroShape`, inventoried below.
 | `impulseZ` | xs:double | Default `0` |
 | `radialImpulse` | nonNegativeDecimal | Default `0` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `source` | xs:IDREF | Optional; the dynamic rigid body whose impact breaks the owner (FRX5 to FRX7) |
+| `minImpulse` | positiveDecimal | Optional; only with `source` (FRX7); absent: twice the source's weight in one step |
+| `energyFraction` | unitDecimal | Optional, no XSD default; only with `source` (FRX7); the engine uses `0.3` |
 
 ### `assetProvenance`
 
