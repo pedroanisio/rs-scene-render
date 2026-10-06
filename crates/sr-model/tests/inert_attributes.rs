@@ -73,7 +73,7 @@ fn i3_stroke_styling_on_an_element_that_draws_no_stroke() {
 #[test]
 fn i4_star_parameters_on_another_shape_kind() {
     assert_eq!(codes("", &shape(r#"points="6""#)), ["INERT-I4"]);
-    assert_eq!(codes("", &shape(r#"innerRadius="2" outerRoundness="10""#)), ["INERT-I4"]);
+    assert_eq!(codes("", &shape(r#"innerRadius="2" outerRoundness="0.5""#)), ["INERT-I4"]);
     let star = r#"<shape id="st" shape="star" width="10" height="10" points="6" innerRadius="2" outerRadius="5" innerRoundness="1" outerRoundness="1"/>"#;
     assert!(codes("", star).is_empty());
     let poly = r#"<shape id="p" shape="polygon" width="10" height="10" points="6" outerRadius="5"/>"#;
