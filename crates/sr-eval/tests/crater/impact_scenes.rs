@@ -10,8 +10,8 @@
 
 use sr_eval::{Evaluator, FrameGraph, FrameNode};
 
-const LAND: &str = include_str!("../../../examples/cinematic-impact/impact-land.scene.xml");
-const OCEAN: &str = include_str!("../../../examples/cinematic-impact/impact-ocean.scene.xml");
+const LAND: &str = include_str!("../../../../examples/cinematic-impact/impact-land.scene.xml");
+const OCEAN: &str = include_str!("../../../../examples/cinematic-impact/impact-ocean.scene.xml");
 
 const GRAVITY: f64 = 9.80665;
 /// Seconds the rock flies from its launch to the surface it hits, the same in every variant.

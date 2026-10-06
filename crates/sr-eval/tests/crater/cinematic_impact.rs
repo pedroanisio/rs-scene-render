@@ -6,7 +6,7 @@ fn node<'a>(frame: &'a FrameGraph, id: &str) -> &'a FrameNode {
 
 #[test]
 fn shipped_impact_scene_runs_combined_systems_and_replays_after_late_seek() {
-    let xml = include_str!("../../../examples/cinematic-impact/impact.scene.xml");
+    let xml = include_str!("../../../../examples/cinematic-impact/impact.scene.xml");
     let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
     let evaluator = Evaluator::new(&doc, &Default::default()).unwrap();
     let sample = |time| {

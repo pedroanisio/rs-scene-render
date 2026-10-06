@@ -5,7 +5,7 @@
 
 use sr_eval::{Evaluator, FrameGraph};
 
-const BLOCK: &str = include_str!("../../../examples/cinematic-impact/impact-block.scene.xml");
+const BLOCK: &str = include_str!("../../../../examples/cinematic-impact/impact-block.scene.xml");
 
 const GRAVITY: f64 = 9.80665;
 /// Seconds the rock flies from its launch to the top of the block, the same in every variant.
