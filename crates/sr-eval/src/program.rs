@@ -3125,9 +3125,54 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     })
 }
 
+/// Whether `value` is the attribute's declared default (an attribute set to its default is not worth a warning).
+fn is_default(value: &AttrValue, default: Option<&str>) -> bool {
+    let Some(d) = default else { return false };
+    match value {
+        AttrValue::Num(x) => d.parse::<f64>().is_ok_and(|v| v == *x),
+        AttrValue::Bool(b) => d == if *b { "true" } else { "false" },
+        other => other.to_string() == d,
+    }
+}
+
+/// `effectType` is one attribute bag shared by every effect type, so the schema accepts any of its attributes on any type;
+/// each type reads a subset (`sr_model::effect_attrs`). An attribute set to a value other than its default on a type that
+/// does not read it does nothing, silently (E19, a warning): a vignette given `intensity` keeps the default `radius`.
+fn unread_effect_attributes(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    let Some(ty) = e.get_attr("type").map(|t| t.to_string()) else { return };
+    let Some(reads) = sr_model::effect_attrs::declared(&ty) else { return };
+    for decl in sr_model::xsd::COMPLEX_TYPES[e.xsd_type()].attrs {
+        if sr_model::effect_attrs::ALWAYS.contains(&decl.name) || reads.contains(&decl.name) {
+            continue;
+        }
+        let Some(value) = e.get_attr(decl.name) else { continue };
+        if is_default(&value, decl.default) {
+            continue;
+        }
+        let id = e.element_id().unwrap_or("");
+        let list = if reads.is_empty() {
+            "no attributes".to_string()
+        } else {
+            reads.iter().map(|r| format!("@{r}")).collect::<Vec<_>>().join(", ")
+        };
+        warnings.push(Diagnostic::warning(
+            "E19",
+            format!(
+                "effect {id:?} of type {ty:?}: @{} is accepted but not read by this type, which reads {list}",
+                decl.name
+            ),
+            e.loc(),
+            id,
+        ));
+    }
+}
+
 /// Attributes the schema accepts that this build does not read: reported (E19, a warning) so that nothing is
 /// accepted silently and then ignored.
 fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
+    if matches!(e.element_name(), "effect" | "effectType") {
+        unread_effect_attributes(e, warnings);
+    }
     let mut note = |what: &str, why: &str| {
         warnings.push(Diagnostic::warning(
             "E19",

@@ -1398,22 +1398,28 @@ impl Builder<'_> {
         let px = cx.px;
         let size = input.size;
         let (w, h) = (size[0] as f64, size[1] as f64);
-        let r = a.num("radius", 4.0) * px;
-        let intensity = a.num("intensity", 1.0);
-        let threshold = a.num("threshold", 0.7);
-        let amount = a.num("amount", 1.0);
-        let sz = a.num("size", 1.0);
-        let angle = a.num("angle", 0.0);
-        let seed = a.opt("seed").unwrap_or(0.0) as f32 % 9973.0;
+        // Read up front for every effect type, used by some: what a type uses is checked against its declared attributes
+        // (sr_model::effect_attrs) by reading this function's source, see tests/effect_reads.rs.
+        let (r, intensity, threshold, amount, sz, angle, seed, speed) = crate::vector::quiet(|| {
+            (
+                a.num("radius", 4.0) * px,
+                a.num("intensity", 1.0),
+                a.num("threshold", 0.7),
+                a.num("amount", 1.0),
+                a.num("size", 1.0),
+                a.num("angle", 0.0),
+                a.opt("seed").unwrap_or(0.0) as f32 % 9973.0,
+                a.num("speed", 1.0),
+            )
+        });
         let t = cx.time;
-        let speed = a.num("speed", 1.0);
         let lin = |c: [f64; 4]| {
             let l = cx.working.to_linear([c[0], c[1], c[2]]);
             [l[0], l[1], l[2], c[3]]
         };
         let colour = |name: &str, d: [f64; 4]| a.paint(name).and_then(|v| (cx.color)(&v)).unwrap_or(d);
         let center = {
-            let (cxp, cyp) = (a.opt("centerX"), a.opt("centerY"));
+            let (cxp, cyp) = crate::vector::quiet(|| (a.opt("centerX"), a.opt("centerY")));
             match (cxp, cyp) {
                 (None, None) => cx.center,
                 _ => {
@@ -1436,7 +1442,7 @@ impl Builder<'_> {
         let big = |r: f64| if r <= 4.0 * px + 1e-9 { w.min(h) * 0.5 } else { r };
         let mut v = [[0.0f32; 4]; 8];
         // seeded ops read the effect's hash seed from i.yz
-        let es = effect_seed(cx.seed, e, a.opt("seed"));
+        let es = effect_seed(cx.seed, e, crate::vector::quiet(|| a.opt("seed")));
         let ids = |op: u32| [op, es as u32, (es >> 32) as u32, 0];
         let color_op = |b: &mut Self, op: u32, v: [[f32; 4]; 8], aux: Aux| {
             b.run(Entry::Color, ids(op), v, input, aux, None, None, input.size)

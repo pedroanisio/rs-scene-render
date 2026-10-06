@@ -1859,7 +1859,8 @@ impl Renderer {
         for id in render_fx::effect_ids(&*n.elem) {
             let Some(e) = render_fx::find_effect(ctx.p, &id) else { continue };
             let a = Attrs { e: e as &dyn Element, props: render_fx::element_props(ctx.g, &id) };
-            let mut names: Vec<String> = a.str("source").into_iter().collect();
+            // a dependency for any type that is given a source, whether or not it reads it
+            let mut names: Vec<String> = crate::vector::quiet(|| a.str("source")).into_iter().collect();
             if e.r#type.as_str() == "shader" {
                 names.extend(crate::shader::param_map(e as &dyn Element).into_values());
             }

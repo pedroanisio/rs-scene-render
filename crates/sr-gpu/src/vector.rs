@@ -22,8 +22,47 @@ pub struct Attrs<'a> {
     pub props: Option<&'a Props>,
 }
 
+thread_local! {
+    static READS: std::cell::RefCell<Option<std::collections::BTreeSet<(String, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` and returns what it returned with every attribute it read through [`Attrs`] as (element name, attribute)
+/// pairs, on this thread. For tests that check what a kernel reads against what it declares.
+pub fn record_reads<R>(f: impl FnOnce() -> R) -> (R, std::collections::BTreeSet<(String, String)>) {
+    READS.with(|r| *r.borrow_mut() = Some(Default::default()));
+    let out = f();
+    let reads = READS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+    (out, reads)
+}
+
+thread_local! {
+    static QUIET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f` without noting the attribute reads it makes: for reads a kernel makes up front for every effect type, whether or
+/// not the type uses the value (the uses are checked against the declarations by reading the source, not by the recorder).
+pub fn quiet<R>(f: impl FnOnce() -> R) -> R {
+    QUIET.with(|q| q.set(q.get() + 1));
+    let out = f();
+    QUIET.with(|q| q.set(q.get() - 1));
+    out
+}
+
+/// Notes a read of attribute `name` of element `e` when a recorder is running.
+pub fn note_read(e: &dyn Element, name: &str) {
+    if QUIET.with(|q| q.get()) > 0 {
+        return;
+    }
+    READS.with(|r| {
+        if let Some(set) = r.borrow_mut().as_mut() {
+            set.insert((e.element_name().to_string(), name.to_string()));
+        }
+    });
+}
+
 impl Attrs<'_> {
     fn animated(&self, name: &str) -> Option<&Value> {
+        note_read(self.e, name);
         self.props.and_then(|p| p.get(name))
     }
     /// A number.
