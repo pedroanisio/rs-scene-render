@@ -73,7 +73,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
-      - run: cargo build --locked --release -p scene-render -p sr-fuzz
+      # the shipped binary carries the PDF resolve step (SREP 17), whose PDF library needs Rust 1.92 or later
+      - name: Check the toolchain for the pdf feature
+        run: |
+          v=$(rustc --version | awk '{print $2}')
+          test "$(printf '%s\n1.92.0\n' "$v" | sort -V | head -1)" = 1.92.0 || { echo "rustc $v is older than 1.92"; exit 1; }
+      - run: cargo build --locked --release -p scene-render -p sr-fuzz --features scene-render/pdf
       - run: python3 tools/evidence.py target/evidence
       - run: python3 tools/evidence.py target/review --manifest tools/evidence/review.json --clips
         if: success() || failure()
