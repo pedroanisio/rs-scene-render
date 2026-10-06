@@ -781,6 +781,10 @@ impl<'a> Eval<'a> {
                 self.check(!marked || matches!(a("shape"), Some("path" | "line")), n, "C65", || {
                     "markers need an open outline: shape=\"path\" or \"line\".".into()
                 });
+                // p73: shape[@region] matches the earlier rule in this pattern.
+                self.check(has("region") || (has("width") && has("height")), n, "C69", || {
+                    "shape needs @width and @height unless it takes its box from @region.".into()
+                });
             }
             // p4
             "mask" => {
