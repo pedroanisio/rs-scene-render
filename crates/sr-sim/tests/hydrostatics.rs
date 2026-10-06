@@ -255,3 +255,28 @@ fn the_primitive_shapes_tessellate_into_closed_hulls_of_the_right_volume() {
     assert!(hull_mesh(&Shape3::Sphere(1.0)).is_err());
     assert!(hull_mesh(&Shape3::Convex(vec![[0.0; 3]; 4])).is_err());
 }
+
+#[test]
+fn the_waterline_of_a_ball_seen_from_above_does_not_depend_on_the_slope_of_the_surface() {
+    // the waterline seen from above is the cut across a tilted surface times the cosine of the tilt, which the mesh
+    // measures and the closed form of the sphere has to agree with
+    let r = 2.0;
+    let m = ball([0.0, 10.0, 0.0], r, 96, 128);
+    for slope in [[0.0f64, 0.0], [0.5, 0.0], [0.0, -1.0], [1.5, 1.0]] {
+        for h in [0.4f64, 1.0, 1.6] {
+            // the cap of the ball below the surface is `h` high, measured along the surface's normal
+            let steep = (1.0 + slope[0] * slope[0] + slope[1] * slope[1]).sqrt();
+            let offset = 10.0 + (r - h) * steep;
+            let surface = Surface { offset, slope };
+            let analytic = submerged_sphere([0.0, 10.0, 0.0], r, &surface);
+            let found = mesh(&m, &surface);
+            let whole = PI * r * r;
+            assert!(
+                (found.waterline - analytic.waterline).abs() < 2e-2 * whole,
+                "slope {slope:?}, h {h}: waterline {} against {}",
+                found.waterline,
+                analytic.waterline
+            );
+        }
+    }
+}

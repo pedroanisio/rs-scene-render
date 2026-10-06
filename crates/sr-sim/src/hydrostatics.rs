@@ -46,9 +46,10 @@ pub fn submerged_sphere(centre: [f64; 3], radius: f64, surface: &Surface) -> Sub
         return Submerged { volume: 0.0, centroid: centre, waterline: 0.0, projected: 0.0 };
     }
     let volume = std::f64::consts::PI * h * h * (3.0 * radius - h) / 3.0;
-    // seen from above the waterline is the circle the surface cuts; the submerged cap fills the
-    // whole disc of the ball once it is more than half under
-    let cut = if h < 2.0 * radius { std::f64::consts::PI * (2.0 * radius * h - h * h) } else { 0.0 };
+    // seen from above the waterline is the circle the surface cuts, foreshortened by the tilt of the surface (the
+    // cut is across the surface, and from above it is the cut times the cosine of the tilt, `1 / steep`); the
+    // submerged cap fills the whole disc of the ball once it is more than half under
+    let cut = if h < 2.0 * radius { std::f64::consts::PI * (2.0 * radius * h - h * h) / steep } else { 0.0 };
     let (waterline, projected) = (cut, if h <= radius { cut } else { std::f64::consts::PI * radius * radius });
     // the cap's centroid, from the sphere's centre toward the water
     let toward = 3.0 * (2.0 * radius - h).powi(2) / (4.0 * (3.0 * radius - h));
