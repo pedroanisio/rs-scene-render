@@ -52,6 +52,8 @@ codegen-units = 1
 inherits = "release"
 lto = false
 codegen-units = 16
+# the edit-and-test loop rebuilds only what changed
+incremental = true
 
 [profile.dev]
 debug = "line-tables-only"
