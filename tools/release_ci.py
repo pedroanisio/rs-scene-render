@@ -35,6 +35,9 @@ def main():
             print("No matching main CI; release will perform full validation.", flush=True)
             break
         if run["status"] == "completed":
+            if run["conclusion"] == "cancelled":
+                print("Main CI was superseded; performing full release validation.", flush=True)
+                break
             if run["conclusion"] != "success":
                 raise RuntimeError(f"Main CI {run['id']} did not pass: {run['conclusion']}")
             artifacts = api(f"repos/{repository}/actions/runs/{run['id']}/artifacts")

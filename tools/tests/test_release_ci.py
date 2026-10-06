@@ -67,6 +67,11 @@ class ReleaseCiTest(unittest.TestCase):
                 {"workflow_runs": [self.run_record(conclusion="failure")]}
             ])
 
+    def test_superseded_main_ci_requires_full_release_validation(self):
+        self.assertEqual(self.run_discovery([
+            {"workflow_runs": [self.run_record(conclusion="cancelled")]}
+        ]), ("run-id=\n", 0))
+
 
 if __name__ == "__main__":
     unittest.main()
