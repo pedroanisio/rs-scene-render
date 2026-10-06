@@ -1,7 +1,7 @@
 //! Verification of the files a document references.
 //!
 //! Every attribute of type `xs:anyURI` that names an input (all of them
-//! except `output/@path`, `output/@report`, `still/@path` and `destination/@uri`) must resolve
+//! except `output/@path`, `still/@path` and `destination/@uri`, and `output/@report`) must resolve
 //! to an existing file. Where the document declares a digest — `@sha256` for
 //! `@src`, `@cacheSha256` for `@cache` — the file's SHA-256 must match it,
 //! which is what makes renders of generated media and transcriptions
@@ -31,7 +31,7 @@ const MAX_SEQUENCE_FRAMES: i128 = 1_000_000;
 pub const MAX_FRAME_DIGITS: usize = 64;
 
 /// Names of input-file attributes, derived from the schema: every `xs:anyURI`
-/// attribute except the output-side `path`, `report` (SREP 18: where a render report is written) and `uri`.
+/// attribute except the output-side `path` and `uri`. (`output/@report` is an output too: see [`is_output_side`].)
 pub fn input_uri_attributes() -> &'static BTreeSet<&'static str> {
     static S: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
     S.get_or_init(|| {
@@ -40,7 +40,7 @@ pub fn input_uri_attributes() -> &'static BTreeSet<&'static str> {
             .flat_map(|c| c.attrs.iter())
             .filter(|a| root_builtin(a.ty) == Some(Builtin::AnyUri))
             .map(|a| a.name)
-            .filter(|n| !matches!(*n, "path" | "report" | "uri"))
+            .filter(|n| !matches!(*n, "path" | "uri"))
             .collect()
     })
 }
@@ -177,6 +177,12 @@ fn parse_digest(s: &str) -> Option<[u8; 32]> {
     <crate::values::Sha256 as crate::parse::ParseValue>::parse_value(s).ok().map(|d| d.0)
 }
 
+/// Whether `attr` of an element named `element` names a file the render writes rather than one it reads:
+/// `output/@report`, where a render report goes (SREP 18). Any other element's `report` is an input as usual.
+pub fn is_output_side(element: &str, attr: &str) -> bool {
+    (element, attr) == ("output", "report")
+}
+
 /// Verifies every input file of `doc`, resolving relative references
 /// against `base_dir`, and appends diagnostics.
 pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
@@ -191,7 +197,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             sequence(n, base_dir, out);
         }
         for &attr in uri_attrs {
-            if numbered && attr == "src" {
+            if (numbered && attr == "src") || is_output_side(name, attr) {
                 continue;
             }
             let Some(value) = n.attribute(attr) else { continue };
@@ -487,6 +493,12 @@ mod tests {
         assert!(input_uri_attributes().contains("src"));
         assert!(input_uri_attributes().contains("cache"));
         assert!(!input_uri_attributes().contains("path"));
-        assert!(!input_uri_attributes().contains("report"), "output/@report names a file the render writes");
+    }
+
+    #[test]
+    fn only_output_report_is_an_output_side_report() {
+        assert!(is_output_side("output", "report"), "output/@report names a file the render writes");
+        assert!(!is_output_side("captionTrack", "report"));
+        assert!(!is_output_side("output", "src"));
     }
 }
