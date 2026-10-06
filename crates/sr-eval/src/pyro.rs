@@ -112,6 +112,9 @@ fn build(p: &Program, node: u32, e: &sr_model::model::Pyro) -> Result<Runtime, S
             _ => pyro::Advection::SemiLagrangian,
         },
         max_bytes: bytes,
+        // a window that follows its plume; the margin is the engine's value (the distance W02 asks of a source)
+        follow: matches!(text(e, "follow").as_deref(), Some("true" | "1"))
+            .then(|| pyro::Follow { margin: num(e, "followMargin", 12.0) as usize, loss: num(e, "followLoss", 0.0) }),
     };
     let timeline = Timeline::new(spec, checkpoint).map_err(|e| e.to_string())?;
     let mesh_budget = (num(e, "meshMemoryMiB", 128.0) as usize).checked_mul(1 << 20).ok_or("mesh memory overflow")?;

@@ -782,6 +782,57 @@ the message names the face and the distance). The 12 comes from one plume, one f
 source; the side faces were not measured; and a source with a rotation or a scale is bounded by a sphere
 or by its extent along the axis.
 
+#### A window that follows its plume (`pyro@follow`)
+
+An open domain cuts a plume that rises past its top face: the face is a zero-pressure outlet and what crosses it is
+lost. `follow="true"` (PYRO9: only with `boundary="open"`) makes the window of the domain move, in whole cells and in the
+object's own axes, to keep the smoke `followMargin` cells (PYRO10: only with `follow`; the engine's value is 12, the
+distance from which a plume's top face was measured to have no effect on it, see W02; PYRO11: it leaves a cell between the
+faces) from every face, plus the cells the fastest air along the axis goes in one step; the number of cells does not
+change, so the memory and the cost of a step do not either (a move is a copy of the state, and about a state clone
+has been measured at 102 ms at 192 x 156 x 192 under load). Absent or false the domain is where it began for good, and
+with a follow that never moves the state is bit for bit the one without it (tests `a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following`,
+the nine reference hashes of the solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
+
+Where the window moves is a function of the state and of the sources that act in the step, never of the history of
+requests: the smoke along an axis is the span of slabs of cells between the ends that hold at most half of
+`followLoss` of all the density each (the lowest and highest cell index, integers, from sums taken in the order of
+the cells, so the same on any number of threads); the sources are the shapes of the `pyroSource` and `pyroImpulse` that
+act in the step, and **a window never leaves a slab that holds a cell of such a source**, whatever the loss, because a
+plume begins at its source and a window that left it would part the plume from the ground. The inputs of a step are
+sampled again if the window moved, so that they are those of the window the step has, and the seeded turbulence is keyed
+by the cell of space (the cell of the window and the cells the window has moved by), so that a point keeps its noise.
+The state keeps the cells it has moved by (so its origin is `base + cells * voxelSize` computed afresh) and the
+density it has let go of (`State::lost`); both are in the checkpoints and in the identity of the state, and a seek replays
+the same moves. The volume exported to the renderer places its grids by the origin of the state, so the smoke does not
+move in the world; a frozen bake of a following plume keeps the transform of each frame (test
+`a_baked_sequence_of_a_following_plume_is_the_frames_it_was_baked_from`), and any order of times and a fresh evaluator give
+the same frames.
+
+`followLoss` (0 to 1, the engine's default is 0) is the share of all the smoke that a move may leave behind on each
+side. **With a loss of zero a window lets go only of slabs that hold no density and no heat, and that is almost never**:
+the interpolation of the advection leaves a tail that is never exactly zero, and a plume drags a stem of smoke down to
+its source. Measured (sr-sim `follow`, a blob of smoke rising in air that accelerates upward at 2 units a second
+squared, 140 steps of 0.05 s, cells of 0.5 units, window of 80 rows; deterministic): a window that stays keeps 12.9 of
+the 164.3 that a window of 640 rows holds, a loss of zero keeps 0.38 and lets go of nothing (the rear slab is never
+empty, so the window cannot move and the blob goes out of the top as with no follow), a loss of 1e-9 keeps 156.3, of
+1e-6 keeps 165.7 (the tall window's centre at -38.5 units and this one's at -39.0) and lets go of 3e-7, of 1e-4 167.9, of 1e-3
+166.8. What a move lets go of is counted in `lost`, never silent, and a move lets go of at most the share asked
+(`what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked`: the smoke before a move equals the smoke after it
+plus what it let go of, to a trillionth, and no move lets go of more than 1.5 times the loss of all the smoke, the three axes
+together). In the evaluator (`crates/sr-eval/tests/volume/pyro_follow.rs`: a blob in a domain of 8 x 60 x 8 units that a
+force field accelerates upward at 6 units a second squared) the fixed domain holds nothing at 5 s and the following one
+holds the blob 14 units above the old top face.
+
+Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to
+its source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit
+between its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and
+`follow` is the saving in cells for a plume that has left its source behind, not a free height. The heated puff of the
+measurements of this section keeps 11 % of its smoke in a stem below the rows that the head has left. A `followLoss` large
+enough to let go of the stem loses visible smoke: the stem is part of the plume. The margin and the loss are the engine's
+values with no published source. The decision reads the density and the temperature of every cell once a step (one pass), and
+the cost of that pass at 128 x 104 x 128 against a step of 485 ms is not yet measured here.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -3019,6 +3070,9 @@ Also includes `assetProvenance`, inventoried below.
 | `seed` | xs:unsignedLong | Default `0` |
 | `pressureTolerance` | positiveDecimal | Default `0.000001` |
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
+| `follow` | xs:boolean | Optional; absent is false; true needs `boundary="open"` (PYRO9) |
+| `followMargin` | xs:positiveInteger | Optional; only with `follow` (PYRO10), leaves a cell between the faces (PYRO11); the engine uses 12 |
+| `followLoss` | unitDecimal | Optional; only with `follow` (PYRO10); the engine uses 0 |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
 | `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
 | `advection` | xs:string; enumeration=semilagrangian, enumeration=maccormack | Default `semilagrangian` |
@@ -3576,11 +3630,12 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (at commit 349d371 the Schematron has 228 assertions,
-counted by parsing the file: `grep -c` of `sch:assert` gives 237 because it also counts closing tags; 77 of them are in the
-cinematic families OCN 13, P3D 11, CRT 9, PYRO 8, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are the
-upstream's own: the rules R, C, V, MOV, PEN and TXT. At commit fa63e5d the file had 169, 66 in the cinematic families
-without BH). Inventory
+rule scorecard remain pending implementation reconciliation** (the Schematron has 260 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 80 of them are in the
+cinematic families OCN 13, P3D 11, CRT 9, PYRO 11, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
+families, and the 14 that it does not (BH1 to BH8, FRX5 to FRX7, PYRO9 to PYRO11) are this repository's. At commit 349d371,
+before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.

@@ -166,3 +166,39 @@ fn pyro_advection_is_a_semilagrangian_or_maccormack_enumeration() {
         assert!(c.contains(&"S06".into()), "{advection:?}: {c:?}");
     }
 }
+
+#[test]
+fn a_window_that_follows_its_plume_needs_an_open_domain_its_own_attributes_and_room_for_its_margin() {
+    let follows = |attributes: &str| {
+        format!(
+            r#"<object3D id="cloud" primitive="volume">{}</object3D>"#,
+            PYRO.replace("<pyro ", &format!("<pyro {attributes} "))
+        )
+    };
+    let open = r#"boundary="open" follow="true""#;
+    assert!(codes(&follows(&format!(r#"{open} followMargin="2" followLoss="0.001""#))).is_empty());
+    assert!(codes(&follows(open)).is_empty());
+    // follow is refused in a closed domain, the default one and the one that says so
+    assert!(codes(&follows(r#"follow="true""#)).contains(&"PYRO9".into()));
+    assert!(codes(&follows(r#"boundary="closed" follow="1""#)).contains(&"PYRO9".into()));
+    // a false follow has nothing to say about the boundary, and its attributes are orphans
+    assert!(codes(&follows(r#"follow="false""#)).is_empty());
+    assert!(codes(&follows(r#"follow="false" followMargin="2""#)).contains(&"PYRO10".into()));
+    assert!(codes(&follows(r#"boundary="open" followLoss="0.1""#)).contains(&"PYRO10".into()));
+    // 8 cells across: a margin of 4 leaves no cell between the faces, a margin of 3 leaves two
+    assert!(codes(&follows(&format!(r#"{open} followMargin="4""#))).contains(&"PYRO11".into()));
+    assert!(codes(&follows(&format!(r#"{open} followMargin="3""#))).is_empty());
+    // the loss is a share
+    assert!(!codes(&follows(&format!(r#"{open} followLoss="1.5""#))).is_empty());
+}
+
+#[test]
+fn a_source_near_an_open_face_is_not_warned_about_when_the_window_follows_its_plume() {
+    let object = |attributes: &str| {
+        format!(
+            r#"<object3D id="cloud" primitive="volume"><pyro width="64" height="64" depth="64" voxelSize="1" dt="0.1" boundary="open" {attributes}><pyroSource shape="sphere" radius="2" densityRate="2" y="-26"/></pyro></object3D>"#
+        )
+    };
+    assert!(codes(&object("")).contains(&"W02".into()), "{:?}", codes(&object("")));
+    assert!(!codes(&object(r#"follow="true""#)).contains(&"W02".into()));
+}

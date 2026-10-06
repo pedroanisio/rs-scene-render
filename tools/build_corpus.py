@@ -33,6 +33,8 @@ VOLUME_BAKED = VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/bak
 
 PYRO = '<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>\n<composition><object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource shape="sphere" radius="2" densityRate="2" start="0.15" end="0.35"/><pyroImpulse shape="box" width="2" height="2" depth="2" time="0.5" density="1" temperature="3000"/></pyro><medium blackbody="true" emissionScale="0.1"/></object3D></composition></scene>\n'
 
+PYRO_FOLLOW = PYRO.replace('<pyro ', '<pyro boundary="open" follow="true" followMargin="2" followLoss="0.000001" ')
+
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
 
 PYRO_COLLIDERS = PYRO.replace("<composition>", '<composition><object3D id="solid" primitive="box" width="2" height="2" depth="2"/>').replace("<pyro ", '<pyro colliders="solid" ')
@@ -125,6 +127,9 @@ CASES = [
     ("crt9-capture-without-source", ["CRT9"], lambda _: CRATER.replace('<crater ', '<crater capture="true" ', 1)),
     ("crt8-static", ["CRT8"], lambda _: CRATER_IMPACT.replace('<rigidBody mass="5"/>', '<rigidBody type="static"/>')),
     ("s09-crater-id", ["S09"], lambda _: CRATER_IMPACT.replace('id="pit"', 'id="ground"')),
+    ("pyro9-closed", ["PYRO9"], lambda _: PYRO_FOLLOW.replace('boundary="open" ', '')),
+    ("pyro10-orphan", ["PYRO10"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro followLoss="0.1" ')),
+    ("pyro11-margin", ["PYRO11"], lambda _: PYRO_FOLLOW.replace('followMargin="2"', 'followMargin="4"')),
     ("pyc1-derived", ["PYC1"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource crater="pit" start="1"/>')),
     ("pyc2-orphan", ["PYC2"], lambda _: PYRO_CRATER.replace('<pyroSource crater="pit"/>', '<pyroSource heatFraction="0.2"/>')),
     ("pyc3-time", ["PYC3"], lambda _: PYRO_CRATER.replace('<pyroImpulse crater="pit" heatFraction="0.2"/>', '<pyroImpulse density="1"/>')),
@@ -471,6 +476,7 @@ VALID = {
     "pyro-multigrid": PYRO.replace('<pyro ', '<pyro solver="multigrid" '),
     "pyro-maccormack": PYRO.replace('<pyro ', '<pyro solver="multigrid" advection="maccormack" '),
     "pyro-mesh": PYRO_MESH,
+    "pyro-follow": PYRO_FOLLOW,
     "pyro-colliders": PYRO_COLLIDERS,
     "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
     "baked-volume": VOLUME_BAKED,
