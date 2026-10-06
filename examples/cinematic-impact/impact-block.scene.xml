@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A rock hits a block of rock lying on the ground, in metres and seconds (physics/@pixelsPerMeter is 1).
+     The rock of impact-land.scene.xml (2 m radius, 90 478 kg) arrives at 100 m/s, 60 degrees above the
+     top of a block of 6 m of granite (2700 kg/m3, 583 200 kg) that lies on the ground (a slab 1 m thick whose top is y = 0). Nothing here says when the
+     block breaks: `fracture@source` names the rock, so it breaks at the impact, in the pieces of its own seeded
+     partition, pushed apart with a part of the energy of the impact (`energyFraction`, the engine's 0.3: no
+     published value). The partition does not depend on where the rock hits. The numbers are the engine's, not a
+     prediction of a measured event. -->
+<scene version="1.3">
+  <project width="1280" height="720" fps="24" duration="6" background="#8FA9C4"/>
+  <metadata><meta name="simulation-kind" value="A block of rock broken by an impact, in physical units; the fracture is a consequence of the contact"/></metadata>
+  <materials>
+    <material id="soil" baseColor="#756653" roughness="0.9"/>
+    <material id="granite" baseColor="#7E7A76" roughness="0.7"/>
+    <material id="cut" baseColor="#B9B2A8" roughness="0.6"/>
+    <material id="rock" baseColor="#392D26" roughness="0.8"/>
+  </materials>
+  <composition>
+    <camera id="camera" x="6" y="-14" z="-60" pitch="-5" fov="42" renderer="pathtrace" pathSamples="8" maxBounces="4" denoise="true"/>
+    <!-- launched 124 m above the ground and 74 m back so that it reaches the top of the block, 6 m up, 1.49 s in,
+         at 100 m/s and 60 degrees: 50 m/s along the ground and 86.6 m/s down -->
+    <object3D id="impactor" primitive="sphere" radius="2" segments="24" x="-74.4" y="-126" material="rock">
+      <rigidBody shape="sphere" mass="90478" velocityX="50" velocityY="72" restitution="0" linearDamping="0" angularDamping="0"/>
+    </object3D>
+    <object3D id="block" primitive="box" width="6" height="6" depth="6" y="-3" material="granite">
+      <rigidBody mass="583200" restitution="0" friction="0.7" linearDamping="0" angularDamping="0"/>
+      <fracture source="impactor" pieces="12" seed="20261006" interiorMaterial="cut" energyFraction="0.3"/>
+    </object3D>
+    <object3D id="ground" primitive="box" width="160" height="1" depth="160" y="0.5" material="soil">
+      <rigidBody type="static" friction="0.7"/>
+    </object3D>
+  </composition>
+  <lights>
+    <light id="sky" type="dome" environment="sky.hdr" environmentVisible="true" intensity="1"/>
+    <light id="sun" type="directional" color="#FFE7C9" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>
+  </lights>
+  <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/>
+</scene>

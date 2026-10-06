@@ -14,7 +14,7 @@ use rapier3d_f64::prelude::*;
 use crate::fields::{self, Field};
 
 mod fracture;
-pub use fracture::{Fracture3, FractureError, Fragment3};
+pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
 
 /// A pose in scene space: position (px) and rotation (unit quaternion x, y, z, w, scene axes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -864,6 +864,14 @@ impl World3 {
             }
             if !w.min_impulse.is_finite() {
                 return Err("impact watch threshold must be finite".into());
+            }
+        }
+        // a fracture by contact reads the impact of a watch against its own source
+        for e in &self.fractures {
+            if let Some(c) = e.contact {
+                if watches.get(c.watch).is_none_or(|w| w.owner != e.source) {
+                    return Err(format!("the fracture of body {} names no impact watch against it", e.source));
+                }
             }
         }
         self.state.impacts = vec![None; watches.len()];

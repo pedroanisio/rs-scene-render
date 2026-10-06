@@ -12,17 +12,31 @@ pub struct Fragment3 {
     pub impulse: [f64; 3],
 }
 
+/// A fracture that fires on an impact instead of at a time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FractureContact {
+    /// The impact watch (an index into [`World3::with_impact_watches`]) whose owner is the source of the fracture:
+    /// the first impact of its projectile on the source, above that watch's threshold, fires it.
+    pub watch: usize,
+    /// The part, 0 to 1, of the kinetic energy of the impact relative to the pair, 1/2 mu v_n^2 with `mu` the reduced
+    /// mass of the projectile and the source and `v_n` the closing speed, that becomes the pieces' push on each other.
+    pub energy_fraction: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Fracture3 {
     pub source: usize,
     /// Composition time. Fires on the first fixed-step boundary at or after
     /// this time for which the source participates. Fragments inherit its pose,
-    /// angular velocity and velocity at their respective centres of mass.
+    /// angular velocity and velocity at their respective centres of mass. Not used with a `contact`.
     pub at: f64,
     /// Total outward impulse in kg·scene-unit/s, distributed by piece mass.
-    /// Directions use actual centres of mass at release, including source rotation.
+    /// Directions use actual centres of mass at release, including source rotation. Not used with a `contact`,
+    /// whose push comes from the energy of the impact.
     pub radial_impulse: f64,
     pub fragments: Vec<Fragment3>,
+    /// With a contact the fracture fires on the step after the impact of the watch is noticed, and not at `at`.
+    pub contact: Option<FractureContact>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,11 +68,13 @@ impl World3 {
         let mut owned = BTreeSet::new();
         let mut properties = Vec::new();
         for e in &events {
+            let timed = e.contact.is_none();
             if !e.at.is_finite()
                 || !e.radial_impulse.is_finite()
                 || e.radial_impulse < 0.
-                || e.at < self.spec.start
+                || (timed && e.at < self.spec.start)
                 || !((e.at - self.spec.start) / self.spec.step).is_finite()
+                || e.contact.is_some_and(|c| !c.energy_fraction.is_finite() || !(0. ..=1.).contains(&c.energy_fraction))
                 || e.source >= self.spec.bodies.len()
                 || !owned.insert(e.source)
                 || e.fragments.is_empty()
@@ -147,20 +163,76 @@ impl World3 {
         // cannot leave a partially activated partition or an applied impulse.
         for (i, e) in self.fractures.iter().enumerate() {
             let source = &self.state.bodies[self.state.handles[e.source]];
-            if self.state.fractured[i] || t < e.at || !source.is_enabled() {
+            if self.state.fractured[i] || !source.is_enabled() {
                 continue;
             }
+            // a fracture by contact fires from the step after its projectile's impact is noticed
+            let due = match e.contact {
+                None => t >= e.at,
+                Some(c) => match (self.state.impacts.get(c.watch), self.watches.get(c.watch)) {
+                    (Some(found), Some(watch)) if watch.owner == e.source => {
+                        found.is_some_and(|impact| t >= impact.time)
+                    }
+                    _ => return Err("a fracture contact names no impact watch against its source".into()),
+                },
+            };
+            if !due {
+                continue;
+            }
+            let (m_source, mu_energy) = match e.contact {
+                Some(c) => {
+                    let impact = self.state.impacts[c.watch].expect("a due contact has its impact");
+                    let projectile = self.spec.bodies[self.watches[c.watch].source].mass;
+                    let reduced =
+                        projectile * self.spec.bodies[e.source].mass / (projectile + self.spec.bodies[e.source].mass);
+                    let speed = impact.closing_speed / ppm;
+                    (self.spec.bodies[e.source].mass, Some(c.energy_fraction * 0.5 * reduced * speed * speed))
+                }
+                None => (self.spec.bodies[e.source].mass, None),
+            };
             let mut parts = Vec::with_capacity(e.fragments.len());
+            // The radial push is the pieces pushing each other: it adds no momentum. Each piece gets the same speed
+            // along the line from the source's centre of mass to its own, and the mass-weighted mean of those
+            // velocities, which is not zero unless the partition is symmetric, is taken off every piece.
+            let mut pushed = Vec::with_capacity(e.fragments.len());
+            let mut mean = Vec3::ZERO;
+            let source_mass = m_source;
             for p in &e.fragments {
                 let rb = &self.state.bodies[self.state.handles[p.body]];
                 let position =
                     *source.position() * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
                 let com = rb.mass_properties().local_mprops.world_com(&position);
-                let radial = (com - source.center_of_mass()).try_normalize().unwrap_or_default()
-                    * (e.radial_impulse / ppm / self.spec.bodies[e.source].mass);
+                let direction = (com - source.center_of_mass()).try_normalize().unwrap_or_default();
+                // by impulse: the same speed for every piece; by contact the speed is found below
+                let radial = direction * (e.radial_impulse / ppm / source_mass);
+                mean += radial * (self.spec.bodies[p.body].mass / source_mass);
+                pushed.push((position, com, direction, radial));
+            }
+            if let Some(energy) = mu_energy {
+                // the push of the contact: one speed `s` along every line out of the centre, with the mean taken off,
+                // chosen so that the kinetic energy of the pieces' motion relative to their mean is `energy` exactly
+                mean = Vec3::ZERO;
+                for (p, (_, _, direction, _)) in e.fragments.iter().zip(&pushed) {
+                    mean += *direction * (self.spec.bodies[p.body].mass / source_mass);
+                }
+                let spread: f64 = e
+                    .fragments
+                    .iter()
+                    .zip(&pushed)
+                    .map(|(p, (_, _, direction, _))| {
+                        self.spec.bodies[p.body].mass * (*direction - mean).length_squared()
+                    })
+                    .sum();
+                let speed = if spread > 0. && energy > 0. { (2. * energy / spread).sqrt() } else { 0. };
+                for (_, (_, _, direction, radial)) in e.fragments.iter().zip(pushed.iter_mut()) {
+                    *radial = *direction * speed;
+                }
+                mean *= speed;
+            }
+            for (p, (position, com, _, radial)) in e.fragments.iter().zip(pushed) {
                 let velocity = source.velocity_at_point(com)
                     + vec3(flip(p.impulse).map(|x| x / ppm)) / self.spec.bodies[p.body].mass
-                    + radial;
+                    + (radial - mean);
                 let angular = source.angvel();
                 if !position.translation.is_finite()
                     || !position.rotation.is_finite()

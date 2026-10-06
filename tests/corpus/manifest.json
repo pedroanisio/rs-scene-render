@@ -286,6 +286,21 @@
       "FRX4",
       "W01"
     ],
+    "frx5-source-self.scene.xml": [
+      "FRX5"
+    ],
+    "frx5-source-static.scene.xml": [
+      "FRX5"
+    ],
+    "frx6-push.scene.xml": [
+      "FRX6"
+    ],
+    "frx6-timed.scene.xml": [
+      "FRX6"
+    ],
+    "frx7-orphan.scene.xml": [
+      "FRX7"
+    ],
     "geo1.scene.xml": [
       "GEO1"
     ],
@@ -840,6 +855,8 @@
     "crater-impact.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
+    "fracture-contact-tuned.scene.xml": [],
+    "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
     "kitchen-sink.scene.xml": [],

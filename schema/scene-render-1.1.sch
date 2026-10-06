@@ -34,7 +34,10 @@
       <sch:assert id="FRX1" test="/scene/@version='1.3'">fracture requires version="1.3".</sch:assert>
       <sch:assert id="FRX2" test="parent::object3D[not(@primitive='volume' or @primitive='plane' or @primitive='map')] and count(../fracture)=1 and count(../rigidBody)=1">fracture requires one closed surface object3D owner and exactly one rigidBody.</sch:assert>
       <sch:assert id="FRX3" test="@interiorMaterial=/scene/materials/material/@id">fracture interiorMaterial must reference a declared material.</sch:assert>
-      <sch:assert id="FRX4" test="not(@*[name()!='interiorMaterial' and not((number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))) - number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))))=0)])">fracture numeric values must be finite.</sch:assert>
+      <sch:assert id="FRX4" test="not(@*[name()!='interiorMaterial' and name()!='source' and not((number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))) - number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))))=0)])">fracture numeric values must be finite.</sch:assert>
+      <sch:assert id="FRX5" test="not(@source) or (/scene//object3D[@id=current()/@source and not(@id=current()/../@id)]/rigidBody[not(@type) or @type='dynamic'])">fracture source must name another object3D whose rigidBody is dynamic.</sch:assert>
+      <sch:assert id="FRX6" test="not(@source and (@at or @radialImpulse or @impulseX or @impulseY or @impulseZ))">a fracture that comes from a source derives its time and its push, so at, radialImpulse and impulseX, impulseY and impulseZ may not be given.</sch:assert>
+      <sch:assert id="FRX7" test="@source or not(@minImpulse or @energyFraction)">minImpulse and energyFraction belong to a fracture with a source.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-crater">

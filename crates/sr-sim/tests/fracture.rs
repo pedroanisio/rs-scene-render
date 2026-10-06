@@ -51,6 +51,7 @@ fn event(at: f64) -> Fracture3 {
             Fragment3 { body: 1, offset: [-1., 0., 0.], impulse: [0.; 3] },
             Fragment3 { body: 2, offset: [1., 0., 0.], impulse: [0.; 3] },
         ],
+        contact: None,
     }
 }
 
@@ -355,4 +356,62 @@ fn rounding_never_fires_an_event_before_its_authored_time() {
     let mut w = World3::new(spec()).with_fractures(vec![event(0.1 + f64::EPSILON)]).unwrap();
     assert_eq!(w.frame_at(0.1, &mut Drive).fractured, [false]);
     assert_eq!(w.frame_at(0.11, &mut Drive).fractured, [true]);
+}
+
+/// Three unequal pieces whose offsets average to the source's centre of mass (mass 1, 2 and 3 at (6,0), (-1,3), (-4/3,-2)):
+/// the directions out of the centre do not cancel when weighted by mass.
+fn asymmetric() -> (World3Spec, Fracture3) {
+    let mut s = spec();
+    s.bodies = vec![body([2., 1., 1.], 6.), body([1.; 3], 1.), body([1.; 3], 2.), body([1.; 3], 3.)];
+    let e = Fracture3 {
+        source: 0,
+        at: 0.5,
+        radial_impulse: 12.,
+        fragments: vec![
+            Fragment3 { body: 1, offset: [6., 0., 0.], impulse: [0.; 3] },
+            Fragment3 { body: 2, offset: [-1., 3., 0.], impulse: [0.; 3] },
+            Fragment3 { body: 3, offset: [-4. / 3., -2., 0.], impulse: [0.; 3] },
+        ],
+        contact: None,
+    };
+    (s, e)
+}
+
+#[test]
+fn the_radial_impulse_adds_no_linear_momentum_to_an_asymmetric_partition() {
+    let (s, e) = asymmetric();
+    let mut quiet = e.clone();
+    quiet.radial_impulse = 0.;
+    let mut with = World3::new(s.clone()).with_fractures(vec![e]).unwrap();
+    let mut without = World3::new(s).with_fractures(vec![quiet]).unwrap();
+    let (a, b) = (with.frame_at(0.5, &mut Drive), without.frame_at(0.5, &mut Drive));
+    assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?} {:?}", a.errors, b.errors);
+    let masses = [1., 2., 3.];
+    let mut added = [0.; 3];
+    for (j, k) in [1, 2, 3].into_iter().enumerate() {
+        for (c, sum) in added.iter_mut().enumerate() {
+            *sum += masses[j] * (a.velocities[k].linear[c] - b.velocities[k].linear[c]);
+        }
+    }
+    // the impulse is a push the pieces give each other: the total momentum does not change
+    for (c, sum) in added.iter().enumerate() {
+        assert!(sum.abs() < 1e-9, "momentum added along {c}: {added:?}");
+    }
+    // nor angular momentum: about the centre of mass the push of every piece is along its own line out of it
+    let com: [f64; 3] = std::array::from_fn(|c| {
+        [1, 2, 3].into_iter().zip(masses).map(|(k, m)| m * a.bodies[k].pos[c]).sum::<f64>() / 6.
+    });
+    let mut torque = [0.; 3];
+    for (j, k) in [1, 2, 3].into_iter().enumerate() {
+        let r: [f64; 3] = std::array::from_fn(|c| a.bodies[k].pos[c] - com[c]);
+        let dv: [f64; 3] = std::array::from_fn(|c| a.velocities[k].linear[c] - b.velocities[k].linear[c]);
+        torque[0] += masses[j] * (r[1] * dv[2] - r[2] * dv[1]);
+        torque[1] += masses[j] * (r[2] * dv[0] - r[0] * dv[2]);
+        torque[2] += masses[j] * (r[0] * dv[1] - r[1] * dv[0]);
+    }
+    for (c, sum) in torque.iter().enumerate() {
+        assert!(sum.abs() < 1e-9, "angular momentum added about {c}: {torque:?}");
+    }
+    // and it still pushes: the pieces move apart
+    assert!((a.velocities[1].linear[0] - b.velocities[1].linear[0]).abs() > 1e-3);
 }
