@@ -4766,6 +4766,23 @@
         <xs:enumeration value="regolith"/><xs:enumeration value="ice"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="mantle" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        Only with `source` (CRT10). The ejecta that the law throws out (0.8 of the crater's volume) come down outside the rim as a mantle
+        `t0 (R / r)^3` thick, `R` the rim crest's radius, which is part of the ground (the same deformation as the bowl and the rim) and
+        is cut at twenty crest radii and scaled to hold exactly the ejecta's volume; the bowl is made to excavate exactly the law's volume.
+        The ejecta particles that come to rest on it are removed (they have become the ground). Off, the ground is as it was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="bulking">
+      <xs:annotation><xs:documentation>
+        Only with `mantle="true"` (CRT10, CRT11). What is put back, the rim and the mantle together, is this many times the volume that the bowl
+        excavates: broken rock takes more room than the rock did (1 to 1.3). Without it the rim keeps the height of the law and the bulking is what
+        that asks for: the law's rim (0.326 of the volume for the authored rock in soft rock) and its 0.8 of ejecta, 1.126 there, a value
+        derived from the law and inside the physical range. With 1 the rim holds 0.2 of the volume.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="1"/><xs:maxInclusive value="1.3"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="targetDensity" type="positiveDecimal"/>
     <xs:attribute name="strength" type="nonNegativeDecimal"/>
     <xs:attribute name="gravity" type="positiveDecimal"/>

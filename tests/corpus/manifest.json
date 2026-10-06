@@ -240,6 +240,19 @@
     "crt1.scene.xml": [
       "CRT1"
     ],
+    "crt10-bulking-without-source.scene.xml": [
+      "CRT10",
+      "CRT11"
+    ],
+    "crt10-mantle-without-source.scene.xml": [
+      "CRT10"
+    ],
+    "crt11-bulking-range.scene.xml": [
+      "S06"
+    ],
+    "crt11-bulking-without-mantle.scene.xml": [
+      "CRT11"
+    ],
     "crt2.scene.xml": [
       "CRT2"
     ],
@@ -884,6 +897,8 @@
     "crater-impact-influence-large.scene.xml": [],
     "crater-impact-influence-small.scene.xml": [],
     "crater-impact.scene.xml": [],
+    "crater-mantle-bulking.scene.xml": [],
+    "crater-mantle.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
     "fracture-contact-tuned.scene.xml": [],

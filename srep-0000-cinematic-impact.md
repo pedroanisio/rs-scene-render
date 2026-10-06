@@ -1839,7 +1839,7 @@ and production validation are finished.
 Rust and Schematron share **CRT1** (version), **CRT2** (single surface owner),
 **CRT3** (ordered timing), **CRT4** (finite direction/profile/envelope) and
 **CRT5** (rigid-body compatibility), with **CRT6** to **CRT8** for a crater from an
-impact and **CRT9** for `capture`. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
+impact, **CRT9** for `capture` and **CRT10** and **CRT11** for `mantle` and `bulking`. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
 `tests/corpus/invalid/crt1.scene.xml` through `crt9-capture-without-source.scene.xml` independently
 exercise the XSD/Schematron and Rust validators.
 
@@ -1888,6 +1888,24 @@ one), so the rock reaches the bed slowed. At 6 s, with and without `capture`, it
 crater's centre in the hydrostatic response (the highest wave after 4 s 2.136 and 2.132 m) and 0.1 and 8.5 m in the
 filtered one (2.097 and 2.083 m): with the depth filter the free rock rolls out of its crater and `capture` keeps it
 in (test `impact_scenes` on 3 m cells, commit e22458b on fa63e5d, 2026-10-05, deterministic).
+
+`crater@mantle` (boolean, default false, only with `source`: **CRT10**) and `crater@bulking` (1 to 1.3, only with `mantle="true"`:
+**CRT10**, **CRT11**). The ground of a crater that grows from an impact takes out less than the law excavates and gives back none of what
+the law throws out: for the authored rock in soft rock the kernel's bowl, whose bump reaches the rim crest, excavates 129.7 m3, 1.285 of the law's
+volume of 100.9 m3, and the rim puts back 32.9 m3, 0.326 of it, so the ground loses 0.959 of the volume and the 0.8 of it that the law says was thrown
+out (80.7 m3) is nowhere in the ground (`sr_sim::cratering::crater`, `sr_3d::crater`; measured by a disposable program on 2026-10-06). With `mantle` the
+volumes are a contract. The bowl excavates exactly the law's volume `V` with the depth and the radius of the law: its bump is `(1 - x^2)^p` with
+`p = pi R^2 d / V - 1` (`R` the rim crest's radius, `d` the law's depth; `p` is 2 for the crater as it was, and the bowl is made deeper if `p` would
+be under 2). The ejecta come down outside the rim as a mantle `t0 (R / r)^3` thick (McGetchin et al. 1973, Collins et al. 2005, from the law's own
+text: the inverse cube), brought to zero over the rim's width by a smooth ramp, cut at twenty crest radii and scaled to hold exactly the law's ejecta
+volume, `0.8 V`; it is part of the ground, the same deformation as the bowl and the rim, and grows with the crater as they do (every part of the
+map, its crest and its height, is scaled by the progress). The rim and the mantle together put back `bulking` times `V` (broken rock takes more room than the
+rock did): with `bulking` the rim has the volume `bulking V - 0.8 V` (0.2 V at 1), and without it the rim keeps the height of the law, which is
+a measured relation of the law and not cut, and the bulking is what that asks for, 1.126 for the authored rock in soft rock (0.326 V of rim and
+0.8 V of mantle), inside the physical range of the debris and derived from the law and not chosen. The integral of the change of height over the
+ground is then `(bulking - 1) V`, to 1e-6 of `V` (test `crater` of `sr-3d`). The transient stage of the crater, its collapse into the final one, is not
+modelled: the law's radius is the final, apparent radius, and multiplying it by 1.2 to 1.3 would count the collapse twice. Off, which is the default,
+the ground is as it was, to the bit.
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
@@ -3239,6 +3257,8 @@ Also includes `pyroShape`, inventoried below.
 | `id` | xs:ID | Optional; names the crater so that what its impact causes can refer to it |
 | `source` | xs:IDREF | Optional; the dynamic rigid body that makes the crater (CRT6 to CRT8) |
 | `capture` | xs:boolean | Default `false`; only with `source` (CRT9): the body that makes the crater is arrested by it |
+| `mantle` | xs:boolean | Default `false`; only with `source` (CRT10): the ejecta come down as a mantle that is part of the ground, and the volumes add up |
+| `bulking` | xs:double; 1 to 1.3 | Optional, only with `mantle="true"` (CRT10, CRT11); what the rim and the mantle put back, in volumes of the bowl; without it, what the law's own rim height asks for |
 | `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
 | `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
 | `strength` | nonNegativeDecimal | Optional with `source`: Pa |
