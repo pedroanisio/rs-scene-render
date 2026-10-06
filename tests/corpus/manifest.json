@@ -213,6 +213,19 @@
     "c65.scene.xml": [
       "C65"
     ],
+    "c66.scene.xml": [
+      "C66"
+    ],
+    "c67.scene.xml": [
+      "C67",
+      "R52"
+    ],
+    "c68.scene.xml": [
+      "C68"
+    ],
+    "c69.scene.xml": [
+      "C69"
+    ],
     "c7.scene.xml": [
       "C7"
     ],
@@ -702,6 +715,13 @@
     "r50.scene.xml": [
       "R50"
     ],
+    "r51.scene.xml": [
+      "R51",
+      "R52"
+    ],
+    "r52.scene.xml": [
+      "R52"
+    ],
     "r6-duplicate.scene.xml": [
       "R6"
     ],
@@ -831,6 +851,9 @@
     "v8-volumes.scene.xml": [
       "V8"
     ],
+    "v9.scene.xml": [
+      "V9"
+    ],
     "vol-light-grid-cell.scene.xml": [
       "S06"
     ],
@@ -907,6 +930,7 @@
     "openvdb.scene.xml": [],
     "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
+    "pdf-region.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
     "pyro-colliders.scene.xml": [],
     "pyro-crater.scene.xml": [],

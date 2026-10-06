@@ -60,6 +60,12 @@ POINTS = '<scene version="1.2"><project width="64" height="64" fps="24" duration
 
 CONNECTOR = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><text id="note" text="Hi" width="20" height="10" size="8"/></assets><composition><shape id="a" shape="rect" x="4" y="4" width="10" height="10" fill="#FF0000"/><shape id="b" shape="rect" x="44" y="40" width="10" height="10" fill="#0000FF"/><connector id="c" from="a" to="b" route="orthogonal" stroke="#00FF00" strokeWidth="2" markerEnd="arrow" label="note"><animate property="trimEnd"><key time="0" value="0"/><key time="1" value="1"/></animate></connector></composition></scene>\n'
 
+LOGO_SHA = hashlib.sha256((MEDIA / "logo.png").read_bytes()).hexdigest()
+PDF = ('<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><pdf id="paper" src="../media/paper.pdf" '
+       f'sha256="{"0" * 64}" dpi="72" cache="../media/logo.png" cacheSha256="{LOGO_SHA}" width="16" height="16">'
+       '<region id="w" text="word" x="2" y="3" width="8" height="4"/></pdf></assets><composition><layer id="page" asset="paper" x="8" y="8"/>'
+       '<shape id="mark" shape="ellipse" region="w" regionLayer="page" regionPadding="1" stroke="#FF0000" strokeWidth="1"/></composition></scene>\n')
+
 CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="ground" primitive="plane" width="20" height="20" segments="40"><crater radius="4" depth="3" rimWidth="1" rimHeight="0.5" start="1" end="2"/><rigidBody type="static"/></object3D></composition></scene>\n'
 
 CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="20" height="20" segments="40" y="2"><crater id="pit" source="rock" targetMaterial="softRock"/><rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>\n'
@@ -135,6 +141,13 @@ CASES = [
     ("r48-to", ["R48-to"], lambda _: CONNECTOR.replace('<shape id="b" shape="rect" x="44" y="40" width="10" height="10" fill="#0000FF"/>', '<repeat id="r" count="1"><shape id="b" shape="rect" x="44" y="40" width="10" height="10" fill="#0000FF"/></repeat>')),
     ("r49", ["R49"], lambda _: CONNECTOR.replace('</composition>', '<shape id="p" shape="rect" width="2" height="2" parent="c"/></composition>')),
     ("r50", ["R50"], lambda _: CONNECTOR.replace('label="note"', 'label="a"')),
+    ("v9", ["V9"], lambda _: PDF.replace('version="1.2"', 'version="1.1"')),
+    ("c66", ["C66"], lambda _: PDF.replace(f' sha256="{"0" * 64}"', '')),
+    ("c67", ["C67", "R52"], lambda _: PDF.replace(' regionLayer="page"', '')),
+    ("c68", ["C68"], lambda _: PDF.replace(' regionLayer="page"', ' regionLayer="page" parent="page"')),
+    ("c69", ["C69"], lambda _: PDF.replace('</composition>', '<shape id="plain" shape="rect" width="4"/></composition>')),
+    ("r51", ["R51", "R52"], lambda _: PDF.replace('region="w"', 'region="page"')),
+    ("r52", ["R52"], lambda _: PDF.replace('<layer id="page" asset="paper" x="8" y="8"/>', '<layer id="page" asset="paper" x="8" y="8"/><layer id="other" asset="paper"/>').replace('regionLayer="page"', 'regionLayer="mark"')),
     ("v5-joint", ["V5"], lambda _: JOINT.replace('version="1.2"', 'version="1.1"')),
     ("v5-morph", ["V5"], lambda _: MORPH.replace('version="1.2"', 'version="1.1"')),
     ("pen1", ["PEN1"], lambda _: STROKE_TEXT.replace(' strokeFont="hand"', '')),
@@ -434,6 +447,7 @@ VALID = {
     "repeat-points-neutral-steps": POINTS.replace('<repeat id="r"', '<repeat id="r" from="0" step="1"'),
     "connector": CONNECTOR,
     "connector-points": CONNECTOR.replace(' to="b"', ' toX="50%" toY="100%"').replace('route="orthogonal"', 'route="curved" bend="-20"').replace(' label="note"', ''),
+    "pdf-region": PDF,
     "stroke-text": STROKE_TEXT,
     "morph": MORPH,
     "joint": JOINT,
