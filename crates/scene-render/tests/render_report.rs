@@ -123,22 +123,15 @@ fn check_shape(r: &Value) {
     let key = |f: &Value| {
         let t = f.get("time").map(|t| t[0].as_f64().unwrap());
         (
-            t.is_some(),
+            u8::from(t.is_some()),
             t.unwrap_or(0.0),
             f["code"].as_str().unwrap().to_string(),
             f["path"].as_str().unwrap().to_string(),
         )
     };
     for w in findings.windows(2) {
-        let (a, b) = (key(&w[0]), key(&w[1]));
-        assert!(
-            a.0 < b.0
-                || (a.0 == b.0
-                    && (a.1 < b.1 || (a.1 == b.1 && (a.2.clone(), a.3.clone()) <= (b.2.clone(), b.3.clone())))),
-            "findings out of order: {} then {}",
-            w[0],
-            w[1]
-        );
+        let order = key(&w[0]).partial_cmp(&key(&w[1]));
+        assert!(order != Some(std::cmp::Ordering::Greater), "findings out of order: {} then {}", w[0], w[1]);
     }
 }
 
