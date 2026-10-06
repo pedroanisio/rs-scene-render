@@ -11,6 +11,7 @@ pub mod audio;
 pub mod captions;
 pub mod ceiling;
 pub mod destinations;
+pub mod legibility;
 pub mod overlay;
 pub mod pipeline;
 pub mod render_report;

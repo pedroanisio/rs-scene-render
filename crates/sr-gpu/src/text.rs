@@ -1145,7 +1145,8 @@ pub fn track_cues(tr: &m::CaptionTrack, base: &FsPath) -> Result<Vec<Cue>, Strin
     Ok(cues)
 }
 
-fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
+/// Loads a caption track: its cues, and its pages as the burned layout breaks them.
+pub fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
     let at = Attrs { e: tr, props: None };
     let cues = track_cues(tr, base)?;
     let pages = captions::paginate_with_line_breaks(

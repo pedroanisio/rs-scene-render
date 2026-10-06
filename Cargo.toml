@@ -31,6 +31,7 @@ bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "tiff", "bmp", "tga", "qoi", "pnm", "ico", "hdr", "exr", "dds", "ff"] }
 roxmltree = "0.20"
+unicode-normalization = "0.1"
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive", "rc"] }

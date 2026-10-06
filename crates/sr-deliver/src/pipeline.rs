@@ -955,6 +955,46 @@ fn run_delivery(
         if opts.report {
             report.findings.extend(text_fit_findings(&ev, &times));
         }
+        // SREP 19: reading speed, display time and text size, when accessibility/@legibilityCheck asks
+        if let Some(s) = crate::legibility::Settings::of(p) {
+            let mut found =
+                crate::legibility::text_findings(&ev, &s, &times, fps, frame, [size[0] as f64, size[1] as f64]);
+            let base_dir = p.base_dirs.first().cloned().unwrap_or_default();
+            let own: Vec<&m::CaptionTrack> = captions.tracks.iter().collect();
+            let tracks: Vec<&m::CaptionTrack> = match &segments {
+                // mapped composition tracks and the output's own, in output time
+                Some(_) => own,
+                None => p.scene.captions.iter().flat_map(|c| c.caption_tracks.iter()).chain(own).collect(),
+            };
+            let mut shown = Vec::new();
+            for tr in tracks {
+                let t = sr_gpu::text::load_track(tr, &base_dir).map_err(DeliverError::Invalid)?;
+                let items = if t.burn {
+                    t.pages
+                        .iter()
+                        .map(|pg| crate::legibility::Shown { start: pg.start, end: pg.end, text: pg.text() })
+                        .collect()
+                } else {
+                    t.cues
+                        .iter()
+                        .map(|c| crate::legibility::Shown { start: c.start, end: c.end, text: c.text.clone() })
+                        .collect()
+                };
+                shown.push(crate::legibility::ShownTrack {
+                    id: tr.id.clone(),
+                    reading_speed: crate::legibility::ShownTrack::reading_speed_of(tr),
+                    shown: items,
+                });
+            }
+            found.extend(crate::legibility::caption_findings(&s, &shown, [start, end]));
+            for f in found {
+                if f.severity == sr_model::Severity::Error && report.accessibility_error.is_none() {
+                    report.accessibility_error = Some(format!("legibilityCheck: {}", f.message));
+                }
+                report.accessibility.push(format!("legibilityCheck: {}", f.message));
+                report.findings.push(f);
+            }
+        }
         let n = times.len() as u64;
         let mut video = Video {
             ev: &ev,

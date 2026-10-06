@@ -10,8 +10,9 @@
 //! reports the first as information and the second as a warning, so that only lost content fails `--strict`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-use sr_eval::{Evaluator, Value};
+use sr_eval::{Evaluator, FrameGraph, FrameNode, Program, Value};
 use sr_model::element::Element as _;
 use sr_model::model::AssetsChild;
 use sr_model::Loc;
@@ -101,6 +102,27 @@ pub fn outside_frame(lay: &sr_text::Layout, n: &sr_eval::FrameNode, box_size: [f
     }
 }
 
+/// The layout node `n` of graph `g` is drawn with, when it is a layer of a text asset: the asset's lines at the size
+/// drawn (after `autoFit`), as the renderer lays them out.
+pub fn layout_of(tc: &mut TextCache, p: &Program, g: &FrameGraph, n: &FrameNode) -> Option<Arc<sr_text::Layout>> {
+    let key = n.asset.as_deref()?;
+    let Some((AssetsChild::Text(asset), doc)) = asset_of(p, key) else { return None };
+    let tokens = HashMap::new();
+    let mut paint = |_: &Value, _: [f64; 4]| -> Option<sr_vector::Paint> { None };
+    let mut unsupported = Vec::new();
+    let mut cx = Cx {
+        p,
+        g,
+        n,
+        base: p.base_dirs.get(doc).cloned().unwrap_or_default(),
+        tol: 0.25,
+        paint: &mut paint,
+        tokens: &tokens,
+        unsupported: &mut unsupported,
+    };
+    Some(text_layout(tc, &mut cx, key, asset))
+}
+
 /// Audits the text layers drawn at `times` (composition seconds, ascending).
 pub fn check(ev: &Evaluator, times: &[f64]) -> Outcome {
     let p = ev.program();
@@ -114,7 +136,6 @@ pub fn check(ev: &Evaluator, times: &[f64]) -> Outcome {
         (s.times, note)
     };
     let mut tc = TextCache::default();
-    let tokens = HashMap::new();
     let mut found: BTreeMap<String, (usize, TextFit)> = BTreeMap::new();
     for &t in &times {
         let g = ev.evaluate_layout(t);
@@ -122,21 +143,7 @@ pub fn check(ev: &Evaluator, times: &[f64]) -> Outcome {
             if !n.draw || n.world_opacity <= 0.0 {
                 continue;
             }
-            let Some(key) = n.asset.as_deref() else { continue };
-            let Some((AssetsChild::Text(asset), doc)) = asset_of(p, key) else { continue };
-            let mut paint = |_: &Value, _: [f64; 4]| -> Option<sr_vector::Paint> { None };
-            let mut unsupported = Vec::new();
-            let mut cx = Cx {
-                p,
-                g: &g,
-                n,
-                base: p.base_dirs.get(doc).cloned().unwrap_or_default(),
-                tol: 0.25,
-                paint: &mut paint,
-                tokens: &tokens,
-                unsupported: &mut unsupported,
-            };
-            let lay = text_layout(&mut tc, &mut cx, key, asset);
+            let Some(lay) = layout_of(&mut tc, p, &g, n) else { continue };
             if lay.overflow <= 0.0 && lay.dropped == 0 {
                 continue;
             }

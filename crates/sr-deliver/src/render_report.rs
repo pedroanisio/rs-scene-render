@@ -36,6 +36,12 @@ pub mod code {
     pub const ACC_CAPTIONS: &str = "ACC-CAPTIONS";
     /// The text contrast check (`contrastCheck`).
     pub const LEG_CONTRAST: &str = "LEG-CONTRAST";
+    /// Reading speed above the limit (SREP 19).
+    pub const LEG_SPEED: &str = "LEG-SPEED";
+    /// Shown for less than `minDisplayTime` (SREP 19).
+    pub const LEG_SHORT: &str = "LEG-SHORT";
+    /// Drawn smaller than `minTextSize` (SREP 19).
+    pub const LEG_SIZE: &str = "LEG-SIZE";
     /// The safe-area check (`safeArea/@enforce`).
     pub const SAFE_AREA: &str = "SAFE-AREA";
     /// Prefix of an inert-attribute finding: `INERT-I2`.
