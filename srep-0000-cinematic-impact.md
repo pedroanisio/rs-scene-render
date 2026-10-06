@@ -2498,6 +2498,95 @@ the default threads and 0 of 80 with one llvmpipe thread. The tests measure imag
 values, not time; the difference between the two commits is not significant, and the
 conclusion holds for these two commits only.
 
+### Schwarzschild black hole (`blackHole`, `accretionDisk`, `camera@geodesics`)
+
+A scene with a non-rotating black hole in vacuum, a thin disk of gas around it and a camera that follows the paths of
+light through its spacetime. Version 1.3. This version draws the hole, the disk and the sky and nothing else.
+
+**Units.** G = c = 1 and lengths are scene units, so the mass `M` (`blackHole@mass`) is a length and the horizon is the
+sphere `r_s = 2M` in the Schwarzschild radial coordinate `r`, centred on the hole's `x y z`. Times are lengths: a
+second of the scene is `timeScale` units of that time for the disk (`accretionDisk@timeScale`, default 1).
+
+**Elements.** `blackHole` has `mass` and a place. `accretionDisk` names its hole (`blackHole`), has `innerRadius` (6M when
+absent), `outerRadius`, `temperatureScale` (kelvin), a `seed`, an `angularPattern` (`none`, `clumps`, `spiral`), its
+`contrast`, `intensity` and `timeScale`, and the tilt of its axis by `rotationX`, `rotationY` and `rotation` (about z)
+in degrees, composed as an object3D composes them, Rz Ry Rx. It has no place of its own: it is centred on the hole.
+`camera@geodesics` (default false) makes the camera trace null geodesics; its position is the position of a static
+observer at the radius `d` = its distance to the hole, which is outside the photon sphere. `fov`, `roll`, `target`, `yaw`
+and `pitch` are those of any camera, and `pathSamples` is the number of antialiasing samples of a pixel.
+
+**Rules.** BH1: the version is 1.3. BH2: one `blackHole` per scene. BH3: an `accretionDisk` names a `blackHole`. BH4: the
+inner radius is at least 6M, the radius of the innermost stable circular orbit, and the outer one is beyond the inner.
+BH5: a camera with `geodesics="true"` needs a hole. BH6: with it the scene has no `object3D`, `particles3D`,
+`particleEmitter`, `ocean`, `fluid`, `flock`, `slime`, `erosion`, `pyro` or `medium`: it is an error and not a silence
+(2D layers, text, shapes, effects and adjustments are allowed: the image goes through the 2D chain). BH7: the camera is
+farther than 3M from the hole (only its authored `x y z` is checked). BH8: one such camera per scene. W03: a hole or a disk
+and no geodesic camera: they are not drawn. W04: `denoise="true"` on a geodesic camera, which does not denoise. W05:
+lights in the scene, which are not used. The corpus holds one document for each rule and warning (tests/corpus,
+`bh1-version` to `bh8-two-cameras`, `w03-no-lens` to `w05-lights`).
+
+**Null geodesics.** The metric is `ds^2 = -(1 - 2M/r) dt^2 + dr^2 / (1 - 2M/r) + r^2 dOmega^2`. A light ray moves in a
+plane through the hole. With `u = 1/r`, `phi` the angle in that plane and `b = L/E` the impact parameter of the ray (its
+angular momentum over its energy), Binet's equation for light is `u'' + u = 3 M u^2` and its first integral is
+`(du/dphi)^2 = 1/b^2 - u^2 + 2 M u^3`. The photon sphere is `r = 3M` (`u = 1/(3M)`), and the critical impact parameter
+`b_c = sqrt(27) M = 3 sqrt(3) M`: a ray with `b < b_c` falls into the hole, one with `b > b_c` is deflected and escapes.
+The ray of a static observer at radius `d` that makes the angle `psi` with the direction to the hole has
+`b = d sin(psi) / sqrt(1 - 2M/d)`, so the shadow of the hole has the angular radius `psi_sh = asin(b_c sqrt(1 - 2M/d) / d)`
+(for `d` far from the hole, `b_c / d`). The total deflection of a ray that escapes is
+`alpha(b) = 2 integral from 0 to u_0 of du / sqrt(1/b^2 - u^2 + 2 M u^3) - pi`, `u_0` the smallest positive root of the
+radicand: `4M/b + (15 pi/4)(M/b)^2 + (128/3)(M/b)^3 + ...` for large `b`, and
+`-ln(b/b_c - 1) + ln(216 (7 - 4 sqrt(3))) - pi` as `b` approaches `b_c`.
+
+**The disk.** The gas is on circular geodesics in the plane through the hole perpendicular to the axis of the disk, which is
+(0, -1, 0), the scene's up, turned by the disk's rotations. A circular orbit of radius `r` is stable for `r >= 6M`, its
+angular velocity is `Omega = sqrt(M / r^3)` (about the axis, anticlockwise seen from the tip of the axis, times `timeScale`
+for the scene's time) and the time dilation of the gas relative to a static observer at infinity is
+`u^t = 1 / sqrt(1 - 3M/r)`. A photon that reaches the camera from a point of the disk carries `lambda = L_z / E`, its angular
+momentum about the axis over its energy, and the ratio of the energy the camera receives to the one the gas emits is
+`g = sqrt(1 - 3M/r) / (1 - Omega lambda)`, with `lambda = b (n . z)`, `n` the unit normal of the plane of the photon's orbit
+oriented by its motion from the gas to the camera and `z` the axis. For weak fields `g = 1 / (1 + v . d)` with `d` the
+direction of the camera ray going out from the camera and `v = Omega r (z x r^)`: the side that moves toward the camera has
+`g > 1` and is bluer and brighter. The renderer traces from the camera and so reverses the orientation of the path; the
+formula in terms of `lambda` is the one that holds. In Luminet's form (Luminet 1979, Astron. Astrophys. 75, 228, not read in preparing
+this text) `1 + z = (1 - 3M/r)^(-1/2) (1 + Omega b sin(theta_0) sin(alpha))` with `theta_0` the inclination of the
+observer against the axis and `alpha` the angle of the pixel, whose sign is that of `-lambda` there. The observed bolometric
+intensity is `g^4` times the emitted one, and the colour is a black body at `g T`, which already carries the `g^3` of
+the spectral intensity.
+
+The temperature of the gas is the profile of a thin disk with no torque at its inner edge,
+`T(r) = temperatureScale * f(r) / f(49/36 r_in)`, `f(r) = (r_in/r)^(3/4) (1 - (r_in/r)^(1/2))^(1/4)` (Shakura and Sunyaev 1973,
+Astron. Astrophys. 24, 337, not read either, in its Newtonian form with the inner edge at `r_in`, `f(49/36 r_in) = 0.48787`): `temperatureScale` is the
+temperature at the maximum, `r = 49/36 r_in`, before the shift of light. The relativistic factors of Novikov and Thorne are not
+applied. The disk is opaque: a ray ends at the first point of the disk it meets, after at most the number of crossings the
+renderer follows. The azimuthal pattern is a seeded function of the angle and of `Omega(r) * time`, so that it turns
+differentially; `none` gives a smooth disk. The sky at infinity is what the rays that escape see.
+
+**Acceptance.** A renderer of this scene is accepted by the physical quantities below, not by a reference image. The numbers
+were computed on 2026-10-06 with a Gauss-Legendre quadrature of 400 points of the integral above, with `M = 1`; they were not
+measured on the renderer.
+- The shadow has the radius `b_c = 5.19615 M` for a distant observer: `psi_sh` is 0.48336 rad at `d = 10 M`, 0.10200 rad
+  at `50 M` and 0.0051910 rad at `1000 M`.
+- The deflection of a ray is `0.590396` rad at `b = 10 M`, `0.236136` at `20 M`, `0.0850835` at `50 M`, `0.0412225` at
+  `100 M` and `0.00401182` at `1000 M`; the weak-field series with the three terms above agrees to 4.4e-5 at `b = 100 M` and
+  to 4.3e-8 at `1000 M`, and the strong-deflection form to 4e-6 at `b = b_c (1 + 1e-6)`, where it is 13.4153 rad.
+- The ratio of energies is `g = sqrt(1 - 3M/r)`, `0.70711` at `r = 6M`, for a ray with `lambda = 0` (a disk seen face on) and
+  `g -> 1` for large `r`; a disk seen at an angle is brighter and bluer on the side that approaches, where `lambda` has
+  the sign that makes `1 - Omega lambda` smaller than 1.
+- The photon ring, the light that goes round the hole before it reaches the camera, is a family of images whose size
+  approaches `b_c` and whose width falls by the factor `e^pi` between one and the next.
+A renderer that does not meet them for the cases it can reach, within the error of its integration, is wrong; the
+integrator step and the number of steps are the renderer's and are written in its own section.
+
+**Limits.** The hole is Schwarzschild: no rotation, no charge, no frame dragging. The disk is analytic, geometrically thin,
+opaque and in steady circular motion: it has no vertical structure, no self-irradiation, no radial flow and no
+relativistic emissivity profile beyond the one above, and it is not made of particles. The scene has no other 3D object
+and no medium (BH6), so there is no light from or through anything but the disk. One hole and one geodesic camera. The
+observer is static at a finite radius `d`; a camera that moves or an observer in free fall is not modelled. None of the
+formulas of this section was checked against the papers it cites: they are derived in the text, the Schwarzschild
+quantities (Binet's equation, `b_c`, the weak-field deflection `4M/b`, `g`) are standard, and the numerical figures above
+are the check of the integrals. The inner edge `r_in = 6M` and the temperature of the disk are the engine's choices and not a
+fit to any observation.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
@@ -2970,6 +3059,36 @@ existing definitions.
 | `textureSize` | xs:positiveInteger; minInclusive=64, maxInclusive=8192 | Default `2048` |
 | `resolution` | xs:positiveInteger; minInclusive=8, maxInclusive=256 | Default `64` |
 
+### `blackHoleType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional |
+| `mass` | positiveDecimal | Required; scene units with G = c = 1 |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+
+### `accretionDiskType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional |
+| `blackHole` | xs:IDREF | Required (BH3) |
+| `innerRadius` | positiveDecimal | Optional; absent is 6 `mass` (BH4) |
+| `outerRadius` | positiveDecimal | Required (BH4) |
+| `temperatureScale` | positiveDecimal | Required; kelvin, at the peak of the profile |
+| `seed` | xs:unsignedLong | Default `0` |
+| `angularPattern` | xs:string; enumeration=none, enumeration=clumps, enumeration=spiral | Default `clumps` |
+| `contrast` | unitDecimal | Default `0.5` |
+| `intensity` | nonNegativeDecimal | Default `1` |
+| `timeScale` | positiveDecimal | Default `1` |
+| `rotationX` | xs:double | Default `0` |
+| `rotationY` | xs:double | Default `0` |
+| `rotation` | xs:double | Default `0`; about z |
+
 ### `cameraType` cinematic bindings
 
 The following attributes connect the new elements and terrain or path-tracing
@@ -2982,6 +3101,7 @@ existing definitions.
 | `pathSamples` | xs:positiveInteger; maxInclusive=65536 | Default `64` |
 | `maxBounces` | xs:positiveInteger; maxInclusive=64 | Default `4` |
 | `denoise` | xs:boolean | Default `true` |
+| `geodesics` | xs:boolean | Default `false`; true traces null geodesics of the scene's `blackHole` (BH5 to BH8) |
 
 
 ## Conformance and acceptance
