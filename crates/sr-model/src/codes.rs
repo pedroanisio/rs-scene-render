@@ -39,6 +39,17 @@ const FIXED: &[(&str, &str, &str)] = &[
         "rules",
         "A pyro source or impulse in a volume with open faces is less than 12 cells from one of them, where its position is in the document and the volume has room to put it further in; the open face changes the flow of the cloud. The number comes from one plume and one face; the side faces were not measured.",
     ),
+    (
+        "W03",
+        "rules",
+        "A blackHole or an accretionDisk is in a scene where no camera has geodesics=\"true\": nothing draws them, and the lens is not rendered.",
+    ),
+    (
+        "W04",
+        "rules",
+        "A camera with geodesics=\"true\" has denoise=\"true\": it does not denoise; pathSamples are antialiasing samples.",
+    ),
+    ("W05", "rules", "A camera with geodesics=\"true\" is in a scene with lights: they are not used."),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
     ("A03", "assets", "A remote input (http, https, s3, …) could not be verified offline."),

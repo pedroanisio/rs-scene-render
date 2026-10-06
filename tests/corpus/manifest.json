@@ -15,6 +15,39 @@
     "bedresponse-value.scene.xml": [
       "S06"
     ],
+    "bh1-version.scene.xml": [
+      "BH1"
+    ],
+    "bh2-two-holes.scene.xml": [
+      "BH2"
+    ],
+    "bh3-disk-target.scene.xml": [
+      "BH3"
+    ],
+    "bh4-inside-isco.scene.xml": [
+      "BH4"
+    ],
+    "bh4-outer-not-beyond-inner.scene.xml": [
+      "BH4"
+    ],
+    "bh5-geodesics-without-hole.scene.xml": [
+      "BH5"
+    ],
+    "bh6-fluid.scene.xml": [
+      "BH6"
+    ],
+    "bh6-other-object.scene.xml": [
+      "BH6"
+    ],
+    "bh6-particles.scene.xml": [
+      "BH6"
+    ],
+    "bh7-inside-photon-sphere.scene.xml": [
+      "BH7"
+    ],
+    "bh8-two-cameras.scene.xml": [
+      "BH8"
+    ],
     "c1.scene.xml": [
       "C1"
     ],
@@ -798,6 +831,9 @@
   "valid": {
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
+    "black-hole-disk-at-isco.scene.xml": [],
+    "black-hole-without-disk.scene.xml": [],
+    "black-hole.scene.xml": [],
     "crater-capture.scene.xml": [],
     "crater-impact-influence-large.scene.xml": [],
     "crater-impact-influence-small.scene.xml": [],
@@ -851,6 +887,15 @@
     ],
     "w02-open-face.scene.xml": [
       "W02"
+    ],
+    "w03-no-lens.scene.xml": [
+      "W03"
+    ],
+    "w04-denoise.scene.xml": [
+      "W04"
+    ],
+    "w05-lights.scene.xml": [
+      "W05"
     ]
   }
 }

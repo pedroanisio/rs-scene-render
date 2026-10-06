@@ -60,6 +60,34 @@
       <sch:assert id="CRT5" test="not(../rigidBody[not(@type='static' or @type='kinematic') or (@shape and not(@shape='auto' or @shape='trimesh'))])">crater rigid bodies require static/kinematic type with auto or trimesh collision geometry.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="cinematic-black-hole-version">
+    <sch:rule context="blackHole|accretionDisk|camera[@geodesics]">
+      <sch:assert id="BH1" test="/scene/@version='1.3'">black holes require version="1.3".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="cinematic-black-hole">
+    <sch:rule context="blackHole">
+      <sch:assert id="BH2" test="count(/scene//blackHole)=1">version 1.3 has one blackHole per scene.</sch:assert>
+    </sch:rule>
+    <sch:rule context="accretionDisk">
+      <sch:let name="mass" value="number(substring(normalize-space(/scene//blackHole[@id=current()/@blackHole]/@mass),1+number(starts-with(normalize-space(/scene//blackHole[@id=current()/@blackHole]/@mass),'+'))))"/>
+      <sch:let name="inner" value="number(substring(normalize-space(@innerRadius),1+number(starts-with(normalize-space(@innerRadius),'+'))))"/>
+      <sch:let name="outer" value="number(substring(normalize-space(@outerRadius),1+number(starts-with(normalize-space(@outerRadius),'+'))))"/>
+      <sch:assert id="BH3" test="/scene//blackHole[@id=current()/@blackHole]">an accretionDisk must name a blackHole.</sch:assert>
+      <sch:assert id="BH4" test="not(/scene//blackHole[@id=current()/@blackHole]) or ((not(@innerRadius) or $inner &gt;= 6*$mass) and ((@innerRadius and $outer &gt; $inner) or (not(@innerRadius) and $outer &gt; 6*$mass)))">the inner radius of an accretionDisk is at least 6 times the mass of its blackHole (the innermost stable circular orbit), and the outer radius is beyond the inner one.</sch:assert>
+    </sch:rule>
+    <sch:rule context="camera[@geodesics]">
+      <sch:let name="hole" value="/scene//blackHole[1]"/>
+      <sch:let name="mass" value="number(substring(normalize-space($hole/@mass),1+number(starts-with(normalize-space($hole/@mass),'+'))))"/>
+      <sch:let name="dx" value="number(concat(substring(normalize-space(./@x),1+number(starts-with(normalize-space(./@x),'+'))),substring('0',1,1*number(not(./@x))))) - number(concat(substring(normalize-space($hole/@x),1+number(starts-with(normalize-space($hole/@x),'+'))),substring('0',1,1*number(not($hole/@x)))))"/>
+      <sch:let name="dy" value="number(concat(substring(normalize-space(./@y),1+number(starts-with(normalize-space(./@y),'+'))),substring('0',1,1*number(not(./@y))))) - number(concat(substring(normalize-space($hole/@y),1+number(starts-with(normalize-space($hole/@y),'+'))),substring('0',1,1*number(not($hole/@y)))))"/>
+      <sch:let name="dz" value="number(concat(substring(normalize-space(./@z),1+number(starts-with(normalize-space(./@z),'+'))),substring('0',1,1*number(not(./@z))))) - number(concat(substring(normalize-space($hole/@z),1+number(starts-with(normalize-space($hole/@z),'+'))),substring('0',1,1*number(not($hole/@z)))))"/>
+      <sch:assert id="BH5" test="@geodesics!='true' or /scene//blackHole">a camera with geodesics="true" needs a blackHole.</sch:assert>
+      <sch:assert id="BH6" test="@geodesics!='true' or not(/scene//object3D or /scene//particles3D or /scene//particleEmitter or /scene//ocean or /scene//fluid or /scene//flock or /scene//slime or /scene//erosion or /scene//pyro or /scene//medium)">a camera with geodesics="true" renders only the black hole, its disk and the 2D layers: no object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may be in the scene.</sch:assert>
+      <sch:assert id="BH7" test="@geodesics!='true' or not($hole) or $dx*$dx + $dy*$dy + $dz*$dz &gt; 9*$mass*$mass">a camera with geodesics="true" must be farther than 3 times the mass of the blackHole from it, the photon sphere.</sch:assert>
+      <sch:assert id="BH8" test="@geodesics!='true' or count(/scene//camera[@geodesics='true']) &lt;= 1">a scene has at most one camera with geodesics="true".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
   <sch:pattern id="cinematic-mesh-sequence">
     <sch:rule context="assets/meshSequence">
       <sch:let name="first" value="number(substring(normalize-space(@first),1+number(starts-with(normalize-space(@first),'+'))))"/>
