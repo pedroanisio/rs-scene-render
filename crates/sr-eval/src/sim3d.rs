@@ -894,6 +894,13 @@ pub(crate) struct Driver<'a, 'b> {
     pub(crate) group: Option<&'a crate::group::Group>,
 }
 
+impl Driver<'_, '_> {
+    /// The composition's time when the world's is `t`: the world runs on the time of its group.
+    fn composition(&self, t: f64) -> f64 {
+        self.group.map_or(t, |g| g.clock().composition_time(t))
+    }
+}
+
 impl Driver3 for Driver<'_, '_> {
     fn collider(
         &mut self,
@@ -902,9 +909,10 @@ impl Driver3 for Driver<'_, '_> {
         revision: Option<u64>,
     ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
         let body = &self.bodies[which];
+        let composition = self.composition(t);
         if let Some(budget) = body.sequence_budget {
             use std::hash::{Hash, Hasher};
-            let graph = self.graphs.at(t);
+            let graph = self.graphs.at(composition);
             let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
             let (sources, _) = crate::fracture::source::load(self.p, &graph.nodes[i], body.scale, budget)?;
             let mut vertices = Vec::new();
@@ -933,7 +941,7 @@ impl Driver3 for Driver<'_, '_> {
             }));
         }
         let Some(i) = ({
-            let graph = self.graphs.at(t);
+            let graph = self.graphs.at(composition);
             index_of(&graph, &body.id).map(|i| (graph, i))
         }) else {
             return Ok(None);
@@ -950,11 +958,12 @@ impl Driver3 for Driver<'_, '_> {
         impact: Option<&sr_sim::physics3d::Impact3>,
     ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
         let body = &self.bodies[which];
+        let composition = self.composition(t);
         let Some(source) = &body.crater else { return self.collider(t, which, revision) };
         // a crater from an impact has nothing to do until the impact has happened
         let Some(impact) = impact else { return Ok(None) };
         let grown = crate::crater::impact_crater(source, impact, t - impact.time)?;
-        let graph = self.graphs.at(t);
+        let graph = self.graphs.at(composition);
         let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
         let element = children(&*graph.nodes[i].elem)
             .into_iter()
@@ -975,9 +984,10 @@ impl Driver3 for Driver<'_, '_> {
         if !state.enabled {
             return Ok(None);
         }
+        let composition = group.clock().composition_time(t);
         let graphs = &mut *self.graphs;
         group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean, plane: Option<&crate::group::Plane>| {
-            water_frame(&graphs.at(t), ocean, plane)
+            water_frame(&graphs.at(composition), ocean, plane)
         })
     }
 
@@ -1013,11 +1023,12 @@ impl Driver3 for Driver<'_, '_> {
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {
-        enabled(&self.bodies[which], t)
+        enabled(&self.bodies[which], self.composition(t))
     }
 
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
-        let g = self.graphs.at(t);
+        let composition = self.composition(t);
+        let g = self.graphs.at(composition);
         which
             .iter()
             .map(|&k| index_of(&g, &self.bodies[k].id).map(|i| decompose(&world3(&g, i, 0)).0).unwrap_or_default())

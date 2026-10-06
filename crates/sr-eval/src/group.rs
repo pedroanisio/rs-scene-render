@@ -22,8 +22,13 @@
 //! to the outcomes those readers can ask for. The group therefore simulates a little beyond the
 //! instant asked for.
 //!
-//! Every member of a group must run on the composition clock: the ocean's local time is the
-//! composition time less its start, with no remapping, because the exchange is indexed by it.
+//! Every member of a group must run on one clock, and it may be any clock that stretches time the same way
+//! everywhere (a group's `timeScale` and `timeOffset`, nested or not), the composition's own included: the
+//! ocean's local time is the group's time less its start, because the exchange is indexed by it. The rigid world
+//! is one world, so every body of it, the ocean and whatever reads the bodies take part in that one clock, and
+//! the world runs on the group's time: a scene in a group of `timeScale` 0.5 at composition time `T` is the
+//! same scene, bit for bit, as the one without the group at `T / 2`. A member on another clock is an error that
+//! names it and the ocean whose clock it differs from.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +38,7 @@ use sr_sim::hydrostatics::{buoyant_load, halfway, place, submerged_mesh, submerg
 use sr_sim::physics3d::{BodyState, Load3};
 
 use crate::program::Program;
-use crate::sim::{num, text};
+use crate::sim::{num, text, uniform_clock, Uniform};
 
 /// What an ocean gave the bodies in it during one canonical step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -266,6 +271,20 @@ pub(crate) struct GroupOcean {
     coupling: Coupling,
 }
 
+/// The clock the rigid world runs on: that of the first ocean that carries bodies, or the composition's. Whether
+/// the document's members all run on it is for [`Group::detect`] to say.
+pub(crate) fn world_clock(p: &Program) -> Uniform {
+    p.nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| {
+            matches!(&*n.elem, sr_model::model::Node::Ocean(_))
+                && text(&*n.elem, "colliders").is_some_and(|c| !c.trim().is_empty())
+        })
+        .and_then(|(index, _)| uniform_clock(p, index as u32))
+        .unwrap_or(Uniform::COMPOSITION)
+}
+
 /// The rigid world and the oceans it exchanges with.
 #[derive(Clone)]
 pub(crate) struct Group {
@@ -276,11 +295,17 @@ pub(crate) struct Group {
     reach: f64,
     /// The rigid world's step, seconds.
     step: f64,
+    /// The clock of the ocean, the bodies and what reads them: the world's time is the time on it.
+    clock: Uniform,
 }
 
 impl std::fmt::Debug for Group {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Group").field("oceans", &self.oceans).field("reach", &self.reach).finish()
+        f.debug_struct("Group")
+            .field("oceans", &self.oceans)
+            .field("reach", &self.reach)
+            .field("clock", &self.clock)
+            .finish()
     }
 }
 
@@ -294,6 +319,7 @@ impl Group {
         injected: Option<Coupling>,
     ) -> Result<Option<Group>, String> {
         let mut oceans = Vec::new();
+        let mut clocks: Vec<(Arc<str>, Uniform)> = Vec::new();
         for (index, n) in p.nodes.iter().enumerate() {
             let sr_model::model::Node::Ocean(e) = &*n.elem else { continue };
             let slots: Vec<(usize, u32)> = text(e, "colliders")
@@ -320,10 +346,15 @@ impl Group {
                 )),
                 _ => continue,
             };
-            // the exchange is indexed by the ocean's own time: it must be the composition's
-            if !crate::sim::composition_clock(p, index as u32, n.start) {
-                return Err(format!("{}: an ocean that exchanges with rigid bodies needs the composition clock", n.id));
-            }
+            // the exchange is indexed by the ocean's own time: the group's, on a clock that stretches time uniformly
+            let Some(clock) = uniform_clock(p, index as u32) else {
+                return Err(format!(
+                    "{}: an ocean that exchanges with rigid bodies needs a clock that stretches time uniformly \
+                     (a group's timeScale and timeOffset), not a remap, a loop, a freeze or a clip's rate",
+                    n.id
+                ));
+            };
+            clocks.push((n.id.clone(), clock));
             let dt = num(e, "dt", 1.0 / 60.0);
             if !(dt.is_finite() && dt > 0.0) {
                 return Err(format!("{}: an ocean that exchanges with rigid bodies needs a positive dt", n.id));
@@ -344,15 +375,54 @@ impl Group {
         let listed = |colliders: Option<String>| {
             colliders.unwrap_or_default().split_whitespace().any(|id| bodies.iter().any(|b| &*b.id == id))
         };
+        // the oceans, the bodies of the world and everything that reads them run on one clock
+        let (first, clock) = clocks[0].clone();
+        let describe = |c: Uniform| format!("scale {} and offset {}", c.scale, c.offset);
+        let mismatch = |name: &str, other: Option<Uniform>, what: &str| {
+            format!(
+                "{name} and {first} must run on the same clock, since {what} (the clock of {first} has {}, that of {name} {})",
+                describe(clock),
+                other.map_or("no uniform clock".to_string(), describe)
+            )
+        };
+        for (id, other) in &clocks[1..] {
+            if *other != clock {
+                return Err(mismatch(id, Some(*other), "the water of both exchanges with one rigid world"));
+            }
+        }
+        for body in bodies {
+            let Some(index) = p.nodes.iter().position(|n| n.id == body.id) else { continue };
+            let other = uniform_clock(p, index as u32);
+            if other != Some(clock) {
+                return Err(mismatch(&body.id, other, "the rigid world is one and runs on the time of the group"));
+            }
+        }
+        // the world begins at its start on that clock, and the scene cannot be asked about before the composition
+        let begins = clock.composition_time(p.scene.physics.as_ref().map_or(0.0, |ph| ph.start));
+        if begins < 0.0 {
+            return Err(format!(
+                "{first}: the rigid world it exchanges with starts at composition time {begins} on the clock of \
+                 its group, before the composition begins"
+            ));
+        }
         // everything else that reads the rigid bodies reads them at most one of its own steps ahead
         let mut reach = 0.0f64;
-        for n in &p.nodes {
+        for (index, n) in p.nodes.iter().enumerate() {
+            let mut reads = false;
             if matches!(&*n.elem, sr_model::model::Node::Particles3D(_)) && listed(text(&*n.elem, "colliders")) {
                 reach = reach.max(num(&*n.elem, "dt", 1.0 / 60.0));
+                reads = true;
             }
             for c in children(&*n.elem).into_iter().filter(|c| c.element_name() == "pyro") {
                 if listed(text(c, "colliders")) {
                     reach = reach.max(num(c, "dt", 1.0 / 60.0));
+                    reads = true;
+                }
+            }
+            if reads {
+                let other = uniform_clock(p, index as u32);
+                if other != Some(clock) {
+                    return Err(mismatch(&n.id, other, "what reads the rigid bodies reads the world on its own time"));
                 }
             }
         }
@@ -361,7 +431,13 @@ impl Group {
             oceans: oceans.into(),
             reach,
             step: rigid_step,
+            clock,
         }))
+    }
+
+    /// The clock the world, the ocean and what reads the bodies run on.
+    pub(crate) fn clock(&self) -> Uniform {
+        self.clock
     }
 
     /// Seconds past a frame that other solvers may read the rigid bodies.

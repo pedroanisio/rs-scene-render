@@ -812,4 +812,29 @@ mod tests {
         assert!(on("plain"));
         assert!(!on("scaled"));
     }
+
+    #[test]
+    fn the_clock_of_a_node_in_groups_is_found_as_one_stretch_of_time() {
+        use crate::sim::{uniform_clock, Uniform};
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition>
+            <ocean id="plain" width="8" depth="8" cellSize="1"/>
+            <group id="slow" timeScale="0.5"><ocean id="half" width="8" depth="8" cellSize="1"/>
+              <group id="late" timeOffset="1" timeScale="4"><ocean id="nested" width="8" depth="8" cellSize="1"/></group>
+            </group>
+            <group id="shifted" timeOffset="2"><ocean id="behind" width="8" depth="8" cellSize="1"/></group>
+        </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let p = crate::program::build(&doc, &Default::default()).unwrap();
+        let clock = |id: &str| uniform_clock(&p, p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32);
+        assert_eq!(clock("plain"), Some(Uniform::COMPOSITION));
+        assert_eq!(clock("half"), Some(Uniform { scale: 0.5, offset: 0.0 }));
+        // the inner group takes the half-speed time of the outer, one second behind it and four times faster
+        let nested = clock("nested").unwrap();
+        for t in [0.0, 1.0, 7.5] {
+            let outer = 0.5 * t;
+            assert_eq!(nested.group_time(t), (outer - 1.0) * 4.0, "t = {t}");
+        }
+        let behind = clock("behind").unwrap();
+        assert_eq!((behind.group_time(3.0), behind.composition_time(0.5)), (1.0, 2.5));
+    }
 }
