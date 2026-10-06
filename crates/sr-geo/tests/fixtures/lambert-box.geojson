@@ -1,0 +1,1 @@
+{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"name": "north box"}, "geometry": {"type": "Polygon", "coordinates": [[[-10, 40], [10, 40], [10, 60], [-10, 60], [-10, 40]]]}}]}

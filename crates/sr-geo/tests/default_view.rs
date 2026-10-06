@@ -6,8 +6,11 @@
 use sr_geo::data::Geometry;
 use sr_geo::view::{Kind, Map, View};
 
+/// The 20 x 20 degree box at 40-60 N, read as a document reads it (rings are wound the way the loader expects).
 fn box_20() -> Geometry {
-    Geometry::Polygons(vec![vec![vec![[-10.0, 40.0], [10.0, 40.0], [10.0, 60.0], [-10.0, 60.0], [-10.0, 40.0]]]])
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lambert-box.geojson");
+    let features = sr_geo::data::load(&path, None, None).expect("the fixture loads");
+    features[0].geometry.clone()
 }
 
 /// The pixel size of a 20 x 20 degree box at 40-60 N seen through the default view.
