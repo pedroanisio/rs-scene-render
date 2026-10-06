@@ -130,11 +130,19 @@ pub(crate) struct BodyHull {
     /// Kilograms.
     pub(crate) mass: f64,
     shape: sr_sim::physics3d::Shape3,
+    /// Whether forces move it: the water loads only a body that they do.
+    dynamic: bool,
 }
 
 impl BodyHull {
     pub(crate) fn new(id: Arc<str>, mass: f64, shape: &sr_sim::physics3d::Shape3) -> BodyHull {
-        BodyHull { id, mass, shape: shape.clone() }
+        BodyHull { id, mass, shape: shape.clone(), dynamic: true }
+    }
+
+    /// A body that the water does not load: static, or moved by the scene and not by forces.
+    pub(crate) fn fixed(mut self) -> BodyHull {
+        self.dynamic = false;
+        self
     }
 }
 
@@ -185,6 +193,10 @@ impl Buoyant {
         let mut hulls = Vec::new();
         for &k in listed {
             let body = &bodies[k];
+            // the water loads what forces move: a static seabed has no hull to float, whatever its shape
+            if !body.dynamic {
+                continue;
+            }
             let hull = match &body.shape {
                 sr_sim::physics3d::Shape3::Sphere(r) => Hull::Sphere(*r),
                 other => {
@@ -631,6 +643,26 @@ mod tests {
         crate::sim::apply_physics(&ev.program, rt.physics.as_mut().unwrap(), &mut g, &mut graphs, &fields, t);
         rt.fields = Some(fields);
         g.problems[before..].to_vec()
+    }
+
+    #[test]
+    fn only_a_body_that_moves_gets_a_hull_so_a_static_collider_cannot_fail_the_ocean() {
+        // a static seabed of a shape that has no hull to float (a convex hull) lists beside a ball
+        let seabed = BodyHull::new(
+            "seabed".into(),
+            0.0,
+            &sr_sim::physics3d::Shape3::Convex(vec![
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, -1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .fixed();
+        let ball = BodyHull::new("ball".into(), 500.0, &sr_sim::physics3d::Shape3::Sphere(1.0));
+        let water = Water { density: 1000.0, gravity: 9.81, drag: 1.0, pixels_per_meter: 1.0 };
+        let buoyant = Buoyant::new(&[seabed, ball], &[0, 1], water, 0.01).expect("the seabed is not floated");
+        assert_eq!(buoyant.hulls.len(), 1, "a hull for the ball only");
     }
 
     #[test]
