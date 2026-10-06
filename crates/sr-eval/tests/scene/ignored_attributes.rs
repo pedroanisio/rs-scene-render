@@ -24,6 +24,8 @@ fn selective_color_does_not_read_channel() {
     let node = r#"<shape id="s" shape="rect" width="8" height="8" effects="sc"/>"#;
     let w = warnings(node, &fx(r#"hue="30" channel="red""#));
     assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("channel")), "{w:?}");
+    // once (SREP 34 rule I10), not once for the effect type and once for the effect's own reading
+    assert_eq!(w.iter().filter(|(c, _)| c == "E19").count(), 1, "{w:?}");
     assert!(warnings(node, &fx(r#"hue="30""#)).is_empty());
 }
 

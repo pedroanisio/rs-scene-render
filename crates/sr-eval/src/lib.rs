@@ -33,6 +33,7 @@ pub mod mesh_sequence;
 pub mod ocean;
 pub mod particles3d;
 pub mod path;
+pub mod pending;
 mod physcache;
 pub mod program;
 pub mod pyro;
