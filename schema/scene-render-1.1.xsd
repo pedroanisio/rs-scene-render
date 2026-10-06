@@ -450,6 +450,9 @@
     <xs:attribute name="autoOrient" type="xs:boolean" default="false"/>
     <xs:attribute name="orientOffset" type="xs:double" default="0"/>
     <xs:attribute name="constantSpeed" type="xs:boolean" default="true"/>
+    <xs:attribute name="additive" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>true: the path is an offset. The node's position is its own x and y (keys, link, expression) plus the path's point at the progress minus the path's first point, so the node starts where it would without the path. false: the path's point is the position.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="linkType">
     <xs:annotation><xs:documentation>

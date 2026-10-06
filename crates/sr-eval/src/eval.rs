@@ -856,8 +856,15 @@ impl<'p> Frame<'p> {
                 }
             };
             let (pt, ang) = m.path.sample(prog, m.constant_speed);
-            x = pt[0];
-            y = pt[1];
+            if m.additive {
+                // an offset: how far the path has gone from its first point
+                let start = m.path.sample(0.0, m.constant_speed).0;
+                x += pt[0] - start[0];
+                y += pt[1] - start[1];
+            } else {
+                x = pt[0];
+                y = pt[1];
+            }
             if m.auto_orient {
                 rot += ang + m.orient_offset;
             }

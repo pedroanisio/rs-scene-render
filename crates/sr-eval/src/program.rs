@@ -208,6 +208,8 @@ pub struct Motion {
     pub orient_offset: f64,
     /// Arc-length parameterisation.
     pub constant_speed: bool,
+    /// The path is an offset from the node's own position (`@additive`).
+    pub additive: bool,
     /// Slot of an animated `progress`, when present.
     pub progress: Option<u32>,
 }
@@ -2332,6 +2334,7 @@ impl Builder {
                         auto_orient: mp.auto_orient,
                         orient_offset: mp.orient_offset,
                         constant_speed: mp.constant_speed,
+                        additive: mp.additive,
                         progress,
                     });
                 }
