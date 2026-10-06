@@ -580,6 +580,8 @@ pub(crate) fn build(
     }
     let mut fractures = Vec::new();
     let mut events = Vec::new();
+    // the fractures that fire on an impact: the event, the body that hits and the threshold of the impulse (if given)
+    let mut by_contact: Vec<(usize, usize, Option<f64>)> = Vec::new();
     let real_count = bodies.len();
     for source in 0..real_count {
         let n = &g0.nodes[index_of(g0, &bodies[source].id).expect("source")];
@@ -588,10 +590,26 @@ pub(crate) fn build(
         else {
             continue;
         };
+        // the body that breaks it, if it breaks on an impact: another dynamic body of the world
+        let projectile = match text(config, "source") {
+            None => None,
+            Some(id) => {
+                let found = bodies.iter().take(real_count).position(|b| *b.id == *id && !b.fragment);
+                match found.filter(|&k| k != source && specs[k].kind == BodyKind::Dynamic) {
+                    Some(k) => Some(k),
+                    None => {
+                        failures.push(format!("{}: fracture source {id} must be another dynamic 3D rigidBody", n.id));
+                        continue;
+                    }
+                }
+            }
+        };
         let prepare = || -> Result<_, String> {
             let start = ph.map_or(0., |p| p.start);
             let step = ph.map_or(1. / 120., |p| p.fixed_step.get());
-            let at = num(config, "at", 0.).max(start);
+            // a fracture on an impact is released by the impact, and the partition is the one of the document: taken
+            // where the source first takes part
+            let at = if projectile.is_some() { start } else { num(config, "at", 0.).max(start) };
             let mut boundary = ((at - start) / step).ceil();
             let mut release = start + boundary * step;
             let mut found = false;
@@ -644,12 +662,19 @@ pub(crate) fn build(
             });
             indices.push(index);
         }
+        if let Some(projectile) = projectile {
+            by_contact.push((events.len(), projectile, config.min_impulse.map(|v| v.get())));
+        }
         events.push(sr_sim::physics3d::Fracture3 {
             source,
             at: num(config, "at", 0.).max(ph.map_or(0., |p| p.start)),
             radial_impulse: num(config, "radialImpulse", 0.),
             fragments,
-            contact: None,
+            // the watch is the one that is made for it below, once the world's others are known
+            contact: projectile.map(|_| sr_sim::physics3d::FractureContact {
+                watch: usize::MAX,
+                energy_fraction: num(config, "energyFraction", 0.3),
+            }),
         });
         fractures.push(FractureNode { source, indices, geometry });
     }
@@ -735,7 +760,7 @@ pub(crate) fn build(
     ];
     let pixels_per_meter = ph.map(|p| p.pixels_per_meter.get()).unwrap_or(100.0);
     let linked = link_craters(g0, &mut bodies, &specs, gravity, pixels_per_meter, step);
-    let (watches, links) = match linked {
+    let (mut watches, links) = match linked {
         Ok(found) => found,
         // an old cache cannot serve a crater from an impact, and says so itself
         Err(_) if matches!(plan, Plan3::Placeholder) => (Vec::new(), Vec::new()),
@@ -744,6 +769,17 @@ pub(crate) fn build(
             (Vec::new(), Vec::new())
         }
     };
+    // a fracture on an impact watches its projectile against its own body, after the craters' watches
+    for (event, projectile, threshold) in by_contact {
+        let owner = events[event].source;
+        let min_impulse = threshold.unwrap_or_else(|| {
+            crate::physcache::rest_threshold(specs[projectile].mass, gravity, pixels_per_meter, step)
+        });
+        if let Some(contact) = &mut events[event].contact {
+            contact.watch = watches.len();
+        }
+        watches.push(sr_sim::physics3d::ImpactWatch { source: projectile, owner, min_impulse });
+    }
     if matches!(plan, Plan3::Placeholder) {
         return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, hulls, watches, links, follow });
     }
