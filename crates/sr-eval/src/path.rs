@@ -4,14 +4,15 @@
 /// A 2D point.
 pub type P = [f64; 2];
 
+/// A segment of a motion path: arcs become cubics of at most 90° and quadratics cubics.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Seg {
+pub(crate) enum Seg {
     Line(P, P),
     Cubic(P, P, P, P),
 }
 
 impl Seg {
-    fn at(&self, s: f64) -> P {
+    pub(crate) fn at(&self, s: f64) -> P {
         match *self {
             Seg::Line(a, b) => [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s],
             Seg::Cubic(a, b, c, d) => {
@@ -22,7 +23,7 @@ impl Seg {
         }
     }
 
-    fn tangent(&self, s: f64) -> P {
+    pub(crate) fn tangent(&self, s: f64) -> P {
         match *self {
             Seg::Line(a, b) => [b[0] - a[0], b[1] - a[1]],
             Seg::Cubic(a, b, c, d) => {
@@ -52,7 +53,8 @@ pub struct MotionPath {
     length: f64,
 }
 
-const SAMPLES: usize = 32;
+/// Samples per segment of the arc-length table.
+pub(crate) const SAMPLES: usize = 32;
 
 /// Parses path data into polylines (see [`MotionPath::polylines`]).
 pub fn flatten(d: &str, tolerance: f64) -> Result<Vec<Vec<P>>, PathError> {
@@ -394,54 +396,90 @@ pub fn commands(d: &str) -> Result<Vec<PathCmd>, PathError> {
     Ok(out)
 }
 
+/// The segments of path data, as motion paths measure them: lines, cubics (quadratics raised to cubics, arcs as
+/// cubics of at most 90°; a closepath back to a different point is a line). Returns the segments, the index of the
+/// first segment of each subpath (a new one at every moveto that follows segments) and, for each segment, the index
+/// of the command it comes from.
+pub(crate) fn segments_of(cmds: &[PathCmd]) -> (Vec<Seg>, Vec<usize>, Vec<usize>) {
+    let mut segs = Vec::new();
+    let mut starts = vec![0usize];
+    let mut from_cmd = Vec::new();
+    for (ci, c) in cmds.iter().enumerate() {
+        match *c {
+            PathCmd::Move(_) => {
+                if starts.last() != Some(&segs.len()) {
+                    starts.push(segs.len());
+                }
+            }
+            PathCmd::Line(a, b) => segs.push(Seg::Line(a, b)),
+            PathCmd::Cubic(a, b, c, d) => segs.push(Seg::Cubic(a, b, c, d)),
+            PathCmd::Quad(a, q, p) => {
+                let c1 = [a[0] + 2.0 / 3.0 * (q[0] - a[0]), a[1] + 2.0 / 3.0 * (q[1] - a[1])];
+                let c2 = [p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1])];
+                segs.push(Seg::Cubic(a, c1, c2, p));
+            }
+            PathCmd::Arc { from, rx, ry, rotation, large, sweep, to } => {
+                arc(from, rx, ry, rotation, large, sweep, to, &mut segs)
+            }
+            PathCmd::Close(a, s) => {
+                if a != s {
+                    segs.push(Seg::Line(a, s));
+                }
+            }
+        }
+        from_cmd.resize(segs.len(), ci);
+    }
+    (segs, starts, from_cmd)
+}
+
+/// The arc-length table of `segs`: [`SAMPLES`] points per segment on the true curve, as (drawn length, segment,
+/// parameter). The length runs on from one segment to the next; at the segments listed in `restart` it restarts
+/// from the segment's own first point, so a jump there adds no length. Returns the table and the total length.
+pub(crate) fn arc_table(segs: &[Seg], restart: &[usize]) -> (Vec<(f64, usize, f64)>, f64) {
+    let mut table = Vec::with_capacity(segs.len() * SAMPLES + 1);
+    let mut acc = 0.0;
+    let mut prev = segs[0].at(0.0);
+    table.push((0.0, 0, 0.0));
+    for (i, s) in segs.iter().enumerate() {
+        if restart.contains(&i) {
+            prev = s.at(0.0);
+        }
+        for k in 1..=SAMPLES {
+            let t = k as f64 / SAMPLES as f64;
+            let p = s.at(t);
+            acc += libm::hypot(p[0] - prev[0], p[1] - prev[1]);
+            table.push((acc, i, t));
+            prev = p;
+        }
+    }
+    (table, acc)
+}
+
+/// The segment and its parameter at drawn length `target` along an [`arc_table`].
+pub(crate) fn locate(table: &[(f64, usize, f64)], target: f64) -> (usize, f64) {
+    let k = table.partition_point(|e| e.0 < target).clamp(1, table.len() - 1);
+    let (l0, i0, t0) = table[k - 1];
+    let (l1, i1, t1) = table[k];
+    let f = if l1 > l0 { (target - l0) / (l1 - l0) } else { 0.0 };
+    if i0 == i1 || t0 == 1.0 {
+        let t0 = if i0 != i1 { 0.0 } else { t0 };
+        (i1, t0 + (t1 - t0) * f)
+    } else {
+        (i1, t1 * f)
+    }
+}
+
 impl MotionPath {
     /// Parses SVG path data (all commands, absolute and relative).
     pub fn parse(d: &str) -> Result<MotionPath, PathError> {
-        let mut segs = Vec::new();
-        let mut starts = vec![0usize];
-        let mut cur: P = [0.0, 0.0];
-        for c in commands(d)? {
-            match c {
-                PathCmd::Move(_) => {
-                    if starts.last() != Some(&segs.len()) {
-                        starts.push(segs.len());
-                    }
-                }
-                PathCmd::Line(a, b) => segs.push(Seg::Line(a, b)),
-                PathCmd::Cubic(a, b, c, d) => segs.push(Seg::Cubic(a, b, c, d)),
-                PathCmd::Quad(a, q, p) => {
-                    let c1 = [a[0] + 2.0 / 3.0 * (q[0] - a[0]), a[1] + 2.0 / 3.0 * (q[1] - a[1])];
-                    let c2 = [p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1])];
-                    segs.push(Seg::Cubic(a, c1, c2, p));
-                }
-                PathCmd::Arc { from, rx, ry, rotation, large, sweep, to } => {
-                    arc(from, rx, ry, rotation, large, sweep, to, &mut segs)
-                }
-                PathCmd::Close(a, s) => {
-                    if a != s {
-                        segs.push(Seg::Line(a, s));
-                    }
-                }
-            }
-            cur = c.end();
-        }
+        let cmds = commands(d)?;
+        let (mut segs, starts, _) = segments_of(&cmds);
         if segs.is_empty() {
+            let cur = cmds.last().map_or([0.0, 0.0], PathCmd::end);
             segs.push(Seg::Line(cur, cur));
         }
-        let mut table = Vec::with_capacity(segs.len() * SAMPLES + 1);
-        let mut acc = 0.0;
-        let mut prev = segs[0].at(0.0);
-        table.push((0.0, 0, 0.0));
-        for (i, s) in segs.iter().enumerate() {
-            for k in 1..=SAMPLES {
-                let t = k as f64 / SAMPLES as f64;
-                let p = s.at(t);
-                acc += libm::hypot(p[0] - prev[0], p[1] - prev[1]);
-                table.push((acc, i, t));
-                prev = p;
-            }
-        }
-        Ok(MotionPath { segs, starts, table, length: acc })
+        let (table, length) = arc_table(&segs, &[]);
+        Ok(MotionPath { segs, starts, table, length })
     }
 
     /// Subpaths as polylines, curves subdivided until the chord deviates by
@@ -486,17 +524,7 @@ impl MotionPath {
     pub fn sample(&self, p: f64, constant_speed: bool) -> (P, f64) {
         let p = p.clamp(0.0, 1.0);
         let (seg, s) = if constant_speed && self.length > 0.0 {
-            let target = p * self.length;
-            let k = self.table.partition_point(|e| e.0 < target).clamp(1, self.table.len() - 1);
-            let (l0, i0, t0) = self.table[k - 1];
-            let (l1, i1, t1) = self.table[k];
-            let f = if l1 > l0 { (target - l0) / (l1 - l0) } else { 0.0 };
-            if i0 == i1 || t0 == 1.0 {
-                let t0 = if i0 != i1 { 0.0 } else { t0 };
-                (i1, t0 + (t1 - t0) * f)
-            } else {
-                (i1, t1 * f)
-            }
+            locate(&self.table, p * self.length)
         } else {
             let n = self.segs.len() as f64;
             let x = p * n;

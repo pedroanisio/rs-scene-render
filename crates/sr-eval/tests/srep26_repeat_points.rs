@@ -183,19 +183,52 @@ fn bars_on_a_circle_follow_the_tangent_only_with_orient() {
 }
 
 #[test]
-fn curve_copies_sit_on_the_sixteen_step_flattening() {
-    // copies at quarter lengths of a cubic: on the 16-step polyline, not on the true curve
-    let path = "M-150,50 C-150,-150 150,-150 150,50";
-    let d = load(&format!(
-        r#"<repeat id="r" x="320" y="180"><points type="along-path" path="{path}" count="5"/>{SQUARE}</repeat>"#
-    ));
-    let pts = sr_eval::points::along_path(&sr_eval::points::FlatPath::parse(path).unwrap(), 5, false);
-    let want: Vec<[f64; 2]> = pts.iter().map(|p| [320.0 + p.x, 180.0 + p.y]).collect();
-    assert_centres(&centres(&d, 0.0, 20.0, 20.0), &want, EPS);
-    // the polyline point at a quarter of the length differs from the curve's own (well inside 2 px, but not equal)
-    let mp = sr_eval::path::MotionPath::parse(path).unwrap();
-    let (exact, _) = mp.sample(0.25, true);
-    assert!((exact[0] - pts[1].x).abs() > 1e-6 || (exact[1] - pts[1].y).abs() > 1e-6);
+fn copies_sit_where_a_motion_path_node_is_at_the_same_fraction() {
+    // copies at quarter lengths of a cubic and of an arc land where a motion-path node with constant speed is at
+    // progress 0, 1/4, 1/2, 3/4 and 1: one measure of path data
+    for path in ["M-150,50 C-150,-150 150,-150 150,50", "M-100,0 A100,60 0 0 1 100,0"] {
+        let mut body = format!(
+            r#"<repeat id="r" x="320" y="180"><points type="along-path" path="{path}" count="5"/>{SQUARE}</repeat>"#
+        );
+        for k in 0..5 {
+            let at = k as f64 / 4.0;
+            body.push_str(&format!(
+                r#"<group id="m{k}" x="320" y="180"><group id="n{k}"><motionPath path="{path}"><animate property="progress"><key time="0" value="{at}"/></animate></motionPath></group></group>"#
+            ));
+        }
+        let d = load(&body);
+        let f = Evaluator::new(&d, &EvalOptions::default()).unwrap().evaluate(0.0);
+        let c = centres(&d, 0.0, 20.0, 20.0);
+        for (k, centre) in c.iter().enumerate() {
+            let node = f.nodes.iter().find(|n| *n.id == *format!("n{k}")).unwrap();
+            let want = node.world.apply([0.0, 0.0]);
+            assert!(near(*centre, want, EPS), "{path}, copy {k}: {centre:?} vs motion path {want:?}");
+        }
+    }
+}
+
+#[test]
+fn group_clocks_reach_the_points_on_both_paths() {
+    // the repeat sits in a group whose children see (t - 0.5) * 2: at t = 1 the repeat's own time is 1, where
+    // spacingX is 100. The copies' places (from the frame's values) and pointX (read by an expression through the
+    // slot's own time) must both show that grid.
+    let grid = r#"<points type="grid" columns="3"><animate property="spacingX"><key time="0" value="0"/><key time="2" value="200"/></animate></points>"#;
+    let body = format!(
+        r#"<group id="g" timeOffset="0.5" timeScale="2"><repeat id="r" x="320" y="180">{grid}<shape id="s" shape="rect" width="20" height="20" anchorX="10" anchorY="10"><expression property="scaleX">1 + (pointX + 100) / 100</expression></shape></repeat></group>"#
+    );
+    let d = load(&body);
+    for (t, spacing) in [(1.0, 100.0), (0.75, 50.0), (1.25, 150.0)] {
+        let c = centres(&d, t, 20.0, 20.0);
+        let xs: Vec<f64> = c.iter().map(|p| p[0] - 320.0).collect();
+        assert!(xs.iter().zip([-spacing, 0.0, spacing]).all(|(a, b)| (a - b).abs() < EPS), "t = {t}: {xs:?}");
+        let scales: Vec<f64> = extents(&d, t, 20.0, 20.0).iter().map(|e| e[0] / 20.0).collect();
+        for (x, sc) in xs.iter().zip(&scales) {
+            assert!(
+                (sc - (1.0 + (x + 100.0) / 100.0)).abs() < EPS,
+                "t = {t}: pointX {sc} disagrees with the place {x}"
+            );
+        }
+    }
 }
 
 #[test]

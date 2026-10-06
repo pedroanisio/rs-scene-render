@@ -4,20 +4,19 @@
 //! point i, before the repeat's step offsets. The five types:
 //!
 //! * `grid`: columns × rows, centred on the origin;
-//! * `along-path`: count points at equal drawn length along a path flattened as motion paths are
-//!   (each curve command in 16 equal parameter steps, as motion paths are measured);
-//! * `scatter`: count points drawn with U(s, c, k) (the seeded lattice hash of noise and random draws, read as a unit number) inside a
-//!   width × height rectangle, or by rejection inside a path region (at most 64 candidates per point);
+//! * `along-path`: count points at equal drawn length along a path measured exactly as a motion path is
+//!   (the same segments, arcs as cubics of at most 90°, and the same arc-length table of 32 samples per segment on
+//!   the true curve), with jumps between subpaths taking no length;
+//! * `scatter`: count points drawn with U(s, c, k) (the seeded lattice hash of noise and random draws, read as a unit
+//!   number) inside a width × height rectangle, or by rejection inside a path region (at most 64 candidates per
+//!   point), the region outlined by the same samples;
 //! * `vertices`: the end point of every drawing command of a path;
 //! * `list`: the pairs of `@at`.
 //!
 //! Every coordinate is computed in binary64 in the order the SREP writes it, so the numeric tests of the
 //! SREP hold to the last digit. Points are a function of the document and the time alone.
 
-use crate::path::{arc_shape, commands, ArcShape, PathCmd, PathError, P};
-
-/// Curve commands are flattened in this many equal parameter steps, as motion paths are measured.
-pub const CURVE_STEPS: usize = 16;
+use crate::path::{arc_table, commands, locate, segments_of, PathCmd, PathError, Seg, P, SAMPLES};
 
 /// Candidates tried per requested point by a path scatter.
 pub const CANDIDATES_PER_POINT: u64 = 64;
@@ -60,121 +59,68 @@ impl Point {
     }
 }
 
-/// One subpath of a flattened path.
-#[derive(Debug, Clone, PartialEq)]
-struct Subpath {
-    pts: Vec<P>,
-    closed: bool,
-}
-
-/// Path data parsed into its drawing commands and flattened as motion paths are measured: lines as they are, each curve
-/// command (`C`, `S`, `Q`, `T`, `A`) in [`CURVE_STEPS`] equal parameter steps, a closed subpath with its
-/// closing segment. A subpath without segments (a lone moveto) is not part of the flattened path.
+/// Path data parsed into its drawing commands and into the segments motion paths measure: lines as they are,
+/// quadratics raised to cubics, arcs as cubics of at most 90°, a closepath back to a different point as a line. A
+/// subpath without segments (a lone moveto) is not part of the path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlatPath {
     cmds: Vec<PathCmd>,
-    subs: Vec<Subpath>,
+    segs: Vec<Seg>,
+    /// Subpaths with segments: (first segment, end segment, closed by a closepath).
+    subs: Vec<(usize, usize, bool)>,
 }
 
 impl FlatPath {
-    /// Parses and flattens SVG path data. Path data a path shape rejects is an error.
+    /// Parses SVG path data. Path data a path shape rejects is an error.
     pub fn parse(d: &str) -> Result<FlatPath, PathError> {
         let cmds = commands(d)?;
-        let subs = flatten(&cmds);
-        Ok(FlatPath { cmds, subs })
+        let (segs, starts, from_cmd) = segments_of(&cmds);
+        let mut bounds = starts.clone();
+        bounds.push(segs.len());
+        let subs = bounds
+            .windows(2)
+            .filter(|w| w[1] > w[0])
+            .map(|w| {
+                // closed when the commands after its last segment, up to the next moveto, hold a closepath
+                let after = &cmds[from_cmd[w[1] - 1]..];
+                let rest = after.iter().position(|c| matches!(c, PathCmd::Move(_))).unwrap_or(after.len());
+                let closed = after[..rest].iter().any(|c| matches!(c, PathCmd::Close(..)));
+                (w[0], w[1], closed)
+            })
+            .collect();
+        Ok(FlatPath { cmds, segs, subs })
     }
 
     /// Whether the path has no segments (the empty string, or movetos only).
     pub fn is_empty(&self) -> bool {
-        self.subs.is_empty()
+        self.segs.is_empty()
     }
 
-    /// Every flattened vertex, subpath after subpath.
-    pub fn vertices(&self) -> Vec<P> {
-        self.subs.iter().flat_map(|s| s.pts.iter().copied()).collect()
-    }
-
-    /// The flattened segments in drawing order, jumps between subpaths left out.
-    fn segments(&self) -> impl Iterator<Item = (P, P)> + '_ {
-        self.subs.iter().flat_map(|s| s.pts.windows(2).map(|w| (w[0], w[1])))
-    }
-}
-
-fn flatten(cmds: &[PathCmd]) -> Vec<Subpath> {
-    let mut subs: Vec<Subpath> = Vec::new();
-    let mut cur: Option<Subpath> = None;
-    let finish = |cur: &mut Option<Subpath>, subs: &mut Vec<Subpath>| {
-        if let Some(s) = cur.take() {
-            if s.pts.len() >= 2 {
-                subs.push(s);
-            }
-        }
-    };
-    for c in cmds {
-        if let PathCmd::Move(p) = *c {
-            finish(&mut cur, &mut subs);
-            cur = Some(Subpath { pts: vec![p], closed: false });
-            continue;
-        }
-        // a drawing command after a closepath starts a new subpath at the start point
-        let from = match *c {
-            PathCmd::Line(a, _) | PathCmd::Quad(a, _, _) | PathCmd::Cubic(a, _, _, _) | PathCmd::Close(a, _) => a,
-            PathCmd::Arc { from, .. } => from,
-            PathCmd::Move(_) => unreachable!("handled above"),
-        };
-        if cur.as_ref().is_none_or(|s| s.closed) {
-            finish(&mut cur, &mut subs);
-            cur = Some(Subpath { pts: vec![from], closed: false });
-        }
-        let s = cur.as_mut().expect("a subpath is open");
-        let steps = |f: &dyn Fn(f64) -> P, end: P, pts: &mut Vec<P>| {
-            for k in 1..CURVE_STEPS {
-                pts.push(f(k as f64 / CURVE_STEPS as f64));
-            }
-            pts.push(end);
-        };
-        match *c {
-            PathCmd::Line(_, b) => s.pts.push(b),
-            PathCmd::Quad(a, q, b) => steps(
-                &|t| {
-                    let m = 1.0 - t;
-                    let (w0, w1, w2) = (m * m, 2.0 * m * t, t * t);
-                    [w0 * a[0] + w1 * q[0] + w2 * b[0], w0 * a[1] + w1 * q[1] + w2 * b[1]]
-                },
-                b,
-                &mut s.pts,
-            ),
-            PathCmd::Cubic(a, b, c, d) => steps(
-                &|t| {
-                    let m = 1.0 - t;
-                    let (w0, w1, w2, w3) = (m * m * m, 3.0 * m * m * t, 3.0 * m * t * t, t * t * t);
-                    [w0 * a[0] + w1 * b[0] + w2 * c[0] + w3 * d[0], w0 * a[1] + w1 * b[1] + w2 * c[1] + w3 * d[1]]
-                },
-                d,
-                &mut s.pts,
-            ),
-            PathCmd::Arc { from, rx, ry, rotation, large, sweep, to } => {
-                match arc_shape(from, rx, ry, rotation, large, sweep, to) {
-                    // an arc between equal points is not drawn (SVG 1.1 F.6.2)
-                    ArcShape::Nothing => {}
-                    ArcShape::Line => s.pts.push(to),
-                    ArcShape::Ellipse(g) => steps(&|t| g.at(g.th1 + g.dth * t), to, &mut s.pts),
+    /// The outline of each subpath as the arc-length table samples it: its first point, then 32 points per
+    /// segment on the true curve.
+    fn outlines(&self) -> Vec<Vec<P>> {
+        self.subs
+            .iter()
+            .map(|&(a, b, _)| {
+                let mut pts = vec![self.segs[a].at(0.0)];
+                for s in &self.segs[a..b] {
+                    pts.extend((1..=SAMPLES).map(|k| s.at(k as f64 / SAMPLES as f64)));
                 }
-            }
-            PathCmd::Close(_, start) => {
-                s.pts.push(start);
-                s.closed = true;
-            }
-            PathCmd::Move(_) => unreachable!("handled above"),
-        }
+                pts
+            })
+            .collect()
     }
-    finish(&mut cur, &mut subs);
-    subs
+
+    /// Every sampled outline point, subpath after subpath.
+    pub fn vertices(&self) -> Vec<P> {
+        self.outlines().into_iter().flatten().collect()
+    }
 }
 
-/// Direction of the segment a → b in degrees clockwise from +x (+y down).
-fn direction(a: P, b: P) -> f64 {
-    libm::atan2(b[1] - a[1], b[0] - a[0]).to_degrees()
+/// Direction of the segment's tangent at `t`, in degrees clockwise from +x (+y down).
+fn heading(s: &Seg, t: f64) -> f64 {
+    let d = s.tangent(t);
+    libm::atan2(d[1], d[0]).to_degrees()
 }
 
 /// Point i of a `columns` × `rows` grid (clause 2).
@@ -184,27 +130,31 @@ pub fn grid(columns: u64, rows: u64, spacing_x: f64, spacing_y: f64, i: u64) -> 
     Point::at([(col as f64 - (c as f64 - 1.0) / 2.0) * spacing_x, (row as f64 - (r as f64 - 1.0) / 2.0) * spacing_y])
 }
 
-/// `count` points at equal drawn length along `path` (clause 3). θ is the direction when `orient`.
+/// `count` points at equal drawn length along `path` (clause 3), measured as a motion path is: on one subpath an
+/// along-path point at fraction f of the length is where a motion path with constant speed is at progress f. A jump
+/// between subpaths takes no length; at a vertex, including a jump, a point takes the outgoing segment, and
+/// segments of zero length have no direction. θ is the direction when `orient`.
 pub fn along_path(path: &FlatPath, count: u64, orient: bool) -> Vec<Point> {
     if path.is_empty() || count == 0 {
         return Vec::new();
     }
-    // (from, to, length, drawn length at the start)
-    let mut segs: Vec<(P, P, f64, f64)> = Vec::new();
-    let mut total = 0.0;
-    for (a, b) in path.segments() {
-        let len = libm::hypot(b[0] - a[0], b[1] - a[1]);
-        segs.push((a, b, len, total));
-        total += len;
-    }
-    let first = segs[0].0;
+    let segs = &path.segs;
+    let starts: Vec<usize> = path.subs.iter().map(|s| s.0).collect();
+    let (table, total) = arc_table(segs, &starts);
+    let first = segs[0].at(0.0);
     if total == 0.0 {
         return (0..count).map(|_| Point::at(first)).collect();
     }
-    let closed = path.subs.len() == 1 && path.subs[0].closed;
+    // the drawn length of each segment, from the table
+    // (a segment's length includes no jump: the table restarts at each subpath)
+    let mut lens = vec![0.0; segs.len()];
+    for w in table.windows(2) {
+        lens[w[1].1] += w[1].0 - w[0].0;
+    }
+    let next_drawn = |from: usize| (from..segs.len()).find(|&j| lens[j] > 0.0);
+    let last_drawn = (0..segs.len()).rev().find(|&j| lens[j] > 0.0).expect("the path has length");
+    let closed = path.subs.len() == 1 && path.subs[0].2;
     let n = count as f64;
-    let last_dir = segs.iter().rev().find(|s| s.2 > 0.0).map(|s| direction(s.0, s.1)).unwrap_or(0.0);
-    let end = segs[segs.len() - 1].1;
     (0..count)
         .map(|i| {
             let l = if closed {
@@ -214,14 +164,28 @@ pub fn along_path(path: &FlatPath, count: u64, orient: bool) -> Vec<Point> {
             } else {
                 i as f64 * total / (n - 1.0)
             };
-            // the first segment of non-zero length that the drawn length has not passed: at a vertex,
-            // including a jump, the point takes the outgoing segment
-            let (pos, dir) = match segs.iter().find(|s| s.2 > 0.0 && l < s.3 + s.2) {
-                Some(&(a, b, len, s0)) => {
-                    let f = ((l - s0) / len).clamp(0.0, 1.0);
-                    ([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], direction(a, b))
+            let (seg, s) = locate(&table, l);
+            let s = s.clamp(0.0, 1.0);
+            let mut pos = segs[seg].at(s);
+            // which segment gives the direction: this one, or the outgoing one at a vertex or a zero-length segment
+            let at_end = s >= 1.0 && l < total;
+            let candidate = if at_end {
+                next_drawn(seg + 1)
+            } else if lens[seg] == 0.0 {
+                next_drawn(seg)
+            } else {
+                Some(seg)
+            };
+            let dir = match candidate {
+                Some(d) if d != seg => {
+                    // crossing a jump: the point is where the next subpath starts
+                    if starts.iter().any(|&b| b > seg && b <= d) {
+                        pos = segs[d].at(0.0);
+                    }
+                    heading(&segs[d], 0.0)
                 }
-                None => (end, last_dir),
+                Some(d) => heading(&segs[d], s),
+                None => heading(&segs[last_drawn], 1.0),
             };
             Point { x: pos[0], y: pos[1], theta: if orient { dir } else { 0.0 }, direction: dir }
         })
@@ -241,15 +205,16 @@ pub fn scatter_path(path: &FlatPath, seed: u64, count: u64, evenodd: bool) -> (V
     }
     let mut edges: Vec<(P, P)> = Vec::new();
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for s in &path.subs {
-        for p in &s.pts {
+    for pts in path.outlines() {
+        for p in &pts {
             x0 = x0.min(p[0]);
             y0 = y0.min(p[1]);
             x1 = x1.max(p[0]);
             y1 = y1.max(p[1]);
         }
-        edges.extend(s.pts.windows(2).map(|w| (w[0], w[1])));
-        let (first, last) = (s.pts[0], s.pts[s.pts.len() - 1]);
+        edges.extend(pts.windows(2).map(|w| (w[0], w[1])));
+        // every subpath is closed for this purpose
+        let (first, last) = (pts[0], pts[pts.len() - 1]);
         if first != last {
             edges.push((last, first));
         }

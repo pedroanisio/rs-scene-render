@@ -175,27 +175,42 @@ fn two_subpaths_are_open_and_jumps_take_no_length() {
 }
 
 #[test]
-fn curves_flatten_in_sixteen_parameter_steps() {
-    let f = flat("M0,0 C0,100 100,100 100,0");
-    let v = f.vertices();
-    assert_eq!(v.len(), 17);
-    for (k, q) in v.iter().enumerate() {
-        let t = k as f64 / 16.0;
-        let m = 1.0 - t;
-        let x = 3.0 * m * t * t * 100.0 + t * t * t * 100.0;
-        let y = 3.0 * m * m * t * 100.0 + 3.0 * m * t * t * 100.0;
-        assert!(close(q[0], x) && close(q[1], y), "vertex {k}: {q:?} vs ({x}, {y})");
+fn along_path_is_measured_exactly_as_a_motion_path() {
+    use sr_eval::path::MotionPath;
+    // smooth paths: arcs (cubics of at most 90°), cubics, quadratics with a reflected control point
+    for d in [
+        "M0,0 A50,50 0 0 1 100,0",
+        "M0,0 A50,30 20 1 1 60,40",
+        "M0,0 C0,100 100,100 100,0",
+        "M-150,50 C-150,-150 150,-150 150,50",
+        "M0,0 Q50,100 100,0 T200,0",
+    ] {
+        let mp = MotionPath::parse(d).unwrap();
+        let n = 9;
+        let pts = points::along_path(&flat(d), n, true);
+        for (i, p) in pts.iter().enumerate() {
+            let f = i as f64 / (n - 1) as f64;
+            let (q, angle) = mp.sample(f, true);
+            assert!(at(p, q[0], q[1]), "{d}, point {i}: {p:?} vs motion path {q:?}");
+            let turn = (p.direction - angle + 540.0).rem_euclid(360.0) - 180.0;
+            assert!(turn.abs() <= EPS, "{d}, point {i}: direction {} vs {angle}", p.direction);
+        }
     }
-    // the midpoint of a 2-point along-path on a symmetric curve is a flattened vertex: t = 1/2 exactly
-    let p = points::along_path(&f, 3, false);
-    assert!(at(&p[1], 50.0, 75.0), "{:?}", p[1]);
-    // an arc is one curve command: 16 steps of its angle
-    let a = flat("M0,0 A50,50 0 0 1 100,0");
-    assert_eq!(a.vertices().len(), 17);
-    let mid = a.vertices()[8];
+    // a path with corners: the positions agree, a point on a vertex takes the outgoing direction
+    let d = "M0,0 L50,0 A25,25 0 1 1 50,50 L0,50";
+    let mp = MotionPath::parse(d).unwrap();
+    for (i, p) in points::along_path(&flat(d), 13, false).iter().enumerate() {
+        let (q, _) = mp.sample(i as f64 / 12.0, true);
+        assert!(at(p, q[0], q[1]), "{d}, point {i}: {p:?} vs {q:?}");
+    }
+    // the outline a scatter tests: the arc-length table's samples, 32 per segment on the true curve; a 180° arc is
+    // two cubics
+    let half = flat("M0,0 A50,50 0 0 1 100,0");
+    assert_eq!(half.vertices().len(), 1 + 2 * 32);
+    let mid = half.vertices()[32];
     assert!(close(mid[0], 50.0) && close(mid[1], -50.0), "{mid:?}");
-    // quadratic curves too
-    assert_eq!(flat("M0,0 Q50,100 100,0").vertices().len(), 17);
+    assert_eq!(flat("M0,0 Q50,100 100,0").vertices().len(), 1 + 32);
+    assert_eq!(flat("M0,0 L10,0 L10,10").vertices().len(), 1 + 2 * 32);
 }
 
 #[test]
