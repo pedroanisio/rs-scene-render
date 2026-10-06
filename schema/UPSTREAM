@@ -66,4 +66,5 @@ their version, and new attributes on 1.0 elements are accepted in every version 
   - link @follow, @timeConstant and the spring parameters (a spring or exponential follower): srep-0000-link-follower.md (91ca279).
   - Diagnostics gain the `info` severity: inert findings (E19, the engine's INERT rules) are reported at `info` and strict checks (`--strict`, `--deny-warnings`) count errors and warnings only, as SREP 18 resolved (b629886). E20 (a mask that misses its node, MASK-MISS) and the new E21 (default cubic-bezier handles) stay warnings because they change the result.
   - object3D child element morph (a morph target by name; version 1.2, gated by V5): srep-0000-morph-by-name.md (3e998d3).
+  - object3D child element joint (pose and aim a joint of an imported model; version 1.2, gated by V5): srep-0000-joint-pose.md (74bac5a).
 The xsd and sch above differ from the vendored sha256 sums by these edits.

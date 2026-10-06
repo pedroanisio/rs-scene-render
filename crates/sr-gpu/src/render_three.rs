@@ -1293,6 +1293,93 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Applies the `<joint>` children of object `n` to the model's local transforms: each joint's rotation offsets, then
+    /// each look-at (ordered by depth in the model's hierarchy). Unknown joints and targets are reported.
+    fn pose_joints(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        n: &FrameNode,
+        model: &sr_3d::Model,
+        locals: &mut [sr_3d::Trs],
+        world: Mat4,
+    ) {
+        struct Aim {
+            node: usize,
+            target: String,
+            axis: Vec3,
+            influence: f32,
+            max_angle: f32,
+        }
+        let mut aims: Vec<Aim> = Vec::new();
+        let report = |plan: &mut Plan, msg: String| {
+            if !plan.stats.unsupported.contains(&msg) {
+                plan.stats.unsupported.push(msg);
+            }
+        };
+        for (k, c) in sr_model::element::children(&*n.elem).into_iter().filter(|c| c.element_name() == "joint").enumerate() {
+            let ca = Attrs { e: c, props: None };
+            let Some(name) = ca.str("name") else { continue };
+            let Some(node) = model.nodes.iter().position(|x| x.name == name) else {
+                let names: Vec<&str> = model.nodes.iter().map(|x| x.name.as_str()).filter(|x| !x.is_empty()).collect();
+                report(plan, format!("{}: joint {name} is no node of the model (it has: {})", n.id, names.join(", ")));
+                continue;
+            };
+            let key = format!("{}/joint[{k}]", n.id);
+            let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
+            let value = |attr: &str| {
+                props
+                    .and_then(|p| p.get(attr))
+                    .and_then(sr_eval::Value::as_num)
+                    .unwrap_or_else(|| ca.num(attr, 0.0)) as f32
+            };
+            let turn = sr_3d::anim::euler_degrees(value("rotationX"), value("rotationY"), value("rotation"));
+            sr_3d::anim::pose_joint(locals, node, turn);
+            if let Some(target) = ca.str("lookAt") {
+                let axis = match ca.str("lookAxis").as_deref() {
+                    Some("x") => Vec3::X,
+                    Some("minus-x") => Vec3::NEG_X,
+                    Some("y") => Vec3::Y,
+                    Some("minus-y") => Vec3::NEG_Y,
+                    Some("minus-z") => Vec3::NEG_Z,
+                    _ => Vec3::Z,
+                };
+                let influence = ca.num("influence", 1.0) as f32;
+                let max_angle = (ca.num("maxAngle", 180.0) as f32).to_radians();
+                aims.push(Aim { node, target, axis, influence, max_angle });
+            }
+        }
+        if aims.is_empty() {
+            return;
+        }
+        let depth = |mut k: usize| {
+            let mut d = 0;
+            while let Some(p) = model.nodes[k].parent {
+                k = p;
+                d += 1;
+            }
+            d
+        };
+        aims.sort_by_key(|a| depth(a.node));
+        // model space to scene space: the object's world, the axis conversion and, with `node`, the selection
+        let select = match n.elem.get_attr("node").map(|v| v.to_string()) {
+            Some(name) => model.nodes.iter().position(|x| x.name == name).map(|k| model.world_matrices(locals)[k].inverse()),
+            None => None,
+        }
+        .unwrap_or(Mat4::IDENTITY);
+        let to_scene = world * model.basis * select;
+        let lights = doc_lights(ctx.p);
+        for aim in aims {
+            match Self::target_point(ctx.g, lights, &aim.target) {
+                Some(t) => {
+                    let target = to_scene.inverse().transform_point3(t);
+                    sr_3d::anim::look_at(model, locals, aim.node, target, aim.axis, aim.influence, aim.max_angle);
+                }
+                None => report(plan, format!("{}: joint look-at target {} not found", n.id, aim.target)),
+            }
+        }
+    }
+
     fn object_draws_at(
         &mut self,
         plan: &mut Plan,
@@ -1397,7 +1484,7 @@ impl Renderer {
                 clip.map(|c| if c.duration > 0.0 { t.rem_euclid(c.duration) } else { 0.0 }).unwrap_or(0.0)
             };
             let blend = a.num("animationBlend", 0.0).clamp(0.0, 1.0) as f32;
-            let (locals, weights) = sr_3d::anim::pose_blend(
+            let (mut locals, weights) = sr_3d::anim::pose_blend(
                 model,
                 clip,
                 at(clip, a.num("animationOffset", 0.0)),
@@ -1405,6 +1492,8 @@ impl Renderer {
                 at(clip_to, a.num("animationOffsetTo", 0.0)),
                 blend,
             );
+            // `<joint>`: pose offsets in the joint's own axes, then look-at, parents before children
+            self.pose_joints(plan, ctx, n, model, &mut locals, world);
             let morph: Option<Vec<f32>> = a.nums("morphWeights").map(|v| v.iter().map(|x| *x as f32).collect());
             let variant = a.str("materialVariant");
             // `node`: only that node and what is under it, placed at the object's origin

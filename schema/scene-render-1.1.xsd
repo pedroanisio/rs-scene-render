@@ -2669,10 +2669,35 @@
     <xs:attribute name="weight" type="xs:double" default="0"/>
   </xs:complexType>
 
+  <xs:complexType name="jointType">
+    <xs:annotation><xs:documentation>
+      With an object3D of primitive="mesh" and an imported model: poses one joint (a node by name) of the model. The
+      rotationX, rotationY and rotation (about z), in degrees and in that order, turn the joint in its own axes on
+      top of the clip's pose; they animate. lookAt then turns the joint so that its lookAxis points at the target
+      node, light or camera (the shortest turn, scaled by influence and limited to maxAngle degrees), without moving
+      the joint's parents. The first joint of that name in the model's node order is used. Version 1.2.
+    </xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="lookAt" type="xs:IDREF"/>
+    <xs:attribute name="lookAxis" default="z">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="x"/><xs:enumeration value="minus-x"/><xs:enumeration value="y"/>
+        <xs:enumeration value="minus-y"/><xs:enumeration value="z"/><xs:enumeration value="minus-z"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="influence" type="unitDecimal" default="1"/>
+    <xs:attribute name="maxAngle" type="nonNegativeDecimal" default="180"/>
+  </xs:complexType>
+
   <xs:complexType name="object3DType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="animationElements"/>
       <xs:element name="transformConstraint" type="transformConstraintType"/>
+      <xs:element name="joint" type="jointType"/>
       <xs:element name="morph" type="morphType"/>
       <xs:element name="blob" type="clayBlobType"/>
       <xs:element name="rigidBody" type="rigidBody3DType"/>

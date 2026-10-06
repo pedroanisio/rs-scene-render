@@ -19,7 +19,7 @@
   </sch:pattern>
   <sch:pattern id="p1b">
     <sch:rule context="/scene[@version='1.0' or @version='1.1']">
-      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D/morph|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
+      <sch:assert id="V5" test="not(assets/tiles|.//basemap|.//object3D/rigidBody|.//object3D/morph|.//object3D/joint|.//object3D[@primitive='map' or @primitive='globe']|output/segment|output/audioTrack|output/captionTrack)">
         documents before version="1.2" cannot use 1.2 elements or asset kinds; set version="1.2".</sch:assert>
     </sch:rule>
   </sch:pattern>

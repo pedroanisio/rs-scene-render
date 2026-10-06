@@ -48,6 +48,7 @@ OCEAN_COUPLED = '<scene version="1.3"><project width="64" height="64" fps="24" d
 GLOBE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><tiles id="dem" src="../media/terrain.pmtiles"/><map id="m" width="64" height="32" background="#FFFFFF"/></assets><composition><object3D id="earth" primitive="globe" map="m" terrain="dem" terrainTileSize="2" terrainZoom="0" planetRadius="1000" radius="20" x="32" y="32" segments="32"/></composition></scene>\n'
 
 MORPH = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><composition><object3D id="piece" primitive="mesh" mesh="set" x="32" y="32"><morph name="smile" weight="0.8"><animate property="weight"><key time="0" value="0"/><key time="1" value="1"/></animate></morph></object3D></composition></scene>\n'
+JOINT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><composition><shape id="t" shape="rect" x="10" y="10" width="4" height="4" fill="#FFFFFF"/><object3D id="piece" primitive="mesh" mesh="set" x="32" y="32"><joint name="head" rotation="12" lookAt="t" lookAxis="z" influence="0.8" maxAngle="35"><animate property="rotationX"><key time="0" value="0"/><key time="1" value="10"/></animate></joint></object3D></composition></scene>\n'
 MODEL_SELECT = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><assets><mesh id="set" src="../media/robot.glb"/></assets><materials><material id="clay" baseColor="#C48A5A"/></materials><composition><object3D id="piece" primitive="mesh" mesh="set" node="Knight" materialOverride="stone:clay old:clay" x="32" y="32"/></composition></scene>\n'
 TEXT3D = '<scene version="1.1"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="title" primitive="text" text="HI" height="20" tracking="120" x="32" y="32"/></composition></scene>\n'
 MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><assets><meshSequence id="frames" src="../media/mesh-frame-%d.obj" first="0" last="1" fps="1"/></assets><composition><object3D id="cache" primitive="mesh" mesh="frames" x="32" y="32"/></composition></scene>\n'
@@ -110,6 +111,7 @@ CASES = [
     ("ocn8-coupling", ["OCN8"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyCoupling="buoyancy" ')),
     ("ocn9-drag", ["OCN9"], lambda _: OCEAN.replace('<ocean ', '<ocean bodyDrag="1" ')),
     ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
+    ("v5-joint", ["V5"], lambda _: JOINT.replace('version="1.2"', 'version="1.1"')),
     ("v5-morph", ["V5"], lambda _: MORPH.replace('version="1.2"', 'version="1.1"')),
     ("mov1", ["MOV1"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay :clay"')),
     ("mov2", ["MOV2"], lambda _: MODEL_SELECT.replace('materialOverride="stone:clay old:clay"', 'materialOverride="stone:clay old:nosuch"')),
@@ -402,6 +404,7 @@ VALID = {
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "model-select": MODEL_SELECT,
     "morph": MORPH,
+    "joint": JOINT,
     "text3d-tracking": TEXT3D,
     "mesh-sequence": MESH_SEQUENCE,
     "globe-relief": GLOBE,

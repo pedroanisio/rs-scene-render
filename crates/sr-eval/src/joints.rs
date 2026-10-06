@@ -99,7 +99,7 @@ fn frames(p: &Program, n: &FrameNode, names: &[String], problems: &mut Vec<Strin
         let t = (n.local_time * value("animationSpeed", 1.) + value(offset, 0.)) as f32;
         clip.map_or(0., |c| if c.duration > 0. { t.rem_euclid(c.duration) } else { 0. })
     };
-    let (locals, _) = sr_3d::anim::pose_blend(
+    let (mut locals, _) = sr_3d::anim::pose_blend(
         &model,
         clips[0],
         at(clips[0], "animationOffset"),
@@ -107,6 +107,17 @@ fn frames(p: &Program, n: &FrameNode, names: &[String], problems: &mut Vec<Strin
         at(clips[1], "animationOffsetTo"),
         value("animationBlend", 0.).clamp(0., 1.) as f32,
     );
+    // `<joint>` rotation offsets, as the renderer applies them (a look-at needs the 3D scene and is the renderer's)
+    for (k, c) in children(&*n.elem).into_iter().filter(|c| c.element_name() == "joint").enumerate() {
+        let Some(name) = text(c, "name") else { continue };
+        let Some(node) = model.nodes.iter().position(|x| x.name == name) else { continue };
+        let key = format!("{}/joint[{k}]", n.id);
+        let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
+        let angle = |attr: &str| {
+            props.and_then(|p| p.get(attr)).and_then(crate::Value::as_num).unwrap_or_else(|| crate::sim::num(c, attr, 0.)) as f32
+        };
+        sr_3d::anim::pose_joint(&mut locals, node, sr_3d::anim::euler_degrees(angle("rotationX"), angle("rotationY"), angle("rotation")));
+    }
     let world = model.world_matrices(&locals);
     let select = match text(&*n.elem, "node") {
         Some(name) => model.nodes.iter().position(|x| x.name == name).map(|k| world[k].inverse()),

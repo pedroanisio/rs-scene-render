@@ -750,6 +750,9 @@
     "v5-elements.scene.xml": [
       "V5"
     ],
+    "v5-joint.scene.xml": [
+      "V5"
+    ],
     "v5-morph.scene.xml": [
       "V5"
     ],
@@ -817,6 +820,7 @@
     "ejecta-crater.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
+    "joint.scene.xml": [],
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
     "minimal.scene.xml": [],
