@@ -737,11 +737,41 @@ impl<'a> Eval<'a> {
                 self.check(contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
                     "fracture interiorMaterial must reference a declared material.".into()
                 });
-                let finite = n.attributes().filter(|a| a.name() != "interiorMaterial").all(|a| {
+                let finite = n.attributes().filter(|a| !matches!(a.name(), "interiorMaterial" | "source")).all(|a| {
                     let s = a.value().trim();
                     xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
                 });
                 self.check(finite, n, "FRX4", || "fracture numeric values must be finite.".into());
+                let body = a("source").and_then(|id| {
+                    n.document().descendants().find(|o| {
+                        is(*o, "object3D")
+                            && o.attribute("id") == Some(id)
+                            && n.parent_element().is_none_or(|owner| owner.attribute("id") != Some(id))
+                    })
+                });
+                self.check(
+                    a("source").is_none()
+                        || body.is_some_and(|o| {
+                            kids(o, "rigidBody").any(|r| r.attribute("type").is_none_or(|t| t == "dynamic"))
+                        }),
+                    n,
+                    "FRX5",
+                    || "fracture source must name another object3D whose rigidBody is dynamic.".into(),
+                );
+                self.check(
+                    !has("source")
+                        || !["at", "radialImpulse", "impulseX", "impulseY", "impulseZ"].iter().any(|k| has(k)),
+                    n,
+                    "FRX6",
+                    || {
+                        "a fracture that comes from a source derives its time and its push, so at, radialImpulse and \
+                         impulseX, impulseY and impulseZ may not be given."
+                            .into()
+                    },
+                );
+                self.check(has("source") || !(has("minImpulse") || has("energyFraction")), n, "FRX7", || {
+                    "minImpulse and energyFraction belong to a fracture with a source.".into()
+                });
             }
             "crater" => {
                 let number = |k, default| {

@@ -2585,7 +2585,20 @@
       impulse, distributed by piece mass along the source-centroid-to-piece directions.
       maxMemoryMiB bounds component geometry/reconstruction admission, not whole-process RSS.
       Fracture is cinematic partitioning, not a material stress/failure calculation.
+      `source` names the dynamic rigid body that breaks it (FRX5): the fracture fires on the step after the first impact of
+      that body on this one is noticed, above `minImpulse`, the total normal impulse of the pair in one step in
+      kg*scene-unit/second (absent: twice the weight of the source in one step, as for a crater from an impact). Its
+      time and its push are then derived, so `at`, `radialImpulse` and `impulseX`/`Y`/`Z` are not given (FRX6), and
+      `minImpulse` and `energyFraction` belong to a fracture with `source` (FRX7). The pieces keep the velocity the
+      body had after the contact, and a part of the kinetic energy of the impact relative to the pair, 1/2 mu v_n^2 (mu
+      the reduced mass of the two bodies, v_n the closing speed), `energyFraction` of it (0 to 1; the engine's default
+      is 0.3, with no published value, and not an XSD default so that it can be refused without `source`), becomes the
+      pieces' push on each other, with no momentum added. The partition is the seeded one of the document and does not
+      depend on where the impact was.
     </xs:documentation></xs:annotation>
+    <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="minImpulse" type="positiveDecimal"/>
+    <xs:attribute name="energyFraction" type="unitDecimal"/>
     <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>

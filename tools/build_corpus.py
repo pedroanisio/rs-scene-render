@@ -82,11 +82,17 @@ def v10(body, extra_sections=""):
     return f'<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/>{extra_sections}<composition>{body}</composition></scene>\n'
 
 BLACKHOLE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><shape id="sky" shape="rect" x="0" y="0" width="64" height="64" fill="#000000"/><camera id="eye" x="0" y="0" z="-60" geodesics="true"/><blackHole id="hole" mass="1" x="0" y="0" z="0"/><accretionDisk id="disk" blackHole="hole" outerRadius="20" temperatureScale="6000"/></composition></scene>\n'
+FRACTURE_CONTACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><materials><material id="interior" baseColor="#A06030"/></materials><composition><object3D id="ball" primitive="sphere" radius="1" x="-8"><rigidBody mass="1"/></object3D><object3D id="rock" primitive="box" width="4" height="4" depth="4"><rigidBody mass="8"/><fracture source="ball" pieces="8" seed="3" interiorMaterial="interior"/></object3D></composition></scene>\n'
 
 # (name, expected codes, transform-or-document, asset codes the oracle cannot see)
 CASES = [
     ("solid-colliders-boil", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('primitive="clay"', 'primitive="clay" boil=" +12 " fingerprints=" +0.5 "')),
     ("solid-colliders-blob", ["P3D6", "PYRO8"], lambda _: SOLID_COLLIDERS.replace('<blob/>', '<blob><animate property="x"><key time="0" value="2"/></animate></blob>')),
+    ("frx5-source-static", ["FRX5"], lambda _: FRACTURE_CONTACT.replace('<rigidBody mass="1"/>', '<rigidBody type="static"/>')),
+    ("frx5-source-self", ["FRX5"], lambda _: FRACTURE_CONTACT.replace('source="ball"', 'source="rock"')),
+    ("frx6-timed", ["FRX6"], lambda _: FRACTURE_CONTACT.replace('<fracture ', '<fracture at="1" ')),
+    ("frx6-push", ["FRX6"], lambda _: FRACTURE_CONTACT.replace('<fracture ', '<fracture radialImpulse="4" ')),
+    ("frx7-orphan", ["FRX7"], lambda _: FRACTURE.replace('<fracture ', '<fracture energyFraction="0.3" ')),
     ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),
     ("frx2", ["FRX2"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '')),
     ("frx3", ["FRX3"], lambda _: FRACTURE.replace('interiorMaterial="interior"', 'interiorMaterial="rock"')),
@@ -416,6 +422,8 @@ VALID = {
     "ocean-colliders": OCEAN_COUPLED,
     "ocean-buoyancy": OCEAN_BUOYANCY,
     "physics-internal-edges": OCEAN_BUOYANCY.replace('<physics pixelsPerMeter="1"/>', '<physics pixelsPerMeter="1" fixInternalEdges="true"/>'),
+    "fracture-contact": FRACTURE_CONTACT,
+    "fracture-contact-tuned": FRACTURE_CONTACT.replace('<fracture ', '<fracture minImpulse="50" energyFraction="0.5" '),
     "crater-impact-influence-small": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" influenceDepth="5"'),
     "crater-impact-influence-large": CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" influenceDepth="30"'),
     "black-hole": BLACKHOLE,
