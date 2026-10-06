@@ -1,8 +1,9 @@
 use sr_3d::{Primitive, Vertex};
 use sr_sim::ocean::whitewater::{Frame, Kind};
 
-/// Two batches rather than a separate draw and prototype for every tracer.
-pub(super) fn meshes(frame: &Frame, available: usize) -> Result<[Primitive; 2], String> {
+/// Two batches rather than a separate draw and prototype for every tracer. The foam batch is empty when `foam` is false:
+/// the foam is then the coverage of the surface, not triangles.
+pub(super) fn meshes(frame: &Frame, available: usize, foam: bool) -> Result<[Primitive; 2], String> {
     // Eight-sided foam disc: 9 vertices, 24 indices. Spray octahedron:
     // 6 vertices, 24 indices. Include normal/tangent workspace and upload copy.
     let bytes = frame.particles.len().checked_mul(9 * 256 + 24 * 8).ok_or("whitewater surface memory overflow")?;
@@ -15,7 +16,7 @@ pub(super) fn meshes(frame: &Frame, available: usize) -> Result<[Primitive; 2], 
         mesh.vertices.reserve_exact(count * if i == 0 { 9 } else { 6 });
         mesh.indices.reserve_exact(count * 24);
     }
-    for p in &frame.particles {
+    for p in frame.particles.iter().filter(|p| foam || p.kind == Kind::Spray) {
         let mesh = &mut meshes[usize::from(p.kind == Kind::Spray)];
         let radius = p.radius * (1. - (frame.time - p.birth) / p.lifetime).clamp(0., 1.);
         let base = mesh.vertices.len() as u32;

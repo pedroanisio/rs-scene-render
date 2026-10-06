@@ -10,6 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 mod bathymetry;
 mod cavity;
 mod colliders;
+mod foam;
 mod surface;
 mod whitewater;
 
@@ -29,6 +30,9 @@ struct Runtime {
     waves: Vec<sim::waves::Wave>,
     whitewater: Option<sim::whitewater::Whitewater>,
     surface_bytes: usize,
+    /// The radius of the coverage that foam tracers give the surface, when whitewater foam is mixed into the water's albedo
+    /// (`foamMode="albedo"`) instead of drawn as triangles.
+    foam_coverage: Option<f64>,
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
@@ -202,12 +206,19 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             sim::whitewater::Whitewater::new(spec.clone(), bed.clone(), cfg).map_err(|e| e.to_string())
         })
         .transpose()?;
+    let foam_coverage = e.children.iter().find_map(|c| match c {
+        sr_model::model::OceanChild::Whitewater(w) if text(w, "foamMode").as_deref() == Some("albedo") => {
+            Some(num(w, "foamRadius", spec.cell_size))
+        }
+        _ => None,
+    });
     Ok(Runtime {
         solver,
         spec,
         bed,
         waves,
         whitewater,
+        foam_coverage,
         surface_bytes: bytes("surfaceMemoryMiB", 128.)?,
         last: None,
         colliders,
@@ -281,6 +292,7 @@ impl Sims {
                     bed,
                     waves,
                     whitewater,
+                    foam_coverage,
                     surface_bytes,
                     last,
                     colliders,
@@ -393,7 +405,7 @@ impl Sims {
                 let base = frame_at(solver, local_time, driver).map_err(reported)?;
                 let frame = sim::waves::apply(spec, base, waves).map_err(|e| e.to_string())?;
                 let bed_now: &[f64] = if frame.bed.is_empty() { bed } else { &frame.bed };
-                let mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
+                let mut mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
                 let mut key = frame_key(&frame, mesh.indices.len());
                 let whitewater_mesh = if let Some(foam) = &foam {
                     let available = surface_bytes.saturating_sub(surface::memory_cost(spec)?);
@@ -407,7 +419,15 @@ impl Sims {
                             p.kind as u64,
                         ]);
                     }
-                    whitewater::meshes(foam, available)?
+                    if let Some(radius) = *foam_coverage {
+                        // the foam is the surface's own: its coverage rides in the alpha of the vertex colour
+                        let coverage = foam::coverage(&mesh.vertices, &foam.particles, foam.time, radius);
+                        for (vertex, share) in mesh.vertices.iter_mut().zip(coverage) {
+                            vertex.color[3] = share;
+                        }
+                        key = crate::rng::hash(&[key, radius.to_bits(), foam.time.to_bits()]);
+                    }
+                    whitewater::meshes(foam, available, foam_coverage.is_none())?
                 } else {
                     Default::default()
                 };
