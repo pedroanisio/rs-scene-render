@@ -33,6 +33,7 @@ pub fn crater_cut_of(
     // crater is made at the surface: the plane of the kernel is where the axis through the point meets the cells' surface
     let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
     let mut spec = grown.spec;
+    spec.outward = crater_axis(grown, before, settings);
     spec.center = surface_along(before, spec.center, spec.outward, cell);
     let kernel = sr_3d::crater::Crater::conserving(
         spec,
@@ -66,6 +67,65 @@ pub fn crater_cut_of(
     let base = before.bounds().map_or(i32::MAX, |(_, max)| max[1]);
     let anchored = move |c: &[i32; 3]| c[1] == base;
     crater_cut(before, &kernel, 1.0 / grown.units, &ejection, 1, &rock, &anchored)
+}
+
+/// The axis of the crater of `grown` in the cells of `before`: the outward normal of the surface of the cells around the impact, from where the mass of the cells
+/// within the crater's crest radius lies (the direction from the centroid of the filled cells of that ball to its centre, which is the normal of a plane
+/// and the mean of the normals of a staircase of cells). The contact normal of the world is the normal of the cell face or edge that the body touched
+/// first, which on a slope of cells is off by ten degrees and more; it is what the axis is when the ground round the impact is a ball with no
+/// filled cell or all filled cells (or the estimate points the other way).
+pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, settings: &Settings) -> [f64; 3] {
+    let contact = grown.spec.outward;
+    let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
+    match surface_normal(before, grown.spec.center, grown.spec.radius, cell) {
+        Some(normal) if (0..3).map(|i| normal[i] * contact[i]).sum::<f64>() > 0.0 => snap_to_lattice(normal),
+        _ => contact,
+    }
+}
+
+/// The nearest axis of the lattice if `normal` is within two degrees of it: the estimate of a surface of cells that is flat along a face has the noise of
+/// the cells' rounding, a few tenths of a degree, and a face of cells has the normal of the face.
+fn snap_to_lattice(normal: [f64; 3]) -> [f64; 3] {
+    let (axis, along) = (0..3).map(|i| (i, normal[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).expect("three axes");
+    if along >= 2.0f64.to_radians().cos() {
+        let mut snapped = [0.0; 3];
+        snapped[axis] = normal[axis].signum();
+        snapped
+    } else {
+        normal
+    }
+}
+
+/// The outward normal of the surface of the cells of `before` round `point` (object units): minus the direction of the centroid of the filled cells within
+/// `radius` of it, None if there is none or they are centred on it.
+pub fn surface_normal(before: &Occupancy, point: [f64; 3], radius: f64, cell: f64) -> Option<[f64; 3]> {
+    let reach = (radius / cell).ceil() as i32 + 1;
+    let centre = sr_3d::voxel::object_to_cell(point, cell)?;
+    let (mut sum, mut count) = ([0.0f64; 3], 0u64);
+    for dk in -reach..=reach {
+        for dj in -reach..=reach {
+            for di in -reach..=reach {
+                let key = [centre[0] + di, centre[1] + dj, centre[2] + dk];
+                if before.get(key) == 0 {
+                    continue;
+                }
+                let at = sr_3d::voxel::cell_to_object(key, cell);
+                let offset: [f64; 3] = std::array::from_fn(|i| at[i] - point[i]);
+                if offset.iter().map(|c| c * c).sum::<f64>() <= radius * radius {
+                    for i in 0..3 {
+                        sum[i] += offset[i];
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let length = sum.iter().map(|c| c * c).sum::<f64>().sqrt();
+    // a ball that is all ground or all air is centred on the point to within the cells' rounding: it has no surface to give a normal
+    (length > 0.02 * radius * count as f64).then(|| sum.map(|c| -c / length))
 }
 
 /// Where the line through `point` along `outward` (object units, unit) meets the surface of the cells of `before`, `cell` object units a side: from a point in a

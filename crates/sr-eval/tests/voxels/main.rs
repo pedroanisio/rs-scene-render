@@ -11,5 +11,6 @@ mod scene_body;
 mod scene_cache;
 mod scene_cut;
 mod scene_fracture;
+mod scene_slope;
 mod split;
 mod world_inertia;
