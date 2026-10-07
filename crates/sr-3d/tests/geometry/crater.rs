@@ -370,3 +370,48 @@ fn a_deposit_that_makes_no_sense_is_an_error_and_none_is_the_crater_as_it_was() 
         assert_eq!(a.position.map(f64::to_bits), b.position.map(f64::to_bits), "{p:?}");
     }
 }
+
+#[test]
+fn the_profile_of_the_bowl_and_of_the_rim_are_readable_and_hold_the_volumes_of_the_crater() {
+    let (spec, budget) = authored();
+    let crater = Crater::conserving(spec, budget).unwrap();
+    // the floor of the bowl under the centre is the depth, and it meets the original surface at the crest radius
+    assert!((crater.bowl_depth_at(0.0) - spec.depth).abs() < 1e-12);
+    assert_eq!(crater.bowl_depth_at(spec.radius), 0.0);
+    assert_eq!(crater.bowl_depth_at(2.0 * spec.radius), 0.0);
+    assert!(
+        crater.bowl_depth_at(0.5 * spec.radius) < crater.bowl_depth_at(0.25 * spec.radius),
+        "it rises towards the wall"
+    );
+    // what the profile encloses is the volume the crater says it excavates (Simpson over the radius)
+    let simpson = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| {
+        let n = 20_000;
+        let h = (hi - lo) / n as f64;
+        let mut sum = f(lo) + f(hi);
+        for i in 1..n {
+            sum += f(lo + i as f64 * h) * if i % 2 == 1 { 4. } else { 2. };
+        }
+        sum * h / 3.
+    };
+    let two_pi = 2. * std::f64::consts::PI;
+    let bowl = simpson(&|r| two_pi * r * crater.bowl_depth_at(r), 0.0, spec.radius);
+    assert!(
+        (bowl - crater.volumes().bowl).abs() < 1e-6 * crater.volumes().bowl,
+        "{bowl} against {}",
+        crater.volumes().bowl
+    );
+    // the rim stands over the original surface between the crest radius less its width and the crest radius plus it, highest at the crest
+    let rim =
+        simpson(&|r| two_pi * r * crater.rim_height_at(r), spec.radius - spec.rim_width, spec.radius + spec.rim_width);
+    assert!((rim - crater.volumes().rim).abs() < 1e-6 * crater.volumes().rim, "{rim} against {}", crater.volumes().rim);
+    assert!((crater.rim_height_at(spec.radius) - spec.rim_height).abs() < 1e-12);
+    assert_eq!(crater.rim_height_at(spec.radius + 1.01 * spec.rim_width), 0.0);
+    // the axis is the unit vector the crater points along
+    let axis = crater.axis();
+    assert!((axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2] - 1.0).abs() < 1e-15);
+    assert_eq!(axis, [0.0, 0.0, -1.0]);
+    // a crater that has the exponent 2 (not conserving) has it readable too
+    let plain = Crater::new(spec).unwrap();
+    assert_eq!(plain.bowl_exponent(), 2.0);
+    assert!(crater.bowl_exponent() >= 2.0);
+}
