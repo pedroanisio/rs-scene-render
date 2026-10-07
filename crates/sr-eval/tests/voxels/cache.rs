@@ -222,3 +222,49 @@ fn two_caches_that_are_asked_alternately_keep_nothing_in_common() {
     assert_eq!((y.computed(), y.hits(), y.evicted(), y.bytes()), alone(false));
     assert_ne!(alone(true), alone(false), "the two sequences are not the same one");
 }
+
+#[test]
+fn the_components_and_the_body_do_not_share_across_a_fingerprint_collision_either() {
+    let mut cache = DerivedCache::with_fingerprint(BIG, |_| 7);
+    // two separate blocks, and the same count and bricks with one cell moved so that they touch
+    let mut a = block(3, 3, 3);
+    for c in block(3, 3, 3).cells().map(|c| [c[0] + 4, c[1], c[2]]) {
+        a.set(c, 1).unwrap();
+    }
+    let mut b = a.clone();
+    b.set([6, 0, 0], 0).unwrap();
+    b.set([3, 0, 0], 1).unwrap();
+    assert_eq!((a.count(), a.bricks().count()), (b.count(), b.bricks().count()));
+    let (ca, cb) = (cache.components(&a), cache.components(&b));
+    assert_eq!((cache.computed(), cache.hits()), (2, 0));
+    assert_eq!(*ca, a.components());
+    assert_eq!(*cb, b.components());
+    assert_ne!(ca.len(), cb.len(), "one touches and the other does not");
+    let (wa, wb) = (cache.body(&a, SIZE, DENSITY, 1.0).unwrap(), cache.body(&b, SIZE, DENSITY, 1.0).unwrap());
+    assert_eq!(*wa, body(&a, SIZE, DENSITY, 1.0).unwrap());
+    assert_eq!(*wb, body(&b, SIZE, DENSITY, 1.0).unwrap());
+    assert_ne!(*wa, *wb);
+    // and each is found by its own content
+    assert!(Arc::ptr_eq(&cache.components(&a), &ca) && Arc::ptr_eq(&cache.body(&b, SIZE, DENSITY, 1.0).unwrap(), &wb));
+}
+
+#[test]
+fn a_product_that_cannot_be_kept_is_not_copied_and_what_is_kept_is_charged_by_its_room() {
+    let o = block(8, 8, 8);
+    let mut cache = DerivedCache::new(BIG);
+    cache.body(&o, SIZE, DENSITY, 1.0).unwrap();
+    let kept = cache.bytes();
+    // the cells at twelve bytes and the brick at 512 and its key: not less than that, and not much more
+    let wanted = 8 * 8 * 8 * 12 + 128 + (512 + 24);
+    assert!(kept >= wanted && kept <= wanted + 64, "{kept} bytes for {wanted}");
+    // a budget that is one byte short of it keeps nothing
+    let mut short = DerivedCache::new(kept - 1);
+    short.body(&o, SIZE, DENSITY, 1.0).unwrap();
+    assert_eq!((short.bytes(), short.evicted()), (0, 0));
+}
+
+#[test]
+fn the_brick_that_the_world_counts_bricks_in_is_the_brick_of_an_occupancy() {
+    // sr-sim does not depend on sr-3d and says the side of a brick itself: the two must not part
+    assert_eq!(sr_sim::physics3d::VOXEL_BRICK, sr_3d::occupancy::BRICK);
+}

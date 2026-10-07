@@ -302,6 +302,10 @@ pub struct Frame3 {
     /// The first impact of each watched pair, once a step has resolved it (see
     /// [`World3::with_impact_watches`]); in the order of the watches.
     pub impacts: Vec<Option<Impact3>>,
+    /// For each body of cells that can be cut (a parent of a split, or a slot with a piece in it): how many cuts have been installed in it as of this
+    /// frame, 0 for the cells it started with. A cut that removes, heaps up and separates is one edit. None for any other body, and for a slot that has
+    /// no piece yet. [`World3::voxel_cells_at`] gives the cells of a body at an edit.
+    pub voxel_revision: Vec<Option<u64>>,
     /// Failed frames contain no poses; consumers must report these diagnostics.
     pub errors: Vec<String>,
 }
@@ -328,6 +332,8 @@ struct State {
     impacts: Vec<Option<Impact3>>,
     /// The revision of the cut installed in each body of cells (none before its first), the slots used by each split, and which slots are in use.
     voxel_revisions: Vec<Option<u64>>,
+    /// How many cuts have been installed in each body of cells (0 for the cells it started with; a slot has 1 when it is given its piece).
+    voxel_edits: Vec<u64>,
     slots_used: Vec<usize>,
     slot_active: Vec<bool>,
     /// Bodies of cells that a cut left with nothing: out of the world for good.
@@ -524,6 +530,21 @@ const FRAME_LOG_BYTES: usize = 32 << 20;
 /// Bookkeeping charged per retained frame, on top of its poses and flags.
 const FRAME_ENTRY_BYTES: usize = 64;
 
+/// The side of a brick in cells, as `sr_3d::occupancy::BRICK` has it (this crate does not depend on that one: a test of `sr-eval` asserts that they are equal).
+pub const VOXEL_BRICK: i32 = 8;
+
+/// What a revision of the history is charged beyond its cells: the Arc and the vector's header and the entries of the map and the order (about).
+const VOXEL_HISTORY_ENTRY_BYTES: usize = 96;
+
+/// What a revision of the history is charged: its cells by the room of their vector, and the entry. The cells of the revision a body is in are shared
+/// with the state and so with the checkpoints, which charge them to their own budget too: they are counted in both.
+fn voxel_history_charge(cells: &std::sync::Arc<Vec<[i32; 3]>>) -> usize {
+    cells.capacity() * std::mem::size_of::<[i32; 3]>() + VOXEL_HISTORY_ENTRY_BYTES
+}
+
+/// Bytes that the history of the cells of the bodies that can be cut may use unless a caller says another limit.
+const VOXEL_HISTORY_BYTES: usize = 256 << 20;
+
 /// The frames already simulated, by step: a request for one of them needs no checkpoint
 /// restore and no replay.
 struct FrameLog {
@@ -570,6 +591,11 @@ pub struct World3 {
     prefetch_hits: u64,
     /// How many times the state was taken back to a checkpoint, to replay from it.
     checkpoint_restores: u64,
+    /// The cells of every body of cells at every edit that a frame has told of, under a budget ([`World3::voxel_cells_at`]), and the order they came in.
+    voxel_history: BTreeMap<(usize, u64), std::sync::Arc<Vec<[i32; 3]>>>,
+    voxel_history_order: std::collections::VecDeque<(usize, u64)>,
+    voxel_history_bytes: usize,
+    voxel_history_budget: usize,
     /// The step of the checkpoint that the world was last taken back to.
     last_restored: Option<u64>,
 }
@@ -653,6 +679,7 @@ impl World3 {
             fracture_lost: Vec::new(),
             impacts: Vec::new(),
             voxel_revisions: vec![None; spec.bodies.len()],
+            voxel_edits: vec![0; spec.bodies.len()],
             slots_used: Vec::new(),
             slot_active: vec![false; spec.bodies.len()],
             voxel_spent: vec![false; spec.bodies.len()],
@@ -868,6 +895,10 @@ impl World3 {
             prefetched: Vec::new(),
             prefetch_hits: 0,
             checkpoint_restores: 0,
+            voxel_history: BTreeMap::new(),
+            voxel_history_order: std::collections::VecDeque::new(),
+            voxel_history_bytes: 0,
+            voxel_history_budget: VOXEL_HISTORY_BYTES,
             last_restored: None,
             fractures: Vec::new(),
             spec,
@@ -919,6 +950,110 @@ impl World3 {
     /// is the room, so a test of the accounting looks at both.
     pub fn voxel_cells_held(&self, body: usize) -> Option<(usize, usize)> {
         self.state.voxel_cells.get(body)?.as_ref().map(|c| (c.len(), c.capacity()))
+    }
+
+    /// Bytes the history of the cells of the bodies that can be cut ([`World3::voxel_cells_at`]) may use: the oldest revisions go first, never the one the
+    /// world is in. A revision is charged for its cells at twelve bytes each, by the room of the vector that holds them.
+    pub fn with_voxel_history_budget(mut self, bytes: usize) -> Self {
+        self.voxel_history_budget = bytes;
+        self.trim_voxel_history();
+        self
+    }
+
+    /// Bytes the history holds now.
+    pub fn voxel_history_bytes(&self) -> usize {
+        self.voxel_history_bytes
+    }
+
+    /// The cells (keys of the body's own lattice, sorted by key: x first, then y, then z, which is not the order of an `Occupancy`'s cells, z first) that body `body` had when `revision` cuts had been installed in it, for a
+    /// revision that a frame ([`Frame3::voxel_revision`]) has told of and that the world has kept: the history is held under a budget of bytes
+    /// ([`World3::with_voxel_history_budget`]) and the oldest go first, so a revision that is gone is None and the frame has to be made again. A cut
+    /// that was replayed has the same cells, so the same revision is always the same cells.
+    pub fn voxel_cells_at(&self, body: usize, revision: u64) -> Option<std::sync::Arc<Vec<[i32; 3]>>> {
+        self.voxel_history.get(&(body, revision)).cloned()
+    }
+
+    /// The keys of the bricks of 8 by 8 by 8 cells that have a cell that is not at both revisions of body `body` (a cell removed, added or moved to a
+    /// piece), in key order, the bricks that were emptied included: what a mesher has to look at again to go from one revision to the other. None if
+    /// the world does not have both.
+    pub fn voxel_bricks_changed(&self, body: usize, from: u64, to: u64) -> Option<Vec<[i32; 3]>> {
+        let (a, b) = (self.voxel_cells_at(body, from)?, self.voxel_cells_at(body, to)?);
+        let (mut i, mut j) = (0, 0);
+        let mut bricks = std::collections::BTreeSet::new();
+        let mut note = |c: &[i32; 3]| {
+            bricks.insert(c.map(|k| k.div_euclid(VOXEL_BRICK)));
+        };
+        while i < a.len() || j < b.len() {
+            match (a.get(i), b.get(j)) {
+                (Some(x), Some(y)) if x == y => {
+                    i += 1;
+                    j += 1;
+                }
+                (Some(x), Some(y)) if x < y => {
+                    note(x);
+                    i += 1;
+                }
+                (Some(_), Some(y)) => {
+                    note(y);
+                    j += 1;
+                }
+                (Some(x), None) => {
+                    note(x);
+                    i += 1;
+                }
+                (None, Some(y)) => {
+                    note(y);
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        Some(bricks.into_iter().collect())
+    }
+
+    /// Keeps the cells of body `body` at edit `edit` in the history, and drops the oldest that are over the budget.
+    pub(super) fn record_voxel_cells(&mut self, body: usize, edit: u64, cells: &std::sync::Arc<Vec<[i32; 3]>>) {
+        let bytes = voxel_history_charge(cells);
+        if let Some(old) = self.voxel_history.insert((body, edit), cells.clone()) {
+            self.voxel_history_bytes -= voxel_history_charge(&old);
+            // a revision that is made again is the newest
+            self.voxel_history_order.retain(|k| *k != (body, edit));
+        }
+        self.voxel_history_order.push_back((body, edit));
+        self.voxel_history_bytes += bytes;
+        self.trim_voxel_history();
+    }
+
+    /// Puts the cells that every body is in now in the history (a frame made again from a checkpoint is in them, and nothing else recorded them).
+    fn record_current_voxel_cells(&mut self) {
+        for k in 0..self.state.voxel_cells.len() {
+            if let Some(cells) = self.state.voxel_cells[k].clone() {
+                let edit = self.state.voxel_edits[k];
+                if self.voxel_history.get(&(k, edit)).is_none_or(|have| !std::sync::Arc::ptr_eq(have, &cells)) {
+                    self.record_voxel_cells(k, edit, &cells);
+                }
+            }
+        }
+    }
+
+    fn trim_voxel_history(&mut self) {
+        // what the world is in is never dropped: the next frame will tell of it
+        let current =
+            |w: &Self, key: &(usize, u64)| w.state.voxel_cells[key.0].is_some() && w.state.voxel_edits[key.0] == key.1;
+        let mut kept = std::collections::VecDeque::new();
+        while self.voxel_history_bytes > self.voxel_history_budget {
+            let Some(key) = self.voxel_history_order.pop_front() else { break };
+            if current(self, &key) {
+                kept.push_back(key);
+                continue;
+            }
+            if let Some(gone) = self.voxel_history.remove(&key) {
+                self.voxel_history_bytes -= voxel_history_charge(&gone);
+            }
+        }
+        while let Some(key) = kept.pop_back() {
+            self.voxel_history_order.push_front(key);
+        }
     }
 
     /// The momentum that the dust of the fracture `event` took away when it fired, if it has fired and has dust: the counter that says what the world
@@ -1654,8 +1789,24 @@ impl World3 {
     /// and kept, otherwise replayed from the nearest checkpoint at or before it.
     pub fn frame_at(&mut self, t: f64, driver: &mut dyn Driver3) -> Frame3 {
         let target = self.step_index(t);
-        if let Some(frame) = self.frame_log.frames.get(&target) {
-            return frame.clone();
+        // the log and the history of cells have budgets of their own: a frame whose revisions the history has dropped is made again (which puts
+        // them back), so that what it says can be asked for
+        let logged = self.frame_log.frames.get(&target).map(|frame| {
+            let kept = frame
+                .voxel_revision
+                .iter()
+                .enumerate()
+                .all(|(k, r)| r.is_none_or(|n| self.voxel_history.contains_key(&(k, n))));
+            (kept, frame.clone())
+        });
+        match logged {
+            Some((true, frame)) => return frame,
+            Some((false, _)) => {
+                if let Some(old) = self.frame_log.frames.remove(&target) {
+                    self.frame_log.bytes -= frame_bytes(&old);
+                }
+            }
+            None => {}
         }
         self.prefetched.clear();
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
@@ -1687,6 +1838,7 @@ impl World3 {
         if let Err(error) = self.apply_voxel_cuts(target, self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
+        self.record_current_voxel_cells();
         self.snapshot()
     }
 
@@ -1736,6 +1888,9 @@ impl World3 {
             fractured: st.fractured.clone(),
             impacts: st.impacts.clone(),
             broken: st.joint_handles.iter().map(|h| h.is_none()).collect(),
+            voxel_revision: (0..st.handles.len())
+                .map(|k| st.voxel_cells[k].as_ref().map(|_| st.voxel_edits[k]))
+                .collect(),
             errors: Vec::new(),
         }
     }
@@ -1839,6 +1994,7 @@ fn frame_bytes(frame: &Frame3) -> usize {
     std::mem::size_of::<Frame3>()
         + frame.bodies.len() * per_body
         + frame.impacts.len() * std::mem::size_of::<Option<Impact3>>()
+        + frame.voxel_revision.len() * std::mem::size_of::<Option<u64>>()
         + FRAME_ENTRY_BYTES
 }
 

@@ -51,9 +51,10 @@ pub struct Fracture3 {
     /// this time for which the source participates. Fragments inherit its pose,
     /// angular velocity and velocity at their respective centres of mass. Not used with a `contact`.
     pub at: f64,
-    /// Total outward impulse in kg·scene-unit/s, distributed by piece mass.
-    /// Directions use actual centres of mass at release, including source rotation. Not used with a `contact`,
-    /// whose push comes from the energy of the impact.
+    /// Outward impulse in kg·scene-unit/s: the push is this divided by the source's mass (its dust included), the same speed for every piece, so that
+    /// without dust the pieces together receive this impulse and with dust they receive this times their share of the source's mass.
+    /// Directions use actual centres of mass at release, including source rotation: out of the source's centre of mass, or out of the fragments' own
+    /// when there is dust. Not used with a `contact`, whose push comes from the energy of the impact.
     pub radial_impulse: f64,
     pub fragments: Vec<Fragment3>,
     /// With a contact the fracture fires on the step after the impact of the watch is noticed, and not at `at`.
@@ -251,7 +252,7 @@ impl World3 {
             };
             let mut parts = Vec::with_capacity(e.fragments.len());
             // The radial push is the pieces pushing each other: it adds no momentum. Each piece gets the same speed
-            // along the line from the source's centre of mass to its own, and the mass-weighted mean of those
+            // along the line from the centre of mass it is pushed out of (see below) to its own, and the mass-weighted mean of those
             // velocities, which is not zero unless the partition is symmetric, is taken off every piece.
             let mut pushed = Vec::with_capacity(e.fragments.len());
             let mut mean = Vec3::ZERO;

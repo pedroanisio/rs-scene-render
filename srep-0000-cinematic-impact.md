@@ -3153,6 +3153,15 @@ by hand; the cells of a ball with a bite go to the nearest seed by a brute-force
 joints equal a brute force over all the pairs of cells, for 1, 3, 7 and 20 seeds; a single cell; cells at the last keys of an occupancy, seeds, offsets
 and normals at the extremes; the seeds are the reference sequence of splitmix64.
 
+**Rigid bodies of cells, what a crater or a fracture does to them, and what a frame says of them (`sr_3d::occupancy`, `sr_sim::physics3d`, `sr_eval::voxels`).**
+The acceptance ledger entry "Voxel physics: the track so far, what is proven and what is stated as untested" holds the figures, and the entries before it each step's.
+Occupancy and mass: a body of cells is an `Occupancy` whose mass, centre of mass and inertia are worked out from exact integer moments, the same bits for the same cells in any order, and the world gives them to the solver with their principal frame (the eigen solver of the physics library swaps the axes of a diagonal tensor with a repeated smaller moment, and the exact path is also used for the pieces of every fracture).
+Cuts and slots: a body that breaks gives its pieces to slots that the world holds for them, with the motion of the point of the body each was, and a frame is the same to the bit however it is asked (fresh, after a later one, again, replayed from a checkpoint).
+Crater in cells: the law's crater in soft rock takes 6 460 cells out of a slab with a pillar (6 352 on flat ground, 98.34 percent of the law's volume), throws 80 percent of them in counts and heaps 20 percent on a rim that is the law's level set, as one cut of the body.
+Fracture: a body of cells divided by `partition` into bodies of cells with the cut's rules for pieces that are too small or too many; the source weighs all its cells until it breaks, the fragments and the dust sum to it, and the momentum and the angular momentum that the dust takes away are recorded as lost (the fragments and the lost equal the source's to 1e-9).
+Cache and frames: the mass properties, components and body of a grid are kept by its content under a budget of bytes (a hit compares the bricks, so a fingerprint collision is never a wrong answer), and a frame says how many cuts each body has had, with the cells of each revision and the bricks that differ between two.
+Not connected to any scene: no attribute or rule reaches it, and craters on sloping ground or with an axis out of the planes tested (a lattice axis, and 45 degrees in one plane) are untested; the limits are in that ledger entry.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.

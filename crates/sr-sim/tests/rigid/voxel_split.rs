@@ -744,6 +744,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
 fn same(a: &Frame3, b: &Frame3, why: &str) {
     assert!(a.errors.is_empty() && b.errors.is_empty(), "{why}: {:?} {:?}", a.errors, b.errors);
     assert_eq!(a.enabled, b.enabled, "{why}: who takes part");
+    assert_eq!(a.voxel_revision, b.voxel_revision, "{why}: how many cuts each body of cells has had");
     assert_eq!(a.bodies.len(), b.bodies.len());
     for k in 0..a.bodies.len() {
         assert_eq!(a.bodies[k].pos.map(f64::to_bits), b.bodies[k].pos.map(f64::to_bits), "{why}: position of body {k}");
@@ -1819,4 +1820,147 @@ fn a_ball_comes_to_rest_on_the_cells_that_were_heaped_on_the_floor_and_not_on_th
     let (bare, heaped) = (rest(false), rest(true));
     assert!((bare + 0.3).abs() < 0.02, "the ball rests on the bare floor: {bare}");
     assert!((heaped + 0.8).abs() < 0.02, "the ball rests on the heap: {heaped}");
+}
+
+fn sorted(mut cells: Vec<[i32; 3]>) -> Vec<[i32; 3]> {
+    cells.sort_unstable();
+    cells
+}
+
+#[test]
+fn a_frame_says_how_many_cuts_each_body_of_cells_has_had_and_nothing_for_the_others() {
+    // the bar (body 0) with two slots; a third body that is not made of cells
+    let mut w = world(2, None);
+    let mut d = Cutter::new(0.2);
+    let before = w.frame_at(0.1, &mut d);
+    assert_eq!(before.voxel_revision, vec![Some(0), None, None], "the bar as it started, the slots with no piece");
+    let after = w.frame_at(0.3, &mut d);
+    assert_eq!(after.voxel_revision, vec![Some(1), Some(1), None], "one cut: the bar once, the piece born at its cut");
+    // a frame asked for again, from the log or replayed, says what it said
+    assert_eq!(w.frame_at(0.1, &mut d).voxel_revision, before.voxel_revision);
+    assert_eq!(w.frame_at(0.3, &mut d).voxel_revision, after.voxel_revision);
+}
+
+#[test]
+fn a_cut_that_removes_heaps_and_separates_is_one_edit_of_its_body() {
+    let mut w = world(1, None);
+    let mut d = Heap::on_the_bar(0.2);
+    d.destroyed = cells_of(0..1, 0..2, 0..2);
+    d.mass = 71.0 * CELL_MASS;
+    let frame = w.frame_at(0.4, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    assert_eq!(frame.voxel_revision[0], Some(1), "cells added and cells destroyed in one cut: one edit");
+}
+
+#[test]
+fn the_cells_of_a_body_at_a_revision_are_those_it_had_then_for_as_long_as_the_world_keeps_them() {
+    let mut w = world(2, None);
+    let mut d = Cutter::new(0.2);
+    let later = w.frame_at(1.0, &mut d);
+    assert_eq!(later.voxel_revision, vec![Some(1), Some(1), None]);
+    // the world has moved on and an earlier frame is asked for: its revision's cells are still the ones it had
+    let early = w.frame_at(0.1, &mut d);
+    assert_eq!(early.voxel_revision[0], Some(0));
+    let started = sorted(bar());
+    assert_eq!(w.voxel_cells_at(0, 0).as_deref(), Some(&started));
+    let mut stays = cells_of(0..5, 0..2, 0..2);
+    stays.sort_unstable();
+    assert_eq!(w.voxel_cells_at(0, 1).as_deref(), Some(&sorted(stays)), "what stays of the bar");
+    assert_eq!(
+        w.voxel_cells_at(1, 1).as_deref(),
+        Some(&sorted(cells_of(6..12, 0..2, 0..2))),
+        "the piece, in the keys of the bar"
+    );
+    // what was never an edit of that body is nothing, and so is a body that is not made of cells
+    assert_eq!(w.voxel_cells_at(0, 2), None);
+    assert_eq!(w.voxel_cells_at(2, 0), None);
+    assert_eq!(w.voxel_cells_at(1, 0), None, "a piece has no revision before its cut");
+    assert_eq!(w.voxel_cells_at(9, 0), None);
+}
+
+#[test]
+fn what_a_mesher_has_to_look_at_again_between_two_revisions_is_the_bricks_with_cells_that_differ() {
+    // the bar of 12 by 2 by 2 cells is in the brick [0,0,0] and the cut at x = 5 takes cells of it; a bar that reaches into the next brick in x
+    // loses cells in both
+    let mut w = world(1, None);
+    let mut d = Cutter::new(0.2);
+    w.frame_at(0.5, &mut d);
+    assert_eq!(
+        w.voxel_bricks_changed(0, 0, 1),
+        Some(vec![[0, 0, 0], [1, 0, 0]]),
+        "x = 5 is in the first brick and the piece (x 6 to 11) in both"
+    );
+    assert_eq!(w.voxel_bricks_changed(0, 1, 1), Some(vec![]), "nothing changes between a revision and itself");
+    assert_eq!(w.voxel_bricks_changed(0, 1, 0), w.voxel_bricks_changed(0, 0, 1), "in either direction");
+    assert_eq!(w.voxel_bricks_changed(0, 0, 7), None, "a revision the world does not have");
+}
+
+#[test]
+fn the_history_is_kept_under_a_budget_and_the_oldest_revisions_go_first() {
+    let mut w = world(1, None).with_voxel_history_budget(44 * 12 * 3 / 2);
+    let mut d = Cutter::new(0.2);
+    let frame = w.frame_at(0.5, &mut d);
+    assert_eq!(frame.voxel_revision, vec![Some(1), Some(1)]);
+    // 48 cells at the start, 20 after the cut and 24 in the piece, and room for fewer than all of them: the start is dropped, what the frame is of stays
+    assert_eq!(w.voxel_cells_at(0, 0), None, "the oldest is gone");
+    assert!(w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some(), "what the world is in is kept");
+    assert!(w.voxel_history_bytes() <= 44 * 12 * 3 / 2, "the bytes kept");
+}
+
+#[test]
+fn a_frame_from_the_log_whose_revision_the_history_dropped_is_made_again_so_that_its_cells_can_be_asked_for() {
+    // the log of frames and the history of cells have budgets of their own: a frame can be in the log with a revision that the history no longer has
+    let mut w = world(2, None);
+    let mut d = Cutter::new(0.2);
+    w.frame_at(1.0, &mut d);
+    assert!(w.voxel_cells_at(0, 0).is_some());
+    let mut w = w.with_voxel_history_budget(1);
+    assert_eq!(
+        w.voxel_cells_at(0, 0),
+        None,
+        "the history dropped the cells the bar started with, and kept those the world is in"
+    );
+    assert!(w.voxel_cells_at(0, 1).is_some());
+    // the frame at 0.1 s is in the log and says revision 0: asking for it makes it again, and its cells are there to ask for
+    let frame = w.frame_at(0.1, &mut d);
+    assert_eq!(frame.voxel_revision[0], Some(0));
+    assert_eq!(w.voxel_cells_at(0, 0).as_deref(), Some(&sorted(bar())));
+}
+
+#[test]
+fn the_cells_of_a_revision_are_sorted_by_key_with_x_first_which_is_not_the_scan_order_of_an_occupancy() {
+    let mut w = world(1, None);
+    w.frame_at(0.1, &mut Cutter::new(0.2));
+    let cells = w.voxel_cells_at(0, 0).unwrap();
+    assert_eq!(*cells, sorted(bar()), "by x, then y, then z");
+    assert_ne!(
+        *cells,
+        bar(),
+        "the order of an Occupancy's cells is z, then y, then x: do not pair the two by position"
+    );
+}
+
+#[test]
+fn with_no_room_for_a_history_only_what_the_world_is_in_is_kept_and_a_later_revision_survives_a_replay_to_an_earlier_time(
+) {
+    // a budget of nothing keeps the revision each body is in and no other
+    let mut w = world_logging(2, None, Some(0)).with_voxel_history_budget(0);
+    let mut d = Cutter::new(0.2);
+    w.frame_at(1.0, &mut d);
+    assert!(w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some());
+    assert_eq!(w.voxel_cells_at(0, 0), None);
+    // a replay to an earlier time (no frames are kept, so the world goes back to a checkpoint) makes the cells of that time as well
+    let restored = w.checkpoint_restores();
+    let early = w.frame_at(0.1, &mut d);
+    assert!(w.checkpoint_restores() > restored, "the frame was replayed");
+    assert_eq!(early.voxel_revision, vec![Some(0), None, None]);
+    assert_eq!(w.voxel_cells_at(0, 0).as_deref(), Some(&sorted(bar())), "the revision the frame is of");
+    // and with room for them, a later revision asked after that replay is still there
+    let mut w = world_logging(2, None, Some(0));
+    w.frame_at(1.0, &mut d);
+    w.frame_at(0.1, &mut d);
+    assert!(
+        w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some(),
+        "the later revisions after a replay to an earlier time"
+    );
 }
