@@ -147,6 +147,7 @@ impl World3 {
             properties.push((e.source, total));
         }
         for (k, props) in properties {
+            self.fracture_props[k] = Some(props);
             let h = self.state.handles[k];
             let collider = self.state.bodies[h].colliders()[0];
             self.state.colliders[collider].set_mass_properties(props);
@@ -267,7 +268,10 @@ impl World3 {
                     let rb = &self.state.bodies[self.state.handles[p.body]];
                     let position = *source.position()
                         * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
-                    (position, rb.mass_properties().local_mprops.world_com(&position))
+                    // the centre of mass of the piece as it was registered: the body is out of the world, and a body that is stepped while it is has the
+                    // mass properties that the solver makes of colliders that are switched off, which is not a fragment's
+                    let local = self.fracture_props[p.body].unwrap_or_else(|| rb.mass_properties().local_mprops);
+                    (position, local.world_com(&position))
                 })
                 .collect();
             // the push comes out of the centre of mass of what it pushes: the source's when every cell is a fragment (they are the same point, and the
