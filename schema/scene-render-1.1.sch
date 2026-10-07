@@ -626,6 +626,7 @@
       <sch:assert id="P3D8" test="not(@crater) or /scene//crater[@id=current()/@crater and @source]">a burst from a crater must name a crater that grows from an impact.</sch:assert>
       <sch:assert id="P3D9" test="@crater or not(@angle or @angleSpread)">angle and angleSpread belong to a burst from a crater.</sch:assert>
       <sch:assert id="P3D10" test="not(@crater) or ($angle - $spread &gt;= 0 and $angle + $spread &lt;= 90)">the launch angle of a burst from a crater (default 45) and its spread (default 15) must stay between 0 and 90 degrees.</sch:assert>
+      <sch:assert id="CRT17" test="not(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater]) or not(@angle or @angleSpread)">a burst from the crater of an object of cells launches the cells that the cut throws with the cut's own velocities, so angle and angleSpread have no meaning there.</sch:assert>
       <sch:assert id="CRT16" test="(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater] and not(@count)) or (not(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater]) and @count)">a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.</sch:assert>
     </sch:rule>
   </sch:pattern>
@@ -679,7 +680,7 @@
       <sch:assert id="CRT12" test="not(@repose) or not(@mantle='true')">a crater that gives its settled ejecta a repose angle has no mantle: the ejecta are the ground once, as one or the other.</sch:assert>
       <sch:assert id="CRT5" test="not(../rigidBody[not(@type='static' or @type='kinematic') or (@shape and not(@shape='auto' or @shape='trimesh' or @shape='voxels'))])">crater rigid bodies require static/kinematic type with auto, trimesh or voxels collision geometry.</sch:assert>
       <sch:assert id="CRT13" test="not(parent::object3D[@primitive='voxels']) or not(@mantle or @bulking or @repose)">a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.</sch:assert>
-      <sch:assert id="CRT14" test="not(parent::object3D[@primitive='voxels']) or not(@start or @end or @curve)">the cut of a crater in an object of cells is instantaneous at the impact, so start, end and curve have no meaning there.</sch:assert>
+      <sch:assert id="CRT14" test="not(parent::object3D[@primitive='voxels']) or not(@curve)">the cut of a crater in an object of cells is instantaneous at the impact, so curve has no meaning there (start and end are refused by CRT6 for a crater with a source, which CRT15 requires).</sch:assert>
       <sch:assert id="CRT15" test="not(parent::object3D[@primitive='voxels']) or @source">a crater in an object of cells grows from a source: it is cut by an impact.</sch:assert>
     </sch:rule>
   </sch:pattern>

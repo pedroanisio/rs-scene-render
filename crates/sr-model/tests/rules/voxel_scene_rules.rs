@@ -105,12 +105,16 @@ fn a_crater_in_cells_is_cut_by_an_impact_once_and_has_no_analytic_rim() {
         (r#"mantle="true""#, "CRT13"),
         (r#"bulking="1.2" mantle="true""#, "CRT13"),
         (r#"repose="30""#, "CRT13"),
-        (r#"start="1""#, "CRT14"),
-        (r#"end="2""#, "CRT14"),
+        // start and end are the growth of a crater with no source (CRT6 refuses them with one, and CRT15 gives the crater of cells one), curve is
+        // the curve of that growth, which only CRT14 refuses
+        (r#"start="1""#, "CRT6"),
+        (r#"end="2""#, "CRT6"),
         (r#"curve="linear""#, "CRT14"),
     ] {
         let c = ground(&format!(r#"<crater id="pit" source="ball" targetMaterial="softRock" {extra}/>"#));
         assert!(c.contains(&code.into()), "{extra}: {c:?}");
+        // and nothing else of the three says it twice
+        assert_eq!(c.iter().filter(|k| ["CRT6", "CRT13", "CRT14"].contains(&k.as_str())).count(), 1, "{extra}: {c:?}");
     }
     assert!(ground(r#"<crater id="pit" radius="4"/>"#).contains(&"CRT15".into()));
     // the rigid body of the owner may be the cells (CRT5), and still not a dynamic one
@@ -128,6 +132,14 @@ fn the_ejecta_of_a_crater_in_cells_are_its_cells_and_have_no_count() {
     let emitter = |burst: &str| format!(r#"<particles3D id="d" rate="0" lifetime="3">{burst}</particles3D>"#);
     assert!(codes(&owner("pit"), &emitter(r#"<burst crater="pit"/>"#)).is_empty());
     assert!(codes(&owner("pit"), &emitter(r#"<burst crater="pit" count="50"/>"#)).contains(&"CRT16".into()));
+    // the particles are the cells that the cut throws, with the velocities of the cut: the launch angle and its spread have no meaning (CRT17)
+    for angle in [r#"angle="30""#, r#"angleSpread="5""#, r#"angle="60" angleSpread="10""#] {
+        let c = codes(&owner("pit"), &emitter(&format!(r#"<burst crater="pit" {angle}/>"#)));
+        assert_eq!(c, ["CRT17"], "{angle}: {c:?}");
+    }
+    // a crater of a surface that is not cells keeps them, as it had
+    let plane_pit = r#"<object3D id="p" primitive="plane" width="9" height="9"><rigidBody type="static"/><crater id="pit" source="ball" targetMaterial="softRock"/></object3D>"#;
+    assert!(codes(plane_pit, &emitter(r#"<burst crater="pit" count="50" angle="30" angleSpread="5"/>"#)).is_empty());
     // a burst that is not of a crater of cells has its count, as it always had
     assert!(codes(&owner("pit"), &emitter(r#"<burst time="0.5" count="50"/>"#)).is_empty());
     assert!(codes(&owner("pit"), &emitter(r#"<burst time="0.5"/>"#)).contains(&"CRT16".into()));

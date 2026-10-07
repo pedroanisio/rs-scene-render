@@ -277,6 +277,9 @@
     "crt16-no-count.scene.xml": [
       "CRT16"
     ],
+    "crt17-angle.scene.xml": [
+      "CRT17"
+    ],
     "crt2.scene.xml": [
       "CRT2"
     ],

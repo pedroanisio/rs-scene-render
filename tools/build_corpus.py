@@ -134,6 +134,7 @@ CASES = [
     ("crt13-mantle", ["CRT13"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" mantle="true"')),
     ("crt14-curve", ["CRT14"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" curve="linear"')),
     ("crt15-no-source", ["CRT15"], lambda _: VOXEL_GROUND.replace('<crater id="pit" source="ball" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("crt17-angle", ["CRT17"], lambda _: VOXEL_EJECTA.replace('<burst crater="pit"/>', '<burst crater="pit" angle="30" angleSpread="5"/>')),
     ("crt16-count", ["CRT16"], lambda _: VOXEL_EJECTA.replace('<burst crater="pit"/>', '<burst crater="pit" count="200"/>')),
     ("crt16-no-count", ["CRT16"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst crater="pit"/>')),
     ("frx8-interior", ["FRX8"], lambda _: VOXEL_FRACTURE.replace('<fracture ', '<fracture interiorMaterial="stone" ')),

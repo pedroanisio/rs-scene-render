@@ -4502,7 +4502,8 @@
     <xs:annotation><xs:documentation>
       A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
       throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
-      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
+      number of particles that stand for the ejecta (for the crater of an object of cells, whose particles are the cells that the cut throws with the cut's own
+      velocities, there is no count, no `angle` and no `angleSpread`: CRT16 and CRT17), and when, where, how fast and how heavy each one is are derived
       (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
       launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
       render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed

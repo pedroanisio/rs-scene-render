@@ -3201,7 +3201,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX14 | a body of cells has a crater or a fracture, not both |
 | VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 417 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 418 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 **Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
@@ -3222,12 +3222,13 @@ cells of the greatest y key: the lowest layer, the way ground is held by what is
 every axis (VOX13: the cells are cubes for the cut), has the one or the other (VOX14), and has the cells for its collider (VOX15: with a box or a mesh for the collider there is no
 body of cells to cut, and a document that said so would mean nothing; this does not depend on the scale, which is why it is a rule of its own and not VOX13's).
 
-*The crater (CRT5, CRT13 to CRT15).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
+*The crater (CRT5, CRT13 to CRT17).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
 fifth heaped as the rim, in cells): so `mantle`, `bulking` and `repose`, which are ideas of an analytic surface, are refused (CRT13), and so are `start`, `end` and `curve`, which
-describe a growth that a cut does not have (CRT14: an attribute with no effect is a falsehood in a document). It grows from a source (CRT15), and its rigid body may be the cells
+describe a growth that a cut does not have (an attribute with no effect is a falsehood in a document): `curve` by CRT14, and `start` and `end` by CRT6, which refuses them for a crater that grows
+from a source, and CRT15 gives the crater of cells one. It grows from a source (CRT15), and its rigid body may be the cells
 (CRT5 gains `voxels`). `capture` is the world's and stays. The ejecta are a `particles3D` whose `burst@crater` names the crater, and for a crater of cells its particles are the
-cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's), and a burst that is not of such a crater
-has one as before.
+cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's) and no `angle` or `angleSpread` (CRT17: the cells leave with the velocities the cut gives them, and a launch angle would be an
+attribute with no effect), and a burst that is not of such a crater has a `count`, and may have the angles, as before.
 
 *The fracture (FRX3, FRX8 to FRX12).* The partition is `voronoi` (the engine's: `pieces` seeds drawn from `seed`, at most 4096), `planes` (up to 63 planes of `nx ny nz offset`
 in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component, is not all zeros and every number is finite: FRX11)
@@ -3559,7 +3560,7 @@ Also includes `pyroShape`, inventoried below.
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
 | `time` | xs:double | Required unless `crater` is given (P3D7) |
-| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16) |
+| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16); `angle` and `angleSpread` are refused there too (CRT17) |
 | `repeat` | xs:nonNegativeInteger | Default `0` |
 | `interval` | positiveDecimal | Default `1` |
 | `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
@@ -3993,11 +3994,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 288 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 108 of them are in the
-cinematic families OCN 14, P3D 11, CRT 16, PYRO 11, VOL 10, BH 8, FRX 12, VOX 15, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 289 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 109 of them are in the
+cinematic families OCN 14, P3D 11, CRT 17, PYRO 11, VOL 10, BH 8, FRX 12, VOX 15, PYC 4, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 41 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT16, PYRO9 to PYRO11, VOX1 to VOX15) are this repository's. At commit 349d371,
+families, and the 42 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT17, PYRO9 to PYRO11, VOX1 to VOX15) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

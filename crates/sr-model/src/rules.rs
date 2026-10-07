@@ -920,8 +920,9 @@ impl<'a> Eval<'a> {
                 self.check(!in_cells || !(has("mantle") || has("bulking") || has("repose")), n, "CRT13", || {
                     "a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.".into()
                 });
-                self.check(!in_cells || !(has("start") || has("end") || has("curve")), n, "CRT14", || {
-                    "the cut of a crater in an object of cells is instantaneous at the impact, so start, end and curve have no meaning there.".into()
+                self.check(!in_cells || !has("curve"), n, "CRT14", || {
+                    "the cut of a crater in an object of cells is instantaneous at the impact, so curve has no meaning there (start and end are refused by CRT6 for a crater with a source, which CRT15 requires)."
+                        .into()
                 });
                 self.check(!in_cells || has("source"), n, "CRT15", || {
                     "a crater in an object of cells grows from a source: it is cut by an impact.".into()
@@ -1287,6 +1288,10 @@ impl<'a> Eval<'a> {
                 });
                 self.check(if of_cells { !has("count") } else { has("count") }, n, "CRT16", || {
                     "a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.".into()
+                });
+                self.check(!of_cells || !(has("angle") || has("angleSpread")), n, "CRT17", || {
+                    "a burst from the crater of an object of cells launches the cells that the cut throws with the cut's own velocities, so angle and angleSpread have no meaning there."
+                        .into()
                 });
                 self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
                     "angle and angleSpread belong to a burst from a crater.".into()
