@@ -3189,7 +3189,21 @@ photometric unit: diffuse is a rough dielectric (`_rough`, else 0.8), metal has 
 index of refraction `_ri` or one plus `_ior` (else 1.5) and `_rough` (else 0.05), emit is an emission of `_emit` (else 1) times the colour, and blend is
 an alpha-blended opacity of `_alpha`; a type the reader does not know is drawn as diffuse and said so in the frame's notes. An emitter does not light
 its neighbours in the raster renderer, and in the path tracer only the paths that sample its faces see it (a light of the scene is the reliable way).
-The surface is made once for a grid, a palette and its materials and kept between frames: a frame that changes none of them makes no mesh. The object has no `mesh`,
+The surface is made once for a grid, a palette and its materials and kept between frames: a frame that changes none of them makes no mesh.
+
+**Measured cost** (`crates/sr-3d/examples/voxel_surface_probe.rs`, `ci` profile, one core of the host, the CPU side only: the exposed faces, their merge
+into quads and the expansion into 96-byte vertices; the upload and the draw are not in it):
+
+| grid | cells | exposed faces | quads | faces | merge | expansion | vertices |
+|---|---|---|---|---|---|---|---|
+| cube of 100 | 1,000,000 | 60,000 | 6 | 0.016 s | 0.018 s | 0.000 s | 0 MiB |
+| sphere of radius 62 | 998,592 | 72,576 | 31,392 | 0.020 s | 0.023 s | 0.005 s | 11.5 MiB |
+| shell of radius 100, 2 cells thick | 245,768 | 369,600 | 157,716 | 0.044 s | 0.061 s | 0.026 s | 57.8 MiB |
+| checkerboard of 126 | 1,000,188 | 6,001,128 | 6,001,128 | 0.40 s | 0.77 s | 0.92 s | 2,198 MiB |
+
+The checkerboard, the worst case, is refused by any budget the schema admits (6,001,128 quads at 1,240 bytes are 7.1 GB), at the first plane that takes it
+over. A cut of 904 cells of a radius of 12 out of the side of the shell touches 9 bricks and remeshes 59 planes in 0.004 s, where a full mesh of the cut
+grid takes 0.060 s; a frame that changes nothing remeshes none. The object has no `mesh`,
 `volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
 every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
 
