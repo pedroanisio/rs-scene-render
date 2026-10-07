@@ -187,6 +187,17 @@ pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], ma
     let inertia: [[f64; 3]; 3] = std::array::from_fn(|i| {
         std::array::from_fn(|j| density * (if i == j { trace } else { 0.0 } - covariance(i, j)))
     });
+    tensor_mass_properties(centre, mass, inertia)
+}
+
+/// The mass properties of a body of `mass` with its centre of mass at `centre` and the tensor `inertia` about it (in the same axes), the tensor
+/// diagonalised as [`voxel_mass_properties`] does. `None` for one that is not symmetric or not a number.
+pub(super) fn tensor_mass_properties(centre: Vector, mass: f64, inertia: [[f64; 3]; 3]) -> Option<MassProperties> {
+    let scale = inertia.iter().flatten().fold(0.0f64, |m, e| m.max(e.abs()));
+    let symmetric = (0..3).all(|i| (0..3).all(|j| (inertia[i][j] - inertia[j][i]).abs() <= 1e-9 * scale));
+    if !(mass.is_finite() && mass > 0.0 && centre.is_finite() && scale.is_finite() && symmetric) {
+        return None;
+    }
     let (moments, axes) = principal(inertia);
     let (x, y) = ([axes[0][0], axes[1][0], axes[2][0]], [axes[0][1], axes[1][1], axes[2][1]]);
     let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];

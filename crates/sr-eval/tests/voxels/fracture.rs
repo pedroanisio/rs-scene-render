@@ -142,7 +142,7 @@ fn the_world_given_the_pieces_breaks_the_source_into_them_with_the_velocity_it_h
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at: 0.2, radial_impulse: 0.0, fragments, contact: None }])
+    .with_fractures(vec![Fracture3 { source: 0, at: 0.2, radial_impulse: 0.0, fragments, contact: None, dust: None }])
     .unwrap();
     let frame = w.frame_at(0.3, &mut Still);
     assert!(frame.errors.is_empty(), "{:?}", frame.errors);
@@ -239,6 +239,13 @@ fn a_fracture_in_which_no_piece_is_a_body_is_an_error_and_the_world_conserves_th
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at: 0.2, radial_impulse: 0.0, fragments, contact: None }]);
+    .with_fractures(vec![Fracture3 {
+        source: 0,
+        at: 0.2,
+        radial_impulse: 0.0,
+        fragments,
+        contact: None,
+        dust: None,
+    }]);
     assert!(w.is_ok(), "{:?}", w.err());
 }

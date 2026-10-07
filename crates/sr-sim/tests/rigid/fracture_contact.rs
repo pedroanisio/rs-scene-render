@@ -71,6 +71,7 @@ fn event() -> Fracture3 {
             Fragment3 { body: 3, offset: [-4. / 3., -2., 0.], impulse: [0.; 3] },
         ],
         contact: Some(FractureContact { watch: 0, energy_fraction: FRACTION }),
+        dust: None,
     }
 }
 

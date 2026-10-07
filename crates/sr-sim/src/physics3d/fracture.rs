@@ -23,6 +23,27 @@ pub struct FractureContact {
     pub energy_fraction: f64,
 }
 
+/// Cells of a fracture's source that are not bodies when it breaks (too small to be one, or more than there are slots for): the source weighs them
+/// until it breaks and they leave with it, so that the fragments and the dust sum to the source. Their momentum at the instant is not kept by
+/// anything: the world records it as lost ([`World3::fracture_lost`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dust3 {
+    /// Kilograms.
+    pub mass: f64,
+    /// Its centre of mass in the source's own axes and units (as the offsets of the fragments are).
+    pub centre: [f64; 3],
+    /// The tensor about its centre of mass, in the source's own axes, in kilograms metres squared.
+    pub inertia: [[f64; 3]; 3],
+}
+
+/// The linear and angular momentum (about the source's centre of mass) that the dust took away when a fracture fired, in the scene's axes and units:
+/// kilograms scene units a second, and kilograms scene units squared a second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FractureLost3 {
+    pub momentum: [f64; 3],
+    pub angular_momentum: [f64; 3],
+}
+
 #[derive(Clone, Debug)]
 pub struct Fracture3 {
     pub source: usize,
@@ -37,6 +58,8 @@ pub struct Fracture3 {
     pub fragments: Vec<Fragment3>,
     /// With a contact the fracture fires on the step after the impact of the watch is noticed, and not at `at`.
     pub contact: Option<FractureContact>,
+    /// What of the source does not become a fragment. The fragments' masses and the dust's sum to the source's.
+    pub dust: Option<Dust3>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,7 +107,7 @@ impl World3 {
                 return Err(FractureError("invalid event time, source or piece count"));
             }
             let source_mass = self.spec.bodies[e.source].mass;
-            let mut combined = Vec::with_capacity(e.fragments.len());
+            let mut combined = Vec::with_capacity(e.fragments.len() + 1);
             for p in &e.fragments {
                 if p.body >= self.spec.bodies.len()
                     || !owned.insert(p.body)
@@ -99,12 +122,26 @@ impl World3 {
                 combined.push(props.transform_by(&pose));
                 properties.push((p.body, props));
             }
+            // the dust is part of the source until it breaks: its mass and its tensor, about its centre of mass in the source's axes, are in the sum
+            if let Some(d) = &e.dust {
+                let centre = vec3(flip(d.centre).map(|c| c / ppm));
+                // the tensor in the physics axes: the half turn about x changes the sign of the products with x and leaves the others
+                let t = |i: usize, j: usize| {
+                    let sign = |k: usize| if k == 0 { 1.0 } else { -1.0 };
+                    d.inertia[i][j] * sign(i) * sign(j)
+                };
+                let inertia: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| t(i, j)));
+                let props = tensor_mass_properties(centre, d.mass, inertia)
+                    .ok_or(FractureError("the dust has no mass, centre or tensor that is a number"))?;
+                valid_properties(&props)?;
+                combined.push(props);
+            }
             // the sum of the fragments' tensors, worked out exactly (Parry's Sum diagonalises with the solver whose mistake voxel_mass works around: for
             // a sum that is diagonal with a repeated smallest moment it would give the source another body's tensor)
             let total: MassProperties = sum_mass_properties(&combined);
             valid_properties(&total)?;
             if !source_mass.is_finite() || source_mass <= 0. || (total.mass() / source_mass - 1.).abs() > 1e-9 {
-                return Err(FractureError("fragment masses must conserve source mass"));
+                return Err(FractureError("fragment and dust masses must conserve source mass"));
             }
             properties.push((e.source, total));
         }
@@ -122,6 +159,7 @@ impl World3 {
             }
         }
         self.state.fractured = vec![false; events.len()];
+        self.state.fracture_lost = vec![None; events.len()];
         self.fractures = events;
         self.checkpoints.clear();
         self.checkpoints.insert(0, Checkpoint { state: self.state.clone(), charge: 0 });
@@ -218,6 +256,8 @@ impl World3 {
             let mut pushed = Vec::with_capacity(e.fragments.len());
             let mut mean = Vec3::ZERO;
             let source_mass = m_source;
+            // the mean that is taken off is over the fragments (the dust is not pushed): without it the push would add the momentum of the dust's share
+            let fragment_mass: f64 = e.fragments.iter().map(|p| self.spec.bodies[p.body].mass).sum();
             for p in &e.fragments {
                 let rb = &self.state.bodies[self.state.handles[p.body]];
                 let position =
@@ -226,7 +266,7 @@ impl World3 {
                 let direction = (com - source.center_of_mass()).try_normalize().unwrap_or_default();
                 // by impulse: the same speed for every piece; by contact the speed is found below
                 let radial = direction * (e.radial_impulse / ppm / source_mass);
-                mean += radial * (self.spec.bodies[p.body].mass / source_mass);
+                mean += radial * (self.spec.bodies[p.body].mass / fragment_mass);
                 pushed.push((position, com, direction, radial));
             }
             if let Some(energy) = mu_energy {
@@ -234,7 +274,7 @@ impl World3 {
                 // chosen so that the kinetic energy of the pieces' motion relative to their mean is `energy` exactly
                 mean = Vec3::ZERO;
                 for (p, (_, _, direction, _)) in e.fragments.iter().zip(&pushed) {
-                    mean += *direction * (self.spec.bodies[p.body].mass / source_mass);
+                    mean += *direction * (self.spec.bodies[p.body].mass / fragment_mass);
                 }
                 let spread: f64 = e
                     .fragments
@@ -265,9 +305,34 @@ impl World3 {
                 }
                 parts.push((p.body, position, velocity, angular));
             }
-            pending.push((i, parts));
+            // what the dust takes with it: its momentum at the point of the source where its centre of mass is, and its angular momentum about the source's
+            // centre of mass (the orbit of the dust and its own spin), which nothing in the world keeps
+            let lost = e.dust.as_ref().map(|d| {
+                let rotation = source.position().rotation;
+                let at = (*source.position()
+                    * Pose::from_parts(vec3(flip(d.centre).map(|c| c / ppm)), Rotation::IDENTITY))
+                .translation;
+                let momentum = source.velocity_at_point(at) * d.mass;
+                let local = rotation.inverse() * source.angvel();
+                let spin = |i: usize| {
+                    let sign = |k: usize| if k == 0 { 1.0 } else { -1.0 };
+                    let l = [local.x, local.y, local.z];
+                    (0..3).map(|j| d.inertia[i][j] * sign(i) * sign(j) * l[j]).sum::<f64>()
+                };
+                let own = rotation * vec3([spin(0), spin(1), spin(2)]);
+                let angular = (at - source.center_of_mass()).cross(momentum) + own;
+                FractureLost3 {
+                    momentum: flip([momentum.x, momentum.y, momentum.z]).map(|c| c * ppm),
+                    angular_momentum: flip([angular.x, angular.y, angular.z]).map(|c| c * ppm * ppm),
+                }
+            });
+            if lost.is_some_and(|l| !l.momentum.iter().chain(&l.angular_momentum).all(|c| c.is_finite())) {
+                return Err("rigid fracture dust momentum exceeds numerical range".into());
+            }
+            pending.push((i, parts, lost));
         }
-        for (i, parts) in pending {
+        for (i, parts, lost) in pending {
+            self.state.fracture_lost[i] = lost;
             let source = self.fractures[i].source;
             self.state.bodies[self.state.handles[source]].set_enabled(false);
             for (j, spec) in self.spec.joints.iter().enumerate() {

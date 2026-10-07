@@ -1173,6 +1173,7 @@ fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
         radial_impulse: 0.0,
         fragments: pieces.into_iter().map(|body| Fragment3 { body, offset: [0.0; 3], impulse: [0.0; 3] }).collect(),
         contact: None,
+        dust: None,
     };
     let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
     assert!(

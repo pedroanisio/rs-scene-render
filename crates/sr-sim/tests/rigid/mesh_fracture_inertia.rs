@@ -74,7 +74,7 @@ fn world(bodies: Vec<Body3Spec>, at: f64, pieces: Vec<(usize, [f64; 3])>) -> Wor
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at, radial_impulse: 0.0, fragments, contact: None }])
+    .with_fractures(vec![Fracture3 { source: 0, at, radial_impulse: 0.0, fragments, contact: None, dust: None }])
     .unwrap()
 }
 
@@ -141,7 +141,14 @@ fn plates_with(plate: impl Fn() -> Shape3) -> Result<World3, FractureError> {
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at: 0.3, radial_impulse: 0.0, fragments, contact: None }])
+    .with_fractures(vec![Fracture3 {
+        source: 0,
+        at: 0.3,
+        radial_impulse: 0.0,
+        fragments,
+        contact: None,
+        dust: None,
+    }])
 }
 
 #[test]

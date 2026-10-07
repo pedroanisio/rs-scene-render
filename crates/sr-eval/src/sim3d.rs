@@ -681,6 +681,7 @@ pub(crate) fn build(
                 watch: usize::MAX,
                 energy_fraction: num(config, "energyFraction", 0.3),
             }),
+            dust: None,
         });
         fractures.push(FractureNode { source, indices, geometry });
     }
