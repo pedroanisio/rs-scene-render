@@ -332,3 +332,232 @@ fn a_split_that_names_a_body_that_is_not_made_of_cells_is_refused() {
     });
     assert!(w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }]).is_err(), "a slot is a dynamic body");
 }
+
+/// A driver that cuts several bodies at several times: each cut is for a parent, applies from a time and only to the state that has the
+/// revision it was made against (so a second cut is the difference from the first).
+struct Script {
+    cuts: Vec<(usize, f64, Option<u64>, VoxelCut3)>,
+}
+
+impl Driver3 for Script {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        Ok(self
+            .cuts
+            .iter()
+            .find(|(p, at, against, _)| *p == parent && t + 1e-9 >= *at && *against == revision)
+            .map(|c| c.3.clone()))
+    }
+}
+
+/// The first cut of the tests above, as a script entry: a slice at x = 5 destroyed, the part with x under 5 stays, the rest separates.
+fn first_cut(at: f64) -> (usize, f64, Option<u64>, VoxelCut3) {
+    (
+        0,
+        at,
+        None,
+        VoxelCut3 {
+            revision: 1,
+            destroyed: cells_of(5..6, 0..2, 0..2),
+            parent_mass: 20.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(6..12, 0..2, 0..2), mass: 24.0 * CELL_MASS }],
+        },
+    )
+}
+
+/// The velocity of the point of a body at `c` that has the centre of mass `c0`, the velocity `v` of it and the spin `w` (rad/s).
+fn point_velocity(v: [f64; 3], w: [f64; 3], c0: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    add(v, cross(w, sub(c, c0)))
+}
+
+#[test]
+fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_next_slot() {
+    // at 1.0 s the part that stayed (x 0..5) loses its slice at x = 2: the cells at x 0..2 separate, those at 3..5 stay
+    let second = (
+        0,
+        1.0,
+        Some(1),
+        VoxelCut3 {
+            revision: 2,
+            destroyed: cells_of(2..3, 0..2, 0..2),
+            parent_mass: 8.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(0..2, 0..2, 0..2), mass: 8.0 * CELL_MASS }],
+        },
+    );
+    let mut w = world(2, None);
+    let mut driver = Script { cuts: vec![first_cut(0.5), second.clone()] };
+    let before = w.frame_at(0.9, &mut driver);
+    assert!(before.errors.is_empty(), "{:?}", before.errors);
+    assert_eq!(before.enabled, vec![true, true, false]);
+    // the state of the remaining part just before its second cut, and just after
+    // (a frame is the state at the start of a step, which a cut of that step has already changed: the world has to have taken the step
+    // for the frame to show the cut, so it is asked past it first)
+    w.frame_at(1.2, &mut driver);
+    let at_cut = w.frame_at(1.0, &mut driver);
+    assert!(at_cut.errors.is_empty(), "{:?}", at_cut.errors);
+    assert_eq!(at_cut.enabled, vec![true, true, true], "the second piece took the second slot");
+    let pose = at_cut.bodies[0];
+    let omega = at_cut.velocities[0].angular.map(f64::to_radians);
+    // before the cut the remaining part moved with the velocity of its centre of mass, which is that of the point of the body where it is
+    let (c_before, m_before) = centre_of(&pose, cells_of(0..5, 0..2, 0..2));
+    assert!((m_before - 20.0 * CELL_MASS).abs() < 1e-9);
+    // the velocity of the part's centre of mass just before: the frame before the cut (the step at 0.99), moved on by nothing since there is no force
+    let v_before = w.frame_at(0.99, &mut driver).velocities[0].linear;
+    let (c_piece, _) = centre_of(&pose, cells_of(0..2, 0..2, 0..2));
+    let wanted = point_velocity(v_before, omega, c_before, c_piece);
+    let got = at_cut.velocities[2].linear;
+    for k in 0..3 {
+        assert!((got[k] - wanted[k]).abs() < 1e-9, "second piece, velocity {k}: {} against {}", got[k], wanted[k]);
+        assert!((at_cut.velocities[2].angular[k] - at_cut.velocities[0].angular[k]).abs() < 1e-9);
+    }
+    // and the part that stays has the velocity of its own centre
+    let (c_stay, _) = centre_of(&pose, cells_of(3..5, 0..2, 0..2));
+    let wanted = point_velocity(v_before, omega, c_before, c_stay);
+    let got = at_cut.velocities[0].linear;
+    for k in 0..3 {
+        assert!((got[k] - wanted[k]).abs() < 1e-9, "stays, velocity {k}: {} against {}", got[k], wanted[k]);
+    }
+    // a third cut has no slot: the world says so
+    let third = (
+        0,
+        1.5,
+        Some(2),
+        VoxelCut3 {
+            revision: 3,
+            destroyed: cells_of(3..4, 0..2, 0..2),
+            parent_mass: 4.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(4..5, 0..2, 0..2), mass: 4.0 * CELL_MASS }],
+        },
+    );
+    let mut full = Script { cuts: vec![first_cut(0.5), second, third] };
+    let mut short = world(2, None);
+    let failed = short.frame_at(1.6, &mut full);
+    assert!(failed.errors.iter().any(|e| e.contains("slot")), "{:?}", failed.errors);
+    // and the replay from any checkpoint of the two cuts is the same to the bit
+    let mut reference = world(2, None);
+    let mut two = Script { cuts: vec![first_cut(0.5), driver.cuts[1].clone()] };
+    let times = [1.4, 0.6, 1.0, 0.95, 1.4, 0.2, 1.1];
+    let wanted: Vec<_> = times.iter().map(|t| reference.frame_at(*t, &mut two)).collect();
+    for budget in [Some(0), Some(4_000)] {
+        let mut replay = world(2, budget);
+        let mut script = Script { cuts: vec![first_cut(0.5), driver.cuts[1].clone()] };
+        for (t, want) in times.iter().zip(&wanted) {
+            let got = replay.frame_at(*t, &mut script);
+            assert!(got.errors.is_empty(), "{:?}", got.errors);
+            for k in 0..3 {
+                assert_eq!(
+                    got.bodies[k].pos.map(f64::to_bits),
+                    want.bodies[k].pos.map(f64::to_bits),
+                    "t = {t}, body {k}"
+                );
+                assert_eq!(got.velocities[k], want.velocities[k], "t = {t}, body {k}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
+    // body 0 is the bar, 1 and 2 are its slots; body 1 is also the parent of a split with the slot 3
+    let mut parent = body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+    parent.velocity = [1.0, 0.4, -0.3];
+    parent.angular_velocity = [20.0, 10.0, 40.0];
+    let mut bodies = vec![parent];
+    for _ in 0..3 {
+        bodies.push(body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic));
+    }
+    let make = |budget: Option<usize>| {
+        let w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: bodies.clone(),
+        });
+        let w = match budget {
+            Some(b) => w.with_checkpoint_budget(b),
+            None => w,
+        };
+        w.with_voxel_splits(vec![
+            VoxelSplit3 { parent: 0, slots: vec![1, 2] },
+            VoxelSplit3 { parent: 1, slots: vec![3] },
+        ])
+        .unwrap()
+    };
+    // the piece in slot 1 is the cells x 6..12; at 1.0 s it loses the slice x = 9 and the cells x 10..12 separate into slot 3
+    let piece_cut = (
+        1,
+        1.0,
+        None,
+        VoxelCut3 {
+            revision: 1,
+            destroyed: cells_of(9..10, 0..2, 0..2),
+            parent_mass: 12.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(10..12, 0..2, 0..2), mass: 8.0 * CELL_MASS }],
+        },
+    );
+    let script = || Script { cuts: vec![first_cut(0.5), piece_cut.clone()] };
+    let mut w = make(None);
+    let mut driver = script();
+    // before the first cut the slot is not a body of the world and its split does nothing, whatever the driver would say
+    let early = w.frame_at(0.4, &mut driver);
+    assert!(early.errors.is_empty(), "{:?}", early.errors);
+    assert_eq!(early.enabled, vec![true, false, false, false]);
+    let mid = w.frame_at(0.9, &mut driver);
+    assert_eq!(mid.enabled, vec![true, true, false, false]);
+    w.frame_at(1.2, &mut driver);
+    let after = w.frame_at(1.0, &mut driver);
+    assert!(after.errors.is_empty(), "{:?}", after.errors);
+    assert_eq!(
+        after.enabled,
+        vec![true, true, false, true],
+        "the piece of the piece took the slot of the second split"
+    );
+    // the part of the piece that separates moves as that part of the piece did: the piece's centre and spin
+    let pose = after.bodies[1];
+    let omega = after.velocities[1].angular.map(f64::to_radians);
+    let (c_piece, _) = centre_of(&pose, cells_of(6..12, 0..2, 0..2));
+    let (c_far, _) = centre_of(&pose, cells_of(10..12, 0..2, 0..2));
+    let v_piece = w.frame_at(0.99, &mut driver).velocities[1].linear;
+    let wanted = point_velocity(v_piece, omega, c_piece, c_far);
+    let got = after.velocities[3].linear;
+    for k in 0..3 {
+        assert!((got[k] - wanted[k]).abs() < 1e-9, "velocity {k}: {} against {}", got[k], wanted[k]);
+    }
+    // the replay of both levels is the same to the bit
+    let times = [1.3, 0.45, 0.95, 1.0, 1.3, 0.2];
+    let mut first = make(None);
+    let mut d = script();
+    let wanted: Vec<_> = times.iter().map(|t| first.frame_at(*t, &mut d)).collect();
+    for budget in [Some(0), Some(6_000)] {
+        let mut replay = make(budget);
+        let mut d = script();
+        for (t, want) in times.iter().zip(&wanted) {
+            let got = replay.frame_at(*t, &mut d);
+            assert!(got.errors.is_empty(), "{:?}", got.errors);
+            for k in 0..4 {
+                assert_eq!(
+                    got.bodies[k].pos.map(f64::to_bits),
+                    want.bodies[k].pos.map(f64::to_bits),
+                    "t = {t}, body {k}"
+                );
+                assert_eq!(got.velocities[k], want.velocities[k], "t = {t}, body {k}");
+            }
+        }
+    }
+}
