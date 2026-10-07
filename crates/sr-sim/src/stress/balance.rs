@@ -85,6 +85,11 @@ impl Rigid {
         rotate_back(&self.rotation, sub(x, self.position))
     }
 
+    /// A vector of the world (a force, a moment), in the body's frame.
+    pub fn local_vector(&self, v: V3) -> V3 {
+        rotate_back(&self.rotation, v)
+    }
+
     fn com(&self) -> V3 {
         self.world(self.centre)
     }

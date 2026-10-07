@@ -16,6 +16,7 @@ mod stress_balance;
 mod stress_math;
 mod stress_plan;
 mod stress_spike;
+mod stress_world;
 mod surface3;
 mod surface_prefetch;
 mod voxel_fracture;
