@@ -392,11 +392,14 @@ pub struct Impulse {
 /// behind the front has fallen to a few times the ambient one, 5.8 for air), and stays there. Each step the air that the front swept in the step
 /// is displaced: the volume `4 pi (R1^3 - R0^3) / 3` is given to the cells whose centres are in the sphere of the radius that the front has at
 /// the end of the step (at least a cell: a front smaller than that is the sphere of one cell, and the volume is still the volume swept), spread
-/// evenly over the cells that are not solid, so that the air given is exactly the volume swept whatever the cells make of the sphere. The
-/// analytic flow of the piston is put in the velocity before the projection (inside, `u = d (x - c) / 3` for the divergence `d` the cells are given;
-/// outside, `u = Q / (4 pi r^2)` away from the centre `c`, `Q` the volume over the step), so that a window that is cut by the sphere, or that is
-/// not centred on it, is pushed from the blast and not from its own middle; the projection then makes the flow consistent with the faces. The
-/// shock is not carried (the solver is incompressible), nothing is heated and no smoke is made. It needs an open domain.
+/// evenly over the cells that the sphere has (all of them: a window that the sphere cuts holds some, and the divergence is the one that the whole sphere
+/// makes in free space, which agrees with the flow outside), so that the air given is exactly the volume swept whatever the cells make of the sphere.
+/// The flow is that of the piston, made apart from the smoke's own: the analytic flow (inside, `u = d (x - c) / 3` for the divergence `d`; outside,
+/// `u = Q / (4 pi r^2)` away from the centre `c` of the blast, `Q` the volume over the step) is projected alone, which is linear, and carries the
+/// smoke (the density and the temperature) once over the step. It is not kept in the velocity of the smoke: a potential flow with open faces is not
+/// removed by a projection with no divergence, so it would stay for ever, and the velocity is what it would have been with no blast, to the bit
+/// ([`Simulation::blast_flow`] gives the flow of the last step). The shock is not carried (the solver is incompressible), nothing is heated and no smoke
+/// is made. It needs an open domain.
 #[derive(Clone, Debug)]
 pub struct Blast {
     center: [f64; 3],
@@ -1301,6 +1304,8 @@ pub struct Simulation {
     spec: Spec,
     state: State,
     step: u64,
+    /// The flow that the blasts of the last step made (the velocity of the faces, by axis), if there were any: not part of the state.
+    blast_flow: Option<[Vec<f64>; 3]>,
 }
 
 impl Simulation {
@@ -1374,7 +1379,13 @@ impl Simulation {
             velocity: std::array::from_fn(|a| vec![0.0; face_dims(s.cells, a).iter().product()]),
             solid: vec![false; count],
         };
-        Ok(Self { spec, state, step: 0 })
+        Ok(Self { spec, state, step: 0, blast_flow: None })
+    }
+
+    /// The velocity of the faces, by axis, of the flow that the blasts of the last step made (none if there was none). It is the flow that carried the smoke
+    /// in that step, and is not kept in the state: the velocity of the state is what it would have been with no blast.
+    pub fn blast_flow(&self, axis: usize) -> Option<&[f64]> {
+        self.blast_flow.as_ref().map(|f| f[axis].as_slice())
     }
 
     pub fn state(&self) -> &State {
@@ -1500,12 +1511,14 @@ impl Simulation {
                 );
             }
         }
+        // the blasts that sweep air in this step: their flow is made apart from the smoke's, after it (see `blast_flow`)
+        let mut pulses = Vec::new();
         for blast in &input.blasts {
             if self.spec.boundary != Boundary::Open {
                 return Err(Error::Invalid("a blast needs an open domain"));
             }
             if let Some((radius, volume)) = blast.swept(dt, self.step) {
-                inject_piston(&mut state, &mut target, blast.center, radius.max(self.spec.voxel_size), volume, dt);
+                pulses.push((blast.center, radius.max(self.spec.voxel_size), volume));
             }
         }
         profile.inject = lap(&mut clock);
@@ -1521,6 +1534,33 @@ impl Simulation {
         clock = Instant::now();
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
+        // The flow of the blasts is made apart: the analytic flow of each piston projected alone (the projection is linear, so this is the share of
+        // the step's flow that the blasts make), and it carries the smoke (the density and the temperature) once, over this step. It is not kept in the
+        // velocity: a potential flow with open faces is not removed by a projection with no divergence, so it would stay for ever, and the smoke's own
+        // velocity is therefore what it would have been without the blast, to the bit.
+        let mut blast_flow = None;
+        if !pulses.is_empty() {
+            let mut flow = state.clone();
+            for axis in &mut flow.velocity {
+                axis.iter_mut().for_each(|v| *v = 0.0);
+            }
+            let mut flow_target = vec![0.0; flow.density.len()];
+            for (center, reach, volume) in &pulses {
+                inject_piston(&mut flow, &mut flow_target, *center, *reach, *volume, dt);
+            }
+            boundaries(&mut flow, &solids);
+            project(&mut flow, &flow_target, &self.spec, &mut profile)?;
+            validate_state(&flow)?;
+            let mut carried = flow.clone();
+            carried.density = state.density.clone();
+            carried.temperature = state.temperature.clone();
+            advect(&mut carried, dt, &self.spec, &solids, &mut profile)?;
+            state.density = carried.density;
+            state.temperature = carried.temperature;
+            validate_state(&state)?;
+            blast_flow = Some(flow.velocity);
+        }
+        self.blast_flow = blast_flow;
         self.state = state;
         self.step += 1;
         profile.pressure_iterations = report.pressure_iterations;
@@ -2282,18 +2322,25 @@ fn inject_piston(state: &mut State, target: &mut [f64], center: [f64; 3], reach:
     let State { velocity: faces, solid, .. } = state;
     let solid = &*solid;
     let inside = |p: [f64; 3]| (0..3).map(|a| (p[a] - center[a]).powi(2)).sum::<f64>() <= reach * reach;
-    let covered = (0..solid.len())
-        .into_par_iter()
-        .with_min_len(HEAVY)
-        .filter(|&k| !solid[k] && inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))))
-        .count();
+    let in_sphere = |k: usize| inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5)));
+    let in_window = (0..solid.len()).into_par_iter().with_min_len(HEAVY).filter(|&k| in_sphere(k)).count();
+    let covered = (0..solid.len()).into_par_iter().with_min_len(HEAVY).filter(|&k| !solid[k] && in_sphere(k)).count();
     if covered == 0 {
         return;
     }
+    // the cells that the volume is shared among are the sphere's whole: a window that the sphere cuts holds only some of them, and the cells of the
+    // sphere that it does not hold take their share (so that the divergence in the window is what the sphere makes in free space, and agrees with the flow
+    // outside). A sphere that is inside the window has its cells counted here (the same number); the solid ones take none.
+    let whole = (0..3).all(|a| center[a] - reach >= origin[a] && center[a] + reach <= origin[a] + cells[a] as f64 * h);
+    let shared = if whole {
+        covered
+    } else {
+        lattice_count(center, origin, h, reach).saturating_sub(in_window - covered).max(covered)
+    };
     let rate = volume / dt;
-    let divergence = rate / (covered as f64 * h * h * h);
+    let divergence = rate / (shared as f64 * h * h * h);
     target.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, t)| {
-        if !solid[k] && inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))) {
+        if !solid[k] && in_sphere(k) {
             *t += divergence;
         }
     });
@@ -2312,4 +2359,31 @@ fn inject_piston(state: &mut State, target: &mut [f64], center: [f64; 3], reach:
             }
         });
     }
+}
+
+/// The number of cell centres of the infinite lattice (`origin` plus half a cell, every `h`) in the sphere, by columns (a cost of the square of the
+/// radius in cells; a sphere of more than 30000 cells across is its volume over `h^3`).
+fn lattice_count(center: [f64; 3], origin: [f64; 3], h: f64, reach: f64) -> usize {
+    if 2.0 * reach / h > 30_000.0 {
+        return (4.0 / 3.0 * std::f64::consts::PI * (reach / h).powi(3)) as usize;
+    }
+    let index = |v: f64, a: usize| (v - origin[a]) / h - 0.5;
+    let (lo_x, hi_x) = (index(center[0] - reach, 0).ceil() as i64, index(center[0] + reach, 0).floor() as i64);
+    let (lo_y, hi_y) = (index(center[1] - reach, 1).ceil() as i64, index(center[1] + reach, 1).floor() as i64);
+    let mut total = 0i64;
+    for i in lo_x..=hi_x {
+        let dx = origin[0] + (i as f64 + 0.5) * h - center[0];
+        for j in lo_y..=hi_y {
+            let dy = origin[1] + (j as f64 + 0.5) * h - center[1];
+            let rest = reach * reach - dx * dx - dy * dy;
+            if rest < 0.0 {
+                continue;
+            }
+            let half = rest.sqrt();
+            let lo = index(center[2] - half, 2).ceil() as i64;
+            let hi = index(center[2] + half, 2).floor() as i64;
+            total += (hi - lo + 1).max(0);
+        }
+    }
+    total as usize
 }

@@ -55,9 +55,11 @@ fn a_blast_displaces_a_puff_of_smoke_by_the_volume_the_front_swept_in_metres_wha
         let (x1, _) = centroid(&blast, after, ppm);
         moved.push(x1 - x0);
     }
-    // the volume swept says 0.51 m for the puff as a whole; what is measured here is the centre of the smoke on the line through the middle of the
-    // puff (the line of the axis, not the centre of the whole puff, which the radial stretching of the flow moves a little differently): 0.60 m, to 0.05
-    assert!((moved[0] - 0.60).abs() < 0.05, "{moved:?}");
+    // by the time asked (3 steps of 0.5 ms: the puff, the first pulse and the second) the front has swept to 5.14 m, and the volume swept says 1.06 m for the puff
+    // as a whole (r1^3 = r0^3 + R^3, the physical oracle; the solver's own test has the one pulse, 0.51 m, and the smoke at 0.984 of it). What is measured here is the
+    // centre of the smoke on the line through the middle of the puff, not the centre of the whole puff, which the radial stretching of the flow moves a little
+    // differently: 1.19 m. The check is that number to 0.05 m (it fixes what was measured), and that it is the same in metres at every scene unit.
+    assert!((moved[0] - 1.186).abs() < 0.05, "{moved:?}");
     assert!((moved[1] - moved[0]).abs() < 1e-3 && (moved[2] - moved[0]).abs() < 1e-3, "{moved:?}");
 }
 
@@ -85,12 +87,14 @@ fn a_blast_needs_an_open_domain_and_a_volume_that_is_scaled_the_same_on_every_ax
 }
 
 #[test]
-fn a_volume_that_is_sheared_by_a_stretched_parent_has_no_sphere_either() {
-    // the parent stretches x by 2 and the child turns by 45 degrees about z: the images of the axes have one length (the square root of 2.5) but are not at
-    // right angles, so the lengths of the columns do not tell the shear
+fn a_volume_that_is_sheared_has_no_sphere_either_though_its_axes_have_one_length() {
+    // a parent turned by 45 degrees and a child scaled by 0.8 on x and 1.5118578920369088 on y: the images of the three axes of the volume have one length
+    // (1) and are not at right angles (their dot product is 0.5625), so that only the angles tell the shear
     let xml = scene(1.0, "3.75e9", "", "open")
-        .replace("<composition><object3D", r#"<composition><group id="stretch" scaleX="2"><object3D"#)
-        .replace(r#"primitive="volume" >"#, r#"primitive="volume" rotation="45">"#)
+        .replace(
+            r#"<composition><object3D id="cloud" primitive="volume" >"#,
+            r#"<composition><group id="turn" rotation="45"><object3D id="cloud" primitive="volume" scaleX="0.8" scaleY="1.5118578920369088">"#,
+        )
         .replace("</object3D></composition>", "</object3D></group></composition>");
     let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
     let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();

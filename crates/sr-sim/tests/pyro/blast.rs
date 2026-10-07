@@ -197,8 +197,17 @@ fn a_scene_with_no_blast_with_one_of_no_energy_or_one_after_the_film_is_the_scen
     assert_ne!(run(vec![blast(1.0, [0.0; 3], 0.0)]), reference, "and a blast that is there is not nothing");
 }
 
-/// The outflow through the faces of the open domain, in cubic units a second.
+/// The velocity of the faces, by axis: the flow of the blasts of the last step if `blast` and there was one, else the smoke's own.
+fn flow(sim: &Simulation, axis: usize, blast: bool) -> &[f64] {
+    sim.blast_flow(axis).filter(|_| blast).unwrap_or_else(|| sim.state().velocity_faces(axis))
+}
+
+/// The outflow through the faces of the open domain, in cubic units a second, of the flow of the blasts.
 fn outflow(sim: &Simulation, h: f64) -> f64 {
+    outflow_of(sim, h, true)
+}
+
+fn outflow_of(sim: &Simulation, h: f64, blast: bool) -> f64 {
     let s = sim.state();
     let n = s.cells();
     let mut total = 0.0;
@@ -214,7 +223,7 @@ fn outflow(sim: &Simulation, h: f64) -> f64 {
                 let mut hi = lo;
                 hi[axis] = n[axis];
                 let at = |p: [usize; 3]| p[0] + dims[0] * (p[1] + dims[1] * p[2]);
-                total += (s.velocity_faces(axis)[at(hi)] - s.velocity_faces(axis)[at(lo)]) * h * h;
+                total += (flow(sim, axis, blast)[at(hi)] - flow(sim, axis, blast)[at(lo)]) * h * h;
             }
         }
     }
@@ -259,14 +268,13 @@ fn outside_the_sphere_the_flow_is_the_potential_flow_of_the_volume_that_was_swep
     // u_r = Q / (4 pi r^2) with Q = (4 pi / 3) r1^3 / dt, along the x axis at 1.25 and 1.5 radii (the faces are at whole cells; the open faces of the
     // domain are at 32 cells, so the far field is not exactly 1/r^2: this is what the box makes of it, at a tolerance for that)
     let q = 4.0 / 3.0 * std::f64::consts::PI * r1.powi(3) / DT;
-    let s = sim.state();
     let n = 64usize;
     let at = |x: usize, y: usize, z: usize| x + (n + 1) * (y + n * z);
     for factor in [1.25, 1.5] {
         let r = factor * r1;
         // the face of the row nearest the axis (its centre is half a cell off it on y and z), at x = r
         let face = (r / h).round() as usize + 32;
-        let measured = s.velocity_faces(0)[at(face, 31, 31)];
+        let measured = sim.blast_flow(0).unwrap()[at(face, 31, 31)];
         let x = (face as f64 - 32.0) * h;
         let dist = (x * x + 0.5 * h * h).sqrt();
         // the radial speed is q / (4 pi dist^2) and its x component is that times x / dist
@@ -306,8 +314,7 @@ fn puff_and_pulse(energy: f64, distance: f64, ppm: f64, cell: f64) -> (f64, f64,
     let b = Blast::new([0.0; 3], DT, energy, RHO0, P0, GAMMA, ppm).unwrap();
     let (_, r1) = b.radii(DT, 1);
     sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
-    // the step advects with the velocity that the last step left (the pulse), so the smoke moves in the step after it: one more, with no blast
-    sim.step(&Inputs::default()).unwrap();
+    // the flow of the blast carries the smoke in the step that it is made in, so the smoke has moved when the step is done
     let (m1, x1) = measure(&sim);
     (x0, x1, m0, m1, r1 / ppm)
 }
@@ -366,7 +373,7 @@ fn kinetic_energy(sim: &Simulation, h: f64, ppm: f64, a: f64) -> f64 {
     let half = n[0] as f64 * h / 2.0;
     let faces = |axis: usize, p: [usize; 3]| {
         let dims: [usize; 3] = std::array::from_fn(|k| n[k] + usize::from(k == axis));
-        s.velocity_faces(axis)[p[0] + dims[0] * (p[1] + dims[1] * p[2])]
+        flow(sim, axis, true)[p[0] + dims[0] * (p[1] + dims[1] * p[2])]
     };
     let mut total = 0.0;
     for z in 0..n[2] {
@@ -472,26 +479,23 @@ fn a_window_that_the_sphere_cuts_is_pushed_from_the_blast_and_not_from_its_own_m
     assert!(r1 > 7.0, "{r1}");
     sim.step(&Inputs { blasts: vec![b.clone()], ..Inputs::default() }).unwrap();
     let swept = b.swept(DT, 0).unwrap().1;
-    // the flow that the window lets out is the volume of the cells that the window holds of the sphere, and not the whole sphere's: the faces are open
-    let covered = covered_by(n, h, centre, r1);
-    let s = sim.state();
     let ux = |x: f64| {
         // the x velocity on the face at x (on the row nearest the axis)
         let face = ((x + 8.0) / h).round() as usize;
-        s.velocity_faces(0)[face + (n + 1) * (n / 2 - 1 + n * (n / 2 - 1))]
+        sim.blast_flow(0).unwrap()[face + (n + 1) * (n / 2 - 1 + n * (n / 2 - 1))]
     };
     // between the middle of the window (x = 0) and the blast (x = 7) the air goes AWAY from the blast, toward -x: a push from the middle of the
     // window would send it toward +x
     for x in [-2.0, 0.0, 2.0, 4.0] {
         assert!(ux(x) < 0.0, "u_x({x}) = {}", ux(x));
     }
-    // inside the sphere the flow is linear in the distance from the blast: u(x) / u(2) = (x - 7) / (2 - 7)
+    // inside the sphere the flow is linear in the distance from the blast: u(4) / u(2) = (4 - 7) / (2 - 7) = 0.6
     let ratio = ux(4.0) / ux(2.0);
-    assert!((ratio - (4.0 - 7.0) / (2.0 - 7.0)).abs() < 0.1, "{ratio}");
-    // and the rate at which the cells are given the divergence is the volume of the sphere over the cells of the window that it covers
-    let rate = swept / DT / (covered * h.powi(3));
-    let d = (ux(4.0) - ux(2.0)) / 2.0 * 3.0 / 1.0;
-    assert!(d.abs() < 3.0 * rate, "{d} against {rate}");
+    assert!((ratio - 0.6).abs() < 0.03, "{ratio}");
+    // and its divergence is the one that the whole sphere makes in free space, the volume swept over the volume of the sphere and over dt (u = d (x - c) / 3)
+    let free = swept / DT / (4.0 / 3.0 * std::f64::consts::PI * r1.powi(3));
+    let d = 3.0 * (ux(4.0) - ux(2.0)) / 2.0;
+    assert!((d / free - 1.0).abs() < 0.1, "{d} against {free}");
 }
 
 #[test]
@@ -544,9 +548,14 @@ fn a_solid_in_the_sphere_takes_none_of_the_volume_and_a_source_in_the_same_step_
     let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
     sim.step(&Inputs { blasts: vec![b], sources: vec![source], ..Inputs::default() }).unwrap();
     let cells = covered_by(n, h, [6.0, 0.0, 0.0], 1.0);
-    let want = swept / DT + 3.0 * cells * h.powi(3);
-    let flux = outflow(&sim, h);
-    assert!((flux / want - 1.0).abs() < 1e-4, "the domain lets out {flux}, the front and the source say {want}");
+    // the flow of the blast is made apart, so the smoke's own flow lets out the source's volume and the blast's lets out the front's
+    let (own, blast) = (outflow_of(&sim, h, false), outflow(&sim, h));
+    assert!((own / (3.0 * cells * h.powi(3)) - 1.0).abs() < 1e-4, "the smoke's flow lets out {own}");
+    assert!(
+        (blast / (swept / DT) - 1.0).abs() < 1e-4,
+        "the blast's flow lets out {blast}, the front swept {}",
+        swept / DT
+    );
 }
 
 #[test]
@@ -577,4 +586,66 @@ fn a_window_that_follows_its_smoke_is_the_window_it_was_where_it_does_not_move()
     let (followed, window) = run(Some(Follow { margin: 2, loss: 0.0 }));
     assert_eq!(window, [0, 0, 0], "the window did not move");
     assert_eq!(followed, plain);
+}
+
+#[test]
+fn a_window_that_the_sphere_cuts_has_the_flow_the_sphere_makes_in_free_space() {
+    // the same blast (1e11 J at x = 7 m, 1 m from the face of a domain of 16 m) in a domain of 16 m and in one of 32 m that holds all its sphere: the air at
+    // the middle of the small one goes at the speed that it goes at in the large one (the divergence of the cells that the window holds is that of the whole sphere,
+    // and not that of the part of it that the window holds: that would be the sphere's volume over a fraction of it, and the air would go faster)
+    let centre = [7.0, 0.0, 0.0];
+    let run = |cells: usize, h: f64| {
+        let mut sim = Simulation::new(domain(cells, h, Boundary::Open)).unwrap();
+        sim.step(&Inputs {
+            blasts: vec![Blast::new(centre, 0.0, 1e11, RHO0, P0, GAMMA, 1.0).unwrap()],
+            ..Inputs::default()
+        })
+        .unwrap();
+        let half = cells as f64 * h / 2.0;
+        let at = |x: f64| {
+            let face = ((x + half) / h).round() as usize;
+            sim.blast_flow(0).unwrap()[face + (cells + 1) * (cells / 2 - 1 + cells * (cells / 2 - 1))]
+        };
+        (at(0.0), at(4.0))
+    };
+    let (small, small_4) = run(32, 0.5);
+    let (large, large_4) = run(64, 0.5);
+    assert!(small < 0.0 && large < 0.0);
+    assert!((small / large - 1.0).abs() < 0.05, "the window gives {small} where free space gives {large}");
+    assert!((small_4 / large_4 - 1.0).abs() < 0.05, "{small_4} against {large_4}");
+}
+
+#[test]
+fn the_velocity_of_the_smoke_is_what_it_would_have_been_with_no_blast_to_the_bit_at_every_step() {
+    // the flow of a blast is not kept in the velocity: a potential flow with open faces is not removed by a projection with no divergence, so it would
+    // stay for ever (and the first design of the blast, which kept it, left 50 to 200 percent of the pulse a step after the front had stopped)
+    let run = |blasts: Vec<Blast>| {
+        let spec = Spec { turbulence: 0.5, seed: 9, ..domain(32, 0.5, Boundary::Open) };
+        let mut sim = Simulation::new(spec).unwrap();
+        let puff = Impulse {
+            shape: Shape::Sphere { center: [0.0, 1.0, 0.0], radius: 1.0 },
+            time: 0.0,
+            density: 1.0,
+            temperature: 600.0,
+            velocity: [0.0; 3],
+            expansion: 0.0,
+        };
+        let mut velocities = Vec::new();
+        for step in 0..14 {
+            let inputs = Inputs {
+                impulses: if step == 0 { vec![puff.clone()] } else { vec![] },
+                blasts: blasts.clone(),
+                ..Inputs::default()
+            };
+            sim.step(&inputs).unwrap();
+            velocities.push(bits(&sim).2);
+        }
+        velocities
+    };
+    let without = run(vec![]);
+    let with = run(vec![blast(1.0, [3.0, 0.0, 0.0], 0.0)]);
+    for (step, (a, b)) in with.iter().zip(&without).enumerate() {
+        assert_eq!(a, b, "step {step}: the velocity of the smoke is not the one with no blast");
+    }
+    // (with no buoyancy: a smoke that the blast has made warmer or colder in a place would be pushed by it, which is the smoke's own dynamics)
 }

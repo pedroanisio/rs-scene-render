@@ -889,19 +889,23 @@ energy inside the front, `E = (16 pi / 25) J rho0 R^5 / t^2` with `J` the integr
 front is that of the sphere of ambient gas to 1e-6 (it is not given), the pressure at the centre of the monatomic blast is 0.3062 of the one behind
 the shock (published 0.306), and an independent integration in Python agrees to 2e-6. The front stops at `0.3 (E / p0)^(1/3)`, the end of the strong
 phase: the radius at which the pressure behind the strong shock, `2 rho0 D^2 / (gamma + 1)` with `D = 2 R / (5 t)`, has fallen to `11.85 xi0^5 / (gamma + 1)`
-times `p0` (5.8 for air, 8.9 for the monatomic gas): a few times the ambient pressure, where the blast stops being strong. It is a choice of the radius
+times `p0` (5.8 for air, 9.0 for the monatomic gas): a few times the ambient pressure, where the blast stops being strong. It is a choice of the radius
 and not a result: the engine's, with no published value (the constant 0.3 is not the 0.3 to 0.6 m per cube root of a kilogram of the fireballs of explosives:
 `0.3 (E / p0)^(1/3)` is 1.04 m per cube root of a kilogram of TNT).
 The smoke solver is incompressible, so the shock is not carried. What is carried is the displacement of the air by the front, as an incompressible
 spherical piston. In each step the volume that the front swept, `4 pi (R1^3 - R0^3) / 3` between the sphere it began the step in and the one it ends it in,
-is given to the cells whose centres are in the sphere of the end of the step and that are not solid (the sphere is at least a cell: a front smaller than that is the
-sphere of one cell, and the volume given is still the volume swept), spread evenly over them: each is given the divergence `volume / (cells h^3 dt)`, so that the air
-the domain lets out is exactly the volume swept whatever the cells make of the sphere, an energy of 1 J included (1.1e-6 cubic metres, not the volume of a
-cell). The analytic flow of the piston is put in the velocity before the projection (inside the sphere `u = d (x - c) / 3`, outside `u = Q / (4 pi r^2)` away from the
-centre `c` of the blast, `Q` the volume over the step), so that a window the sphere cuts, or that is not centred on the blast, is pushed from the blast and not from
-its own middle (a divergence alone, with the faces open at zero pressure, is made into a flow from the middle of the window); the projection then makes
-the flow consistent with the faces, the solids and the other sources of the step. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
-`pyroImpulse` that the author adds).
+is given to the sphere's cells (the cells whose centres are in the sphere of the end of the step; at least a cell: a front smaller than that is the sphere of one cell,
+and the volume given is still the volume swept), spread evenly over them: each is given the divergence `volume / (cells h^3 dt)`, so that the air the domain lets out is
+exactly the volume swept whatever the cells make of the sphere, an energy of 1 J included (1.1e-6 cubic metres, not the volume of a cell). The cells that share the volume are the
+sphere's WHOLE (a window that the sphere cuts holds only some of them, and the others take their share), so that the divergence in the window is the one that the sphere
+makes in free space and agrees with the flow outside. The analytic flow of the piston (inside the sphere `u = d (x - c) / 3`, outside `u = Q / (4 pi r^2)` away from the centre `c` of
+the blast, `Q` the volume over the step) is put in a velocity of its own and projected ALONE (the projection is linear, so this is the share of the step's flow
+that the blast makes), with the faces open at zero pressure and the solids and obstacles of the step; that flow carries the smoke (the density and the temperature) once, over
+the step, and it is NOT kept in the velocity of the smoke. Kept, it would stay for ever: a potential flow with open faces is not removed by a projection with
+no divergence (the first design of the blast kept it and left 50 to 200 percent of the pulse a step after the front had stopped), so the velocity of the smoke is what it
+would have been with no blast, to the bit, at every step (`Simulation::blast_flow` gives the flow of the last step to whoever wants it). A window that the sphere cuts, or that is
+not centred on the blast, is pushed from the blast and not from its own middle. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
+`pyroImpulse` that the author adds), and the velocity of the air does not carry the blast's momentum on (the momentum of the air in a blast is not modelled).
 
 **Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
 `pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
@@ -920,15 +924,16 @@ history within the step), so there are none. The front, for three energies in ai
 | 1e9 | 17.6 | 23.3 | 6.44 | 3.4 ms | one pulse of R_max |
 | 1e15 | 279 | 369 | 643 | 0.336 s (8.06 steps) | 9 (the ninth is the last to sweep) |
 
-The sphere of the front, which stops at `R_max`, covers a whole window of side `L` only if `R_max` is at least `L / 2`: `E >= p0 (L / 0.6)^3`, 9.0e7 J for the
-hero's domain of 5.76 m (at 100 pixels to the metre) and 9.0e13 J for one of 576 m. A window that the sphere does not cover whole sees the cells it holds of the sphere,
-each given the same divergence (not normalised by the volume covered), and the flow of the piston from the centre of the blast.
+The sphere of the front, which stops at `R_max`, reaches the centres of the faces of a window of side `L` if `R_max` is `L / 2`, `E = p0 (L / 0.6)^3`: 9.0e7 J for the
+hero's domain of 5.76 m (at 100 pixels to the metre) and 9.0e13 J for one of 576 m; it covers the whole window, corners included, at `R_max = sqrt(3) L / 2`, 4.66e8 J for
+5.76 m. A window that the sphere does not cover whole holds the cells it has of the sphere, each given the divergence that the whole sphere gives in free space (the window's
+flow is the free-space flow of the sphere, to 5 percent in the test), and the flow of the piston from the centre of the blast.
 
 **What it does.** Measured on a domain of 64 cells with the blast of 3.75e9 J (the strong phase ends at 10 m; `crates/sr-sim/tests/pyro/blast.rs`): the air that
-the domain lets out is the volume swept over `dt` to 1e-6, over one step and over all the steps of the strong phase (the sum is the volume of the sphere of `R_max`), with
-a solid in the sphere and with a source in the same step; the cells of the sphere are its volume to 5 percent; the speed outside the sphere is `Q / (4 pi r^2)` to 15
-percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); a window cut by the sphere, with the blast 1 m from its face, has the air go away from the blast
-and the flow inside linear in the distance from it; the kinetic energy in a ball of 1.5 radii is `rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.85 at a
+the blast's flow lets out of the domain is the volume swept over `dt` to 1e-6, over one step and over all the steps of the strong phase (the sum is the volume of the sphere of `R_max`), with
+a solid in the sphere, and the smoke's own flow in the same step lets out the source's (the two are made apart); the cells of the sphere are its volume to 5 percent; the speed outside the sphere is `Q / (4 pi r^2)` to 15
+percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); a window cut by the sphere, with the blast 1 m from its face, has the air go away from the blast, the flow inside linear in the distance from it (0.6 to 3 percent) with the divergence
+of the whole sphere (10 percent), and the flow at the middle the one that free space gives (5 percent); the kinetic energy in a ball of 1.5 radii is `rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.85 at a
 quarter (the piston's own energy is `2 pi rho Rdot^2 R^3` outside and a fifth of that inside: for the strong phase the energy that the solver's flow has is that of the displacement,
 which is part of the blast's `E`, not all); a puff of smoke at 6 m is displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to 0.984 and 0.990 of it at half a metre
 and a quarter. With a pulse of many cells in one step (1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian
@@ -936,7 +941,8 @@ trace neither leaves the domain nor crosses the sphere, and the displacement is 
 3.6 percent at half a metre and 0.70 at a quarter (1.8 and 1.4 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell;
 it is not the 1e-6 of a conservative scheme. This is a limit of the smoke solver as a whole and not of the blast: any large velocity (a pulse, a gust, a fast plume) gains or loses
 smoke by the same interpolation, and a conservative advection or a correction of the mass in each step (with the puff of this test as its oracle) is work for the solver. The same
-document through the evaluator displaces the smoke on the axis of the puff by the same 0.60 m (the centre of the line, not of the whole puff) at every scene unit.
+document through the evaluator, after the puff and the first two pulses (the front at 5.14 m; the volume swept says 1.06 m for the puff as a whole), moves the centre of the smoke on the line
+through the puff by 1.19 m (the centre of the line, not of the whole puff: 12 percent over) at every scene unit; the test fixes that number to 0.05 m.
 
 **Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
 flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's

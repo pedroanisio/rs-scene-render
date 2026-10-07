@@ -47,8 +47,8 @@ pub fn solve_cached(gamma: f64) -> Result<std::sync::Arc<Sedov>, String> {
         return Ok(found.clone());
     }
     let solved = Arc::new(solve(gamma)?);
-    SOLVED.get_or_init(Default::default).lock().unwrap().insert(key, solved.clone());
-    Ok(solved)
+    // another thread may have solved the same gas while this one did: the first to enter is the one that everybody gets
+    Ok(SOLVED.get_or_init(Default::default).lock().unwrap().entry(key).or_insert(solved).clone())
 }
 
 /// The right-hand side of the three equations, as derivatives with respect to `xi`: `(U', (ln G)', (ln P)')` (the logarithms keep `G`, which
