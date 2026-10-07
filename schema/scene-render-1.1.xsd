@@ -4659,7 +4659,7 @@
     <xs:attribute name="foamMaterial" type="xs:IDREF"/>
     <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
     <xs:attribute name="foamMode" default="particles">
-      <xs:annotation><xs:documentation>particles draws each foam tracer as a triangle batch (foamMaterial). albedo draws no foam triangles: the foam tracers become a per-vertex coverage of the ocean surface (a kernel of foamRadius, fading with age) that mixes the water's albedo, transmission and roughness toward foamAlbedo and foamRoughness; foamMaterial is then unused. Spray is drawn in both modes. The mix is the path tracer's: with the raster renderer the frame reports an error instead of drawing no foam, and the water's material must have the opaque alpha mode.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>particles draws each foam tracer as a triangle batch (foamMaterial). albedo draws no foam triangles: the foam tracers become a per-vertex coverage of the ocean surface (a kernel of foamRadius, fading with age) that is the share of the surface's area the foam covers: where it covers, the surface is a diffuse white of albedo foamAlbedo and roughness foamRoughness that lets no light through, and the light that gets through the rest keeps the water's tint; foamMaterial is then unused. Spray is drawn in both modes. The mix is the path tracer's: with the raster renderer the frame reports an error instead of drawing no foam, and the water's material must have the opaque alpha mode.</xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="particles"/><xs:enumeration value="albedo"/></xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="foamRadius" type="positiveDecimal">

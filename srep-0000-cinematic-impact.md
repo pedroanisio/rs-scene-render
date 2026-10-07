@@ -1534,20 +1534,36 @@ each foam tracer instead gives the vertices of the water surface within
 `(1 - x^2)^2` of its distance `x` to the radius, full until 60 % of the
 tracer's life and fading linearly to zero after it; shares of several tracers
 combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
-The share rides in the alpha of the vertex colour. A path-traced hit takes its
-albedo (`foamAlbedo`, .9), roughness (`foamRoughness`, .8) and transmission
-toward the foam's by that share, and the refracted shadow ray reads the same
-share, so opaque foam stops the sun that clear water lets through. The mix is
-the path tracer's: the raster renderer reports an error for a scene with
-`foamMode="albedo"` instead of drawing no foam, and the water needs an opaque
-alpha mode (also an error otherwise). Scenes without the mix keep their shader text and
-pipelines; foam on a surface that lets no light through uses a variant with
-only this hook, because forcing the water variant (the refracted shadow rays)
-cost 6.7 times the plain shader on the hero frame (21.3 s against 3.2 s at
-640 x 360). Verified on an NVIDIA adapter: water wholly covered by foam equals
-the quadrature of a diffuse .9 surface (0.1928 against 0.1928), a share of 0 is
-the unmixed picture bit for bit, and the seven comparison frames and the hero
-frame keep their hashes.
+The share rides in the alpha of the vertex colour and is the share of the
+surface's area that the foam covers: a path-traced sample on a covered surface
+is on the foam with that probability, and then the surface is the foam's (a
+diffuse white of albedo `foamAlbedo`, .9, and roughness `foamRoughness`, .8,
+that lets no light through), and on the water otherwise, so that the picture is
+the mean of the two weighted by the share and the light that gets through the
+uncovered part keeps the water's tint. The refracted shadow ray scales its
+transmittance by one minus the same share, so opaque foam stops the sun that
+clear water lets through, and the albedo guide of the denoiser takes the mean
+albedo. The mix is the path tracer's: the raster renderer reports an error for
+a scene with `foamMode="albedo"` instead of drawing no foam, and the water
+needs an opaque alpha mode (also an error otherwise). A metallic or unlit water
+has no foam mix made for it (the foam sample is a non-metal, lit surface; an
+unlit water draws its own colour). Scenes without the mix keep the text of the
+plain shaders and their pipelines; the water shader gains the declaration
+`override FOAM` and one branch that is off without foam, so that its identity is
+a measurement (the same picture, bit for bit, on an NVIDIA adapter) and not a
+structural fact. Foam on a surface that lets no light through uses a variant
+with only this hook, because forcing the water variant (the refracted shadow
+rays) cost 6.7 times the plain shader: 21.25 s against 3.2 s of the GPU pass
+`pathtrace trace` on `examples/cinematic-impact/hero.scene.xml` with its
+whitewater at threshold 1000 (no tracer) and `foamMode="albedo"`, t = 3.0,
+640 x 360, the scene's own samples, an NVIDIA RTX 6000 Ada through `sr-gpu`,
+`tools/probe_render.py --size 640x360 --short`, on the first form of the
+renderer change (the one that selected the water variant for a foam mix). On
+an NVIDIA adapter: water wholly covered by foam equals the quadrature of a
+diffuse .9 surface (0.1926 against 0.1928), the picture at shares of .25, .5
+and .75 is the weighted mean of the bare and the covered picture to 5 %, a
+share of 0 is the unmixed picture bit for bit for opaque and for transmissive
+water, and the seven comparison frames and the hero frame keep their hashes.
 
 #### Implemented numerical contract
 

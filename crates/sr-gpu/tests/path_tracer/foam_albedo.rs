@@ -44,7 +44,20 @@ fn water(foam: Option<FoamMix>) -> MaterialParams {
 
 /// A horizontal plane of 40 x 40 at depth `y` (the scene's up is -y), its vertices' colour alpha from `share(x)`.
 fn plane(eng: &ThreeEngine, y: f32, material: MaterialParams, share: impl Fn(f32) -> f32) -> Draw3 {
-    let mut p = prim::plane(40.0, 40.0, 40);
+    plane_of(eng, 40.0, 40, y, material, share)
+}
+
+/// The same plane, `size` wide in `segments` cells: the share of foam changes from one vertex to the next, so a finer plane has a
+/// sharper edge.
+fn plane_of(
+    eng: &ThreeEngine,
+    size: f32,
+    segments: u32,
+    y: f32,
+    material: MaterialParams,
+    share: impl Fn(f32) -> f32,
+) -> Draw3 {
+    let mut p = prim::plane(size, size, segments);
     for v in &mut p.vertices {
         v.color = [1.0, 1.0, 1.0, share(v.pos[0])];
     }
@@ -183,23 +196,95 @@ fn the_roughness_of_the_foam_sets_the_specular_lobe_of_covered_water() {
     }
 }
 
+/// The mean luminance of the middle of a view from under a plane at depth 0 (the camera 6 below it, looking up) whose water has
+/// a grey tint and a uniform share `share` of foam, under a uniform dome.
+fn seen_from_below(eng: &mut ThreeEngine, share: f32) -> f32 {
+    let dome = srgb_to_linear(128.0 / 255.0);
+    let tinted = MaterialParams { base_color: [0.1, 0.1, 0.1, 1.0], ..water(Some(FOAM)) };
+    let draw = plane(eng, 0.0, tinted, move |_| share);
+    let px = eng.render_now(&scene(eng, vec![draw], Some(dome), false, Vec3::new(0.0, 6.0, -0.5)), None);
+    mean(&px, 24, 40, 24, 40)
+}
+
+#[test]
+fn the_light_that_gets_through_partly_covered_water_keeps_the_waters_tint() {
+    let Some(mut eng) = engine() else { return };
+    // Seen from below, the uncovered share of the surface lets the light through with the water's tint and the covered share is a
+    // white diffuse surface: the picture is the mean of the bare water's and the wholly covered water's, weighted by the share.
+    // Taking the foam's colour for the tint of the light that gets through (0.5 in place of 0.1 at half) makes the middle far brighter.
+    let (bare, half, covered) =
+        (seen_from_below(&mut eng, 0.0), seen_from_below(&mut eng, 0.5), seen_from_below(&mut eng, 1.0));
+    let want = 0.5 * (bare + covered);
+    println!("from below: share 0 {bare:.4}, 0.5 {half:.4}, 1 {covered:.4}; the weighted mean {want:.4}");
+    assert!(covered > 2.0 * bare, "the foam is brighter than the tinted water: {covered} against {bare}");
+    assert!((half - want).abs() <= 0.03 * want, "{half} against {want}");
+}
+
+#[test]
+fn the_denoiser_keeps_the_edge_of_the_foam_because_its_albedo_guide_is_the_mixed_albedo() {
+    let Some(mut eng) = engine() else { return };
+    // Half of a dark sea is covered by foam, with an edge of one pixel (a plane of 6 in 120 cells seen 2.9 wide in 64 pixels): a step
+    // from 0.006 to 0.19. At 4 samples a pixel the denoiser must not smear it: its filter keeps an edge where the guide (the albedo at
+    // the first hit) steps, and that is the albedo after the mix.
+    let dome = srgb_to_linear(128.0 / 255.0);
+    let render = |eng: &mut ThreeEngine, samples: u32, denoise: bool| {
+        let draw = plane_of(eng, 6.0, 120, 0.0, water(Some(FOAM)), |x| if x < 0.0 { 1.0 } else { 0.0 });
+        let mut s = scene(eng, vec![draw], Some(dome), false, TOP);
+        s.path = Some(PathOpts { samples, bounces: 4, denoise });
+        eng.render_now(&s, None)
+    };
+    let reference = render(&mut eng, 1024, false);
+    let denoised = render(&mut eng, 4, true);
+    let noisy = render(&mut eng, 4, false);
+    println!(
+        "PROFILE {:?}",
+        (0..64).step_by(2).map(|x| (mean(&reference, x, x + 1, 20, 44) * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+    );
+    // the error of a picture against the reference in the columns 2 either side of the edge (the foam is on the left of the middle)
+    let edge = (0..64).find(|x| mean(&reference, *x, *x + 1, 20, 44) < 0.1).unwrap_or(32);
+    let error = |px: &[[f32; 4]]| -> f32 {
+        let mut sum = 0.0;
+        for x in edge.saturating_sub(2)..edge + 2 {
+            sum += (mean(px, x, x + 1, 20, 44) - mean(&reference, x, x + 1, 20, 44)).abs();
+        }
+        sum / 4.0
+    };
+    let (noisy_error, denoised_error) = (error(&noisy), error(&denoised));
+    println!("edge at column {edge}; mean error there: noisy {noisy_error:.4}, denoised {denoised_error:.4}");
+    assert!(
+        mean(&reference, 5, 15, 20, 44) > 20.0 * mean(&reference, 40, 50, 20, 44),
+        "a step from foam to dark water"
+    );
+    assert!(
+        denoised_error <= noisy_error,
+        "the denoiser smears the edge of the foam: error {denoised_error} against {noisy_error} without it"
+    );
+}
+
 #[test]
 fn bare_water_is_the_same_with_or_without_the_mix_and_foam_brightens_it_by_share() {
     let Some(mut eng) = engine() else { return };
     let dome = srgb_to_linear(128.0 / 255.0);
     let render = |eng: &mut ThreeEngine, foam: Option<FoamMix>, share: f32| {
         let draw = plane(eng, 0.0, water(foam), |_| share);
-        let px = eng.render_now(&scene(eng, vec![draw], Some(dome), false, TOP), None);
-        mean(&px, 24, 40, 24, 40)
+        eng.render_now(&scene(eng, vec![draw], Some(dome), false, TOP), None)
     };
+    // the transmissive water takes the foam variant of the shader, and with no foam it is the picture of the water without the mix,
+    // bit for bit (the random numbers a sample draws are the same)
     let plain = render(&mut eng, None, 0.0);
     let mixed = render(&mut eng, Some(FOAM), 0.0);
-    println!("bare water {plain:.5} without the mix, {mixed:.5} with it");
-    assert!((plain - mixed).abs() <= 0.002 * plain.max(0.01), "{plain} against {mixed}");
-    let shares: Vec<f32> = [0.0, 0.25, 0.5, 0.75, 1.0].iter().map(|s| render(&mut eng, Some(FOAM), *s)).collect();
+    assert!(plain == mixed, "a mix with no foam changes the picture of transmissive water");
+    let level = |px: &[[f32; 4]]| mean(px, 24, 40, 24, 40);
+    let shares: Vec<f32> =
+        [0.0, 0.25, 0.5, 0.75, 1.0].iter().map(|s| level(&render(&mut eng, Some(FOAM), *s))).collect();
     println!("by share 0, 0.25, 0.5, 0.75, 1: {shares:?}");
     assert!(shares.windows(2).all(|w| w[1] > w[0]), "foam brightens water step by step: {shares:?}");
     assert!(shares[4] > 20.0 * shares[0], "from a dark sea to white foam: {shares:?}");
+    // the share is the area the foam covers: the picture is the mean of the water's and the foam's weighted by it
+    for (i, share) in [0.25f32, 0.5, 0.75].iter().enumerate() {
+        let want = (1.0 - share) * shares[0] + share * shares[4];
+        assert!((shares[i + 1] - want).abs() <= 0.05 * want, "share {share}: {} against {want}", shares[i + 1]);
+    }
 }
 
 #[test]

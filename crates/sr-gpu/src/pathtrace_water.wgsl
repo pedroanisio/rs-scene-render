@@ -38,7 +38,6 @@ fn first_interface(o: vec3<f32>, d: vec3<f32>, dist: f32) -> Iface {
                     let bw = 1.0 - hit.u - hit.v;
                     let foam = clamp(tverts[hit.tri * 24u + 2u].a * bw + tverts[hit.tri * 24u + 8u].a * hit.u + tverts[hit.tri * 24u + 14u].a * hit.v, 0.0, 1.0);
                     out.trans = out.trans * (1.0 - foam);
-                    out.tint = mix(out.tint, vec3(m.attenuation.w), foam);
                 }
                 return out;
             }

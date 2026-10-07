@@ -663,10 +663,13 @@ mod tests {
             include_str!("pathtrace.wgsl"),
             include_str!("volume.wgsl")
         );
-        assert!(!plain.contains("s.trans = s.trans * (1.0 - foam);"), "scenes without foam keep their shader text");
+        assert!(!plain.contains("rnd() < foam"), "scenes without foam keep their shader text");
         for base in [plain.clone(), grid_source(), water_source(&plain)] {
             let foamy = foam_source(&base);
-            assert!(foamy.contains("var s = surf_of(m);") && foamy.contains("s.trans = s.trans * (1.0 - foam);"));
+            assert!(foamy.contains("var s = surf_of(m);") && foamy.contains("if (foam > 0.0 && rnd() < foam) {"));
+            assert!(foamy.contains("guide_albedo = mix(guide_albedo"), "the denoiser's guide is the mean albedo");
+            // the light that gets through keeps the water's tint: the foam sample is the one that lets nothing through
+            assert!(foamy.contains("s.trans = 0.0;") && !foamy.contains("s.albedo = mix("));
             assert_eq!(foamy.contains("fn light_through("), base.contains("fn light_through("));
         }
     }
@@ -1002,20 +1005,37 @@ fn water_source(base: &str) -> String {
     format!("{hooked}\n{}", include_str!("pathtrace_water.wgsl"))
 }
 
-/// The shader for scenes where some surface has foam mixed into its material: the shader it is given plus the mix at the
-/// hit. A surface's share of foam, the alpha of its vertex colour, takes its albedo, its transmission and its roughness
-/// toward the foam's. Scenes without such a surface keep the text, and so the compiled code, they had.
+/// The shader for scenes where some surface has foam mixed into its material: the shader it is given plus the foam at the hit. A
+/// surface's share of foam, the alpha of its vertex colour, is the share of its area that the foam covers: a sample is on the foam
+/// with that probability (and then the surface is the foam's, a white diffuse one that lets nothing through), on the water otherwise
+/// (and then the light that gets through keeps the water's tint), so the picture is the mean of the two, weighted by the share. The
+/// albedo guide of the denoiser takes the mean albedo. Scenes without such a surface keep the text, and so the compiled code, they had.
 fn foam_source(base: &str) -> String {
+    const GUIDE: &str = "            guide[pix * 2u] += vec4(m.base.rgb, 1.0);\n";
     const SURFACE: &str = "        let s = surf_of(m);\n";
-    assert_eq!(base.matches(SURFACE).count(), 1, "one place hooks in the foam: {SURFACE}");
+    for hook in [GUIDE, SURFACE] {
+        assert_eq!(base.matches(hook).count(), 1, "one place hooks in the foam: {hook}");
+    }
     base.replace(
+        GUIDE,
+        "            var guide_albedo = m.base.rgb;\n\
+         \x20           if (m.extra.w > 0.5) { guide_albedo = mix(guide_albedo, vec3(m.attenuation.w), clamp(color.a, 0.0, 1.0)); }\n\
+         \x20           guide[pix * 2u] += vec4(guide_albedo, 1.0);\n",
+    )
+    .replace(
         SURFACE,
         "        var s = surf_of(m);\n\
          \x20       if (m.extra.w > 0.5) {\n\
          \x20           let foam = clamp(color.a, 0.0, 1.0);\n\
-         \x20           s.albedo = mix(s.albedo, vec3(m.attenuation.w), foam);\n\
-         \x20           s.trans = s.trans * (1.0 - foam);\n\
-         \x20           s.a = mix(s.a, max((m.extra.w - 1.0) * (m.extra.w - 1.0), 1e-3), foam);\n\
+         \x20           if (foam > 0.0 && rnd() < foam) {\n\
+         \x20               let r0 = (s.ior - 1.0) / (s.ior + 1.0);\n\
+         \x20               s.albedo = vec3(m.attenuation.w);\n\
+         \x20               s.metallic = 0.0;\n\
+         \x20               s.a = max((m.extra.w - 1.0) * (m.extra.w - 1.0), 1e-3);\n\
+         \x20               s.trans = 0.0;\n\
+         \x20               s.f0 = vec3(r0 * r0);\n\
+         \x20               s.specw = clamp(m.extra.x, 0.0, 1.0);\n\
+         \x20           }\n\
          \x20       }\n",
     )
 }
