@@ -36,6 +36,7 @@ pub mod sampling;
 pub mod sequence;
 pub mod terrain;
 pub mod usdc;
+pub mod voxel;
 
 use glam::{Mat4, Quat, Vec3};
 

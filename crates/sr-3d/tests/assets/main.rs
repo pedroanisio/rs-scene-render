@@ -8,3 +8,4 @@ mod malformed;
 mod materialx;
 mod sequence;
 mod skinning;
+mod vox;
