@@ -103,5 +103,13 @@ fn a_pull_across_a_ring_is_shared_by_the_areas_of_the_joints_that_the_plane_cros
     let step = Step { contacts: &off, ..step };
     let wrench = step.on_part(&across.mass, &in_part, q);
     let stresses = cut_stresses(&members, &across.side_has_a, &wrench);
-    assert!(stresses[0].principal > stresses[1].principal && stresses[0].principal > sigma, "{stresses:?}");
+    // by hand: the pull f / 0.04 over the two joints; the moment about the centre of the section (y = 0.75) is 0.75 f; the second moment about it is the areas at their distances,
+    // 0.01 * 0.75^2 + 0.03 * 0.25^2 = 0.0075, and the joints' own (0.1^3 * 0.1 / 12 and 0.1^3 * 0.3 / 12); the bending stress is 0.75 f r / J at the corner that is farthest on the
+    // tension side of each joint: r = 0.8 below the centre for the joint 0-1 (its corner at y = -0.05) and 0.2 for the joint 2-3 (its nearest corner, at y = 0.7 + 0.1 - 0.05... that is
+    // 0.25 - 0.05 above the centre, where the bending is least compressive): the figures are exact, and the second is not zero (the box of a joint, not its centre, is read)
+    let j = 0.0075 + 0.1f64.powi(3) * 0.1 / 12.0 + 0.1f64.powi(3) * 0.3 / 12.0;
+    let first = f / 0.04 + 0.75 * f * 0.8 / j;
+    let second = f / 0.04 - 0.75 * f * 0.2 / j;
+    assert!((stresses[0].principal - first).abs() < 1e-9 * first, "{} against {first}", stresses[0].principal);
+    assert!((stresses[1].principal - second).abs() < 1e-9 * first, "{} against {second}", stresses[1].principal);
 }

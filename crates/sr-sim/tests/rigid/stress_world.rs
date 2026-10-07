@@ -144,8 +144,8 @@ fn the_load_in_each_joint_of_a_cantilever_at_rest_is_the_beam_s_to_the_exact_sec
     for (j, (joint, principal)) in levels.iter().enumerate() {
         assert_eq!(*joint as usize, j);
         let want = beam_principal(j, n, edge, load);
-        // the solver holds a weld and a resting block to a few ten-thousandths of the load
-        assert!((principal / want - 1.0).abs() < 0.005, "joint {j}: {principal} against {want}");
+        // the solver holds a weld and a resting block to a few ten-thousandths of the load (5e-4 measured: 0.0004 to 0.0005 in the four joints, the weld's give)
+        assert!((principal / want - 1.0).abs() < 1e-3, "joint {j}: {principal} against {want}");
     }
 }
 
@@ -467,7 +467,7 @@ fn a_body_that_breaks_in_flight_keeps_its_momentum_its_angular_momentum_and_its_
     for (step, (p, l, e)) in &readings {
         for a in 0..3 {
             assert!(
-                (p[a] - p0[a]).abs() <= 1e-9 * p0[0].abs().max(1.0) * 10.0,
+                (p[a] - p0[a]).abs() <= 1e-9 * p0.iter().map(|v| v.abs()).fold(1.0, f64::max),
                 "step {step} momentum {a}: {p:?} against {p0:?}"
             );
             assert!(
@@ -725,6 +725,11 @@ fn the_world_refuses_a_registration_that_is_not_a_body_of_pieces_it_can_read() {
         s.joints.pop();
     });
     bad("a mass that is not the body's", &|s| s.pieces[2].mass *= 1.5);
+    // the same total, and a piece heavier than its cells and another lighter: not one density
+    bad("masses that add up and are not the cells'", &|s| {
+        s.pieces[1].mass *= 1.25;
+        s.pieces[3].mass -= s.pieces[1].mass * 0.2;
+    });
     bad("a joint to itself", &|s| s.joints[1].b = s.joints[1].a);
     bad("a joint to a piece that is not there", &|s| s.joints[3].b = 9);
     bad("a joint twice", &|s| s.joints.push(row_joint(0, 0.4)));
@@ -977,7 +982,8 @@ fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accou
         }
     }
     let broken = (0..640).filter(|&j| w.stress_joint_broken(0, j) == Some(true)).count();
-    assert!(broken > 0 && bodies >= 1, "{broken} joints broke, in {bodies} bodies");
+    // the numbers of this run, which is deterministic: the strength of 4e4 Pa is 13% over what the block reads at rest (3.53e4), so the blow of the first steps breaks nearly all of it
+    assert_eq!((broken, bodies), (633, 250), "joints broken, bodies that hold pieces");
     assert!(seen.iter().all(|c| *c == 1), "every piece is in exactly one body");
 }
 

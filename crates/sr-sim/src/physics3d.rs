@@ -593,7 +593,7 @@ pub struct World3 {
     stresses: Vec<stress::StressFamily>,
     stress_of: Vec<Option<usize>>,
     /// The cuts of a body for the pieces it holds and the joints that are gone, by body and the fingerprint of both.
-    stress_plans: std::collections::HashMap<(usize, u64), std::sync::Arc<Vec<crate::stress::plan::CutPlan>>>,
+    stress_plans: std::collections::HashMap<(usize, u64), stress::CachedPlan>,
     /// What the last step read on each body of a family: the principal tension of each of its intact joints.
     stress_levels: Vec<Vec<(u32, f64)>>,
     stress_balance: Vec<Option<stress::StressBalance>>,

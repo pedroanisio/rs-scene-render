@@ -153,6 +153,13 @@ impl StressFamily {
     }
 }
 
+/// What the cuts of a body were worked out for, and the cuts.
+pub(super) struct CachedPlan {
+    held: Vec<u32>,
+    broken: Vec<bool>,
+    plans: Arc<Vec<CutPlan>>,
+}
+
 fn fingerprint(held: &[u32], broken: &[bool]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &i in held {
@@ -253,6 +260,16 @@ impl World3 {
             }
             if (total / spec.mass - 1.0).abs() > 1e-9 {
                 return fail("the masses of the pieces are not the mass of the body");
+            }
+            // a body of cells has one density: the mass of a piece is its cells' (the pieces' own centres and moments are those of cells of one mass, and a body cut into pieces of other
+            // densities that add up to the same would be another body)
+            let per_cell = spec.mass / body_cells.len() as f64;
+            if let Some(i) =
+                e.pieces.iter().position(|p| (p.mass / (p.cells.len() as f64 * per_cell) - 1.0).abs() > 1e-9)
+            {
+                return fail(format!(
+                    "the piece {i} does not weigh what its cells weigh in the body: a body of cells has one density"
+                ));
             }
             let mut seen = BTreeSet::new();
             for (k, j) in e.joints.iter().enumerate() {
@@ -494,24 +511,25 @@ impl World3 {
         (normal_loads, friction_loads)
     }
 
-    /// The cuts of the body `k`, worked out once for the pieces it holds and the joints that are gone.
+    /// The cuts of the body `k`, worked out once for the pieces it holds and the joints that are gone. The cache is keyed by a hash of both, and an entry is taken only if what it was
+    /// worked out for is what the body holds now, compared whole (a hash of 64 bits that met another would give a body the cuts of another).
     fn stress_plan(&mut self, k: usize) -> Arc<Vec<CutPlan>> {
         let fam = self.stress_of[k].expect("a body of a family");
-        let key = (k, fingerprint(&self.state.stress_held[k], &self.state.stress_broken[fam]));
-        if let Some(plans) = self.stress_plans.get(&key) {
-            return plans.clone();
+        let held = &self.state.stress_held[k];
+        let broken = &self.state.stress_broken[fam];
+        let key = (k, fingerprint(held, broken));
+        if let Some(cached) = self.stress_plans.get(&key) {
+            if cached.held == *held && cached.broken == *broken {
+                return cached.plans.clone();
+            }
         }
         let family = &self.stresses[fam];
-        let plans = Arc::new(plan::plan(
-            &self.state.stress_held[k],
-            &self.state.stress_broken[fam],
-            &family.geoms,
-            &family.joint_geoms,
-        ));
+        let plans = Arc::new(plan::plan(held, broken, &family.geoms, &family.joint_geoms));
+        let cached = CachedPlan { held: held.clone(), broken: broken.clone(), plans: plans.clone() };
         if self.stress_plans.len() > 256 {
             self.stress_plans.clear();
         }
-        self.stress_plans.insert(key, plans.clone());
+        self.stress_plans.insert(key, cached);
         plans
     }
 
