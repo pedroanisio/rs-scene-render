@@ -1430,7 +1430,41 @@ impl Renderer {
         }
         if primitive_kind(n) != "mesh" {
             if let Some(mesh) = self.primitive_mesh(plan, ctx, n) {
-                let (material, maps) = doc_mat.unwrap_or_else(default_mat);
+                let (mut material, maps) = doc_mat.unwrap_or_else(default_mat);
+                if n.kind == "ocean" {
+                    // whitewater foam in the albedo mode is the coverage the surface's vertices carry: the water mixes toward it
+                    let config =
+                        sr_model::element::children(&*n.elem).into_iter().find(|e| e.element_name() == "whitewater");
+                    if let Some(c) =
+                        config.filter(|c| c.get_attr("foamMode").is_some_and(|v| v.to_string() == "albedo"))
+                    {
+                        let shines = material.unlit
+                            || (material.emissive_strength > 0.0 && material.emissive.iter().any(|c| *c > 0.0));
+                        if material.alpha_mode != sr_3d::AlphaMode::Opaque {
+                            plan.stats.errors.push(format!(
+                                "{}: whitewater foamMode=\"albedo\" needs a water material with an opaque alpha mode; the ocean is not drawn",
+                                n.id
+                            ));
+                            // the share of foam rides in the alpha of the vertices: drawn as it is, the water would be as
+                            // transparent as the foam is absent
+                            return;
+                        }
+                        if shines {
+                            // the shading that takes the foam is the lit surface's: an unlit water draws its own colour and an emissive
+                            // one adds its emission to the foam's samples, so there the foam would show only in the denoiser's guide
+                            plan.stats.errors.push(format!(
+                                "{}: whitewater foamMode=\"albedo\" needs a lit water material without emission: an unlit or emissive one is not drawn with the foam; the ocean is not drawn",
+                                n.id
+                            ));
+                            return;
+                        }
+                        let a = Attrs { e: c, props: None };
+                        material.foam_mix = Some(sr_3d::FoamMix {
+                            albedo: a.num("foamAlbedo", 0.9) as f32,
+                            roughness: a.num("foamRoughness", 0.8) as f32,
+                        });
+                    }
+                }
                 draws.push(Draw3 {
                     mesh: MeshSrc::Cached(mesh),
                     model: world,
@@ -2903,6 +2937,7 @@ impl Renderer {
         let limits = self.gpu.device.limits();
         // Surface/medium depth and shadows are evaluated together. Raster-authored
         // passes containing media use the transport pipeline with deterministic samples.
+        let mut path_limit: Option<String> = None;
         let transport = ex.path.or_else(|| {
             (!scene.volumes.is_empty()).then_some(crate::pathtrace::PathOpts { samples: 4, bounces: 2, denoise: true })
         });
@@ -2913,12 +2948,18 @@ impl Renderer {
                     return;
                 }
                 plan.stats.unsupported.push(format!("{}: {m}", n.id));
+                path_limit = Some(m);
             } else {
                 plan.stats
                     .unsupported
                     .extend(crate::pathtrace::notes(&scene).into_iter().map(|m| format!("{}: {m}", n.id)));
                 scene.path = Some(opts);
             }
+        }
+        if scene.path.is_none() && scene.draws.iter().any(|d| d.material.foam_mix.is_some()) {
+            // the foam is mixed into the water by the path tracer's shading; the raster renderer has no such mix
+            plan.stats.errors.push(foam_needs_the_path_tracer(&n.id, ex.path.is_some(), path_limit.as_deref()));
+            return;
         }
         if scene.path.is_none() {
             let lost =
@@ -3091,9 +3132,31 @@ fn visible3(g: &FrameGraph, j: usize) -> bool {
     g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true)
 }
 
+/// Why a pass with foam mixed into the water's albedo cannot be drawn without the path tracer: the camera is not path traced, or it
+/// asks for it and the scene is over a limit of the path tracer (`limit`), which is then the reason to act on.
+fn foam_needs_the_path_tracer(id: &str, camera_asks: bool, limit: Option<&str>) -> String {
+    match (camera_asks, limit) {
+        (true, Some(limit)) => format!(
+            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer, which cannot render this pass ({limit}), and the raster renderer does not draw it"
+        ),
+        _ => format!(
+            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it, and the 3D pass is not drawn"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn the_refusal_of_foam_without_the_path_tracer_names_the_limit_when_the_camera_asked_for_it() {
+        let raster = foam_needs_the_path_tracer("sea", false, None);
+        assert!(raster.contains("renderer=\"pathtrace\""), "{raster}");
+        let over = foam_needs_the_path_tracer("sea", true, Some("3 GiB of triangles exceed the storage binding"));
+        assert!(over.contains("cannot render this pass") && over.contains("3 GiB of triangles"), "{over}");
+        assert!(!over.contains("renderer=\"pathtrace\""), "the camera already asks for it: {over}");
+    }
 
     #[test]
     fn instantiated_three_dimensional_parents_resolve_per_instance() {

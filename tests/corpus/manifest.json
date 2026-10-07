@@ -375,6 +375,9 @@
     "ocn13-splash.scene.xml": [
       "OCN13"
     ],
+    "ocn14-foam-radius.scene.xml": [
+      "OCN14"
+    ],
     "ocn2.scene.xml": [
       "OCN2"
     ],
@@ -942,6 +945,12 @@
     ],
     "whitewater-checkpoint-range.scene.xml": [
       "S06"
+    ],
+    "whitewater-foam-albedo-range.scene.xml": [
+      "S06"
+    ],
+    "whitewater-foam-mode.scene.xml": [
+      "S06"
     ]
   },
   "valid": {
@@ -1005,7 +1014,8 @@
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],
     "voxels.scene.xml": [],
-    "whitewater-checkpoint.scene.xml": []
+    "whitewater-checkpoint.scene.xml": [],
+    "whitewater-foam-albedo.scene.xml": []
   },
   "warnings": {
     "a03-remote.scene.xml": [
@@ -1028,6 +1038,15 @@
     ],
     "w05-lights.scene.xml": [
       "W05"
+    ],
+    "w06-foam-material.scene.xml": [
+      "W06"
+    ],
+    "w07-foam-raster.scene.xml": [
+      "W07"
+    ],
+    "w08-foam-unlit.scene.xml": [
+      "W08"
     ]
   }
 }

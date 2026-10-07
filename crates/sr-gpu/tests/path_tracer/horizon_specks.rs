@@ -71,80 +71,6 @@ fn a_glossy_sea_at_the_horizon_has_no_specks_at_eight_samples_and_the_same_mean_
 
 // ---------------------------------------------------------------- the reflectance a pixel must show
 
-/// Smith masking, GGX distribution and the height-correlated visibility of the path tracer's surface, in f64.
-fn d_ggx(nh: f64, a: f64) -> f64 {
-    let a2 = a * a;
-    let f = nh * nh * (a2 - 1.0) + 1.0;
-    a2 / (std::f64::consts::PI * f * f)
-}
-
-fn v_smith(nl: f64, nv: f64, a: f64) -> f64 {
-    let a2 = a * a;
-    let gv = nl * (nv * nv * (1.0 - a2) + a2).sqrt();
-    let gl = nv * (nl * nl * (1.0 - a2) + a2).sqrt();
-    0.5 / (gv + gl)
-}
-
-/// The directional albedo of the surface (the integral of its BRDF times the cosine of the light over the
-/// hemisphere) seen at cosine `nv` with the normal, as (specular, diffuse per unit of albedo), for a
-/// dielectric of index `ior` and the roughness `roughness` (alpha = roughness squared).
-fn albedo(nv: f64, roughness: f64, ior: f64) -> (f64, f64) {
-    use std::f64::consts::PI;
-    let a = roughness * roughness;
-    let f0 = ((ior - 1.0) / (ior + 1.0)).powi(2);
-    let fresnel = |vh: f64| f0 + (1.0 - f0) * (1.0 - vh).clamp(0.0, 1.0).powi(5);
-    let v = [(1.0 - nv * nv).sqrt(), 0.0, nv];
-    // the specular lobe over the half vector (dl = 4 v.h dh), dense where the distribution is narrow
-    let (steps_t, steps_p) = (6000, 90);
-    let mut spec = 0.0;
-    for i in 0..steps_t {
-        let s0 = i as f64 / steps_t as f64;
-        let s1 = (i + 1) as f64 / steps_t as f64;
-        let (t0, t1) = (0.5 * PI * s0.powi(4), 0.5 * PI * s1.powi(4));
-        let t = 0.5 * (t0 + t1);
-        let dt = t1 - t0;
-        for j in 0..steps_p {
-            let p = PI * (j as f64 + 0.5) / steps_p as f64;
-            let h = [t.sin() * p.cos(), t.sin() * p.sin(), t.cos()];
-            let vh = v[0] * h[0] + v[1] * h[1] + v[2] * h[2];
-            if vh <= 0.0 {
-                continue;
-            }
-            let l = [2.0 * vh * h[0] - v[0], 2.0 * vh * h[1] - v[1], 2.0 * vh * h[2] - v[2]];
-            let nl = l[2];
-            if nl <= 0.0 {
-                continue;
-            }
-            // two half-planes (p and -p) are equal: the factor 2
-            spec += 2.0
-                * fresnel(vh)
-                * d_ggx(h[2], a)
-                * v_smith(nl, nv, a)
-                * nl
-                * 4.0
-                * vh
-                * t.sin()
-                * dt
-                * (PI / steps_p as f64);
-        }
-    }
-    // the diffuse lobe over the light direction
-    let (n_t, n_p) = (400, 400);
-    let mut diffuse = 0.0;
-    for i in 0..n_t {
-        let tl = 0.5 * PI * (i as f64 + 0.5) / n_t as f64;
-        for j in 0..n_p {
-            let pl = 2.0 * PI * (j as f64 + 0.5) / n_p as f64;
-            let l = [tl.sin() * pl.cos(), tl.sin() * pl.sin(), tl.cos()];
-            let hv = [l[0] + v[0], l[1] + v[1], l[2] + v[2]];
-            let len = (hv[0] * hv[0] + hv[1] * hv[1] + hv[2] * hv[2]).sqrt();
-            let vh = (v[0] * hv[0] + v[1] * hv[1] + v[2] * hv[2]) / len;
-            diffuse += (1.0 - fresnel(vh)) / PI * l[2] * tl.sin() * (0.5 * PI / n_t as f64) * (2.0 * PI / n_p as f64);
-        }
-    }
-    (spec, diffuse)
-}
-
 fn srgb_to_linear(c: f64) -> f64 {
     if c <= 0.04045 {
         c / 12.92
@@ -172,7 +98,7 @@ fn rows_against_reflectance(base: [f64; 3], roughness: f64, rows: &[u32]) -> Opt
             got += f64::from(lum(shot.at(x, y)));
             let (dx, dy) = (x as f64 + 0.5 - W as f64 * 0.5, y as f64 + 0.5 - H as f64 * 0.5);
             let nv = dy / (dx * dx + dy * dy + focal * focal).sqrt();
-            let (spec, diffuse) = albedo(nv, roughness, 1.333);
+            let (spec, diffuse) = common::directional_albedo(nv, roughness, 1.333);
             want += dome * (spec + albedo_lum * diffuse);
         }
         out.push((y, got / W as f64, want / W as f64));

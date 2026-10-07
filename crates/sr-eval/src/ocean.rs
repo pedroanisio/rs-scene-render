@@ -10,6 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 mod bathymetry;
 mod cavity;
 mod colliders;
+mod foam;
 mod surface;
 mod whitewater;
 
@@ -29,6 +30,11 @@ struct Runtime {
     waves: Vec<sim::waves::Wave>,
     whitewater: Option<sim::whitewater::Whitewater>,
     surface_bytes: usize,
+    /// The radius of the coverage that foam tracers give the surface, and the most distances it may take a frame (the whitewater's
+    /// `maxWork`), when whitewater foam is mixed into the water's albedo (`foamMode="albedo"`) instead of drawn as triangles.
+    foam_coverage: Option<(f64, u64)>,
+    /// The whitewater is in `foamMode="albedo"`: its foam is not drawn as triangles whether or not the coverage is made.
+    foam_albedo: bool,
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
@@ -69,6 +75,14 @@ impl WaterAttrs {
             density: num(e, "density", 1000.0),
         }
     }
+}
+
+/// Whether a camera of the composition path-traces: what draws the foam of `foamMode="albedo"`.
+fn any_path_traced_camera(node: &dyn sr_model::element::Element) -> bool {
+    children(node).into_iter().any(|c| {
+        (c.element_name() == "camera" && text(c, "renderer").as_deref() == Some("pathtrace"))
+            || any_path_traced_camera(c)
+    })
 }
 
 fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
@@ -202,12 +216,33 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             sim::whitewater::Whitewater::new(spec.clone(), bed.clone(), cfg).map_err(|e| e.to_string())
         })
         .transpose()?;
+    let albedo = e.children.iter().find_map(|c| match c {
+        sr_model::model::OceanChild::Whitewater(w) if text(w, "foamMode").as_deref() == Some("albedo") => {
+            Some((num(w, "foamRadius", spec.cell_size), num(w, "maxWork", 100_000_000.) as u64))
+        }
+        _ => None,
+    });
+    // the coverage is made only where it will be drawn: a water the renderer refuses for the foam (not opaque, unlit, shining) or a scene with
+    // no path-traced camera get the specific error of the renderer and not a failure of the budget of a coverage nobody reads
+    let material = text(e, "material").and_then(|id| p.scene.materials.as_ref()?.materials.iter().find(|m| m.id == id));
+    let takes_foam = material.is_none_or(|m| {
+        sr_model::foam::water_takes_foam(
+            text(m, "alphaMode").as_deref(),
+            text(m, "unlit").as_deref(),
+            text(m, "emissive").as_deref(),
+            text(m, "emissiveStrength").as_deref(),
+        )
+    });
+    let foam_coverage = albedo.filter(|_| takes_foam && any_path_traced_camera(&p.scene.composition));
+    let foam_albedo = albedo.is_some();
     Ok(Runtime {
         solver,
         spec,
         bed,
         waves,
         whitewater,
+        foam_coverage,
+        foam_albedo,
         surface_bytes: bytes("surfaceMemoryMiB", 128.)?,
         last: None,
         colliders,
@@ -281,6 +316,8 @@ impl Sims {
                     bed,
                     waves,
                     whitewater,
+                    foam_coverage,
+                    foam_albedo,
                     surface_bytes,
                     last,
                     colliders,
@@ -393,7 +430,7 @@ impl Sims {
                 let base = frame_at(solver, local_time, driver).map_err(reported)?;
                 let frame = sim::waves::apply(spec, base, waves).map_err(|e| e.to_string())?;
                 let bed_now: &[f64] = if frame.bed.is_empty() { bed } else { &frame.bed };
-                let mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
+                let mut mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
                 let mut key = frame_key(&frame, mesh.indices.len());
                 let whitewater_mesh = if let Some(foam) = &foam {
                     let available = surface_bytes.saturating_sub(surface::memory_cost(spec)?);
@@ -407,7 +444,18 @@ impl Sims {
                             p.kind as u64,
                         ]);
                     }
-                    whitewater::meshes(foam, available)?
+                    if let Some((radius, max_work)) = *foam_coverage {
+                        // the foam is the surface's own: its coverage rides in the alpha of the vertex colour. While it is made the
+                        // surface holds the arrays of the coverage too, which count in its budget
+                        let left = surface_bytes.saturating_sub(surface::memory_cost(spec)?);
+                        let coverage =
+                            foam::coverage_within(&mesh.vertices, &foam.particles, foam.time, radius, max_work, left)?;
+                        for (vertex, share) in mesh.vertices.iter_mut().zip(coverage) {
+                            vertex.color[3] = share;
+                        }
+                        key = crate::rng::hash(&[key, radius.to_bits(), foam.time.to_bits()]);
+                    }
+                    whitewater::meshes(foam, available, !*foam_albedo)?
                 } else {
                     Default::default()
                 };

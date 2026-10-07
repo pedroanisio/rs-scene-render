@@ -4658,6 +4658,19 @@
     <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="foamMaterial" type="xs:IDREF"/>
     <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
+    <xs:attribute name="foamMode" default="particles">
+      <xs:annotation><xs:documentation>particles draws each foam tracer as a triangle batch (foamMaterial). albedo draws no foam triangles: the foam tracers become a per-vertex coverage of the ocean surface (a kernel of foamRadius, fading with age) that is the share of the surface's area the foam covers: where it covers, the surface is a diffuse white of albedo foamAlbedo and roughness foamRoughness that lets no light through, and the light that gets through the rest keeps the water's tint; foamMaterial is then unused. Spray is drawn in both modes. The mix is the path tracer's: with the raster renderer the frame reports an error instead of drawing no foam, and the water's material must have the opaque alpha mode.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="particles"/><xs:enumeration value="albedo"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="foamRadius" type="positiveDecimal">
+      <xs:annotation><xs:documentation>Radius in scene units of the coverage one foam tracer gives the surface in albedo mode; absent, one cell of the ocean; at most 64 cells of the ocean (OCN14). Ignored in particles mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="foamAlbedo" type="unitDecimal" default="0.9">
+      <xs:annotation><xs:documentation>Diffuse albedo of fully covered water in albedo mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="foamRoughness" type="unitDecimal" default="0.8">
+      <xs:annotation><xs:documentation>Roughness of fully covered water in albedo mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="oceanWaveType">
     <xs:attribute name="wavelength" type="positiveDecimal" default="16"/>

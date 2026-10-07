@@ -1055,6 +1055,59 @@ impl<'a> Eval<'a> {
                     "OCN5",
                     || "ocean accepts one whitewater source with end >= start and valid foam/spray materials.".into(),
                 );
+                let cell = a("cellSize").map_or(1.0, xpath_number);
+                self.check(
+                    sources.iter().all(|s| s.attribute("foamRadius").is_none_or(|r| xpath_number(r) <= 64.0 * cell)),
+                    n,
+                    "OCN14",
+                    || "ocean whitewater foamRadius is at most 64 cells of the ocean: a wider coverage takes too many distances to the vertices of the surface.".into(),
+                );
+                // the foam mixed into the water is the path tracer's: warn where the document is valid and a renderer can run it
+                let albedo: Vec<_> = sources.iter().filter(|s| s.attribute("foamMode") == Some("albedo")).collect();
+                if albedo.iter().any(|s| s.attribute("foamMaterial").is_some()) {
+                    self.warn(
+                        n,
+                        "W06",
+                        "foamMaterial is not used by whitewater with foamMode=\"albedo\": the foam is the water's own."
+                            .into(),
+                    );
+                }
+                let path_traced = n
+                    .document()
+                    .root_element()
+                    .descendants()
+                    .any(|c| c.is_element() && is(c, "camera") && c.attribute("renderer") == Some("pathtrace"));
+                // a water that is not opaque, is unlit or shines is refused by a renderer (an unlit one draws its own colour, and the foam would
+                // be in the guide of the denoiser only): a warning where the document says so, by the criterion the renderer applies
+                let ocean_material = a("material").and_then(|id| {
+                    n.document()
+                        .root_element()
+                        .descendants()
+                        .find(|m| m.is_element() && is(*m, "material") && m.attribute("id") == Some(id))
+                });
+                if !albedo.is_empty()
+                    && ocean_material.is_some_and(|m| {
+                        !crate::foam::water_takes_foam(
+                            m.attribute("alphaMode"),
+                            m.attribute("unlit"),
+                            m.attribute("emissive"),
+                            m.attribute("emissiveStrength"),
+                        )
+                    })
+                {
+                    self.warn(
+                        n,
+                        "W08",
+                        "whitewater with foamMode=\"albedo\" needs an opaque, lit water material without emission: a renderer reports an error for another (read from the document's attributes at the start: one that animates is read by the renderer at each frame).".into(),
+                    );
+                }
+                if !albedo.is_empty() && !path_traced {
+                    self.warn(
+                        n,
+                        "W07",
+                        "whitewater with foamMode=\"albedo\" is drawn only by the path tracer, and no camera has renderer=\"pathtrace\": a renderer reports an error.".into(),
+                    );
+                }
             }
             "particles3D" => {
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "P3D1", || {

@@ -4,6 +4,9 @@
 
 // ---------------------------------------------------------------- lights seen through a refracting surface
 
+// Foam is mixed into some surface's material (see the hook of surf_of in water_source).
+override FOAM: bool = false;
+
 struct Iface { found: bool, t: f32, n: vec3<f32>, ior: f32, trans: f32, tint: vec3<f32>, entering: bool, sigma: vec3<f32> };
 
 fn fresnel_schlick(cosi: f32, eta: f32) -> f32 {
@@ -30,6 +33,12 @@ fn first_interface(o: vec3<f32>, d: vec3<f32>, dist: f32) -> Iface {
                 out.found = true; out.t = travelled + hit.t; out.n = select(-ng0, ng0, dot(d, ng0) < 0.0);
                 out.ior = m.params.w; out.trans = m.params.z; out.tint = m.base.rgb;
                 out.entering = dot(d, ng0) < 0.0; out.sigma = m.attenuation.rgb;
+                if (FOAM && m.extra.w > 0.5) {
+                    // foam is opaque and white where it covers the water: less light gets through
+                    let bw = 1.0 - hit.u - hit.v;
+                    let foam = clamp(tverts[hit.tri * 24u + 2u].a * bw + tverts[hit.tri * 24u + 8u].a * hit.u + tverts[hit.tri * 24u + 14u].a * hit.v, 0.0, 1.0);
+                    out.trans = out.trans * (1.0 - foam);
+                }
                 return out;
             }
         }

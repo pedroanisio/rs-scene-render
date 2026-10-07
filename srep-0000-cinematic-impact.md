@@ -1460,7 +1460,7 @@ name: at most 4096 distinct objects, a plane or mesh with a crater or a closed b
 one), OCN7 (collider geometry is static), OCN8 (`bodyCoupling` needs `colliders`), OCN9
 (`bodyDrag` belongs to an ocean with `colliders`), OCN10 to OCN12 (a `waterImpulse` with
 `source`: no derived attribute given, a dynamic rigid body without a crater listed in
-`colliders`, one impulse per body) and OCN13 (`splash` names emitters of crater ejecta).
+`colliders`, one impulse per body) OCN13 (`splash` names emitters of crater ejecta) and OCN14 (a foam coverage radius of at most 64 cells; it is checked in the particles mode too, where the radius is ignored, so that a document does not become invalid by changing the mode).
 Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
@@ -1490,6 +1490,10 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth). The tracers keep checkpoints within their own byte budget, one per second of simulated time at first and every second, fourth, eighth... second when the budget fills, so a request that goes back in time replays from the nearest checkpoint at or before it; a cold seek to 6 s on 518,400 cells with a 1/24 s step still costs about 600 million units |
 | `checkpointMemoryMiB` | 64 | Byte ceiling of the retained tracer checkpoints, 0 to 4096 MiB, separate from `maxMemoryMiB`; zero keeps none, so every request that goes back in time replays from zero |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
+| `foamMode` | `particles` | `particles` draws each foam tracer as a triangle batch; `albedo` makes the foam tracers a coverage of the water surface that the path tracer's shading takes toward the foam (below) and draws no foam triangles |
+| `foamRadius` | one cell | In `albedo` mode, radius in scene units of the coverage one tracer gives the surface, at most 64 cells (OCN14); ignored otherwise |
+| `foamAlbedo` | .9 | In `albedo` mode, diffuse albedo of fully covered water, 0 to 1 |
+| `foamRoughness` | .8 | In `albedo` mode, roughness of fully covered water, 0 to 1 |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
 height and horizontal Froude number `speed/sqrt(gravity*depth)`. A dry neighbour
@@ -1527,6 +1531,68 @@ pose, opacity, depth and shadow settings. Material references override these
 defaults. This bounded geometry is tested in raster and path-traced passes;
 it is not volumetric mist or a liquid-sheet reconstruction. OCN5 enforces the
 single source, ordered window and material-reference constraints.
+
+With `foamMode="albedo"` foam is the water's own: no foam mesh is built, and
+each foam tracer instead gives the vertices of the water surface within
+`foamRadius` (default one cell, so the coverage is at mesh resolution) a share
+`(1 - x^2)^2` of its distance `x` to the radius, full until 60 % of the
+tracer's life and fading linearly to zero after it; shares of several tracers
+combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
+The coverage is made on the CPU for every surface vertex, per frame, and is
+budgeted (the distances against a budget of their own, equal to the whitewater's
+`maxWork` for each frame, that is not shared with the solver's): it counts the distances it will take (every living tracer takes one
+for each vertex of the 3 x 3 squares around the one it is in, of a grid of squares that are at least
+`foamRadius` a side and at most about as many as there are vertices) before
+taking any, and fails with its cause when they pass the whitewater's `maxWork`;
+and the arrays of the coverage (16 bytes a vertex and 4 for each square of its
+grid, exactly) count in the surface's `surfaceMemoryMiB`.
+Foam that is not drawn as triangles is not charged to the whitewater mesh budget.
+The share rides in the alpha of the vertex colour and is the share of the
+surface's area that the foam covers: a path-traced sample on a covered surface
+is on the foam with that probability, and then the surface is the foam's (a
+diffuse white of albedo `foamAlbedo`, .9, and roughness `foamRoughness`, .8,
+that lets no light through), and on the water otherwise, so that the picture is
+the mean of the two weighted by the share and the light that gets through the
+uncovered part keeps the water's tint. The refracted shadow ray scales its
+transmittance by one minus the same share, so opaque foam stops the sun that
+clear water lets through (in expectation: the sun's ray is not drawn at random but
+scaled, which is the mean of what the randomly drawn samples of a camera path see, and so the
+same approximation as the mix itself), and the albedo guide of the denoiser takes the mean
+albedo. The random draw costs variance at the same number of samples: on a sea
+wholly at a share of one half, 8 samples a pixel and a window of 16 x 16 pixels, the standard
+deviation of the luminance is 0.0354 (0.345 of the mean) against 0.0061 (0.111) for the
+continuous mix it replaced, and with the denoiser 0.0118 (0.125) against none that could be
+read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 against 0.0101 and
+0.0088), so the cost is the band of the surface where the share is neither, and the
+denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
+a scene with `foamMode="albedo"` instead of drawing no foam, and the water
+needs an opaque alpha mode (also an error otherwise). Three warnings say it before
+a renderer runs: W08 (a water that is not opaque, is unlit or shines, by the criterion the renderer applies,
+read from the document's attributes at the start: a material attribute that animates is read by the renderer at each frame and not seen by it), W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
+used) and W07 (`foamMode="albedo"` in a scene where no camera has
+`renderer="pathtrace"`); the corpus has a document for each, and the valid
+albedo document has the path-traced camera. A metallic water is covered by foam like any other (the foam sample is a
+non-metal surface, so a wholly covered metallic sea is the same white as a
+dielectric one: 0.1926 against 0.1928 of the quadrature); an unlit water, which
+draws its own colour, and an emissive one, whose emission the foam samples would add
+to their own, are refused with an error that names the cause and the ocean is not
+drawn (W08 says so in the document). Scenes without the mix keep the text of the
+plain shaders and their pipelines; the water shader gains the declaration
+`override FOAM` and one branch that is off without foam, so that its identity is
+a measurement (the same picture, bit for bit, on an NVIDIA adapter) and not a
+structural fact. Foam on a surface that lets no light through uses a variant
+with only this hook, because forcing the water variant (the refracted shadow
+rays) cost 6.7 times the plain shader: 21.25 s against 3.2 s of the GPU pass
+`pathtrace trace` on `examples/cinematic-impact/hero.scene.xml` with its
+whitewater at threshold 1000 (no tracer) and `foamMode="albedo"`, t = 3.0,
+640 x 360, the scene's own samples, an NVIDIA RTX 6000 Ada through `sr-gpu`,
+`tools/probe_render.py --size 640x360 --short`, on the first form of the
+renderer change (the one that selected the water variant for a foam mix). On
+an NVIDIA adapter: water wholly covered by foam equals the quadrature of a
+diffuse .9 surface (0.1926 against 0.1928), the picture at shares of .25, .5
+and .75 is the weighted mean of the bare and the covered picture to 5 %, a
+share of 0 is the unmixed picture bit for bit for opaque and for transmissive
+water, and the seven comparison frames and the hero frame keep their hashes.
 
 #### Implemented numerical contract
 
@@ -3559,6 +3625,10 @@ Also includes `pyroShape`, inventoried below.
 | `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
+| `foamMode` | enumeration `particles`, `albedo` | Default `particles` |
+| `foamRadius` | positiveDecimal | Optional; absent (one cell) |
+| `foamAlbedo` | unitDecimal | Default `0.9` |
+| `foamRoughness` | unitDecimal | Default `0.8` |
 
 ### `craterType`
 
