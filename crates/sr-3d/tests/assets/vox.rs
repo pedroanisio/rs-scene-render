@@ -213,60 +213,108 @@ fn the_limits_are_checked_before_anything_is_built_and_say_what_was_over() {
     assert!(error.contains("bytes"), "{error}");
 }
 
-#[test]
-fn translations_that_add_up_past_the_keys_of_an_occupancy_are_an_error_and_never_a_wrapped_cell() {
-    let chunk = |name: &str, content: &[u8]| {
+/// Bytes of a `.vox` file written by hand, chunk by chunk, so that a test says exactly what is in the file.
+mod raw {
+    pub fn chunk(name: &str, content: &[u8]) -> Vec<u8> {
         let mut out = name.as_bytes().to_vec();
         out.extend((content.len() as i32).to_le_bytes());
         out.extend(0i32.to_le_bytes());
         out.extend(content);
         out
-    };
-    let string = |s: &str| [(s.len() as i32).to_le_bytes().to_vec(), s.as_bytes().to_vec()].concat();
-    let dictionary = |pairs: &[(&str, &str)]| {
+    }
+    fn string(s: &str) -> Vec<u8> {
+        [(s.len() as i32).to_le_bytes().to_vec(), s.as_bytes().to_vec()].concat()
+    }
+    pub fn dictionary(pairs: &[(&str, &str)]) -> Vec<u8> {
         let mut out = (pairs.len() as i32).to_le_bytes().to_vec();
         for (k, v) in pairs {
             out.extend(string(k));
             out.extend(string(v));
         }
         out
-    };
-    let transform = |node: i32, child: i32, t: &str| {
+    }
+    /// A model of the size `size` with the cells `[x, y, z, index]`.
+    pub fn model(size: [i32; 3], cells: &[[u8; 4]]) -> Vec<u8> {
+        let mut xyzi = (cells.len() as i32).to_le_bytes().to_vec();
+        for c in cells {
+            xyzi.extend(c);
+        }
+        [
+            chunk("SIZE", &[size[0].to_le_bytes(), size[1].to_le_bytes(), size[2].to_le_bytes()].concat()),
+            chunk("XYZI", &xyzi),
+        ]
+        .concat()
+    }
+    /// An `nTRN` node: its child, and a translation and a rotation byte as the strings the file holds.
+    pub fn transform(node: i32, child: i32, translation: Option<&str>, rotation: Option<&str>) -> Vec<u8> {
         let mut content = node.to_le_bytes().to_vec();
         content.extend(dictionary(&[]));
         content.extend(child.to_le_bytes());
         content.extend((-1i32).to_le_bytes());
         content.extend((-1i32).to_le_bytes());
         content.extend(1i32.to_le_bytes());
-        content.extend(dictionary(&[("_t", t)]));
+        let mut pairs = Vec::new();
+        if let Some(r) = rotation {
+            pairs.push(("_r", r));
+        }
+        if let Some(t) = translation {
+            pairs.push(("_t", t));
+        }
+        content.extend(dictionary(&pairs));
         chunk("nTRN", &content)
-    };
-    let shape = {
-        let mut content = 2i32.to_le_bytes().to_vec();
+    }
+    pub fn group(node: i32, children: &[i32]) -> Vec<u8> {
+        let mut content = node.to_le_bytes().to_vec();
         content.extend(dictionary(&[]));
-        content.extend(1i32.to_le_bytes());
-        content.extend(0i32.to_le_bytes());
+        content.extend((children.len() as i32).to_le_bytes());
+        for c in children {
+            content.extend(c.to_le_bytes());
+        }
+        chunk("nGRP", &content)
+    }
+    pub fn shape(node: i32, models: &[i32]) -> Vec<u8> {
+        let mut content = node.to_le_bytes().to_vec();
         content.extend(dictionary(&[]));
+        content.extend((models.len() as i32).to_le_bytes());
+        for m in models {
+            content.extend(m.to_le_bytes());
+            content.extend(dictionary(&[]));
+        }
         chunk("nSHP", &content)
-    };
-    let model = [
-        chunk("SIZE", &[2i32.to_le_bytes(), 2i32.to_le_bytes(), 2i32.to_le_bytes()].concat()),
-        chunk("XYZI", &[1i32.to_le_bytes().to_vec(), vec![0, 0, 0, 1]].concat()),
-    ]
-    .concat();
+    }
+    pub fn file(children: Vec<u8>) -> Vec<u8> {
+        let mut out = b"VOX ".to_vec();
+        out.extend(150i32.to_le_bytes());
+        out.extend(b"MAIN");
+        out.extend(0i32.to_le_bytes());
+        out.extend((children.len() as i32).to_le_bytes());
+        out.extend(children);
+        out
+    }
+}
+
+fn read_raw(children: Vec<u8>) -> Result<sr_3d::voxel::Imported, String> {
+    vox::import(&raw::file(children), None, Limits::default(), &vox::Bounds::default())
+}
+
+#[test]
+fn translations_that_add_up_past_the_keys_of_an_occupancy_are_an_error_and_never_a_wrapped_cell() {
     let read = |first: &str, second: &str| {
-        let children = [model.clone(), transform(0, 1, first), transform(1, 2, second), shape.clone()].concat();
-        let mut file = b"VOX ".to_vec();
-        file.extend(150i32.to_le_bytes());
-        file.extend(b"MAIN");
-        file.extend(0i32.to_le_bytes());
-        file.extend((children.len() as i32).to_le_bytes());
-        file.extend(children);
-        vox::import(&file, None, Limits::default(), &vox::Bounds::default())
+        read_raw(
+            [
+                raw::model([2, 2, 2], &[[0, 0, 0, 1]]),
+                raw::transform(0, 1, Some(first), None),
+                raw::transform(1, 2, Some(second), None),
+                raw::shape(2, &[0]),
+            ]
+            .concat(),
+        )
     };
-    // in reach: the cell is where the two translations say
+    // in reach: the cell of the model (0, 0, 0) is the cell -1 about its pivot (1, 1, 1), moved by 3 + 4 = 7 in x
     let moved = read("3 0 0", "4 0 0").unwrap();
     assert_eq!(moved.occupancy.count(), 1);
+    // MagicaVoxel's cell (6, -1, -1) is the scene's (6, 0, -1)
+    assert_eq!(moved.occupancy.get([6, 0, -1]), 1);
     // every one of these adds up, in 64 bits, to a number that wraps or to one far outside the keys
     for (first, second) in [
         ("9223372036854775807 0 0", "9223372036854775807 0 0"),
@@ -287,4 +335,70 @@ fn the_empty_palette_index_has_no_colour_whatever_the_file_says() {
         let imported = vox::import(&bytes, None, Limits::default(), &vox::Bounds::default()).unwrap();
         assert_eq!(imported.occupancy.palette().color(0), [0, 0, 0, 0], "{name}");
     }
+}
+
+/// `levels` pairs of nodes, each an `nTRN` whose child is an `nGRP` that names the next pair twice, and a shape at the bottom: `2^levels`
+/// places of one model, in a file of a few hundred bytes.
+fn doubling(levels: i32) -> Vec<u8> {
+    let mut children = raw::model([2, 2, 2], &[[0, 0, 0, 1]]);
+    for k in 0..levels {
+        children.extend(raw::transform(2 * k, 2 * k + 1, Some("1 0 0"), None));
+        children.extend(raw::group(2 * k + 1, &[2 * k + 2, 2 * k + 2]));
+    }
+    children.extend(raw::shape(2 * levels, &[0]));
+    children
+}
+
+#[test]
+fn a_node_that_two_parents_share_is_counted_before_it_is_placed() {
+    let start = std::time::Instant::now();
+    // 2^30 places in about two kilobytes: the count says so before a single place is made, and nothing is allocated for them
+    let error = read_raw(doubling(30)).unwrap_err();
+    assert!(error.contains("1073741824") && error.contains("places"), "{error}");
+    assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    // the cells that they would make are counted too, against the limit on cells
+    let limits = Limits { max_cells: 1000, ..Limits::default() };
+    let error = vox::import(&raw::file(doubling(20)), None, limits, &vox::Bounds::default()).unwrap_err();
+    assert!(error.contains("1048576") && error.contains("cells"), "{error}");
+    // within the bounds a shared node is placed as many times as it is used, the later place winning where two fall on one cell
+    let few = read_raw(doubling(3)).unwrap();
+    assert_eq!(few.occupancy.count(), 1);
+    // and the bound on places is a bound of its own
+    let bounds = vox::Bounds { max_placements: 7, ..vox::Bounds::default() };
+    let error = vox::import(&raw::file(doubling(3)), None, Limits::default(), &bounds).unwrap_err();
+    assert!(error.contains('8') && error.contains("places"), "{error}");
+}
+
+#[test]
+fn a_scene_graph_that_has_no_root_or_two_or_a_node_outside_the_root_is_an_error_in_every_case() {
+    let model = raw::model([2, 2, 2], &[[0, 0, 0, 1]]);
+    // the nodes only name each other: nTRN 0 -> nGRP 1 -> [0]
+    let cycle = read_raw([model.clone(), raw::transform(0, 1, None, None), raw::group(1, &[0])].concat());
+    assert!(cycle.unwrap_err().contains("root"));
+    // a good root and a second node that nobody names
+    let two_roots = read_raw(
+        [model.clone(), raw::transform(0, 1, None, None), raw::shape(1, &[0]), raw::transform(2, 1, None, None)]
+            .concat(),
+    );
+    assert!(two_roots.unwrap_err().contains("roots"));
+    // a good root and a cycle of two nodes off to the side
+    let aside = read_raw(
+        [
+            model.clone(),
+            raw::transform(0, 1, None, None),
+            raw::shape(1, &[0]),
+            raw::transform(2, 3, None, None),
+            raw::group(3, &[2]),
+        ]
+        .concat(),
+    );
+    assert!(aside.unwrap_err().contains("does not reach"));
+    // a node that names a model the file does not have, and a child that is not there
+    let missing = read_raw([model.clone(), raw::transform(0, 5, None, None)].concat());
+    assert!(missing.unwrap_err().contains("node 5"));
+    let unknown = read_raw([model.clone(), raw::transform(0, 1, None, None), raw::shape(1, &[3])].concat());
+    assert!(unknown.unwrap_err().contains("model 3"));
+    // the good graph is a graph
+    let good = read_raw([model, raw::transform(0, 1, None, None), raw::shape(1, &[0])].concat()).unwrap();
+    assert_eq!(good.occupancy.count(), 1);
 }

@@ -42,11 +42,13 @@ pub struct Bounds {
     pub max_nodes: usize,
     /// Depth of the scene graph.
     pub max_depth: usize,
+    /// Places of models that the scene graph makes, a model used many times counting many times.
+    pub max_placements: u64,
 }
 
 impl Default for Bounds {
     fn default() -> Self {
-        Self { max_file_bytes: 1 << 30, max_models: 65_536, max_nodes: 1 << 20, max_depth: 64 }
+        Self { max_file_bytes: 1 << 30, max_models: 65_536, max_nodes: 1 << 20, max_depth: 64, max_placements: 1 << 24 }
     }
 }
 
@@ -373,8 +375,13 @@ fn insert_node(vox: &mut Vox, bounds: &Bounds, id: i32, node: Node) -> Result<()
 
 impl Vox {
     /// The shapes the scene graph places, in the order of the walk from its root: the model and where it is. `None` if the file has no
-    /// scene graph.
-    fn placed(&self, bounds: &Bounds) -> Result<Option<Vec<(usize, Placement)>>, String> {
+    /// scene graph. The graph is checked whole before anything is placed: one root, no node that the root does not reach, no cycle, and
+    /// the places that it makes (a node under two parents counts under both) and the cells in them counted, by node and once, against
+    /// the bounds and `max_cells`, so that a file of a few hundred bytes cannot ask for billions of places.
+    fn placed(&self, bounds: &Bounds, max_cells: u64) -> Result<Option<Vec<(usize, Placement)>>, String> {
+        if self.nodes.is_empty() {
+            return Ok(None);
+        }
         let referenced: BTreeSet<i32> = self
             .nodes
             .values()
@@ -384,15 +391,77 @@ impl Vox {
                 Node::Shape { .. } => Vec::new(),
             })
             .collect();
-        let root = self
-            .nodes
-            .iter()
-            .find(|(id, n)| matches!(n, Node::Transform { .. }) && !referenced.contains(id))
-            .map(|(id, _)| *id);
-        let Some(root) = root else { return Ok(None) };
+        let roots: Vec<i32> = self.nodes.keys().filter(|id| !referenced.contains(id)).copied().collect();
+        let root = match roots.as_slice() {
+            [] => {
+                return Err(
+                    "the scene graph has no root: every node is the child of another, and there is a cycle".into()
+                )
+            }
+            [root] => *root,
+            many => return Err(format!("the scene graph has {} roots, the nodes {many:?}", many.len())),
+        };
+        let mut counted: BTreeMap<i32, (u64, u64)> = BTreeMap::new();
+        self.count(root, &mut Vec::new(), bounds, &mut counted)?;
+        if let Some(id) = self.nodes.keys().find(|id| !counted.contains_key(id)) {
+            return Err(format!("the scene graph has the node {id}, which the root does not reach"));
+        }
+        let (places, cells) = counted[&root];
+        if places > bounds.max_placements {
+            return Err(format!(
+                "the scene graph makes {places} places of models and the limit is {}",
+                bounds.max_placements
+            ));
+        }
+        if cells > max_cells {
+            return Err(format!("the file places {cells} cells and the limit is {max_cells} cells"));
+        }
         let mut out = Vec::new();
         self.walk(root, Placement::IDENTITY, &mut Vec::new(), bounds, &mut out)?;
         Ok(Some(out))
+    }
+
+    /// The places of models and the cells in them under `id`, each node worked out once (saturating: a count that big is over any bound).
+    fn count(
+        &self,
+        id: i32,
+        path: &mut Vec<i32>,
+        bounds: &Bounds,
+        counted: &mut BTreeMap<i32, (u64, u64)>,
+    ) -> Result<(u64, u64), String> {
+        if let Some(done) = counted.get(&id) {
+            return Ok(*done);
+        }
+        if path.len() >= bounds.max_depth {
+            return Err(format!("the scene graph is more than {} deep", bounds.max_depth));
+        }
+        if path.contains(&id) {
+            return Err(format!("the scene graph has a cycle through the node {id}"));
+        }
+        let node = self.nodes.get(&id).ok_or_else(|| format!("the scene graph names the node {id} and has none"))?;
+        path.push(id);
+        let total = match node {
+            Node::Transform { child, .. } => self.count(*child, path, bounds, counted)?,
+            Node::Group { children } => {
+                let mut total = (0u64, 0u64);
+                for child in children {
+                    let (p, c) = self.count(*child, path, bounds, counted)?;
+                    total = (total.0.saturating_add(p), total.1.saturating_add(c));
+                }
+                total
+            }
+            Node::Shape { models } => {
+                let mut total = (0u64, 0u64);
+                for m in models {
+                    let cells = self.models.get(*m).map_or(0, |model| model.voxels.len() as u64);
+                    total = (total.0.saturating_add(1), total.1.saturating_add(cells));
+                }
+                total
+            }
+        };
+        path.pop();
+        counted.insert(id, total);
+        Ok(total)
     }
 
     fn walk(
@@ -443,7 +512,7 @@ impl Vox {
                     cells.insert(scene_cell([i32::from(v[0]), i32::from(v[1]), i32::from(v[2])]), v[3]);
                 }
             }
-            None => match self.placed(bounds)? {
+            None => match self.placed(bounds, limits.max_cells)? {
                 None => {
                     if self.models.len() != 1 {
                         return Err(format!(
@@ -457,8 +526,7 @@ impl Vox {
                     }
                 }
                 Some(shapes) => {
-                    // a model used many times places its cells many times: the count is of what is placed
-                    cap(shapes.iter().map(|(m, _)| self.models[*m].voxels.len() as u64).sum())?;
+                    // the places and their cells were counted, node by node, against the bounds before they were made
                     for (m, placement) in shapes {
                         let model = &self.models[m];
                         let centre = model.size.map(|s| i64::from(s / 2));
