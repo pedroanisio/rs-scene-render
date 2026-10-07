@@ -154,6 +154,7 @@ impl World3 {
     pub(super) fn fracture_enabled(&self, k: usize) -> bool {
         self.fracture_sources[k].is_none_or(|i| !self.state.fractured[i])
             && self.fragment_owners[k].is_none_or(|i| self.state.fractured[i])
+            && self.slot_owners[k].is_none_or(|_| self.state.slot_active[k])
     }
 
     pub(super) fn apply_fractures(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
