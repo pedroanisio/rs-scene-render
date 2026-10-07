@@ -788,50 +788,67 @@ An open domain cuts a plume that rises past its top face: the face is a zero-pre
 lost. `follow="true"` (PYRO9: only with `boundary="open"`) makes the window of the domain move, in whole cells and in the
 object's own axes, to keep the smoke `followMargin` cells (PYRO10: only with `follow`; the engine's value is 12, the
 distance from which a plume's top face was measured to have no effect on it, see W02; PYRO11: it leaves a cell between the
-faces) from every face, plus the cells the fastest air along the axis goes in one step; the number of cells does not
-change, so the memory and the cost of a step do not either (a move is a copy of the state, and about a state clone
-has been measured at 102 ms at 192 x 156 x 192 under load). Absent or false the domain is where it began for good, and
-with a follow that never moves the state is bit for bit the one without it (tests `a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following`,
-the nine reference hashes of the solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
+faces) from the faces it is going toward, plus the cells the fastest air along the axis goes in one step; the number of
+cells does not change, so the memory and the cost of a step do not either (a move is a copy of the state, and about a state
+clone has been measured at 102 ms at 192 x 156 x 192 under load). Absent or false the domain is where it began for good, and
+with a follow that never moves the state is bit for bit the one without it (tests
+`a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following`, the nine reference hashes of the
+solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
 
 Where the window moves is a function of the state and of the sources that act in the step, never of the history of
-requests: the smoke along an axis is the span of slabs of cells between the ends that hold at most half of
-`followLoss` of all the density each (the lowest and highest cell index, integers, from sums taken in the order of
-the cells, so the same on any number of threads); the sources are the shapes of the `pyroSource` and `pyroImpulse` that
-act in the step, and **a window never leaves a slab that holds a cell of such a source**, whatever the loss, because a
-plume begins at its source and a window that left it would part the plume from the ground. The inputs of a step are
-sampled again if the window moved, so that they are those of the window the step has, and the seeded turbulence is keyed
-by the cell of space (the cell of the window and the cells the window has moved by), so that a point keeps its noise.
-The state keeps the cells it has moved by (so its origin is `base + cells * voxelSize` computed afresh) and the
-density it has let go of (`State::lost`); both are in the checkpoints and in the identity of the state, and a seek replays
-the same moves. The volume exported to the renderer places its grids by the origin of the state, so the smoke does not
-move in the world; a frozen bake of a following plume keeps the transform of each frame (test
-`a_baked_sequence_of_a_following_plume_is_the_frames_it_was_baked_from`), and any order of times and a fresh evaluator give
-the same frames.
+requests. The smoke along an axis is the span of slabs of cells between the ends that hold at most half of `followLoss` of all
+the density each (the lowest and highest cell index, integers, from sums taken in the order of the cells, so the same on any
+number of threads). Smoke that goes one way along an axis (the drift of its density-weighted air is at least a fifth of its
+speed) asks for room only on the face it goes toward, because a face behind a plume that rises away from it is no reason to
+take from the room it rises into (test `a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`; the
+fireball of the hero scene, which expands toward its own bottom face for a moment and then rises, made a window move 22 units
+down without this rule); smoke that goes nowhere or spreads both ways along an axis asks on both. The sources are the
+shapes of the `pyroSource` and `pyroImpulse` that act in the step, and **a window never leaves a slab that holds a cell of such a
+source**, whatever the loss, because a plume begins at its source and a window that left it would part the plume from the
+ground. The inputs of a step are sampled again if the window moved, so that they are those of the window the step has, and
+the seeded turbulence is keyed by the cell of space (the cell of the window and the cells the window has moved by), so that a
+point keeps its noise. The state keeps the cells it has moved by (so its origin is `base + cells * voxelSize` computed afresh)
+and the density it has let go of (`State::lost`); both are in the checkpoints and in the identity of the state, and a seek
+replays the same moves. The volume exported to the renderer places its grids by the origin of the state, so the smoke does
+not move in the world; a frozen bake of a following plume keeps the transform of each frame (test
+`a_baked_sequence_of_a_following_plume_is_the_frames_it_was_baked_from`), and any order of times and a fresh evaluator give the
+same frames.
 
-`followLoss` (0 to 1, the engine's default is 0) is the share of all the smoke that a move may leave behind on each
-side. **With a loss of zero a window lets go only of slabs that hold no density and no heat, and that is almost never**:
-the interpolation of the advection leaves a tail that is never exactly zero, and a plume drags a stem of smoke down to
-its source. Measured (sr-sim `follow`, a blob of smoke rising in air that accelerates upward at 2 units a second
-squared, 140 steps of 0.05 s, cells of 0.5 units, window of 80 rows; deterministic): a window that stays keeps 12.9 of
-the 164.3 that a window of 640 rows holds, a loss of zero keeps 0.38 and lets go of nothing (the rear slab is never
-empty, so the window cannot move and the blob goes out of the top as with no follow), a loss of 1e-9 keeps 156.3, of
-1e-6 keeps 165.7 (the tall window's centre at -38.5 units and this one's at -39.0) and lets go of 3e-7, of 1e-4 167.9, of 1e-3
-166.8. What a move lets go of is counted in `lost`, never silent, and a move lets go of at most the share asked
-(`what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked`: the smoke before a move equals the smoke after it
-plus what it let go of, to a trillionth, and no move lets go of more than 1.5 times the loss of all the smoke, the three axes
-together). In the evaluator (`crates/sr-eval/tests/volume/pyro_follow.rs`: a blob in a domain of 8 x 60 x 8 units that a
-force field accelerates upward at 6 units a second squared) the fixed domain holds nothing at 5 s and the following one
-holds the blob 14 units above the old top face.
+`followLoss` (0 to 1, the engine's default is 0) is the share of all the smoke that a move may leave behind on each side.
+**With a loss of zero a window lets go only of slabs that hold no density and no heat, and that is almost never**: the
+interpolation of the advection leaves a tail that is never exactly zero, and a plume drags a stem of smoke down to its source.
+Measured (sr-sim `follow`, a blob of smoke rising in air that accelerates upward at 2 units a second squared, 140 steps of
+0.05 s, cells of 0.5 units, a window of 80 rows; deterministic; the reference is a window of 640 rows): the reference holds 164.3
+of smoke with its centre at -38.5 units; a window that stays holds 12.9 (centre -28.5); a loss of zero never moves and holds
+the same 12.9, a loss of 1e-9 holds 42.6, of 1e-6 holds 174.0 (centre -37.9) and has let go of 9e-4 in all, of 1e-4 178.6 and of 1e-3
+181.0. The follow holds up to 10 % more smoke than the reference because the open bottom face is not where the reference's is, a
+difference of the two domains and not of the follow. What a move lets go of is counted in `lost`, never silent, and a move lets go of
+at most the share asked (`what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked`: the smoke before a move
+equals the smoke after it plus what it let go of, to a trillionth, and no move lets go of more than 1.5 times the loss of all the
+smoke, the three axes together). In the evaluator (`crates/sr-eval/tests/volume/pyro_follow.rs`: a blob in a domain of
+8 x 60 x 8 units that a force field accelerates upward at 6 units a second squared) the fixed domain holds nothing at 5 s and the
+following one holds the blob 14 units above the old top face.
 
-Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to
-its source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit
-between its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and
-`follow` is the saving in cells for a plume that has left its source behind, not a free height. The heated puff of the
-measurements of this section keeps 11 % of its smoke in a stem below the rows that the head has left. A `followLoss` large
-enough to let go of the stem loses visible smoke: the stem is part of the plume. The margin and the loss are the engine's
-values with no published source. The decision reads the density and the temperature of every cell once a step (one pass), and
-the cost of that pass at 128 x 104 x 128 against a step of 485 ms is not yet measured here.
+On the hero scene (`examples/cinematic-impact/hero.scene.xml`, plume of 192 x 156 x 192 units in cells of 3, open, 24 steps a
+second; tool `crates/sr-eval/examples/pyro_extent.rs`, deterministic; the cut figures are the scene's own solver, Jacobi, the others the
+multigrid one) the plume is cut by the top face from about 5 s: the smoke in the three cells at the top face is 0.30 of 3526 at 5 s
+and 98 of 2972 at 6 s. A domain of 468 units
+(the same cells below, two more windows above) shows what the plume is: at 6 s the smoke above a thousandth of the peak spans y = -83
+to 62 (145 units), above a hundredth -77 to 53, above a tenth -74 to 8, and the whole smoke is 3016. A window of 156 units
+holds that with a margin of 3 cells (9 units) only just: with `follow="true" followMargin="3" followLoss="0.001"` the window moves
+up by about 10 units, the smoke at the top face at 6 s is 0.28, the whole smoke 2977, and the plume reaches the margin; a loss of
+zero lets go of nothing, never makes room and holds 158 at the top face at 6 s, as little help as a fixed window. A plume that the
+hero film follows to its end needs 145 units and its margins, about 240 for a margin of 12 cells, and that is 64 x 80 x 64 cells
+against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with them.
+
+Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to its
+source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit between
+its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and `follow` is the
+saving in cells for a plume that has left its source behind, not a free height. A `followLoss` large enough to let go of the stem
+loses visible smoke: the stem is part of the plume (a heated puff keeps 11 % of its smoke in a stem below the rows its head has
+left). The margin and the loss are the engine's values with no published source. The decision reads the density, the velocity and
+the temperature of every cell once a step (one serial pass), and its cost at 128 x 104 x 128 against a step of 485 ms is not yet
+measured here.
 
 ### Three-dimensional particles
 
