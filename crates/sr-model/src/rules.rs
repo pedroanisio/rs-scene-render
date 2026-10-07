@@ -808,12 +808,13 @@ impl<'a> Eval<'a> {
                 let planes_ok = !numbers.is_empty()
                     && numbers.len() <= 252
                     && numbers.len() & 3 == 0
-                    && numbers.iter().all(|x| !x.is_nan());
+                    && numbers.iter().all(|x| x.is_finite())
+                    && numbers.chunks(4).all(|plane| plane[..3].iter().any(|c| *c != 0.0));
                 self.check(
                     (a("partition") == Some("planes") || !has("planes")) && (a("partition") != Some("planes") || (has("planes") && planes_ok)),
                     n,
                     "FRX11",
-                    || "partition planes takes planes, from one to 63 planes of four numbers (nx ny nz offset), and planes belongs to that partition.".into(),
+                    || "partition planes takes planes, from one to 63 planes of four finite numbers (nx ny nz offset, the normal not all zeros), and planes belongs to that partition.".into(),
                 );
                 self.check(
                     (a("partition") == Some("labels") || !has("labels"))
@@ -919,8 +920,9 @@ impl<'a> Eval<'a> {
                 self.check(!in_cells || !(has("mantle") || has("bulking") || has("repose")), n, "CRT13", || {
                     "a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.".into()
                 });
-                self.check(!in_cells || !(has("start") || has("end") || has("curve")), n, "CRT14", || {
-                    "the cut of a crater in an object of cells is instantaneous at the impact, so start, end and curve have no meaning there.".into()
+                self.check(!in_cells || !has("curve"), n, "CRT14", || {
+                    "the cut of a crater in an object of cells is instantaneous at the impact, so curve has no meaning there (start and end are refused by CRT6 for a crater with a source, which CRT15 requires)."
+                        .into()
                 });
                 self.check(!in_cells || has("source"), n, "CRT15", || {
                     "a crater in an object of cells grows from a source: it is cut by an impact.".into()
@@ -1244,6 +1246,10 @@ impl<'a> Eval<'a> {
                 self.check(grid, n, "PYRO1", || {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
                 });
+                let blasts = n.children().any(|c| is(c, "pyroBlast"));
+                self.check(!blasts || a("boundary") == Some("open"), n, "PYC5", || {
+                    "a pyro with a blast needs boundary=\"open\": a blast is a source of divergence, which a closed domain cannot let out.".into()
+                });
                 let follows = matches!(a("follow"), Some("true" | "1"));
                 self.check(!follows || a("boundary") == Some("open"), n, "PYRO9", || {
                     "a pyro whose window follows its plume needs boundary=\"open\".".into()
@@ -1286,6 +1292,10 @@ impl<'a> Eval<'a> {
                 });
                 self.check(if of_cells { !has("count") } else { has("count") }, n, "CRT16", || {
                     "a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.".into()
+                });
+                self.check(!of_cells || !(has("angle") || has("angleSpread")), n, "CRT17", || {
+                    "a burst from the crater of an object of cells launches the cells that the cut throws with the cut's own velocities, so angle and angleSpread have no meaning there."
+                        .into()
                 });
                 self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
                     "angle and angleSpread belong to a burst from a crater.".into()
@@ -1333,6 +1343,19 @@ impl<'a> Eval<'a> {
                     "OCN12",
                     || "a body makes one cavity: at most one water impulse names it.".into(),
                 );
+            }
+            "pyroBlast" => {
+                let parent = n.parent_element();
+                let inside = [("x", "width"), ("y", "height"), ("z", "depth")].iter().all(|(axis, size)| {
+                    a(axis).is_none_or(|v| {
+                        let half = parent.and_then(|p| p.attribute(*size)).map_or(f64::NAN, xpath_number) / 2.0;
+                        let v = xpath_number(v);
+                        v >= -half && v <= half
+                    })
+                });
+                self.check(inside, n, "PYC6", || {
+                    "a blast is released inside the domain of its pyro (x between plus and minus half the width, and likewise y with the height and z with the depth).".into()
+                });
             }
             "pyroSource" | "pyroImpulse" => {
                 self.pyro_source_near_open_face(n);
@@ -1490,6 +1513,14 @@ impl<'a> Eval<'a> {
                     "a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child."
                         .into()
                 });
+                let breaks = kids(n, "crater").next().is_some() || kids(n, "fracture").next().is_some();
+                let of_cells = |b: roxmltree::Node| matches!(b.attribute("shape"), None | Some("auto" | "voxels"));
+                self.check(
+                    !(voxels && breaks) || (kids(n, "rigidBody").next().is_some() && kids(n, "rigidBody").all(of_cells)),
+                    n,
+                    "VOX15",
+                    || "an object of cells that a crater or a fracture breaks has a rigidBody whose collider is the cells (shape voxels or auto, or no shape).".into(),
+                );
                 let thermal = kids(n, "medium").any(|m| matches!(m.attribute("blackbody"), Some("true" | "1")));
                 let temperature = n
                     .document()
@@ -1666,7 +1697,13 @@ impl<'a> Eval<'a> {
                 let cells = voxels && matches!(a("shape"), None | Some("auto" | "voxels"));
                 let crater = owner.is_some_and(|o| kids(o, "crater").next().is_some());
                 let fracture = owner.is_some_and(|o| kids(o, "fracture").next().is_some());
-                let scale = |axis: &str| owner.and_then(|o| o.attribute(axis)).map_or(1.0, xpath_number);
+                // xs:double has the plus sign and XPath 1.0 does not: the Schematron takes it off, as here
+                let scale = |axis: &str| {
+                    owner.and_then(|o| o.attribute(axis)).map_or(1.0, |v| {
+                        let v = v.trim_matches([' ', '\t', '\n', '\r']);
+                        xpath_number(v.strip_prefix('+').unwrap_or(v))
+                    })
+                };
                 self.check(a("shape") != Some("voxels") || voxels, n, "VOX8", || {
                     "a rigidBody with shape voxels belongs to an object3D of primitive voxels.".into()
                 });

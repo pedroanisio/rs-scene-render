@@ -428,7 +428,7 @@ fn noise_of(eng: &mut ThreeEngine, mix: Option<FoamMix>, share: f32, samples: u3
 fn the_noise_of_the_foam_mix_at_a_half_share_is_what_the_srep_states() {
     let Some(mut eng) = engine() else { return };
     // 8 samples a pixel, a window of 16 x 16 pixels, a uniform grey dome: the numbers of the SREP (NVIDIA), with the room that the
-    // adapters and the random numbers give; a way to draw the lobe that has less variance tightens them
+    // adapters and the random numbers give
     let (half, half_sd) = noise_at(&mut eng, 0.5, 8, false);
     let (denoised, denoised_sd) = noise_at(&mut eng, 0.5, 8, true);
     let (open, open_sd) = noise_at(&mut eng, 0.0, 8, false);
@@ -441,11 +441,68 @@ fn the_noise_of_the_foam_mix_at_a_half_share_is_what_the_srep_states() {
         half_sd / half,
         denoised_sd / denoised
     );
-    // the coefficient of variation of the mix at a half: 0.345 measured
-    assert!(half_sd / half < 0.45, "cv {}", half_sd / half);
-    // with the denoiser: 0.125 measured, and its mean about 5 % under the true one (0.0996)
-    assert!(denoised_sd / denoised < 0.17, "cv {}", denoised_sd / denoised);
-    assert!((denoised - 0.0996).abs() < 0.0996 * 0.08, "the denoised mean {denoised}");
+    // the coefficient of variation of the mix at a half: 0.156 measured with the lobe of the first hit drawn in strata (0.345 when it was
+    // drawn at random)
+    assert!(half_sd / half < 0.2, "cv {}", half_sd / half);
+    // with the denoiser: 0.003 measured (0.125 at random), and its mean within 3 % of the true one (0.0996; 5 % under at random)
+    assert!(denoised_sd / denoised < 0.02, "cv {}", denoised_sd / denoised);
+    assert!((denoised - 0.0996).abs() < 0.0996 * 0.03, "the denoised mean {denoised}");
     // a share of 0 or of 1 is as noisy as it was before the mix existed: 0.0101 and 0.0091 measured
     assert!(open_sd < 0.013 && covered_sd < 0.012, "{open_sd} {covered_sd}");
+}
+
+/// The luminance of every pixel of the middle 32 x 32 of a sea wholly at a half share of foam, at `samples` a pixel.
+fn half_sea_window(eng: &mut ThreeEngine, samples: u32) -> Vec<f32> {
+    let dome = srgb_to_linear(128.0 / 255.0);
+    let draw = plane(eng, 0.0, water(Some(FOAM)), |_| 0.5);
+    let mut s = scene(eng, vec![draw], Some(dome), false, TOP);
+    s.path = Some(PathOpts { samples, bounces: 4, denoise: false });
+    let px = eng.render_now(&s, None);
+    let mut v = Vec::new();
+    for y in 16..48u32 {
+        for x in 16..48u32 {
+            v.push(lum(px[(y * W + x) as usize]));
+        }
+    }
+    v
+}
+
+#[test]
+fn the_lobe_of_the_first_hit_is_drawn_in_strata_so_the_half_share_is_far_less_noisy_than_a_random_draw() {
+    let Some(mut eng) = engine() else { return };
+    // 8 samples a pixel at a half share: a random draw of the lobe gave a coefficient of variation of 0.345 over the window; drawing it
+    // from a sequence that has a different offset in every pixel puts nearly half of a pixel's samples on each
+    let v = half_sea_window(&mut eng, 8);
+    let m = v.iter().sum::<f32>() / v.len() as f32;
+    let sd = (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32).sqrt();
+    println!("half share, 8 samples: mean {m:.4} sd {sd:.4} cv {:.3}", sd / m);
+    assert!(sd / m < 0.2, "cv {}", sd / m);
+}
+
+#[test]
+fn the_strata_leave_no_pattern_in_the_picture_and_no_bias_in_its_mean() {
+    let Some(mut eng) = engine() else { return };
+    // the offset of a pixel's sequence is a hash of the pixel: neighbours are not correlated (a lattice of offsets would be a grid in the
+    // picture), and the mean of many samples is the mean of the lobes weighted by the share: 0.0996 from the bare and covered pictures
+    let v = half_sea_window(&mut eng, 8);
+    let m = v.iter().sum::<f32>() / v.len() as f32;
+    let residual: Vec<f32> = v.iter().map(|x| x - m).collect();
+    let var = residual.iter().map(|r| r * r).sum::<f32>() / residual.len() as f32;
+    let corr = |dx: usize, dy: usize| -> f32 {
+        let mut sum = 0.0;
+        let mut n = 0;
+        for y in 0..32 - dy {
+            for x in 0..32 - dx {
+                sum += residual[y * 32 + x] * residual[(y + dy) * 32 + x + dx];
+                n += 1;
+            }
+        }
+        sum / n as f32 / var
+    };
+    let (right, below, diagonal) = (corr(1, 0), corr(0, 1), corr(1, 1));
+    println!("correlation of neighbours: right {right:.3}, below {below:.3}, diagonal {diagonal:.3}");
+    assert!(right.abs() < 0.15 && below.abs() < 0.15 && diagonal.abs() < 0.15, "{right} {below} {diagonal}");
+    let many = half_sea_window(&mut eng, 128);
+    let mean = many.iter().sum::<f32>() / many.len() as f32;
+    assert!((mean - 0.0996).abs() <= 0.05 * 0.0996, "the mean of 128 samples: {mean}");
 }

@@ -873,6 +873,91 @@ the temperature of every cell once a step (one serial pass), and its cost, measu
 decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
 and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
 
+#### A blast in the smoke (`pyroBlast`)
+
+`<pyroBlast time energy x y z ambientDensity ambientPressure gamma/>` is a child of `<pyro>` (version 1.3 with it): at `time` seconds `energy`
+joules are released at (x, y, z) in the pyro's own axes into air of `ambientDensity` kg/m^3 (1.2) and `ambientPressure` Pa (101325), a gas of
+`gamma` (1.4, from 1.1 to 3). A pyro with a blast needs `boundary="open"` (PYC5: a blast is a source of divergence, which a closed domain cannot let
+out; the evaluator and the solver refuse it too) and the blast's place is in the domain (PYC6). An energy of zero is a blast that does nothing, and a
+pyro with no blast is bit for bit the pyro it was (the reference hashes of the solver, and a test of a puff with turbulence).
+
+**What is solved.** The front is the Sedov-Taylor blast: `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres, where the constant is not quoted but found
+(`sr_sim::sedov`): with `xi = r / R`, `u = Rdot U`, `rho = rho0 G` and `p = rho0 Rdot^2 P` the equations of an ideal gas reduce to three ordinary
+differential equations that are integrated from the shock (`U = P = 2 / (gamma + 1)`, `G = (gamma + 1) / (gamma - 1)`) to the centre, and the
+energy inside the front, `E = (16 pi / 25) J rho0 R^5 / t^2` with `J` the integral of `G U^2 / 2 + P / (gamma - 1)` over `xi^2 dxi`, gives
+`xi0 = (25 / (16 pi J))^(1/5)`: 1.0328 for gamma 1.4 (Landau and Lifshitz print alpha = 0.851) and 1.1517 for 5/3 (published 1.15), the mass inside the
+front is that of the sphere of ambient gas to 1e-6 (it is not given), the pressure at the centre of the monatomic blast is 0.3062 of the one behind
+the shock (published 0.306), and an independent integration in Python agrees to 2e-6. The front stops at `0.3 (E / p0)^(1/3)`, the end of the strong
+phase: the radius at which the pressure behind the strong shock, `2 rho0 D^2 / (gamma + 1)` with `D = 2 R / (5 t)`, has fallen to `11.85 xi0^5 / (gamma + 1)`
+times `p0` (5.8 for air, 9.0 for the monatomic gas): a few times the ambient pressure, where the blast stops being strong. It is a choice of the radius
+and not a result: the engine's, with no published value (the constant 0.3 is not the 0.3 to 0.6 m per cube root of a kilogram of the fireballs of explosives:
+`0.3 (E / p0)^(1/3)` is 1.04 m per cube root of a kilogram of TNT).
+The smoke solver is incompressible, so the shock is not carried. What is carried is the displacement of the air by the front, as an incompressible
+spherical piston. In each step the volume that the front swept, `4 pi (R1^3 - R0^3) / 3` between the sphere it began the step in and the one it ends it in,
+is given to the sphere's cells (the cells whose centres are in the sphere of the end of the step; at least a cell: a front smaller than that is the sphere of one cell,
+and the volume given is still the volume swept), spread evenly over them: each is given the divergence `volume / (cells h^3 dt)`, so that the air the domain lets out is
+exactly the volume swept whatever the cells make of the sphere, an energy of 1 J included (1.1e-6 cubic metres, not the volume of a cell). The cells that share the volume are the
+sphere's WHOLE (a window that the sphere cuts holds only some of them, and the others take their share), so that the divergence in the window is the one that the sphere
+makes in free space and agrees with the flow outside. The analytic flow of the piston (inside the sphere `u = d (x - c) / 3`, outside `u = Q / (4 pi r^2)` away from the centre `c` of
+the blast, `Q` the volume over the step) is put in a velocity of its own and projected ALONE (the projection is linear, so this is the share of the step's flow
+that the blast makes), with the faces open at zero pressure and the solids and obstacles of the step; that flow carries the smoke (the density and the temperature) once, over
+the step, and it is NOT kept in the velocity of the smoke. Kept, it would stay for ever: a potential flow with open faces is not removed by a projection with
+no divergence (the first design of the blast kept it and left 50 to 200 percent of the pulse a step after the front had stopped), so the velocity of the smoke is what it
+would have been with no blast, to the bit, at every step (`Simulation::blast_flow` gives the flow of the last step to whoever wants it). A window that the sphere cuts, or that is
+not centred on the blast, is pushed from the blast and not from its own middle. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
+`pyroImpulse` that the author adds). The order of a step with a blast is the smoke's own (advection, sources, forces, projection) and then the blast's: its flow is projected alone, with
+the solids of the step at rest for it (what a moving collider does to the air is the smoke's own flow, made first, and the two add up to the whole), and it carries the density and the
+temperature once, by the same advection with no decay and no cooling (the step has made those: a decay of 1 a second would otherwise be made twice in a step with a blast). The cost of a step with
+a blast is a second projection and one more state while the first is held (about 41 bytes a cell, which carries the smoke by exchange of its density and temperature and not by copy, and a copy of the
+three faces of its flow, which the advection replaces): the live bytes at the peak of a step are counted by an allocator (`tests/pyro_blast_memory.rs`, 48^3 cells) at 206 bytes a cell with a blast and 141
+without, inside the 288 of the budget (a first version of this, which copied the whole state and kept the last step's flow through this one, was 248; 1.1 GB more than a step with no blast at 256^3),
+the simulation holds 66.6 bytes a cell after a step with a blast (its state, 42, and the flow of that step, 24, which is dropped when the next begins or the window moves), and the time is in the profile as `blast`.
+
+**Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
+`pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
+axis has no sphere, and is an error: the images of the three axes must have one length and be at right angles, so a shear is refused as well as a stretch). The radius is worked out in metres and then multiplied by that; the divergence is a ratio of volumes per second and
+needs no conversion. Tested at 1, 100 and 37 pixels to the metre: the same radius in metres, the same displacement of a puff of smoke in metres
+(to 1e-3, the density being a single float), and the same kinetic energy in joules to 1e-6.
+
+**The time step.** With `dt` of the pyro (1/24 s) the strong phase of a plausible blast is over within the first step: the energy above which it is not is
+`E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2)`, which goes as `dt^3`: 1.91e12 J at 1/24 s and 2.64e10 J at 1/100 s, and below it the blast is ONE PULSE of the volume
+of `R_max`, in the step that contains `time`. Sub-steps would not change what the projection gives (the potential flow depends on the volume swept, not on its
+history within the step), so there are none. The front, for three energies in air at 1/24 s:
+
+| energy (J) | R(dt) (m) | R(2 dt) (m) | R_max (m) | R_max reached at | steps of the strong phase |
+|---|---|---|---|---|---|
+| 1e6 | 4.43 | 5.84 | 0.64 | 0.3 ms | one pulse of R_max |
+| 1e9 | 17.6 | 23.3 | 6.44 | 3.4 ms | one pulse of R_max |
+| 1e15 | 279 | 369 | 643 | 0.336 s (8.06 steps) | 9 (the ninth is the last to sweep) |
+
+The sphere of the front, which stops at `R_max`, reaches the centres of the faces of a window of side `L` if `R_max` is `L / 2`, `E = p0 (L / 0.6)^3`: 9.0e7 J for the
+hero's domain of 5.76 m (at 100 pixels to the metre) and 9.0e13 J for one of 576 m; it covers the whole window, corners included, at `R_max = sqrt(3) L / 2`, 4.66e8 J for
+5.76 m. A window that the sphere does not cover whole holds the cells it has of the sphere, each given the divergence that the whole sphere gives in free space (the window's
+flow is the free-space flow of the sphere, to 5 percent in the test), and the flow of the piston from the centre of the blast.
+
+**What it does.** Measured on a domain of 64 cells with the blast of 3.75e9 J (the strong phase ends at 10 m; `crates/sr-sim/tests/pyro/blast.rs`): the air that
+the blast's flow lets out of the domain is the volume swept over `dt` to 1e-6, over one step and over all the steps of the strong phase (the sum is the volume of the sphere of `R_max`), with
+a solid in the sphere, and the smoke's own flow in the same step lets out the source's (the two are made apart); the cells of the sphere are its volume to 5 percent; the speed outside the sphere is `Q / (4 pi r^2)` to 15
+percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); a window cut by the sphere, with the blast 1 m from its face, has the air go away from the blast, the flow inside linear in the distance from it (0.6 to 3 percent) with the divergence
+of the whole sphere (10 percent), and the flow at the middle the one that free space gives (5 percent); the kinetic energy in a ball of 1.5 radii is `rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.85 at a
+quarter (the piston's own energy is `2 pi rho Rdot^2 R^3` outside and a fifth of that inside: for the strong phase the energy that the solver's flow has is that of the displacement,
+which is part of the blast's `E`, not all); a puff of smoke at 6 m is displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to 0.984 and 0.990 of it at half a metre
+and a quarter. With a pulse of many cells in one step (1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian
+trace neither leaves the domain nor crosses the sphere, and the displacement is 0.990 and 0.981 of the exact one. **The advection does not conserve the smoke**: it changes by
+3.6 percent at half a metre and 0.70 at a quarter (1.8 and 1.4 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell;
+it is not the 1e-6 of a conservative scheme. This is a limit of the smoke solver as a whole and not of the blast: any large velocity (a pulse, a gust, a fast plume) gains or loses
+smoke by the same interpolation, and a conservative advection or a correction of the mass in each step (with the puff of this test as its oracle) is work for the solver. The same
+document through the evaluator, after the puff and the first two pulses (the front at 5.14 m; the volume swept says 1.06 m for the puff as a whole), moves the centre of the smoke on the line
+through the puff by 1.19 m (the centre of the line, not of the whole puff: 12 percent over) at every scene unit; the test fixes that number to 0.05 m.
+
+**Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
+flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's
+profile, and only the displacement of the front is the blast's: the energy of the flow is the energy of the displacement. (3) The strong phase is shorter
+than a step of the pyro for any `E` below `E*`; a blast faithful in time needs a `dt` of the pyro smaller than a tenth of the time of the strong phase (`dt` of 3e-5 s
+for 1e6 J), at the cost of that many steps. (4) After `R_max` nothing is modelled: no negative phase, no reflection, and the walls are the solver's. (5) No heat and
+no smoke are injected. (6) Because the blast's flow is not kept in the velocity, the smoke's own velocity gets no impulse from it: an updraft or a vortex stays where it was while the density and the temperature move, a plume made after the blast is not deflected by its wind, and the two advections in a step (the smoke's, then the blast's) are a first-order splitting with the numerical diffusion of both. A blast has no compressible after-flow and no negative phase. In a potential incompressible flow no velocity is left when the source stops, which is right. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
+world's own conservation test can check) and to the ocean (the same pressure as a `waterImpulse`): each its own step with its own oracle.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -1558,13 +1643,21 @@ transmittance by one minus the same share, so opaque foam stops the sun that
 clear water lets through (in expectation: the sun's ray is not drawn at random but
 scaled, which is the mean of what the randomly drawn samples of a camera path see, and so the
 same approximation as the mix itself), and the albedo guide of the denoiser takes the mean
-albedo. The random draw costs variance at the same number of samples: on a sea
-wholly at a share of one half, 8 samples a pixel and a window of 16 x 16 pixels, the standard
-deviation of the luminance is 0.0354 (0.345 of the mean) against 0.0061 (0.111) for the
-continuous mix it replaced, and with the denoiser 0.0118 (0.125) against none that could be
-read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 against 0.0101 and
-0.0088), so the cost is the band of the surface where the share is neither, and the
-denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
+albedo. The lobe of the first hit of a sample is not drawn at random but from a
+sequence with a random offset in each pixel (the offset a hash of the pixel, so that
+neighbours are not correlated, and the sequence the golden-ratio one, so that the
+samples of a pixel are spread over the share): at 8 samples a pixel, a window of
+16 x 16 pixels and a share of one half, the standard deviation of the luminance is
+0.0155 (0.156 of the mean) where the random draw gave 0.0354 (0.345) and the
+continuous mix before it 0.0061 (0.111); with the denoiser 0.0003 (0.003) against
+0.0118 (0.125) and a mean of 0.0984 against 0.0996 of many samples (it was about
+5 % under). The correlation of the residuals of neighbouring pixels is 0.014 to the
+right, -0.002 below and 0.011 on the diagonal, and a share of 0 or of 1 is as noisy
+as before the mix (0.0101 and 0.0087). The variance that remains under a dome is
+that of the draws at the later hits of the path, which are random, and of the
+sampling of the lobes themselves; a light of the scene is evaluated at every hit
+with the lobe of the sample, so a direct light adds the draw of that lobe to the
+noise (evaluating both lobes for it is a possible further step). The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
 needs an opaque alpha mode (also an error otherwise). Three warnings say it before
 a renderer runs: W08 (a water that is not opaque, is unlit or shines, by the criterion the renderer applies,
@@ -3192,8 +3285,16 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX5 | `voxels`, `cellSize`, `palette`, `surface` belong to primitive `voxels` |
 | VOX6 | `palette` is `file` or at most 255 material IDs |
 | VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
+| VOX8 | `rigidBody@shape="voxels"` belongs to an object of primitive `voxels` |
+| VOX9 | `density`, `maxFragments`, `fragmentMinCells`, `fragmentOverflow` and `anchor` belong to a rigid body whose collider is the cells |
+| VOX10 | a body of cells has a `density` and no `mass` |
+| VOX11 | `maxFragments`, `fragmentMinCells` and `fragmentOverflow` belong to a body that a crater or a fracture can break |
+| VOX12 | `anchor` belongs to a body that has a crater |
+| VOX13 | a body of cells that a crater or a fracture breaks is scaled the same on every axis |
+| VOX14 | a body of cells has a crater or a fracture, not both |
+| VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 418 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 **Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
@@ -3202,26 +3303,29 @@ a document is the next step, and the physics it will call is already in the engi
 
 *The frame.* The object's origin is the minimum corner of the box of its occupied cells, the axes are the scene's with y down, and the cell `[i, j, k]` fills
 `[i, i + 1) x [j, j + 1) x [k, k + 1)` cells of `cellSize` object units; `sr_3d::voxel::cell_to_object(key, cellSize)` is the centre `(key + 1/2) * cellSize`,
-`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
+`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, where a point within 4 units in the last place of a face is on it and so in the cell above, since 0.3 / 0.1 is 2.9999999999999996 and 0.3 is a face of cells of 0.1; none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
 file's own lattice. The body's centre of mass is not the origin; the world works it out from the cells. Metres are scene units over `pixelsPerMeter`.
 
-*The body (VOX8 to VOX14).* `rigidBody@shape="voxels"` (or `auto`, which is the cells for an object of primitive voxels) makes the cells the collider: the mass is the number of
+*The body (VOX8 to VOX15).* `rigidBody@shape="voxels"` (or `auto`, which is the cells for an object of primitive voxels) makes the cells the collider: the mass is the number of
 cells times the volume of one (`cellSize` times the object's scale, over `pixelsPerMeter`, cubed) times `density` (kg/m^3, required: the materials of an asset carry none; `mass` is
 refused). `maxFragments` (1 to 4096, 64 in the engine), `fragmentMinCells` (loose parts of fewer cells are dust, 1) and `fragmentOverflow` (`error`, which names both numbers, or
 `dust`, which makes the smallest parts dust) are the slots that the pieces of a cut take, and cost bodies of the world, so they are refused where there is nothing to cut
-(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `largest`, or `base`, every part that touches the base layer (the
-cells of the greatest y key: the lowest layer, the way ground is held by what is under it); with a crater only (VOX12). A body that a crater or a fracture breaks is scaled the same on
-every axis (VOX13: the cells are cubes for the cut), and has the one or the other (VOX14).
+(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `base`, every part that touches the base layer (the
+cells of the greatest y key: the lowest layer, the way ground is held by what is under it), which is the value when it is not given, or `largest`; with a crater only (VOX12), and the owner of a
+crater is static or kinematic (CRT5), so a dynamic body has no anchor to give. A body that a crater or a fracture breaks is scaled the same on
+every axis (VOX13: the cells are cubes for the cut; the rule reads the scale of the object itself, so the scale of an ancestor group, and an animated scale, are not seen by it and the evaluator has to check the world scale of the owner at run time), has the one or the other (VOX14), and has the cells for its collider (VOX15: with a box or a mesh for the collider there is no
+body of cells to cut, and a document that said so would mean nothing; this does not depend on the scale, which is why it is a rule of its own and not VOX13's).
 
-*The crater (CRT5, CRT13 to CRT15).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
+*The crater (CRT5, CRT13 to CRT17).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
 fifth heaped as the rim, in cells): so `mantle`, `bulking` and `repose`, which are ideas of an analytic surface, are refused (CRT13), and so are `start`, `end` and `curve`, which
-describe a growth that a cut does not have (CRT14: an attribute with no effect is a falsehood in a document). It grows from a source (CRT15), and its rigid body may be the cells
+describe a growth that a cut does not have (an attribute with no effect is a falsehood in a document): `curve` by CRT14, and `start` and `end` by CRT6, which refuses them for a crater that grows
+from a source, and CRT15 gives the crater of cells one. It grows from a source (CRT15), and its rigid body may be the cells
 (CRT5 gains `voxels`). `capture` is the world's and stays. The ejecta are a `particles3D` whose `burst@crater` names the crater, and for a crater of cells its particles are the
-cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's), and a burst that is not of such a crater
-has one as before.
+cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's) and no `angle` or `angleSpread` (CRT17: the cells leave with the velocities the cut gives them, and a launch angle would be an
+attribute with no effect), and a burst that is not of such a crater has a `count`, and may have the angles, as before.
 
 *The fracture (FRX3, FRX8 to FRX12).* The partition is `voronoi` (the engine's: `pieces` seeds drawn from `seed`, at most 4096), `planes` (up to 63 planes of `nx ny nz offset`
-in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component)
+in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component, is not all zeros and every number is finite: FRX11)
 or `labels="material"` (the palette index of a cell is its label, so a model breaks along its materials); a part that is not connected is split into its components. `pieces` and `seed`
 belong to voronoi (FRX10). The pieces have the material of their cells: there is no cut surface to paint, so `interiorMaterial` and `interiorUvScale` are refused for cells (FRX8; the
 exposed face of a piece is drawn from the palette like any other, and a surface that is to look different is a palette index, or a later `surface` value) and `interiorMaterial` stays
@@ -3451,6 +3555,19 @@ Also includes `pyroShape`, inventoried below.
 | `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
 | `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
+### `pyroBlastType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Required |
+| `energy` | nonNegativeDecimal | Required; joules |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `ambientDensity` | positiveDecimal | Default `1.2`; kg/m^3 |
+| `ambientPressure` | positiveDecimal | Default `101325`; Pa |
+| `gamma` | positiveDecimal; minInclusive=1.1, maxInclusive=3 | Default `1.4` |
+
 ### `particles3DType`
 
 | Attribute | XSD type or inline restriction | Presence/default |
@@ -3550,7 +3667,7 @@ Also includes `pyroShape`, inventoried below.
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
 | `time` | xs:double | Required unless `crater` is given (P3D7) |
-| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16) |
+| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16); `angle` and `angleSpread` are refused there too (CRT17) |
 | `repeat` | xs:nonNegativeInteger | Default `0` |
 | `interval` | positiveDecimal | Default `1` |
 | `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
@@ -3721,7 +3838,7 @@ Also includes `pyroShape`, inventoried below.
 | `maxFragments` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; only with a crater or a fracture on the owner (VOX11); the engine uses `64` |
 | `fragmentMinCells` | xs:positiveInteger | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `1` |
 | `fragmentOverflow` | xs:string; enumeration=error, enumeration=dust | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `error` |
-| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12); the engine uses `largest` for a dynamic body and `base` for a static or kinematic one |
+| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12), which is static or kinematic (CRT5), so the engine's value when it is not given is `base` |
 
 ### `assetProvenance`
 
@@ -3984,11 +4101,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 287 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 107 of them are in the
-cinematic families OCN 14, P3D 11, CRT 16, PYRO 11, VOL 10, BH 8, FRX 12, VOX 14, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 291 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 111 of them are in the
+cinematic families OCN 14, P3D 11, CRT 17, PYRO 11, VOL 10, BH 8, FRX 12, VOX 15, PYC 6, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 40 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT16, PYRO9 to PYRO11, VOX1 to VOX14) are this repository's. At commit 349d371,
+families, and the 44 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT17, PYRO9 to PYRO11, VOX1 to VOX15, PYC5 and PYC6) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

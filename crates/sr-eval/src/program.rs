@@ -1134,6 +1134,8 @@ fn template(
             }
         }
     });
+    // a body of cells is valid and not evaluated yet: refused by name, once for each object, and not evaluated as another thing
+    walk(&scene, &mut |e| crate::pending::refuse_bodies_of_cells(e, &mut *diags));
     Templated { scene, params, size, reframe }
 }
 

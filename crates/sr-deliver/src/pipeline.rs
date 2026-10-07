@@ -481,7 +481,13 @@ impl Video<'_> {
         let min_contrast = checks.min_contrast;
         for (id, (_, ratio, at)) in &judge.lowest {
             if *ratio < min_contrast {
-                fail(&checks.contrast, format!("contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"), report);
+                fail(
+                    &checks.contrast,
+                    format!(
+                        "contrastCheck: {id} reaches only {ratio:.2}:1 against its background at {at:.3} s (minimum {min_contrast}:1)"
+                    ),
+                    report,
+                );
             }
         }
     }
@@ -699,8 +705,10 @@ pub fn deliver(
     // with segments the programme is the output's own mix in output time (its own tracks may be its
     // only audio)
     let takes_audio = output.audio && (codec.takes_audio() || codec.is_audio_only());
+    // Shader inputs are still needed for silent video and image-sequence exports.
+    let overlay_audio_needed = output.overlay.is_some();
     let own_tracks = output.children.iter().any(|c| matches!(c, m::OutputChild::AudioTrack(_)));
-    if takes_audio && scene_audio.is_none() && own_tracks {
+    if (takes_audio || overlay_audio_needed) && scene_audio.is_none() && own_tracks {
         scene_audio = Some(audio::silent(p, fps));
     }
     // Without segments, selection attributes have no effect. Only output-owned
@@ -709,13 +717,16 @@ pub fn deliver(
         (None, true) => Some(crate::segment_audio::output_map(p, output)?),
         _ => None,
     };
-    let programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
-        (Some(tm), Some(sa)) if takes_audio => {
+    let mut programme = match (segments.as_ref().or(plain.as_ref()), &scene_audio) {
+        (Some(tm), Some(sa)) if takes_audio || overlay_audio_needed => {
             let t = Instant::now();
-            let a =
+            let mut a =
                 crate::segment_audio::render(p, sa, output, tm, fps, representation.as_deref(), segments.is_some())?;
+            if !overlay_audio_needed {
+                a.nodes.clear();
+            }
             report.audio_seconds += t.elapsed().as_secs_f64();
-            Some(a.master)
+            Some(a)
         }
         _ => None,
     };
@@ -725,7 +736,7 @@ pub fn deliver(
         // Plain programmes start at their mapped composition time; the scene and
         // explicitly segmented programmes start at zero on their respective clocks.
         let origin = plain.as_ref().map_or(0.0, |tm| tm.composition(0, 0.0));
-        let master = programme.as_ref().unwrap_or(&sa.mixed.master);
+        let master = programme.as_ref().map(|a| &a.master).unwrap_or(&sa.mixed.master);
         let mut part = audio::slice(master, sa.mix.rate, start - origin, end - origin);
         let weights = sa.mix.layout.loudness_weights();
         // integrated loudness needs at least one 400 ms gating block
@@ -852,6 +863,25 @@ pub fn deliver(
             renderer.audio =
                 Some(std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: sa.mix.rate as f64, channels }));
         }
+        let overlay_audio = renderer.audio.as_ref().filter(|_| overlay_audio_needed).map(|audio| {
+            if let Some(mixed) = programme.take() {
+                let mut channels: std::collections::HashMap<_, _> =
+                    mixed.nodes.into_iter().map(|(id, samples)| (id, std::sync::Arc::new(samples))).collect();
+                channels.insert("master".into(), std::sync::Arc::new(mixed.master));
+                std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: audio.rate, channels })
+            } else if start > 0.0 {
+                let channels = audio
+                    .channels
+                    .iter()
+                    .map(|(id, samples)| {
+                        (id.clone(), std::sync::Arc::new(audio::slice(samples, audio.rate as u32, start, end)))
+                    })
+                    .collect();
+                std::sync::Arc::new(sr_gpu::shader::AudioSignals { rate: audio.rate, channels })
+            } else {
+                audio.clone()
+            }
+        });
         let frame_times: Option<Vec<crate::segments::FrameTime>> = segments.as_ref().map(|tm| {
             tm.frames(fps).into_iter().filter(|f| f.output >= start - 1e-9 && f.output < end - 1e-9).collect()
         });
@@ -863,9 +893,45 @@ pub fn deliver(
             }
         };
         // content a safe area holds to its region: findings are warnings, or fail before anything is rendered
-        let (from, to) = (times.first().copied().unwrap_or(0.0), times.last().map(|t| t + 1.0 / fps).unwrap_or(0.0));
-        let safe = sr_gpu::safe_audit::check(&ev, from, to);
-        let diagnostics = safe.diagnostics(p);
+        let mut diagnostics = if p.safe_enforce == sr_eval::safe_area::SafeEnforce::Off && p.scene.captions.is_none() {
+            Vec::new()
+        } else if let Some((tm, frames)) = segments.as_ref().zip(frame_times.as_ref()) {
+            // Cuts, remaps and holds need not visit composition times in increasing order. A bounding
+            // interval would also audit footage that was cut. Include both pictures used by a join.
+            let mut audited = times.clone();
+            for f in frames {
+                if let Some(join) = tm.join_at(f.output) {
+                    audited.extend([join.from.composition, join.to.composition]);
+                }
+            }
+            // Simulations advance chronologically, and a frozen/repeated frame only needs one check.
+            audited.sort_by(f64::total_cmp);
+            audited.dedup();
+            sr_gpu::safe_audit::diagnostics(&ev, &audited)
+        } else {
+            // Output fps and a fractional trim origin can both differ from the project's
+            // frame grid. Only the timestamps actually exported belong in this audit.
+            sr_gpu::safe_audit::diagnostics(&ev, &times)
+        };
+        let mut overlay = crate::overlay::Overlay::new(
+            doc,
+            output,
+            timeline,
+            size,
+            &captions,
+            &gpu,
+            &eo,
+            opts.quality,
+            representation.as_deref(),
+        )?;
+        if let Some(layer) = &mut overlay {
+            layer.set_audio(overlay_audio.clone());
+            let output_times: Vec<f64> = match &frame_times {
+                Some(frames) => frames.iter().map(|f| f.output).collect(),
+                None => times.iter().map(|t| t - output.start).collect(),
+            };
+            diagnostics.extend(layer.safe_diagnostics(&output_times));
+        }
         if diagnostics.iter().any(|d| d.is_error()) {
             return Err(DeliverError::Document(sr_model::Report { diagnostics }));
         }
@@ -882,16 +948,7 @@ pub fn deliver(
             fps,
             reframe: p.reframe,
             segments: segments.as_ref().zip(frame_times),
-            overlay: crate::overlay::Overlay::new(
-                doc,
-                output,
-                timeline,
-                size,
-                &captions,
-                &gpu,
-                &eo,
-                representation.as_deref(),
-            )?,
+            overlay,
             origin: if segments.is_some() { 0.0 } else { output.start },
             join_tex: None,
         };
@@ -1041,6 +1098,7 @@ pub fn deliver(
                             ev,
                             eo,
                             captions,
+                            overlay_audio,
                         ) = (
                             &cancelled,
                             &done,
@@ -1053,6 +1111,7 @@ pub fn deliver(
                             &ev,
                             &eo,
                             &captions,
+                            &overlay_audio,
                         );
                         sc.spawn(move || -> Result<(Report, String), DeliverError> {
                             let gpu = gpu.clone();
@@ -1063,7 +1122,7 @@ pub fn deliver(
                             renderer.audio = audio.clone();
                             renderer.captions_off = map.is_some();
                             let stage = OutputStage::new(gpu.device.clone(), gpu.queue.clone());
-                            let overlay = crate::overlay::Overlay::new(
+                            let mut overlay = crate::overlay::Overlay::new(
                                 doc,
                                 output,
                                 timeline,
@@ -1071,8 +1130,12 @@ pub fn deliver(
                                 captions,
                                 &gpu,
                                 eo,
+                                opts.quality,
                                 representation.as_deref(),
                             )?;
+                            if let Some(layer) = &mut overlay {
+                                layer.set_audio(overlay_audio.clone());
+                            }
                             let mut worker = Video {
                                 ev,
                                 renderer,

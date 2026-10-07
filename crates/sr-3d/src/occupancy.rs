@@ -516,7 +516,7 @@ impl Moments {
         if self.n == 0 {
             return Err("an object with no cells has no mass properties".into());
         }
-        if !size.iter().all(|s| s.is_finite() && *s > 0.0) || !(density.is_finite() && density > 0.0) {
+        if !(size.iter().all(|s| s.is_finite() && *s > 0.0) && density.is_finite() && density > 0.0) {
             return Err("the cells need a positive size and density".into());
         }
         let n = self.n as f64;

@@ -277,6 +277,9 @@
     "crt16-no-count.scene.xml": [
       "CRT16"
     ],
+    "crt17-angle.scene.xml": [
+      "CRT17"
+    ],
     "crt2.scene.xml": [
       "CRT2"
     ],
@@ -316,10 +319,16 @@
     "frx10-pieces.scene.xml": [
       "FRX10"
     ],
+    "frx11-infinite.scene.xml": [
+      "FRX11"
+    ],
     "frx11-no-partition.scene.xml": [
       "FRX11"
     ],
     "frx11-planes.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-zero-normal.scene.xml": [
       "FRX11"
     ],
     "frx12-labels.scene.xml": [
@@ -493,7 +502,16 @@
     "pyc4-authored.scene.xml": [
       "PYC4"
     ],
+    "pyc5-closed.scene.xml": [
+      "PYC5"
+    ],
+    "pyc6-outside.scene.xml": [
+      "PYC6"
+    ],
     "pyro-advection.scene.xml": [
+      "S06"
+    ],
+    "pyro-blast-gamma.scene.xml": [
       "S06"
     ],
     "pyro-solver.scene.xml": [
@@ -958,6 +976,12 @@
     "vox14-both.scene.xml": [
       "VOX14"
     ],
+    "vox15-fracture-box.scene.xml": [
+      "VOX15"
+    ],
+    "vox15-mesh-collider.scene.xml": [
+      "VOX15"
+    ],
     "vox2-both-sources.scene.xml": [
       "VOX2"
     ],
@@ -1050,6 +1074,8 @@
     "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
+    "pyro-blast-gas.scene.xml": [],
+    "pyro-blast.scene.xml": [],
     "pyro-colliders.scene.xml": [],
     "pyro-crater-push.scene.xml": [],
     "pyro-crater.scene.xml": [],
@@ -1068,6 +1094,7 @@
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
     "voxel-body.scene.xml": [],
+    "voxel-crater-signed-scale.scene.xml": [],
     "voxel-crater.scene.xml": [],
     "voxel-ejecta.scene.xml": [],
     "voxel-fracture-labels.scene.xml": [],

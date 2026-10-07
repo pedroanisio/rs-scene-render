@@ -19,9 +19,11 @@ pub struct Body {
 
 /// Kilograms of one cell of `size` scene units a side, a metre being `pixels_per_meter` of them, of `density` kilograms a cubic metre.
 fn cell_mass(size: [f64; 3], density: f64, pixels_per_meter: f64) -> Result<f64, String> {
-    if !size.iter().all(|s| s.is_finite() && *s > 0.0)
-        || !(density.is_finite() && density > 0.0)
-        || !(pixels_per_meter.is_finite() && pixels_per_meter > 0.0)
+    if !(size.iter().all(|s| s.is_finite() && *s > 0.0)
+        && density.is_finite()
+        && density > 0.0
+        && pixels_per_meter.is_finite()
+        && pixels_per_meter > 0.0)
     {
         return Err("a body of cells needs a positive cell size, density and scale".into());
     }

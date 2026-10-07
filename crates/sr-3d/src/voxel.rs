@@ -56,9 +56,13 @@ pub fn cell_to_object(key: [i32; 3], cell_size: f64) -> [f64; 3] {
     key.map(|k| (f64::from(k) + 0.5) * cell_size)
 }
 
-/// The key of the cell that holds the point `p` (object units): the floor of `p / cell_size` on each axis (a point on a face between two cells is in the
-/// one that has the face as its lower face). None for a point that is not finite, or whose cell has a key outside those of an occupancy
-/// ([`crate::occupancy::KEY_LIMIT`]), or for a `cell_size` that is not positive and finite.
+/// The key of the cell that holds the point `p` (object units): the floor of `p / cell_size` on each axis, where a point on a face between two cells is
+/// in the one that has the face as its lower face. A point is on a face if `p / cell_size` is within 4 units in the last place (of the larger of its
+/// own size and 1) of a whole number: the division of two doubles that stand for decimals is rounded (0.3 / 0.1 is 2.9999999999999996, and 0.3 is the face
+/// between the cells 2 and 3 of cells of 0.1), as is the product of the key and the size that a caller gets a face by, and a floor alone would put the
+/// point in the cell below. A point nearer to the face than that is taken to be on it; anything farther (a nanometre in a cell of a metre) is not.
+/// None for a point that is not finite, or whose cell has a key outside those of an occupancy ([`crate::occupancy::KEY_LIMIT`]), or for a `cell_size` that is
+/// not positive and finite.
 pub fn object_to_cell(p: [f64; 3], cell_size: f64) -> Option<[i32; 3]> {
     if !(cell_size.is_finite() && cell_size > 0.0) {
         return None;
@@ -66,7 +70,9 @@ pub fn object_to_cell(p: [f64; 3], cell_size: f64) -> Option<[i32; 3]> {
     let limit = f64::from(crate::occupancy::KEY_LIMIT);
     let mut key = [0i32; 3];
     for a in 0..3 {
-        let k = (p[a] / cell_size).floor();
+        let q = p[a] / cell_size;
+        let whole = q.round();
+        let k = if (q - whole).abs() <= 4.0 * f64::EPSILON * q.abs().max(1.0) { whole } else { q.floor() };
         if !(k.is_finite() && (-limit..limit).contains(&k)) {
             return None;
         }

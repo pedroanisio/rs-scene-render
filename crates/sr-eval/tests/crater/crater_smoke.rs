@@ -292,3 +292,32 @@ fn a_ground_that_the_smoke_cannot_enter_does_not_take_any_of_its_dust() {
     assert!((open - want).abs() < 0.2 * want, "with nothing in the way: {open} against {want}");
     assert!((closed - want).abs() < 0.2 * want, "with the ground in the way: {closed} against {want}");
 }
+
+#[test]
+fn smoke_from_a_crater_in_a_volume_that_is_stretched_on_any_axis_or_sheared_is_refused() {
+    let xml = Setup::default().xml();
+    let after = arrival(100.0) + 0.5;
+    let refused = |xml: String| {
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e}"));
+        let frame = Evaluator::new(&doc, &Default::default()).unwrap().evaluate(after);
+        frame.failures.iter().chain(&frame.problems).any(|f| f.contains("uniformly scaled"))
+    };
+    // the same volume at the same scale on every axis is fine (a scale of 2), and a stretch of any one axis is refused, z included (the check looked at x and y)
+    assert!(!refused(xml.replace(
+        r#"<object3D id="cloud" primitive="volume" y="55">"#,
+        r#"<object3D id="cloud" primitive="volume" y="55" scaleX="2" scaleY="2" scaleZ="2">"#
+    )));
+    for stretch in [r#"scaleX="2""#, r#"scaleY="2""#, r#"scaleZ="2""#] {
+        let object = format!(r#"<object3D id="cloud" primitive="volume" y="55" {stretch}>"#);
+        assert!(refused(xml.replace(r#"<object3D id="cloud" primitive="volume" y="55">"#, &object)), "{stretch}");
+    }
+    // a shear: a parent turned by 45 degrees and a child scaled by 0.8 on x and 1.5118578920369088 on y, which makes the three images of the axes of the volume
+    // one length (1) and not at right angles
+    let sheared = xml
+        .replace(
+            r#"<object3D id="cloud" primitive="volume" y="55">"#,
+            r#"<group id="turn" rotation="45"><object3D id="cloud" primitive="volume" y="55" scaleX="0.8" scaleY="1.5118578920369088">"#,
+        )
+        .replace("</object3D>\n            </composition>", "</object3D></group>\n            </composition>");
+    assert!(refused(sheared));
+}

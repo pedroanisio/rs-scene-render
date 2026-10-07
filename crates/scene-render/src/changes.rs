@@ -5,8 +5,8 @@
 //! animated values, transforms and timing), the source text of every element it draws (its
 //! static attributes), the document outside the composition (assets, paints, effects,
 //! symbols, project, colour management), the files those name, and the render settings. When
-//! the scene uses motion blur or time effects a frame also shows other times, so the whole
-//! composition joins the shared part and any edit renders every frame again.
+//! the scene uses simulation, persistent shaders, motion blur or time effects a frame also depends on other times,
+//! so the whole composition joins the shared part and any edit renders every frame again.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -198,7 +198,13 @@ fn scene_inputs(
             let frames = if seq.last >= seq.first { (seq.last - seq.first) / seq.step + 1 } else { 0 };
             count += frames;
             if count > MAX_SEQUENCE_INPUTS {
-                error=Some(std::io::Error::new(std::io::ErrorKind::InvalidInput,format!("{} sequence {:?} ({frames} frames) exceeds the dependency limit of {MAX_SEQUENCE_INPUTS} inputs; narrow its range",seq.kind,seq.src)));
+                error = Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} sequence {:?} ({frames} frames) exceeds the dependency limit of {MAX_SEQUENCE_INPUTS} inputs; narrow its range",
+                        seq.kind, seq.src
+                    ),
+                ));
             }
         }
     });
@@ -493,12 +499,21 @@ pub struct Fingerprints {
 
 impl Fingerprints {
     /// Fingerprints for `doc`, whose source is `text`, with resolved `inputs` and render `settings`
-    /// (quality, bit depth, variant and anything else that changes pixels).
-    pub fn new(text: &str, doc: &sr_model::Document, inputs: &[PathBuf], settings: &str) -> Fingerprints {
+    /// (quality, bit depth, variant and anything else that changes pixels). `simulation` comes from
+    /// the effective evaluator, so templated and included simulations also retain their full history.
+    /// `persistent` identifies ISF feedback buffers, which also depend on earlier frames.
+    pub fn new(
+        text: &str,
+        doc: &sr_model::Document,
+        inputs: &[PathBuf],
+        settings: &str,
+        simulation: bool,
+        persistent: bool,
+    ) -> Fingerprints {
         let mut shared = fnv(settings.as_bytes(), SEED);
         shared = fnv(env!("CARGO_PKG_VERSION").as_bytes(), shared);
-        // Invalidate fingerprints produced without the inputs selected by bindings and overrides.
-        shared = fnv(b"frame-fingerprint-v7", shared);
+        // Invalidate fingerprints that omitted persistent shader history.
+        shared = fnv(b"frame-fingerprint-v9", shared);
         shared = fnv(&font_set(&font_dirs()).to_le_bytes(), shared);
         // the document outside the composition
         let (a, b) = composition_range(text).unwrap_or((text.len(), text.len()));
@@ -508,7 +523,11 @@ impl Fingerprints {
         for f in inputs {
             shared = fnv(format!("{}:{}", f.display(), file_print(f)).as_bytes(), shared);
         }
-        let whole = if doc.scene.project.motion_blur {
+        let whole = if simulation {
+            Some("the scene uses simulation, so frames depend on earlier states".to_string())
+        } else if persistent {
+            Some("the scene uses persistent shaders, so frames depend on earlier states".to_string())
+        } else if doc.scene.project.motion_blur {
             Some("the scene uses motion blur, so frames show other times".to_string())
         } else if doc
             .scene
@@ -554,6 +573,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn expired_collider_edits_invalidate_later_particle_frames() {
+        let scene = |y| {
+            format!(
+                r##"<scene version="1.3"><project width="400" height="400" fps="30" duration="4"/>
+            <composition><shape id="slab" shape="rect" x="100" y="{y}" width="200" height="40" end="1" fill="#FFFFFF"><rigidBody type="static"/></shape>
+            <particleEmitter id="p" x="200" y="60" emitterShape="line" emitterWidth="300" seed="1" rate="120" speed="300" direction="90" spread="10" lifetime="3" collide="true"/></composition>
+            <physics gravityY="0" bounds="none"/></scene>"##
+            )
+        };
+        let sample = |xml: &str| {
+            let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+            let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+            let frame = ev.evaluate(2.0);
+            assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+            assert_eq!(frame.nodes.len(), 1, "the collider has left the active frame");
+            let positions = frame.nodes[0].particles.as_ref().unwrap().pos.clone();
+            let fingerprint = Fingerprints::new(xml, &doc, &[], "", ev.has_simulation(), false).frame(xml, &frame);
+            (positions, fingerprint)
+        };
+        let (before, after) = (sample(&scene(300)), sample(&scene(900)));
+        assert_ne!(before.0, after.0, "the earlier collision changes the visible particles");
+        assert_ne!(before.1, after.1, "changed-only must redraw the later frame");
+    }
+
+    #[test]
+    fn nonsimulated_frames_still_ignore_edits_to_expired_nodes() {
+        let fingerprint = |fill: &str| {
+            let xml = format!(
+                r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="2"/>
+                <composition><shape id="gone" shape="rect" width="10" height="10" end="0.5" fill="{fill}"/>
+                <shape id="visible" shape="rect" width="10" height="10"/></composition></scene>"##
+            );
+            let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+            let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+            let prints = Fingerprints::new(&xml, &doc, &[], "", ev.has_simulation(), false);
+            assert!(prints.whole.is_none());
+            prints.frame(&xml, &ev.evaluate(1.0))
+        };
+        assert_eq!(fingerprint("#FF0000"), fingerprint("#00FF00"));
+    }
+
+    #[test]
     fn baked_volume_payloads_invalidate_incremental_frames_and_renderer_setup() {
         use sr_volume::{
             bake::{BakeLimits, BakeWriter},
@@ -581,17 +642,23 @@ mod tests {
         assert!(inputs.contains(&receipt.manifest));
         assert_eq!(inputs.iter().filter(|p| **p == payload).count(), 1);
         let frame = ev.evaluate_frame(0);
-        let fingerprint = Fingerprints::new(&xml, &doc, &inputs, "").frame(&xml, &frame);
+        let fingerprint = Fingerprints::new(&xml, &doc, &inputs, "", ev.has_simulation(), false).frame(&xml, &frame);
         let setup = setup_key(&xml, &inputs);
         std::fs::remove_file(&payload).unwrap();
         let missing_inputs = effective_files(&path, &doc, ev.program()).unwrap();
         assert_eq!(missing_inputs, inputs, "missing payloads must remain watched so repairs are detected");
-        assert_ne!(fingerprint, Fingerprints::new(&xml, &doc, &missing_inputs, "").frame(&xml, &frame));
+        assert_ne!(
+            fingerprint,
+            Fingerprints::new(&xml, &doc, &missing_inputs, "", ev.has_simulation(), false).frame(&xml, &frame)
+        );
         assert_ne!(setup, setup_key(&xml, &missing_inputs));
         let missing_stamp = stamp(&payload);
         volume.write(std::fs::File::create(&payload).unwrap()).unwrap();
         assert_ne!(missing_stamp, stamp(&payload), "restoring a missing payload must wake watch");
-        assert_eq!(fingerprint, Fingerprints::new(&xml, &doc, &inputs, "").frame(&xml, &frame));
+        assert_eq!(
+            fingerprint,
+            Fingerprints::new(&xml, &doc, &inputs, "", ev.has_simulation(), false).frame(&xml, &frame)
+        );
     }
 
     #[test]
@@ -822,13 +889,13 @@ mod tests {
         std::fs::write(&logo, b"aaaa").unwrap();
         let time = std::fs::metadata(&logo).unwrap().modified().unwrap();
         let inputs = files(&main, &doc).unwrap();
-        let before = (Fingerprints::new(xml, &doc, &inputs, "").shared, setup_key(xml, &inputs));
+        let before = (Fingerprints::new(xml, &doc, &inputs, "", false, false).shared, setup_key(xml, &inputs));
         // as `cp -p` of another file of the same size does
         std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(&logo, b"bbbb").unwrap();
         std::fs::File::options().write(true).open(&logo).unwrap().set_modified(time).unwrap();
         assert_eq!(std::fs::metadata(&logo).unwrap().modified().unwrap(), time);
-        assert_ne!(Fingerprints::new(xml, &doc, &inputs, "").shared, before.0);
+        assert_ne!(Fingerprints::new(xml, &doc, &inputs, "", false, false).shared, before.0);
         if cfg!(unix) {
             assert_ne!(setup_key(xml, &inputs), before.1, "a kept renderer would show the old image");
         }
