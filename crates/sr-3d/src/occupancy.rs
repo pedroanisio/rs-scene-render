@@ -8,6 +8,13 @@
 //! * Cells are stored in sparse **bricks** of 8 by 8 by 8 cells, keyed by the key divided (flooring) by 8. Keys may
 //!   be negative. A grid may have a limit on its bricks.
 //! * The **scan order** of cells, which every ordering in this module and above it uses, is z, then y, then x (x runs fastest).
+//! * The grid carries a **palette** of 256 RGBA colours beside the cells (index 0 is empty and its colour does not matter; the
+//!   others start opaque white). Colours are not geometry: recolouring changes [`Occupancy::palette_revision`] and
+//!   [`Occupancy::appearance_fingerprint`], and leaves the revision and [`Occupancy::fingerprint`] alone, so a collider, a mass or a
+//!   component list computed from the cells stays valid and a mesh with colours does not.
+//! * An importer that has the whole of a model builds it in bulk, from dense bricks ([`Occupancy::from_bricks`]) or from a list of
+//!   cells with their palette indices ([`Occupancy::from_cells`]); the result has the same fingerprint as the same cells set one by
+//!   one, and every brick of it is new to a reader at revision 0.
 //! * The **revision** is a counter of this grid that changes when, and only when, a cell changes; the bricks that changed
 //!   since a revision are told by [`Occupancy::changed_bricks_since`], in key order, a brick that was emptied included until it
 //!   is compacted away. Two grids built differently have different revisions; the **fingerprint** is the hash of the content
@@ -29,6 +36,30 @@ struct Brick {
     changed: u64,
 }
 
+/// 256 RGBA colours, which the palette indices of the cells of an [`Occupancy`] choose from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Palette {
+    colors: [[u8; 4]; 256],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        let mut colors = [[255; 4]; 256];
+        colors[0] = [0; 4];
+        Self { colors }
+    }
+}
+
+impl Palette {
+    pub fn color(&self, index: u8) -> [u8; 4] {
+        self.colors[usize::from(index)]
+    }
+
+    pub fn colors(&self) -> &[[u8; 4]; 256] {
+        &self.colors
+    }
+}
+
 /// A sparse grid of filled cells, with a palette index in each.
 #[derive(Clone, Debug)]
 pub struct Occupancy {
@@ -36,6 +67,8 @@ pub struct Occupancy {
     filled: u64,
     revision: u64,
     max_bricks: usize,
+    palette: Palette,
+    palette_revision: u64,
 }
 
 impl Default for Occupancy {
@@ -66,12 +99,128 @@ fn scan_key(c: &[i32; 3]) -> (i32, i32, i32) {
 impl Occupancy {
     /// An empty grid with no limit.
     pub fn new() -> Self {
-        Self { bricks: BTreeMap::new(), filled: 0, revision: 0, max_bricks: usize::MAX }
+        Self {
+            bricks: BTreeMap::new(),
+            filled: 0,
+            revision: 0,
+            max_bricks: usize::MAX,
+            palette: Palette::default(),
+            palette_revision: 0,
+        }
     }
 
     /// An empty grid that holds at most `max_bricks` bricks (of 512 cells); a cell in another brick is an error.
     pub fn with_limit(max_bricks: usize) -> Self {
         Self { max_bricks, ..Self::new() }
+    }
+
+    /// A grid made of dense bricks (512 palette indices each, x fastest, then y, then z), in any order: a brick that is all empty is
+    /// not kept, a brick given twice is an error. Every brick of it has changed since revision 0.
+    pub fn from_bricks(bricks: impl IntoIterator<Item = ([i32; 3], [u8; BRICK_CELLS])>) -> Result<Self, String> {
+        Self::from_bricks_with_limit(usize::MAX, bricks)
+    }
+
+    /// As [`Occupancy::from_bricks`], for a grid with a limit on its bricks.
+    pub fn from_bricks_with_limit(
+        max_bricks: usize,
+        bricks: impl IntoIterator<Item = ([i32; 3], [u8; BRICK_CELLS])>,
+    ) -> Result<Self, String> {
+        let mut o = Self::with_limit(max_bricks);
+        for (key, cells) in bricks {
+            let filled = cells.iter().filter(|c| **c != 0).count() as u16;
+            if filled == 0 {
+                continue;
+            }
+            if o.bricks.contains_key(&key) {
+                return Err(format!("the brick {key:?} is given twice"));
+            }
+            if o.bricks.len() >= max_bricks {
+                return Err(format!("the occupancy would hold more than {max_bricks} bricks"));
+            }
+            o.filled += u64::from(filled);
+            o.bricks.insert(key, Brick { cells: Box::new(cells), filled, changed: 1 });
+        }
+        o.revision = u64::from(!o.bricks.is_empty());
+        Ok(o)
+    }
+
+    /// A grid made of cells with their palette indices (1 to 255), in any order; a cell given twice, or with the index 0, is an error.
+    pub fn from_cells(cells: impl IntoIterator<Item = ([i32; 3], u8)>) -> Result<Self, String> {
+        Self::from_cells_with_limit(usize::MAX, cells)
+    }
+
+    /// As [`Occupancy::from_cells`], for a grid with a limit on its bricks.
+    pub fn from_cells_with_limit(
+        max_bricks: usize,
+        cells: impl IntoIterator<Item = ([i32; 3], u8)>,
+    ) -> Result<Self, String> {
+        let mut o = Self::with_limit(max_bricks);
+        for (key, palette) in cells {
+            if palette == 0 {
+                return Err(format!("the cell {key:?} is listed with the empty palette index"));
+            }
+            let (brick_key, index) = split(key);
+            if !o.bricks.contains_key(&brick_key) && o.bricks.len() >= max_bricks {
+                return Err(format!("the occupancy would hold more than {max_bricks} bricks"));
+            }
+            let brick = o.bricks.entry(brick_key).or_insert_with(|| Brick {
+                cells: Box::new([0; BRICK_CELLS]),
+                filled: 0,
+                changed: 1,
+            });
+            if brick.cells[index] != 0 {
+                return Err(format!("the cell {key:?} is listed twice"));
+            }
+            brick.cells[index] = palette;
+            brick.filled += 1;
+            o.filled += 1;
+        }
+        o.revision = u64::from(!o.bricks.is_empty());
+        Ok(o)
+    }
+
+    /// The palette of colours beside the cells.
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Changes whenever a colour of the palette does, and only then.
+    pub fn palette_revision(&self) -> u64 {
+        self.palette_revision
+    }
+
+    /// Sets one colour of the palette; true if that changed it. The cells and their revision are not touched.
+    pub fn set_color(&mut self, index: u8, rgba: [u8; 4]) -> bool {
+        if self.palette.colors[usize::from(index)] == rgba {
+            return false;
+        }
+        self.palette.colors[usize::from(index)] = rgba;
+        self.palette_revision += 1;
+        true
+    }
+
+    /// Sets the whole palette (an importer's); true if that changed it.
+    pub fn set_palette(&mut self, colors: [[u8; 4]; 256]) -> bool {
+        if self.palette.colors == colors {
+            return false;
+        }
+        self.palette.colors = colors;
+        self.palette_revision += 1;
+        true
+    }
+
+    /// A hash of the content and of the colours: equal cells with equal palettes are equal, whatever the history. The key of what
+    /// is made from both, a mesh with colours; for what is made from the cells alone use [`Occupancy::fingerprint`].
+    pub fn appearance_fingerprint(&self) -> u64 {
+        let mut h = self.fingerprint();
+        for color in self.palette.colors {
+            for byte in color {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h ^= h >> 29;
+        h.wrapping_mul(0xff51afd7ed558ccd)
     }
 
     /// The palette index of a cell; 0 for an empty one.

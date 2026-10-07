@@ -275,3 +275,96 @@ fn components_are_labelled_by_their_first_cell_in_the_scan_and_do_not_depend_on_
     // and from the grid itself
     assert_eq!(filled(&cells).components(), parts);
 }
+
+/// A dense brick with the cells of `cells` that fall in it, palette `value`.
+fn dense(key: [i32; 3], cells: &[[i32; 3]], value: u8) -> [u8; 512] {
+    let mut brick = [0u8; 512];
+    for c in cells {
+        if c.map(|k| k.div_euclid(8)) == key {
+            let l = c.map(|k| k.rem_euclid(8) as usize);
+            brick[l[0] + 8 * (l[1] + 8 * l[2])] = value;
+        }
+    }
+    brick
+}
+
+#[test]
+fn an_occupancy_built_in_bulk_from_bricks_is_the_one_built_cell_by_cell() {
+    let cells: Vec<[i32; 3]> =
+        block([-5, -3, 2], [17, 6, 4]).into_iter().filter(|c| (c[0] + c[1] + c[2]) % 3 != 0).collect();
+    let by_cell = filled(&cells);
+    let mut keys: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|k| k.div_euclid(8))).collect();
+    keys.sort();
+    keys.dedup();
+    let bulk = Occupancy::from_bricks(shuffled(&keys, 9).into_iter().map(|k| (k, dense(k, &cells, 1)))).unwrap();
+    assert_eq!(bulk.count(), by_cell.count());
+    assert_eq!(bulk.fingerprint(), by_cell.fingerprint());
+    assert_eq!(bulk.cells().collect::<Vec<_>>(), by_cell.cells().collect::<Vec<_>>());
+    assert_eq!(bulk.components(), by_cell.components());
+    // the whole of it is new to a reader that has seen nothing: every brick has changed since revision 0
+    assert_eq!(bulk.changed_bricks_since(0), keys);
+    assert!(bulk.revision() > 0);
+    // the palette index is kept, and an empty brick is not a brick
+    let mixed =
+        Occupancy::from_bricks([([0, 0, 0], dense([0, 0, 0], &[[1, 2, 3]], 9)), ([5, 5, 5], [0u8; 512])]).unwrap();
+    assert_eq!((mixed.get([1, 2, 3]), mixed.count(), mixed.bricks().count()), (9, 1, 1));
+    assert_eq!(Occupancy::from_bricks(std::iter::empty()).unwrap().revision(), 0);
+    // a brick twice is an error, and so is one over the limit
+    assert!(Occupancy::from_bricks([
+        ([0, 0, 0], dense([0, 0, 0], &[[1, 1, 1]], 1)),
+        ([0, 0, 0], dense([0, 0, 0], &[[2, 2, 2]], 1))
+    ])
+    .is_err());
+    assert!(Occupancy::from_bricks_with_limit(1, keys.iter().map(|k| (*k, dense(*k, &cells, 1)))).is_err());
+}
+
+#[test]
+fn an_occupancy_built_from_a_list_of_cells_and_palette_indices_is_the_one_built_cell_by_cell() {
+    let cells = block([-9, 4, -2], [11, 5, 3]);
+    let listed: Vec<([i32; 3], u8)> =
+        cells.iter().map(|c| (*c, 1 + ((c[0] * 7 + c[1] * 3 + c[2]).rem_euclid(5)) as u8)).collect();
+    let mut by_cell = Occupancy::new();
+    for (c, v) in &listed {
+        by_cell.set(*c, *v).unwrap();
+    }
+    for seed in [1, 2, 3] {
+        let bulk = Occupancy::from_cells(shuffled(&listed, seed)).unwrap();
+        assert_eq!(bulk.fingerprint(), by_cell.fingerprint());
+        assert_eq!(bulk.count(), by_cell.count());
+        assert!(listed.iter().all(|(c, v)| bulk.get(*c) == *v));
+    }
+    // a cell listed twice, or with the empty index, is an error
+    assert!(Occupancy::from_cells([([0, 0, 0], 1), ([0, 0, 0], 2)]).is_err());
+    assert!(Occupancy::from_cells([([0, 0, 0], 0)]).is_err());
+    assert!(Occupancy::from_cells_with_limit(1, [([0, 0, 0], 1), ([8, 0, 0], 1)]).is_err());
+}
+
+#[test]
+fn the_palette_has_256_colours_beside_the_cells_and_recolouring_is_not_a_change_of_the_cells() {
+    let mut o = filled(&block([0, 0, 0], [3, 3, 3]));
+    // index 0 is empty and has no colour that matters; the others start opaque white
+    assert_eq!(o.palette().color(1), [255, 255, 255, 255]);
+    assert_eq!(o.palette().colors().len(), 256);
+    let (cells, revision, palette_revision) = (o.fingerprint(), o.revision(), o.palette_revision());
+    let look = o.appearance_fingerprint();
+    assert!(o.set_color(7, [10, 20, 30, 255]));
+    assert!(!o.set_color(7, [10, 20, 30, 255]), "the same colour is no change");
+    assert_eq!(o.palette().color(7), [10, 20, 30, 255]);
+    assert_eq!(o.fingerprint(), cells, "the geometry is the same, so a collider or a mass computed from it is too");
+    assert_eq!(o.revision(), revision);
+    assert!(o.palette_revision() > palette_revision);
+    assert_ne!(o.appearance_fingerprint(), look, "but a mesh with colours is not");
+    // a whole palette, as an importer reads it, in one go
+    let mut colours = [[0u8; 4]; 256];
+    for (i, c) in colours.iter_mut().enumerate() {
+        *c = [i as u8, 255 - i as u8, (i * 3) as u8, 255];
+    }
+    let mut other = filled(&block([0, 0, 0], [3, 3, 3]));
+    other.set_palette(colours);
+    assert_eq!(other.palette().color(200), colours[200]);
+    assert_eq!(other.fingerprint(), cells);
+    // equal cells and equal colours are equal in appearance whatever the history
+    let mut again = filled(&block([0, 0, 0], [3, 3, 3]));
+    again.set_palette(colours);
+    assert_eq!(other.appearance_fingerprint(), again.appearance_fingerprint());
+}
