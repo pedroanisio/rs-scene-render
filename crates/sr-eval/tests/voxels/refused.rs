@@ -31,6 +31,7 @@ fn the_valid_documents_of_the_corpus_that_make_bodies_of_cells_are_refused_by_na
     for name in [
         "voxel-body",
         "voxel-crater",
+        "voxel-crater-signed-scale",
         "voxel-ejecta",
         "voxel-fracture",
         "voxel-fracture-planes",
