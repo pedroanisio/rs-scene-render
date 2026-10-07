@@ -1310,6 +1310,44 @@ fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
     );
 }
 
+/// A driver that breaks the contract of `voxel_cut`: its revision is not a function of the time but counts how often it has been asked, so that the
+/// cut it gives at one instant is a new one every time, and takes the cells it took before.
+struct Counting;
+
+impl Driver3 for Counting {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(&mut self, _: f64, parent: usize, revision: Option<u64>, _: Option<&Impact3>) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            revision: revision.map_or(1, |r| r + 1),
+            destroyed: cells_of(5..6, 0..2, 0..2),
+            parent_mass: 44.0 * CELL_MASS,
+            pieces: vec![],
+        }))
+    }
+}
+
+#[test]
+fn a_driver_whose_revision_is_not_a_function_of_the_time_gets_the_same_error_however_the_frame_is_asked() {
+    // the contract: at one instant the driver gives one revision, so that asking again finds it installed. One that gives a new revision with the
+    // cells it destroyed before is refused for taking cells the body has not, in a fresh world and in one asked twice, and never half installs it
+    let mut fresh = world(1, None);
+    let first = fresh.frame_at(0.05, &mut Counting);
+    assert!(first.errors.iter().any(|e| e.contains("has not")), "{:?}", first.errors);
+    let mut twice = world(1, None);
+    twice.frame_at(0.02, &mut Counting);
+    let second = twice.frame_at(0.05, &mut Counting);
+    assert_eq!(first.errors, second.errors);
+    assert_eq!(first, twice.frame_at(0.05, &mut Counting));
+}
+
 /// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of
 /// the floor beyond it comes away as a piece.
 struct Undermine;
@@ -1388,8 +1426,10 @@ fn a_cut_that_is_a_function_of_the_impact_the_world_noticed_is_the_same_however_
     let steps: Vec<u64> = (first - 2..=first + 3).collect();
     let wanted = the_same_four_ways(&floor_and_ball, &|| Undermine, &steps);
     assert!(!wanted[0].enabled[2] && wanted[5].enabled[2]);
-    // and the piece falls: its height after the cut is below where it started
-    assert!(wanted[5].velocities[2].linear[1] > 0.0 || wanted[5].bodies[2].pos[1] != 0.0, "the piece is moving");
+    // and the piece falls under gravity from rest (the floor was static; scene y points down): three steps after the first with it, its speed is g
+    // times the steps it has been free, three of 0.01 s (0.2942) and in any case between two and three
+    let vy = wanted[5].velocities[2].linear[1];
+    assert!((0.2..=0.31).contains(&vy), "the piece falls: {vy}");
 }
 
 /// A driver that cuts as a [`Script`] does for a body that does not exist until `born`: it is hidden before, and when it comes in it takes the pose

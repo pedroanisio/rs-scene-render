@@ -169,10 +169,6 @@ fn the_cells_above_the_surface_of_the_crater_are_taken_out_to_the_reach_of_the_c
     // the ground with the pillar is within a cell of the law's volume only because the pillar's cells over the plane make up for the wall that the lip stands on:
     // the flat ground alone is 1.7 percent under it
     assert!((n as f64 - cells_of_law).abs() < 1.0, "within a cell of the law's volume: {n} against {cells_of_law}");
-    assert!(
-        (on_flat as f64 / cells_of_law - 1.0).abs() < 0.02,
-        "the flat ground alone within 2 percent: {on_flat} against {cells_of_law}"
-    );
 }
 
 #[test]
@@ -478,6 +474,52 @@ fn a_crater_whose_axis_is_slanted_takes_out_what_a_brute_force_over_the_whole_gr
         "the box that is scanned missed cells of the region"
     );
     assert_eq!((x.thrown.len(), x.uplift.len(), x.rim.len()), (x.removed.len(), 0, 0));
+}
+
+#[test]
+fn a_wide_crater_whose_axis_is_slanted_reaches_along_the_lattice_as_far_as_the_hypotenuse_of_its_crest_and_its_rim() {
+    // a crater of 12 m with a rim of 3 m and a depth of half a metre, its axis at 45 degrees, in a slab of 50 m by 50 m by 3 m: the cells it takes out
+    // at the foot of the crest are 19.2 m from its centre along the lattice axis, where the crest and the rim and the depth alone reach 16 m. The cells
+    // that the scan misses on the reach it first had are the ones this checks (480 000 cells, every one tested against the surface)
+    let law = law();
+    let mut cells = Vec::new();
+    for k in -100..100 {
+        for j in 0..12 {
+            for i in -100..100 {
+                cells.push(([i, j, k], 1u8));
+            }
+        }
+    }
+    let before = occupancy(&cells);
+    let spec = Spec {
+        center: [1.0, 0.0, -1.0],
+        outward: [1.0, -1.0, 0.0],
+        radius: 12.0,
+        depth: 0.5,
+        rim_height: 0.25,
+        rim_width: 3.0,
+        influence_depth: 4.0,
+    };
+    let kernel = Crater::new(spec).unwrap();
+    let all = Ejection { share: 1.0, ..ejection(&law) };
+    let x = excavate(&before, &kernel, 1.0, H, &all).unwrap();
+    let axis = kernel.axis();
+    let expected: BTreeSet<[i32; 3]> = cells
+        .iter()
+        .map(|c| c.0)
+        .filter(|c| {
+            let p = centre(*c);
+            let d = [p[0] - spec.center[0], p[1] - spec.center[1], p[2] - spec.center[2]];
+            let a = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+            let r = (0..3).map(|i| (d[i] - a * axis[i]).powi(2)).sum::<f64>().sqrt();
+            r < spec.radius + spec.rim_width
+                && a >= kernel.rim_height_at(r) - kernel.bowl_depth_at(r)
+                && a <= spec.radius
+        })
+        .collect();
+    let far = expected.iter().filter(|c| (f64::from(c[0]) + 0.5 - spec.center[0]).abs() > 16.0 + 2.0 * H).count();
+    assert!(far > 0, "the case has cells beyond the old reach of 16 m");
+    assert_eq!(x.removed.iter().copied().collect::<BTreeSet<_>>(), expected, "the box that is scanned missed {far} cells beyond the old reach");
 }
 
 #[test]

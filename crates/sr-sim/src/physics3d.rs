@@ -211,6 +211,11 @@ pub trait Driver3 {
     /// (`revision`, none before the first cut), or `None` if nothing is new: cells that are gone and parts that separate into the slots
     /// reserved for them. `impact` is the first impact the world has noticed on it. It must depend only on its arguments and on records
     /// that no longer change, so that a world restored to a checkpoint finds the same cut at the same step. The default cuts nothing.
+    ///
+    /// The revision of a cut is a function of the time: the driver gives one revision at one instant, so that asking again finds it installed
+    /// and returns `None` (or the same revision, which the world skips). A driver that gives a new revision for cells it has already destroyed is
+    /// refused with an error that names the cell, the same one however the frame is asked. The world asks twice a step (at its start and for the
+    /// frame's own time) and clones the slots of each split to do it, so the cost of a step grows with the slots reserved.
     fn voxel_cut(
         &mut self,
         _t: f64,
