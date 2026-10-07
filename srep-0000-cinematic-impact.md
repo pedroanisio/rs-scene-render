@@ -1528,6 +1528,25 @@ defaults. This bounded geometry is tested in raster and path-traced passes;
 it is not volumetric mist or a liquid-sheet reconstruction. OCN5 enforces the
 single source, ordered window and material-reference constraints.
 
+With `foamMode="albedo"` foam is the water's own: no foam mesh is built, and
+each foam tracer instead gives the vertices of the water surface within
+`foamRadius` (default one cell, so the coverage is at mesh resolution) a share
+`(1 - x^2)^2` of its distance `x` to the radius, full until 60 % of the
+tracer's life and fading linearly to zero after it; shares of several tracers
+combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
+The share rides in the alpha of the vertex colour. A path-traced hit takes its
+albedo (`foamAlbedo`, .9), roughness (`foamRoughness`, .8) and transmission
+toward the foam's by that share, and the refracted shadow ray reads the same
+share, so opaque foam stops the sun that clear water lets through. The water
+needs an opaque alpha mode. Scenes without the mix keep their shader text and
+pipelines; foam on a surface that lets no light through uses a variant with
+only this hook, because forcing the water variant (the refracted shadow rays)
+cost 6.7 times the plain shader on the hero frame (21.3 s against 3.2 s at
+640 x 360). Verified on an NVIDIA adapter: water wholly covered by foam equals
+the quadrature of a diffuse .9 surface (0.1928 against 0.1928), a share of 0 is
+the unmixed picture bit for bit, and the seven comparison frames and the hero
+frame keep their hashes.
+
 #### Implemented numerical contract
 
 The CPU solver evolves depth and two horizontal momenta on square x/z cells.
