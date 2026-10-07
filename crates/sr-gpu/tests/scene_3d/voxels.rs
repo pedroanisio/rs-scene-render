@@ -448,3 +448,48 @@ fn the_surface_memory_of_a_voxels_object_is_one_budget_for_the_object_and_the_pi
         assert!(errors[0].contains("admits 825 quads"), "{camera}: the budget that was left: {}", errors[0]);
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------- an isolated group in cache
+
+#[test]
+fn a_cut_of_a_voxels_object_inside_an_isolated_group_redraws_the_group() {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("grouped.vox", &block(8, 1), &[RED]);
+    // the group is isolated (its opacity is below 1) and cached by what is in it: the object's cells are in that, and a cut changes them
+    // without any attribute of the node changing
+    let xml = document(&file, "", "", "")
+        .replace("<object3D id=\"obj\"", "<group id=\"g\" opacity=\"0.9\"><object3D id=\"obj\"")
+        .replace("/></composition>", "/></group></composition>");
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let whole = ev.evaluate(0.5);
+    let before = renderer.render(&whole, ev.program());
+    let before = renderer.read(&before.texture);
+    // the same frame with the cells of a simulation that has cut the object once: a block with a hole through it
+    let mut cut = ev.evaluate(0.5);
+    let holed: Vec<([i32; 3], u8)> = block(8, 1)
+        .into_iter()
+        .filter(|(c, _)| !((2..6).contains(&c[0]) && (2..6).contains(&c[1])))
+        .map(|(c, i)| (c.map(i32::from), i))
+        .collect();
+    let node = cut.nodes.iter_mut().find(|n| &*n.id == "obj").unwrap();
+    node.voxels = Some(std::sync::Arc::new(sr_eval::voxel_cut::SimVoxels {
+        enabled: true,
+        revision: 1,
+        grid: std::sync::Arc::new(sr_3d::Occupancy::from_cells(holed).unwrap()),
+        changed_bricks: vec![[0, 0, 0]],
+        steps: vec![(1, vec![[0, 0, 0]])],
+        thrown: None,
+        pieces: Vec::new(),
+    }));
+    let after = renderer.render(&cut, ev.program());
+    let after_pixels = renderer.read(&after.texture);
+    assert_ne!(before, after_pixels, "the group was drawn again with the cut object");
+    assert_eq!(after.stats.voxel_surfaces.len(), 1);
+    assert_eq!(after.stats.voxel_surfaces[0].revision, 1);
+    // and a scene without voxels hashes its nodes as it did: the same picture twice is a cached one (no group is drawn the second time)
+    let plain = ev.evaluate(0.5);
+    let again = renderer.render(&plain, ev.program());
+    assert_eq!(renderer.read(&again.texture), before, "the whole object again is the first picture");
+}

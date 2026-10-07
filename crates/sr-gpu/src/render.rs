@@ -1771,7 +1771,7 @@ impl Renderer {
             Some(a) => Self::element_state(ctx, a),
             None => 0,
         };
-        h(&[
+        let hash = h(&[
             Self::effects_state(ctx, n),
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
@@ -1800,7 +1800,20 @@ impl Renderer {
                     h(&p.pos.iter().chain(&p.vel).flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>())
                 })
                 .unwrap_or(7),
-        ])
+        ]);
+        // the cells of an object that a simulation cuts change without an attribute of the node changing: a group that holds it and is
+        // kept between frames must be drawn again after a cut. Nodes without them hash as they did.
+        match n.voxels.as_deref() {
+            None => hash,
+            Some(v) => {
+                let mut words = vec![hash, v.enabled as u64, v.revision, v.grid.lineage()];
+                for piece in &v.pieces {
+                    words.extend([piece.body as u64, piece.enabled as u64, piece.revision, piece.grid.lineage()]);
+                    words.extend(piece.pose3.iter().map(|c| c.to_bits()));
+                }
+                h(&words)
+            }
+        }
     }
 
     /// Hash of a node and its subtree (and mattes) in a target space.
