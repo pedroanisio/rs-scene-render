@@ -117,7 +117,7 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a
         ),
     ] {
         let xml = format!(
-            r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} roughness="0.3" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" {camera}/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" foamMode="albedo"/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/></lights></scene>"##
+            r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} roughness="0.3" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" {camera}/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0" foamMode="albedo"/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/></lights></scene>"##
         );
         let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
         let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
@@ -129,6 +129,13 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a
             out.stats.errors.iter().any(|e| e.contains("foamMode") && e.contains(wants)),
             "{camera} / {water}: no error says why: {:?}",
             out.stats.errors
+        );
+        // and nothing of the water is drawn: not the water seen through the share of foam that rides in the alpha of its vertices
+        let background = renderer.read(&out.texture);
+        let corner = background[0];
+        assert!(
+            background.iter().all(|p| p.iter().zip(corner).all(|(a, b)| (a - b).abs() < 1e-4)),
+            "{camera} / {water}: the water is drawn although the frame is refused"
         );
     }
 }

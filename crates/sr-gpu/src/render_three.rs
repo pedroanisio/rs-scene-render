@@ -1449,6 +1449,9 @@ impl Renderer {
                                 "{}: whitewater foamMode=\"albedo\" needs a water material with an opaque alpha mode",
                                 n.id
                             ));
+                            // the share of foam rides in the alpha of the vertices: drawn as it is, the water would be as
+                            // transparent as the foam is absent
+                            return;
                         }
                     }
                 }
@@ -2924,6 +2927,7 @@ impl Renderer {
         let limits = self.gpu.device.limits();
         // Surface/medium depth and shadows are evaluated together. Raster-authored
         // passes containing media use the transport pipeline with deterministic samples.
+        let mut path_limit: Option<String> = None;
         let transport = ex.path.or_else(|| {
             (!scene.volumes.is_empty()).then_some(crate::pathtrace::PathOpts { samples: 4, bounces: 2, denoise: true })
         });
@@ -2934,6 +2938,7 @@ impl Renderer {
                     return;
                 }
                 plan.stats.unsupported.push(format!("{}: {m}", n.id));
+                path_limit = Some(m);
             } else {
                 plan.stats
                     .unsupported
@@ -2943,10 +2948,7 @@ impl Renderer {
         }
         if scene.path.is_none() && scene.draws.iter().any(|d| d.material.foam_mix.is_some()) {
             // the foam is mixed into the water by the path tracer's shading; the raster renderer has no such mix
-            plan.stats.errors.push(format!(
-                "{}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it",
-                n.id
-            ));
+            plan.stats.errors.push(foam_needs_the_path_tracer(&n.id, ex.path.is_some(), path_limit.as_deref()));
             return;
         }
         if scene.path.is_none() {
@@ -3120,9 +3122,31 @@ fn visible3(g: &FrameGraph, j: usize) -> bool {
     g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true)
 }
 
+/// Why a pass with foam mixed into the water's albedo cannot be drawn without the path tracer: the camera is not path traced, or it
+/// asks for it and the scene is over a limit of the path tracer (`limit`), which is then the reason to act on.
+fn foam_needs_the_path_tracer(id: &str, camera_asks: bool, limit: Option<&str>) -> String {
+    match (camera_asks, limit) {
+        (true, Some(limit)) => format!(
+            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer, which cannot render this pass ({limit}), and the raster renderer does not draw it"
+        ),
+        _ => format!(
+            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn the_refusal_of_foam_without_the_path_tracer_names_the_limit_when_the_camera_asked_for_it() {
+        let raster = foam_needs_the_path_tracer("sea", false, None);
+        assert!(raster.contains("renderer=\"pathtrace\""), "{raster}");
+        let over = foam_needs_the_path_tracer("sea", true, Some("3 GiB of triangles exceed the storage binding"));
+        assert!(over.contains("cannot render this pass") && over.contains("3 GiB of triangles"), "{over}");
+        assert!(!over.contains("renderer=\"pathtrace\""), "the camera already asks for it: {over}");
+    }
 
     #[test]
     fn instantiated_three_dimensional_parents_resolve_per_instance() {
