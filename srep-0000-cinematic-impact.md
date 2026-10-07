@@ -1537,8 +1537,10 @@ combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
 The share rides in the alpha of the vertex colour. A path-traced hit takes its
 albedo (`foamAlbedo`, .9), roughness (`foamRoughness`, .8) and transmission
 toward the foam's by that share, and the refracted shadow ray reads the same
-share, so opaque foam stops the sun that clear water lets through. The water
-needs an opaque alpha mode. Scenes without the mix keep their shader text and
+share, so opaque foam stops the sun that clear water lets through. The mix is
+the path tracer's: the raster renderer reports an error for a scene with
+`foamMode="albedo"` instead of drawing no foam, and the water needs an opaque
+alpha mode (also an error otherwise). Scenes without the mix keep their shader text and
 pipelines; foam on a surface that lets no light through uses a variant with
 only this hook, because forcing the water variant (the refracted shadow rays)
 cost 6.7 times the plain shader on the hero frame (21.3 s against 3.2 s at

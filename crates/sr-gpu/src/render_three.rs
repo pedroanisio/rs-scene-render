@@ -2941,6 +2941,14 @@ impl Renderer {
                 scene.path = Some(opts);
             }
         }
+        if scene.path.is_none() && scene.draws.iter().any(|d| d.material.foam_mix.is_some()) {
+            // the foam is mixed into the water by the path tracer's shading; the raster renderer has no such mix
+            plan.stats.errors.push(format!(
+                "{}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it",
+                n.id
+            ));
+            return;
+        }
         if scene.path.is_none() {
             let lost =
                 crate::three::shadow_note(&scene.lights, !scene.cam.orthographic, limits.max_texture_array_layers);

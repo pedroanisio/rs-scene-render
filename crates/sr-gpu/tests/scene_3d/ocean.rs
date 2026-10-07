@@ -88,3 +88,32 @@ fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_renders_in_the
     assert!(albedo.1.iter().any(|p| p[2] > 0.02), "the water is absent");
     assert_ne!(particles.1, albedo.1);
 }
+
+#[test]
+fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a_blended_water() {
+    let Some(gpu) = gpu() else { return };
+    // the mix is the path tracer's: the raster renderer says so instead of drawing no foam, and the water must be opaque
+    for (camera, water, wants) in [
+        ("", r##"baseColor="#102040""##, "path tracer"),
+        (
+            r#"renderer="pathtrace" pathSamples="2" maxBounces="1""#,
+            r##"baseColor="#102040" alphaMode="blend""##,
+            "opaque",
+        ),
+    ] {
+        let xml = format!(
+            r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} roughness="0.3" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" {camera}/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" foamMode="albedo"/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/></lights></scene>"##
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let frame = ev.evaluate(0.5);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let out = renderer.render(&frame, ev.program());
+        assert!(
+            out.stats.errors.iter().any(|e| e.contains("foamMode") && e.contains(wants)),
+            "{camera} / {water}: no error says why: {:?}",
+            out.stats.errors
+        );
+    }
+}
