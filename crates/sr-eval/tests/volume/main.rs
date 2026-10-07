@@ -8,3 +8,4 @@ mod pyro_follow;
 mod pyro_physics_failure;
 mod terrain;
 mod volume;
+mod voxelize;
