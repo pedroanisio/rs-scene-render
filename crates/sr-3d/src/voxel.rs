@@ -12,6 +12,7 @@
 use crate::occupancy::Occupancy;
 use std::collections::BTreeMap;
 
+pub mod srvol;
 pub mod vox;
 
 /// What an importer makes of a file.

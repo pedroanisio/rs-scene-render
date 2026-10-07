@@ -2465,6 +2465,7 @@ dependencies = [
  "spade",
  "sr-media",
  "sr-vector",
+ "sr-volume",
  "thiserror",
  "tobj",
  "ufbx",
