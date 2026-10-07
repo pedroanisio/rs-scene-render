@@ -157,6 +157,33 @@ fn foam_on_a_surface_that_lets_no_light_through_gives_the_same_white_and_changes
 }
 
 #[test]
+fn the_roughness_of_the_foam_sets_the_specular_lobe_of_covered_water() {
+    let Some(mut eng) = engine() else { return };
+    let dome = srgb_to_linear(128.0 / 255.0);
+    // seen from 10 degrees over the horizon, where the lobe of a smooth surface is far brighter than a rough one's
+    let eye = Vec3::new(0.0, -1.5, -8.0);
+    let nv = 1.5 / eye.length() as f64;
+    let mut got = Vec::new();
+    for roughness in [0.2f32, 0.9] {
+        let sea = MaterialParams { transmission: 0.0, ..water(Some(FoamMix { albedo: 0.9, roughness })) };
+        let draw = plane(&eng, 0.0, sea, |_| 1.0);
+        let px = eng.render_now(&scene(&eng, vec![draw], Some(dome), false, eye), None);
+        let (spec, diffuse) = common::directional_albedo(nv, roughness as f64, 1.333);
+        let want = dome * (spec + 0.9 * diffuse) as f32;
+        got.push((mean(&px, 30, 34, 30, 34), want));
+        println!("foam roughness {roughness}: picture {:.4}, quadrature {want:.4} (nv {nv:.3})", got.last().unwrap().0);
+    }
+    let (smooth, rough) = (got[0], got[1]);
+    assert!(
+        smooth.0 > 1.25 * rough.0,
+        "the smoother foam has the brighter lobe at a grazing view: {smooth:?} against {rough:?}"
+    );
+    for (picture, want) in got {
+        assert!((picture - want).abs() <= 0.03 * want, "{picture} against {want}");
+    }
+}
+
+#[test]
 fn bare_water_is_the_same_with_or_without_the_mix_and_foam_brightens_it_by_share() {
     let Some(mut eng) = engine() else { return };
     let dome = srgb_to_linear(128.0 / 255.0);

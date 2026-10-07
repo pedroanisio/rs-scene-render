@@ -63,10 +63,11 @@ fn whitewater_batches_render_typed_materials_in_raster_and_pathtrace() {
 }
 
 #[test]
-fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_renders_in_the_path_tracer() {
+fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_whitens_the_water_by_the_documents_albedo() {
     let Some(gpu) = gpu() else { return };
+    // the particles mode, the albedo mode, and the albedo mode with a foam that is black
     let mut shots = Vec::new();
-    for mode in ["", r#"foamMode="albedo""#] {
+    for mode in ["", r#"foamMode="albedo""#, r#"foamMode="albedo" foamAlbedo="0""#] {
         let xml = format!(
             r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#101020"/><materials><material id="water" baseColor="#102040" roughness="0.3" doubleSided="true"/><material id="foam" baseColor="#10FF10" unlit="true" doubleSided="true"/><material id="spray" baseColor="#FF1010" unlit="true" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" renderer="pathtrace" pathSamples="4" maxBounces="2"/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0.5" foamMaterial="foam" sprayMaterial="spray" {mode}/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/><light id="fill" type="ambient" intensity="1"/></lights></scene>"##
         );
@@ -79,14 +80,28 @@ fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_renders_in_the
         assert!(out.stats.errors.is_empty() && out.stats.unsupported.is_empty(), "{:?}", out.stats);
         shots.push((out.stats.triangles, renderer.read(&out.texture)));
     }
-    let (particles, albedo) = (&shots[0], &shots[1]);
-    assert!(albedo.0 < particles.0, "the foam is still drawn as triangles: {} against {}", albedo.0, particles.0);
-    assert!(
-        !albedo.1.iter().any(|p| p[1] > 0.3 && p[1] > p[0] * 3.),
-        "the foam material is drawn although the foam is the water's own"
+    let green = |px: &[[f32; 4]]| px.iter().filter(|p| p[1] > 0.3 && p[1] > p[0] * 3.).count();
+    // light and grey: the foam's white under the ambient light and the sun (the water is dark blue, the spray red)
+    let white = |px: &[[f32; 4]]| px.iter().filter(|p| p[0] > 0.45 && p[2] < p[0] * 1.2 && p[1] > p[0] * 0.8).count();
+    let (particles, albedo, black) = (&shots[0], &shots[1], &shots[2]);
+    println!(
+        "green {} / {} / {}, white {} / {} / {}",
+        green(&particles.1),
+        green(&albedo.1),
+        green(&black.1),
+        white(&particles.1),
+        white(&albedo.1),
+        white(&black.1)
     );
-    assert!(albedo.1.iter().any(|p| p[2] > 0.02), "the water is absent");
-    assert_ne!(particles.1, albedo.1);
+    assert!(albedo.0 < particles.0, "the foam is still drawn as triangles: {} against {}", albedo.0, particles.0);
+    assert!(green(&particles.1) > 0, "the green of the foam material is visible in the particles mode");
+    assert_eq!(green(&albedo.1), 0, "the foam material is drawn although the foam is the water's own");
+    assert!(
+        white(&albedo.1) > white(&black.1) + 20,
+        "foam of albedo 0.9 whitens the water, one of albedo 0 does not: {} against {}",
+        white(&albedo.1),
+        white(&black.1)
+    );
 }
 
 #[test]

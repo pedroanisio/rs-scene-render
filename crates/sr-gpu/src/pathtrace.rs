@@ -629,6 +629,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn foam_alone_selects_the_foam_variant_and_never_the_water_one_and_every_variant_has_its_own_pipeline_slot() {
+        let plain = sr_3d::MaterialParams::default();
+        let glass = sr_3d::MaterialParams { transmission: 1.0, ..Default::default() };
+        let mixed = sr_3d::MaterialParams {
+            foam_mix: Some(sr_3d::FoamMix { albedo: 0.9, roughness: 0.8 }),
+            ..Default::default()
+        };
+        let mixed_glass = sr_3d::MaterialParams { foam_mix: mixed.foam_mix, ..glass.clone() };
+        assert_eq!(variant_of([&plain].into_iter()), (false, false));
+        assert_eq!(variant_of([&plain, &glass].into_iter()), (true, false));
+        assert_eq!(variant_of([&plain, &mixed].into_iter()), (false, true), "foam does not bring in the water variant");
+        assert_eq!(variant_of([&glass, &mixed].into_iter()), (true, true));
+        assert_eq!(variant_of([&mixed_glass].into_iter()), (true, true));
+        // 5 shapes of scene (media, grid, lighting) times 3 variants: 15 distinct slots in 0..15
+        let mut slots = std::collections::BTreeSet::new();
+        for (media, grid, lighting) in
+            [(false, false, false), (true, false, false), (true, false, true), (true, true, false), (true, true, true)]
+        {
+            for (water, foam) in [(true, false), (true, true), (false, true)] {
+                slots.insert(variant_slot(media, grid, lighting, water, foam));
+            }
+        }
+        assert_eq!(slots.len(), 15);
+        assert_eq!((slots.first(), slots.last()), (Some(&0), Some(&14)));
+    }
+
+    #[test]
     fn the_foam_hook_changes_the_surface_at_the_hit_and_brings_in_no_refracted_shadow_ray() {
         let plain = format!(
             "{}\n{}\n{}",
@@ -993,6 +1020,22 @@ fn foam_source(base: &str) -> String {
     )
 }
 
+/// The variant of the trace shader the materials of a scene need beyond the plain one: `(water, foam)`, where `water` is a
+/// transmissive material (the refracted shadow rays) and `foam` a foam mix (the hook at the hit). Foam alone does not make
+/// `water`: the refracted shadow rays cost several times the plain shader.
+fn variant_of<'a>(materials: impl Iterator<Item = &'a sr_3d::MaterialParams>) -> (bool, bool) {
+    materials.fold((false, false), |(water, foam), m| (water || m.transmission > 0.0, foam || m.foam_mix.is_some()))
+}
+
+/// The slot of the variant pipeline for a scene: five by media and grid lighting, times water, water with foam, or foam alone.
+fn variant_slot(media: bool, grid: bool, lighting: bool, water: bool, foam: bool) -> usize {
+    (match (media, grid) {
+        (false, _) => 0,
+        (true, false) => 1 + lighting as usize,
+        (true, true) => 3 + lighting as usize,
+    }) + 5 * if water { foam as usize } else { 2 }
+}
+
 /// Pipelines of the path tracer (built on first use).
 pub struct PtGpu {
     bgl0: wgpu::BindGroupLayout,
@@ -1170,8 +1213,7 @@ impl PtGpu {
     }
 
     fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
-        let water = scene.draws.iter().any(|dr| dr.material.transmission > 0.0);
-        let foam = scene.draws.iter().any(|dr| dr.material.foam_mix.is_some());
+        let (water, foam) = variant_of(scene.draws.iter().map(|dr| &dr.material));
         if water || foam {
             return self.variant_pipeline(d, scene, grid, water, foam);
         }
@@ -1232,11 +1274,7 @@ impl PtGpu {
     ) -> &wgpu::ComputePipeline {
         let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
         let media = !scene.volumes.is_empty();
-        let slot = match (media, grid) {
-            (false, _) => 0,
-            (true, false) => 1 + lighting as usize,
-            (true, true) => 3 + lighting as usize,
-        } + 5 * if water { foam as usize } else { 2 };
+        let slot = variant_slot(media, grid, lighting, water, foam);
         self.trace_water[slot].get_or_init(|| {
             let mut constants = vec![("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
             if water {
