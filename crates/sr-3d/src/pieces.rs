@@ -70,9 +70,13 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// An edge from its parts (for a consumer that builds one by other means; [`partition`] makes its own). `a < b` is the caller's to keep.
-    pub fn new(a: u32, b: u32, faces: [u32; 3], face_sum: [[i64; 3]; 3], normal_sum: [i32; 3]) -> Edge {
-        Edge { a, b, faces, face_sum, normal_sum }
+    /// An edge from its parts (for a consumer that builds one by other means; [`partition`] makes its own). The pieces are `a < b`: an edge from a
+    /// piece to itself or from a higher to a lower is an error.
+    pub fn new(a: u32, b: u32, faces: [u32; 3], face_sum: [[i64; 3]; 3], normal_sum: [i32; 3]) -> Result<Edge, String> {
+        if a >= b {
+            return Err(format!("an edge is from a piece to a higher one, and {a} to {b} is not"));
+        }
+        Ok(Edge { a, b, faces, face_sum, normal_sum })
     }
 
     pub fn a(&self) -> u32 {
@@ -111,14 +115,18 @@ impl Edge {
     }
 
     /// The centre of the joint for cells of `size`, in the same units as `size` and from the corner of the lattice: the mean of the centres of
-    /// the faces weighted by their areas.
-    pub fn centroid(&self, size: [f64; 3]) -> [f64; 3] {
+    /// the faces weighted by their areas (each sum is an integer that is converted once to a float, so the relative error is that of a float
+    /// whatever the sum), or none for a joint with no area (an edge built by hand with no faces, or a size of zero).
+    pub fn centroid(&self, size: [f64; 3]) -> Option<[f64; 3]> {
         let area = self.area(size);
-        std::array::from_fn(|j| {
+        if !(area.is_finite() && area > 0.0) {
+            return None;
+        }
+        Some(std::array::from_fn(|j| {
             // the doubled coordinates make the centres, so half the sum is the sum of the centres in cells
             let moment: f64 = (0..3).map(|k| face_area(size, k) * self.face_sum[k][j] as f64 * 0.5 * size[j]).sum();
             moment / area
-        })
+        }))
     }
 }
 
@@ -310,7 +318,8 @@ pub fn partition(occupancy: &Occupancy, rule: Partition, max_pieces: usize) -> R
                 continue;
             }
             let (a, b) = ((*mine).min(theirs), (*mine).max(theirs));
-            let e = joints.entry((a, b)).or_insert(Edge::new(a, b, [0; 3], [[0; 3]; 3], [0; 3]));
+            let e =
+                joints.entry((a, b)).or_insert(Edge { a, b, faces: [0; 3], face_sum: [[0; 3]; 3], normal_sum: [0; 3] });
             e.faces[axis] = e.faces[axis].checked_add(1).ok_or("a joint has more faces than a u32 counts")?;
             let u = doubled(*c);
             for (k, sum) in e.face_sum[axis].iter_mut().enumerate() {
