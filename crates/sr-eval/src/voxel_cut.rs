@@ -91,7 +91,8 @@ pub struct SimVoxels {
     pub pieces: Vec<SimVoxelPiece>,
 }
 
-/// The cells that a crater's cut threw, each with where it leaves from and how fast (metres and metres a second in the frame of the cells), and the mass of one.
+/// The cells that a crater's cut threw, and then those that it left as dust, each with where it leaves from and how fast (metres and metres a second in the frame of
+/// the cells; the dust is at rest in it), and the mass of one.
 #[derive(Debug)]
 pub struct ThrownCells {
     pub cells: Vec<crate::voxel_crater::Thrown>,

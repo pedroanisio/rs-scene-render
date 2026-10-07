@@ -223,3 +223,36 @@ fn the_burst_of_the_crater_of_cells_is_the_cells_that_the_cut_threw() {
     // (after 0.4 s of flight under the particles' own gravity, so not the same number: the cut's fastest cell is within a metre a second a second of it)
     assert!(launched > 0.5 * fastest && launched < 1.5 * fastest, "{launched} against {fastest}");
 }
+
+#[test]
+fn the_dust_of_a_cut_leaves_as_particles_with_the_cells_that_were_thrown() {
+    // the top of the pillar is 136 cells and the least of a body is 200: it is dust, which leaves the ground and is no piece, and the burst has it as well as the
+    // cells the crater threw (their mass is all that left the ground by the cut, without the heap)
+    let dir = Dir::new("dust");
+    std::fs::write(dir.0.join("ground.srvol"), srvol::write(&ground(), 0.25).unwrap()).unwrap();
+    let debris = r#"<particles3D id="debris" rate="0" lifetime="6" dt="0.01" gravityY="9.80665" maxParticles="10000"><burst crater="pit"/></particles3D>"#;
+    let xml = DOCUMENT.replace("CONTENT", debris).replace(
+        r#"<rigidBody type="static" density="2700"/>"#,
+        r#"<rigidBody type="static" density="2700" fragmentMinCells="200"/>"#,
+    );
+    let ev = evaluator(&dir, &xml);
+    let frame = ev.evaluate(0.6);
+    assert!(frame.failures.is_empty() && frame.problems.is_empty(), "{:?} {:?}", frame.failures, frame.problems);
+    let ground_node = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap();
+    let state = ground_node.voxels.as_ref().unwrap();
+    assert!(state.pieces.is_empty(), "136 cells are under the least of a body");
+    let mut settings = settings();
+    settings.rock.policy.min_cells = 200;
+    let wanted =
+        crater_cut_of(ground_node.crater_impact.as_ref().unwrap(), &ground(), &settings, seed_of("ground")).unwrap();
+    assert_eq!(wanted.cut.dust.len(), 136);
+    let particles = frame.nodes.iter().find(|n| &*n.id == "debris").unwrap().particles3d.clone().expect("particles");
+    assert_eq!(
+        particles.frame.emitted as usize,
+        wanted.excavation.thrown.len() + wanted.cut.dust.len(),
+        "the thrown cells and the dust"
+    );
+    let cell = 2700.0 * 0.25f64.powi(3);
+    let mass: f64 = particles.frame.particles.iter().map(|p| p.mass).sum();
+    assert!((mass - (wanted.excavation.thrown.len() + wanted.cut.dust.len()) as f64 * cell).abs() < 1e-6 * mass);
+}

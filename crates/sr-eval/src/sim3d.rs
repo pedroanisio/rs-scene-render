@@ -1472,8 +1472,20 @@ fn voxel_state(
     let enabled = frame.enabled.get(k).copied().unwrap_or(true);
     let rock = owner.settings().rock;
     let thrown = cut.as_ref().map(|c| {
+        // the loose parts too small to be bodies leave the ground as well, at rest in its frame (a moving owner's motion is not given them)
+        let metres = rock.size.map(|s| s / rock.pixels_per_meter);
+        let rim: std::collections::BTreeMap<[i32; 3], u8> = c.excavation.rim.iter().copied().collect();
+        let dust = c.cut.dust.iter().map(|cell| crate::voxel_crater::Thrown {
+            cell: *cell,
+            palette: match owner.model.occupancy.get(*cell) {
+                0 => rim.get(cell).copied().unwrap_or(1),
+                index => index,
+            },
+            position: std::array::from_fn(|a| (f64::from(cell[a]) + 0.5) * metres[a]),
+            velocity: [0.0; 3],
+        });
         Arc::new(crate::voxel_cut::ThrownCells {
-            cells: c.excavation.thrown.clone(),
+            cells: c.excavation.thrown.iter().cloned().chain(dust).collect(),
             mass: rock.density * (rock.size[0] * rock.size[1] * rock.size[2]) / rock.pixels_per_meter.powi(3),
         })
     });
