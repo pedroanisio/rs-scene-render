@@ -1134,6 +1134,8 @@ fn template(
             }
         }
     });
+    // a fracture by stress is valid and not evaluated yet: refused by name, and not made as a fracture by impact
+    walk(&scene, &mut |e| crate::pending::refuse_stress_fracture(e, &mut *diags));
     Templated { scene, params, size, reframe }
 }
 
