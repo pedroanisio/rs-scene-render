@@ -24,17 +24,19 @@
 //! take a joint's stress concentrations (a corner, a hole) or its own softness (the joint is rigid until it breaks), and a section that is not flat is a
 //! flat one with the mean normal of its faces: its faces' own tilt is in the second moments but not in the direction of the stress.
 
-type V3 = [f64; 3];
+pub mod balance;
 
-fn dot(a: V3, b: V3) -> f64 {
+pub(crate) type V3 = [f64; 3];
+
+pub(crate) fn dot(a: V3, b: V3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: V3, b: V3) -> V3 {
+pub(crate) fn cross(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
-fn sub(a: V3, b: V3) -> V3 {
+pub(crate) fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
