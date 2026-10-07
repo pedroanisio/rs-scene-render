@@ -100,6 +100,9 @@ impl Emitter {
 #[derive(Default)]
 struct Inner {
     entries: Option<ExchangeLog<Entry>>,
+    /// What settled on the ground, by emitter and fixed step: the particles' debris, which is the ground's and not the
+    /// ocean's (`crater@repose`).
+    settled: Option<ExchangeLog<crate::debris::Settled>>,
     emitters: Vec<Emitter>,
 }
 
@@ -124,6 +127,22 @@ impl Log {
     pub(crate) fn put(&self, channel: u32, step: u64, entries: &[Entry]) -> Result<Put, String> {
         let mut inner = self.inner();
         inner.entries.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, entries)
+    }
+
+    /// Record what settled on the ground in fixed step `step` of the emitter. A replay must reproduce it exactly.
+    pub(crate) fn put_settled(
+        &self,
+        channel: u32,
+        step: u64,
+        settled: &[crate::debris::Settled],
+    ) -> Result<Put, String> {
+        let mut inner = self.inner();
+        inner.settled.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, settled)
+    }
+
+    /// What settled in fixed step `step` of the emitter; none for a step that has not been computed.
+    pub(crate) fn settled(&self, channel: u32, step: u64) -> Option<Vec<crate::debris::Settled>> {
+        self.inner().settled.as_ref().and_then(|l| l.get(channel, step)).map(<[_]>::to_vec)
     }
 
     /// Whether the `listed` emitters that fall into `ocean` have all made themselves known: until they have, a read

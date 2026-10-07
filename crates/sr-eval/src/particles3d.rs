@@ -77,6 +77,8 @@ struct Runtime {
     /// How far above the surface the ejecta of a crater are born: the largest collision radius.
     lift: f64,
     crater_bursts: Vec<CraterBurst>,
+    /// What lies on the ground of the crater whose ejecta these are, when it has an angle of repose, and the beds of it.
+    debris: Option<(crate::debris::Config, crate::debris::State)>,
     colliders: colliders::Colliders,
     emitter: sim::Emitter,
     names: Option<Vec<String>>,
@@ -214,6 +216,27 @@ fn build(
                     .any(|c| c.element_name() == "crater" && text(c, "mantle").as_deref() == Some("true"))
             })
         });
+    // the crater that gives what settles an angle of repose: one for an emitter, since what settles is not told apart
+    let mut reposed: Vec<(Arc<str>, f64)> = Vec::new();
+    for id in children(e).into_iter().filter(|c| c.element_name() == "burst").filter_map(|c| text(c, "crater")) {
+        let repose = p.nodes.iter().find(|o| *o.id == *id).and_then(|o| {
+            children(&*o.elem)
+                .into_iter()
+                .filter(|c| c.element_name() == "crater")
+                .find_map(|c| text(c, "repose").and_then(|r| r.trim().parse::<f64>().ok()))
+        });
+        if let Some(repose) = repose {
+            if !reposed.iter().any(|(known, _)| **known == *id) {
+                reposed.push((Arc::from(id.as_str()), repose));
+            }
+        }
+    }
+    if reposed.len() > 1 {
+        return Err(
+            "an emitter deposits the ejecta that settle on one crater with an angle of repose: it names several".into(),
+        );
+    }
+    let debris = reposed.pop().map(|(crater, repose)| (crate::debris::Config { crater, repose }, Default::default()));
     let rest_speed = REST_SPEED * p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get());
     let spec = sim::Spec {
         seed: e.seed,
@@ -245,7 +268,7 @@ fn build(
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         water: fall.as_ref().map(|(water, _)| *water),
-        settle: mantle.then_some(rest_speed),
+        settle: (mantle || debris.is_some()).then_some(rest_speed),
         max_work: number("maxWork", 100000000.) as u64,
     };
     let crater_bursts = children(e)
@@ -271,6 +294,7 @@ fn build(
         seed: e.seed,
         lift,
         crater_bursts,
+        debris,
         colliders: colliders::build(p, n, bytes("meshMemoryMiB", 128.)?)?,
         emitter: sim::Emitter::new(spec).map_err(|e| e.to_string())?,
         names: crate::sim::field_names(e),
@@ -303,6 +327,8 @@ struct SceneDriver<'a, 'b> {
     gas_at: Vec<(i64, Option<GasAt>)>,
     /// The ocean the particles fall into, the log that tells it, and the scene units a metre.
     splash: Option<(&'a crate::splash::Emitter, &'a crate::splash::Log, f64)>,
+    /// The crater that what settles on the ground is deposited on, and the log it is told to.
+    settled: Option<(&'a crate::debris::Config, &'a crate::splash::Log)>,
     /// What the rigid world said when it could not answer, to fail the step that asked rather than go on without it.
     fault: Option<String>,
 }
@@ -457,6 +483,47 @@ impl SceneDriver<'_, '_> {
 
     /// The emitter's time at which the source clock reads `t`, for the clocks an emitter can
     /// have here: affine ones that run forward.
+    /// What came to rest on the ground of the crater in fixed step `step`: where, in the plane of the crater, and the volume
+    /// of its target that each particle stands for, in the owner's object units cubed. The ground is as it is at the end of
+    /// the step.
+    fn settle(
+        &mut self,
+        config: &crate::debris::Config,
+        step: u64,
+        list: &[sim::Absorbed],
+    ) -> Result<Vec<crate::debris::Settled>, Error> {
+        let ground: Vec<&sim::Absorbed> = list.iter().filter(|a| a.ground).collect();
+        if ground.is_empty() {
+            return Ok(Vec::new());
+        }
+        let frame = self.frame(self.step_origin + (step + 1) as f64 * self.step);
+        let i =
+            frame.nodes.iter().position(|n| n.id == config.crater).ok_or_else(|| {
+                Error::Driver(format!("{} is not in the frame where ejecta settle on it", config.crater))
+            })?;
+        let impact = frame.nodes[i]
+            .crater_impact
+            .clone()
+            .ok_or_else(|| Error::Driver(format!("ejecta settled on {} before its crater was known", config.crater)))?;
+        let to_object = crate::sim3d::world3(&frame, i, 0).inverse();
+        let kernel = crate::crater::ground_kernel(&impact).map_err(Error::Driver)?;
+        let (u, v) = kernel.plane_basis();
+        let (u, v) = (DVec3::from(u), DVec3::from(v));
+        let centre = DVec3::from(impact.spec.center);
+        let cubic = impact.units.powi(3);
+        Ok(ground
+            .into_iter()
+            .map(|a| {
+                let at = to_object.transform_point3(DVec3::from(a.position)) - centre;
+                crate::debris::Settled {
+                    id: a.id,
+                    plane: [at.dot(u), at.dot(v)],
+                    volume: a.mass / impact.cause.target_density * cubic,
+                }
+            })
+            .collect())
+    }
+
     fn emitter_time(&self, t: f64) -> Result<f64, Error> {
         let start = self.p.nodes[self.node as usize].start;
         let (f0, clocks) = crate::sim::source_sample(self.p, self.node, start, self.at);
@@ -581,6 +648,11 @@ impl Driver for SceneDriver<'_, '_> {
         if let Some(fault) = self.fault.take() {
             return Err(Error::Driver(fault));
         }
+        if let Some((config, log)) = self.settled {
+            // told for every step, the empty ones too: the deposit is a fold over all of them
+            let settled = self.settle(config, step, list)?;
+            log.put_settled(self.node, step, &settled).map_err(Error::Driver)?;
+        }
         let Some((emitter, log, pixels_per_meter)) = self.splash else { return Ok(()) };
         // what they are made of: the target of the crater that threw them
         let density = self.bursts.iter().map(|b| b.density).find(|d| *d > 0.);
@@ -696,9 +768,38 @@ impl Sims {
                 splash,
             );
             match result {
-                Ok(f) => g.nodes[i].particles3d = Some(f),
+                Ok(f) => {
+                    self.deposit(&id, node, g, &f, splash);
+                    g.nodes[i].particles3d = Some(f);
+                }
                 Err(e) => g.fail(format!("{id}: {e}")),
             }
+        }
+    }
+
+    /// Puts on the ground of the crater that emitter `id` deposits on what has settled by the time of `f`, the particles it
+    /// has computed: the deposit is in the crater's frame node, where whatever reads the crater after the particles sees it.
+    fn deposit(
+        &mut self,
+        id: &Arc<str>,
+        node: u32,
+        g: &mut FrameGraph,
+        f: &Arc<SimParticles3D>,
+        splash: &crate::splash::Log,
+    ) {
+        let Some(Ok(rt)) = self.runtimes.get_mut(id) else { return };
+        let Some((config, state)) = rt.debris.as_mut() else { return };
+        let Some(k) = g.nodes.iter().position(|n| n.id == config.crater) else { return };
+        let Some(impact) = g.nodes[k].crater_impact.clone() else { return };
+        let spec = rt.emitter.spec();
+        let steps = ((f.frame.time - spec.start) / spec.step).round().max(0.) as u64;
+        match state.deposit(&impact, config.repose, steps, &|step| splash.settled(node, step)) {
+            Ok(deposit) if deposit.volume() > 0. => {
+                let grown = crate::crater::ImpactCrater { deposit: Some(deposit), ..(*impact).clone() };
+                g.nodes[k].crater_impact = Some(Arc::new(grown));
+            }
+            Ok(_) => {}
+            Err(error) => g.fail(format!("{id}: {error}")),
         }
     }
 
@@ -819,6 +920,7 @@ impl Sims {
                 .splash
                 .as_ref()
                 .map(|e| (e, splash, p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()))),
+            settled: rt.debris.as_ref().map(|(config, _)| (config, splash)),
             fault: None,
         };
         // an ocean that runs after the particles reads what falls until the end of its step, which is later than
