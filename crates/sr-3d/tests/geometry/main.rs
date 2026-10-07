@@ -6,3 +6,4 @@ mod fracture_surface;
 mod occupancy;
 mod pieces;
 mod terrain;
+mod voxel_surface;
