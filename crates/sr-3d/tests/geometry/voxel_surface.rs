@@ -3,7 +3,7 @@
 //! module; `tools/voxel_reference_mesher.py` is the same rule in another language.
 
 use sr_3d::occupancy::Occupancy;
-use sr_3d::voxel::surface::{exposed_faces, Classes, Face};
+use sr_3d::voxel::surface::{exposed_faces, mesh_quads, quads_hash, Classes, Face, Quad};
 use std::collections::BTreeSet;
 
 /// The cells of a box of `n` cells a side with its corner at `at`, all of palette index `index`.
@@ -123,6 +123,27 @@ fn a_block_of_n_cubed_has_six_n_squared_faces_wherever_it_is_even_across_the_bri
 }
 
 #[test]
+fn a_box_of_a_by_b_by_c_has_two_of_ab_plus_bc_plus_ca_faces_and_six_quads() {
+    for (a, b, c) in [(1, 2, 3), (4, 9, 5), (8, 1, 17), (13, 13, 2)] {
+        let mut cells = Vec::new();
+        for z in 0..c {
+            for y in 0..b {
+                for x in 0..a {
+                    cells.push(([x - 5, y + 2, z - 9], 1));
+                }
+            }
+        }
+        let g = grid(cells);
+        assert_eq!(
+            exposed_faces(&g, &Classes::identity()).len() as i32,
+            2 * (a * b + b * c + c * a),
+            "{a} x {b} x {c}"
+        );
+        assert_eq!(mesh_quads(&g, &Classes::identity()).len(), 6);
+    }
+}
+
+#[test]
 fn a_block_with_a_square_hole_through_it_has_the_faces_of_the_outside_and_of_the_hole() {
     // 6 n^2 outside less the two openings of h^2 plus the four walls of the hole of h by n
     for (n, h, a) in [(3, 1, 1), (4, 2, 1), (8, 2, 3), (8, 4, 2), (9, 3, 1), (16, 4, 6)] {
@@ -202,4 +223,164 @@ fn the_faces_do_not_depend_on_the_order_the_cells_were_given_in() {
         exposed_faces(&grid(shuffled), &Classes::identity()),
         "the same list, in the same order"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------------- quads
+
+/// The cells of the wall of the golden fixture: 24 by 3 by 16, the palette index 1 or 2 by the tile of 4 by 2 cells in x and z.
+fn wall() -> Occupancy {
+    let mut cells = Vec::new();
+    for x in 0..24 {
+        for y in 0..3 {
+            for z in 0..16 {
+                cells.push(([x, y, z], 1 + ((x / 4 + z / 2) % 2) as u8));
+            }
+        }
+    }
+    grid(cells)
+}
+
+/// Every face the quads cover, with how many times.
+fn covered(quads: &[Quad]) -> std::collections::BTreeMap<Face, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    for q in quads {
+        for dv in 0..q.h as i32 {
+            for du in 0..q.w as i32 {
+                let f = Face {
+                    axis: q.axis,
+                    positive: q.positive,
+                    plane: q.plane,
+                    u: q.u0 + du,
+                    v: q.v0 + dv,
+                    class: q.class,
+                };
+                *out.entry(f).or_insert(0) += 1;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_block_of_n_cubed_is_exactly_six_quads_whatever_its_size_and_place() {
+    // the bricks are 8 cells a side: a quad that stopped at a brick would make 24 of a block of 16
+    for n in (1..=12).chain([16, 17, 25, 33]) {
+        for at in [[0, 0, 0], [-3, 5, -7], [5, 5, 5]] {
+            let q = mesh_quads(&grid(block(at, n, 1)), &Classes::identity());
+            assert_eq!(q.len(), 6, "n = {n} at {at:?}");
+            assert!(q.iter().all(|q| q.w as i32 == n && q.h as i32 == n), "each is the whole face");
+        }
+    }
+}
+
+#[test]
+fn a_block_with_a_square_hole_through_it_is_sixteen_quads_and_the_cap_is_four_bars() {
+    // each cap is a frame around the opening: with the widest run first, a bar along the top, one down each side and the piece below
+    // the opening; four sides outside and four walls in the hole
+    for (n, h, a) in [
+        (3, 1, 1),
+        (4, 2, 1),
+        (5, 1, 2),
+        (5, 3, 1),
+        (6, 2, 2),
+        (6, 4, 1),
+        (8, 2, 3),
+        (8, 4, 2),
+        (8, 6, 1),
+        (9, 3, 1),
+        (12, 2, 5),
+        (16, 4, 6),
+    ] {
+        assert_eq!(mesh_quads(&grid(holed(n, h, a)), &Classes::identity()).len(), 16, "n {n} h {h} a {a}");
+    }
+    let q = mesh_quads(&grid(holed(8, 2, 3)), &Classes::identity());
+    for plane in [0, 8] {
+        let cap: Vec<_> =
+            q.iter().filter(|q| q.axis == 2 && q.plane == plane).map(|q| (q.u0, q.v0, q.w, q.h)).collect();
+        assert_eq!(cap, [(0, 0, 8, 3), (0, 3, 3, 5), (5, 3, 3, 5), (3, 5, 2, 3)], "the cap on the plane {plane}");
+    }
+    // a hole that touches the border opens two sides: 10 quads
+    assert_eq!(mesh_quads(&grid(holed(9, 3, 0)), &Classes::identity()).len(), 10);
+}
+
+#[test]
+fn the_quads_are_in_the_canonical_order_and_have_the_bits_the_reference_mesher_gives() {
+    let q = mesh_quads(&grid(block([0, 0, 0], 8, 1)), &Classes::identity());
+    assert!(q.windows(2).all(|w| (w[0].axis, w[0].positive, w[0].plane, w[0].v0, w[0].u0)
+        < (w[1].axis, w[1].positive, w[1].plane, w[1].v0, w[1].u0)));
+    // the hashes of tools/voxel_reference_mesher.py, FNV-1a 64 of the quads as axis u8, facing u8, plane i32, u0 i32, v0 i32,
+    // w u16, h u16, class u8, little endian, in that order
+    assert_eq!(format!("{:016x}", quads_hash(&q)), "4a7c15d5ebc45cc8", "a block of 8");
+    let q = mesh_quads(&grid(holed(8, 2, 3)), &Classes::identity());
+    assert_eq!(format!("{:016x}", quads_hash(&q)), "b61f3c69c0f98e99", "a block of 8 with a hole of 2");
+    let q = mesh_quads(&wall(), &Classes::identity());
+    assert_eq!(q.len(), 124);
+    assert_eq!(format!("{:016x}", quads_hash(&q)), "5fdf69dec601e091", "a wall of 24 by 3 by 16 of two kinds");
+}
+
+#[test]
+fn every_exposed_face_is_covered_by_exactly_one_quad_of_its_class() {
+    let classes = Classes::identity();
+    let w = wall();
+    assert_eq!(covered(&mesh_quads(&w, &classes)), exposed_faces(&w, &classes).into_iter().map(|f| (f, 1)).collect());
+    let mut seed = 0x9e3779b97f4a7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut cells = Vec::new();
+    for z in -7..9 {
+        for y in -4..9 {
+            for x in -6..11 {
+                if next() % 100 < 60 {
+                    cells.push(([x, y, z], 1 + (next() % 3) as u8));
+                }
+            }
+        }
+    }
+    let cloud = grid(cells);
+    let glass = Classes::identity().with_see_through(&[2]);
+    for c in [&classes, &glass] {
+        let quads = mesh_quads(&cloud, c);
+        let covers = covered(&quads);
+        assert!(covers.values().all(|n| *n == 1), "no face is covered twice");
+        assert_eq!(covers.keys().copied().collect::<BTreeSet<_>>(), faces(&cloud, c));
+        assert!(quads.len() < covers.len(), "something merged");
+    }
+}
+
+#[test]
+fn the_quads_are_the_same_whatever_the_order_the_cells_came_in() {
+    let cells = block([-4, 2, -4], 9, 1).into_iter().filter(|(c, _)| c[0] != 0 || c[1] != 4).collect::<Vec<_>>();
+    let mut shuffled = cells.clone();
+    let mut seed = 11u64;
+    for i in (1..shuffled.len()).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        shuffled.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    assert_eq!(mesh_quads(&grid(cells), &Classes::identity()), mesh_quads(&grid(shuffled), &Classes::identity()));
+}
+
+#[test]
+fn indices_of_one_class_merge_and_indices_of_two_do_not() {
+    // 16 indices that look alike are one class: the block is six quads; as 16 classes it is a patchwork
+    let cells: Vec<_> = block([0, 0, 0], 10, 1)
+        .into_iter()
+        .map(|(c, _)| (c, 1 + ((c[0] * 3 + c[1] * 5 + c[2] * 7).rem_euclid(16)) as u8))
+        .collect();
+    let g = grid(cells);
+    assert_eq!(mesh_quads(&g, &Classes::new(|_| 1, &[])).len(), 6);
+    assert!(mesh_quads(&g, &Classes::identity()).len() > 100);
+}
+
+#[test]
+fn a_quad_never_runs_past_what_a_u16_can_say_and_is_cut_in_two() {
+    // a bar of 70000 cells: the two ends are one quad each, each of the four long sides is 65535 and 4465
+    let g = grid((0..70000).map(|x| ([x, 0, 0], 1)).collect());
+    let q = mesh_quads(&g, &Classes::identity());
+    assert_eq!(q.len(), 2 + 4 * 2, "{q:?}");
+    assert!(q.iter().all(|q| q.w <= 65535 && q.h <= 65535));
+    assert_eq!(covered(&q).len(), 2 + 4 * 70000);
 }

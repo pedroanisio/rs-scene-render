@@ -13,8 +13,10 @@
 //!   one body, with no face between them.
 
 mod exposure;
+mod greedy;
 
 pub use exposure::{exposed_faces, Face};
+pub use greedy::{mesh_quads, quads_hash, Quad};
 
 /// What the palette indices of a grid look like to the extraction: the class of each index (indices of one class merge into one quad,
 /// and the face between two cells of one see-through class is not made) and whether a class lets light through. Index 0 is empty and
