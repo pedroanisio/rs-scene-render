@@ -1802,9 +1802,10 @@
     </xs:attribute>
     <xs:attribute name="anchor">
       <xs:annotation><xs:documentation>
-        Which part of what a crater's cut leaves stays the body (VOX12): `largest`, the largest connected part (the engine's value for a dynamic body), or `base`, every part
-        that touches the base layer (the cells of the greatest y key, the lowest layer in the scene's axes, y down), the way ground is held by what is under it (the
-        engine's value for a static or kinematic body).
+        Which part of what a crater's cut leaves stays the body (VOX12): `base`, every part that touches the base layer (the cells of the greatest y key, the lowest
+        layer in the scene's axes, y down), the way ground is held by what is under it, or `largest`, the largest connected part. Only an owner with a crater has it, and
+        that owner is static or kinematic (CRT5), so the engine's value when it is not given is `base`: a dynamic body, whose cut would leave its largest part, has no
+        anchor to give.
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="largest"/><xs:enumeration value="base"/></xs:restriction></xs:simpleType>
     </xs:attribute>

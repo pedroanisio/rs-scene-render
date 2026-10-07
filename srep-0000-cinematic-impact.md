@@ -3217,9 +3217,10 @@ file's own lattice. The body's centre of mass is not the origin; the world works
 cells times the volume of one (`cellSize` times the object's scale, over `pixelsPerMeter`, cubed) times `density` (kg/m^3, required: the materials of an asset carry none; `mass` is
 refused). `maxFragments` (1 to 4096, 64 in the engine), `fragmentMinCells` (loose parts of fewer cells are dust, 1) and `fragmentOverflow` (`error`, which names both numbers, or
 `dust`, which makes the smallest parts dust) are the slots that the pieces of a cut take, and cost bodies of the world, so they are refused where there is nothing to cut
-(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `largest`, or `base`, every part that touches the base layer (the
-cells of the greatest y key: the lowest layer, the way ground is held by what is under it); with a crater only (VOX12). A body that a crater or a fracture breaks is scaled the same on
-every axis (VOX13: the cells are cubes for the cut), has the one or the other (VOX14), and has the cells for its collider (VOX15: with a box or a mesh for the collider there is no
+(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `base`, every part that touches the base layer (the
+cells of the greatest y key: the lowest layer, the way ground is held by what is under it), which is the value when it is not given, or `largest`; with a crater only (VOX12), and the owner of a
+crater is static or kinematic (CRT5), so a dynamic body has no anchor to give. A body that a crater or a fracture breaks is scaled the same on
+every axis (VOX13: the cells are cubes for the cut; the rule reads the scale of the object itself, so the scale of an ancestor group, and an animated scale, are not seen by it and the evaluator has to check the world scale of the owner at run time), has the one or the other (VOX14), and has the cells for its collider (VOX15: with a box or a mesh for the collider there is no
 body of cells to cut, and a document that said so would mean nothing; this does not depend on the scale, which is why it is a rule of its own and not VOX13's).
 
 *The crater (CRT5, CRT13 to CRT17).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
@@ -3731,7 +3732,7 @@ Also includes `pyroShape`, inventoried below.
 | `maxFragments` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; only with a crater or a fracture on the owner (VOX11); the engine uses `64` |
 | `fragmentMinCells` | xs:positiveInteger | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `1` |
 | `fragmentOverflow` | xs:string; enumeration=error, enumeration=dust | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `error` |
-| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12); the engine uses `largest` for a dynamic body and `base` for a static or kinematic one |
+| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12), which is static or kinematic (CRT5), so the engine's value when it is not given is `base` |
 
 ### `assetProvenance`
 
