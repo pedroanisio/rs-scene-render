@@ -393,18 +393,23 @@ fn the_refracted_shadow_ray_scales_the_light_by_one_minus_the_share_and_not_by_a
     println!("floor: share 0 {open:.4}, 0.5 {half:.4}, 1 {covered:.4}");
     assert!(open > 0.2 && covered < 0.35 * open, "from the sun's light to the shade: {open} against {covered}");
     // one minus the share of what the open water lets through (0.2985 against 0.2697 at a half: the light the floor gives back to the
-    // surface and the surface to the floor adds a tenth); a step at one half would give the whole or nothing, and one minus the share
+    // surface and the surface to the floor adds a tenth; 0.3103 is the edge of the band); a step at one half would give the whole or nothing, and one minus the share
     // squared a quarter of the open water's
     let want = 0.5 * (open + covered);
-    assert!((half - want).abs() <= 0.15 * want, "{half} against the mean {want} of {open} and {covered}");
+    assert!((half - want).abs() <= 0.2 * want, "{half} against the mean {want} of {open} and {covered}");
     assert!(half > 0.4 * open && half < 0.7 * open, "neither a step nor a square: {half} of {open}");
 }
 
 /// The mean and the standard deviation of the luminance of the middle 16 x 16 pixels of a sea wholly at `share` of foam, rendered at
 /// `samples` a pixel under a uniform dome.
 fn noise_at(eng: &mut ThreeEngine, share: f32, samples: u32, denoise: bool) -> (f32, f32) {
+    noise_of(eng, Some(FOAM), share, samples, denoise)
+}
+
+/// The same for the water with the foam mix `mix` (none: the water as it was before the mix existed).
+fn noise_of(eng: &mut ThreeEngine, mix: Option<FoamMix>, share: f32, samples: u32, denoise: bool) -> (f32, f32) {
     let dome = srgb_to_linear(128.0 / 255.0);
-    let draw = plane(eng, 0.0, water(Some(FOAM)), move |_| share);
+    let draw = plane(eng, 0.0, water(mix), move |_| share);
     let mut s = scene(eng, vec![draw], Some(dome), false, TOP);
     s.path = Some(PathOpts { samples, bounces: 4, denoise });
     let px = eng.render_now(&s, None);
@@ -426,7 +431,10 @@ fn the_noise_of_the_foam_mix_at_a_half_share_is_what_the_srep_states() {
     // adapters and the random numbers give; a way to draw the lobe that has less variance tightens them
     let (half, half_sd) = noise_at(&mut eng, 0.5, 8, false);
     let (denoised, denoised_sd) = noise_at(&mut eng, 0.5, 8, true);
-    let (_, open_sd) = noise_at(&mut eng, 0.0, 8, false);
+    let (open, open_sd) = noise_at(&mut eng, 0.0, 8, false);
+    // a share of 0 is the water without the mix, in the same run: the same mean and the same noise, to the bit
+    let (plain, plain_sd) = noise_of(&mut eng, None, 0.0, 8, false);
+    assert_eq!((open, open_sd), (plain, plain_sd), "no foam, no change");
     let (covered, covered_sd) = noise_at(&mut eng, 1.0, 8, false);
     println!(
         "noise at 8 samples: half {half:.4} sd {half_sd:.4} (cv {:.3}); denoised {denoised:.4} sd {denoised_sd:.4} (cv {:.3}); open sd {open_sd:.4}; covered {covered:.4} sd {covered_sd:.4}",

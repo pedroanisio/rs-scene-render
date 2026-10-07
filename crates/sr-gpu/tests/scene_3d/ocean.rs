@@ -132,7 +132,7 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_for_a_raster_camera_and_for_wat
         let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
         let out = renderer.render(&frame, ev.program());
         assert!(
-            out.stats.errors.iter().any(|e| e.contains("foamMode") && e.contains(wants)),
+            out.stats.errors.iter().any(|e| e.contains("foamMode") && e.contains(wants) && e.contains("not drawn")),
             "{camera} / {water}: no error says why: {:?}",
             out.stats.errors
         );
@@ -152,13 +152,13 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_for_a_raster_camera_and_for_wat
 /// The picture of a sea with foam in the albedo mode, seen from `y` over it by a path tracer, whose whitewater has `foam` besides
 /// `foamMode="albedo"`: the sum of the luminance of its pixels.
 fn foamy_sea(gpu: &sr_gpu::Gpu, y: f32, foam: &str) -> Vec<[f32; 4]> {
-    foamy_sea_of(gpu, y, foam, r##"baseColor="#102040" roughness="0.3""##)
+    foamy_sea_of(gpu, y, &format!(r#"foamMode="albedo" {foam}"#), r##"baseColor="#102040" roughness="0.3""##)
 }
 
-/// The same sea of a water material `water`.
+/// The same sea of a water material `water`, with the whitewater attributes `foam` as they are (the mode among them).
 fn foamy_sea_of(gpu: &sr_gpu::Gpu, y: f32, foam: &str, water: &str) -> Vec<[f32; 4]> {
     let xml = format!(
-        r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} doubleSided="true"/></materials><composition><camera id="cam" x="0" y="{y}" z="-8" target="sea" renderer="pathtrace" pathSamples="16" maxBounces="2"/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0" foamMode="albedo" {foam}/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/><light id="fill" type="ambient" intensity="1"/></lights></scene>"##
+        r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} doubleSided="true"/></materials><composition><camera id="cam" x="0" y="{y}" z="-8" target="sea" renderer="pathtrace" pathSamples="16" maxBounces="2"/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0" {foam}/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/><light id="fill" type="ambient" intensity="1"/></lights></scene>"##
     );
     let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
     let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
@@ -210,16 +210,18 @@ fn the_documents_foam_reaches_a_transmissive_water_through_the_water_variant_of_
     // a water that lets the light through is the shader with the refracted shadow rays and the foam together (the variants of the
     // pipelines that no document with an opaque water reaches): foam of albedo 0, 0.45 and 0.9 adds light in proportion to the albedo
     let clear = r##"baseColor="#102040" roughness="0.05" transmission="1" ior="1.333""##;
-    let level = |foam: &str| light(&foamy_sea_of(&gpu, -6.0, foam, clear));
+    let level = |foam: &str| light(&foamy_sea_of(&gpu, -6.0, &format!(r#"foamMode="albedo" {foam}"#), clear));
     let (black, half, full) = (level(r#"foamAlbedo="0""#), level(r#"foamAlbedo="0.45""#), level(""));
     println!("transmissive: albedo 0: {black:.2}, 0.45: {half:.2}, default: {full:.2}");
     assert!(full > black + 5.0, "the foam brightens the sea: {full} against {black}");
     let ratio = (half - black) / (full - black);
     assert!((ratio - 0.5).abs() <= 0.1, "half the albedo adds half the light: {ratio}");
-    // and a foam of no share (no tracers: births that start after the frame) is the picture of the water with no foam mode, bit for bit
-    let none = |foam: &str| foamy_sea_of(&gpu, -6.0, foam, clear);
-    assert!(
-        none(r#"start="100""#) == none(r#"start="100" foamAlbedo="0.5" foamRoughness="0.2""#),
-        "no foam, no change"
-    );
+    // and a foam of no share (no tracers: births that start after the frame) is the picture of the same water in a document that has no
+    // foam mode at all, bit for bit, whatever the albedo and the roughness
+    let plain = foamy_sea_of(&gpu, -6.0, r#"start="100""#, clear);
+    for foam in
+        [r#"foamMode="albedo" start="100""#, r#"foamMode="albedo" start="100" foamAlbedo="0.5" foamRoughness="0.2""#]
+    {
+        assert!(foamy_sea_of(&gpu, -6.0, foam, clear) == plain, "{foam}: no foam, no change");
+    }
 }
