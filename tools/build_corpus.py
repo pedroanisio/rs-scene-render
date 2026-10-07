@@ -42,7 +42,7 @@ VOXEL_HEAD = '<scene version="1.3"><project width="64" height="64" fps="24" dura
 VOXEL_TAIL = '</composition><physics pixelsPerMeter="1"/></scene>\n'
 VOXEL_BODY = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="2" material="stone"><rigidBody density="2400"/></object3D>' + VOXEL_TAIL
 VOXEL_GROUND = VOXEL_HEAD + '<object3D id="ground" primitive="voxels" voxels="model" cellSize="2" material="stone" y="2"><rigidBody type="static" density="2400" maxFragments="128" fragmentMinCells="2" fragmentOverflow="dust" anchor="base"/><crater id="pit" source="ball" targetMaterial="softRock"/></object3D>' + VOXEL_TAIL
-VOXEL_FRACTURE = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="2" material="stone"><rigidBody density="2400" maxFragments="32" fragmentMinCells="2"/><fracture source="ball" pieces="8" seed="3"/></object3D>' + VOXEL_TAIL
+VOXEL_FRACTURE = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="2" material="stone"><rigidBody density="2400" maxFragments="32" fragmentMinCells="1"/><fracture source="ball" pieces="8" seed="3"/></object3D>' + VOXEL_TAIL
 VOXEL_EJECTA = VOXEL_GROUND.replace(VOXEL_TAIL, '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit"/></particles3D>' + VOXEL_TAIL)
 
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
@@ -130,7 +130,7 @@ CASES = [
     ("vox12-anchor", ["VOX12"], lambda _: VOXEL_BODY.replace('density="2400"', 'density="2400" anchor="base"')),
     ("vox13-scale", ["VOX13"], lambda _: VOXEL_GROUND.replace('y="2">', 'y="2" scaleX="2">')),
     ("vox15-mesh-collider", ["VOX15"], lambda _: VOXEL_GROUND.replace('type="static" density="2400"', 'type="static" shape="trimesh"').replace(' maxFragments="128" fragmentMinCells="2" fragmentOverflow="dust" anchor="base"', '').replace('y="2">', 'y="2" scaleX="2">')),
-    ("vox15-fracture-box", ["VOX15"], lambda _: VOXEL_FRACTURE.replace('<rigidBody density="2400" maxFragments="32" fragmentMinCells="2"/>', '<rigidBody shape="box"/>')),
+    ("vox15-fracture-box", ["VOX15"], lambda _: VOXEL_FRACTURE.replace('<rigidBody density="2400" maxFragments="32" fragmentMinCells="1"/>', '<rigidBody shape="box"/>')),
     ("vox14-both", ["VOX14"], lambda _: VOXEL_GROUND.replace('</object3D>' + VOXEL_TAIL, '<fracture source="ball" pieces="4"/></object3D>' + VOXEL_TAIL)),
     ("crt13-mantle", ["CRT13"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" mantle="true"')),
     ("crt14-curve", ["CRT14"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" curve="linear"')),
