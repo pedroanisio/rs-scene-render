@@ -3047,7 +3047,9 @@ reads nothing, rather than failing, when the files are not there.
 
 **Bounds before allocation.** The reader checks, before it builds anything: the size of the file (default 1 GiB), the models
 (65,536), the nodes of the scene graph (1,048,576), its depth (64) with a cycle check, and the count of cells that a graph places
-(one model as many times as it is used, capped before it is built), then the limits of the grid. A model with a side over 4,096 is
+(one model as many times as it is used, capped before it is built), then the limits of the grid. A translation or a placed cell
+more than 2^24 cells from the origin is an error (so that the translations of a graph at its deepest cannot wrap), and every way of
+filling the grid, from a file, a cache or a mesh, refuses a cell outside the keys of an occupancy, `[-2^30, 2^30)`, by name. A model with a side over 4,096 is
 not a model and is refused, and every number is named in the message.
 
 | Rule | Says |

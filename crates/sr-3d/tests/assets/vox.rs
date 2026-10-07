@@ -212,3 +212,79 @@ fn the_limits_are_checked_before_anything_is_built_and_say_what_was_over() {
     let error = vox::import(&bytes, None, Limits::default(), &bounds).unwrap_err();
     assert!(error.contains("bytes"), "{error}");
 }
+
+#[test]
+fn translations_that_add_up_past_the_keys_of_an_occupancy_are_an_error_and_never_a_wrapped_cell() {
+    let chunk = |name: &str, content: &[u8]| {
+        let mut out = name.as_bytes().to_vec();
+        out.extend((content.len() as i32).to_le_bytes());
+        out.extend(0i32.to_le_bytes());
+        out.extend(content);
+        out
+    };
+    let string = |s: &str| [(s.len() as i32).to_le_bytes().to_vec(), s.as_bytes().to_vec()].concat();
+    let dictionary = |pairs: &[(&str, &str)]| {
+        let mut out = (pairs.len() as i32).to_le_bytes().to_vec();
+        for (k, v) in pairs {
+            out.extend(string(k));
+            out.extend(string(v));
+        }
+        out
+    };
+    let transform = |node: i32, child: i32, t: &str| {
+        let mut content = node.to_le_bytes().to_vec();
+        content.extend(dictionary(&[]));
+        content.extend(child.to_le_bytes());
+        content.extend((-1i32).to_le_bytes());
+        content.extend((-1i32).to_le_bytes());
+        content.extend(1i32.to_le_bytes());
+        content.extend(dictionary(&[("_t", t)]));
+        chunk("nTRN", &content)
+    };
+    let shape = {
+        let mut content = 2i32.to_le_bytes().to_vec();
+        content.extend(dictionary(&[]));
+        content.extend(1i32.to_le_bytes());
+        content.extend(0i32.to_le_bytes());
+        content.extend(dictionary(&[]));
+        chunk("nSHP", &content)
+    };
+    let model = [
+        chunk("SIZE", &[2i32.to_le_bytes(), 2i32.to_le_bytes(), 2i32.to_le_bytes()].concat()),
+        chunk("XYZI", &[1i32.to_le_bytes().to_vec(), vec![0, 0, 0, 1]].concat()),
+    ]
+    .concat();
+    let read = |first: &str, second: &str| {
+        let children = [model.clone(), transform(0, 1, first), transform(1, 2, second), shape.clone()].concat();
+        let mut file = b"VOX ".to_vec();
+        file.extend(150i32.to_le_bytes());
+        file.extend(b"MAIN");
+        file.extend(0i32.to_le_bytes());
+        file.extend((children.len() as i32).to_le_bytes());
+        file.extend(children);
+        vox::import(&file, None, Limits::default(), &vox::Bounds::default())
+    };
+    // in reach: the cell is where the two translations say
+    let moved = read("3 0 0", "4 0 0").unwrap();
+    assert_eq!(moved.occupancy.count(), 1);
+    // every one of these adds up, in 64 bits, to a number that wraps or to one far outside the keys
+    for (first, second) in [
+        ("9223372036854775807 0 0", "9223372036854775807 0 0"),
+        ("-9223372036854775808 0 0", "-9223372036854775808 0 0"),
+        ("4611686018427387904 0 0", "4611686018427387904 0 0"),
+        ("1073741824 0 0", "0 0 0"),
+        ("0 0 0", "0 -2147483649 0"),
+    ] {
+        let error = read(first, second).err().unwrap_or_else(|| format!("{first} / {second} was read"));
+        assert!(error.contains("translation") || error.contains("far"), "{first} / {second}: {error}");
+    }
+}
+
+#[test]
+fn the_empty_palette_index_has_no_colour_whatever_the_file_says() {
+    for name in NAMES {
+        let (bytes, _) = fixture(name);
+        let imported = vox::import(&bytes, None, Limits::default(), &vox::Bounds::default()).unwrap();
+        assert_eq!(imported.occupancy.palette().color(0), [0, 0, 0, 0], "{name}");
+    }
+}

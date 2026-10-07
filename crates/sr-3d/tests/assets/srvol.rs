@@ -111,3 +111,19 @@ fn the_limits_of_the_grid_and_of_the_cache_are_checked_before_anything_is_built(
     let small = CacheLimits { max_bytes: 100, ..CacheLimits::default() };
     assert!(srvol::import(&bytes, srvol::GRID, Limits::default(), small).is_err());
 }
+
+#[test]
+fn a_cell_outside_the_keys_of_an_occupancy_is_an_error_that_names_the_brick_and_the_edge_is_in() {
+    let key_limit = sr_3d::occupancy::KEY_LIMIT;
+    let read = |bytes: Vec<u8>| srvol::import(&bytes, srvol::GRID, Limits::default(), CacheLimits::default());
+    let inside = read(grid_of(&[([key_limit - 1, -key_limit, 0], 7.0)])).unwrap();
+    assert_eq!(inside.occupancy.count(), 1);
+    assert_eq!(inside.occupancy.get([key_limit - 1, -key_limit, 0]), 7);
+    for index in [[key_limit, 0, 0], [0, -key_limit - 1, 0], [i32::MAX, 0, i32::MAX], [0, i32::MIN, 0]] {
+        let error = read(grid_of(&[(index, 1.0)])).unwrap_err();
+        assert!(error.contains("outside"), "{index:?}: {error}");
+    }
+    // and the index 0 of the palette has no colour, whatever the model is
+    let model = read(grid_of(&[([0, 0, 0], 1.0)])).unwrap();
+    assert_eq!(model.occupancy.palette().color(0), [0, 0, 0, 0]);
+}

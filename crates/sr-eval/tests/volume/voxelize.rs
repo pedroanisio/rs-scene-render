@@ -202,3 +202,17 @@ fn the_cells_are_the_same_on_any_number_of_threads_and_every_time() {
     }
     assert_eq!(first.fingerprint(), voxelize(&mesh, 0.5).unwrap().fingerprint());
 }
+
+#[test]
+fn a_mesh_is_cut_up_to_the_last_key_of_an_occupancy_and_no_further() {
+    let edge = f64::from(sr_3d::occupancy::KEY_LIMIT);
+    // the cells 2^30 - 2 and 2^30 - 1 of x are the last two
+    let last = cuboid([edge - 2.0, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let cut = voxelize(&last, 1.0).unwrap();
+    assert_eq!(cut.cells().collect::<Vec<_>>(), vec![[(edge as i32) - 2, 0, 0], [(edge as i32) - 1, 0, 0]]);
+    // one cell further is far from the origin, and so is the other side
+    for min in [[edge - 1.0, 0.0, 0.0], [-edge - 1.0, 0.0, 0.0], [0.0, f64::from(i32::MAX), 0.0]] {
+        let error = voxelize(&cuboid(min, [2.0, 1.0, 1.0]), 1.0).unwrap_err();
+        assert!(error.contains("far"), "{min:?}: {error}");
+    }
+}

@@ -184,6 +184,10 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// How far from the origin, in cells, a translation or a placed cell may be: far inside the keys of an occupancy, and small enough that
+/// the translations of a scene graph at its deepest add up in 64 bits.
+const REACH: i64 = 1 << 24;
+
 /// The largest side of a model that is accepted: a size beyond a few thousand is not a model.
 const MAX_SIDE: u32 = 4096;
 
@@ -301,6 +305,10 @@ pub fn parse(bytes: &[u8], bounds: &Bounds) -> Result<Vox, String> {
                             .collect::<Result<_, _>>()?;
                         if parts.len() != 3 {
                             return Err(format!("the translation \"{t}\" is not three integers"));
+                        }
+                        // a translation is bounded where it is read, so that the sum of up to `max_depth` of them cannot wrap
+                        if parts.iter().any(|c| !(-REACH..=REACH).contains(c)) {
+                            return Err(format!("the translation \"{t}\" is too far from the origin"));
                         }
                         placement.translation = [parts[0], parts[1], parts[2]];
                     }
@@ -459,7 +467,7 @@ impl Vox {
                                 [i64::from(v[0]) - centre[0], i64::from(v[1]) - centre[1], i64::from(v[2]) - centre[2]];
                             let r = placement.rotation.apply(local);
                             let p: [i64; 3] = std::array::from_fn(|k| r[k] + placement.translation[k]);
-                            if p.iter().any(|c| c.abs() > (1 << 24)) {
+                            if p.iter().any(|c| !(-REACH..=REACH).contains(c)) {
                                 return Err(format!("the scene graph places a cell at {p:?}, too far from the origin"));
                             }
                             cells.insert(scene_cell([p[0] as i32, p[1] as i32, p[2] as i32]), v[3]);
