@@ -3176,7 +3176,20 @@ surface may take while it is made and drawn, at 1,240 bytes for each quad at the
 the upload, 408 on the device): the quads that a budget admits are its bytes over 1,240, rounded down (108,240 at 128 MiB), the surface is made plane by
 plane in a fixed order and the first plane that takes it over the budget stops the work with an error that says what the budget admits. Faces that
 lie on one plane, look one way and are of one class merge into rectangles, scanning the plane by `v` and then by `u` and taking the widest run first;
-the result is a function of the cells alone. The object has no `mesh`,
+the result is a function of the cells alone.
+
+**Drawing.** The renderer draws the quads as meshes of the raster pass and of the path tracer, with no change to either shader. The material of a
+palette index is the one that `palette` names for it (the i-th id), else the object's `material`, else the colour and the material of the file; an
+index with none of the three is an error that names it. Cells whose indices look alike (the same document material, or the same colour and file
+material, or the same emissive colour and strength) are one class: they merge into one quad, and the face between two cells of one see-through class
+(glass, a blended or transmissive material) is not made; between two see-through classes the lesser owns the face. A draw is made for each document
+material in use, for the file's indices that differ only in colour (the colour is in the vertices) and for each distinct emissive colour and strength;
+`voxel_groups` and `voxel_mesh_seconds` of the frame statistics count them. The file's materials are mapped as the engine decides, the format having no
+photometric unit: diffuse is a rough dielectric (`_rough`, else 0.8), metal has `_metal` (else 1) and `_rough` (else 0.2), glass has `_trans` (else 1), the
+index of refraction `_ri` or one plus `_ior` (else 1.5) and `_rough` (else 0.05), emit is an emission of `_emit` (else 1) times the colour, and blend is
+an alpha-blended opacity of `_alpha`; a type the reader does not know is drawn as diffuse and said so in the frame's notes. An emitter does not light
+its neighbours in the raster renderer, and in the path tracer only the paths that sample its faces see it (a light of the scene is the reliable way).
+The surface is made once for a grid, a palette and its materials and kept between frames: a frame that changes none of them makes no mesh. The object has no `mesh`,
 `volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
 every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
 

@@ -98,6 +98,9 @@ pub struct RenderStats {
     pub sim_rigid_seconds: f64,
     /// Seconds the ocean solver spent producing this frame's surface (inclusive, like all four `sim_*` fields).
     pub sim_ocean_seconds: f64,
+    /// Groups of voxel cells drawn (one draw each) and the CPU seconds spent preparing the surfaces of voxel objects this frame.
+    pub voxel_groups: usize,
+    pub voxel_mesh_seconds: f64,
     /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
     /// rigid-body stepping its colliders trigger.
     pub sim_smoke_seconds: f64,
@@ -349,6 +352,8 @@ pub struct Renderer {
     text: crate::text::TextCache,
     /// The current mesh key of each clay object (its old meshes are dropped when it changes).
     clay_keys: HashMap<Arc<str>, String>,
+    /// The surface of each voxels object between frames, by node id.
+    voxel_surfaces: HashMap<Arc<str>, render_three::VoxelState>,
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
     /// Burn only this caption track (an output's `burnCaptions`); otherwise tracks with mode burn or both.
     pub burn_captions: Option<String>,
@@ -940,6 +945,7 @@ impl Renderer {
             svgs: HashMap::new(),
             text: Default::default(),
             clay_keys: HashMap::new(),
+            voxel_surfaces: HashMap::new(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
             captions_off: false,

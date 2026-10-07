@@ -12,6 +12,10 @@ use glam::{Mat4, Vec3};
 use sr_3d::camera::{self, CameraParams, CameraView};
 use sr_3d::{AlphaMode, Asset, MaterialParams};
 
+#[path = "render_voxels.rs"]
+mod render_voxels;
+pub(in crate::render) use render_voxels::VoxelState;
+
 enum LoadedMesh {
     Static(Arc<Result<Asset, String>>),
     Sequence(sr_eval::mesh_sequence::Loaded),
@@ -1426,6 +1430,10 @@ impl Renderer {
         };
         if matches!(primitive_kind(n).as_str(), "map" | "globe") {
             self.map3d_draws(plan, ctx, j, world, opacity, doc_mat, cast, receive, draws);
+            return;
+        }
+        if primitive_kind(n) == "voxels" {
+            self.voxel_draws(plan, ctx, n, world, opacity, (cast, receive, catcher), draws);
             return;
         }
         if primitive_kind(n) != "mesh" {
