@@ -119,3 +119,61 @@ fn the_pieces_of_a_fracture_that_are_plates_spin_up_as_the_plates_they_are() {
         );
     }
 }
+
+/// The three plates of the box above as the pieces of a fracture, whatever shape the caller makes of them.
+fn plates_with(plate: impl Fn() -> Shape3) -> Result<World3, FractureError> {
+    let bodies = vec![
+        body(Shape3::Box([0.375, 0.5, 0.5]), 1800.0, true),
+        body(plate(), 600.0, true),
+        body(plate(), 600.0, true),
+        body(plate(), 600.0, true),
+    ];
+    let pieces = [(1, [-0.25, 0.0, 0.0]), (2, [0.0; 3]), (3, [0.25, 0.0, 0.0])];
+    let fragments = pieces.into_iter().map(|(body, offset)| Fragment3 { body, offset, impulse: [0.0; 3] }).collect();
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies,
+    })
+    .with_fractures(vec![Fracture3 { source: 0, at: 0.3, radial_impulse: 0.0, fragments, contact: None }])
+}
+
+#[test]
+fn a_piece_that_is_a_convex_hull_spins_up_as_the_plate_it_is() {
+    // the hull of the eight corners of a plate: its tensor comes from the same exact integrals as a mesh's, and not from Parry's hull routine, whose
+    // eigen solver puts the largest moment of a plate on the wrong axis
+    let (points, _) = cuboid([0.125, 0.5, 0.5]);
+    let mut w = plates_with(|| Shape3::Convex(points.clone())).unwrap();
+    for k in 1..=3 {
+        let alpha = spin_up(&mut w, k, 300.0);
+        assert!((alpha - 3.0).abs() < 1e-9, "hull {k} spins up at {alpha} rad/s2, a plate of 100 kg m2 under 300 at 3");
+    }
+}
+
+#[test]
+fn a_piece_whose_mesh_is_open_or_wound_both_ways_is_refused_and_one_with_unwelded_corners_is_not() {
+    let (points, triangles) = cuboid([0.125, 0.5, 0.5]);
+    // a face left out: no volume to speak of, and a tensor that depends on where the origin is
+    let open: Vec<[u32; 3]> = triangles[2..].to_vec();
+    assert!(plates_with(|| Shape3::Decomposition(points.clone(), open.clone())).is_err(), "an open mesh");
+    // one triangle turned over: two faces that meet with the same winding
+    let mut turned = triangles.clone();
+    turned[3].swap(1, 2);
+    assert!(plates_with(|| Shape3::Decomposition(points.clone(), turned.clone())).is_err(), "a mesh wound both ways");
+    // every triangle with corners of its own (as a mesh that was cut apart has): the same closed surface
+    let (mut loose, mut faces) = (Vec::new(), Vec::new());
+    for t in &triangles {
+        let base = loose.len() as u32;
+        loose.extend(t.iter().map(|i| points[*i as usize]));
+        faces.push([base, base + 1, base + 2]);
+    }
+    let mut w = plates_with(|| Shape3::Decomposition(loose.clone(), faces.clone())).unwrap();
+    let alpha = spin_up(&mut w, 1, 300.0);
+    assert!((alpha - 3.0).abs() < 1e-9, "{alpha}");
+}

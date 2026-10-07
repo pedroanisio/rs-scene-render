@@ -17,7 +17,7 @@ mod fracture;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
-use voxel_mass::{mesh_mass_properties, sum_mass_properties, voxel_mass_properties};
+use voxel_mass::{hull_mass_properties, mesh_mass_properties, sum_mass_properties, voxel_mass_properties};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 

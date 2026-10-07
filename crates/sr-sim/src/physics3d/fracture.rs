@@ -148,7 +148,16 @@ impl World3 {
                 // the closed mesh's own properties, worked out exactly (Parry's from_trimesh diagonalises with the solver that mistakes the axes of a plate)
                 mesh_mass_properties(&points, indices, spec.mass).ok_or(FractureError("fragment mesh has no volume"))?
             }
-            _ => self.state.colliders[body.colliders()[0]].mass_properties(),
+            _ => {
+                let collider = &self.state.colliders[body.colliders()[0]];
+                // a convex hull has its properties worked out exactly too, as a mesh's are
+                match collider.shape().as_convex_polyhedron() {
+                    Some(hull) => {
+                        hull_mass_properties(hull, spec.mass).ok_or(FractureError("fragment hull has no volume"))?
+                    }
+                    None => collider.mass_properties(),
+                }
+            }
         };
         valid_properties(&props)?;
         props.set_mass(spec.mass, true);
