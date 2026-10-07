@@ -50,6 +50,16 @@ const FIXED: &[(&str, &str, &str)] = &[
         "A camera with geodesics=\"true\" has denoise=\"true\": it does not denoise; pathSamples are antialiasing samples.",
     ),
     ("W05", "rules", "A camera with geodesics=\"true\" is in a scene with lights: they are not used."),
+    (
+        "W06",
+        "rules",
+        "A whitewater with foamMode=\"albedo\" names a foamMaterial: it is not used, the foam is the water's own.",
+    ),
+    (
+        "W07",
+        "rules",
+        "A whitewater with foamMode=\"albedo\" is in a scene where no camera has renderer=\"pathtrace\": the mix is the path tracer's, and the raster renderer reports an error.",
+    ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
     ("A03", "assets", "A remote input (http, https, s3, …) could not be verified offline."),

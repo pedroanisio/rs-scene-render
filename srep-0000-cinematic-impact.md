@@ -1556,7 +1556,11 @@ transmittance by one minus the same share, so opaque foam stops the sun that
 clear water lets through, and the albedo guide of the denoiser takes the mean
 albedo. The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
-needs an opaque alpha mode (also an error otherwise). A metallic or unlit water
+needs an opaque alpha mode (also an error otherwise). Two warnings say it before
+a renderer runs: W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
+used) and W07 (`foamMode="albedo"` in a scene where no camera has
+`renderer="pathtrace"`); the corpus has a document for each, and the valid
+albedo document has the path-traced camera. A metallic or unlit water
 has no foam mix made for it (the foam sample is a non-metal, lit surface; an
 unlit water draws its own colour). Scenes without the mix keep the text of the
 plain shaders and their pipelines; the water shader gains the declaration

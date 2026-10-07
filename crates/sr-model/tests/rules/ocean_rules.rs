@@ -1,3 +1,10 @@
+/// The codes of a scene whose composition is `node` after a camera `camera`.
+fn codes_seen_by(camera: &str, node: &str) -> Vec<String> {
+    codes(&format!("{camera}{node}"), "1.3")
+}
+
+const PATH_TRACER: &str = r#"<camera id="cam" renderer="pathtrace"/>"#;
+
 fn codes(node: &str, version: &str) -> Vec<String> {
     let xml = format!(
         r#"<scene version="{version}"><project width="64" height="64" fps="24" duration="2"/><assets><image id="bed" src="bed.png" width="8" height="8"/><mesh id="terrain" src="terrain.obj"/><audio id="sound" src="sound.wav"/></assets><composition>{node}</composition></scene>"#
@@ -153,7 +160,7 @@ fn numeric_bathymetry_does_not_silently_ignore_an_image_layer_selection() {
 fn whitewater_foam_can_be_drawn_as_particles_or_mixed_into_the_water_albedo() {
     for mode in ["particles", "albedo"] {
         let node = format!(r#"<ocean id="o"><whitewater foamMode="{mode}"/></ocean>"#);
-        assert!(codes(&node, "1.3").is_empty(), "{mode}: {:?}", codes(&node, "1.3"));
+        assert!(codes_seen_by(PATH_TRACER, &node).is_empty(), "{mode}: {:?}", codes_seen_by(PATH_TRACER, &node));
     }
     for mode in ["", "mix", "Albedo", "none"] {
         let node = format!(r#"<ocean id="o"><whitewater foamMode="{mode}"/></ocean>"#);
@@ -161,7 +168,7 @@ fn whitewater_foam_can_be_drawn_as_particles_or_mixed_into_the_water_albedo() {
     }
     // the mix's own attributes: a coverage radius over zero, an albedo and a roughness in 0 to 1
     let all = r#"<ocean id="o"><whitewater foamMode="albedo" foamRadius="1.5" foamAlbedo="0.9" foamRoughness="0.8"/></ocean>"#;
-    assert!(codes(all, "1.3").is_empty(), "{:?}", codes(all, "1.3"));
+    assert!(codes_seen_by(PATH_TRACER, all).is_empty(), "{:?}", codes_seen_by(PATH_TRACER, all));
     for bad in [
         r#"foamRadius="0""#,
         r#"foamRadius="-1""#,
@@ -179,11 +186,41 @@ fn a_foam_coverage_wider_than_64_cells_of_the_ocean_is_refused() {
     // the cell is the ocean's cellSize (1 when absent): 64 cells are the most, a wider coverage takes too many distances
     let ok = |attrs: &str, radius: &str| {
         let node = format!(r#"<ocean id="o" {attrs}><whitewater foamMode="albedo" foamRadius="{radius}"/></ocean>"#);
-        codes(&node, "1.3")
+        codes_seen_by(PATH_TRACER, &node)
     };
     assert!(ok("", "64").is_empty(), "{:?}", ok("", "64"));
     assert!(ok(r#"cellSize="0.5""#, "32").is_empty());
     assert!(ok("", "64.5").contains(&"OCN14".into()), "{:?}", ok("", "64.5"));
     assert!(ok(r#"cellSize="0.5""#, "33").contains(&"OCN14".into()));
     assert!(ok(r#"cellSize="2""#, "129").contains(&"OCN14".into()));
+}
+
+#[test]
+fn a_foam_material_in_the_albedo_mode_and_albedo_foam_without_a_path_traced_camera_are_warned_about() {
+    let albedo = r#"<ocean id="o"><whitewater foamMode="albedo"/></ocean>"#;
+    // a valid document that a renderer can run, and the warnings say what it will not do
+    assert!(codes_seen_by(PATH_TRACER, albedo).is_empty());
+    let raster = codes_seen_by(r#"<camera id="cam"/>"#, albedo);
+    assert_eq!(raster, ["W07"], "a raster camera: {raster:?}");
+    assert_eq!(codes(albedo, "1.3"), ["W07"], "no camera at all");
+    let particles = r#"<ocean id="o"><whitewater foamMode="particles"/></ocean>"#;
+    assert!(codes_seen_by(r#"<camera id="cam"/>"#, particles).is_empty(), "the particles mode needs no path tracer");
+    let with_material = r#"<ocean id="o"><whitewater foamMode="albedo" foamMaterial="m"/></ocean>"#;
+    let xml = format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><materials><material id="m"/></materials><composition>{PATH_TRACER}{with_material}</composition></scene>"#
+    );
+    let got: Vec<String> = sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets())
+        .diagnostics
+        .into_iter()
+        .map(|d| d.code)
+        .collect();
+    assert_eq!(got, ["W06"], "{got:?}");
+    // foamMaterial in the particles mode is what it is for
+    let xml = xml.replace(r#"foamMode="albedo""#, r#"foamMode="particles""#);
+    let got: Vec<String> = sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets())
+        .diagnostics
+        .into_iter()
+        .map(|d| d.code)
+        .collect();
+    assert!(got.is_empty(), "{got:?}");
 }

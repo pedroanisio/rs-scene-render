@@ -1062,6 +1062,28 @@ impl<'a> Eval<'a> {
                     "OCN14",
                     || "ocean whitewater foamRadius is at most 64 cells of the ocean: a wider coverage takes too many distances to the vertices of the surface.".into(),
                 );
+                // the foam mixed into the water is the path tracer's: warn where the document is valid and a renderer can run it
+                let albedo: Vec<_> = sources.iter().filter(|s| s.attribute("foamMode") == Some("albedo")).collect();
+                if albedo.iter().any(|s| s.attribute("foamMaterial").is_some()) {
+                    self.warn(
+                        n,
+                        "W06",
+                        "foamMaterial is not used by whitewater with foamMode=\"albedo\": the foam is the water's own."
+                            .into(),
+                    );
+                }
+                let path_traced = n
+                    .document()
+                    .root_element()
+                    .descendants()
+                    .any(|c| c.is_element() && is(c, "camera") && c.attribute("renderer") == Some("pathtrace"));
+                if !albedo.is_empty() && !path_traced {
+                    self.warn(
+                        n,
+                        "W07",
+                        "whitewater with foamMode=\"albedo\" is drawn only by the path tracer, and no camera has renderer=\"pathtrace\": a renderer reports an error.".into(),
+                    );
+                }
             }
             "particles3D" => {
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "P3D1", || {
