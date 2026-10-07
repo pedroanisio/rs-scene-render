@@ -241,3 +241,22 @@ fn no_load_is_no_stress_and_a_line_that_is_asked_for_a_moment_is_an_infinite_one
     let pull = Wrench { force: [10.0, 0.0, 0.0], moment: [0.0; 3], point: line.centroid };
     assert!((cut_stresses(&[&line], &[true], &pull)[0].normal - 10.0 / 0.04).abs() < 1e-9);
 }
+
+#[test]
+fn a_section_from_the_lattice_is_the_half_turn_about_x_of_it() {
+    // an area of 0.5 with its centre, a normal along +y of the lattice (down in the scene), second moments with every product, and a box
+    let second = [[1.0, 2.0, 3.0], [2.0, 4.0, 5.0], [3.0, 5.0, 6.0]];
+    let s = JointSection::from_lattice(0.5, [1.0, 2.0, 3.0], second, [0.0, 1.0, 0.0], [0.5, 1.5, 2.5], [1.5, 2.5, 3.5]);
+    assert_eq!(s.centroid, [1.0, -2.0, -3.0]);
+    assert_eq!(s.normal, [0.0, -1.0, 0.0]);
+    // the products with x and one of y, z change sign; the others do not
+    assert_eq!(s.second, [[1.0, -2.0, -3.0], [-2.0, 4.0, 5.0], [-3.0, 5.0, 6.0]]);
+    assert_eq!((s.lo, s.hi), ([0.5, -2.5, -3.5], [1.5, -1.5, -2.5]));
+    assert_eq!(s.area, 0.5);
+    // twice is the identity
+    let back = JointSection::from_lattice(s.area, s.centroid, s.second, s.normal, s.lo, s.hi);
+    assert_eq!(
+        (back.centroid, back.second, back.normal, back.lo, back.hi),
+        ([1.0, 2.0, 3.0], second, [0.0, 1.0, 0.0], [0.5, 1.5, 2.5], [1.5, 2.5, 3.5])
+    );
+}

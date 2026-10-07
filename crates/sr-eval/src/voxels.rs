@@ -250,3 +250,78 @@ pub fn fracture(
 
 /// The most pieces a partition may make: the world's own limit on the fragments of one event.
 const MAX_PIECES: usize = 4096;
+
+/// What a body of cells that breaks by stress needs besides its cells and the rule that cuts it into pieces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StressConfig {
+    /// Pascals: the principal tension that breaks a joint.
+    pub strength: f64,
+    /// Loose parts of fewer cells than this are dust.
+    pub min_cells: usize,
+    /// More loose parts than slots: the smallest are dust (true), or it is an error (false).
+    pub overflow_to_dust: bool,
+}
+
+/// The body of `occupancy` as pieces joined at the faces that they share, for the world to break where a load makes more stress than `config.strength` in a
+/// joint ([`sr_sim::physics3d::World3::with_stress`]): `rule` cuts it into pieces ([`sr_3d::pieces::partition`]), each piece has the mass of its cells
+/// (`density` kilograms a cubic metre, cells of `size` scene units, a metre being `pixels_per_meter` of them), its centre and second moment, and each joint has
+/// the exact section of the faces that its two pieces share ([`sr_3d::pieces::sections`], in metres, turned from the axes of the lattice into the physics'). `parent` is
+/// the body of the world that the cells are the shape of, which has to be the parent of a split with a slot for each piece that is to come loose. At most
+/// [`sr_sim::physics3d::MAX_STRESS_PIECES`] pieces: the cuts of the body are worked out for every joint.
+pub fn stress(
+    occupancy: &Occupancy,
+    rule: sr_3d::pieces::Partition,
+    config: &StressConfig,
+    parent: usize,
+    size: [f64; 3],
+    density: f64,
+    pixels_per_meter: f64,
+) -> Result<sr_sim::physics3d::Stress3, String> {
+    use sr_sim::physics3d::{Stress3, StressJoint3, StressPiece3, MAX_STRESS_PIECES};
+    if !(config.strength.is_finite() && config.strength > 0.0) {
+        return Err("a body breaks by stress at a strength that is a positive number of pascals".into());
+    }
+    let one = cell_mass(size, density, pixels_per_meter)?;
+    if occupancy.count() == 0 {
+        return Err("a body of cells needs at least one cell".into());
+    }
+    let metres = size.map(|c| c / pixels_per_meter);
+    let graph = sr_3d::pieces::partition(occupancy, rule, MAX_STRESS_PIECES)?;
+    let sections = sr_3d::pieces::sections(&graph, occupancy, metres)?;
+    let mut pieces = Vec::with_capacity(graph.pieces().len());
+    for (i, piece) in graph.pieces().iter().enumerate() {
+        // the world looks a cell up in the order of the keys, and the pieces list theirs in the order of the scan
+        let mut cells = piece.cells().to_vec();
+        cells.sort_unstable();
+        pieces.push(
+            StressPiece3::from_cells(&cells, metres, cells.len() as f64 * one)
+                .ok_or_else(|| format!("the piece {i} has no mass or no cells"))?,
+        );
+    }
+    let joints = graph
+        .edges()
+        .iter()
+        .zip(&sections)
+        .map(|(edge, s)| StressJoint3 {
+            a: edge.a(),
+            b: edge.b(),
+            // a joint whose faces' normals cancel (a core inside a shell) has no direction: zero, which the world reads as none
+            section: sr_sim::stress::JointSection::from_lattice(
+                s.area,
+                s.centroid,
+                s.second,
+                s.normal.unwrap_or([0.0; 3]),
+                s.lo,
+                s.hi,
+            ),
+        })
+        .collect();
+    Ok(Stress3 {
+        parent,
+        strength: config.strength,
+        pieces,
+        joints,
+        min_cells: config.min_cells,
+        overflow_to_dust: config.overflow_to_dust,
+    })
+}

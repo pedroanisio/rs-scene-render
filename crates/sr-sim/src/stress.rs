@@ -66,6 +66,24 @@ pub struct JointSection {
     pub hi: V3,
 }
 
+impl JointSection {
+    /// The section of a joint from the numbers of `sr_3d::pieces::Section` for the same joint, which are in the axes of the lattice (the scene's: y and z are the physics'
+    /// negated) and in the units of the cell size it was given, which has to be metres: the half turn about x, `(x, y, z) -> (x, -y, -z)`, on the centre, the normal, the
+    /// second moments (the products with y or z, not both, change sign) and the box (its corners on y and z swap).
+    pub fn from_lattice(area: f64, centroid: V3, second: [V3; 3], normal: V3, lo: V3, hi: V3) -> JointSection {
+        let flip = |v: V3| [v[0], -v[1], -v[2]];
+        let sign = |k: usize| if k == 0 { 1.0 } else { -1.0 };
+        JointSection {
+            area,
+            centroid: flip(centroid),
+            second: std::array::from_fn(|i| std::array::from_fn(|j| second[i][j] * sign(i) * sign(j))),
+            normal: flip(normal),
+            lo: [lo[0], -hi[1], -hi[2]],
+            hi: [hi[0], -lo[1], -lo[2]],
+        }
+    }
+}
+
 /// The load that the rest of a body puts on one side of a cut: a force (newtons) and a moment (newton metres) about `point`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Wrench {
