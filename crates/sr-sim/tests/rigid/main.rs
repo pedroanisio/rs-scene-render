@@ -10,6 +10,7 @@ mod fracture_contact;
 mod frames3;
 mod impacts3;
 mod internal_edges;
+mod mesh_fracture_inertia;
 mod sim;
 mod surface3;
 mod surface_prefetch;
