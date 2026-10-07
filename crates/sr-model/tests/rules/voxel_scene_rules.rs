@@ -66,6 +66,12 @@ fn the_slots_the_overflow_and_the_anchor_belong_to_a_body_that_has_something_to_
         assert!(body("density=\"2400\"", fracture, stretch).contains(&"VOX13".into()), "{stretch}");
     }
     assert!(body(r#"type="static" density="2400""#, crater, r#"scaleX="3" scaleY="3" scaleZ="3""#).is_empty());
+    // a number with a plus sign is a number (xs:double has it), and the same one written twice ways is the same scale
+    for same in [r#"scaleX="+2" scaleY="2" scaleZ="2""#, r#"scaleX=" +2.0 " scaleY="2e0" scaleZ="+2""#] {
+        assert!(body(r#"type="static" density="2400""#, crater, same).is_empty(), "{same}");
+        assert!(body("density=\"2400\"", fracture, same).is_empty(), "{same}");
+    }
+    assert!(body(r#"type="static" density="2400""#, crater, r#"scaleX="+2" scaleY="3""#).contains(&"VOX13".into()));
     assert!(body(r#"type="static" density="2400""#, &format!("{crater}{fracture}"), "").contains(&"VOX14".into()));
 }
 

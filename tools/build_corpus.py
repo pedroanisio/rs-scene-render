@@ -537,6 +537,7 @@ VALID = {
     "voxel-body": VOXEL_BODY,
     "voxel-crater": VOXEL_GROUND,
     "voxel-ejecta": VOXEL_EJECTA,
+    "voxel-crater-signed-scale": VOXEL_GROUND.replace('y="2">', 'y="2" scaleX="+3" scaleY="3" scaleZ=" 3.0 ">'),
     "voxel-fracture": VOXEL_FRACTURE,
     "voxel-fracture-planes": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 4 0 1 0 2"'),
     "voxel-fracture-labels": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels" labels="material"'),

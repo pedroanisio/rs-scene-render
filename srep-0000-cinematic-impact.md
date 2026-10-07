@@ -3201,7 +3201,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX14 | a body of cells has a crater or a fracture, not both |
 | VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 416 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 417 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 **Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of

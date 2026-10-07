@@ -577,9 +577,9 @@
     <sch:rule context="object3D/rigidBody">
       <sch:let name="voxels" value="boolean(parent::object3D[@primitive='voxels'])"/>
       <sch:let name="cells" value="boolean(parent::object3D[@primitive='voxels'] and (not(@shape) or @shape='auto' or @shape='voxels'))"/>
-      <sch:let name="sx" value="number(concat(../@scaleX, substring('1', 1 + string-length(../@scaleX))))"/>
-      <sch:let name="sy" value="number(concat(../@scaleY, substring('1', 1 + string-length(../@scaleY))))"/>
-      <sch:let name="sz" value="number(concat(../@scaleZ, substring('1', 1 + string-length(../@scaleZ))))"/>
+      <sch:let name="sx" value="number(concat(substring(normalize-space(../@scaleX), 1 + number(starts-with(normalize-space(../@scaleX), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleX)))))"/>
+      <sch:let name="sy" value="number(concat(substring(normalize-space(../@scaleY), 1 + number(starts-with(normalize-space(../@scaleY), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleY)))))"/>
+      <sch:let name="sz" value="number(concat(substring(normalize-space(../@scaleZ), 1 + number(starts-with(normalize-space(../@scaleZ), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleZ)))))"/>
       <sch:assert id="VOX8" test="not(@shape='voxels') or $voxels">a rigidBody with shape voxels belongs to an object3D of primitive voxels.</sch:assert>
       <sch:assert id="VOX9" test="$cells or not(@density or @maxFragments or @fragmentMinCells or @fragmentOverflow or @anchor)">density, maxFragments, fragmentMinCells, fragmentOverflow and anchor belong to a rigidBody whose collider is the cells of an object of primitive voxels.</sch:assert>
       <sch:assert id="VOX10" test="not($cells) or (@density and not(@mass))">a body of cells has a density and no mass (its mass is its cells').</sch:assert>

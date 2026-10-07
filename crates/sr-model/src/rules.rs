@@ -1675,7 +1675,13 @@ impl<'a> Eval<'a> {
                 let cells = voxels && matches!(a("shape"), None | Some("auto" | "voxels"));
                 let crater = owner.is_some_and(|o| kids(o, "crater").next().is_some());
                 let fracture = owner.is_some_and(|o| kids(o, "fracture").next().is_some());
-                let scale = |axis: &str| owner.and_then(|o| o.attribute(axis)).map_or(1.0, xpath_number);
+                // xs:double has the plus sign and XPath 1.0 does not: the Schematron takes it off, as here
+                let scale = |axis: &str| {
+                    owner.and_then(|o| o.attribute(axis)).map_or(1.0, |v| {
+                        let v = v.trim_matches([' ', '\t', '\n', '\r']);
+                        xpath_number(v.strip_prefix('+').unwrap_or(v))
+                    })
+                };
                 self.check(a("shape") != Some("voxels") || voxels, n, "VOX8", || {
                     "a rigidBody with shape voxels belongs to an object3D of primitive voxels.".into()
                 });
