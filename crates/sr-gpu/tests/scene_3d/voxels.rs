@@ -180,3 +180,89 @@ fn a_frame_that_changes_nothing_of_the_cells_gives_the_same_picture_to_the_bit()
     }
     assert!(frames[0] == frames[1] && frames[1] == frames[2], "a still object is the same picture at every time");
 }
+
+// ---------------------------------------------------------------------------------------------------------- T-junctions
+
+/// The cells of a ball of radius `r` cells (index 1): a closed body whose merged quads meet at vertices that lie on the edges of larger ones.
+fn ball(r: f32) -> Vec<([u8; 3], u8)> {
+    let n = (2.0 * r).ceil() as u8 + 1;
+    block(n, 1)
+        .into_iter()
+        .filter(|(c, _)| {
+            let d = |a: usize| f32::from(c[a]) + 0.5 - r;
+            (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)).sqrt() <= r
+        })
+        .collect()
+}
+
+/// Pixels that are background but enclosed by the body: the background that cannot be reached from the corners of the picture without
+/// crossing a pixel of the body (lighter than a half). A crack between two quads of a closed body shows as such a pixel.
+fn holes(shot: &Shot, size: usize) -> usize {
+    let solid = |i: usize| shot.pixels[i][0] > 0.5;
+    let mut reached = vec![false; size * size];
+    let mut stack = Vec::new();
+    for i in 0..size {
+        for p in [i, (size - 1) * size + i, i * size, i * size + size - 1] {
+            if !solid(p) && !reached[p] {
+                reached[p] = true;
+                stack.push(p);
+            }
+        }
+    }
+    while let Some(p) = stack.pop() {
+        let (x, y) = (p % size, p / size);
+        for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+            if nx < size && ny < size {
+                let q = ny * size + nx;
+                if !solid(q) && !reached[q] {
+                    reached[q] = true;
+                    stack.push(q);
+                }
+            }
+        }
+    }
+    (0..size * size).filter(|i| !solid(*i) && !reached[*i]).count()
+}
+
+#[test]
+fn a_closed_voxel_body_has_no_cracks_between_its_merged_quads_at_any_pose_in_either_renderer() {
+    let Some(gpu) = gpu() else { return };
+    // an unlit white ball of radius 10 on black: the quads that the merge makes meet at vertices that lie on the edges of larger quads (a
+    // T-junction), and a crack between them would show the black through the ball. Poses of the object in both axes, both renderers
+    let file = vox_file("ball.vox", &ball(6.0), &[[255, 255, 255, 255]]);
+    let materials = r##"<material id="white" baseColor="#FFFFFF" unlit="true"/>"##;
+    let mut worst = 0;
+    for (renderer, camera) in
+        [("raster", ""), ("path tracer", r#"renderer="pathtrace" pathSamples="4" maxBounces="1""#)]
+    {
+        // the camera goes round the ball (its centre is at the origin) at every pose; the ball does not move
+        for (ry, rx) in [
+            (0.0f32, 0.0f32),
+            (17.0, 5.0),
+            (41.0, 23.0),
+            (63.0, 77.0),
+            (97.0, 12.0),
+            (133.0, 61.0),
+            (171.0, 33.0),
+            (229.0, 49.0),
+            (283.0, 7.0),
+            (337.0, 85.0),
+        ] {
+            let (a, b) = (ry.to_radians(), rx.to_radians());
+            let (x, y, z) = (40.0 * a.sin() * b.cos(), -40.0 * b.sin(), -40.0 * a.cos() * b.cos());
+            let xml = document(&file, r#"palette="white""#, camera, materials)
+                .replace(r##"background="#202020""##, r##"background="#000000""##)
+                .replace(r#"x="4" y="-3" z="-24" target="obj""#, &format!(r#"x="{x}" y="{y}" z="{z}" target="mid""#))
+                .replace(r#"x="-4" y="-4" z="-4""#, r#"x="-6" y="-6" z="-6""#)
+                .replace("</composition>", r#"<object3D id="mid" primitive="box" width="0.1" height="0.1" depth="0.1" visible="false"/></composition>"#);
+            let shot = render(&gpu, &xml);
+            assert!(shot.errors.is_empty(), "{:?}", shot.errors);
+            let body = shot.pixels.iter().filter(|p| p[0] > 0.5).count();
+            assert!((600..1800).contains(&body), "the ball is seen, with room round it ({body} pixels of it)");
+            let count = holes(&shot, 64);
+            println!("{renderer} rotationY {ry} rotationX {rx}: {body} pixels of the body, {count} pixels of the background inside the silhouette");
+            worst = worst.max(count);
+        }
+    }
+    assert_eq!(worst, 0, "a crack shows the background through the closed body");
+}

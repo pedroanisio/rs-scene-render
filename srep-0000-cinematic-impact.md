@@ -3191,6 +3191,12 @@ an alpha-blended opacity of `_alpha`; a type the reader does not know is drawn a
 its neighbours in the raster renderer, and in the path tracer only the paths that sample its faces see it (a light of the scene is the reliable way).
 The surface is made once for a grid, a palette and its materials and kept between frames: a frame that changes none of them makes no mesh.
 
+**T-junctions.** The merge leaves vertices of smaller quads on the edges of larger ones. A probe renders an unlit white ball of radius 6 cells
+(about 1,100 pixels of a picture of 64 x 64) on black from 10 poses all round it, in the raster renderer (with its multisampling) and in the path tracer
+(4 samples), and counts the pixels of the background enclosed by the body (not reached from the corners without crossing it): 0 in all 20 pictures, so
+no crack shows at that size. The probe says nothing of larger pictures or of bodies with larger flat faces, where a sub-pixel gap between the edges of
+two quads is more likely; the surface is not conformed (no vertex is added on the longer edge).
+
 **Measured cost** (`crates/sr-3d/examples/voxel_surface_probe.rs`, `ci` profile, one core of the host, the CPU side only: the exposed faces, their merge
 into quads and the expansion into 96-byte vertices; the upload and the draw are not in it):
 
