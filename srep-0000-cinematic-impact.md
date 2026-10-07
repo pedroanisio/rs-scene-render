@@ -1460,7 +1460,7 @@ name: at most 4096 distinct objects, a plane or mesh with a crater or a closed b
 one), OCN7 (collider geometry is static), OCN8 (`bodyCoupling` needs `colliders`), OCN9
 (`bodyDrag` belongs to an ocean with `colliders`), OCN10 to OCN12 (a `waterImpulse` with
 `source`: no derived attribute given, a dynamic rigid body without a crater listed in
-`colliders`, one impulse per body) OCN13 (`splash` names emitters of crater ejecta) and OCN14 (a foam coverage radius of at most 64 cells).
+`colliders`, one impulse per body) OCN13 (`splash` names emitters of crater ejecta) and OCN14 (a foam coverage radius of at most 64 cells; it is checked in the particles mode too, where the radius is ignored, so that a document does not become invalid by changing the mode).
 Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
@@ -1539,11 +1539,12 @@ each foam tracer instead gives the vertices of the water surface within
 tracer's life and fading linearly to zero after it; shares of several tracers
 combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
 The coverage is made on the CPU for every surface vertex, per frame, and is
-budgeted: it counts the distances it will take (every living tracer takes one
+budgeted (the distances against a budget of their own, equal to the whitewater's
+`maxWork` for each frame, that is not shared with the solver's): it counts the distances it will take (every living tracer takes one
 for each vertex of the 3 x 3 squares of side `foamRadius` around it) before
 taking any, and fails with its cause when they pass the whitewater's `maxWork`;
-and the bins, the shares not yet covered and the coverage itself (at most 80
-bytes a vertex while it is made) count in the surface's `surfaceMemoryMiB`.
+and the arrays of the coverage (16 bytes a vertex and 4 for each square of its
+grid, exactly) count in the surface's `surfaceMemoryMiB`.
 Foam that is not drawn as triangles is not charged to the whitewater mesh budget.
 The share rides in the alpha of the vertex colour and is the share of the
 surface's area that the foam covers: a path-traced sample on a covered surface
@@ -1564,13 +1565,16 @@ read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 agai
 0.0088), so the cost is the band of the surface where the share is neither, and the
 denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
-needs an opaque alpha mode (also an error otherwise). Two warnings say it before
-a renderer runs: W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
+needs an opaque alpha mode (also an error otherwise). Three warnings say it before
+a renderer runs: W08 (an unlit or emissive water), W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
 used) and W07 (`foamMode="albedo"` in a scene where no camera has
 `renderer="pathtrace"`); the corpus has a document for each, and the valid
-albedo document has the path-traced camera. A metallic or unlit water
-has no foam mix made for it (the foam sample is a non-metal, lit surface; an
-unlit water draws its own colour). Scenes without the mix keep the text of the
+albedo document has the path-traced camera. A metallic water is covered by foam like any other (the foam sample is a
+non-metal surface, so a wholly covered metallic sea is the same white as a
+dielectric one: 0.1926 against 0.1928 of the quadrature); an unlit water, which
+draws its own colour, and an emissive one, whose emission the foam samples would add
+to their own, are refused with an error that names the cause and the ocean is not
+drawn (W08 says so in the document). Scenes without the mix keep the text of the
 plain shaders and their pipelines; the water shader gains the declaration
 `override FOAM` and one branch that is off without foam, so that its identity is
 a measurement (the same picture, bit for bit, on an NVIDIA adapter) and not a

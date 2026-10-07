@@ -1438,21 +1438,31 @@ impl Renderer {
                     if let Some(c) =
                         config.filter(|c| c.get_attr("foamMode").is_some_and(|v| v.to_string() == "albedo"))
                     {
-                        if material.alpha_mode == sr_3d::AlphaMode::Opaque {
-                            let a = Attrs { e: c, props: None };
-                            material.foam_mix = Some(sr_3d::FoamMix {
-                                albedo: a.num("foamAlbedo", 0.9) as f32,
-                                roughness: a.num("foamRoughness", 0.8) as f32,
-                            });
-                        } else {
+                        let shines = material.unlit
+                            || (material.emissive_strength > 0.0 && material.emissive.iter().any(|c| *c > 0.0));
+                        if material.alpha_mode != sr_3d::AlphaMode::Opaque {
                             plan.stats.errors.push(format!(
-                                "{}: whitewater foamMode=\"albedo\" needs a water material with an opaque alpha mode",
+                                "{}: whitewater foamMode=\"albedo\" needs a water material with an opaque alpha mode; the ocean is not drawn",
                                 n.id
                             ));
                             // the share of foam rides in the alpha of the vertices: drawn as it is, the water would be as
                             // transparent as the foam is absent
                             return;
                         }
+                        if shines {
+                            // the shading that takes the foam is the lit surface's: an unlit water draws its own colour and an emissive
+                            // one adds its emission to the foam's samples, so there the foam would show only in the denoiser's guide
+                            plan.stats.errors.push(format!(
+                                "{}: whitewater foamMode=\"albedo\" needs a lit water material without emission: an unlit or emissive one is not drawn with the foam; the ocean is not drawn",
+                                n.id
+                            ));
+                            return;
+                        }
+                        let a = Attrs { e: c, props: None };
+                        material.foam_mix = Some(sr_3d::FoamMix {
+                            albedo: a.num("foamAlbedo", 0.9) as f32,
+                            roughness: a.num("foamRoughness", 0.8) as f32,
+                        });
                     }
                 }
                 draws.push(Draw3 {
@@ -3130,7 +3140,7 @@ fn foam_needs_the_path_tracer(id: &str, camera_asks: bool, limit: Option<&str>) 
             "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer, which cannot render this pass ({limit}), and the raster renderer does not draw it"
         ),
         _ => format!(
-            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it"
+            "{id}: whitewater foamMode=\"albedo\" is drawn only by the path tracer (the camera's renderer=\"pathtrace\"); the raster renderer does not draw it, and the 3D pass is not drawn"
         ),
     }
 }

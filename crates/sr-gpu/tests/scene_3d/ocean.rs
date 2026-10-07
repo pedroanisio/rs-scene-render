@@ -105,17 +105,23 @@ fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_whitens_the_wa
 }
 
 #[test]
-fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a_blended_water() {
+fn whitewater_foam_in_the_albedo_mode_is_refused_for_a_raster_camera_and_for_water_that_is_not_opaque_lit_and_dark() {
     let Some(gpu) = gpu() else { return };
-    // the mix is the path tracer's: the raster renderer says so instead of drawing no foam, and the water must be opaque
-    for (camera, water, wants) in [
-        ("", r##"baseColor="#102040""##, "path tracer"),
-        (
-            r#"renderer="pathtrace" pathSamples="2" maxBounces="1""#,
-            r##"baseColor="#102040" alphaMode="blend""##,
-            "opaque",
-        ),
-    ] {
+    // the mix is the path tracer's, of an opaque lit water that does not shine by itself: each of the others is an error that names
+    // the attribute and what is wrong, and the water is not drawn (a raster camera discards the whole 3D pass, as its error says)
+    let path = r#"renderer="pathtrace" pathSamples="2" maxBounces="1""#;
+    let lit = r##"baseColor="#102040""##;
+    let cases = [
+        ("", lit.to_string(), "path tracer"),
+        (path, format!(r#"{lit} alphaMode="blend""#), "opaque"),
+        (path, format!(r#"{lit} alphaMode="mask""#), "opaque"),
+        (path, format!(r#"{lit} unlit="true""#), "lit"),
+        (path, format!(r##"{lit} emissive="#FFFFFF" emissiveStrength="2""##), "emission"),
+    ];
+    // the background #101020 as a linear colour
+    let linear = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let expected = [linear(16.0 / 255.0), linear(16.0 / 255.0), linear(32.0 / 255.0)];
+    for (camera, water, wants) in cases {
         let xml = format!(
             r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="2" background="#101020"/><materials><material id="water" {water} roughness="0.3" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" {camera}/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0" foamMode="albedo"/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/></lights></scene>"##
         );
@@ -130,13 +136,16 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a
             "{camera} / {water}: no error says why: {:?}",
             out.stats.errors
         );
-        // and nothing of the water is drawn: not the water seen through the share of foam that rides in the alpha of its vertices
-        let background = renderer.read(&out.texture);
-        let corner = background[0];
-        assert!(
-            background.iter().all(|p| p.iter().zip(corner).all(|(a, b)| (a - b).abs() < 1e-4)),
-            "{camera} / {water}: the water is drawn although the frame is refused"
-        );
+        // and nothing of the water is drawn: every pixel is the background, and the background is not black
+        let frame = renderer.read(&out.texture);
+        for p in &frame {
+            for k in 0..3 {
+                assert!(
+                    (p[k] - expected[k]).abs() < 2e-3,
+                    "{camera} / {water}: a pixel {p:?} is not the background {expected:?}"
+                );
+            }
+        }
     }
 }
 

@@ -56,6 +56,11 @@ const FIXED: &[(&str, &str, &str)] = &[
         "A whitewater with foamMode=\"albedo\" names a foamMaterial: it is not used, the foam is the water's own.",
     ),
     (
+        "W08",
+        "rules",
+        "A whitewater with foamMode=\"albedo\" is in an ocean whose material is unlit or emissive: the foam mix needs a lit material without emission, and a renderer reports an error.",
+    ),
+    (
         "W07",
         "rules",
         "A whitewater with foamMode=\"albedo\" is in a scene where no camera has renderer=\"pathtrace\": the mix is the path tracer's, and the raster renderer reports an error.",

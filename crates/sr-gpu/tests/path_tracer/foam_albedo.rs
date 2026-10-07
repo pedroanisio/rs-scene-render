@@ -161,6 +161,12 @@ fn foam_on_a_surface_that_lets_no_light_through_gives_the_same_white_and_changes
     let want = dome * (spec + 0.9 * diffuse) as f32;
     println!("covered opaque sea: picture {got:.4}, quadrature {want:.4}");
     assert!((got - want).abs() <= 0.02 * want, "{got} against {want}");
+    // a metallic water is covered by foam as well: the foam sample is a non-metal, so a wholly covered metallic sea is the same white
+    let metal = MaterialParams { metallic: 1.0, ..sea(Some(FOAM)) };
+    let px = eng.render_now(&scene(&eng, vec![plane(&eng, 0.0, metal, |_| 1.0)], Some(dome), false, TOP), None);
+    let got = mean(&px, 24, 40, 24, 40);
+    println!("covered metallic sea: picture {got:.4}, quadrature {want:.4}");
+    assert!((got - want).abs() <= 0.02 * want, "{got} against {want}");
     // with no foam anywhere the picture is the one of the same material without the mix, bit for bit
     let bare = plane(&eng, 0.0, sea(Some(FOAM)), |_| 0.0);
     let plain = plane(&eng, 0.0, sea(None), |_| 0.0);

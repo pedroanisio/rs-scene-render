@@ -1077,6 +1077,26 @@ impl<'a> Eval<'a> {
                     .root_element()
                     .descendants()
                     .any(|c| c.is_element() && is(c, "camera") && c.attribute("renderer") == Some("pathtrace"));
+                // an unlit or emissive water is refused by a renderer (it draws its own colour, and the foam would be in the guide of the
+                // denoiser only): a warning where the document says so
+                let ocean_material = a("material").and_then(|id| {
+                    n.document()
+                        .root_element()
+                        .descendants()
+                        .find(|m| m.is_element() && is(*m, "material") && m.attribute("id") == Some(id))
+                });
+                if !albedo.is_empty()
+                    && ocean_material.is_some_and(|m| {
+                        matches!(m.attribute("unlit"), Some("true" | "1"))
+                            || (m.attribute("emissive").is_some() && m.attribute("emissiveStrength") != Some("0"))
+                    })
+                {
+                    self.warn(
+                        n,
+                        "W08",
+                        "whitewater with foamMode=\"albedo\" needs a lit water material without emission: a renderer reports an error for an unlit or emissive one.".into(),
+                    );
+                }
                 if !albedo.is_empty() && !path_traced {
                     self.warn(
                         n,

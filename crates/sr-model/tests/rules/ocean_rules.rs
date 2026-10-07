@@ -224,3 +224,34 @@ fn a_foam_material_in_the_albedo_mode_and_albedo_foam_without_a_path_traced_came
         .collect();
     assert!(got.is_empty(), "{got:?}");
 }
+
+#[test]
+fn an_unlit_or_emissive_water_with_albedo_foam_is_warned_about_and_a_lit_one_is_not() {
+    let scene = |material: &str, foam: &str| {
+        format!(
+            r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><materials><material id="w" {material}/></materials><composition>{PATH_TRACER}<ocean id="o" material="w"><whitewater {foam}/></ocean></composition></scene>"#
+        )
+    };
+    let codes_of = |xml: String| -> Vec<String> {
+        sr_model::validate_str(&xml, &sr_model::LoadOptions::without_assets())
+            .diagnostics
+            .into_iter()
+            .map(|d| d.code)
+            .collect()
+    };
+    assert!(
+        codes_of(scene(r##"baseColor="#102040" metallic="1""##, r#"foamMode="albedo""#)).is_empty(),
+        "a metallic water takes foam"
+    );
+    for shining in [r#"unlit="true""#, r##"emissive="#FFFFFF""##] {
+        assert_eq!(codes_of(scene(shining, r#"foamMode="albedo""#)), ["W08"], "{shining}");
+        assert!(
+            codes_of(scene(shining, r#"foamMode="particles""#)).is_empty(),
+            "{shining}: the particles mode draws the water as it always did"
+        );
+    }
+    assert!(
+        codes_of(scene(r##"emissive="#FFFFFF" emissiveStrength="0""##, r#"foamMode="albedo""#)).is_empty(),
+        "no strength, no emission"
+    );
+}

@@ -1044,6 +1044,9 @@
     ],
     "w07-foam-raster.scene.xml": [
       "W07"
+    ],
+    "w08-foam-unlit.scene.xml": [
+      "W08"
     ]
   }
 }
