@@ -323,7 +323,8 @@ pub struct Flyer {
     pub slots: usize,
     pub min_cells: usize,
     pub dust: bool,
-    /// Two walls (static boxes) at this distance from the middle on each side, along x, if any: what the halves of a beam that has broken in two fly into.
+    /// Two walls (static boxes) at this distance from the middle on each side, along y, if any: what the halves of a beam that has broken in two fly into (a beam that spins about z
+    /// sends its halves off along +y and -y).
     pub walls: Option<f64>,
 }
 
@@ -345,7 +346,7 @@ impl Flyer {
         }
         if let Some(d) = walls {
             for side in [-1.0, 1.0] {
-                let mut wall = body(Shape3::Box([0.1, 2.0, 2.0]), 1e6, [side * (d + 0.1), 0.0, 0.0]);
+                let mut wall = body(Shape3::Box([3.0, 0.1, 3.0]), 1e6, [0.0, side * (d + 0.1), 0.0]);
                 wall.kind = BodyKind::Static;
                 bodies.push(wall);
             }
@@ -1092,4 +1093,47 @@ fn a_beam_that_spins_has_in_each_joint_the_pull_of_the_part_beyond_it_by_the_cen
         assert_eq!(*joint as usize, j);
         assert!((principal / want - 1.0).abs() < 2e-3, "joint {j}: {principal} against {want}");
     }
+}
+
+/// A beam of six cubes spinning at 12 rad/s breaks at its middle joint alone (a strength a little over what the joints on each side of it read) and its two halves fly
+/// off along +y and -y into two walls, which they hit together, and every joint of each breaks: two bodies of the same family break in the same step, with `slots` slots
+/// in all for the pieces (one is taken by the first break).
+fn halves_into_walls(slots: usize, dust: bool) -> World3 {
+    let (n, edge, omega) = (6, 0.4f64, 12.0);
+    let mass = DENSITY * edge.powi(3);
+    let strength = 4.25 * mass * omega * omega / edge;
+    Flyer { n, edge, strength, omega, drift: [0.0; 3], slots, min_cells: 1, dust, walls: Some(0.9) }.world()
+}
+
+#[test]
+fn two_bodies_of_a_family_that_break_in_the_same_step_share_the_pool_and_the_one_that_does_not_fit_is_an_error_or_dust()
+{
+    // three slots: the first break takes one, the two halves that hit the walls together need two each and there are two left
+    let mut w = halves_into_walls(3, false);
+    let mut broke_apart = None;
+    let mut errors = Vec::new();
+    for step in 1..=240u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        if broke_apart.is_none() && w.stress_pieces(0).is_some_and(|h| h.len() == 1) {
+            broke_apart = Some(step);
+        }
+        if !frame.errors.is_empty() {
+            errors = frame.errors;
+            break;
+        }
+    }
+    // the first body takes the two that are free, and the second finds none: an error that names both numbers, and not an index out of the pool
+    assert!(
+        errors.iter().any(|e| e.contains("2 loose parts") && e.contains("0 slots free") && e.contains("maxFragments")),
+        "{errors:?} (the parent broke apart at {broke_apart:?})"
+    );
+    // with the overflow to dust it is the same step and no error: the second body's loose parts are dust, the pool is used once
+    let mut w = halves_into_walls(3, true);
+    for step in 1..=240u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "step {step}: {:?}", frame.errors);
+    }
+    let held: Vec<usize> = (0..4).filter_map(|k| w.stress_pieces(k).map(<[u32]>::len)).collect();
+    // the parent and slot 1 hold what is left of the halves (one piece each, the others being the two slots and the dust), and the slots 2 and 3 hold one piece each
+    assert_eq!(held.iter().sum::<usize>(), 4, "{held:?}");
 }

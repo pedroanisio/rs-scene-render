@@ -605,7 +605,14 @@ impl World3 {
     }
 
     /// The cut that the pending joints of the body `k` make, or none if there are none.
-    pub(super) fn stress_install_for(&self, k: usize, step: u64) -> Result<Option<StressInstall>, String> {
+    /// `reserved` is how many of the slots of the pool the other bodies of the family that break in this same step have taken already: the pool is one for all of them, and the
+    /// slots are not given out until the cuts are installed, so each body is asked in turn with what the ones before it will take.
+    pub(super) fn stress_install_for(
+        &self,
+        k: usize,
+        step: u64,
+        reserved: usize,
+    ) -> Result<Option<StressInstall>, String> {
         let pending = &self.state.stress_pending[k];
         if pending.is_empty() {
             return Ok(None);
@@ -644,7 +651,8 @@ impl World3 {
             }
             keep
         });
-        let free = self.voxel_splits[family.split].slots.len() - self.state.slots_used[family.split];
+        let free =
+            self.voxel_splits[family.split].slots.len().saturating_sub(self.state.slots_used[family.split] + reserved);
         if loose.len() > free {
             if !family.overflow_to_dust {
                 return Err(format!(

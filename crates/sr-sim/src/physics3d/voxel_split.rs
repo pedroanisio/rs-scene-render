@@ -170,20 +170,26 @@ impl World3 {
             stress: Option<StressInstall>,
         }
         let mut prepared: Vec<Prepared> = Vec::new();
+        let mut claimed = vec![0usize; self.voxel_splits.len()];
         // the cuts to look at: every split's parent, which the driver cuts from an impact, and every body of a family that breaks by stress that has joints put aside
         // at the end of the last step, which cuts itself (the joints that are over strength, all together)
         let mut jobs: Vec<(usize, usize, Option<StressInstall>)> =
             (0..self.voxel_splits.len()).map(|s| (s, self.voxel_splits[s].parent, None)).collect();
         // the joints that break and leave the body in one piece are recorded when the cuts are installed, with the rest
         let mut only_broken: Vec<(usize, StressInstall)> = Vec::new();
+        // the slots of each split that the cuts of this call have claimed, in the order of the bodies: the pool of a family is one, and what each cut takes is not out of it until all
+        // are installed, so a cut is asked how many are free after the ones before it
+        let mut reserved = vec![0usize; self.voxel_splits.len()];
         for k in 0..self.spec.bodies.len() {
             if self.state.stress_pending[k].is_empty() {
                 continue;
             }
             let family = self.stress_of[k].expect("a body with joints put aside is in a family");
-            if let Some(install) = self.stress_install_for(k, step)? {
+            let split = self.stress_split(family);
+            if let Some(install) = self.stress_install_for(k, step, reserved[split])? {
                 if install.cut.is_some() {
-                    jobs.push((self.stress_split(family), k, Some(install)));
+                    reserved[split] += install.loose.len();
+                    jobs.push((split, k, Some(install)));
                 } else {
                     only_broken.push((k, install));
                 }
@@ -213,7 +219,8 @@ impl World3 {
                     cut
                 }
             };
-            let free = slots.len() - self.state.slots_used[s];
+            // the slots that the cuts before this one in the call will take are not out of the pool yet: a second cut of the same split asked with the whole pool would find them free
+            let free = slots.len().saturating_sub(self.state.slots_used[s] + claimed[s]);
             if cut.pieces.len() > free {
                 return Err(format!(
                     "a cut of body {parent} separates {} pieces and only {free} of its {} slots are free (maxFragments)",
@@ -221,6 +228,7 @@ impl World3 {
                     slots.len()
                 ));
             }
+            claimed[s] += cut.pieces.len();
             if !cut.parent_mass.is_finite()
                 || cut.parent_mass < 0.0
                 || cut.pieces.iter().any(|p| !(p.mass.is_finite() && p.mass > 0.0) || p.cells.is_empty())
