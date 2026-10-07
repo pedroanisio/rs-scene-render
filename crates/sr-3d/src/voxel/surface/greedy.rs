@@ -33,10 +33,13 @@ pub fn mesh_quads(grid: &Occupancy, classes: &Classes) -> Vec<Quad> {
     mesh_quads_within(grid, classes, usize::MAX).expect("a surface with no budget to exceed")
 }
 
-/// What a quad costs at the most, in bytes: the 16 of the compact list, the 408 of its four vertices and six indices in the builder, the
-/// 408 of the copy a mesh upload keeps on the host and the 408 of the buffers on the device. A surface budget in bytes admits that
-/// many quads divided by this.
-pub const BYTES_PER_QUAD: usize = 16 + 3 * 408;
+/// What a quad costs at the most, in bytes, while a surface is replaced: its 24 in the cache's slices, in the list that
+/// [`SurfaceCache::quads`](super::SurfaceCache::quads) makes and in the copy that sorts it into the groups drawn, and the vertices and
+/// indices of its mesh, 408, on the host (an upload keeps the vectors the builder made) and on the device. The meshes that a rebuild
+/// replaces are released before it makes the new ones. The device's is counted from the sizes of the buffers, not measured. A surface
+/// budget in bytes admits that many quads divided by this.
+pub const BYTES_PER_QUAD: usize =
+    3 * std::mem::size_of::<Quad>() + 2 * (4 * std::mem::size_of::<crate::Vertex>() + 6 * 4);
 
 /// [`mesh_quads`] under a budget of `max_bytes` (the object's `surfaceMemoryMiB`): the quads are counted as the planes are merged, in
 /// a fixed order, and the first plane that takes the surface over the budget stops the work with an error that says how many quads the

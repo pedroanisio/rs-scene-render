@@ -319,6 +319,9 @@ impl Renderer {
             let mut remeshed = (0, false);
             if self.voxel_surfaces.get(&state_key).and_then(|s| s.signature) != Some(signature) {
                 let state = self.voxel_surfaces.entry(state_key.clone()).or_default();
+                // the meshes that this rebuild replaces are released before the new ones are made (the budget counts one set of them)
+                state.groups.clear();
+                state.signature = None;
                 let update = match body.steps {
                     None => state.cache.update(body.grid, &classes, budget),
                     Some(steps) => state.cache.update_steps(
@@ -349,6 +352,7 @@ impl Renderer {
                     }
                 }
                 let mut out = Vec::new();
+                let mut failed = false;
                 let limit = self.gpu.device.limits().max_buffer_size;
                 for (group, quads) in by_group {
                     let colour = |class: u8| -> [f32; 4] {
@@ -366,14 +370,16 @@ impl Renderer {
                     {
                         plan.stats.errors.push(format!("{}: voxel surface exceeds device buffer limits", n.id));
                         out.clear();
+                        failed = true;
                         break;
                     }
-                    let mesh = self.three_engine().upload_mesh(&primitive.vertices, &primitive.indices);
+                    let mesh = self.three_engine().upload_mesh_owned(primitive.vertices, primitive.indices);
                     out.push(GroupDraw { group: group.clone(), mesh });
                 }
                 let state = self.voxel_surfaces.get_mut(&state_key).expect("the state of this body");
                 state.groups = out;
-                state.signature = Some(signature);
+                // a surface that could not be drawn is made again at the next frame, and says why again
+                state.signature = (!failed).then_some(signature);
             }
             let state = &self.voxel_surfaces[&state_key];
             let model_matrix = body.world * Mat4::from_scale(Vec3::splat(cell_size));

@@ -517,13 +517,16 @@ fn checkerboard(n: i32) -> Occupancy {
 
 #[test]
 fn a_surface_that_fits_its_budget_is_made_and_one_a_quad_over_is_refused_with_its_cause() {
-    assert_eq!(
-        BYTES_PER_QUAD, 1240,
-        "16 for the quad, 408 for the builder's vertices, 408 for the copy of the upload, 408 on the device"
-    );
+    // what a quad costs while a surface is replaced, from the sizes of what is alive: the quad in the cache's slices, in the list that
+    // `quads()` makes and in the copy that sorts it into groups (24 each), and the vertices and indices of its mesh on the host (the
+    // upload keeps the builder's vectors) and on the device (408 each); the meshes it replaces are released before the new ones are made
+    let mesh = 4 * std::mem::size_of::<sr_3d::Vertex>() + 6 * std::mem::size_of::<u32>();
+    assert_eq!((std::mem::size_of::<sr_3d::voxel::surface::Quad>(), mesh), (24, 408));
+    assert_eq!(BYTES_PER_QUAD, 3 * 24 + 2 * 408);
+    assert_eq!(BYTES_PER_QUAD, 888);
     // the quads that a budget admits are its bytes over the bytes a quad costs at its peak, rounded down
-    assert_eq!((128usize << 20) / BYTES_PER_QUAD, 108_240);
-    assert_eq!((256usize << 20) / BYTES_PER_QUAD, 216_480);
+    assert_eq!((128usize << 20) / BYTES_PER_QUAD, 151_146);
+    assert_eq!((256usize << 20) / BYTES_PER_QUAD, 302_292);
     let g = checkerboard(6);
     let quads = mesh_quads(&g, &Classes::identity()).len();
     assert_eq!(quads, 6 * 108, "six faces for each of the 108 cells");

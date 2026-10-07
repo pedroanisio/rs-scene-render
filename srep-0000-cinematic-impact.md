@@ -3172,8 +3172,7 @@ An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette
 `palette` is the word `file` or at most 255 material IDs, in the order of the palette indices 1, 2, ... (VOX6); the material of a
 cell is the one of its index, else the object's `material`, else the colour of the file, and an index with none of the three is an
 error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. `surfaceMemoryMiB` (1 to 4096; the engine's default is 128) is the most memory the
-surface may take while it is made and drawn, at 1,240 bytes for each quad at the peak (16 in the compact list, 408 in the builder, 408 for the copy of
-the upload, 408 on the device): the quads that a budget admits are its bytes over 1,240, rounded down (108,240 at 128 MiB), the surface is made plane by
+surface may take while it is made and drawn, at 888 bytes for each quad at the peak (24 in the cache's slices, 24 in the list of quads and 24 in the copy that sorts them into the groups drawn, and 408, the vertices and indices of its mesh, on the host and on the device; the meshes that a rebuild replaces are released before the new ones are made, and the device's 408 is counted from the sizes of the buffers, not measured): the quads that a budget admits are its bytes over 888, rounded down (151,146 at 128 MiB), the surface is made plane by
 plane in a fixed order and the first plane that takes it over the budget stops the work with an error that says what the budget admits. Faces that
 lie on one plane, look one way and are of one class merge into rectangles, scanning the plane by `v` and then by `u` and taking the widest run first;
 the result is a function of the cells alone.
