@@ -4783,6 +4783,17 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="1"/><xs:maxInclusive value="1.3"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="repose">
+      <xs:annotation><xs:documentation>
+        Only with `source` (CRT10), and not with `mantle="true"` (CRT12): the angle of repose of the debris, in degrees (10 to 60). The ejecta
+        particles that come to rest on the ground are removed and their volume (mass over the target's density) is poured onto a
+        height field of deposit over the final crater, which relaxes at this angle in a fixed order over sixteen neighbours, without making or losing
+        volume; the deposit is added to the height of the ground in the crater's deformation. Absent (the default), the settled particles
+        are not removed and nothing is added to the ground. The deposit is as faithful as the grid is fine: a pile of fewer than ten cells'
+        radius is not within two degrees of the angle. The particles do not see the deposit, and nor does the rigid world or the ocean.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="10"/><xs:maxInclusive value="60"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="targetDensity" type="positiveDecimal"/>
     <xs:attribute name="strength" type="nonNegativeDecimal"/>
     <xs:attribute name="gravity" type="positiveDecimal"/>

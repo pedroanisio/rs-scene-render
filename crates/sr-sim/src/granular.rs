@@ -34,8 +34,10 @@ pub struct Bed {
     cells: [usize; 2],
     cell: f64,
     tan: f64,
-    ground: Vec<f64>,
+    ground: std::sync::Arc<[f64]>,
     deposit: Vec<f64>,
+    /// The first and last column and row of the cells that have ever held deposit (inclusive); a pass looks at no others.
+    active: Option<[usize; 4]>,
 }
 
 impl Bed {
@@ -58,11 +60,30 @@ impl Bed {
         if ground.iter().any(|h| !h.is_finite()) {
             return Err("the ground of a bed must be finite".into());
         }
-        Ok(Self { cells, cell, tan: repose.to_radians().tan(), deposit: vec![0.0; ground.len()], ground })
+        Ok(Self {
+            cells,
+            cell,
+            tan: repose.to_radians().tan(),
+            deposit: vec![0.0; ground.len()],
+            ground: ground.into(),
+            active: None,
+        })
     }
 
     pub fn cells(&self) -> [usize; 2] {
         self.cells
+    }
+
+    /// The height of the deposit in every cell, row by row.
+    pub fn heights(&self) -> &[f64] {
+        &self.deposit
+    }
+
+    fn reach(&mut self, ix: usize, iz: usize) {
+        self.active = Some(match self.active {
+            None => [ix, ix, iz, iz],
+            Some([x0, x1, z0, z1]) => [x0.min(ix), x1.max(ix), z0.min(iz), z1.max(iz)],
+        });
     }
 
     /// The height of the deposit in a cell.
@@ -73,6 +94,9 @@ impl Bed {
     /// Sets the deposit of a cell, which is not made by pouring (a bed that starts with something on it).
     pub fn set_deposit(&mut self, ix: usize, iz: usize, height: f64) {
         self.deposit[iz * self.cells[0] + ix] = height.max(0.0);
+        if height > 0.0 {
+            self.reach(ix, iz);
+        }
     }
 
     /// Cubic units of deposit.
@@ -104,7 +128,10 @@ impl Bed {
         for (dz, wz) in [(0, 1.0 - fz), (1, fz)] {
             for (dx, wx) in [(0, 1.0 - fx), (1, fx)] {
                 let (x, z) = ((ix + dx).min(self.cells[0] - 1), (iz + dz).min(self.cells[1] - 1));
-                self.deposit[z * self.cells[0] + x] += height * wx * wz;
+                if wx * wz > 0.0 {
+                    self.deposit[z * self.cells[0] + x] += height * wx * wz;
+                    self.reach(x, z);
+                }
             }
         }
         Ok(())
@@ -114,8 +141,9 @@ impl Bed {
     /// no deposit stands on a surface steeper than the angle of repose that it could run down.
     pub fn steepest_transferable(&self) -> f64 {
         let mut most = 0.0f64;
-        for iz in 0..self.cells[1] {
-            for ix in 0..self.cells[0] {
+        let Some([x0, x1, z0, z1]) = self.active else { return 0.0 };
+        for iz in z0..=z1 {
+            for ix in x0..=x1 {
                 for (_, moved) in self.moves(ix, iz) {
                     most = most.max(moved);
                 }
@@ -148,8 +176,9 @@ impl Bed {
     pub fn relax(&mut self, tolerance: f64, max_passes: u32) -> Result<u32, String> {
         for pass in 0..=max_passes {
             let mut most = 0.0f64;
-            for iz in 0..self.cells[1] {
-                for ix in 0..self.cells[0] {
+            let Some(mut scan) = self.active else { return Ok(pass) };
+            for iz in scan[2]..=scan[3] {
+                for ix in scan[0]..=scan[1] {
                     let i = iz * self.cells[0] + ix;
                     for &(ox, oz) in &OFFSETS {
                         let (x, z) = (ix as i64 + ox as i64, iz as i64 + oz as i64);
@@ -164,10 +193,13 @@ impl Bed {
                             self.deposit[i] -= moved;
                             self.deposit[j] += moved;
                             most = most.max(moved);
+                            let (jx, jz) = (x as usize, z as usize);
+                            scan = [scan[0].min(jx), scan[1].max(jx), scan[2].min(jz), scan[3].max(jz)];
                         }
                     }
                 }
             }
+            self.active = Some(scan);
             if most <= tolerance {
                 return Ok(pass);
             }

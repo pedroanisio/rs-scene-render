@@ -29,6 +29,13 @@ pub struct ImpactCrater {
     pub spec: sr_3d::crater::Spec,
     /// The volumes the ground has to add up to, with a mantle (`crater@mantle`); none without.
     pub budget: Option<sr_3d::crater::Budget>,
+    /// The angle of repose, degrees, of what the ejecta that settle make on the ground (`crater@repose`); none without.
+    pub repose: Option<f64>,
+    /// What has settled on the ground by the time of the frame, when the frame has been through the particles that threw it:
+    /// added to the height of the ground in the deformation.
+    pub deposit: Option<sr_3d::crater::Deposit>,
+    /// Object units to a metre: the scale that the law's lengths and volumes are brought to the owner's object space by.
+    pub(crate) units: f64,
     /// What the impact itself was, for what it causes besides the crater (smoke).
     pub(crate) cause: ImpactCause,
 }
@@ -105,6 +112,8 @@ pub(crate) struct CraterSource {
     pub(crate) mantle: bool,
     /// What the rim and the mantle put back, in volumes of the bowl (`crater@bulking`); none leaves it to the law's rim.
     pub(crate) bulking: Option<f64>,
+    /// The angle of repose of what settles on the ground (`crater@repose`).
+    pub(crate) repose: Option<f64>,
     /// The last impact worked out and its crater: the law reads the impact and the source and not the time, so a
     /// crater that is asked about again for the same impact (every rigid step, every frame) is not worked out again.
     memo: Memo,
@@ -173,6 +182,7 @@ impl CraterSource {
                 .ok_or("crater memory budget overflow")?,
             mantle: text(element, "mantle").as_deref() == Some("true"),
             bulking: element_number(element, "bulking"),
+            repose: element_number(element, "repose"),
             memo: Memo::default(),
         })
     }
@@ -277,7 +287,7 @@ fn worked_out(source: &CraterSource, impact: &Impact3, age: f64) -> Result<Impac
         ejecta: law.ejecta_volume * cubic,
         bulking: source.bulking,
     });
-    Ok(ImpactCrater { age, duration: law.duration, spec, budget, cause })
+    Ok(ImpactCrater { age, duration: law.duration, spec, budget, repose: source.repose, deposit: None, units, cause })
 }
 
 pub fn at(node: &FrameNode) -> Result<Option<Deformation>, String> {
@@ -287,6 +297,14 @@ pub fn at(node: &FrameNode) -> Result<Option<Deformation>, String> {
 
 pub(crate) fn from_element(owner: &dyn Element, time: f64) -> Result<Option<Deformation>, String> {
     from_element_with(owner, time, None)
+}
+
+/// The kernel of the ground of the crater that `impact` makes, without what has settled on it.
+pub(crate) fn ground_kernel(impact: &ImpactCrater) -> Result<sr_3d::crater::Crater, String> {
+    match impact.budget {
+        Some(budget) => sr_3d::crater::Crater::conserving(impact.spec, budget),
+        None => sr_3d::crater::Crater::new(impact.spec),
+    }
 }
 
 /// The deformation a crater with `impact` makes now.
@@ -300,10 +318,10 @@ pub(crate) fn from_impact(element: &dyn Element, impact: &ImpactCrater) -> Resul
     };
     let max_bytes =
         (num(element, "maxMemoryMiB", 128.) as usize).checked_mul(1 << 20).ok_or("crater memory budget overflow")?;
-    let kernel = match impact.budget {
-        Some(budget) => sr_3d::crater::Crater::conserving(impact.spec, budget)?,
-        None => sr_3d::crater::Crater::new(impact.spec)?,
-    };
+    let mut kernel = ground_kernel(impact)?;
+    if let Some(deposit) = &impact.deposit {
+        kernel = kernel.with_deposit(deposit.clone());
+    }
     Ok(Deformation { kernel, progress, max_bytes })
 }
 

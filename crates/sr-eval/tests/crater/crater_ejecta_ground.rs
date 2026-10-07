@@ -164,3 +164,79 @@ fn with_a_mantle_the_ejecta_that_come_to_rest_are_taken_out_and_the_replay_is_id
     assert_eq!(first.key, again.key);
     assert_eq!(first.frame, again.frame);
 }
+
+/// The same scene with the ejecta's crater given an angle of repose for what settles.
+fn with_repose(count: usize, segments: usize) -> Evaluator {
+    let xml = scene(count, segments, "", 90478)
+        .replace(r#"<crater id="pit" source="impactor""#, r#"<crater id="pit" repose="35" source="impactor""#);
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    Evaluator::new(&doc, &Default::default()).unwrap()
+}
+
+/// The mass of the particles in a frame, kilograms.
+fn mass_of(ev: &Evaluator, t: f64) -> f64 {
+    ejecta(ev, t).frame.particles.iter().map(|q| q.mass).sum()
+}
+
+/// The deposit that lies on the ground at `t`: none for a crater that has not got one.
+fn deposit_of(ev: &Evaluator, t: f64) -> Option<sr_3d::crater::Deposit> {
+    let frame = ev.evaluate(t);
+    assert!(
+        frame.failures.is_empty() && frame.problems.is_empty(),
+        "t = {t}: {:?} {:?}",
+        frame.failures,
+        frame.problems
+    );
+    let node = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap();
+    sr_eval::crater::at(node).unwrap().expect("a crater").kernel.deposit().cloned()
+}
+
+#[test]
+fn the_mass_of_the_ejecta_that_settles_is_in_the_ground_as_a_deposit_and_nowhere_else() {
+    let (plain, bed) = (evaluator(1000, 80), with_repose(1000, 80));
+    // the whole of what is thrown out, from the scene without the attribute, in which none is removed
+    let thrown = mass_of(&plain, 5.5);
+    let left = mass_of(&bed, 5.5);
+    let settled = thrown - left;
+    println!("DEBRIS thrown {thrown:.1} kg, still moving {left:.1} kg, settled {settled:.1} kg");
+    assert!(settled > 0.1 * thrown && left > 0.0, "{settled} of {thrown}");
+    // in the scene's units, the crater of soft rock of 2100 kg/m3 at one scene unit a metre
+    let deposit = deposit_of(&bed, 5.5).expect("a deposit on the ground");
+    println!("DEBRIS deposit {:.6} against {:.6}", deposit.volume(), settled / 2100.0);
+    assert!(
+        (deposit.volume() - settled / 2100.0).abs() < 1e-9 * (settled / 2100.0),
+        "{} against {}",
+        deposit.volume(),
+        settled / 2100.0
+    );
+    // without the attribute nothing is put on the ground
+    assert!(deposit_of(&plain, 5.5).is_none());
+    // before anything has settled there is none: at 1.6 s the rock has just landed
+    assert!(deposit_of(&bed, 1.6).is_none_or(|d| d.volume() < 0.05 * settled / 2100.0));
+}
+
+#[test]
+fn the_deposit_grows_as_the_ejecta_settle_and_is_the_same_whatever_order_the_frames_are_asked_in() {
+    let ev = with_repose(1000, 80);
+    let started = std::time::Instant::now();
+    let volumes: Vec<f64> =
+        [2.0, 3.0, 4.0, 5.5].iter().map(|&t| deposit_of(&ev, t).map_or(0.0, |d| d.volume())).collect();
+    println!("DEBRIS volume at 2, 3, 4, 5.5 s: {volumes:.3?}; {:.2} s for the four", started.elapsed().as_secs_f64());
+    // the same four frames of the scene without the deposit, for what the deposit costs
+    let plain = evaluator(1000, 80);
+    let started = std::time::Instant::now();
+    for t in [2.0, 3.0, 4.0, 5.5] {
+        ejecta(&plain, t);
+    }
+    println!("DEBRIS the same frames without the angle of repose: {:.2} s", started.elapsed().as_secs_f64());
+    assert!(volumes.windows(2).all(|w| w[1] >= w[0]), "{volumes:?}");
+    assert!(volumes[3] > volumes[0]);
+    // going back and forward gives the same, and so does an evaluator that has seen none of it
+    let forward = deposit_of(&ev, 5.5).unwrap();
+    let early = deposit_of(&ev, 3.0).unwrap();
+    let again = deposit_of(&ev, 5.5).unwrap();
+    assert_eq!(forward, again);
+    let fresh = with_repose(1000, 80);
+    assert_eq!(deposit_of(&fresh, 3.0).unwrap(), early);
+    assert_eq!(deposit_of(&fresh, 5.5).unwrap(), forward);
+}

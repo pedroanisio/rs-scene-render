@@ -22,6 +22,7 @@ pub mod codes;
 pub mod crater;
 pub mod curve;
 pub mod data;
+mod debris;
 pub mod eval;
 pub mod expr;
 pub mod fracture;

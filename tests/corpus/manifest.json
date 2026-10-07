@@ -247,11 +247,20 @@
     "crt10-mantle-without-source.scene.xml": [
       "CRT10"
     ],
+    "crt10-repose-without-source.scene.xml": [
+      "CRT10"
+    ],
     "crt11-bulking-range.scene.xml": [
       "S06"
     ],
     "crt11-bulking-without-mantle.scene.xml": [
       "CRT11"
+    ],
+    "crt12-repose-range.scene.xml": [
+      "S06"
+    ],
+    "crt12-repose-with-mantle.scene.xml": [
+      "CRT12"
     ],
     "crt2.scene.xml": [
       "CRT2"
@@ -899,6 +908,7 @@
     "crater-impact.scene.xml": [],
     "crater-mantle-bulking.scene.xml": [],
     "crater-mantle.scene.xml": [],
+    "crater-repose.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
     "fracture-contact-tuned.scene.xml": [],

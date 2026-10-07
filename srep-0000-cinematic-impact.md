@@ -1917,8 +1917,15 @@ in `sr-sim`); the analytic mantle, with all of its 0.8 V outside the rim and out
 particles do, which is not corrected here.
 
 Granular debris is a height field of deposit over the ground (`sr_sim::granular::Bed`) that relaxes to an angle of repose in a fixed order over sixteen neighbours, without making or losing
-volume; it is a module of the simulation and is not yet connected to any attribute or scene: no particle is deposited into it and no ground takes its height. A volume poured at one point of level
-ground piles into a cone whose flank, in each sector of 15 degrees, is within 2 degrees of the declared angle when the pile is ten cells of radius or more (34.1 to 35.6 degrees for 35, and 28.6 to 30.5, 23.7 to 25.5,
+volume. `crater@repose` (10 to 60 degrees, only with `source`, never with `mantle="true"`: **CRT10**, **CRT12**) connects it to the scene: the emitter of the crater's ejecta takes out each
+particle that comes to rest on the ground (0.5 m a second relative to it, as with the mantle), tells where it lay in the plane of the crater and how much of the target it stood for (its mass over the
+target's density), and the volumes are poured, step by step, onto a bed of 144 by 144 cells (twelve to the crest radius, six crest radii to each side) over the grown crater, which relaxes after each step.
+The bed after the steps that a frame's particles have computed lies on the ground in that frame, as a height added in the crater's deformation to what the bowl and the rim give. The bed is a fold of
+a log of what settled, so it is the same whatever order the frames are asked in (tested to the bit), and is kept at checkpoints like the particles'. For the authored rock thrown as 1000 ejecta, 73 621 kg of the 169 634 kg
+have settled by 5.5 s and the deposit is 35.0577 m3 of the 35.0577 that their mass stands for. Limits: the particles and the rigid world land on the ground without the deposit; what reads the crater
+after the particles in a frame (the render, and any simulation that runs after them) sees it; material that settles beyond six crest radii is put on the edge of the bed; an emitter deposits on one crater; and
+the ground the deposit relaxes on is the final crater, also for what settles during its growth. A volume poured at one point of level
+ground piles into a cone whose flank, in each sector of 15 degrees, is within 2 degrees of the declared angle when the pile is ten cells of radius or more (34.1 to 35.6 degrees for 35, and 29.2 to 30.5, 23.7 to 25.5,
 38.3 to 40.6 and 34.5 to 35.6 for 30, 25, 40 and 35 at 10, 12, 12 and 20 cells), and up to about 5 degrees off for piles of 5 to 8 cells (26.2 to 30.0 degrees for 30 at 5 cells and 26.9 to 30.8 at 8). Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
@@ -3273,6 +3280,7 @@ Also includes `pyroShape`, inventoried below.
 | `capture` | xs:boolean | Default `false`; only with `source` (CRT9): the body that makes the crater is arrested by it |
 | `mantle` | xs:boolean | Default `false`; only with `source` (CRT10): the ejecta come down as a mantle that is part of the ground, and the volumes add up |
 | `bulking` | xs:double; 1 to 1.3 | Optional, only with `mantle="true"` (CRT10, CRT11); what the rim and the mantle put back, in volumes of the bowl; without it, what the law's own rim height asks for |
+| `repose` | xs:double; 10 to 60 | Optional, only with `source` and not with `mantle="true"` (CRT10, CRT12); the angle of repose in degrees of the debris: the ejecta particles that come to rest are removed and their volume is poured onto a deposit that relaxes at this angle and lies on the ground |
 | `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
 | `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
 | `strength` | nonNegativeDecimal | Optional with `source`: Pa |
