@@ -1,12 +1,12 @@
 //! A body of cells divided into pieces (the partition of `sr_3d::pieces`) that are bodies of cells for the rigid world's fracture: every cell
-//! and every kilogram of the source is in one piece, and the world given them breaks the source into them with the motion it had.
+//! and every kilogram of the source is in one piece or in the dust, and the world given them breaks the source into them with the motion it had.
 #![allow(clippy::needless_range_loop)]
 
 use sr_3d::occupancy::Occupancy;
-use sr_3d::pieces::{partition, Partition, Plane};
-use sr_eval::voxels::{fracture, FracturePolicy, Fractured, Overflow};
+use sr_3d::pieces::{Partition, Plane};
+use sr_eval::voxels::{fracture, Body, FracturePolicy, Fractured, Overflow};
 use sr_sim::fields::Field;
-use sr_sim::physics3d::*;
+use sr_sim::physics3d::{shape_mass_properties, *};
 use std::collections::BTreeSet;
 
 const SIZE: [f64; 3] = [0.25; 3];
@@ -35,6 +35,15 @@ fn cells_of(shape: &Shape3) -> Vec<[i32; 3]> {
     cells.clone()
 }
 
+/// The block of 12 by 6 by 6 cells cut by the planes x >= 2 and x >= 6 into columns of 72, 144 and 216 cells.
+fn columns() -> (Occupancy, [Plane; 2]) {
+    (block(12, 6, 6), [Plane { normal: [1, 0, 0], offset: 4 }, Plane { normal: [1, 0, 0], offset: 12 }])
+}
+
+fn cells_in(f: &Fractured) -> Vec<usize> {
+    f.pieces.iter().map(|p| cells_of(&p.shape).len()).collect()
+}
+
 #[test]
 fn every_cell_and_every_kilogram_of_the_source_is_in_exactly_one_piece() {
     let o = block(12, 6, 6);
@@ -54,49 +63,62 @@ fn every_cell_and_every_kilogram_of_the_source_is_in_exactly_one_piece() {
     let total: f64 = f.pieces.iter().map(|p| p.mass).sum();
     assert!((total - f.source.mass).abs() < 1e-9 * total, "{total} against {}", f.source.mass);
     assert_eq!(cells_of(&f.source.shape).len(), o.count() as usize);
-    // the pieces are the graph's, in its order, with its joints
-    assert_eq!(f.graph, partition(&o, Partition::Voronoi { seeds: 5, seed: 7 }, 16).unwrap());
+    assert!(f.dust.is_empty() && f.dust_body.is_none());
     assert_eq!(f.graph.pieces().len(), f.pieces.len());
-    assert!(!f.graph.edges().is_empty());
+    assert_eq!(f.piece_ids, (0..f.pieces.len()).collect::<Vec<_>>());
 }
 
 #[test]
-fn the_pieces_do_not_depend_on_the_order_the_cells_were_put_in() {
-    let o = block(9, 5, 4);
-    let reversed =
-        Occupancy::from_cells(o.cells().collect::<Vec<_>>().into_iter().rev().map(|c| (c, o.get(c)))).unwrap();
-    let rule = || Partition::Planes(&[Plane { normal: [1, 0, 0], offset: 9 }, Plane { normal: [0, 1, 0], offset: 5 }]);
-    let a = fracture(&o, rule(), &keep(8), SIZE, DENSITY, 1.0).unwrap();
-    let b = fracture(&reversed, rule(), &keep(8), SIZE, DENSITY, 1.0).unwrap();
+fn the_pieces_and_their_joints_are_the_ones_a_hand_count_gives() {
+    // the columns of 72, 144 and 216 cells: each joint is the 6 by 6 faces of the plane between two of them, and the first and the last do not touch
+    let (o, planes) = columns();
+    let f = fracture(&o, Partition::Planes(&planes), &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    assert_eq!(cells_in(&f), vec![72, 144, 216]);
+    let joints: Vec<(u32, u32, u64)> = f.graph.edges().iter().map(|e| (e.a(), e.b(), e.total_faces())).collect();
+    assert_eq!(joints, vec![(0, 1, 36), (1, 2, 36)]);
+    // the pieces list their cells in the order of the scan: along x, then y, then z
+    let first = cells_of(&f.pieces[0].shape);
+    assert_eq!(first[..3], [[0, 0, 0], [1, 0, 0], [0, 1, 0]]);
+}
+
+#[test]
+fn the_pieces_do_not_depend_on_the_order_of_the_seeds_that_cut_the_body() {
+    // seeds in doubled coordinates, found so that no cell of the block is at the same distance from two of them: the nearest one is the same in any
+    // order, and the pieces are
+    // numbered by their first cell and not by their seed
+    let o = block(12, 6, 6);
+    let seeds = [[3i64, 5, 0], [0, 0, 10], [17, 0, 6], [21, 3, 6]];
+    let reversed = [seeds[3], seeds[2], seeds[1], seeds[0]];
+    let shuffled = [seeds[1], seeds[3], seeds[0], seeds[2]];
+    let a = fracture(&o, Partition::VoronoiAt(&seeds), &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    let b = fracture(&o, Partition::VoronoiAt(&reversed), &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    let c = fracture(&o, Partition::VoronoiAt(&shuffled), &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    assert!(a.pieces.len() >= 4, "{} pieces", a.pieces.len());
     assert_eq!(a, b);
-    assert_eq!(a.pieces.len(), 4, "two planes cut the block into four");
+    assert_eq!(a, c);
 }
 
 #[test]
 fn what_cannot_be_broken_is_an_error_that_says_why() {
     let o = block(8, 4, 4);
     let many = fracture(&o, Partition::Voronoi { seeds: 12, seed: 3 }, &keep(3), SIZE, DENSITY, 1.0).unwrap_err();
-    assert!(many.contains("piece"), "{many}");
+    assert!(many.contains("maxFragments") && many.contains("slots"), "{many}");
     let empty = Occupancy::from_cells(Vec::<([i32; 3], u8)>::new()).unwrap();
-    assert!(fracture(&empty, Partition::Voronoi { seeds: 2, seed: 1 }, &keep(4), SIZE, DENSITY, 1.0).is_err());
+    let e = fracture(&empty, Partition::Voronoi { seeds: 2, seed: 1 }, &keep(4), SIZE, DENSITY, 1.0).unwrap_err();
+    assert!(e.contains("at least one cell"), "{e}");
     for (size, density, ppm) in [([0.0; 3], DENSITY, 1.0), (SIZE, 0.0, 1.0), (SIZE, DENSITY, f64::NAN)] {
-        assert!(fracture(&o, Partition::Voronoi { seeds: 2, seed: 1 }, &keep(4), size, density, ppm).is_err());
+        let e = fracture(&o, Partition::Voronoi { seeds: 2, seed: 1 }, &keep(4), size, density, ppm).unwrap_err();
+        assert!(e.contains("positive"), "{e}");
     }
 }
 
-/// The source at rest but for a velocity, nothing else in the world.
-struct Still;
-impl Driver3 for Still {
-    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
-        vec![Pose3::default(); which.len()]
-    }
-    fn fields(&mut self, _: f64) -> Vec<Field> {
-        vec![]
-    }
+/// The source of a fracture as a body of the world, with the velocity and the spin that the tests give it.
+fn source_spec(source: &Body, velocity: [f64; 3], spin: [f64; 3]) -> Body3Spec {
+    Body3Spec { velocity, angular_velocity: spin, ..piece_spec(source) }
 }
 
-fn spec(f: &Fractured) -> Body3Spec {
-    let body = |b: &sr_eval::voxels::Body| Body3Spec {
+fn piece_spec(b: &Body) -> Body3Spec {
+    Body3Spec {
         kind: BodyKind::Dynamic,
         shape: b.shape.clone(),
         mass: b.mass,
@@ -112,26 +134,16 @@ fn spec(f: &Fractured) -> Body3Spec {
         fixed_rotation: false,
         bullet: false,
         activate_at: 0.,
-        start: Pose3::default(),
-    };
-    let _ = f;
-    Body3Spec { velocity: [1.0, 0.4, -0.3], ..body(&f.source) }
+        start: Pose3 { pos: [0.3, -1.0, 0.2], rot: [0., 0., 0., 1.] },
+    }
 }
 
-#[test]
-fn the_world_given_the_pieces_breaks_the_source_into_them_with_the_velocity_it_had() {
-    let o = block(10, 6, 6);
-    let f = fracture(&o, Partition::Voronoi { seeds: 4, seed: 11 }, &keep(8), SIZE, DENSITY, 1.0).unwrap();
-    let mut bodies = vec![spec(&f)];
-    for p in &f.pieces {
-        let mut b = spec(&f);
-        b.shape = p.shape.clone();
-        b.mass = p.mass;
-        b.velocity = [0.; 3];
-        bodies.push(b);
-    }
+/// The world of a fracture made by [`fracture`]: the source, then its pieces as the fragments, at `at`.
+fn world_of(f: &Fractured, velocity: [f64; 3], spin: [f64; 3], at: f64) -> Result<World3, FractureError> {
+    let mut bodies = vec![source_spec(&f.source, velocity, spin)];
+    bodies.extend(f.pieces.iter().map(piece_spec));
     let fragments = (1..=f.pieces.len()).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
-    let mut w = World3::new(World3Spec {
+    World3::new(World3Spec {
         fix_internal_edges: false,
         start: 0.,
         step: 0.01,
@@ -142,29 +154,62 @@ fn the_world_given_the_pieces_breaks_the_source_into_them_with_the_velocity_it_h
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at: 0.2, radial_impulse: 0.0, fragments, contact: None, dust: None }])
-    .unwrap();
-    let frame = w.frame_at(0.3, &mut Still);
+    .with_fractures(vec![Fracture3 {
+        source: 0,
+        at,
+        radial_impulse: 0.0,
+        fragments,
+        contact: None,
+        dust: f.dust_body.clone(),
+    }])
+}
+
+/// The source at rest but for what it was given, nothing else in the world.
+struct Still;
+impl Driver3 for Still {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+#[test]
+fn the_world_given_the_pieces_puts_each_where_its_cells_were_with_the_velocity_of_that_point_of_the_source() {
+    // the source spins and moves: at the instant of the fracture (the first, so that it has not turned) each piece's centre of mass is where its cells'
+    // centre of mass was and it moves as that point of the body did, v + w x d, and has the body's spin
+    let o = block(10, 6, 6);
+    let f = fracture(&o, Partition::Voronoi { seeds: 4, seed: 11 }, &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    assert!(f.pieces.len() >= 3);
+    let (v0, w0) = ([1.0, 0.4, -0.3], [20.0, 10.0, 40.0]);
+    let mut w = world_of(&f, v0, w0, 0.0).unwrap();
+    let frame = w.frame_at(0.0, &mut Still);
     assert!(frame.errors.is_empty(), "{:?}", frame.errors);
     assert_eq!(frame.fractured, vec![true]);
     let shown: BTreeSet<usize> = (0..frame.enabled.len()).filter(|k| frame.enabled[*k]).collect();
     assert_eq!(shown, (1..=f.pieces.len()).collect::<BTreeSet<_>>());
-    // pieces of one body with no spin and no impulse all move as it moved
-    for k in 1..=f.pieces.len() {
-        for a in 0..3 {
-            assert!((frame.velocities[k].linear[a] - [1.0, 0.4, -0.3][a]).abs() < 1e-9, "piece {k} axis {a}");
-            assert!(frame.velocities[k].angular[a].abs() < 1e-9);
+    let whole = shape_mass_properties(&f.source.shape, f.source.mass, 1.0).unwrap();
+    let c0: [f64; 3] = std::array::from_fn(|i| frame.bodies[0].pos[i] + whole.centre[i]);
+    for (k, piece) in f.pieces.iter().enumerate() {
+        let q = shape_mass_properties(&piece.shape, piece.mass, 1.0).unwrap();
+        let placed = &frame.bodies[k + 1];
+        let com: [f64; 3] = std::array::from_fn(|i| placed.pos[i] + q.centre[i]);
+        // the piece is placed at the source's origin: its cells are in the source's frame, so its centre of mass is where those cells' was
+        assert!((com[0] - (0.3 + q.centre[0])).abs() < 1e-12, "piece {k} is put at the source's own place");
+        let d: [f64; 3] = std::array::from_fn(|i| com[i] - c0[i]);
+        let turn = cross(w0.map(f64::to_radians), d);
+        for i in 0..3 {
+            let wanted = v0[i] + turn[i];
+            let got = frame.velocities[k + 1].linear[i];
+            assert!((got - wanted).abs() < 1e-9, "piece {k}, axis {i}: {got} against {wanted}");
+            assert!((frame.velocities[k + 1].angular[i] - w0[i]).abs() < 1e-9, "the spin of piece {k}");
         }
     }
-}
-
-/// The block of 12 by 6 by 6 cells cut by the planes x >= 2 and x >= 6 into columns of 72, 144 and 216 cells.
-fn columns() -> (Occupancy, [Plane; 2]) {
-    (block(12, 6, 6), [Plane { normal: [1, 0, 0], offset: 4 }, Plane { normal: [1, 0, 0], offset: 12 }])
-}
-
-fn cells_in(f: &Fractured) -> Vec<usize> {
-    f.pieces.iter().map(|p| cells_of(&p.shape).len()).collect()
 }
 
 #[test]
@@ -177,21 +222,23 @@ fn the_pieces_with_fewer_cells_than_the_least_are_dust_that_leaves_with_the_frac
     assert_eq!(f.graph.pieces().len(), 3, "the graph has all the pieces");
     assert_eq!(f.dust.len(), 72);
     assert!(f.dust.iter().all(|c| c[0] < 2), "the dust is the column of 72 cells");
-    // every cell is a body's, the dust's or nowhere else, and the source has the mass of the bodies and all the cells
+    // every cell is a body's, the dust's or nowhere else
     let mut every: Vec<[i32; 3]> = f.dust.clone();
     every.extend(f.pieces.iter().flat_map(|p| cells_of(&p.shape)));
     every.sort_unstable();
     let mut wanted: Vec<[i32; 3]> = o.cells().collect();
     wanted.sort_unstable();
     assert_eq!(every, wanted);
+    // the source weighs all its cells, and the fragments and the dust sum to it
     assert_eq!(cells_of(&f.source.shape).len(), 432);
-    let total: f64 = f.pieces.iter().map(|p| p.mass).sum();
-    assert!(
-        (f.source.mass - total).abs() < 1e-9 * total,
-        "the source has the mass of its pieces: {} against {total}",
-        f.source.mass
-    );
-    assert!((total + 72.0 * CELL_MASS - 432.0 * CELL_MASS).abs() < 1e-9 * total, "and the dust has the rest");
+    assert!((f.source.mass - 432.0 * CELL_MASS).abs() < 1e-9 * f.source.mass);
+    let dust = f.dust_body.as_ref().unwrap();
+    let total: f64 = f.pieces.iter().map(|p| p.mass).sum::<f64>() + dust.mass;
+    assert!((total - f.source.mass).abs() < 1e-9 * total, "{total} against {}", f.source.mass);
+    // the dust's centre is that of its column (cells 0 and 1 of x, 6 by 6 of the others, a quarter of a metre each): at x = 0.25 m, y and z at 0.75 m
+    for (got, wanted) in dust.centre.iter().zip([0.25, 0.75, 0.75]) {
+        assert!((got - wanted).abs() < 1e-12, "{:?}", dust.centre);
+    }
 }
 
 #[test]
@@ -212,40 +259,56 @@ fn of_too_many_pieces_the_smallest_are_dust_or_it_is_an_error_that_says_how_many
 }
 
 #[test]
-fn a_fracture_in_which_no_piece_is_a_body_is_an_error_and_the_world_conserves_the_mass_with_dust() {
+fn a_fracture_in_which_no_piece_is_a_body_is_an_error_and_the_world_takes_the_pieces_and_the_dust() {
     let (o, planes) = columns();
     let none = FracturePolicy { min_cells: 1000, max_fragments: 8, overflow: Overflow::Dust };
     assert!(fracture(&o, Partition::Planes(&planes), &none, SIZE, DENSITY, 1.0).is_err());
-    // with dust the world is given the source with the mass of the bodies, which the pieces sum to: it takes them
+    // the world is given the source with all its mass, the pieces as fragments and the dust: they sum to the source, and it takes them
     let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
     let f = fracture(&o, Partition::Planes(&planes), &policy, SIZE, DENSITY, 1.0).unwrap();
-    let mut bodies = vec![spec(&f)];
-    for p in &f.pieces {
-        let mut b = spec(&f);
-        b.shape = p.shape.clone();
-        b.mass = p.mass;
-        b.velocity = [0.; 3];
-        bodies.push(b);
-    }
-    let fragments = (1..=f.pieces.len()).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
-    let w = World3::new(World3Spec {
-        fix_internal_edges: false,
-        start: 0.,
-        step: 0.01,
-        gravity: [0.; 3],
-        pixels_per_meter: 1.,
-        iterations: 8,
-        bounds: Bounds3::None,
-        joints: vec![],
-        bodies,
-    })
-    .with_fractures(vec![Fracture3 {
-        source: 0,
-        at: 0.2,
-        radial_impulse: 0.0,
-        fragments,
-        contact: None,
-        dust: None,
-    }]);
+    let w = world_of(&f, [0.0; 3], [0.0; 3], 0.2);
     assert!(w.is_ok(), "{:?}", w.err());
+    // and without the dust that the pieces leave out, the sum is not the source's
+    let without = Fractured { dust_body: None, ..f };
+    assert!(world_of(&without, [0.0; 3], [0.0; 3], 0.2).is_err());
+}
+
+#[test]
+fn a_world_with_a_fracture_made_here_is_the_same_to_the_bit_however_its_frames_are_asked() {
+    // the pieces and the dust of a partition, the fracture fired at 0.3 s, the frames asked fresh, after a later one, and by a world that keeps none and
+    // replays from a checkpoint (which has to have been taken and used)
+    let (o, planes) = columns();
+    let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
+    let f = fracture(&o, Partition::Planes(&planes), &policy, SIZE, DENSITY, 1.0).unwrap();
+    let spin = [30.0, -20.0, 50.0];
+    let make = || world_of(&f, [1.0, 0.4, -0.3], spin, 0.3).unwrap();
+    let times = [0.29, 0.3, 0.31, 0.5];
+    let reference: Vec<_> = {
+        let mut w = make();
+        times.iter().map(|t| w.frame_at(*t, &mut Still)).collect()
+    };
+    assert!(reference.iter().all(|fr| fr.errors.is_empty()), "{:?}", reference[1].errors);
+    assert_eq!((reference[0].fractured.clone(), reference[1].fractured.clone()), (vec![false], vec![true]));
+    for (k, t) in times.iter().enumerate() {
+        // fresh, for that time alone
+        assert_eq!(make().frame_at(*t, &mut Still), reference[k], "fresh, at {t}");
+        // asked for a later time first, then again
+        let mut later = make();
+        later.frame_at(0.9, &mut Still);
+        assert_eq!(later.frame_at(*t, &mut Still), reference[k], "after a later one, at {t}");
+        assert_eq!(later.frame_at(*t, &mut Still), reference[k], "again, at {t}");
+    }
+    // a world that keeps no frames: every frame is replayed from a checkpoint
+    let mut replay = make().with_frame_log_budget(0);
+    replay.frame_at(150.0 * 0.01, &mut Still);
+    for (k, t) in times.iter().enumerate().rev() {
+        assert_eq!(replay.frame_at(*t, &mut Still), reference[k], "replayed, at {t}");
+    }
+    assert!(replay.checkpoint_restores() >= 1, "the replay went back to a checkpoint");
+    // and what the dust took is the same figure from the world that fired it however it got there
+    let mut fresh = make();
+    fresh.frame_at(0.5, &mut Still);
+    let wanted = fresh.fracture_lost(0).expect("the dust took something");
+    replay.frame_at(0.5, &mut Still);
+    assert_eq!(replay.fracture_lost(0), Some(wanted));
 }
