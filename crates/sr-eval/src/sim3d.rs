@@ -1554,7 +1554,8 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
         }));
     }
     // the objects of cells that can be cut: how many cuts each has had, its cells, and the pieces that have come away
-    if let Some(world) = three.world.as_ref() {
+    // a frame that failed has no revisions and says why itself: it is not told again, for each object, that it has none
+    if let Some(world) = three.world.as_ref().filter(|_| frame.errors.is_empty()) {
         for (k, b) in three.bodies.iter().enumerate() {
             let Some(owner) = &b.voxels else { continue };
             let Some(i) = index_of(g, &b.id) else { continue };

@@ -2,7 +2,7 @@
 //! small is dust.
 #![allow(clippy::needless_range_loop)]
 
-use super::scene_body::{evaluator, Dir};
+use super::scene_body::{assert_every_frame_is_clean, evaluator, Dir};
 use sr_3d::occupancy::Occupancy;
 use sr_3d::voxel::srvol;
 use sr_eval::{Evaluator, FrameNode};
@@ -218,4 +218,16 @@ fn a_fracture_of_cells_before_a_fracture_of_a_mesh_does_not_fire_the_mesh_at_its
     assert!(!slab(0.5), "the block's fracture has fired, the slab's has not");
     assert!(slab(1.2), "the slab's own time");
     assert!(block_node(&ev, 0.5).voxels.unwrap().pieces.len() > 1, "and the block's pieces are there");
+}
+
+#[test]
+fn the_documents_of_the_fracture_evaluate_clean_through_their_last_frame() {
+    for (name, rigid, fracture) in [
+        ("planes", r#"fragmentMinCells="100""#, r#"at="0.2" partition="planes" planes="1 0 0 0.5 1 0 0 1.5""#),
+        ("seeds", "", r#"at="0.2" pieces="5" seed="7""#),
+        ("labels", "", r#"at="0.2" partition="labels" labels="material""#),
+    ] {
+        let (_dir, ev) = setup(&format!("every-{name}"), rigid, fracture);
+        assert_every_frame_is_clean(&ev, name);
+    }
 }

@@ -44,6 +44,21 @@ pub(crate) fn evaluator(dir: &Dir, xml: &str) -> Evaluator {
     Evaluator::new(&doc, &Default::default()).unwrap_or_else(|e| panic!("{e:?}"))
 }
 
+/// Every frame of the document, to the last, has no failure and no problem: an end-to-end test that looks at chosen instants misses what happens after the
+/// impact of its own document (a crater of a body no larger than its projectile failed in the last frame of a corpus document that was only looked at in the
+/// first and the middle ones).
+pub(crate) fn assert_every_frame_is_clean(ev: &Evaluator, what: &str) {
+    for n in 0..ev.frame_count() {
+        let frame = ev.evaluate_frame(n);
+        assert!(
+            frame.failures.is_empty() && frame.problems.is_empty(),
+            "{what}, frame {n}: {:?} {:?}",
+            frame.failures,
+            frame.problems
+        );
+    }
+}
+
 /// Where the body `id` is at `t` (the translation of its world matrix, scene units).
 pub(crate) fn position(ev: &Evaluator, id: &str, t: f64) -> [f64; 3] {
     let frame = ev.evaluate(t);

@@ -2,7 +2,7 @@
 //! surface of the cells on the slope.
 #![allow(clippy::needless_range_loop)]
 
-use super::scene_body::{evaluator, Dir};
+use super::scene_body::{assert_every_frame_is_clean, evaluator, Dir};
 use sr_3d::occupancy::Occupancy;
 use sr_3d::voxel::srvol;
 use sr_eval::voxel_crater::Rock;
@@ -147,4 +147,11 @@ fn the_ball_that_comes_along_the_normal_of_a_slope_cuts_the_law_s_crater_in_the_
         stays.sort_unstable();
         assert_eq!(have, stays, "{degrees} degrees");
     }
+}
+
+#[test]
+fn the_document_of_the_slope_evaluates_clean_through_its_last_frame() {
+    let dir = Dir::new("slope-every-frame");
+    std::fs::write(dir.0.join("slope.srvol"), srvol::write(&slope(20.0), 0.25).unwrap()).unwrap();
+    assert_every_frame_is_clean(&evaluator(&dir, &document(20.0)), "the slope of 20 degrees");
 }

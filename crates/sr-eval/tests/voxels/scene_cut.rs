@@ -1,7 +1,7 @@
 //! A crater in an object of cells, end to end through the evaluator: the ball hits the ground, the world cuts it, and the frames say what the cut was.
 #![allow(clippy::needless_range_loop)]
 
-use super::scene_body::{evaluator, Dir};
+use super::scene_body::{assert_every_frame_is_clean, evaluator, Dir};
 use sr_3d::occupancy::Occupancy;
 use sr_3d::voxel::srvol;
 use sr_eval::voxel_crater::Rock;
@@ -399,4 +399,39 @@ fn a_second_impact_of_the_ball_is_not_a_second_cut() {
     let later = ground_node(&ev, 10.5).voxels.unwrap();
     assert_eq!(later.revision, 1, "one cut");
     assert_eq!(later.grid.fingerprint(), first.grid.fingerprint(), "and the ground as it was cut");
+}
+
+#[test]
+fn the_documents_of_the_crater_evaluate_clean_through_their_last_frame() {
+    let (_dir, ev) = setup("every-frame");
+    assert_every_frame_is_clean(&ev, "the crater");
+    let dir = Dir::new("every-frame-burst");
+    std::fs::write(dir.0.join("ground.srvol"), srvol::write(&ground(), 0.25).unwrap()).unwrap();
+    let debris = r#"<particles3D id="debris" rate="0" lifetime="6" dt="0.01" gravityY="9.80665" maxParticles="10000"><burst crater="pit"/></particles3D>"#;
+    assert_every_frame_is_clean(&evaluator(&dir, &DOCUMENT.replace("CONTENT", debris)), "the crater with its burst");
+}
+
+#[test]
+fn a_cut_that_cannot_be_made_is_one_failure_that_says_why_and_not_another_for_the_frame_that_has_no_revision() {
+    // two pillars in the crater's reach come loose and there is one slot, with the overflow an error: the cut fails, and the document says that once
+    let dir = Dir::new("one-failure");
+    let mut cells: Vec<([i32; 3], u8)> = ground().cells().map(|c| (c, 1u8)).collect();
+    for k in 44..46 {
+        for j in 0..60 {
+            for i in 76..78 {
+                cells.push(([i, j, k], 1));
+            }
+        }
+    }
+    std::fs::write(dir.0.join("ground.srvol"), srvol::write(&Occupancy::from_cells(cells).unwrap(), 0.25).unwrap())
+        .unwrap();
+    let xml = DOCUMENT.replace("CONTENT", "").replace(
+        r#"<rigidBody type="static" density="2700"/>"#,
+        r#"<rigidBody type="static" density="2700" maxFragments="1"/>"#,
+    );
+    let ev = evaluator(&dir, &xml);
+    let frame = ev.evaluate(0.6);
+    let said: Vec<&String> = frame.failures.iter().chain(&frame.problems).collect();
+    assert_eq!(said.len(), 1, "{:?} {:?}", frame.failures, frame.problems);
+    assert!(said[0].contains("loose parts") && said[0].contains("maxFragments"), "{}", said[0]);
 }
