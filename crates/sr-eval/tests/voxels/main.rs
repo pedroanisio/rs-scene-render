@@ -7,5 +7,6 @@ mod fracture;
 mod loader;
 mod mass_properties;
 mod scene_body;
+mod scene_cut;
 mod split;
 mod world_inertia;
