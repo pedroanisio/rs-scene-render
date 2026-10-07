@@ -1553,8 +1553,16 @@ that lets no light through), and on the water otherwise, so that the picture is
 the mean of the two weighted by the share and the light that gets through the
 uncovered part keeps the water's tint. The refracted shadow ray scales its
 transmittance by one minus the same share, so opaque foam stops the sun that
-clear water lets through, and the albedo guide of the denoiser takes the mean
-albedo. The mix is the path tracer's: the raster renderer reports an error for
+clear water lets through (in expectation: the sun's ray is not drawn at random but
+scaled, which is the mean of what the randomly drawn samples of a camera path see, and so the
+same approximation as the mix itself), and the albedo guide of the denoiser takes the mean
+albedo. The random draw costs variance at the same number of samples: on a sea
+wholly at a share of one half, 8 samples a pixel and a window of 16 x 16 pixels, the standard
+deviation of the luminance is 0.0354 (0.345 of the mean) against 0.0061 (0.111) for the
+continuous mix it replaced, and with the denoiser 0.0118 (0.125) against none that could be
+read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 against 0.0101 and
+0.0088), so the cost is the band of the surface where the share is neither, and the
+denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
 needs an opaque alpha mode (also an error otherwise). Two warnings say it before
 a renderer runs: W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
