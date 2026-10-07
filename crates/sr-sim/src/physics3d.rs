@@ -915,6 +915,12 @@ impl World3 {
         self
     }
 
+    /// The cells the state keeps of the body `body` of a split, and the room the vector that holds them has: what a checkpoint is charged for them
+    /// is the room, so a test of the accounting looks at both.
+    pub fn voxel_cells_held(&self, body: usize) -> Option<(usize, usize)> {
+        self.state.voxel_cells.get(body)?.as_ref().map(|c| (c.len(), c.capacity()))
+    }
+
     /// The momentum that the dust of the fracture `event` took away when it fired, if it has fired and has dust: the counter that says what the world
     /// did not keep: part of the world's state, as of the last step it took, restored with a checkpoint (so a frame served from the log says nothing of it).
     pub fn fracture_lost(&self, event: usize) -> Option<FractureLost3> {
