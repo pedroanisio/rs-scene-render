@@ -554,6 +554,26 @@
       <sch:assert id="VOL4" test="not(@boundsMinX|@boundsMinY|@boundsMinZ|@boundsMaxX|@boundsMaxY|@boundsMaxZ) or (count(@boundsMinX|@boundsMinY|@boundsMinZ|@boundsMaxX|@boundsMaxY|@boundsMaxZ)=6 and number(@boundsMinX)&lt;number(@boundsMaxX) and number(@boundsMinY)&lt;number(@boundsMaxY) and number(@boundsMinZ)&lt;number(@boundsMaxZ))">volume bounds require all six finite coordinates with each minimum below its maximum.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="cinematic-voxels-version">
+    <sch:rule context="/scene[@version!='1.3']">
+      <sch:assert id="VOX1" test="not(assets/voxelAsset|.//object3D[@primitive='voxels' or @voxels])">voxel assets and the voxels primitive require version="1.3".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="cinematic-voxel-assets">
+    <sch:rule context="assets/voxelAsset">
+      <sch:assert id="VOX2" test="count(@src|@fromMesh)=1 and (not(@format|@model) or @src) and (not(@model) or @format='vox' or (not(@format) and substring(@src,string-length(@src) - 3)='.vox')) and (not(@voxelGrid) or @format='srvol' or (not(@format) and substring(@src,string-length(@src) - 5)='.srvol')) and ((@fromMesh and @cellSize) or not(@fromMesh|@cellSize))">a voxelAsset has exactly one of src and fromMesh; format, model and voxelGrid belong to src (model to a vox file, voxelGrid to an srvol file), and cellSize is required with fromMesh and not given with src.</sch:assert>
+      <sch:assert id="VOX3" test="not(@fromMesh) or /scene/assets/mesh[@id=current()/@fromMesh]">voxelAsset/@fromMesh must name a mesh asset.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="cinematic-voxel-objects">
+    <sch:rule context="object3D">
+      <sch:let name="materials" value="/scene/materials/material"/>
+      <sch:assert id="VOX4" test="not(@primitive='voxels') or (@voxels and /scene/assets/voxelAsset[@id=current()/@voxels])">an object3D of primitive voxels names a voxelAsset in voxels.</sch:assert>
+      <sch:assert id="VOX5" test="@primitive='voxels' or not(@voxels|@cellSize|@palette|@surface)">voxels, cellSize, palette and surface belong to primitive="voxels".</sch:assert>
+      <sch:assert id="VOX6" test="not(@palette) or normalize-space(@palette)='file' or (count(str:tokenize(normalize-space(@palette),' '))&lt;=255 and count(str:tokenize(normalize-space(@palette),' ')[. = $materials/@id])=count(str:tokenize(normalize-space(@palette),' ')))">palette is the word file or at most 255 material ids.</sch:assert>
+      <sch:assert id="VOX7" test="not(@primitive='voxels') or not(@mesh|@volume|@terrain|@map|@text|@path|medium|pyro)">a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
   <sch:pattern id="cinematic-mesh-sequence">
     <sch:rule context="assets/meshSequence">
       <sch:let name="first" value="number(substring(normalize-space(@first),1+number(starts-with(normalize-space(@first),'+'))))"/>

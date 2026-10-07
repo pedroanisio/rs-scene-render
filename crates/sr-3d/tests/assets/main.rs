@@ -8,3 +8,6 @@ mod malformed;
 mod materialx;
 mod sequence;
 mod skinning;
+mod srvol;
+mod vox;
+mod vox_real;

@@ -34,6 +34,8 @@ VOLUME_BAKED = VOLUME.replace('src="../media/uniform.srvol"', 'src="../media/bak
 PYRO = '<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/>\n<composition><object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1"><pyroSource shape="sphere" radius="2" densityRate="2" start="0.15" end="0.35"/><pyroImpulse shape="box" width="2" height="2" depth="2" time="0.5" density="1" temperature="3000"/></pyro><medium blackbody="true" emissionScale="0.1"/></object3D></composition></scene>\n'
 
 PYRO_FOLLOW = PYRO.replace('<pyro ', '<pyro boundary="open" follow="true" followMargin="2" followLoss="0.000001" ')
+VOXELS = '<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/><assets><voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/><mesh id="shape" src="../media/robot.glb"/></assets><materials><material id="stone" baseColor="#808080"/><material id="moss" baseColor="#406040"/></materials><composition><object3D id="build" primitive="voxels" voxels="model" cellSize="2" palette="stone moss" surface="blocks"/></composition></scene>\n'
+VOXELS_FROM_MESH = VOXELS.replace('<voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/>', '<voxelAsset id="model" fromMesh="shape" cellSize="0.5"/>').replace(' palette="stone moss"', ' palette="file"')
 
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
 
@@ -100,6 +102,19 @@ CASES = [
     ("frx6-timed", ["FRX6"], lambda _: FRACTURE_CONTACT.replace('<fracture ', '<fracture at="1" ')),
     ("frx6-push", ["FRX6"], lambda _: FRACTURE_CONTACT.replace('<fracture ', '<fracture radialImpulse="4" ')),
     ("frx7-orphan", ["FRX7"], lambda _: FRACTURE.replace('<fracture ', '<fracture energyFraction="0.3" ')),
+    ("vox1-version", ["VOX1"], lambda _: VOXELS.replace('version="1.3"', 'version="1.2"')),
+    ("vox2-both-sources", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/voxels.vox" fromMesh="shape" cellSize="1"')),
+    ("vox2-no-source", ["VOX2"], lambda _: VOXELS.replace(' src="../media/voxels.vox"', '')),
+    ("vox2-cellsize-with-src", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/voxels.vox" cellSize="1"')),
+    ("vox2-model-of-mesh", ["VOX2"], lambda _: VOXELS_FROM_MESH.replace('fromMesh="shape"', 'fromMesh="shape" model="0"')),
+    ("vox2-grid-of-vox", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/voxels.vox" voxelGrid="voxels"')),
+    ("vox2-model-of-srvol", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" model="0"')),
+    ("vox3-frommesh", ["VOX3"], lambda _: VOXELS_FROM_MESH.replace('fromMesh="shape"', 'fromMesh="stone"')),
+    ("vox4-asset", ["VOX4"], lambda _: VOXELS.replace('voxels="model"', 'voxels="shape"')),
+    ("vox4-no-asset", ["VOX4"], lambda _: VOXELS.replace(' voxels="model"', '')),
+    ("vox5-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box"')),
+    ("vox6-palette", ["VOX6"], lambda _: VOXELS.replace('palette="stone moss"', 'palette="stone nothing"')),
+    ("vox7-exclusion", ["VOX7"], lambda _: VOXELS.replace('surface="blocks"', 'surface="blocks" mesh="shape"')),
     ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),
     ("frx2", ["FRX2"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '')),
     ("frx3", ["FRX3"], lambda _: FRACTURE.replace('interiorMaterial="interior"', 'interiorMaterial="rock"')),
@@ -477,6 +492,11 @@ VALID = {
     "pyro-maccormack": PYRO.replace('<pyro ', '<pyro solver="multigrid" advection="maccormack" '),
     "pyro-mesh": PYRO_MESH,
     "pyro-follow": PYRO_FOLLOW,
+    "voxels": VOXELS,
+    "voxels-from-mesh": VOXELS_FROM_MESH,
+    # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it
+    "voxels-srvol": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" voxelGrid="voxels"'),
+    "voxels-srvol-format": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" format="srvol" voxelGrid="voxels"'),
     "pyro-colliders": PYRO_COLLIDERS,
     "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
     "baked-volume": VOLUME_BAKED,

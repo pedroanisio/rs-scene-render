@@ -1,0 +1,27 @@
+{
+ "cells": 12452,
+ "min": [
+  -20,
+  -199,
+  -16
+ ],
+ "max": [
+  239,
+  -1,
+  248
+ ],
+ "checksum": 3741694928051262,
+ "cube_cells": 332,
+ "cube_min_voxel_axes": [
+  -16,
+  -16,
+  0
+ ],
+ "cube_max_voxel_axes": [
+  15,
+  15,
+  24
+ ],
+ "checksum_formula": "wrapping 64-bit sum over cells of ((x+1000)*73856093) ^ ((y+1000)*19349663) ^ ((z+1000)*83492791) ^ (index*1315423911), in the scene cells (x, -z-1, y) of the voxel cell (x, y, z)",
+ "note": "worked out by an independent decoder of dotvox_axes.vox (python): pivot floor(size/2), translations only (the file has no rotation), the file has no RGBA chunk issue: it has one"
+}

@@ -200,6 +200,12 @@ pub(crate) fn mesh_asset_triangles(p: &Program, key: &str, max_bytes: usize) -> 
         sr_3d::Asset::Model(m) => m,
         sr_3d::Asset::Splats(_) => return Err("splats have no surface to collide with".into()),
     };
+    model_triangles(&model, max_bytes)
+}
+
+/// The triangles of a model as the renderer places them (its basis times the transform of each node, scene units, scene axes), with the
+/// winding turned where that transform mirrors, bounded before they are copied.
+pub(crate) fn model_triangles(model: &sr_3d::Model, max_bytes: usize) -> Result<Triangles, String> {
     let locals: Vec<_> = model.nodes.iter().map(|nd| nd.local).collect();
     let worlds = model.world_matrices(&locals);
     let (mut pts, mut tris) = (Vec::new(), Vec::new());

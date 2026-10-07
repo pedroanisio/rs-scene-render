@@ -216,6 +216,7 @@ struct Sets<'a> {
     mesh_sequences: HashSet<&'a str>,
     sequence_colliders: HashSet<&'a str>,
     volume_assets: HashSet<&'a str>,
+    voxel_assets: HashSet<&'a str>,
     pyro_colliders: HashSet<&'a str>,
     /// Objects that hold a native pyro volume.
     pyro_volumes: HashSet<&'a str>,
@@ -373,6 +374,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.mesh_sequences.insert(i);
             } else if is(a, "volume") {
                 s.volume_assets.insert(i);
+            } else if is(a, "voxelAsset") {
+                s.voxel_assets.insert(i);
             } else if is(a, "geo") {
                 s.geo_assets.push(i);
             } else if is(a, "tiles") {
@@ -709,6 +712,14 @@ impl<'a> Eval<'a> {
                         && (d.attribute("primitive") == Some("volume") || d.attribute("volume").is_some()))
             });
             self.check(!uses_volume, n, "V8", || "volumetric assets and media require version=\"1.3\".".into());
+            let uses_voxels = n.descendants().any(|d| {
+                is(d, "voxelAsset")
+                    || (is(d, "object3D")
+                        && (d.attribute("primitive") == Some("voxels") || d.attribute("voxels").is_some()))
+            });
+            self.check(!uses_voxels, n, "VOX1", || {
+                "voxel assets and the voxels primitive require version=\"1.3\".".into()
+            });
         }
 
         if matches!(local, "object3D" | "pyro" | "particles3D") {
@@ -1348,6 +1359,29 @@ impl<'a> Eval<'a> {
                 );
                 let target = !has("volume") || contains(&self.sets.volume_assets, a("volume"));
                 self.check(target, n, "VOL2", || "object3D/@volume must name a volume asset.".into());
+                let voxels = a("primitive") == Some("voxels");
+                self.check(!voxels || contains(&self.sets.voxel_assets, a("voxels")), n, "VOX4", || {
+                    "an object3D of primitive voxels names a voxelAsset in voxels.".into()
+                });
+                self.check(
+                    voxels || !["voxels", "cellSize", "palette", "surface"].iter().any(|k| has(k)),
+                    n,
+                    "VOX5",
+                    || "voxels, cellSize, palette and surface belong to primitive=\"voxels\".".into(),
+                );
+                let palette_ok = a("palette").is_none_or(|p| {
+                    let tokens: Vec<&str> = p.split_whitespace().collect();
+                    p.trim() == "file"
+                        || (tokens.len() <= 255 && tokens.iter().all(|t| self.sets.materials.contains(t)))
+                });
+                self.check(palette_ok, n, "VOX6", || "palette is the word file or at most 255 material ids.".into());
+                let excluded = ["mesh", "volume", "terrain", "map", "text", "path"].iter().any(|k| has(k))
+                    || kids(n, "medium").next().is_some()
+                    || kids(n, "pyro").next().is_some();
+                self.check(!voxels || !excluded, n, "VOX7", || {
+                    "a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child."
+                        .into()
+                });
                 let thermal = kids(n, "medium").any(|m| matches!(m.attribute("blackbody"), Some("true" | "1")));
                 let temperature = n
                     .document()
@@ -1441,6 +1475,22 @@ impl<'a> Eval<'a> {
                 });
                 self.check(!has("sha256"), n, "MSQ3", || {
                     "mesh sequence sha256 cannot identify multiple numbered files.".into()
+                });
+            }
+            "voxelAsset" if parent_is("assets") => {
+                let extension = |e: &str| a("src").is_some_and(|s| s.ends_with(e));
+                let vox = a("format") == Some("vox") || (!has("format") && extension(".vox"));
+                let srvol = a("format") == Some("srvol") || (!has("format") && extension(".srvol"));
+                let sources = usize::from(has("src")) + usize::from(has("fromMesh"));
+                let belongs = (!(has("format") || has("model")) || has("src"))
+                    && (!has("model") || vox)
+                    && (!has("voxelGrid") || srvol)
+                    && (has("fromMesh") == has("cellSize"));
+                self.check(sources == 1 && belongs, n, "VOX2", || {
+                    "a voxelAsset has exactly one of src and fromMesh; format, model and voxelGrid belong to src (model to a vox file, voxelGrid to an srvol file), and cellSize is required with fromMesh and not given with src.".into()
+                });
+                self.check(!has("fromMesh") || contains(&self.sets.mesh_assets, a("fromMesh")), n, "VOX3", || {
+                    "voxelAsset/@fromMesh must name a mesh asset.".into()
                 });
             }
             // p42

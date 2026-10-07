@@ -2969,6 +2969,118 @@ quantities (Binet's equation, `b_c`, the weak-field deflection `4M/b`, `g`) are 
 are the check of the integrals. The inner edge `r_in = 6M` and the temperature of the disk are the engine's choices and not a
 fit to any observation.
 
+### Voxel assets and objects (`voxelAsset`, `primitive="voxels"`)
+
+A model of cells, each with a palette index 1 to 255, is declared once as an asset and used by any number of objects. It is the
+body of cells of `sr_3d::occupancy` (sparse bricks of side eight, exact moments, connected components) that the rigid world already
+reads, so what an object looks like and what it collides as are the same cells.
+
+```xml
+<assets>
+  <voxelAsset id="castle" src="castle.vox" sha256="DIGEST" license="MIT" maxCells="2000000"/>
+  <mesh id="rock" src="rock.glb"/>
+  <voxelAsset id="rock-cells" fromMesh="rock" cellSize="0.25"/>
+</assets>
+<composition>
+  <object3D id="keep" primitive="voxels" voxels="castle" cellSize="2" palette="file" surface="blocks"/>
+</composition>
+```
+
+`voxelAsset` is version 1.3 (VOX1). It has exactly one source (VOX2): a file (`src`, with `format` `vox` or `srvol`, by extension if
+absent; `model` is the number from 0 of one model of a `vox` file; `voxelGrid` names the grid of an `srvol`) or a closed mesh asset
+(`fromMesh`, a mesh asset by VOX3, with `cellSize`). The attributes of the other source are an error, not ignored. `maxCells`
+(at most 67,108,864) and `maxMemoryMiB` (at most 4,096) are types of the schema; the engine's defaults are 4,194,304 cells,
+128 MiB and the grid `voxels`, and over either is an error that names the number, never a model cut short. The provenance
+attributes are those of the other assets.
+
+An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette` and `surface` belong to that primitive (VOX5).
+`palette` is the word `file` or at most 255 material IDs, in the order of the palette indices 1, 2, ... (VOX6); the material of a
+cell is the one of its index, else the object's `material`, else the colour of the file, and an index with none of the three is an
+error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. The object has no `mesh`,
+`volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
+every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
+
+**Axes.** The lattice is the scene's: the cell `[i, j, k]` is `[i, i+1) x [j, j+1) x [k, k+1)` of the object's space in cells, x
+right, y down, z away from the camera. MagicaVoxel is x right, y forward, z up, also right-handed, and its cell `[x, y, z]` becomes
+`[x, -z-1, y]`: a half turn about x composed with a swap of y and z, determinant 1, so no face is mirrored and every cell stays
+exactly on the lattice.
+
+**A mesh cut into cells (`fromMesh`).** The mesh is taken in the frame it is drawn in: the vertices as the renderer places them (the
+basis of the import times the node's transform), in scene units (an asset in metres is 100 to the metre) and scene axes (y and z turned
+about x), and `cellSize` is in scene units; a cube of one metre in a glb, cut at 10, is 1000 cells, x 0 to 9, y -10 to -1 and z -10 to -1
+(`sr_eval::voxel::from_model`, test `a_mesh_asset_is_cut_in_the_frame_it_is_drawn_in...`). The lattice is aligned to multiples of `cellSize` in those coordinates, and a
+cell is filled, with the palette index 1, when its centre is inside the mesh by the test that the colliders of the smoke use
+(`sr_sim::pyro::mesh::Mesh`: a closed, validated surface, the nearest oriented surface decides), so a mesh that is not closed is the
+collider's error. The box of the lattice and the limits are checked before any cell is looked at, and the rows are cut in parallel
+and put together in the order of the scan, so the result is the same on any number of threads.
+
+**SRVOL as a voxel cache.** One grid, `voxels` by default, whose value at the index `[i, j, k]` is the palette index of the cell
+(exact in a float, 0 for none) and whose transform is a uniform scale, the cell size. The bytes are canonical: the same cells give the
+same file, and a model written and read comes back with the same fingerprint. A cache has no palette; a value that is not an integer
+from 0 to 255 is an error that names the cell and the value. The reader's bounds are the ones of the SRVOL section above.
+
+**What the `.vox` reader takes from the format, and from where.** The reader accepts the header `VOX ` with version 150 or 200,
+and the chunks `MAIN`, `PACK`, `SIZE`, `XYZI`, `RGBA`, `MATL`, `nTRN`, `nGRP` and `nSHP`; every other chunk is skipped by its length.
+Layers, hidden nodes, animation after the first frame and cameras are not read. Four facts of the format are not obvious and each
+has its source:
+
+1. *The palette is offset by one.* The colour of the cell index `c` is the entry `c - 1` of the `RGBA` chunk: "color [0-254] are
+   mapped to palette index [1-255]" (`MagicaVoxel-file-format-vox.txt` of `ephtracy/voxel-model`, section 7). Proved by the knight
+   of the same repository: its cells' colours are the file's entries one place down.
+2. *A file with no `RGBA` chunk has the default palette* of the same description (section 8), 256 entries embedded in
+   `sr_3d::voxel::default_palette` by `tools/make_default_palette.py` (the description is MIT licensed; the table is that of the
+   description and nothing else). Proved by the cat and the soldier of the same repository, which have no `RGBA` chunk.
+3. *A `MATL` id is the palette index.* The description does not say it; `ogt_vox.h` of opengametools (MIT) keeps
+   `materials.matl[color_index]` beside `palette.color[color_index]`, and the real files agree: in `metal-material` the cells have
+   the colour index 85 and the one material that is not the default is the `MATL` with id 85, and in
+   `single-voxel-with-material` the cell is 249 and the odd material is the `MATL` 249.
+4. *Placement under a scene graph.* A model's cells are placed about its centre, `floor(size / 2)` ("the centre pivot for that model
+   is located at floor(size.xyz / 2)", `ogt_vox.h`, line 125), by `p = R q + t`, where `R` comes from the rotation byte of the `nTRN` and a voxel is a unit box (the pivot is a corner of the
+   grid, every face is on an integer coordinate, the pivot is subtracted from the geometry and the transform then applied to it:
+   `ogt_vox.h`, "EXPLANATION OF MODEL PIVOTS", lines 123 to 170), so that a negated axis sends the cell `q` to `-q - 1`, not
+   `-q` (a model of 3 x 3 x 3, the cell (0, 0, 0), the byte 105 and the translation (5, 6, 7) give the cell (4, 6, 7), worked
+   out by hand in the test and not by the script that writes the fixtures):
+   bits 0 and 1 are the column of the nonzero entry of the first row, bits 2 and 3 those of the second (the third is the column that
+   is left), bits 4, 5 and 6 the signs of the three rows (section (c) of the extension file of the same repository, whose example
+   `R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]` is the byte 105 and is the fixture `spec-rotation`). Where the cells of two models fall
+   on one place the later one in the graph wins.
+
+*What is evidence and what is proof.* Fact 4 is proved by the description, by `ogt_vox.h` and by the fixtures that `tools/make_vox.py`
+writes (an independent script that shares no code with the reader and works with the centres of the boxes as exact fractions: 24 rotations,
+nesting, several models), and by cells worked out by hand in a test, not by a real file: none of the real files has a rotation (`axes.vox`
+has translations only), so the convention of the negated axis is the reference's and is not checked against a file that MagicaVoxel wrote. The layout of `axes.vox` of the `dot_vox` crate, with its cube on the plane z = 0 and about x = y = 0, fits
+the centre `floor(size / 2)` and is the evidence of it, not a proof. The real files are in `crates/sr-3d/tests/fixtures/vox/real`, with
+the licence texts and the sources (`SOURCES.md`); the test that reads all thirteen sample files is run with `VOX_SAMPLES` set and
+reads nothing, rather than failing, when the files are not there.
+
+**Limitation: an SRVOL file has no checksum of its own.** The `sha256` of a `voxelAsset` is the evaluator's to check on the bytes it
+reads (the loader of the next step); SRVOL version 1 has no field for the provenance of the file a cache was made from, and gets one,
+as a version 2 or an optional chunk, when something needs to say where the cells came from.
+
+**Bounds before allocation.** The reader checks, before it builds anything: the size of the file (default 1 GiB), the models
+(65,536), the nodes of the scene graph (1,048,576), its depth (64) with a cycle check, and the count of cells that a graph places
+(one model as many times as it is used, capped before it is built), then the limits of the grid. A translation or a placed cell
+more than 2^24 cells from the origin is an error (so that the translations of a graph at its deepest cannot wrap), and every way of
+filling the grid, from a file, a cache or a mesh, refuses a cell outside the keys of an occupancy, `[-2^30, 2^30)`, by name. A model with a side over 256 (the
+coordinates of a cell are bytes, and MagicaVoxel's own models are at most 256 on a side) is refused, and every number is named in the
+message. The scene graph is checked whole before anything is placed: exactly one root that reaches every node (a cycle, a second root
+or a node off the tree is an error that names it), and the places that it makes and the cells in them are counted node by node, once,
+so that a node under two parents cannot ask for billions of places from a file of a few hundred bytes (`max_placements`, default 2^24).
+The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut is a chunk and not the box.
+
+| Rule | Says |
+|---|---|
+| VOX1 | `voxelAsset` and primitive `voxels` need `version="1.3"` |
+| VOX2 | exactly one of `src` and `fromMesh`; `format`, `model`, `voxelGrid` only with a file of that format; `fromMesh` and `cellSize` together |
+| VOX3 | `fromMesh` names a mesh asset |
+| VOX4 | an object of primitive `voxels` names a `voxelAsset` in `voxels` |
+| VOX5 | `voxels`, `cellSize`, `palette`, `surface` belong to primitive `voxels` |
+| VOX6 | `palette` is `file` or at most 255 material IDs |
+| VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
+
+The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
+`tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
@@ -3055,6 +3167,21 @@ Also includes `assetProvenance`, inventoried below.
 | `interpolation` | meshSequenceInterpolationType | Default `hold` |
 | `missingFrame` | volumeMissingFrameType | Default `error` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+
+### `voxelAssetType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `src` | xs:anyURI | Optional; exactly one of `src` and `fromMesh` (VOX2) |
+| `format` | xs:string; enumeration=vox, enumeration=srvol | Optional; absent: from the extension; only with `src` |
+| `model` | xs:nonNegativeInteger | Optional; absent: the whole scene of a `vox` file; only with format `vox` |
+| `fromMesh` | xs:IDREF | Optional; a mesh asset (VOX3) |
+| `cellSize` | positiveDecimal | Optional; required with `fromMesh`, refused with `src` (VOX2) |
+| `voxelGrid` | volumeChannelType | Optional, no XSD default; only with format `srvol`; the engine uses `voxels` |
+| `maxCells` | xs:positiveInteger; maxInclusive=67108864 | Optional, no XSD default; the engine uses `4194304` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; the engine uses `128` |
+| `sha256`, `license`, `credit`, `proxy` | assetProvenance | As in `assetProvenance` |
 
 ### `mediumType`
 
@@ -3438,10 +3565,14 @@ existing definitions.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
-| `primitive` | xs:string; enumeration=sphere, enumeration=box, enumeration=plane, enumeration=mesh, enumeration=cylinder, enumeration=cone, enumeration=torus, enumeration=capsule, enumeration=text, enumeration=extrude, enumeration=clay, enumeration=map, enumeration=globe, enumeration=volume | Required |
+| `primitive` | xs:string; enumeration=sphere, enumeration=box, enumeration=plane, enumeration=mesh, enumeration=cylinder, enumeration=cone, enumeration=torus, enumeration=capsule, enumeration=text, enumeration=extrude, enumeration=clay, enumeration=map, enumeration=globe, enumeration=volume, enumeration=voxels | Required |
 | `material` | xs:IDREF | Optional; absent |
 | `mesh` | xs:IDREF | Optional; absent |
 | `volume` | xs:IDREF | Optional; absent |
+| `voxels` | xs:IDREF | Optional; a `voxelAsset`, required with primitive `voxels` (VOX4, VOX5) |
+| `cellSize` | positiveDecimal | Optional, no XSD default; only with primitive `voxels` (VOX5); absent: the asset's, else the cache's, else `1` |
+| `palette` | xs:string | Optional; `file` or at most 255 material IDs (VOX5, VOX6); absent: `file` if the file has colours, else the object's `material` |
+| `surface` | xs:string; enumeration=blocks | Optional, no XSD default; only with primitive `voxels` (VOX5); the engine uses `blocks` |
 | `terrain` | xs:IDREF | Optional; absent |
 | `planetRadius` | positiveDecimal | Default `6378137` |
 | `terrainTileSize` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
@@ -3657,11 +3788,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 263 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 83 of them are in the
-cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 270 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 90 of them are in the
+cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 17 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11) are this repository's. At commit 349d371,
+families, and the 24 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
