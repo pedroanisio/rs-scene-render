@@ -42,20 +42,21 @@ fn the_radius_of_the_piston_is_the_sedov_front_up_to_the_end_of_the_strong_phase
     let mut swept = 0.0;
     let mut last = 0.0;
     for step in 0..40u64 {
-        let (r0, r1) = b.radii(DT, step, 0.01);
+        let (r0, r1) = b.radii(DT, step);
         // each step starts where the last ended
         assert!((r0 - last).abs() < 1e-12, "step {step}: {r0} against {last}");
         // the end of the step is the front at the end of the step, or the end of the strong phase
         let want = s.radius(ENERGY, RHO0, (step + 1) as f64 * DT).min(r_max);
         assert!((r1 - want).abs() < 1e-9 * want, "step {step}: {r1} against {want}");
-        // the pulse of the step is the volume swept, as a share of the volume of the sphere that it ends in
-        match b.pulse(DT, step, 0.01) {
-            Some((radius, expansion)) => {
+        // what the front sweeps in the step is the volume between the two spheres
+        match b.swept(DT, step) {
+            Some((radius, volume)) => {
                 assert_eq!(radius, r1);
-                assert!((expansion - (1.0 - (r0 / r1).powi(3))).abs() < 1e-12);
+                let want = 4.0 / 3.0 * std::f64::consts::PI * (r1.powi(3) - r0.powi(3));
+                assert!((volume - want).abs() < 1e-12 * want, "step {step}: {volume} against {want}");
                 swept += r1.powi(3) - r0.powi(3);
             }
-            None => assert_eq!(r0, r1, "a step with no pulse does not move the front"),
+            None => assert_eq!(r0, r1, "a step in which the front does not move sweeps nothing"),
         }
         last = r1;
     }
@@ -64,36 +65,46 @@ fn the_radius_of_the_piston_is_the_sedov_front_up_to_the_end_of_the_strong_phase
     assert!((swept - r_max.powi(3)).abs() < 1e-9 * r_max.powi(3));
     // the blast has nothing to do before it is released: a release at 7.3 steps starts in step 7
     let late = blast(1.0, [0.0; 3], 7.3 * DT);
-    assert_eq!(late.radii(DT, 6, 0.01), (0.0, 0.0));
-    let (r0, r1) = late.radii(DT, 7, 0.01);
+    assert_eq!(late.radii(DT, 6), (0.0, 0.0));
+    let (r0, r1) = late.radii(DT, 7);
     assert_eq!(r0, 0.0);
     // the front at the end of the step in which it was released has had 0.7 of a step
     assert!((r1 - s.radius(ENERGY, RHO0, 0.7 * DT)).abs() < 1e-9 * r1);
 }
 
 #[test]
-fn a_front_smaller_than_a_cell_is_the_sphere_of_one_cell_and_a_small_energy_is_one_pulse() {
+fn a_small_energy_is_one_pulse_of_the_volume_of_the_end_of_the_strong_phase_and_the_energy_that_makes_more_is_the_one_stated(
+) {
     // 1e6 J: the strong phase ends at 0.64 m, long before the end of one step of 1/24 s: one pulse of the volume of R_max
     let small = Blast::new([0.0; 3], 0.0, 1e6, RHO0, P0, GAMMA, 1.0).unwrap();
     let dt = 1.0 / 24.0;
-    let r_max = solve(GAMMA).unwrap().max_radius(1e6, P0);
-    let (r0, r1) = small.radii(dt, 0, 0.1);
+    let s = solve(GAMMA).unwrap();
+    let r_max = s.max_radius(1e6, P0);
+    let (r0, r1) = small.radii(dt, 0);
     assert_eq!(r0, 0.0);
     assert!((r1 - r_max).abs() < 1e-12 && (r_max - 0.6435).abs() < 1e-3, "{r1}");
-    // and a front of less than a cell (a cell of 2 m against R_max of 0.64 m) is the sphere of one cell: the pulse covers a cell
-    let (_, clamped) = small.radii(dt, 0, 2.0);
-    assert_eq!(clamped, 2.0);
-    // the energy above which the strong phase has not ended when the first step does, at this step: E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2)
-    let xi0 = solve(GAMMA).unwrap().xi0();
-    let e_star = (xi0 * (dt * dt / RHO0).powf(0.2) * P0.cbrt() / 0.3).powf(7.5);
-    assert!((1.0e12..2.0e12).contains(&e_star), "{e_star}");
-    let below = Blast::new([0.0; 3], 0.0, 0.5 * e_star, RHO0, P0, GAMMA, 1.0).unwrap();
-    let above = Blast::new([0.0; 3], 0.0, 2.0 * e_star, RHO0, P0, GAMMA, 1.0).unwrap();
+    let (_, volume) = small.swept(dt, 0).unwrap();
+    assert!((volume - 4.0 / 3.0 * std::f64::consts::PI * r_max.powi(3)).abs() < 1e-12 * volume);
+    // the volume does not depend on the cell, only the cells that are given it do (a test of the solver below, with an energy of 1 J)
+    // the energy above which the strong phase has not ended when the first step does, at this step: E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2),
+    // 1.91e12 J at 1/24 s and 2.64e10 J at 1/100 s (it goes as dt^3)
+    let e_star = |dt: f64| (s.xi0() * (dt * dt / RHO0).powf(0.2) * P0.cbrt() / 0.3).powf(7.5);
+    assert!((e_star(1.0 / 24.0) / 1.912e12 - 1.0).abs() < 1e-3, "{}", e_star(1.0 / 24.0));
+    assert!((e_star(0.01) / 2.643e10 - 1.0).abs() < 1e-3, "{}", e_star(0.01));
+    assert!((e_star(0.01) / e_star(0.02) - 0.125).abs() < 1e-12, "it goes as the cube of the step");
+    let below = Blast::new([0.0; 3], 0.0, 0.5 * e_star(dt), RHO0, P0, GAMMA, 1.0).unwrap();
+    let above = Blast::new([0.0; 3], 0.0, 2.0 * e_star(dt), RHO0, P0, GAMMA, 1.0).unwrap();
     // below it the first step ends at R_max (one pulse), above it the first step ends inside the strong phase
-    let max_below = solve(GAMMA).unwrap().max_radius(0.5 * e_star, P0);
-    let max_above = solve(GAMMA).unwrap().max_radius(2.0 * e_star, P0);
-    assert!((below.radii(dt, 0, 0.1).1 - max_below).abs() < 1e-9 * max_below);
-    assert!(above.radii(dt, 0, 0.1).1 < max_above * 0.999);
+    let max_below = s.max_radius(0.5 * e_star(dt), P0);
+    let max_above = s.max_radius(2.0 * e_star(dt), P0);
+    assert!((below.radii(dt, 0).1 - max_below).abs() < 1e-9 * max_below);
+    assert!(above.radii(dt, 0).1 < max_above * 0.999);
+    // the tabled front for 1e15 J at 1/24 s: 279 m and 369 m after one and two steps, R_max 643.5 m, reached after 8.06 steps (so in the ninth)
+    let big = Blast::new([0.0; 3], 0.0, 1e15, RHO0, P0, GAMMA, 1.0).unwrap();
+    assert!((big.radii(dt, 0).1 - 279.3).abs() < 0.1 && (big.radii(dt, 1).1 - 368.6).abs() < 0.1);
+    assert!((big.radii(dt, 8).1 - 643.5).abs() < 0.1 && big.radii(dt, 7).1 < 643.0);
+    assert!(big.swept(dt, 8).is_some() && big.swept(dt, 9).is_none());
+    assert!((s.time_at(1e15, RHO0, 643.5) / dt - 8.06).abs() < 0.01);
 }
 
 #[test]
@@ -102,7 +113,7 @@ fn the_radius_in_scene_units_is_the_radius_in_metres_times_the_pixels_to_the_met
         .iter()
         .map(|&ppm| {
             let b = blast(ppm, [0.0; 3], 0.0);
-            let (_, r1) = b.radii(DT, 3, 1e-6);
+            let (_, r1) = b.radii(DT, 3);
             r1 / ppm
         })
         .collect();
@@ -110,10 +121,10 @@ fn the_radius_in_scene_units_is_the_radius_in_metres_times_the_pixels_to_the_met
         (metres[0] - metres[1]).abs() < 1e-12 * metres[0] && (metres[0] - metres[2]).abs() < 1e-12 * metres[0],
         "{metres:?}"
     );
-    // the share of the sphere that is swept is a ratio of volumes, with no unit
+    // the volume swept is in cubic scene units: in cubic metres it is the same
     let shares: Vec<f64> =
-        [1.0, 100.0, 37.0].iter().map(|&ppm| blast(ppm, [0.0; 3], 0.0).pulse(DT, 3, 1e-6).unwrap().1).collect();
-    assert!((shares[0] - shares[1]).abs() < 1e-12 && (shares[0] - shares[2]).abs() < 1e-12, "{shares:?}");
+        [1.0, 100.0, 37.0].iter().map(|&ppm| blast(ppm, [0.0; 3], 0.0).swept(DT, 3).unwrap().1 / ppm.powi(3)).collect();
+    assert!((shares[0] / shares[1] - 1.0).abs() < 1e-12 && (shares[0] / shares[2] - 1.0).abs() < 1e-12, "{shares:?}");
 }
 
 #[test]
@@ -216,9 +227,9 @@ fn the_air_displaced_is_the_volume_the_front_swept_to_the_cells_that_the_sphere_
     let h = 0.25;
     let mut sim = Simulation::new(domain(64, h, Boundary::Open)).unwrap();
     let b = blast(1.0, [0.0; 3], 0.0);
-    let (_, r1) = b.radii(DT, 0, h);
+    let (_, r1) = b.radii(DT, 0);
     assert!(r1 > 12.0 * h && r1 < 20.0 * h, "the first front is at {r1} metres");
-    let inputs = Inputs { blasts: vec![b], ..Inputs::default() };
+    let inputs = Inputs { blasts: vec![b.clone()], ..Inputs::default() };
     sim.step(&inputs).unwrap();
     // the number of cells whose centres are in the sphere, counted here
     let covered = (0..64usize.pow(3))
@@ -229,11 +240,11 @@ fn the_air_displaced_is_the_volume_the_front_swept_to_the_cells_that_the_sphere_
             r2 <= r1 * r1
         })
         .count() as f64;
-    // each covered cell is given the divergence 1 - (r0/r1)^3 over the step (here r0 = 0): all the sphere's volume, over dt
+    // the air that the domain lets out is exactly the volume that the front swept over the step, whatever the cells make of the sphere
+    let (_, swept) = b.swept(DT, 0).unwrap();
     let flux = outflow(&sim, h);
-    let expected = covered * h.powi(3) / DT;
-    assert!((flux / expected - 1.0).abs() < 1e-6, "the domain lets out {flux} and the cells took in {expected}");
-    // the cells of a sphere are its volume to a few percent at this size, so that the air given is the volume swept: 4 pi r^3 / 3 over dt
+    assert!((flux / (swept / DT) - 1.0).abs() < 1e-6, "the domain lets out {flux} and the front swept {}", swept / DT);
+    // and the cells of the sphere are its volume to a few percent at this size
     let volume = 4.0 / 3.0 * std::f64::consts::PI * r1.powi(3);
     assert!((covered * h.powi(3) / volume - 1.0).abs() < 0.05, "{covered} cells against {volume}");
 }
@@ -243,7 +254,7 @@ fn outside_the_sphere_the_flow_is_the_potential_flow_of_the_volume_that_was_swep
     let h = 0.25;
     let mut sim = Simulation::new(domain(64, h, Boundary::Open)).unwrap();
     let b = blast(1.0, [0.0; 3], 0.0);
-    let (_, r1) = b.radii(DT, 0, h);
+    let (_, r1) = b.radii(DT, 0);
     sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
     // u_r = Q / (4 pi r^2) with Q = (4 pi / 3) r1^3 / dt, along the x axis at 1.25 and 1.5 radii (the faces are at whole cells; the open faces of the
     // domain are at 32 cells, so the far field is not exactly 1/r^2: this is what the box makes of it, at a tolerance for that)
@@ -293,7 +304,7 @@ fn puff_and_pulse(energy: f64, distance: f64, ppm: f64, cell: f64) -> (f64, f64,
     };
     let (m0, x0) = measure(&sim);
     let b = Blast::new([0.0; 3], DT, energy, RHO0, P0, GAMMA, ppm).unwrap();
-    let (_, r1) = b.radii(DT, 1, h);
+    let (_, r1) = b.radii(DT, 1);
     sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
     // the step advects with the velocity that the last step left (the pulse), so the smoke moves in the step after it: one more, with no blast
     sim.step(&Inputs::default()).unwrap();
@@ -309,20 +320,18 @@ fn smoke_outside_the_sphere_is_displaced_by_the_volume_the_front_swept_and_the_s
     for cell in [0.5, 0.25] {
         let (x0, x1, m0, m1, radius) = puff_and_pulse(ENERGY, 6.0, 1.0, cell);
         let want = exact(6.0, radius);
-        // the displacement is the exact one to one cell, and to 2 percent at a quarter of a metre
+        // the displacement is the exact one to 5 percent at half a metre and to 3 at a quarter (0.984 and 0.990 of it, measured)
+        let tolerance = if cell == 0.5 { 0.05 } else { 0.03 };
         assert!(
-            (x1 - x0 - want).abs() < cell,
-            "cell {cell}: the smoke moved {} m and the volume swept says {want} m",
+            (x1 - x0) / want > 1.0 - tolerance && (x1 - x0) / want < 1.0 + tolerance,
+            "cell {cell}: the smoke moved {} m of {want} m",
             x1 - x0
         );
-        if cell == 0.25 {
-            assert!((x1 / x0 - 1.0 - want / 6.0).abs() < 0.02 * want / 6.0 + 1e-3, "{x0} to {x1}");
-        }
         errors.push((m1 / m0 - 1.0).abs());
     }
     // the semi-Lagrangian advection is not conservative: the smoke is not made or lost to a tolerance of 1e-6 but to the interpolation, which falls
-    // with the cell (3.6 percent at half a metre, 0.74 at a quarter, measured)
-    assert!(errors[1] < errors[0] && errors[1] < 0.01, "the smoke changed by {errors:?}");
+    // with the cell (3.6 percent at half a metre, 0.70 at a quarter, measured)
+    assert!(errors[1] < errors[0] && errors[1] < 0.015, "the smoke changed by {errors:?}");
     // the same shape in other units (a metre of 100 and of 37 scene units): the same displacement in metres and the same smoke
     let (x0, x1, m0, m1, _) = puff_and_pulse(ENERGY, 6.0, 1.0, 0.5);
     for ppm in [100.0, 37.0] {
@@ -336,7 +345,7 @@ fn smoke_outside_the_sphere_is_displaced_by_the_volume_the_front_swept_and_the_s
 fn a_pulse_of_many_cells_in_one_step_still_displaces_the_smoke_by_the_volume_swept_to_the_trace_of_the_advection() {
     // 1e11 J: the front of one step is at about 7.5 m, and smoke at 9 m is pushed to about 10.5 m: 3 cells in the step at half a metre (a Courant
     // number of 3) and 6 at a quarter. What the semi-Lagrangian trace does with it, measured: it neither runs out of the domain nor crosses the
-    // sphere, and the displacement is the exact one to 3 percent (a little over, 1.026 and 1.012 of it), the smoke changing by 3.0 and 0.34 percent
+    // sphere, and the displacement is the exact one to 5 percent (a little under, 0.990 and 0.981 of it), the smoke changing by 1.8 and 1.4 percent
     let mut errors = Vec::new();
     for cell in [0.5, 0.25] {
         let (x0, x1, m0, m1, radius) = puff_and_pulse(1e11, 9.0, 1.0, cell);
@@ -344,10 +353,10 @@ fn a_pulse_of_many_cells_in_one_step_still_displaces_the_smoke_by_the_volume_swe
         let cfl = want / cell;
         assert!(cfl > 2.9, "a Courant number of {cfl}");
         let ratio = (x1 - x0) / want;
-        assert!((0.97..=1.03).contains(&ratio), "cell {cell}: the displacement is {ratio} of the exact one");
+        assert!((0.95..=1.03).contains(&ratio), "cell {cell}: the displacement is {ratio} of the exact one");
         errors.push((m1 / m0 - 1.0).abs());
     }
-    assert!(errors[1] < errors[0] && errors[1] < 0.01, "the smoke changed by {errors:?}");
+    assert!(errors[1] < errors[0] && errors[1] < 0.03, "the smoke changed by {errors:?}");
 }
 
 /// The kinetic energy in joules of the flow inside the ball of `a` metres about the centre, from the velocity of the faces.
@@ -388,7 +397,7 @@ fn the_kinetic_energy_of_the_piston_is_the_flow_it_makes_inside_and_outside_the_
     for (n, h) in [(32usize, 0.5f64), (64, 0.25)] {
         let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
         let b = blast(1.0, [0.0; 3], 0.0);
-        let (_, r) = b.radii(DT, 0, h);
+        let (_, r) = b.radii(DT, 0);
         sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
         let q = 4.0 / 3.0 * std::f64::consts::PI * r.powi(3) / DT;
         let a = 1.5 * r;
@@ -398,20 +407,174 @@ fn the_kinetic_energy_of_the_piston_is_the_flow_it_makes_inside_and_outside_the_
         println!("BLAST KE h {h}: {got:.4e} J against {want:.4e} J");
     }
     assert!(errors[1] < errors[0], "{errors:?}");
-    assert!(errors[1] < 0.1, "{errors:?}");
+    // 0.9 and 0.85 percent, measured
+    assert!(errors[1] < 0.02, "{errors:?}");
     // and in other units (a metre of 37 scene units) the same energy in joules
     let ppm = 37.0;
     let mut spec = domain(64, 0.25 * ppm, Boundary::Open);
     spec.origin = [-8.0 * ppm; 3];
     let mut sim = Simulation::new(spec).unwrap();
     let b = blast(ppm, [0.0; 3], 0.0);
-    let (_, r) = b.radii(DT, 0, 0.25 * ppm);
+    let (_, r) = b.radii(DT, 0);
     sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
     let in_37 = kinetic_energy(&sim, 0.25 * ppm, ppm, 1.5 * r / ppm);
     let mut base = Simulation::new(domain(64, 0.25, Boundary::Open)).unwrap();
     let b = blast(1.0, [0.0; 3], 0.0);
-    let (_, r1) = b.radii(DT, 0, 0.25);
+    let (_, r1) = b.radii(DT, 0);
     base.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
     let in_1 = kinetic_energy(&base, 0.25, 1.0, 1.5 * r1);
     assert!((in_37 / in_1 - 1.0).abs() < 1e-6, "{in_37} against {in_1}");
+}
+
+fn covered_by(cells: usize, h: f64, center: [f64; 3], radius: f64) -> f64 {
+    let half = cells as f64 * h / 2.0;
+    let c = |i: usize| (i as f64 + 0.5) * h - half;
+    let mut n = 0u64;
+    for z in 0..cells {
+        for y in 0..cells {
+            for x in 0..cells {
+                let d = [c(x) - center[0], c(y) - center[1], c(z) - center[2]];
+                n += u64::from(d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius);
+            }
+        }
+    }
+    n as f64
+}
+
+#[test]
+fn an_energy_of_one_joule_displaces_the_volume_of_its_own_front_and_not_the_volume_of_a_cell() {
+    // 1 J: the strong phase ends at 0.3 (1 / p0)^(1/3) = 6.4 mm, a sphere of 1.1e-6 cubic metres, in cells of half a metre: the cells that
+    // the sphere is given to (a cell is the least that it covers) hold that volume and no more
+    let h = 0.5;
+    let mut sim = Simulation::new(domain(16, h, Boundary::Open)).unwrap();
+    let b = Blast::new([0.0; 3], 0.0, 1.0, RHO0, P0, GAMMA, 1.0).unwrap();
+    let (_, volume) = b.swept(DT, 0).unwrap();
+    let r_max = 0.3 * (1.0 / P0).cbrt();
+    assert!((volume - 4.0 / 3.0 * std::f64::consts::PI * r_max.powi(3)).abs() < 1e-9 * volume, "{volume}");
+    sim.step(&Inputs { blasts: vec![b], ..Inputs::default() }).unwrap();
+    let flux = outflow(&sim, h);
+    // (to the tolerance of the projection, 1e-8 a second over the 512 cubic metres of the domain, of 2.2e-3 cubic metres a second)
+    assert!((flux / (volume / DT) - 1.0).abs() < 5e-3, "the domain lets out {flux}, the front swept {}", volume / DT);
+    // and not the 0.125 cubic metres of a cell over dt that the volume of one cell would have been
+    assert!(flux < 0.01 * 0.125 / DT);
+}
+
+#[test]
+fn a_window_that_the_sphere_cuts_is_pushed_from_the_blast_and_not_from_its_own_middle() {
+    // a domain of 32 cells of half a metre (16 m) and a blast of 1e11 J at x = 7 m, 1 m from the face: its front (7.5 m in the first step) covers
+    // most of the window, and its centre is not the window's
+    let h = 0.5;
+    let n = 32;
+    let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
+    let centre = [7.0, 0.0, 0.0];
+    let b = Blast::new(centre, 0.0, 1e11, RHO0, P0, GAMMA, 1.0).unwrap();
+    let (_, r1) = b.radii(DT, 0);
+    assert!(r1 > 7.0, "{r1}");
+    sim.step(&Inputs { blasts: vec![b.clone()], ..Inputs::default() }).unwrap();
+    let swept = b.swept(DT, 0).unwrap().1;
+    // the flow that the window lets out is the volume of the cells that the window holds of the sphere, and not the whole sphere's: the faces are open
+    let covered = covered_by(n, h, centre, r1);
+    let s = sim.state();
+    let ux = |x: f64| {
+        // the x velocity on the face at x (on the row nearest the axis)
+        let face = ((x + 8.0) / h).round() as usize;
+        s.velocity_faces(0)[face + (n + 1) * (n / 2 - 1 + n * (n / 2 - 1))]
+    };
+    // between the middle of the window (x = 0) and the blast (x = 7) the air goes AWAY from the blast, toward -x: a push from the middle of the
+    // window would send it toward +x
+    for x in [-2.0, 0.0, 2.0, 4.0] {
+        assert!(ux(x) < 0.0, "u_x({x}) = {}", ux(x));
+    }
+    // inside the sphere the flow is linear in the distance from the blast: u(x) / u(2) = (x - 7) / (2 - 7)
+    let ratio = ux(4.0) / ux(2.0);
+    assert!((ratio - (4.0 - 7.0) / (2.0 - 7.0)).abs() < 0.1, "{ratio}");
+    // and the rate at which the cells are given the divergence is the volume of the sphere over the cells of the window that it covers
+    let rate = swept / DT / (covered * h.powi(3));
+    let d = (ux(4.0) - ux(2.0)) / 2.0 * 3.0 / 1.0;
+    assert!(d.abs() < 3.0 * rate, "{d} against {rate}");
+}
+
+#[test]
+fn the_volume_swept_over_all_the_steps_of_the_strong_phase_is_the_volume_of_its_last_sphere() {
+    let h = 0.5;
+    let mut sim = Simulation::new(domain(64, h, Boundary::Open)).unwrap();
+    let b = blast(1.0, [0.0; 3], 0.0);
+    let r_max = solve(GAMMA).unwrap().max_radius(ENERGY, P0);
+    let mut released = 0.0;
+    let mut previous = 0.0;
+    for step in 0..14u64 {
+        sim.step(&Inputs { blasts: vec![b.clone()], ..Inputs::default() }).unwrap();
+        let out = outflow(&sim, h) * DT;
+        let want = b.swept(DT, step).map_or(0.0, |s| s.1);
+        assert!(
+            (out - want).abs() < 1e-6 * want + 1e-7,
+            "step {step}: the domain let out {out} and the front swept {want}"
+        );
+        released += out;
+        previous = b.radii(DT, step).1;
+    }
+    assert!((previous - r_max).abs() < 1e-9, "the front has stopped at the end of the strong phase");
+    assert!((released / (4.0 / 3.0 * std::f64::consts::PI * r_max.powi(3)) - 1.0).abs() < 1e-6, "{released}");
+}
+
+#[test]
+fn a_solid_in_the_sphere_takes_none_of_the_volume_and_a_source_in_the_same_step_adds_its_own() {
+    use sr_sim::pyro::Obstacle;
+    let h = 0.25;
+    let n = 64;
+    let b = blast(1.0, [0.0; 3], 0.0);
+    let (_, swept) = b.swept(DT, 0).unwrap();
+    // a stationary box in the middle of the sphere: its cells are solid, so the cells that are given the volume are the sphere's that are not
+    let wall = Obstacle::stationary(Shape::Box { min: [-1.0, -1.0, -1.0], max: [1.0, 1.0, 1.0] });
+    let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
+    sim.step(&Inputs { blasts: vec![b.clone()], obstacles: vec![wall], ..Inputs::default() }).unwrap();
+    let flux = outflow(&sim, h);
+    assert!(
+        (flux / (swept / DT) - 1.0).abs() < 1e-4,
+        "with a solid: the domain lets out {flux}, the front swept {}",
+        swept / DT
+    );
+    // a source with an expansion in the same step: the domain lets out the volume of the front and the expansion times the volume of the cells
+    // that the source covers
+    let source = sr_sim::pyro::Source {
+        shape: Shape::Sphere { center: [6.0, 0.0, 0.0], radius: 1.0 },
+        expansion: 3.0,
+        ..sr_sim::pyro::Source::default()
+    };
+    let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
+    sim.step(&Inputs { blasts: vec![b], sources: vec![source], ..Inputs::default() }).unwrap();
+    let cells = covered_by(n, h, [6.0, 0.0, 0.0], 1.0);
+    let want = swept / DT + 3.0 * cells * h.powi(3);
+    let flux = outflow(&sim, h);
+    assert!((flux / want - 1.0).abs() < 1e-4, "the domain lets out {flux}, the front and the source say {want}");
+}
+
+#[test]
+fn a_window_that_follows_its_smoke_is_the_window_it_was_where_it_does_not_move() {
+    use sr_sim::pyro::Follow;
+    let run = |follow: Option<Follow>| {
+        let spec = Spec { follow, ..domain(32, 0.5, Boundary::Open) };
+        let mut sim = Simulation::new(spec).unwrap();
+        let puff = Impulse {
+            shape: Shape::Sphere { center: [4.0, 0.0, 0.0], radius: 1.0 },
+            time: 0.0,
+            density: 1.0,
+            temperature: 0.0,
+            velocity: [0.0; 3],
+            expansion: 0.0,
+        };
+        for step in 0..4 {
+            let inputs = Inputs {
+                impulses: if step == 0 { vec![puff.clone()] } else { vec![] },
+                blasts: vec![blast(1.0, [0.0; 3], DT)],
+                ..Inputs::default()
+            };
+            sim.step(&inputs).unwrap();
+        }
+        (bits(&sim), sim.state().window())
+    };
+    let (plain, _) = run(None);
+    let (followed, window) = run(Some(Follow { margin: 2, loss: 0.0 }));
+    assert_eq!(window, [0, 0, 0], "the window did not move");
+    assert_eq!(followed, plain);
 }

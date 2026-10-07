@@ -388,21 +388,25 @@ pub struct Impulse {
 ///
 /// `energy` is released at `center` (scene units) at `time` (seconds from the start of the simulation) into air of density `ambient_density`
 /// (kg/m^3) and pressure `ambient_pressure` (Pa), a gas of `gamma`; a metre is `pixels_per_meter` scene units. The front is at
-/// `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres until it reaches `0.3 (E / p0)^(1/3)` (the end of the strong phase), and stays there. Each step the
-/// air that the front swept in the step is displaced: the cells whose centres are in the sphere of the radius that the front has at the end of
-/// the step are given the divergence `1 - (R0 / R1)^3` over the step (a ratio of volumes, with no unit), so that the air given is exactly
-/// the volume swept and, outside, the projection makes the potential flow `u = Rdot R^2 / r^2`. The shock is not carried (the solver is
-/// incompressible), nothing is heated and no smoke is made. A front smaller than a cell is the sphere of one cell. It needs an open domain.
+/// `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres until it reaches `0.3 (E / p0)^(1/3)` (the end of the strong phase: the radius at which the pressure
+/// behind the front has fallen to a few times the ambient one, 5.8 for air), and stays there. Each step the air that the front swept in the step
+/// is displaced: the volume `4 pi (R1^3 - R0^3) / 3` is given to the cells whose centres are in the sphere of the radius that the front has at
+/// the end of the step (at least a cell: a front smaller than that is the sphere of one cell, and the volume is still the volume swept), spread
+/// evenly over the cells that are not solid, so that the air given is exactly the volume swept whatever the cells make of the sphere. The
+/// analytic flow of the piston is put in the velocity before the projection (inside, `u = d (x - c) / 3` for the divergence `d` the cells are given;
+/// outside, `u = Q / (4 pi r^2)` away from the centre `c`, `Q` the volume over the step), so that a window that is cut by the sphere, or that is
+/// not centred on it, is pushed from the blast and not from its own middle; the projection then makes the flow consistent with the faces. The
+/// shock is not carried (the solver is incompressible), nothing is heated and no smoke is made. It needs an open domain.
 #[derive(Clone, Debug)]
 pub struct Blast {
-    pub center: [f64; 3],
-    pub time: f64,
-    pub energy: f64,
-    pub ambient_density: f64,
-    pub ambient_pressure: f64,
-    pub gamma: f64,
-    pub pixels_per_meter: f64,
-    law: crate::sedov::Sedov,
+    center: [f64; 3],
+    time: f64,
+    energy: f64,
+    ambient_density: f64,
+    ambient_pressure: f64,
+    gamma: f64,
+    pixels_per_meter: f64,
+    law: std::sync::Arc<crate::sedov::Sedov>,
 }
 
 impl Blast {
@@ -426,12 +430,28 @@ impl Blast {
         {
             return Err(Error::Invalid("a blast has a positive ambient pressure and pixels to the metre"));
         }
-        let law = crate::sedov::solve(gamma)
-            .map_err(|_| Error::Invalid("a blast needs a ratio of specific heats from 1.05 to 3"))?;
+        let law = crate::sedov::solve_cached(gamma)
+            .map_err(|_| Error::Invalid("a blast needs a ratio of specific heats from 1.1 to 3"))?;
         Ok(Blast { center, time, energy, ambient_density, ambient_pressure, gamma, pixels_per_meter, law })
     }
 
-    /// The front `t` seconds after the release, in scene units, before the clamp to a cell.
+    pub fn center(&self) -> [f64; 3] {
+        self.center
+    }
+
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
+    pub fn energy(&self) -> f64 {
+        self.energy
+    }
+
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
+    /// The front `t` seconds after the release, in scene units.
     fn front(&self, t: f64) -> f64 {
         if t <= 0.0 || self.energy == 0.0 {
             return 0.0;
@@ -443,24 +463,23 @@ impl Blast {
         strong * self.pixels_per_meter
     }
 
-    /// The radius of the front at the start and at the end of the fixed step `step`, in scene units, for cells of `voxel_size`: a front that
-    /// is not zero is at least a cell.
-    pub fn radii(&self, dt: f64, step: u64, voxel_size: f64) -> (f64, f64) {
+    /// The radius of the front at the start and at the end of the fixed step `step`, in scene units: nothing before the step in which the blast is
+    /// released, and the front at the end of that step (the time since the release) after it.
+    pub fn radii(&self, dt: f64, step: u64) -> (f64, f64) {
         let first = fixed_step_index(self.time / dt);
         if step < first {
             return (0.0, 0.0);
         }
-        let cell = |r: f64| if r > 0.0 { r.max(voxel_size) } else { 0.0 };
-        let end = cell(self.front((step + 1) as f64 * dt - self.time));
-        let start = if step == first { 0.0 } else { cell(self.front(step as f64 * dt - self.time)) };
+        let end = self.front((step + 1) as f64 * dt - self.time);
+        let start = if step == first { 0.0 } else { self.front(step as f64 * dt - self.time) };
         (start, end)
     }
 
-    /// The pulse of the step: the radius of the sphere that the front ends it in and the divergence that its cells are given over the step
-    /// (the volume swept as a share of the volume of that sphere), if the front moved.
-    pub fn pulse(&self, dt: f64, step: u64, voxel_size: f64) -> Option<(f64, f64)> {
-        let (r0, r1) = self.radii(dt, step, voxel_size);
-        (r1 > r0).then(|| (r1, 1.0 - (r0 / r1).powi(3)))
+    /// What the front sweeps in the step, if it moved: the radius that it ends the step at and the volume between the two spheres, in cubic scene
+    /// units.
+    pub fn swept(&self, dt: f64, step: u64) -> Option<(f64, f64)> {
+        let (r0, r1) = self.radii(dt, step);
+        (r1 > r0).then(|| (r1, 4.0 / 3.0 * std::f64::consts::PI * (r1.powi(3) - r0.powi(3))))
     }
 }
 
@@ -1485,19 +1504,8 @@ impl Simulation {
             if self.spec.boundary != Boundary::Open {
                 return Err(Error::Invalid("a blast needs an open domain"));
             }
-            if let Some((radius, expansion)) = blast.pulse(dt, self.step, self.spec.voxel_size) {
-                inject(
-                    &mut state,
-                    &mut target,
-                    &Shape::Sphere { center: blast.center, radius },
-                    Injection {
-                        density: 0.0,
-                        temperature: 0.0,
-                        velocity: [0.0; 3],
-                        expansion: expansion / dt,
-                        heated: None,
-                    },
-                );
+            if let Some((radius, volume)) = blast.swept(dt, self.step) {
+                inject_piston(&mut state, &mut target, blast.center, radius.max(self.spec.voxel_size), volume, dt);
             }
         }
         profile.inject = lap(&mut clock);
@@ -2259,6 +2267,48 @@ fn inject(state: &mut State, target: &mut [f64], shape: &Shape, add: Injection) 
             let p = world_point(origin, h, std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 }));
             if shape.contains(p) {
                 *v += amount;
+            }
+        });
+    }
+}
+
+/// Puts the flow of a spherical piston that has swept `volume` (cubic scene units) in a step of `dt` seconds, as the sphere of radius `reach` about
+/// `center`: the cells whose centres are in the sphere and that are not solid are given the divergence that makes the volume that they let out the
+/// volume swept (`volume / (cells * h^3 * dt)`, 1/second), and the faces of the whole domain are given the analytic velocity of the piston, inside
+/// `d (x - c) / 3` and outside `Q / (4 pi r^2)` along `x - c` (`Q = volume / dt`), so that the projection that follows has only the faces and the
+/// discretization to correct and pushes from the centre of the blast wherever the window is.
+fn inject_piston(state: &mut State, target: &mut [f64], center: [f64; 3], reach: f64, volume: f64, dt: f64) {
+    let (cells, origin, h) = (state.cells, state.origin, state.h);
+    let State { velocity: faces, solid, .. } = state;
+    let solid = &*solid;
+    let inside = |p: [f64; 3]| (0..3).map(|a| (p[a] - center[a]).powi(2)).sum::<f64>() <= reach * reach;
+    let covered = (0..solid.len())
+        .into_par_iter()
+        .with_min_len(HEAVY)
+        .filter(|&k| !solid[k] && inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))))
+        .count();
+    if covered == 0 {
+        return;
+    }
+    let rate = volume / dt;
+    let divergence = rate / (covered as f64 * h * h * h);
+    target.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, t)| {
+        if !solid[k] && inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5))) {
+            *t += divergence;
+        }
+    });
+    let outside = rate / (4.0 * std::f64::consts::PI);
+    for (a, axis) in faces.iter_mut().enumerate() {
+        let dims = face_dims(cells, a);
+        axis.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, v)| {
+            let cell = coords(k, dims);
+            let p = world_point(origin, h, std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 }));
+            let d: [f64; 3] = std::array::from_fn(|i| p[i] - center[i]);
+            let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if r2 <= reach * reach {
+                *v += divergence / 3.0 * d[a];
+            } else {
+                *v += outside / (r2 * r2.sqrt()) * d[a];
             }
         });
     }

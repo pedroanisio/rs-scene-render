@@ -55,8 +55,9 @@ fn a_blast_displaces_a_puff_of_smoke_by_the_volume_the_front_swept_in_metres_wha
         let (x1, _) = centroid(&blast, after, ppm);
         moved.push(x1 - x0);
     }
-    // the exact displacement is 0.5 m (to a cell, half a metre, by the advection), and the same in metres in every scene unit
-    assert!((moved[0] - 0.5).abs() < 0.25, "{moved:?}");
+    // the volume swept says 0.51 m for the puff as a whole; what is measured here is the centre of the smoke on the line through the middle of the
+    // puff (the line of the axis, not the centre of the whole puff, which the radial stretching of the flow moves a little differently): 0.60 m, to 0.05
+    assert!((moved[0] - 0.60).abs() < 0.05, "{moved:?}");
     assert!((moved[1] - moved[0]).abs() < 1e-3 && (moved[2] - moved[0]).abs() < 1e-3, "{moved:?}");
 }
 
@@ -79,6 +80,21 @@ fn a_blast_needs_an_open_domain_and_a_volume_that_is_scaled_the_same_on_every_ax
     // a volume that is stretched has no sphere in its own units
     let stretched = evaluator(&scene(1.0, "3.75e9", r#"scaleX="2""#, "open"));
     let frame = stretched.evaluate(0.002);
-    let said = frame.failures.iter().chain(&frame.problems).any(|f| f.contains("uniformly scaled"));
+    let said = frame.failures.iter().chain(&frame.problems).any(|f| f.contains("scaled the same on every axis"));
+    assert!(said, "{:?} {:?}", frame.failures, frame.problems);
+}
+
+#[test]
+fn a_volume_that_is_sheared_by_a_stretched_parent_has_no_sphere_either() {
+    // the parent stretches x by 2 and the child turns by 45 degrees about z: the images of the axes have one length (the square root of 2.5) but are not at
+    // right angles, so the lengths of the columns do not tell the shear
+    let xml = scene(1.0, "3.75e9", "", "open")
+        .replace("<composition><object3D", r#"<composition><group id="stretch" scaleX="2"><object3D"#)
+        .replace(r#"primitive="volume" >"#, r#"primitive="volume" rotation="45">"#)
+        .replace("</object3D></composition>", "</object3D></group></composition>");
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let frame = ev.evaluate(0.002);
+    let said = frame.failures.iter().chain(&frame.problems).any(|f| f.contains("scaled the same on every axis"));
     assert!(said, "{:?} {:?}", frame.failures, frame.problems);
 }

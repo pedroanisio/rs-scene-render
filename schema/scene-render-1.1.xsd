@@ -4722,7 +4722,7 @@
     <xs:attribute name="z" type="xs:double" default="0"/>
     <xs:attribute name="ambientDensity" type="positiveDecimal" default="1.2"/>
     <xs:attribute name="ambientPressure" type="positiveDecimal" default="101325"/>
-    <xs:attribute name="gamma" default="1.4"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:minInclusive value="1.05"/><xs:maxInclusive value="3"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="gamma" default="1.4"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:minInclusive value="1.1"/><xs:maxInclusive value="3"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="pyroType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/><xs:element name="pyroBlast" type="pyroBlastType"/></xs:choice>

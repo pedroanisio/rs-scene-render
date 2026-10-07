@@ -88,8 +88,15 @@ fn a_blast_of_a_known_size_has_the_overpressure_and_the_radius_of_the_order_it_i
 
 #[test]
 fn a_gas_that_cannot_be_is_an_error() {
-    for gamma in [1.0, 0.5, f64::NAN, f64::INFINITY, 1.0 + 1e-12, 9.0] {
+    for gamma in [1.0, 0.5, f64::NAN, f64::INFINITY, 1.0 + 1e-12, 1.05, 1.0999, 9.0] {
         assert!(solve(gamma).is_err(), "{gamma}");
     }
-    assert!(Sedov::with_steps(1.4, 0).is_err());
+    assert!(Sedov::with_steps(1.4, 0).is_err()); // the least gas that is solved is solved: its mass inside the front is that of the sphere that it swept (1e-4: the density goes to zero as the 30th power of xi
+                                                 // there, so the integral is the least exact), and its constant is a number between the values for 1 and for 1.2
+    let thin = solve(1.1).unwrap();
+    assert!((thin.swept_mass() - 1.0 / 3.0).abs() < 1e-4, "{}", thin.swept_mass());
+    assert!(thin.xi0() > 0.7 && thin.xi0() < solve(1.2).unwrap().xi0(), "{}", thin.xi0());
+    // the solution for a gas is the same one the second time (and is computed once)
+    let again = sr_sim::sedov::solve_cached(1.4).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&again, &sr_sim::sedov::solve_cached(1.4).unwrap()));
 }

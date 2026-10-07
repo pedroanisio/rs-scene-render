@@ -212,7 +212,7 @@ fn a_blast_needs_an_open_domain_a_place_in_it_and_a_gas_that_is_one() {
     };
     let open = r#"boundary="open""#;
     assert!(blast(open, "").is_empty(), "{:?}", blast(open, ""));
-    assert!(blast(open, r#"x="4" y="-4" z="0" ambientDensity="0.9" ambientPressure="90000" gamma="1.67""#).is_empty());
+    assert!(blast(open, r#"x="4" y="-4" z="0" ambientDensity="0.9" ambientPressure="90000" gamma="1.1""#).is_empty());
     // a closed pyro (the default) cannot let the divergence of a blast out
     assert!(blast("", "").contains(&"PYC5".into()));
     assert!(blast(r#"boundary="closed""#, "").contains(&"PYC5".into()));
@@ -221,8 +221,14 @@ fn a_blast_needs_an_open_domain_a_place_in_it_and_a_gas_that_is_one() {
         assert!(blast(open, place).contains(&"PYC6".into()), "{place}");
     }
     // the types: no energy that is negative, no gas that is not one, no air of nothing
-    for bad in [r#"energy="-1""#, r#"gamma="1""#, r#"gamma="3.5""#, r#"ambientDensity="0""#, r#"ambientPressure="-5""#]
-    {
+    for bad in [
+        r#"energy="-1""#,
+        r#"gamma="1""#,
+        r#"gamma="1.05""#,
+        r#"gamma="3.5""#,
+        r#"ambientDensity="0""#,
+        r#"ambientPressure="-5""#,
+    ] {
         let object = format!(
             r#"<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" boundary="open"><pyroBlast time="0.3" energy="1000000" {bad}/></pyro><medium blackbody="true"/></object3D>"#
         )

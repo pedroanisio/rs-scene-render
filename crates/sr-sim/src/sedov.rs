@@ -31,9 +31,24 @@ pub const STEPS: usize = 40_000;
 /// The least `xi` that the integration reaches: below it the mass is `xi^(3 + 3 / (gamma - 1))` and the energy `xi^3`, both beyond the precision.
 const XI_MIN: f64 = 1e-5;
 
-/// The solution for the ratio of specific heats `gamma`, from `1.05` to `3`.
+/// The solution for the ratio of specific heats `gamma`, from `1.1` to `3` (below it the density goes to zero toward the centre as a power
+/// of `xi` so high (`3 / (gamma - 1)`) that the integration is lost: the step and the order are not enough, and no result is better than a wrong one).
 pub fn solve(gamma: f64) -> Result<Sedov, String> {
     Sedov::with_steps(gamma, STEPS)
+}
+
+/// The solution for `gamma`, computed once for each ratio in the process (a blast asks for it for every step of a simulation).
+pub fn solve_cached(gamma: f64) -> Result<std::sync::Arc<Sedov>, String> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static SOLVED: OnceLock<Mutex<HashMap<u64, Arc<Sedov>>>> = OnceLock::new();
+    let key = gamma.to_bits();
+    if let Some(found) = SOLVED.get_or_init(Default::default).lock().unwrap().get(&key) {
+        return Ok(found.clone());
+    }
+    let solved = Arc::new(solve(gamma)?);
+    SOLVED.get_or_init(Default::default).lock().unwrap().insert(key, solved.clone());
+    Ok(solved)
 }
 
 /// The right-hand side of the three equations, as derivatives with respect to `xi`: `(U', (ln G)', (ln P)')` (the logarithms keep `G`, which
@@ -52,8 +67,8 @@ fn slopes(gamma: f64, xi: f64, [u, lng, lnp]: [f64; 3]) -> [f64; 3] {
 impl Sedov {
     /// The solution by `steps` steps of the integration in `ln xi`.
     pub fn with_steps(gamma: f64, steps: usize) -> Result<Sedov, String> {
-        if !(gamma.is_finite() && (1.05..=3.0).contains(&gamma)) {
-            return Err(format!("the ratio of specific heats {gamma} is not between 1.05 and 3"));
+        if !(gamma.is_finite() && (1.1..=3.0).contains(&gamma)) {
+            return Err(format!("the ratio of specific heats {gamma} is not between 1.1 and 3"));
         }
         if steps == 0 {
             return Err("an integration needs at least one step".into());
@@ -83,7 +98,7 @@ impl Sedov {
             let k3 = deriv(x + h / 2.0, &at(&k2, h / 2.0));
             let k4 = deriv(x + h, &at(&k3, h));
             let next: [f64; 3] = std::array::from_fn(|i| y[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]));
-            // Simpson on the step for the integrals, with the state at the middle from the second stage of the method
+            // Simpson on the step for the integrals, with the state at the middle from the Hermite interpolation of the step (the slopes k1 and k4 at its ends)
             let mid: [f64; 3] = std::array::from_fn(|i| (y[i] + next[i]) / 2.0 + h / 8.0 * (k1[i] - k4[i]));
             let (f0, fm, f1) =
                 (integrands(x.exp(), &y), integrands((x + h / 2.0).exp(), &mid), integrands((x + h).exp(), &next));

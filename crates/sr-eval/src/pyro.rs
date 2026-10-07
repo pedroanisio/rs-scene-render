@@ -255,11 +255,18 @@ fn blast_inputs(p: &Program, frame: &FrameGraph, node: usize, input: &mut Inputs
     }
     let domain = inverse_transform(crate::sim3d::world3(frame, node, 0))?;
     let pixels_per_meter = p.scene.physics.as_ref().map(|ph| ph.pixels_per_meter.get()).unwrap_or(100.0);
-    let along = domain.transform_vector3(DVec3::new(pixels_per_meter, 0.0, 0.0)).length();
-    let across = [DVec3::new(0.0, pixels_per_meter, 0.0), DVec3::new(0.0, 0.0, pixels_per_meter)]
-        .map(|v| domain.transform_vector3(v).length());
-    if !(along.is_finite() && along > 0.0) || across.iter().any(|a| (a - along).abs() > 1e-6 * along) {
-        return Err(pyro::Error::Invalid("a blast needs a uniformly scaled volume"));
+    // a sphere of the scene is a sphere of the volume's own units only if the map between them is a rotation and the same scale on every axis:
+    // the images of the three axes have one length and are at right angles (a shear, as well as a stretch, is refused)
+    let columns = [DVec3::X, DVec3::Y, DVec3::Z].map(|axis| domain.transform_vector3(axis * pixels_per_meter));
+    let along = columns[0].length();
+    let conformal = along.is_finite()
+        && along > 0.0
+        && columns.iter().all(|c| (c.length() - along).abs() <= 1e-6 * along)
+        && (0..3).all(|i| (i + 1..3).all(|j| columns[i].dot(columns[j]).abs() <= 1e-6 * along * along));
+    if !conformal {
+        return Err(pyro::Error::Invalid(
+            "a blast needs a volume that is scaled the same on every axis and not sheared",
+        ));
     }
     for child in blasts {
         let number = |name: &str, default: f64| num(child, name, default);
