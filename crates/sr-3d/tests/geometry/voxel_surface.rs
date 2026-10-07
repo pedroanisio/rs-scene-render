@@ -808,3 +808,28 @@ fn a_frame_that_reads_the_steps_of_an_owner_remeshes_the_union_of_the_bricks_of_
     ask(&mut cache, 8, 6, &steps).unwrap();
     assert_eq!(ask(&mut cache, 8, 6, &steps).unwrap().remeshed, 0);
 }
+
+#[test]
+fn a_surface_over_its_budget_is_refused_at_the_plane_that_takes_it_over_and_not_after_the_whole_of_it_is_made() {
+    // a checkerboard of 100 cubed: every cell shows its six faces, 3 000 000 quads in all and 10 000 on every plane but the first of each axis
+    let cells: Vec<([i32; 3], u8)> = (0..100)
+        .flat_map(|z| (0..100).flat_map(move |y| (0..100).map(move |x| ([x, y, z], 1u8))))
+        .filter(|(c, _)| (c[0] + c[1] + c[2]) % 2 == 0)
+        .collect();
+    let board = grid(cells);
+    let classes = Classes::identity();
+    for production in [false, true] {
+        let mut cache = SurfaceCache::new();
+        let budget = 15_000 * BYTES_PER_QUAD;
+        let refused = if production {
+            cache.update_known(&board, &classes, budget, (3, 1), None)
+        } else {
+            cache.update(&board, &classes, budget)
+        }
+        .unwrap_err();
+        assert!(refused.contains("voxel surface exceeds memory budget"), "{refused}");
+        // the budget admits the first plane (5 000 quads at the edge) and the second (10 000): the third takes it over, and no plane is made after
+        assert!(cache.planes_meshed() <= 3, "production {production}: {} planes meshed", cache.planes_meshed());
+        assert!(cache.quads().is_empty());
+    }
+}

@@ -32,11 +32,17 @@ type Slice = Arc<[Quad]>;
 pub struct SurfaceCache {
     held: Option<(u64, u64, Classes)>,
     slices: BTreeMap<(u8, bool, i32), Slice>,
+    meshed: usize,
 }
 
 impl SurfaceCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many planes the last update meshed, whether it came to an end or was refused for the budget.
+    pub fn planes_meshed(&self) -> usize {
+        self.meshed
     }
 
     /// Brings the surface to the state of `grid` under `classes`, within `max_bytes` of surface memory (the budget of
@@ -120,48 +126,63 @@ impl SurfaceCache {
         let all: usize = (0..3).map(|a| index.planes(a).len()).sum();
         let dirty = dirty.filter(|d| 2 * d.len() <= all);
         let full = dirty.is_none();
-        let remeshed = match &dirty {
+        // the budget is checked at every plane, as `mesh_quads_within` does: a surface that does not fit is refused at the plane that takes it
+        // over, and the planes after it are not made
+        let limit = max_bytes / BYTES_PER_QUAD;
+        let mut meshed = 0;
+        let mut fits = true;
+        match &dirty {
             Some(dirty) => {
+                let mut held: usize = self.slices.values().map(|s| s.len()).sum();
                 for (axis, plane) in dirty {
-                    self.remesh(&index, *axis, *plane, classes);
+                    meshed += 1;
+                    held = self.remesh(&index, *axis, *plane, classes, held);
+                    if held > limit {
+                        fits = false;
+                        break;
+                    }
                 }
-                dirty.len()
             }
             None => {
                 self.slices.clear();
-                for axis in 0..3 {
+                let mut held = 0;
+                'all: for axis in 0..3 {
                     for plane in index.planes(axis) {
-                        self.remesh(&index, axis, plane, classes);
+                        meshed += 1;
+                        held = self.remesh(&index, axis, plane, classes, held);
+                        if held > limit {
+                            fits = false;
+                            break 'all;
+                        }
                     }
                 }
-                all
             }
-        };
-        let quads: usize = self.slices.values().map(|s| s.len()).sum();
-        if quads > max_bytes / BYTES_PER_QUAD {
-            *self = Self::default();
+        }
+        if !fits {
+            *self = Self { meshed, ..Self::default() };
             return Err(format!(
-                "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {} quads, and the surface has more",
-                max_bytes / BYTES_PER_QUAD
+                "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {limit} quads, and the surface has more"
             ));
         }
+        self.meshed = meshed;
         self.held = Some((ident.0, ident.1, classes.clone()));
-        Ok(Remesh { remeshed, full })
+        Ok(Remesh { remeshed: meshed, full })
     }
 
-    fn remesh(&mut self, index: &Index, axis: usize, plane: i32, classes: &Classes) {
+    /// Meshes a plane again, given that the surface held `held` quads, and returns how many it has after it.
+    fn remesh(&mut self, index: &Index, axis: usize, plane: i32, classes: &Classes, held: usize) -> usize {
         let (minus, plus) = index.plane_faces(axis, plane, classes);
+        let mut count = held;
         for (faces, positive) in [(minus, false), (plus, true)] {
             let mut quads = Vec::new();
             merge(axis as u8, positive, plane, &faces, &mut quads);
             quads.sort_by_key(|q| (q.v0, q.u0));
             let key = (axis as u8, positive, plane);
-            if quads.is_empty() {
-                self.slices.remove(&key);
-            } else {
-                self.slices.insert(key, quads.into());
-            }
+            count += quads.len();
+            let old = if quads.is_empty() { self.slices.remove(&key) } else { self.slices.insert(key, quads.into()) };
+            count -= old.map_or(0, |s| s.len());
         }
+        count
     }
 
     /// The quads of the surface in the canonical order: by axis, facing, plane, then `v0` and `u0`.
