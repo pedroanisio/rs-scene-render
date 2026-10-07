@@ -513,6 +513,10 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
             "{} restores for {backward} steps back",
             replay.checkpoint_restores()
         );
+        // with the default budget a checkpoint other than the first was taken (each second), so the replays could start from one
+        if budget.is_none() {
+            assert!(replay.progress().1 > 1, "{} checkpoints", replay.progress().1);
+        }
     }
 }
 
@@ -608,6 +612,10 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
             "{} restores for {backward} steps back",
             replay.checkpoint_restores()
         );
+        // with the default budget a checkpoint other than the first was taken (each second), so the replays could start from one
+        if budget.is_none() {
+            assert!(replay.progress().1 > 1, "{} checkpoints", replay.progress().1);
+        }
     }
 }
 
@@ -816,18 +824,25 @@ fn resting(slots: usize) -> World3 {
     .unwrap()
 }
 
-/// What the world made of the mass and the inertia of the part of the bar that stays and of the piece: pushed from 0.4 s, a body speeds up
-/// as F / m and spins up as I^-1 tau, with the m and I of its own cells.
-fn push_and_measure(closed: Vec<(usize, f64)>, from: f64, ask: (f64, f64)) {
+/// What the world made of the mass and the inertia of the part of the bar that stays and of the piece: pushed from `from` s, a body speeds up
+/// as F / m and spins up as I^-1 tau, with the m and I of its own cells. `stay` and `piece` are the cells the cut leaves in the parent and gives
+/// the piece.
+fn push_and_measure(
+    closed: Vec<(usize, f64)>,
+    from: f64,
+    ask: (f64, f64),
+    cut: (usize, f64, Option<u64>, VoxelCut3),
+    stay: Vec<[i32; 3]>,
+    piece: Vec<[i32; 3]>,
+) {
     let (force, torque) = ([120.0, -40.0, 75.0], [30.0, 55.0, -45.0]);
     let mut w = resting(1);
-    let mut d = Pusher { script: Script { cuts: vec![first_cut(0.3)] }, from, force, torque, closed };
+    let mut d = Pusher { script: Script { cuts: vec![cut] }, from, force, torque, closed };
     let (a, b) = (w.frame_at(ask.0, &mut d), w.frame_at(ask.1, &mut d));
     assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?} {:?}", a.errors, b.errors);
     let dt = ask.1 - ask.0;
-    for (k, cells, mass) in
-        [(0usize, cells_of(0..5, 0..2, 0..2), 20.0 * CELL_MASS), (1, cells_of(6..12, 0..2, 0..2), 24.0 * CELL_MASS)]
-    {
+    for (k, cells) in [(0usize, stay), (1, piece)] {
+        let mass = cells.len() as f64 * CELL_MASS;
         let props = shape_mass_properties(&Shape3::Voxels { size: SIZE, cells }, mass, 1.0).unwrap();
         for i in 0..3 {
             let accel = (b.velocities[k].linear[i] - a.velocities[k].linear[i]) / dt;
@@ -849,16 +864,54 @@ fn push_and_measure(closed: Vec<(usize, f64)>, from: f64, ask: (f64, f64)) {
     }
 }
 
+/// A cut whose piece is an L, which has products of inertia, so that a swap or a rotation of the axes shows: the slice x = 5 is destroyed, and so is
+/// the notch of the far end (x 9 to 11, y = 1), which leaves the cells x 6 to 11 with the notch out as the piece.
+/// A cut as the script holds it: the parent, the time from which it applies, the revision it is made against, and the cut.
+type Scripted = (usize, f64, Option<u64>, VoxelCut3);
+
+fn the_l_cut(at: f64) -> (Scripted, Vec<[i32; 3]>, Vec<[i32; 3]>) {
+    let notch = cells_of(9..12, 1..2, 0..2);
+    let piece: Vec<[i32; 3]> = cells_of(6..12, 0..2, 0..2).into_iter().filter(|c| !notch.contains(c)).collect();
+    let mut destroyed = cells_of(5..6, 0..2, 0..2);
+    destroyed.extend(notch);
+    let cut = VoxelCut3 {
+        revision: 1,
+        destroyed,
+        parent_mass: 20.0 * CELL_MASS,
+        pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * CELL_MASS }],
+    };
+    ((0, at, None, cut), cells_of(0..5, 0..2, 0..2), piece)
+}
+
 #[test]
 fn what_the_world_gives_the_part_that_stays_and_the_piece_is_the_mass_and_the_inertia_of_their_cells() {
     // pushed from 0.4 s, a tenth of a second after the cut, with the measurement over four steps
-    push_and_measure(vec![], 0.4, (0.41, 0.45));
+    push_and_measure(
+        vec![],
+        0.4,
+        (0.41, 0.45),
+        first_cut(0.3),
+        cells_of(0..5, 0..2, 0..2),
+        cells_of(6..12, 0..2, 0..2),
+    );
+    // and with a piece that is an L, whose tensor has products
+    let (cut, stay, piece) = the_l_cut(0.3);
+    push_and_measure(vec![], 0.4, (0.41, 0.45), cut, stay, piece);
 }
 
 #[test]
 fn a_piece_whose_slot_is_hidden_when_it_is_cut_has_the_mass_and_the_inertia_of_its_cells_when_it_shows() {
     // the slot is hidden by the driver until 0.8 s, the cut is at 0.3 s: it is a body that the world has made and does not yet show
-    push_and_measure(vec![(1, 0.8)], 0.9, (0.91, 0.95));
+    push_and_measure(
+        vec![(1, 0.8)],
+        0.9,
+        (0.91, 0.95),
+        first_cut(0.3),
+        cells_of(0..5, 0..2, 0..2),
+        cells_of(6..12, 0..2, 0..2),
+    );
+    let (cut, stay, piece) = the_l_cut(0.3);
+    push_and_measure(vec![(1, 0.8)], 0.9, (0.91, 0.95), cut, stay, piece);
 }
 
 #[test]

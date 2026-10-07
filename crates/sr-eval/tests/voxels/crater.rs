@@ -143,16 +143,16 @@ fn the_cells_above_the_surface_of_the_crater_are_taken_out_to_the_reach_of_the_c
     assert!(inside.iter().all(|c| x.removed.contains(c)), "the pillar inside the reach of the crater goes");
     assert!(above.iter().all(|c| !x.removed.contains(c)), "and the part above it stays");
     assert!(!inside.is_empty() && !above.is_empty());
-    // the volume: pinned for the authored rock and 0.25 m cells, and within a hundredth of a percent of the law's
+    // the volume: pinned for the authored rock and 0.25 m cells, and within a cell of the law's (100.9275 m3 is 6 459.4 cells of 0.015625 m3)
     let volume = n as f64 * H * H * H;
-    println!("VOXEL CRATER {n} cells, volume {volume:.3} m3 against the law's {:.3}", law.volume);
-    assert_eq!(n, 6460, "the number of cells the crater takes out (pinned from the run: the law's volume is {:.3} m3, which is 6459.5 cells)", law.volume);
-    assert!((volume - 100.9375).abs() < 1e-9, "{volume}");
-    assert!(
-        (volume - law.volume).abs() < 0.03 * law.volume,
-        "within 3 percent of the law's volume: {volume} against {}",
+    let cells_of_law = law.volume / (H * H * H);
+    println!(
+        "VOXEL CRATER {n} cells, volume {volume:.4} m3 against the law's {:.4}, which is {cells_of_law:.2} cells",
         law.volume
     );
+    assert_eq!(n, 6460, "the number of cells the crater takes out (pinned from the run)");
+    assert!((volume - 100.9375).abs() < 1e-9, "{volume}");
+    assert!((n as f64 - cells_of_law).abs() < 1.0, "within a cell of the law's volume: {n} against {cells_of_law}");
 }
 
 #[test]
