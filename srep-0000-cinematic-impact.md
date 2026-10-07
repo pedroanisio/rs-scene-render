@@ -839,7 +839,8 @@ and 98 of 2972 at 6 s. A domain of 468 units
 (the same cells below, two more windows above) shows what the plume is: at 6 s the smoke above a thousandth of the peak spans y = -83
 to 62 (145 units), above a hundredth -77 to 53, above a tenth -74 to 8, and the whole smoke is 3016. A window of 156 units
 holds that with a margin of 3 cells (9 units) only just: with `follow="true" followMargin="3" followLoss="0.001"` the window moves
-up by about 10 units, the smoke at the top face at 6 s is 0.28, the whole smoke 2977, and the plume reaches the margin; a loss of
+down 6 units at 1.1 s (the fireball) and then up, to 12 units above where it began at 5.96 s, the smoke in the three cells at the top
+face at 5.96 s is 0.17 of 2999 (88.5 of 2996 without follow, a plume cut by the face) and the plume reaches the margin; a loss of
 zero lets go of nothing, never makes room and holds 158 at the top face at 6 s, as little help as a fixed window. A plume that the
 hero film follows to its end needs 145 units and its margins, about 240 for a margin of 12 cells, and that is 64 x 80 x 64 cells
 against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with them.
@@ -847,8 +848,15 @@ against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with the
 The hero scene sets `follow="true" followMargin="3" followLoss="0.001"` on its `<pyro>`: the default margin of 12 cells (36
 units there) does not fit a window of 52 rows with a plume of 145 units, and a loss above zero is what makes the window follow
 at all. The margin is in cells, so a copy of the scene with cells of 1.5 units (`hero-hires.scene.xml`) needs a margin of 6 for the
-same distance. Whether the frame at 3 s of the 720p probe changes with the window is for the render to say (the window does not
-move before the plume nears a face, so the smoke may be bit for bit the same until then).
+same distance. The frame at 3 s of the 720p probe does change, and was expected to: the window has moved at 1.125 s, before 3 s, so the frame cannot be
+the one of the scene without follow. Its sha256 has three values, each with its reason: `24c6ab56...` (963b614, the scene without the
+follow attributes), `eeb71e14...` (d87fc65, follow merged: the window moved by the first policy and the noise keyed by the cell of the
+window) and `c8a66483...` (from 80f70d5, and the same on 28887eb and later: the noise keyed by the cell of the box the state began in, and a face
+asked for room only if the air in the smoke nearest it goes toward it). The two corrections between the last two (8c30823, 80f70d5)
+change 185,284 pixels of 921,600 (20.1 %, largest difference 157 levels, mean 0.153); the frames without follow are bit for bit the same
+in both (frames 120 and 143, sha256 `a9d92b13...` and `ea8a614c...`), so the path without follow did not change. A frame is a function of
+the policy, and a change of policy changes the hero's frames after the first move of the window: the hash is not a fixed reference of
+the scene but of the scene at a commit.
 
 Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to its
 source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit between
