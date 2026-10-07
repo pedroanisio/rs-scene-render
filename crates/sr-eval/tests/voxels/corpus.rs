@@ -1,4 +1,4 @@
-//! The valid documents of the corpus that make bodies of cells are evaluated, and as what the document says: the evaluator no longer refuses them by name, and a valid
+//! The valid documents of the corpus that make bodies of cells are evaluated, and as what the document says: the evaluator does not refuse them by name, and a valid
 //! document is one that does what it says: none of them evaluates to a failure or a problem.
 
 use sr_eval::{EvalOptions, Evaluator};
@@ -23,7 +23,8 @@ fn the_valid_documents_of_the_corpus_that_make_bodies_of_cells_are_evaluated_as_
         let doc = sr_model::load_file(corpus(name), &sr_model::LoadOptions::default())
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        for t in [0.0, doc.duration() / 2.0, doc.duration()] {
+        // the first frame, the middle and the last (a frame is at its own instant: the end of the duration is not one)
+        for t in [0.0, doc.duration() / 2.0, doc.fps().frame_time(doc.frame_count() - 1)] {
             let frame = ev.evaluate(t);
             assert!(
                 frame.failures.is_empty() && frame.problems.is_empty(),
@@ -56,7 +57,8 @@ fn every_valid_document_of_the_corpus_with_cells_evaluates_clean() {
         let doc =
             sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
-        for t in [0.0, doc.duration() / 2.0, doc.duration()] {
+        // the first frame, the middle and the last (a frame is at its own instant: the end of the duration is not one)
+        for t in [0.0, doc.duration() / 2.0, doc.fps().frame_time(doc.frame_count() - 1)] {
             let g = ev.evaluate(t);
             assert!(
                 g.failures.is_empty() && g.problems.is_empty(),
