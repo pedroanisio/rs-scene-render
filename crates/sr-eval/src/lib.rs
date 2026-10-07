@@ -49,6 +49,7 @@ pub mod splash;
 pub mod stroke_font;
 pub mod terrain;
 pub mod value;
+pub mod voxels;
 
 /// Closest candidate within a small edit distance ("did you mean").
 pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {

@@ -3,7 +3,7 @@
 // the tensors are compared entry by entry, which reads best by index
 #![allow(clippy::needless_range_loop)]
 
-use sr_3d::occupancy::{components, Moments, Occupancy};
+use sr_3d::occupancy::{components, Limits, Moments, Occupancy};
 
 /// Cells of a box of `a` by `b` by `c` cells with its corner at `at`.
 fn block(at: [i32; 3], [a, b, c]: [i32; 3]) -> Vec<[i32; 3]> {
@@ -367,4 +367,77 @@ fn the_palette_has_256_colours_beside_the_cells_and_recolouring_is_not_a_change_
     let mut again = filled(&block([0, 0, 0], [3, 3, 3]));
     again.set_palette(colours);
     assert_eq!(other.appearance_fingerprint(), again.appearance_fingerprint());
+}
+
+#[test]
+fn the_bounding_box_and_the_size_of_the_cells_are_exact_and_follow_the_content() {
+    let mut o = Occupancy::new();
+    assert_eq!((o.bounds(), o.extent()), (None, None));
+    o.set([3, -5, 70], 1).unwrap();
+    o.set([-9, 12, 8], 1).unwrap();
+    o.set([0, 0, 0], 2).unwrap();
+    assert_eq!(o.bounds(), Some(([-9, -5, 0], [3, 12, 70])));
+    assert_eq!(o.extent(), Some([13, 18, 71]));
+    // it follows what is there, not what once was: emptying the extreme cell shrinks it, and an emptied brick counts for nothing
+    o.set([3, -5, 70], 0).unwrap();
+    assert_eq!(o.bounds(), Some(([-9, 0, 0], [0, 12, 8])));
+    o.set([-9, 12, 8], 0).unwrap();
+    assert_eq!((o.bounds(), o.extent()), (Some(([0, 0, 0], [0, 0, 0])), Some([1, 1, 1])));
+    // the same from a bulk build
+    let cells = block([-5, 2, 40], [17, 3, 9]);
+    let bulk = Occupancy::from_cells(cells.iter().map(|c| (*c, 1u8))).unwrap();
+    assert_eq!(bulk.bounds(), Some(([-5, 2, 40], [11, 4, 48])));
+}
+
+#[test]
+fn a_grid_with_limits_on_cells_and_bytes_errors_where_it_would_have_to_truncate() {
+    let cells = block([0, 0, 0], [10, 10, 10]);
+    // the cells: the one that makes the count go over is refused, and the grid keeps what it had
+    let mut o = Occupancy::with_limits(Limits { max_cells: 5, ..Limits::default() });
+    for c in &cells[..5] {
+        assert!(o.set(*c, 1).is_ok());
+    }
+    assert!(o.set(cells[5], 1).is_err());
+    assert_eq!(o.count(), 5);
+    assert!(
+        o.set(cells[0], 0).is_ok() && o.set(cells[5], 1).is_ok(),
+        "a cell that leaves makes room for one that comes"
+    );
+    // a bulk build over the limit is an error and no partial grid
+    let over = Limits { max_cells: 999, ..Limits::default() };
+    assert!(Occupancy::from_cells_with_limits(over, cells.iter().map(|c| (*c, 1u8))).is_err());
+    assert!(Occupancy::from_cells_with_limits(
+        Limits { max_cells: 1000, ..Limits::default() },
+        cells.iter().map(|c| (*c, 1u8))
+    )
+    .is_ok());
+    // the bytes: one brick holds 512 cells and has a cost, so a limit under it refuses the first cell
+    let brick = Occupancy::BRICK_BYTES;
+    let mut small = Occupancy::with_limits(Limits { max_bytes: 2 * brick, ..Limits::default() });
+    assert!(small.set([0, 0, 0], 1).is_ok() && small.set([8, 0, 0], 1).is_ok() && small.set([9, 0, 0], 1).is_ok());
+    assert!(small.set([16, 0, 0], 1).is_err());
+    assert_eq!(small.bytes(), 2 * brick);
+    assert!(Occupancy::from_bricks_with_limits(
+        Limits { max_bytes: brick, ..Limits::default() },
+        [([0, 0, 0], dense([0, 0, 0], &[[1, 1, 1]], 1)), ([1, 0, 0], dense([1, 0, 0], &[[9, 1, 1]], 1))]
+    )
+    .is_err());
+}
+
+#[test]
+fn the_bytes_of_a_model_can_be_bounded_from_its_count_and_its_box_before_anything_is_allocated() {
+    // an upper bound on the bytes of a grid of `cells` cells in a box: no more bricks than cells, and no more than the box holds
+    for (cells, min, max) in
+        [(5u64, [0, 0, 0], [0, 0, 0]), (1000, [-5, 2, 40], [11, 4, 48]), (100_000, [0, 0, 0], [99, 99, 99])]
+    {
+        let bound = Occupancy::estimate_bytes(cells, min, max);
+        // the worst case for that count and box: cells spread one to a brick as far as the box has bricks
+        let bricks = (0..3).map(|a| (max[a].div_euclid(8) - min[a].div_euclid(8) + 1) as u64).product::<u64>();
+        assert_eq!(bound, cells.min(bricks) * Occupancy::BRICK_BYTES as u64, "{cells} cells in {min:?}..{max:?}");
+    }
+    // and a real grid is within it
+    let cells = block([-5, 2, 40], [17, 3, 9]);
+    let o = Occupancy::from_cells(cells.iter().map(|c| (*c, 1u8))).unwrap();
+    let (min, max) = o.bounds().unwrap();
+    assert!(o.bytes() as u64 <= Occupancy::estimate_bytes(o.count(), min, max));
 }

@@ -5,6 +5,10 @@
 //!
 //! * A cell is an integer key `[x, y, z]`; a cell's value is a palette index, `0` meaning empty and `1..=255` a
 //!   material of the object's palette (the palette itself belongs to the asset, not to the grid).
+//! * **Coordinates.** The cell `[i, j, k]` occupies `[i, i + 1) x [j, j + 1) x [k, k + 1)` of the object's space, in cells, in the object's
+//!   own axes (the scene's: x right, y down, z away from the camera); an importer from another convention (MagicaVoxel is z up) turns
+//!   its keys into these before it fills the grid. The size of a cell belongs to the object, not to the grid. The palette index
+//!   is a `u8` by design (a `.vox` model has 255 colours): a label above 255 is the importer's error to report.
 //! * Cells are stored in sparse **bricks** of 8 by 8 by 8 cells, keyed by the key divided (flooring) by 8. Keys may
 //!   be negative. A grid may have a limit on its bricks.
 //! * The **scan order** of cells, which every ordering in this module and above it uses, is z, then y, then x (x runs fastest).
@@ -34,6 +38,23 @@ struct Brick {
     filled: u16,
     /// The revision of the grid after the last edit of this brick.
     changed: u64,
+}
+
+/// What a grid may hold. A cell, a brick or a byte over a limit is an error where it is set, never a truncation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Bricks that hold at least one cell.
+    pub max_bricks: usize,
+    /// Filled cells.
+    pub max_cells: u64,
+    /// Bytes of the bricks, by [`Occupancy::bytes`]: bricks times [`Occupancy::BRICK_BYTES`].
+    pub max_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { max_bricks: usize::MAX, max_cells: u64::MAX, max_bytes: usize::MAX }
+    }
 }
 
 /// 256 RGBA colours, which the palette indices of the cells of an [`Occupancy`] choose from.
@@ -66,7 +87,9 @@ pub struct Occupancy {
     bricks: BTreeMap<[i32; 3], Brick>,
     filled: u64,
     revision: u64,
-    max_bricks: usize,
+    limits: Limits,
+    /// Bricks with at least one cell.
+    live: usize,
     palette: Palette,
     palette_revision: u64,
 }
@@ -103,7 +126,8 @@ impl Occupancy {
             bricks: BTreeMap::new(),
             filled: 0,
             revision: 0,
-            max_bricks: usize::MAX,
+            limits: Limits { max_bricks: usize::MAX, max_cells: u64::MAX, max_bytes: usize::MAX },
+            live: 0,
             palette: Palette::default(),
             palette_revision: 0,
         }
@@ -111,7 +135,69 @@ impl Occupancy {
 
     /// An empty grid that holds at most `max_bricks` bricks (of 512 cells); a cell in another brick is an error.
     pub fn with_limit(max_bricks: usize) -> Self {
-        Self { max_bricks, ..Self::new() }
+        Self::with_limits(Limits { max_bricks, ..Limits::default() })
+    }
+
+    /// An empty grid with limits on its bricks, cells and bytes.
+    pub fn with_limits(limits: Limits) -> Self {
+        Self { limits, ..Self::new() }
+    }
+
+    /// What a brick costs, in bytes, for the limits and for [`Occupancy::bytes`]: its 512 palette indices and the bookkeeping of a node
+    /// of the tree it is kept in. An estimate, the same for every brick.
+    pub const BRICK_BYTES: usize = BRICK_CELLS + 48;
+
+    /// The bytes of the bricks that hold something.
+    pub fn bytes(&self) -> usize {
+        self.live * Self::BRICK_BYTES
+    }
+
+    /// An upper bound on the bytes of a grid of `cells` filled cells whose box is `min` to `max` (inclusive keys), worked out before
+    /// anything is allocated: no more bricks than cells, and no more than the box has.
+    pub fn estimate_bytes(cells: u64, min: [i32; 3], max: [i32; 3]) -> u64 {
+        let bricks: u64 = (0..3)
+            .map(|a| (i64::from(max[a].div_euclid(BRICK)) - i64::from(min[a].div_euclid(BRICK)) + 1).max(0) as u64)
+            .product();
+        cells.min(bricks).saturating_mul(Self::BRICK_BYTES as u64)
+    }
+
+    /// The smallest and largest keys of the filled cells (inclusive), exact for what is there now; none for an empty grid.
+    pub fn bounds(&self) -> Option<([i32; 3], [i32; 3])> {
+        let mut bounds: Option<([i32; 3], [i32; 3])> = None;
+        for (key, cells) in self.bricks() {
+            for (i, c) in cells.iter().enumerate() {
+                if *c == 0 {
+                    continue;
+                }
+                let cell = join(key, i);
+                bounds = Some(match bounds {
+                    None => (cell, cell),
+                    Some((lo, hi)) => {
+                        (std::array::from_fn(|a| lo[a].min(cell[a])), std::array::from_fn(|a| hi[a].max(cell[a])))
+                    }
+                });
+            }
+        }
+        bounds
+    }
+
+    /// The size of the box of the filled cells, in cells along each axis; none for an empty grid.
+    pub fn extent(&self) -> Option<[u64; 3]> {
+        self.bounds().map(|(lo, hi)| std::array::from_fn(|a| (i64::from(hi[a]) - i64::from(lo[a]) + 1) as u64))
+    }
+
+    /// Whether one more cell, in a brick that holds nothing yet (`new_brick`) or in one that does, fits the limits.
+    fn room(&self, new_brick: bool) -> Result<(), String> {
+        if self.filled >= self.limits.max_cells {
+            return Err(format!("the occupancy would hold more than {} cells", self.limits.max_cells));
+        }
+        if new_brick && self.live >= self.limits.max_bricks {
+            return Err(format!("the occupancy would hold more than {} bricks", self.limits.max_bricks));
+        }
+        if new_brick && (self.live + 1).saturating_mul(Self::BRICK_BYTES) > self.limits.max_bytes {
+            return Err(format!("the occupancy would hold more than {} bytes", self.limits.max_bytes));
+        }
+        Ok(())
     }
 
     /// A grid made of dense bricks (512 palette indices each, x fastest, then y, then z), in any order: a brick that is all empty is
@@ -125,7 +211,15 @@ impl Occupancy {
         max_bricks: usize,
         bricks: impl IntoIterator<Item = ([i32; 3], [u8; BRICK_CELLS])>,
     ) -> Result<Self, String> {
-        let mut o = Self::with_limit(max_bricks);
+        Self::from_bricks_with_limits(Limits { max_bricks, ..Limits::default() }, bricks)
+    }
+
+    /// As [`Occupancy::from_bricks`], for a grid with limits: over one is an error, not a grid that was cut short.
+    pub fn from_bricks_with_limits(
+        limits: Limits,
+        bricks: impl IntoIterator<Item = ([i32; 3], [u8; BRICK_CELLS])>,
+    ) -> Result<Self, String> {
+        let mut o = Self::with_limits(limits);
         for (key, cells) in bricks {
             let filled = cells.iter().filter(|c| **c != 0).count() as u16;
             if filled == 0 {
@@ -134,10 +228,13 @@ impl Occupancy {
             if o.bricks.contains_key(&key) {
                 return Err(format!("the brick {key:?} is given twice"));
             }
-            if o.bricks.len() >= max_bricks {
-                return Err(format!("the occupancy would hold more than {max_bricks} bricks"));
+            // the cells of the brick come in at once: the brick's cost, then its cells against the limit on cells
+            o.room(true)?;
+            if o.filled + u64::from(filled) > o.limits.max_cells {
+                return Err(format!("the occupancy would hold more than {} cells", o.limits.max_cells));
             }
             o.filled += u64::from(filled);
+            o.live += 1;
             o.bricks.insert(key, Brick { cells: Box::new(cells), filled, changed: 1 });
         }
         o.revision = u64::from(!o.bricks.is_empty());
@@ -154,15 +251,22 @@ impl Occupancy {
         max_bricks: usize,
         cells: impl IntoIterator<Item = ([i32; 3], u8)>,
     ) -> Result<Self, String> {
-        let mut o = Self::with_limit(max_bricks);
+        Self::from_cells_with_limits(Limits { max_bricks, ..Limits::default() }, cells)
+    }
+
+    /// As [`Occupancy::from_cells`], for a grid with limits: over one is an error, not a grid that was cut short.
+    pub fn from_cells_with_limits(
+        limits: Limits,
+        cells: impl IntoIterator<Item = ([i32; 3], u8)>,
+    ) -> Result<Self, String> {
+        let mut o = Self::with_limits(limits);
         for (key, palette) in cells {
             if palette == 0 {
                 return Err(format!("the cell {key:?} is listed with the empty palette index"));
             }
             let (brick_key, index) = split(key);
-            if !o.bricks.contains_key(&brick_key) && o.bricks.len() >= max_bricks {
-                return Err(format!("the occupancy would hold more than {max_bricks} bricks"));
-            }
+            let new_brick = o.bricks.get(&brick_key).is_none_or(|b| b.filled == 0);
+            o.room(new_brick)?;
             let brick = o.bricks.entry(brick_key).or_insert_with(|| Brick {
                 cells: Box::new([0; BRICK_CELLS]),
                 filled: 0,
@@ -174,6 +278,7 @@ impl Occupancy {
             brick.cells[index] = palette;
             brick.filled += 1;
             o.filled += 1;
+            o.live += usize::from(new_brick);
         }
         o.revision = u64::from(!o.bricks.is_empty());
         Ok(o)
@@ -229,17 +334,16 @@ impl Occupancy {
         self.bricks.get(&brick).map_or(0, |b| b.cells[index])
     }
 
-    /// Sets a cell; true if that changed it. A brick that is not there is made (an error over the limit) only to hold a filled cell.
+    /// Sets a cell; true if that changed it. A brick that holds nothing yet is made, and a cell filled, only within the limits.
     pub fn set(&mut self, key: [i32; 3], palette: u8) -> Result<bool, String> {
         let (brick_key, index) = split(key);
         let present = self.bricks.get(&brick_key).map(|b| b.cells[index]);
         if present.unwrap_or(0) == palette {
             return Ok(false);
         }
-        if !self.bricks.contains_key(&brick_key)
-            && self.bricks.values().filter(|b| b.filled > 0).count() >= self.max_bricks
-        {
-            return Err(format!("the occupancy would hold more than {} bricks", self.max_bricks));
+        if present.unwrap_or(0) == 0 {
+            // a cell that is filled where none was
+            self.room(self.bricks.get(&brick_key).is_none_or(|b| b.filled == 0))?;
         }
         self.revision += 1;
         let revision = self.revision;
@@ -255,10 +359,12 @@ impl Occupancy {
             (0, _) => {
                 brick.filled += 1;
                 self.filled += 1;
+                self.live += usize::from(brick.filled == 1);
             }
             (_, 0) => {
                 brick.filled -= 1;
                 self.filled -= 1;
+                self.live -= usize::from(brick.filled == 0);
             }
             _ => {}
         }
