@@ -150,7 +150,8 @@ impl Material {
                 None => h.bytes(&[0]),
                 Some(v) => {
                     h.bytes(&[1]);
-                    h.bytes(&v.to_bits().to_le_bytes());
+                    // -0 and 0 are one number: adding 0 turns a negative zero into a zero and changes nothing else
+                    h.bytes(&(v + 0.0).to_bits().to_le_bytes());
                 }
             }
         }

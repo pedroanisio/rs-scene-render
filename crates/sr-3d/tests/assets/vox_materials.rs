@@ -97,3 +97,11 @@ fn the_fingerprint_of_the_materials_changes_with_every_property_and_with_nothing
     });
     changed(&|m| m.get_mut(&1).unwrap().g = Some(0.0));
 }
+
+#[test]
+fn a_negative_zero_and_a_zero_are_the_same_material() {
+    let plus = Material::parse(1, &dictionary(&[("_rough", "0")])).unwrap();
+    let minus = Material::parse(1, &dictionary(&[("_rough", "-0")])).unwrap();
+    let mine = |m: Material| BTreeMap::from([(1u8, m)]);
+    assert_eq!(fingerprint(&mine(plus)), fingerprint(&mine(minus)));
+}
