@@ -444,3 +444,75 @@ fn cells_that_are_too_far_apart_for_an_occupancy_are_an_error_that_names_the_spa
     assert_eq!(widest.occupancy.count(), 2);
     assert_eq!(widest.occupancy.bounds().unwrap(), ([0, 0, 0], [key_limit - 1, 0, 0]));
 }
+
+/// Sets the modification time of `path` to `time` exactly (so that a file that is rewritten can be made to look as it did).
+fn restamp(path: &Path, time: std::time::SystemTime) {
+    std::fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(time).unwrap();
+}
+
+#[test]
+fn a_mesh_over_the_limit_is_refused_before_it_is_parsed_and_a_cached_model_is_returned_without_parsing_the_mesh() {
+    let dir = Dir::new("order");
+    // 2 MiB that are not a mesh, under a limit of 1 MiB: the size is what is refused, not the content (it would be "malformed glTF" if the
+    // importer's dependency scan, which reads and parses the whole file, ran first)
+    dir.write("big.glb", &vec![0u8; 2 << 20]);
+    let ev = evaluator(
+        &dir,
+        r#"<mesh id="big" src="big.glb"/><voxelAsset id="v" fromMesh="big" cellSize="10" maxMemoryMiB="1"/>"#,
+    );
+    let error = load(ev.program(), "v").unwrap_err();
+    assert!(error.contains("maxMemoryMiB") && error.contains("2097152"), "{error}");
+
+    // a model that is cached is returned by the size and the time of its files, with no parse of the mesh at all: the .gltf is made into
+    // something that no importer reads, of the same length and with the time that it had, and the call still gives the model
+    let cube = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cube-1m.glb")).unwrap();
+    let path = dir.write("cube.glb", &cube);
+    let ev = evaluator(&dir, r#"<mesh id="m" src="cube.glb"/><voxelAsset id="v" fromMesh="m" cellSize="10"/>"#);
+    let first = load(ev.program(), "v").unwrap();
+    let time = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, vec![b'x'; cube.len()]).unwrap();
+    restamp(&path, time);
+    assert!(Arc::ptr_eq(&first, &load(ev.program(), "v").unwrap()));
+}
+
+#[test]
+fn a_file_that_a_mesh_names_and_that_is_not_there_yet_is_part_of_its_source() {
+    let dir = Dir::new("missing-dependency");
+    // a cube as an .obj that names a material library which does not exist: the importer goes on without it
+    let corners: Vec<String> = (0..8).map(|i| format!("v {} {} {}", i & 1, i >> 1 & 1, i >> 2 & 1)).collect();
+    let quads = [[1, 3, 4, 2], [5, 6, 8, 7], [1, 2, 6, 5], [3, 7, 8, 4], [1, 5, 7, 3], [2, 4, 8, 6]];
+    let faces: Vec<String> = quads.iter().map(|q| format!("f {} {} {} {}", q[0], q[1], q[2], q[3])).collect();
+    let obj = format!("mtllib stone.mtl\n{}\nusemtl stone\n{}\n", corners.join("\n"), faces.join("\n"));
+    dir.write("cube.obj", obj.as_bytes());
+    let ev = evaluator(&dir, r#"<mesh id="m" src="cube.obj"/><voxelAsset id="v" fromMesh="m" cellSize="10"/>"#);
+    let first = load(ev.program(), "v").unwrap();
+    assert_eq!(first.occupancy.count(), 1000);
+    assert!(Arc::ptr_eq(&first, &load(ev.program(), "v").unwrap()));
+    // the library is made: the source is not the one that was read, whatever the mesh file did, and the model is read again
+    dir.write("stone.mtl", b"newmtl stone\nKd 0.5 0.5 0.5\n");
+    let second = load(ev.program(), "v").unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_ne!(first.source.sha256, second.source.sha256);
+    assert_eq!(second.occupancy.count(), 1000);
+}
+
+#[test]
+fn a_box_as_wide_as_an_occupancy_can_be_is_moved_to_the_origin_by_a_copy() {
+    let dir = Dir::new("widest-copy");
+    let key_limit = sr_3d::occupancy::KEY_LIMIT;
+    let mut grid = sr_volume::SparseGrid::new(sr_volume::Transform::identity(), 0.0, 1000).unwrap();
+    // 2^30 cells wide from the first key of an occupancy to the key before the origin, so the corner is not at the origin and the cells are moved
+    for c in [[-key_limit, 0, 0], [-1, 0, 0]] {
+        grid.set(c, 5.0).unwrap();
+    }
+    let mut volume = sr_volume::Volume::new();
+    volume.insert("voxels", grid).unwrap();
+    let mut bytes = Vec::new();
+    volume.write(&mut bytes).unwrap();
+    dir.write("widest.srvol", &bytes);
+    let ev = evaluator(&dir, r#"<voxelAsset id="widest" src="widest.srvol"/>"#);
+    let widest = load(ev.program(), "widest").unwrap();
+    assert_eq!(widest.origin_cells, [-i64::from(key_limit), 0, 0]);
+    assert_eq!(widest.occupancy.bounds().unwrap(), ([0, 0, 0], [key_limit - 1, 0, 0]));
+    assert_eq!((widest.occupancy.get([0, 0, 0]), widest.occupancy.get([key_limit - 1, 0, 0])), (5, 5));
+}

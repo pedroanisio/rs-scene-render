@@ -9,7 +9,7 @@ g, media (0 if absent, else 1 and the 8 bytes of the IEEE double, little endian,
 each such key and value as strings. A string is its length in bytes (u64, little endian) and its bytes. The result is mixed:
 x ^= x >> 33; x *= 0xff51afd7ed558ccd; x ^= x >> 33 (64 bits).
 
-Usage: tools/vox_materials_hash.py FIXTURE.expected.json   (the "materials" object of a fixture written by tools/make_vox.py)
+Usage: tools/vox_materials_hash.py FIXTURE.expected.json   (the "materials" object of a fixture written by tools/make_vox.py; a fixture with none gives the fingerprint of no materials)
 """
 import json
 import struct
@@ -67,5 +67,5 @@ def fingerprint(materials):
 
 
 if __name__ == "__main__":
-    materials = json.load(open(sys.argv[1]))["materials"]
+    materials = json.load(open(sys.argv[1])).get("materials", {})
     print(fingerprint(materials))

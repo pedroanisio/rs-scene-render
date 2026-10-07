@@ -21,8 +21,18 @@
 //!   of an `.obj`), and its digest covers all of them; the mesh is cut after its digest is taken and the digest is taken again after, and a
 //!   file that changed between the two is an error and not a model that its digest does not describe. The `sha256` that a mesh asset declares
 //!   is checked against its own file's bytes.
-//! * The peak memory of a load is up to about three times `maxMemoryMiB`: the bytes of the file, the grid that the importer builds and, when
-//!   the corner of the cells is not already at the origin, the copy that is moved.
+//!   How easily that hole is fallen into: the modification time of a file is as coarse as the clock of the kernel on Linux (about four
+//!   milliseconds), two seconds on FAT, and `cp -p`, `rsync -t` and `tar` keep the time of the file they copy, so a file replaced by another of
+//!   the same length with its time kept is taken for the old one; without a modification time (a file system that has none) only the length decides.
+//! * The order of a load is: the size of the main file against the limit, then the cache (by the sizes and times of the files that the model was
+//!   made from, the ones that were not there included, as absent), then the files that the importer reads for a mesh (this scan reads and parses
+//!   the mesh, so it is behind the limit and the cache), then the bytes. The size and the time of a file are taken from the handle that is read,
+//!   before it is read, so that a write after the read is a change and not a model that is held with the time of the newer file.
+//! * The peak memory of a load: for a file asset about three times `maxMemoryMiB` (the bytes of the file, the grid that the importer builds and,
+//!   when the corner of the cells is not already at the origin, the copy that is moved); for a `fromMesh` up to about four times it, plus what the
+//!   mesh importer holds for the model (not bounded by `maxMemoryMiB` beyond the size of the file): the bytes of the mesh are hashed as they are
+//!   read and not kept, and what stays is the importer's model, the triangles that are made of it (within `maxMemoryMiB`), the grid and the
+//!   copy.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -71,25 +81,36 @@ pub struct VoxelModel {
     pub source: Source,
 }
 
-/// A file as it was when it was read: where, how long, and when it was last written.
+/// A file as it was when it was read: where, whether it was there, how long, and when it was last written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Stat {
     path: PathBuf,
+    present: bool,
     len: u64,
     modified: Option<SystemTime>,
 }
 
 impl Stat {
-    fn of(path: &Path) -> Option<Stat> {
-        let meta = std::fs::metadata(path).ok()?;
-        Some(Stat { path: path.to_path_buf(), len: meta.len(), modified: meta.modified().ok() })
+    /// The file as it is, or as absent (a file that is not there is something that can be made, and then the source is not the one that was read).
+    fn of(path: &Path) -> Stat {
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                Stat { path: path.to_path_buf(), present: true, len: meta.len(), modified: meta.modified().ok() }
+            }
+            Err(_) => Stat { path: path.to_path_buf(), present: false, len: 0, modified: None },
+        }
+    }
+
+    fn from_handle(path: &Path, meta: &std::fs::Metadata) -> Stat {
+        Stat { path: path.to_path_buf(), present: true, len: meta.len(), modified: meta.modified().ok() }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Entry {
     source: Source,
-    /// The files that the model was made from, as they were; none that is missing (a missing file is read again, and is an error).
+    /// The files that the model was made from, as they were, a file that was not there as absent: the model is returned only while every one of
+    /// them is as it was.
     stats: Vec<Stat>,
     model: Arc<VoxelModel>,
 }
@@ -137,10 +158,19 @@ fn hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The bytes of a file, no more than `max` of them: a longer file is an error before it is read whole.
-fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+/// A file read within `max` bytes: its SHA-256, its bytes if they are wanted, and the file as it was (from the handle, before it was read).
+struct Reading {
+    sha: [u8; 32],
+    bytes: Vec<u8>,
+    stat: Stat,
+}
+
+/// Reads a file, no more than `max` of it: a longer file is an error before it is read whole. The bytes are hashed as they come, and kept only
+/// if `keep`.
+fn read_bounded(path: &Path, max: u64, keep: bool) -> Result<Reading, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let meta = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?;
+    let stat = Stat::from_handle(path, &meta);
     if meta.len() > max {
         return Err(format!(
             "{}: the file has {} bytes and the limit is {max} bytes (maxMemoryMiB)",
@@ -148,12 +178,26 @@ fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, String> {
             meta.len()
         ));
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(max + 1).read_to_end(&mut bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    if bytes.len() as u64 > max {
+    let mut hash = Sha256::new();
+    let mut bytes = Vec::new();
+    let mut total = 0u64;
+    let mut chunk = vec![0u8; 1 << 16];
+    let mut reader = file.take(max + 1);
+    loop {
+        let n = reader.read(&mut chunk).map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        hash.update(&chunk[..n]);
+        if keep {
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+    }
+    if total > max {
         return Err(format!("{}: the file is longer than the limit of {max} bytes (maxMemoryMiB)", path.display()));
     }
-    Ok(bytes)
+    Ok(Reading { sha: hash.finalize().into(), bytes, stat })
 }
 
 /// What the source of a model is: the bytes of its main file (kept, for a format that is read from them), and the digest of the main
@@ -167,37 +211,39 @@ struct Sourced {
     stats: Vec<Stat>,
 }
 
-fn read_source(main: &Path, others: &[PathBuf], max: u64) -> Result<Sourced, String> {
-    let bytes = read_bounded(main, max)?;
-    let main_sha: [u8; 32] = Sha256::digest(&bytes).into();
-    let mut stats: Vec<Stat> = Stat::of(main).into_iter().collect();
-    let mut total = bytes.len() as u64;
-    let mut modified = stats.first().and_then(|s| s.modified);
-    let mut digest = main_sha;
+fn read_source(main: &Path, others: &[PathBuf], max: u64, keep_main: bool) -> Result<Sourced, String> {
+    let first = read_bounded(main, max, keep_main)?;
+    let mut stats = vec![first.stat.clone()];
+    let mut total = first.stat.len;
+    let mut modified = first.stat.modified;
+    let mut digest = first.sha;
     if !others.is_empty() {
         let mut h = Sha256::new();
-        h.update(main_sha);
+        h.update(first.sha);
         for path in others {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             h.update((name.len() as u64).to_le_bytes());
             h.update(name.as_bytes());
-            match read_bounded(path, max.saturating_sub(total)) {
-                Ok(data) => {
-                    total += data.len() as u64;
-                    h.update([1u8]);
-                    h.update(Sha256::digest(&data));
-                    if let Some(stat) = Stat::of(path) {
-                        modified = modified.max(stat.modified);
-                        stats.push(stat);
-                    }
-                }
-                Err(_) if !path.exists() => h.update([0u8]),
-                Err(e) => return Err(e),
+            if !path.exists() {
+                h.update([0u8]);
+                stats.push(Stat::of(path));
+                continue;
             }
+            let dependency = read_bounded(path, max.saturating_sub(total), false)?;
+            total += dependency.stat.len;
+            modified = modified.max(dependency.stat.modified);
+            h.update([1u8]);
+            h.update(dependency.sha);
+            stats.push(dependency.stat);
         }
         digest = h.finalize().into();
     }
-    Ok(Sourced { bytes, main: main_sha, source: Source { sha256: digest, bytes: total, modified }, stats })
+    Ok(Sourced {
+        bytes: first.bytes,
+        main: first.sha,
+        source: Source { sha256: digest, bytes: total, modified },
+        stats,
+    })
 }
 
 fn local(src: &str, base: &Path, what: &str) -> Result<PathBuf, String> {
@@ -249,27 +295,42 @@ pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
     // the files: the one a file asset names, or the mesh asset's (of the same document, so under the same namespace) and what it reads
     let namespace = key.strip_suffix(name.as_str()).unwrap_or("");
     let mesh_key = asset.from_mesh.as_ref().map(|m| format!("{namespace}{m}"));
-    let (main, others, declared) = match (&asset.src, &mesh_key) {
-        (Some(src), None) => (local(src, &base, "the voxel asset")?, Vec::new(), asset.sha256),
+    let (main, mesh_format, declared) = match (&asset.src, &mesh_key) {
+        (Some(src), None) => (local(src, &base, "the voxel asset")?, None, asset.sha256),
         (None, Some(mesh_key)) => {
             let (mesh, mesh_base) = mesh_asset(program, mesh_key).map_err(with)?;
             let path = local(&mesh.src, &mesh_base, "the mesh").map_err(with)?;
-            let format = mesh.format.map(|f| f.to_string());
-            let mut others = sr_3d::import::dependencies_as(&path, format.as_deref()).map_err(with)?;
-            others.retain(|p| *p != path);
-            others.sort();
-            others.dedup();
-            (path, others, mesh.sha256)
+            (path, Some(mesh.format.map(|f| f.to_string())), mesh.sha256)
         }
         _ => return Err(with("has exactly one of src and fromMesh (VOX2)".into())),
     };
-    // the file is as it was when the model was made: the model, with no reading of it
+    // the size of the main file against the limit, before any file is read or parsed (the scan for what a mesh reads parses the whole mesh)
+    let head = Stat::of(&main);
+    if head.present && head.len > max_bytes {
+        return Err(with(format!(
+            "{}: the file has {} bytes and the limit is {max_bytes} bytes (maxMemoryMiB)",
+            main.display(),
+            head.len
+        )));
+    }
+    // the files are as they were when the model was made: the model, with no reading of any of them
     if let Some(entry) = program.voxel_models.lock().unwrap().get(key) {
-        if !entry.stats.is_empty() && entry.stats.iter().all(|s| Stat::of(&s.path).as_ref() == Some(s)) {
+        if !entry.stats.is_empty() && entry.stats.iter().all(|s| Stat::of(&s.path) == *s) {
             return Ok(entry.model.clone());
         }
     }
-    let read = read_source(&main, &others, max_bytes).map_err(with)?;
+    // the files that the importer reads for a mesh, now that the file is within the limit and is not a cached one
+    let others = match &mesh_format {
+        Some(format) => {
+            let mut others = sr_3d::import::dependencies_as(&main, format.as_deref()).map_err(with)?;
+            others.retain(|p| *p != main);
+            others.sort();
+            others.dedup();
+            others
+        }
+        None => Vec::new(),
+    };
+    let read = read_source(&main, &others, max_bytes, asset.src.is_some()).map_err(with)?;
     if let Some(declared) = declared {
         if declared.0 != read.main {
             return Err(with(format!(
@@ -319,7 +380,7 @@ pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
             let bounds = crate::voxel::Bounds::default();
             let occupancy = crate::voxel::from_triangles(&points, &triangles, cell, limits, &bounds).map_err(with)?;
             // the importer read the files itself: they are the ones that the digest was taken of, or the digest does not describe the cells
-            let again = read_source(&main, &others, max_bytes).map_err(with)?;
+            let again = read_source(&main, &others, max_bytes, false).map_err(with)?;
             if again.source.sha256 != read.source.sha256 {
                 return Err(with(
                     "the mesh changed while it was read, and the cells are not those of the digest that was taken"
