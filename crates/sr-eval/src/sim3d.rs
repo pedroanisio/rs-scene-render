@@ -37,7 +37,7 @@ pub(crate) struct Body3Node {
     /// An object of cells that a crater cuts: the cells, how it is cut and the bodies that take its pieces.
     voxels: Option<Arc<crate::voxel_cut::VoxelOwner>>,
     /// An object of cells whose collider is its cells: what its rigidBody says of them.
-    cells: Option<Arc<crate::voxel_cut::CellsInfo>>,
+    pub(crate) cells: Option<Arc<crate::voxel_cut::CellsInfo>>,
     /// An object of cells that a fracture breaks into the bodies that take its pieces.
     cell_fracture: Option<Arc<crate::voxel_cut::CellFracture>>,
     /// A body that only takes a piece of an object of cells.
@@ -501,6 +501,21 @@ fn flag(e: &dyn Element, n: &str) -> bool {
         _ => false,
     }
 }
+
+/// Whether the document has a body of cells: an object of primitive voxels whose rigidBody has the cells as its collider.
+pub(crate) fn has_bodies_of_cells(g0: &FrameGraph) -> bool {
+    g0.nodes.iter().any(|n| {
+        n.kind == "object3D"
+            && text(&*n.elem, "primitive").as_deref() == Some("voxels")
+            && children(&*n.elem).iter().any(|c| {
+                c.element_name() == "rigidBody"
+                    && matches!(text(*c, "shape").as_deref(), None | Some("auto" | "voxels"))
+            })
+    })
+}
+
+/// Why a physics cache cannot hold a world with bodies of cells.
+pub(crate) const NO_CACHE_OF_CELLS: &str = "a physics cache holds poses, velocities and contacts and has no place for the revisions and the cuts of bodies of cells (an object of primitive voxels whose rigidBody collider is its cells)";
 
 /// Ids of the 3D bodies in `g0`.
 pub(crate) fn body_ids(g0: &FrameGraph) -> Vec<Arc<str>> {
@@ -1453,7 +1468,14 @@ fn voxel_state(
         .collect::<Vec<_>>();
     let steps = if steps.len() as u64 == revision { steps } else { Vec::new() };
     let enabled = frame.enabled.get(k).copied().unwrap_or(true);
-    Ok(crate::voxel_cut::SimVoxels { enabled, revision, grid, changed_bricks, steps, pieces })
+    let rock = owner.settings().rock;
+    let thrown = cut.as_ref().map(|c| {
+        Arc::new(crate::voxel_cut::ThrownCells {
+            cells: c.excavation.thrown.clone(),
+            mass: rock.density * (rock.size[0] * rock.size[1] * rock.size[2]) / rock.pixels_per_meter.powi(3),
+        })
+    });
+    Ok(crate::voxel_cut::SimVoxels { enabled, revision, grid, changed_bricks, steps, thrown, pieces })
 }
 
 pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d::Frame3) {
@@ -1499,6 +1521,7 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
             grid: broken.source.clone(),
             changed_bricks: Vec::new(),
             steps: Vec::new(),
+            thrown: None,
             pieces,
         }));
     }

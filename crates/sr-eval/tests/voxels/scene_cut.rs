@@ -42,13 +42,14 @@ const DOCUMENT: &str = r##"<scene version="1.3"><project width="64" height="64" 
         <rigidBody type="static" density="2700"/>
         <crater id="pit" source="ball" targetMaterial="softRock" gravity="9.80665"/>
       </object3D>
+      CONTENT
     </composition>
     <physics gravityY="0" pixelsPerMeter="1" fixedStep="0.004166666666666667" bounds="none"/></scene>"##;
 
 fn setup(name: &str) -> (Dir, Evaluator) {
     let dir = Dir::new(name);
     std::fs::write(dir.0.join("ground.srvol"), srvol::write(&ground(), 0.25).unwrap()).unwrap();
-    let ev = evaluator(&dir, DOCUMENT);
+    let ev = evaluator(&dir, &DOCUMENT.replace("CONTENT", ""));
     (dir, ev)
 }
 
@@ -186,4 +187,39 @@ fn the_same_frame_whoever_asks_and_in_whatever_order_and_a_second_impact_is_not_
     // the ball is long since at rest on the ground, and what was cut was cut once
     assert_eq!(later.voxels.as_ref().unwrap().revision, 1);
     assert_eq!(later.voxels.as_ref().unwrap().grid.fingerprint(), a.voxels.as_ref().unwrap().grid.fingerprint());
+}
+
+#[test]
+fn the_burst_of_the_crater_of_cells_is_the_cells_that_the_cut_threw() {
+    // a particles3D with a burst from the crater and no count: one particle for each cell thrown, each of the mass of a cell
+    let dir = Dir::new("burst");
+    std::fs::write(dir.0.join("ground.srvol"), srvol::write(&ground(), 0.25).unwrap()).unwrap();
+    let debris = r#"<particles3D id="debris" rate="0" lifetime="6" dt="0.01" gravityY="9.80665" maxParticles="10000"><burst crater="pit"/></particles3D>"#;
+    let ev = evaluator(&dir, &DOCUMENT.replace("CONTENT", debris));
+    // before the impact nothing is thrown
+    let early = ev.evaluate(0.05);
+    assert!(early.failures.is_empty(), "{:?}", early.failures);
+    let none = early.nodes.iter().find(|n| &*n.id == "debris").unwrap().particles3d.clone().expect("particles");
+    assert_eq!(none.frame.particles.len(), 0);
+    let frame = ev.evaluate(0.6);
+    assert!(frame.failures.is_empty() && frame.problems.is_empty(), "{:?} {:?}", frame.failures, frame.problems);
+    let thrown = frame.nodes.iter().find(|n| &*n.id == "debris").unwrap().particles3d.clone().expect("particles");
+    assert_eq!(thrown.frame.emitted as usize, PINNED.3, "one particle for each cell that the cut throws");
+    let mass: f64 = thrown.frame.particles.iter().map(|p| p.mass).sum();
+    let cell = 2700.0 * 0.25f64.powi(3);
+    assert!((mass - PINNED.3 as f64 * cell).abs() < 1e-6 * mass, "{mass} kg for {} cells of {cell} kg", PINNED.3);
+    // and they are the cut's: the speed of the fastest is the fastest of the cut
+    let node = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap();
+    let grown = node.crater_impact.as_ref().unwrap();
+    let wanted = crater_cut_of(grown, &ground(), &settings(), seed_of("ground")).unwrap();
+    let fastest = wanted
+        .excavation
+        .thrown
+        .iter()
+        .map(|t| t.velocity.iter().map(|v| v * v).sum::<f64>().sqrt())
+        .fold(0.0, f64::max);
+    let launched =
+        thrown.frame.particles.iter().map(|p| p.velocity.iter().map(|v| v * v).sum::<f64>().sqrt()).fold(0.0, f64::max);
+    // (after 0.4 s of flight under the particles' own gravity, so not the same number: the cut's fastest cell is within a metre a second a second of it)
+    assert!(launched > 0.5 * fastest && launched < 1.5 * fastest, "{launched} against {fastest}");
 }

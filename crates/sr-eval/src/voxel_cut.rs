@@ -86,7 +86,17 @@ pub struct SimVoxels {
     /// The bricks that each edit changed, by the revision it made: `(r, bricks)` for r from 1 to `revision`, so that a surface cache that read revision `a`
     /// remeshes the union of those with r over `a`. Empty for a revision that the world no longer has the history of.
     pub steps: Vec<(u64, Vec<[i32; 3]>)>,
+    /// The cells that the cut threw (once there has been one): what the burst of the crater's ejecta is made of.
+    pub thrown: Option<Arc<ThrownCells>>,
     pub pieces: Vec<SimVoxelPiece>,
+}
+
+/// The cells that a crater's cut threw, each with where it leaves from and how fast (metres and metres a second in the frame of the cells), and the mass of one.
+#[derive(Debug)]
+pub struct ThrownCells {
+    pub cells: Vec<crate::voxel_crater::Thrown>,
+    /// Kilograms of a cell.
+    pub mass: f64,
 }
 
 /// A piece that has come away from an object of cells: its cells (in the object's own keys), and its pose, a world matrix (column-major, scene space) of the

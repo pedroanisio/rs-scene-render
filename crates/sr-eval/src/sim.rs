@@ -810,7 +810,14 @@ fn build_physics(
     let mut traced = None;
     let mut stale = false;
     let mut plan = crate::sim3d::Plan3::Simulate { record: keep.contacts, digest: keep.identity };
-    if let Some(uri) = ph.and_then(|p| p.cache.as_deref()) {
+    let of_cells = crate::sim3d::has_bodies_of_cells(&g3);
+    if of_cells && ph.is_some_and(|p| p.cache.is_some()) {
+        failures.push(format!(
+            "physics@cache: {}: remove physics@cache from this document",
+            crate::sim3d::NO_CACHE_OF_CELLS
+        ));
+    }
+    if let Some(uri) = ph.and_then(|p| p.cache.as_deref()).filter(|_| !of_cells) {
         let base = p.base_dirs.first().cloned().unwrap_or_default();
         if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(uri, &base) {
             if path.is_file() {
@@ -2096,6 +2103,9 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
     let mut ph = built(p, &fields, &mut graphs, Keep { contacts: true, identity: true })?;
     if ph.cached.is_some() {
         return Err("already cached".into());
+    }
+    if ph.three.as_ref().is_some_and(|t| t.bodies.iter().any(|b| b.cells.is_some())) {
+        return Err(format!("this document cannot be baked into a physics cache: {}", crate::sim3d::NO_CACHE_OF_CELLS));
     }
     let hulls: Vec<crate::group::BodyHull> = ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
     if crate::group::Group::detect(p, &hulls, ph.step, None)?.is_some() {

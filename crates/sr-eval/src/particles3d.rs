@@ -537,6 +537,35 @@ impl SceneDriver<'_, '_> {
         Ok((t - f0) / slope)
     }
 
+    /// The cells that the cut of the impact `grown` threw, as particles: one for each, born at the impact, where its cell was and with the velocity the cut gave it.
+    fn thrown_cells(
+        &mut self,
+        k: usize,
+        grown: &crate::crater::ImpactCrater,
+        thrown: &crate::voxel_cut::ThrownCells,
+    ) -> Result<Vec<Birth>, Error> {
+        let owner = self.bursts[k].crater.clone();
+        let cause = &grown.cause;
+        let frame = self.frame(self.emitter_time(cause.time)?);
+        let i =
+            frame.nodes.iter().position(|n| n.id == owner).ok_or_else(|| {
+                Error::Driver(format!("the owner of crater ejecta, {owner}, is missing at the impact"))
+            })?;
+        // the cells are in the owner's frame (metres): to the object's units and then to the scene by the owner's matrix at the impact
+        let world = crate::sim3d::world3(&frame, i, 0);
+        let time = self.emitter_time(cause.time)?;
+        Ok(thrown
+            .cells
+            .iter()
+            .map(|cell| Birth {
+                time,
+                position: world.transform_point3(DVec3::from(cell.position.map(|c| c * grown.units))).to_array(),
+                velocity: world.transform_vector3(DVec3::from(cell.velocity.map(|v| v * grown.units))).to_array(),
+                mass: thrown.mass,
+            })
+            .collect())
+    }
+
     /// The particles that the impact `grown` throws out for burst `k`, in order of birth.
     fn ejecta(&mut self, k: usize, grown: &crate::crater::ImpactCrater) -> Result<Vec<Birth>, Error> {
         let cause = grown.cause;
@@ -679,12 +708,17 @@ impl Driver for SceneDriver<'_, '_> {
             if self.bursts[k].ejecta.is_none() {
                 // The impact is known from the first frame after it; before that nothing is thrown out.
                 let frame = self.frame(hi);
-                let Some(grown) =
-                    frame.nodes.iter().find(|n| n.id == self.bursts[k].crater).and_then(|n| n.crater_impact.clone())
-                else {
-                    continue;
+                let Some(node) = frame.nodes.iter().find(|n| n.id == self.bursts[k].crater) else { continue };
+                let Some(grown) = node.crater_impact.clone() else { continue };
+                // the crater of an object of cells throws the cells that its cut took out, not particles that the law samples
+                let list = match node.voxels.as_ref() {
+                    Some(cells) => match cells.thrown.clone() {
+                        Some(thrown) => self.thrown_cells(k, &grown, &thrown)?,
+                        None => continue,
+                    },
+                    None => self.ejecta(k, &grown)?,
                 };
-                self.bursts[k].ejecta = Some(Arc::new(self.ejecta(k, &grown)?));
+                self.bursts[k].ejecta = Some(Arc::new(list));
             }
             let Some(list) = self.bursts[k].ejecta.clone() else { continue };
             let first = lo == self.step_origin;
