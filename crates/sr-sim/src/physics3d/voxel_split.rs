@@ -33,6 +33,9 @@ pub struct VoxelPiece3 {
 /// What a body of cells has lost, as of the revision `revision`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoxelCut3 {
+    /// Cells that join the body (heaped on it: a crater's rim), in the body's own keys, each one it does not have. They are added before
+    /// anything leaves, so a destroyed cell or a piece may contain them; their mass is in `parent_mass` and in the pieces' like any other's.
+    pub added: Vec<[i32; 3]>,
     /// Identifies this state of the body: the world asks again with the one it has installed, and installs a cut only for another.
     pub revision: u64,
     /// Cells that are gone (they leave the body and are no part of any piece).
@@ -205,8 +208,24 @@ impl World3 {
             };
             // the cells that stay: the cells the body has, less those that are destroyed and those that go to the pieces (the body's own record of
             // its cells, not Parry's iteration over its shape, which is a half-open range of floor(p / size) that loses a cell at the edge of a chunk)
-            let Some(have) = self.state.voxel_cells[parent].clone() else {
+            let Some(had) = self.state.voxel_cells[parent].clone() else {
                 return Err(format!("body {parent} has no record of its cells"));
+            };
+            // the cells that are heaped on it join it first, so that a destroyed cell or a piece may be one of them
+            let mut joining = cut.added.clone();
+            joining.sort_unstable();
+            if let Some(twice) = joining.windows(2).find(|w| w[0] == w[1]) {
+                return Err(format!("a cut of body {parent} adds the cell {:?} twice", twice[0]));
+            }
+            if let Some(known) = joining.iter().find(|c| had.binary_search(c).is_ok()) {
+                return Err(format!("a cut of body {parent} adds the cell {known:?}, which the body has already"));
+            }
+            let have: std::sync::Arc<Vec<[i32; 3]>> = if joining.is_empty() {
+                had
+            } else {
+                let mut all: Vec<[i32; 3]> = had.iter().chain(joining.iter()).copied().collect();
+                all.sort_unstable();
+                std::sync::Arc::new(all)
             };
             let mut leaving: Vec<[i32; 3]> =
                 cut.destroyed.iter().chain(cut.pieces.iter().flat_map(|p| &p.cells)).copied().collect();
@@ -217,12 +236,18 @@ impl World3 {
             if let Some(missing) = leaving.iter().find(|c| have.binary_search(c).is_err()) {
                 return Err(format!("a cut of body {parent} takes the cell {missing:?}, which the body has not"));
             }
-            let remaining: Vec<[i32; 3]> = have.iter().filter(|c| leaving.binary_search(c).is_err()).copied().collect();
+            let mut remaining: Vec<[i32; 3]> =
+                have.iter().filter(|c| leaving.binary_search(c).is_err()).copied().collect();
+            // what is kept is charged to the checkpoints by its capacity, which a collect over a filter leaves up to twice the length
+            remaining.shrink_to_fit();
             // the new shape of the body, edited on a private copy so that nothing changed if anything after this fails
             let collider = self.state.bodies[h].colliders()[0];
             let mut shape = self.state.colliders[collider].shared_shape().clone();
             {
                 let voxels = shape.make_mut().as_voxels_mut().ok_or("a body of cells has lost its cells")?;
+                for cell in &joining {
+                    voxels.set_voxel(voxel_key(cell), true);
+                }
                 for cell in &leaving {
                     voxels.set_voxel(voxel_key(cell), false);
                 }
@@ -332,5 +357,6 @@ fn sorted_unique(cells: &[[i32; 3]]) -> Vec<[i32; 3]> {
     let mut v = cells.to_vec();
     v.sort_unstable();
     v.dedup();
+    v.shrink_to_fit();
     v
 }

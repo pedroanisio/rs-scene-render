@@ -67,6 +67,7 @@ impl Driver3 for Cutter {
             ];
         }
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -384,6 +385,69 @@ fn a_registered_parent_is_charged_to_the_checkpoints_for_the_cells_the_state_kee
     assert!(big - small >= taken * 14 * (24_000 - 400), "{} against {}", big - small, taken * 14 * 23_600);
 }
 
+/// Takes the first column of cells (x = 0) off the parent at 0.5 s.
+struct FirstColumn;
+
+impl Driver3 for FirstColumn {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 || revision.is_some() || t + 1e-9 < 0.5 {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            added: vec![],
+            revision: 1,
+            destroyed: cells_of(0..1, 0..20, 0..10),
+            parent_mass: 1.0,
+            pieces: vec![],
+        }))
+    }
+}
+
+#[test]
+fn the_cells_a_cut_leaves_in_the_state_are_charged_for_what_they_hold_and_not_for_the_room_the_vector_has() {
+    // the cells that stay are collected over a filter, which leaves the vector up to twice as long as it is full: held by every checkpoint taken
+    // after the cut, they are charged at twelve bytes a cell and the shape's two, not at the capacity
+    let bytes = |n: i32| {
+        let mut w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(Shape3::Voxels { size: SIZE, cells: cells_of(0..n, 0..20, 0..10) }, 1000.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        })
+        .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+        .unwrap();
+        let frame = w.frame_at(3.5, &mut FirstColumn);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        (w.checkpoint_bytes(), w.progress().1)
+    };
+    let ((small, kept), (big, kept_big)) = (bytes(21), bytes(141));
+    assert_eq!(kept, kept_big);
+    // checkpoints 1.. are taken after the cut at 0.5 s (a world keeps one a second)
+    let taken = kept - 1;
+    let per_cell = (big - small) as f64 / (taken as f64 * 200.0 * 120.0);
+    assert!((14.0..=14.6).contains(&per_cell), "{per_cell} bytes a cell in every checkpoint");
+}
+
 #[test]
 fn a_split_that_names_a_body_that_is_not_made_of_cells_is_refused() {
     let w = World3::new(World3Spec {
@@ -453,6 +517,7 @@ fn first_cut(at: f64) -> (usize, f64, Option<u64>, VoxelCut3) {
         at,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -474,6 +539,7 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
         1.0,
         Some(1),
         VoxelCut3 {
+            added: vec![],
             revision: 2,
             destroyed: cells_of(2..3, 0..2, 0..2),
             parent_mass: 8.0 * CELL_MASS,
@@ -516,6 +582,7 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
         1.5,
         Some(2),
         VoxelCut3 {
+            added: vec![],
             revision: 3,
             destroyed: cells_of(3..4, 0..2, 0..2),
             parent_mass: 4.0 * CELL_MASS,
@@ -593,6 +660,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
         1.0,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(9..10, 0..2, 0..2),
             parent_mass: 12.0 * CELL_MASS,
@@ -782,6 +850,7 @@ fn chained_splits_cut_the_slot_one_step_after_it_is_used_however_often_and_in_wh
                 1.5,
                 None,
                 VoxelCut3 {
+                    added: vec![],
                     revision: 1,
                     destroyed: cells_of(9..10, 0..2, 0..2),
                     parent_mass: 12.0 * CELL_MASS,
@@ -917,6 +986,7 @@ fn the_l_cut(at: f64) -> (Scripted, Vec<[i32; 3]>, Vec<[i32; 3]>) {
     let mut destroyed = cells_of(5..6, 0..2, 0..2);
     destroyed.extend(notch);
     let cut = VoxelCut3 {
+        added: vec![],
         revision: 1,
         destroyed,
         parent_mass: 20.0 * CELL_MASS,
@@ -964,6 +1034,7 @@ fn a_body_that_loses_all_its_cells_stays_out_of_the_world_and_its_pieces_are_the
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: vec![],
             parent_mass: 0.0,
@@ -1022,6 +1093,7 @@ fn a_step_whose_second_cut_cannot_be_installed_does_not_install_the_first() {
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: vec![[40, 0, 0]],
             parent_mass: 20.0 * CELL_MASS,
@@ -1041,6 +1113,7 @@ fn a_step_whose_second_cut_cannot_be_installed_does_not_install_the_first() {
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -1202,6 +1275,7 @@ fn the_part_that_stays_after_a_cut_has_all_its_cells_when_they_end_at_the_edge_o
     .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
     .unwrap();
     let cut = VoxelCut3 {
+        added: vec![],
         revision: 1,
         destroyed,
         parent_mass: stay.len() as f64 * cell_mass,
@@ -1314,6 +1388,9 @@ fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
 /// cut it gives at one instant is a new one every time, and takes the cells it took before.
 struct Counting;
 
+/// The instant from which [`Counting`] cuts: after the first steps, so that a world asked for 0.03 s installs the first cut in the tail of its frame.
+const COUNTING_FROM: f64 = 0.03;
+
 impl Driver3 for Counting {
     fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
         vec![Pose3::default(); which.len()]
@@ -1323,15 +1400,16 @@ impl Driver3 for Counting {
     }
     fn voxel_cut(
         &mut self,
-        _: f64,
+        t: f64,
         parent: usize,
         revision: Option<u64>,
         _: Option<&Impact3>,
     ) -> Result<Option<VoxelCut3>, String> {
-        if parent != 0 {
+        if parent != 0 || t + 1e-9 < COUNTING_FROM {
             return Ok(None);
         }
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: revision.map_or(1, |r| r + 1),
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 44.0 * CELL_MASS,
@@ -1343,15 +1421,19 @@ impl Driver3 for Counting {
 #[test]
 fn a_driver_whose_revision_is_not_a_function_of_the_time_gets_the_same_error_however_the_frame_is_asked() {
     // the contract: at one instant the driver gives one revision, so that asking again finds it installed. One that gives a new revision with the
-    // cells it destroyed before is refused for taking cells the body has not, in a fresh world and in one asked twice, and never half installs it
+    // cells it destroyed before is refused for taking cells the body has not, and never half installs it. The first cut is from 0.03 s: a world that
+    // is asked for that instant installs it in the tail of its frame and fails in the prefix of the next step (the path the doc of voxel_cut
+    // describes), a fresh world asked for a later one installs it in a prefix and fails in the next, and both say the same
     let mut fresh = world(1, None);
     let first = fresh.frame_at(0.05, &mut Counting);
     assert!(first.errors.iter().any(|e| e.contains("has not")), "{:?}", first.errors);
-    let mut twice = world(1, None);
-    twice.frame_at(0.02, &mut Counting);
-    let second = twice.frame_at(0.05, &mut Counting);
+    let mut tail = world(1, None);
+    let at_the_cut = tail.frame_at(COUNTING_FROM, &mut Counting);
+    assert!(at_the_cut.errors.is_empty(), "the cut itself is fine: {:?}", at_the_cut.errors);
+    assert!(tail.frame_at(0.02, &mut Counting).errors.is_empty(), "and earlier frames are not touched");
+    let second = tail.frame_at(0.05, &mut Counting);
     assert_eq!(first.errors, second.errors);
-    assert_eq!(first, twice.frame_at(0.05, &mut Counting));
+    assert_eq!(first, tail.frame_at(0.05, &mut Counting));
 }
 
 /// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of
@@ -1377,6 +1459,7 @@ impl Driver3 for Undermine {
         let column = (impact.point[0] / 0.25).floor() as i32;
         let piece = cells_of(column + 1..24, 0..3, 0..8);
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(column..column + 1, 0..3, 0..8),
             parent_mass: (column as usize * 24) as f64 * CELL_MASS,
@@ -1554,4 +1637,158 @@ fn a_piece_cut_while_hidden_is_a_body_with_its_own_centre_of_mass_at_the_first_s
             wanted[k]
         );
     }
+}
+
+/// A driver that heaps cells on the bar at `at` (what a crater's rim does) and, if `destroyed` is not empty, destroys some of the cells that are heaped
+/// and some of those that were there in the same cut, and remembers the state of every body at every load.
+struct Heap {
+    at: f64,
+    added: Vec<[i32; 3]>,
+    destroyed: Vec<[i32; 3]>,
+    mass: f64,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Heap {
+    fn on_the_bar(at: f64) -> Self {
+        Heap {
+            at,
+            added: cells_of(0..12, 2..3, 0..2),
+            destroyed: vec![],
+            mass: 72.0 * CELL_MASS,
+            seen: vec![vec![]; 2],
+        }
+    }
+}
+
+impl Driver3 for Heap {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 || revision == Some(1) || t + 1e-9 < self.at {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            added: self.added.clone(),
+            revision: 1,
+            destroyed: self.destroyed.clone(),
+            parent_mass: self.mass,
+            pieces: vec![],
+        }))
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+/// The centre of mass of the bar, in its own frame, in the last step that was asked about it.
+fn local_centre_of_the_bar(d: &Heap) -> [f64; 3] {
+    let state = d.seen[0].last().unwrap().1;
+    local_centre(&state.pose, state.centre)
+}
+
+fn assert_close(got: [f64; 3], wanted: [f64; 3], what: &str) {
+    for k in 0..3 {
+        assert!((got[k] - wanted[k]).abs() < 1e-9, "{what}, axis {k}: {} against {}", got[k], wanted[k]);
+    }
+}
+
+#[test]
+fn cells_heaped_on_a_body_are_part_of_it_with_their_mass_and_their_place_in_its_centre_of_mass() {
+    let mut w = world(1, None);
+    let mut d = Heap::on_the_bar(0.2);
+    let frame = w.frame_at(0.4, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let mut all = bar();
+    all.extend(cells_of(0..12, 2..3, 0..2));
+    let wanted =
+        shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: all }, 72.0 * CELL_MASS, 1.0).unwrap().centre;
+    assert_close(local_centre_of_the_bar(&d), wanted, "the bar with the cells on it");
+}
+
+#[test]
+fn a_cell_heaped_in_the_cut_that_destroys_it_is_never_part_of_the_body() {
+    // the cells are added before anything leaves: a destroyed cell may be one that was heaped in the same cut, and what stays is the bar and the rest
+    let mut w = world(1, None);
+    let mut d = Heap::on_the_bar(0.2);
+    d.destroyed = cells_of(0..6, 2..3, 0..2);
+    d.mass = 60.0 * CELL_MASS;
+    let frame = w.frame_at(0.4, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let mut stays = bar();
+    stays.extend(cells_of(6..12, 2..3, 0..2));
+    let wanted =
+        shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: stays }, 60.0 * CELL_MASS, 1.0).unwrap().centre;
+    assert_close(local_centre_of_the_bar(&d), wanted, "the bar with half the cells on it");
+}
+
+#[test]
+fn a_cut_that_heaps_a_cell_the_body_has_or_the_same_cell_twice_is_refused_and_installs_nothing() {
+    for (added, says) in [
+        (cells_of(5..6, 0..1, 0..1), "has"),
+        ([cells_of(0..2, 2..3, 0..1), cells_of(1..3, 2..3, 0..1)].concat(), "twice"),
+    ] {
+        let mut w = world(1, None);
+        let mut d = Heap::on_the_bar(0.2);
+        d.added = added;
+        let failed = w.frame_at(0.4, &mut d);
+        assert!(failed.errors.iter().any(|e| e.contains(says)), "{says}: {:?}", failed.errors);
+        // nothing was installed: a driver that cuts nothing finds the bar as it was
+        let after = w.frame_at(0.4, &mut Cutter::new(99.0));
+        assert!(after.errors.is_empty(), "{:?}", after.errors);
+    }
+}
+
+#[test]
+fn a_cut_that_heaps_cells_is_the_same_however_the_frames_are_asked() {
+    let steps: Vec<u64> = (18..=24).collect();
+    let make = |frames: Option<usize>| world_logging(1, None, frames);
+    the_same_four_ways(&make, &|| Heap::on_the_bar(0.2), &steps);
+}
+
+#[test]
+fn a_ball_comes_to_rest_on_the_cells_that_were_heaped_on_the_floor_and_not_on_the_floor() {
+    // a static floor that has half a metre of cells heaped on it by a cut at the start: a ball dropped on it rests on the heap (scene y points down,
+    // the floor's top is at 0 and the ball is 0.3 m in radius)
+    struct Rim(Heap);
+    impl Driver3 for Rim {
+        fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+            self.0.kinematic(t, which)
+        }
+        fn fields(&mut self, t: f64) -> Vec<Field> {
+            self.0.fields(t)
+        }
+        fn voxel_cut(
+            &mut self,
+            t: f64,
+            p: usize,
+            r: Option<u64>,
+            i: Option<&Impact3>,
+        ) -> Result<Option<VoxelCut3>, String> {
+            self.0.voxel_cut(t, p, r, i)
+        }
+    }
+    let rest = |heap: bool| {
+        let mut w = floor_and_ball(None);
+        let mut inner = Heap::on_the_bar(0.0);
+        inner.added = if heap { cells_of(0..24, -2..0, 0..8) } else { vec![] };
+        inner.mass = if heap { 960.0 } else { 576.0 } * CELL_MASS;
+        let frame = w.frame_at(3.0, &mut Rim(inner));
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        frame.bodies[1].pos[1]
+    };
+    let (bare, heaped) = (rest(false), rest(true));
+    assert!((bare + 0.3).abs() < 0.02, "the ball rests on the bare floor: {bare}");
+    assert!((heaped + 0.8).abs() < 0.02, "the ball rests on the heap: {heaped}");
 }

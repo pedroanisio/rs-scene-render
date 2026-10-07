@@ -145,6 +145,7 @@ fn a_thin_plate_cut_off_a_block_spins_up_as_its_cells_say() {
     let plate = cells_of(0..1, 0..7, 0..7);
     let stays = cells_of(2..6, 0..7, 0..7);
     let cut = VoxelCut3 {
+        added: vec![],
         revision: 1,
         destroyed: cells_of(1..2, 0..7, 0..7),
         parent_mass: stays.len() as f64 * CELL_MASS,

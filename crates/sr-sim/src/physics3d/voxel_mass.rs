@@ -144,10 +144,11 @@ pub(super) fn sum_mass_properties(parts: &[MassProperties]) -> MassProperties {
 
 /// The mass properties of a body whose surface is the closed triangle mesh `triangles` over `points` (physics axes, metres, outward windings
 /// or all inward) and total `mass`, uniformly dense: the volume integrals of the signed tetrahedra that each triangle makes with the origin, which
-/// are exact for a polyhedron, and the tensor diagonalised as [`voxel_mass_properties`] does. A mesh that is not closed has no volume to speak of and is
-/// taken as it is (as Parry's own is).
+/// are exact for a polyhedron, and the tensor diagonalised as [`voxel_mass_properties`] does. A mesh that is not closed and consistently wound has no
+/// volume to speak of (the integrals depend on where the origin is) and is refused: every edge must be met once in each direction, the corners
+/// that are at one place being one (a mesh cut apart has corners of its own for every triangle).
 pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], mass: f64) -> Option<MassProperties> {
-    if triangles.is_empty() || !(mass.is_finite() && mass > 0.0) {
+    if triangles.is_empty() || !(mass.is_finite() && mass > 0.0) || !closed_and_consistent(points, triangles)? {
         return None;
     }
     let (mut volume, mut moment) = (0.0f64, Vector::ZERO);
@@ -191,4 +192,51 @@ pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], ma
     let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
     let frame = Rotation::from_mat3(&Matrix::from_cols(vec3(x), vec3(y), vec3(z)));
     Some(MassProperties::with_principal_inertia_frame(centre, mass, vec3(moments), frame))
+}
+
+/// Whether the surface is closed and its triangles are wound alike: every directed edge is met exactly once and so is its reverse (corners at the same
+/// place are the same corner). `None` if a triangle names a corner that is not there.
+fn closed_and_consistent(points: &[Vector], triangles: &[[u32; 3]]) -> Option<bool> {
+    let mut ids: std::collections::HashMap<[u64; 3], u32> = std::collections::HashMap::new();
+    let mut corner = Vec::with_capacity(points.len());
+    for p in points {
+        // + 0.0 makes -0.0 into 0.0: the same place has one key
+        let key = [(p.x + 0.0).to_bits(), (p.y + 0.0).to_bits(), (p.z + 0.0).to_bits()];
+        let next = ids.len() as u32;
+        corner.push(*ids.entry(key).or_insert(next));
+    }
+    let mut seen: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    for t in triangles {
+        let c = [*corner.get(t[0] as usize)?, *corner.get(t[1] as usize)?, *corner.get(t[2] as usize)?];
+        for (a, b) in [(c[0], c[1]), (c[1], c[2]), (c[2], c[0])] {
+            if a != b {
+                *seen.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+    }
+    Some(seen.iter().all(|(&(a, b), &n)| n == 1 && seen.get(&(b, a)) == Some(&1)))
+}
+
+/// The mass properties of a convex hull of total `mass`, from the exact integrals over its faces (fanned into triangles, wound as their face's
+/// normal says), and not from Parry's hull routine, which diagonalises with the solver whose mistake the rest of this module works around.
+pub(super) fn hull_mass_properties(
+    hull: &rapier3d_f64::parry::shape::ConvexPolyhedron,
+    mass: f64,
+) -> Option<MassProperties> {
+    let points = hull.points();
+    let adjacent = hull.vertices_adj_to_face();
+    let mut triangles = Vec::new();
+    for face in hull.faces() {
+        let first = face.first_vertex_or_edge as usize;
+        let ring = adjacent.get(first..first + face.num_vertices_or_edges as usize)?;
+        for w in 1..ring.len().saturating_sub(1) {
+            let mut t = [ring[0], ring[w], ring[w + 1]];
+            let (a, b, c) = (*points.get(t[0] as usize)?, *points.get(t[1] as usize)?, *points.get(t[2] as usize)?);
+            if (b - a).cross(c - a).dot(face.normal) < 0.0 {
+                t.swap(1, 2);
+            }
+            triangles.push(t);
+        }
+    }
+    mesh_mass_properties(points, &triangles, mass)
 }
