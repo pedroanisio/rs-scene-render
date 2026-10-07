@@ -798,11 +798,14 @@ solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
 Where the window moves is a function of the state and of the sources that act in the step, never of the history of
 requests. The smoke along an axis is the span of slabs of cells between the ends that hold at most half of `followLoss` of all
 the density each (the lowest and highest cell index, integers, from sums taken in the order of the cells, so the same on any
-number of threads). Smoke that goes one way along an axis (the drift of its density-weighted air is at least a fifth of its
-speed) asks for room only on the face it goes toward, because a face behind a plume that rises away from it is no reason to
-take from the room it rises into (test `a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`; the
-fireball of the hero scene, which expands toward its own bottom face for a moment and then rises, made a window move 22 units
-down without this rule); smoke that goes nowhere or spreads both ways along an axis asks on both. The sources are the
+number of threads). A face is asked for room only if the air in the smoke nearest it is going toward it (the density-weighted
+velocity along the axis, summed over the slabs of the smoke within the margin of that end, points to the face): a face behind a plume
+that rises away from it is no reason to take from the room it rises into (test
+`a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`; the fireball of the hero scene, which expands toward
+its own bottom face for a moment and then rises, made a window of the first policy, that asked for room on every face, move 22
+units down), and smoke at rest is going toward none. On the hero scene with `followMargin="3"` the window still moves down 6
+units (two cells) at 1.1 s, when the expanding fireball comes within the margin of the bottom face, and stays there to 4 s; a
+smaller margin keeps it where it began for longer, at the price of smoke nearer the face. The sources are the
 shapes of the `pyroSource` and `pyroImpulse` that act in the step, and **a window never leaves a slab that holds a cell of such a
 source**, whatever the loss, because a plume begins at its source and a window that left it would part the plume from the
 ground. The inputs of a step are sampled again if the window moved, so that they are those of the window the step has, and

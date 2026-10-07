@@ -31,9 +31,6 @@ const LIGHT: usize = 8192;
 /// A temperature that differs from ambient by less than this share of it is the rounding of the interpolation, not
 /// heat: the window that follows a plume does not count it as smoke.
 const HEAT_NOISE: f64 = 1e-9;
-/// The share of its speed that the drift of the smoke along an axis must have for the smoke to be going one way along
-/// it: a window that follows asks for room only on the face such smoke is going toward.
-const FOLLOW_DRIFT: f64 = 0.2;
 
 #[cfg(test)]
 mod atomicity;
@@ -697,7 +694,6 @@ impl State {
         let mut heat: [Vec<u64>; 3] = std::array::from_fn(|a| vec![0; n[a]]);
         // and the density times the velocity of the air along the axis, to tell which way the smoke at each end is going
         let mut flux: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
-        let mut flux_abs: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
         for z in 0..n[2] {
             for y in 0..n[1] {
                 let row = index([0, y, z], n);
@@ -714,7 +710,6 @@ impl State {
                             high[a] += 1;
                             let v = 0.5 * (self.velocity[a][index(low, dims)] + self.velocity[a][index(high, dims)]);
                             flux[a][i] += d * v;
-                            flux_abs[a][i] += d * v.abs();
                         }
                     }
                 }
@@ -759,13 +754,13 @@ impl State {
                 hi -= 1;
             }
             let width = margin + reach[a];
-            // Smoke that is going one way along the axis (its density-weighted air has at least a fifth of its speed
-            // as drift) asks for room only on the face it is going toward: a face behind a plume that is rising away
-            // from it is no reason to move the window, which would take the room that the plume rises into. Smoke
-            // that is not going anywhere along the axis, or spreads both ways, asks for room on both.
-            let (drift, speed): (f64, f64) = (flux[a].iter().sum(), flux_abs[a].iter().sum());
-            let directed = speed > 0.0 && drift.abs() >= FOLLOW_DRIFT * speed;
-            let (toward_low, toward_high) = (!directed || drift < 0.0, !directed || drift > 0.0);
+            // A face is asked for room only if the air in the smoke nearest it is going toward it (the density-weighted
+            // velocity along the axis in the slabs of the smoke within the margin of that end): a face behind a plume
+            // that is rising away from it is no reason to move the window, which would take the room that the plume
+            // rises into, and smoke at rest is going toward none.
+            let going = |from: usize, to: usize| flux[a][from..=to].iter().sum::<f64>();
+            let toward_low = going(lo, (lo + width).min(hi)) < 0.0;
+            let toward_high = going(hi.saturating_sub(width).max(lo), hi) > 0.0;
             let (n, lo, hi, margin) = (n[a] as i64, lo as i64, hi as i64, width as i64);
             // smoke nearer the low face than the margin: the window moves toward lower cells by what is short, at
             // most as far as the slabs at the high end that may be left behind
@@ -1553,11 +1548,17 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &
     Ok(())
 }
 
-/// A number for the cell of space that cell `c` of a window moved by `window` cells is: 21 bits of each of its three
-/// coordinates counted from the domain's own origin.
-fn global_cell(c: [usize; 3], window: [i64; 3]) -> u64 {
-    let part = |a: usize| ((c[a] as i64 + window[a] + (1 << 20)) as u64) & 0x1f_ffff;
-    part(0) | part(1) << 21 | part(2) << 42
+/// A number for the cell of space that cell `c` of a window moved by `window` cells is. A cell inside the box that the domain began
+/// as has the number it has without a follow (its index in that box), so that a window that has not moved, or has moved and
+/// looks at cells of the first box, has the noise that the domain had; a cell outside it has a number of its own, the high bit set
+/// and 21 bits of each of its three coordinates, and no two cells share one.
+fn global_cell(c: [usize; 3], window: [i64; 3], cells: [usize; 3]) -> u64 {
+    let g: [i64; 3] = std::array::from_fn(|a| c[a] as i64 + window[a]);
+    if (0..3).all(|a| (0..cells[a] as i64).contains(&g[a])) {
+        return index(g.map(|v| v as usize), cells) as u64;
+    }
+    let part = |a: usize| ((g[a] + (1 << 20)) as u64) & 0x1f_ffff;
+    1 << 63 | part(0) | part(1) << 21 | part(2) << 42
 }
 
 fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
@@ -1568,7 +1569,7 @@ fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
         let (cells, window, follows) = (s.cells, s.window, spec.follow.is_some());
         force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
             // the noise of a window that moves belongs to the cell of space, not to the cell of the window
-            let key = if follows { global_cell(coords(k, cells), window) } else { k as u64 };
+            let key = if follows { global_cell(coords(k, cells), window, cells) } else { k as u64 };
             for a in 0..3 {
                 f[a] = input.acceleration[a]
                     + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])

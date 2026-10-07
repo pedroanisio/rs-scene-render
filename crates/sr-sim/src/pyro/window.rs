@@ -74,3 +74,29 @@ fn without_a_follow_the_turbulence_is_keyed_by_the_cell_of_the_window_as_it_alwa
     // the cells did not change place in the window: the same noise, whatever the window says
     assert_eq!(a.velocity, b.velocity);
 }
+
+#[test]
+fn a_following_window_that_has_not_moved_has_the_turbulence_that_it_has_without_following() {
+    let follow = Some(Follow { margin: 2, loss: 0.0 });
+    let (with, without) = (spec(follow), spec(None));
+    let base = Simulation::new(without.clone()).unwrap().state().clone();
+    let (a, b) = (pushed(&base, &without), pushed(&base, &with));
+    assert_eq!(a.velocity, b.velocity, "the noise does not depend on follow while the window is where it began");
+}
+#[test]
+fn a_cell_of_the_window_that_moved_out_of_where_it_began_has_a_noise_of_its_own() {
+    let spec = spec(Some(Follow { margin: 2, loss: 0.0 }));
+    // the cell one past the first window on the high side of x is not the cell one past it on the next row: no two cells share a key
+    let mut keys = std::collections::HashSet::new();
+    for z in -3i64..15 {
+        for y in -3i64..15 {
+            for x in -3i64..15 {
+                assert!(
+                    keys.insert(global_cell([0; 3], [x, y, z], spec.cells)),
+                    "the cell {:?} shares a key",
+                    [x, y, z]
+                );
+            }
+        }
+    }
+}
