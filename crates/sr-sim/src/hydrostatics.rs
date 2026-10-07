@@ -299,6 +299,9 @@ pub fn hull_mesh(shape: &crate::physics3d::Shape3) -> Result<Mesh, String> {
             Ok(revolved(&profile, AROUND))
         }
         Shape3::Sphere(_) => Err("a sphere is measured in closed form".into()),
+        Shape3::Voxels { .. } => {
+            Err("buoyancy of a body of cells is not supported: its displaced volume is not a mesh here".into())
+        }
         Shape3::Convex(_) => {
             Err("buoyancy of a convex hull is not supported: give the body a primitive or a closed mesh".into())
         }

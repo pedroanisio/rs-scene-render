@@ -29,6 +29,7 @@ pub mod light;
 pub mod material;
 pub mod mtlx;
 mod mtlx_graph;
+pub mod occupancy;
 
 pub mod prim;
 pub mod sampling;

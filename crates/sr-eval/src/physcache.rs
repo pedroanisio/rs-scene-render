@@ -190,6 +190,12 @@ fn absorb_shape(id: &mut Identity, shape: &Shape3) {
         Shape3::TriMesh(v, t) => absorb_mesh(id, "trimesh", v, t),
         Shape3::Decomposition(v, t) => absorb_mesh(id, "decomposition", v, t),
         Shape3::Convex(v) => absorb_mesh(id, "convex", v, &[]),
+        Shape3::Voxels { size, cells } => {
+            id.value("voxels", &(size.map(f64::to_bits), cells.len()));
+            for k in cells.iter().flatten() {
+                id.0.update(k.to_le_bytes());
+            }
+        }
         other => id.value("shape", other),
     }
 }
