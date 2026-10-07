@@ -262,6 +262,21 @@
     "crt12-repose-with-mantle.scene.xml": [
       "CRT12"
     ],
+    "crt13-mantle.scene.xml": [
+      "CRT13"
+    ],
+    "crt14-curve.scene.xml": [
+      "CRT14"
+    ],
+    "crt15-no-source.scene.xml": [
+      "CRT15"
+    ],
+    "crt16-count.scene.xml": [
+      "CRT16"
+    ],
+    "crt16-no-count.scene.xml": [
+      "CRT16"
+    ],
     "crt2.scene.xml": [
       "CRT2"
     ],
@@ -298,6 +313,18 @@
     "frx1.scene.xml": [
       "FRX1"
     ],
+    "frx10-pieces.scene.xml": [
+      "FRX10"
+    ],
+    "frx11-no-partition.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-planes.scene.xml": [
+      "FRX11"
+    ],
+    "frx12-labels.scene.xml": [
+      "FRX12"
+    ],
     "frx2.scene.xml": [
       "FRX2"
     ],
@@ -322,6 +349,12 @@
     ],
     "frx7-orphan.scene.xml": [
       "FRX7"
+    ],
+    "frx8-interior.scene.xml": [
+      "FRX8"
+    ],
+    "frx9-partition.scene.xml": [
+      "FRX9"
     ],
     "geo1.scene.xml": [
       "GEO1"
@@ -907,6 +940,24 @@
     "vox1-version.scene.xml": [
       "VOX1"
     ],
+    "vox10-mass.scene.xml": [
+      "VOX10"
+    ],
+    "vox10-no-density.scene.xml": [
+      "VOX10"
+    ],
+    "vox11-slots.scene.xml": [
+      "VOX11"
+    ],
+    "vox12-anchor.scene.xml": [
+      "VOX12"
+    ],
+    "vox13-scale.scene.xml": [
+      "VOX13"
+    ],
+    "vox14-both.scene.xml": [
+      "VOX14"
+    ],
     "vox2-both-sources.scene.xml": [
       "VOX2"
     ],
@@ -942,6 +993,12 @@
     ],
     "vox7-exclusion.scene.xml": [
       "VOX7"
+    ],
+    "vox8-shape.scene.xml": [
+      "VOX8"
+    ],
+    "vox9-density.scene.xml": [
+      "VOX9"
     ],
     "whitewater-checkpoint-range.scene.xml": [
       "S06"
@@ -1010,6 +1067,12 @@
     "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
+    "voxel-body.scene.xml": [],
+    "voxel-crater.scene.xml": [],
+    "voxel-ejecta.scene.xml": [],
+    "voxel-fracture-labels.scene.xml": [],
+    "voxel-fracture-planes.scene.xml": [],
+    "voxel-fracture.scene.xml": [],
     "voxels-from-mesh.scene.xml": [],
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],

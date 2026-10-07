@@ -102,7 +102,8 @@ pub(crate) fn prepare(
     Ok(Arc::new(Geometry {
         key: NEXT.fetch_add(1, Ordering::Relaxed),
         pieces: output,
-        interior_material: config.interior_material.to_string(),
+        // a fracture of a mesh has one (FRX3 refuses it without); a fracture of cells has none (FRX8) and is not made here
+        interior_material: config.interior_material.clone().unwrap_or_default(),
         model,
     }))
 }

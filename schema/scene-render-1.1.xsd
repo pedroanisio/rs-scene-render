@@ -1771,10 +1771,43 @@
         <xs:enumeration value="sphere"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="cylinder"/><xs:enumeration value="cone"/>
         <xs:enumeration value="convex-hull"/><xs:enumeration value="trimesh"/>
-        <xs:enumeration value="decomposition"/>
+        <xs:enumeration value="decomposition"/><xs:enumeration value="voxels"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="mass" type="positiveDecimal" default="1"/>
+    <xs:attribute name="density" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        Kilograms per cubic metre, for a body of cells (VOX9, VOX10): its mass is the number of cells times the volume of one (cellSize times the object's
+        scale, over the scene's pixelsPerMeter, cubed) times this. Required with cells as the collider, and `mass` is then not given.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="maxFragments">
+      <xs:annotation><xs:documentation>
+        A body of cells that a crater or a fracture can break gets this many slots (bodies that wait, one cell each, until a cut frees a part of it): 1 to 4096; the
+        engine's value is 64, and it is not an XSD default so that it can be refused where there is nothing to cut (VOX11). The world refuses more fragments
+        than slots (see fragmentOverflow).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="fragmentMinCells" type="xs:positiveInteger">
+      <xs:annotation><xs:documentation>
+        Loose parts of a cut with fewer cells than this are dust: they leave the body and become particles (VOX11). The engine's value is 1.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="fragmentOverflow">
+      <xs:annotation><xs:documentation>
+        What a cut does when it frees more parts than there are slots (VOX11): `error` names both numbers, `dust` makes the smallest parts dust. The engine's value is error.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="dust"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="anchor">
+      <xs:annotation><xs:documentation>
+        Which part of what a crater's cut leaves stays the body (VOX12): `largest`, the largest connected part (the engine's value for a dynamic body), or `base`, every part
+        that touches the base layer (the cells of the greatest y key, the lowest layer in the scene's axes, y down), the way ground is held by what is under it (the
+        engine's value for a static or kinematic body).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="largest"/><xs:enumeration value="base"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="friction" type="unitDecimal" default="0.5"/>
     <xs:attribute name="restitution" type="unitDecimal" default="0"/>
     <xs:attribute name="linearDamping" type="unitDecimal" default="0.01"/>
@@ -4482,7 +4515,7 @@
       pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
     </xs:documentation></xs:annotation>
     <xs:attribute name="time" type="xs:double"/>
-    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="count" type="xs:positiveInteger"/>
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
     <xs:attribute name="crater" type="xs:IDREF"/>
@@ -4787,8 +4820,30 @@
     <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="interiorMaterial" type="xs:IDREF" use="required"/>
+    <xs:attribute name="interiorMaterial" type="xs:IDREF"/>
     <xs:attribute name="interiorUvScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="partition">
+      <xs:annotation><xs:documentation>
+        On an object of cells (FRX9): how the body is cut into pieces, `voronoi` (the engine's value: `pieces` seeds drawn from `seed` in the box of the cells, each cell
+        to the nearest), `planes` (the cells are the pieces' sides of the planes in `planes`) or `labels` (the cells that have one palette index are one part). A part that is not
+        connected by faces is split into its components, so every piece is connected. `pieces` and `seed` belong to voronoi (FRX10). The pieces have the material of
+        their cells, and a face that a cut exposes is drawn with the palette like any other: there is no interior material (FRX8).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="voronoi"/><xs:enumeration value="planes"/><xs:enumeration value="labels"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="planes" type="xs:string">
+      <xs:annotation><xs:documentation>
+        With partition="planes" (FRX11): up to 63 planes, each four numbers `nx ny nz offset`, in object units (the object's own axes, before its scale, the
+        origin at the corner of the cells): a cell is on the positive side of a plane if the dot product of the normal with the centre of the cell, `(key + 1/2) * cellSize`,
+        is at least the offset. The normal is not unit and need not be; it is taken to 2^-32 of its largest component.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="labels">
+      <xs:annotation><xs:documentation>
+        With partition="labels" (FRX12): `material`, the palette index of a cell is its label, so that a model breaks along its materials.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="material"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="impulseX" type="xs:double" default="0"/>
     <xs:attribute name="impulseY" type="xs:double" default="0"/>
     <xs:attribute name="impulseZ" type="xs:double" default="0"/>

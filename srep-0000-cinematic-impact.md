@@ -3196,6 +3196,37 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
+**Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
+an object of cells can be asked for; the rules say what is refused. (This is the schema and the rules; the evaluator that makes bodies, cuts and fractures of them from
+a document is the next step, and the physics it will call is already in the engine.)
+
+*The frame.* The object's origin is the minimum corner of the box of its occupied cells, the axes are the scene's with y down, and the cell `[i, j, k]` fills
+`[i, i + 1) x [j, j + 1) x [k, k + 1)` cells of `cellSize` object units; `sr_3d::voxel::cell_to_object(key, cellSize)` is the centre `(key + 1/2) * cellSize`,
+`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
+file's own lattice. The body's centre of mass is not the origin; the world works it out from the cells. Metres are scene units over `pixelsPerMeter`.
+
+*The body (VOX8 to VOX14).* `rigidBody@shape="voxels"` (or `auto`, which is the cells for an object of primitive voxels) makes the cells the collider: the mass is the number of
+cells times the volume of one (`cellSize` times the object's scale, over `pixelsPerMeter`, cubed) times `density` (kg/m^3, required: the materials of an asset carry none; `mass` is
+refused). `maxFragments` (1 to 4096, 64 in the engine), `fragmentMinCells` (loose parts of fewer cells are dust, 1) and `fragmentOverflow` (`error`, which names both numbers, or
+`dust`, which makes the smallest parts dust) are the slots that the pieces of a cut take, and cost bodies of the world, so they are refused where there is nothing to cut
+(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `largest`, or `base`, every part that touches the base layer (the
+cells of the greatest y key: the lowest layer, the way ground is held by what is under it); with a crater only (VOX12). A body that a crater or a fracture breaks is scaled the same on
+every axis (VOX13: the cells are cubes for the cut), and has the one or the other (VOX14).
+
+*The crater (CRT5, CRT13 to CRT15).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
+fifth heaped as the rim, in cells): so `mantle`, `bulking` and `repose`, which are ideas of an analytic surface, are refused (CRT13), and so are `start`, `end` and `curve`, which
+describe a growth that a cut does not have (CRT14: an attribute with no effect is a falsehood in a document). It grows from a source (CRT15), and its rigid body may be the cells
+(CRT5 gains `voxels`). `capture` is the world's and stays. The ejecta are a `particles3D` whose `burst@crater` names the crater, and for a crater of cells its particles are the
+cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's), and a burst that is not of such a crater
+has one as before.
+
+*The fracture (FRX3, FRX8 to FRX12).* The partition is `voronoi` (the engine's: `pieces` seeds drawn from `seed`, at most 4096), `planes` (up to 63 planes of `nx ny nz offset`
+in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component)
+or `labels="material"` (the palette index of a cell is its label, so a model breaks along its materials); a part that is not connected is split into its components. `pieces` and `seed`
+belong to voronoi (FRX10). The pieces have the material of their cells: there is no cut surface to paint, so `interiorMaterial` and `interiorUvScale` are refused for cells (FRX8; the
+exposed face of a piece is drawn from the palette like any other, and a surface that is to look different is a palette index, or a later `surface` value) and `interiorMaterial` stays
+required for a mesh (FRX3). The slots are those of the owner's `rigidBody`.
+
 **The pieces of a body of cells (`sr_3d::pieces`).** `partition(occupancy, rule, max_pieces)` cuts a body into pieces and finds the joints
 between them: by seeds (`Voronoi`, drawn from `(seed, index)` by splitmix64, or `VoronoiAt`, given; at most 4096 and within 2^40 of the origin in
 doubled coordinates, an error that names the number or the seed otherwise), by up to 63 planes, or by labels the caller gives. This module has
@@ -3519,7 +3550,7 @@ Also includes `pyroShape`, inventoried below.
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
 | `time` | xs:double | Required unless `crater` is given (P3D7) |
-| `count` | xs:positiveInteger | Required |
+| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16) |
 | `repeat` | xs:nonNegativeInteger | Default `0` |
 | `interval` | positiveDecimal | Default `1` |
 | `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
@@ -3667,7 +3698,7 @@ Also includes `pyroShape`, inventoried below.
 | `at` | nonNegativeDecimal | Default `0` |
 | `pieces` | xs:positiveInteger; maxInclusive=4096 | Default `8` |
 | `seed` | xs:unsignedLong | Default `0` |
-| `interiorMaterial` | xs:IDREF | Required |
+| `interiorMaterial` | xs:IDREF | Required of a fracture of a mesh (FRX3); refused on a fracture of cells (FRX8) |
 | `interiorUvScale` | positiveDecimal | Default `1` |
 | `impulseX` | xs:double | Default `0` |
 | `impulseY` | xs:double | Default `0` |
@@ -3677,6 +3708,20 @@ Also includes `pyroShape`, inventoried below.
 | `source` | xs:IDREF | Optional; the dynamic rigid body whose impact breaks the owner (FRX5 to FRX7) |
 | `minImpulse` | positiveDecimal | Optional; only with `source` (FRX7); absent: twice the source's weight in one step |
 | `energyFraction` | unitDecimal | Optional, no XSD default; only with `source` (FRX7); the engine uses `0.3` |
+| `partition` | xs:string; enumeration=voronoi, enumeration=planes, enumeration=labels | Optional; only on the fracture of an object of cells (FRX9); engine default `voronoi` |
+| `planes` | xs:string | Optional; with `partition="planes"` (FRX11): up to 63 planes of four numbers `nx ny nz offset` in object units |
+| `labels` | xs:string; enumeration=material | Optional; with `partition="labels"` (FRX12) |
+
+### `rigidBody3DType` bindings of a body of cells
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `shape` | adds enumeration=voxels | `auto` is the cells for an object of primitive voxels (VOX8) |
+| `density` | positiveDecimal | Required when the collider is the cells, and `mass` is then not given (VOX9, VOX10); kg/m^3 |
+| `maxFragments` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; only with a crater or a fracture on the owner (VOX11); the engine uses `64` |
+| `fragmentMinCells` | xs:positiveInteger | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `1` |
+| `fragmentOverflow` | xs:string; enumeration=error, enumeration=dust | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `error` |
+| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12); the engine uses `largest` for a dynamic body and `base` for a static or kinematic one |
 
 ### `assetProvenance`
 
@@ -3939,11 +3984,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 270 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 90 of them are in the
-cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 287 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 107 of them are in the
+cinematic families OCN 14, P3D 11, CRT 16, PYRO 11, VOL 10, BH 8, FRX 12, VOX 14, PYC 4, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 24 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7) are this repository's. At commit 349d371,
+families, and the 40 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT16, PYRO9 to PYRO11, VOX1 to VOX14) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

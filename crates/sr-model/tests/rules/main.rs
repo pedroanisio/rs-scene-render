@@ -18,3 +18,4 @@ mod terrain_rules;
 mod text3d_tracking_rules;
 mod volume_rules;
 mod voxel_rules;
+mod voxel_scene_rules;

@@ -749,13 +749,17 @@ impl<'a> Eval<'a> {
                     "FRX2",
                     || "fracture requires one closed surface object3D owner and exactly one rigidBody.".into(),
                 );
-                self.check(contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
+                let cells_owner = n.parent_element().is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                self.check(cells_owner || contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
                     "fracture interiorMaterial must reference a declared material.".into()
                 });
-                let finite = n.attributes().filter(|a| !matches!(a.name(), "interiorMaterial" | "source")).all(|a| {
-                    let s = a.value().trim();
-                    xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
-                });
+                let finite = n
+                    .attributes()
+                    .filter(|a| !matches!(a.name(), "interiorMaterial" | "source" | "partition" | "planes" | "labels"))
+                    .all(|a| {
+                        let s = a.value().trim();
+                        xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
+                    });
                 self.check(finite, n, "FRX4", || "fracture numeric values must be finite.".into());
                 let body = a("source").and_then(|id| {
                     n.document().descendants().find(|o| {
@@ -787,6 +791,37 @@ impl<'a> Eval<'a> {
                 self.check(has("source") || !(has("minImpulse") || has("energyFraction")), n, "FRX7", || {
                     "minImpulse and energyFraction belong to a fracture with a source.".into()
                 });
+                self.check(!cells_owner || !(has("interiorMaterial") || has("interiorUvScale")), n, "FRX8", || {
+                    "a fracture of an object of cells has no interior material: its pieces have the material of their cells.".into()
+                });
+                self.check(cells_owner || !(has("partition") || has("planes") || has("labels")), n, "FRX9", || {
+                    "partition, planes and labels belong to the fracture of an object of primitive voxels.".into()
+                });
+                self.check(
+                    !has("partition") || a("partition") == Some("voronoi") || !(has("pieces") || has("seed")),
+                    n,
+                    "FRX10",
+                    || "pieces and seed belong to a voronoi partition.".into(),
+                );
+                let numbers: Vec<f64> =
+                    a("planes").map_or(Vec::new(), |v| v.split_whitespace().map(xpath_number).collect());
+                let planes_ok = !numbers.is_empty()
+                    && numbers.len() <= 252
+                    && numbers.len() & 3 == 0
+                    && numbers.iter().all(|x| !x.is_nan());
+                self.check(
+                    (a("partition") == Some("planes") || !has("planes")) && (a("partition") != Some("planes") || (has("planes") && planes_ok)),
+                    n,
+                    "FRX11",
+                    || "partition planes takes planes, from one to 63 planes of four numbers (nx ny nz offset), and planes belongs to that partition.".into(),
+                );
+                self.check(
+                    (a("partition") == Some("labels") || !has("labels"))
+                        && (a("partition") != Some("labels") || a("labels") == Some("material")),
+                    n,
+                    "FRX12",
+                    || "partition labels takes labels=\"material\", and labels belongs to that partition.".into(),
+                );
             }
             "crater" => {
                 let number = |k, default| {
@@ -870,16 +905,26 @@ impl<'a> Eval<'a> {
                     owner.is_none_or(|o| {
                         kids(o, "rigidBody").all(|b| {
                             matches!(b.attribute("type"), Some("static" | "kinematic"))
-                                && matches!(b.attribute("shape"), None | Some("auto" | "trimesh"))
+                                && matches!(b.attribute("shape"), None | Some("auto" | "trimesh" | "voxels"))
                         })
                     }),
                     n,
                     "CRT5",
                     || {
-                        "crater rigid bodies require static/kinematic type with auto or trimesh collision geometry."
+                        "crater rigid bodies require static/kinematic type with auto, trimesh or voxels collision geometry."
                             .into()
                     },
                 );
+                let in_cells = owner.is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                self.check(!in_cells || !(has("mantle") || has("bulking") || has("repose")), n, "CRT13", || {
+                    "a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.".into()
+                });
+                self.check(!in_cells || !(has("start") || has("end") || has("curve")), n, "CRT14", || {
+                    "the cut of a crater in an object of cells is instantaneous at the impact, so start, end and curve have no meaning there.".into()
+                });
+                self.check(!in_cells || has("source"), n, "CRT15", || {
+                    "a crater in an object of cells grows from a source: it is cut by an impact.".into()
+                });
             }
             // p1 — version gate
             "scene" if n.parent_element().is_none() && matches!(a("version"), Some("1.0" | "1.1")) => {
@@ -1232,6 +1277,16 @@ impl<'a> Eval<'a> {
                     "P3D8",
                     || "a burst from a crater must name a crater that grows from an impact.".into(),
                 );
+                let of_cells = a("crater").is_some_and(|id| {
+                    n.document().descendants().any(|o| {
+                        is(o, "object3D")
+                            && o.attribute("primitive") == Some("voxels")
+                            && kids(o, "crater").any(|c| c.attribute("id") == Some(id))
+                    })
+                });
+                self.check(if of_cells { !has("count") } else { has("count") }, n, "CRT16", || {
+                    "a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.".into()
+                });
                 self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
                     "angle and angleSpread belong to a burst from a crater.".into()
                 });
@@ -1605,6 +1660,37 @@ impl<'a> Eval<'a> {
             "rigidBody" if parent_is("object3D") => {
                 let ok = a("shape") != Some("trimesh") || matches!(a("type"), Some("static" | "kinematic"));
                 self.check(ok, n, "C48", || "a trimesh rigidBody must be static or kinematic.".into());
+                // the rigid bodies of cells (VOX8 to VOX14)
+                let owner = n.parent_element();
+                let voxels = owner.is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                let cells = voxels && matches!(a("shape"), None | Some("auto" | "voxels"));
+                let crater = owner.is_some_and(|o| kids(o, "crater").next().is_some());
+                let fracture = owner.is_some_and(|o| kids(o, "fracture").next().is_some());
+                let scale = |axis: &str| owner.and_then(|o| o.attribute(axis)).map_or(1.0, xpath_number);
+                self.check(a("shape") != Some("voxels") || voxels, n, "VOX8", || {
+                    "a rigidBody with shape voxels belongs to an object3D of primitive voxels.".into()
+                });
+                let cell_only = ["density", "maxFragments", "fragmentMinCells", "fragmentOverflow", "anchor"];
+                self.check(cells || !cell_only.iter().any(|k| has(k)), n, "VOX9", || {
+                    "density, maxFragments, fragmentMinCells, fragmentOverflow and anchor belong to a rigidBody whose collider is the cells of an object of primitive voxels.".into()
+                });
+                self.check(!cells || (has("density") && !has("mass")), n, "VOX10", || {
+                    "a body of cells has a density and no mass (its mass is its cells').".into()
+                });
+                let slots = ["maxFragments", "fragmentMinCells", "fragmentOverflow"];
+                self.check(!slots.iter().any(|k| has(k)) || crater || fracture, n, "VOX11", || {
+                    "maxFragments, fragmentMinCells and fragmentOverflow belong to a body of cells that a crater or a fracture can break.".into()
+                });
+                self.check(!has("anchor") || crater, n, "VOX12", || {
+                    "anchor belongs to a body of cells that has a crater.".into()
+                });
+                let uniform = scale("scaleX") == scale("scaleY") && scale("scaleY") == scale("scaleZ");
+                self.check(!(cells && (crater || fracture)) || uniform, n, "VOX13", || {
+                    "a body of cells that a crater or a fracture breaks is scaled the same on every axis.".into()
+                });
+                self.check(!(voxels && crater && fracture), n, "VOX14", || {
+                    "a body of cells has a crater or a fracture, not both.".into()
+                });
             }
             "tiles" => {
                 let ok = has("src") || (has("url") && has("cache") && has("cacheSha256"));
