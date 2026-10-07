@@ -147,35 +147,88 @@ pub fn cut(
     })
 }
 
+/// What a fracture does with the pieces that are small or too many: the cut's own rules (see [`Policy`]), without the part that stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FracturePolicy {
+    /// Pieces with fewer cells than this are dust, not bodies.
+    pub min_cells: usize,
+    /// Slots there are for pieces.
+    pub max_fragments: usize,
+    pub overflow: Overflow,
+}
+
 /// A body of cells divided into pieces that are bodies of cells: the source and the pieces that take its place, with the joints between them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fractured {
-    /// The body before it breaks: all its cells and their mass.
+    /// The body before it breaks: all its cells, and the mass of the pieces (what the world needs for the pieces to conserve it; the dust's mass is not
+    /// in it, see `dust`).
     pub source: Body,
-    /// The pieces in the order of [`sr_3d::pieces::partition`], each a body of its own cells (keys of the source's lattice) and their mass.
+    /// The pieces that are bodies, in the order of [`sr_3d::pieces::partition`], each a body of its own cells (keys of the source's lattice) and their mass.
     pub pieces: Vec<Body>,
-    /// The pieces' cells and the faces they share.
+    /// For each of `pieces`, its index in `graph`.
+    pub piece_ids: Vec<usize>,
+    /// The cells of the pieces that are not bodies (too small, or the smallest of too many), in the order of the scan: they leave with the fracture.
+    pub dust: Vec<[i32; 3]>,
+    /// All the pieces of the partition, dust included, and the faces they share.
     pub graph: sr_3d::pieces::PieceGraph,
 }
 
-/// Divides the body of `occupancy` by `rule` (see [`sr_3d::pieces::partition`]: at most `max_pieces`) into pieces that are bodies of cells of the same
-/// lattice, each with the mass of its cells, and the source with all of them. Every cell is in exactly one piece, the pieces are in the order of
-/// the partition (by their first cell in the scan), and the result is the same for the same cells in any order.
+/// Divides the body of `occupancy` by `rule` (see [`sr_3d::pieces::partition`]) into pieces that are bodies of cells of the same lattice, each with the
+/// mass of its cells, and the source with all of them. Every cell is in exactly one piece, the pieces are in the order of the partition (by their first
+/// cell in the scan), and the result is the same for the same cells in any order.
+///
+/// The pieces are sorted out as the cut sorts the loose parts: those with fewer than `policy.min_cells` cells are dust (their cells are no body and leave
+/// with the fracture); of the rest, up to `policy.max_fragments` are bodies, and if there are more the policy says whether that is an error or the
+/// smallest are dust too (the largest keep their slots, of equals the first). The source has all the cells but the mass of the bodies, which is what
+/// the world needs to take the pieces as its fragments (it asks them to sum to the source): the dust's mass is not simulated, and the body is lighter
+/// by it before it breaks and the momentum of the dust is not kept, which is small as `min_cells` is (the share is `dust.len() / cells`).
 pub fn fracture(
     occupancy: &Occupancy,
     rule: sr_3d::pieces::Partition,
-    max_pieces: usize,
+    policy: &FracturePolicy,
     size: [f64; 3],
     density: f64,
     pixels_per_meter: f64,
 ) -> Result<Fractured, String> {
-    let source = body(occupancy, size, density, pixels_per_meter)?;
-    let graph = sr_3d::pieces::partition(occupancy, rule, max_pieces)?;
+    let mut source = body(occupancy, size, density, pixels_per_meter)?;
     let one = cell_mass(size, density, pixels_per_meter)?;
-    let pieces = graph
-        .pieces()
+    // the partition's own cap is the most the world takes as fragments of one event
+    let graph = sr_3d::pieces::partition(occupancy, rule, MAX_PIECES)?;
+    let all = graph.pieces();
+    let (bodies, small): (Vec<usize>, Vec<usize>) =
+        (0..all.len()).partition(|i| all[*i].cells().len() >= policy.min_cells);
+    let (mut kept, mut dust_parts) = (bodies, small);
+    if kept.len() > policy.max_fragments {
+        if policy.overflow == Overflow::Error {
+            return Err(format!(
+                "a fracture makes {} pieces and there are {} slots for them (maxFragments)",
+                kept.len(),
+                policy.max_fragments
+            ));
+        }
+        let mut by_size = kept.clone();
+        by_size.sort_by_key(|i| (std::cmp::Reverse(all[*i].cells().len()), *i));
+        let slots: BTreeSet<usize> = by_size.into_iter().take(policy.max_fragments).collect();
+        dust_parts.extend(kept.iter().filter(|i| !slots.contains(i)));
+        kept.retain(|i| slots.contains(i));
+    }
+    if kept.is_empty() {
+        return Err(
+            "no piece of the fracture is a body: they are all too small for minCells or there are no slots".into()
+        );
+    }
+    let mut dust: Vec<[i32; 3]> = dust_parts.iter().flat_map(|i| all[*i].cells().iter().copied()).collect();
+    dust.sort_by_key(scan);
+    let pieces: Vec<Body> = kept
         .iter()
-        .map(|p| Body { shape: Shape3::Voxels { size, cells: p.cells().to_vec() }, mass: p.cells().len() as f64 * one })
+        .map(|i| {
+            let cells = all[*i].cells();
+            Body { shape: Shape3::Voxels { size, cells: cells.to_vec() }, mass: cells.len() as f64 * one }
+        })
         .collect();
-    Ok(Fractured { source, pieces, graph })
+    source.mass = pieces.iter().map(|p| p.mass).sum();
+    Ok(Fractured { source, pieces, piece_ids: kept, dust, graph })
 }
+
+/// The most pieces a partition may make: the world's own limit on the fragments of one event.
+const MAX_PIECES: usize = 4096;
