@@ -1132,3 +1132,52 @@ fn a_load_that_reads_the_state_of_a_body_finds_the_same_world_in_the_step_of_a_c
         &steps,
     );
 }
+
+#[test]
+fn the_part_that_stays_after_a_cut_has_all_its_cells_when_they_end_at_the_edge_of_a_chunk_of_the_shape() {
+    // cells of 0.1 m, 8 along x from key 680 to 687: Parry keeps its cells in chunks of 8 and its iterator over them is a half-open range of
+    // floor(p / size), which for 688 * 0.1 / 0.1 comes out as 687.999...: the last column is the one it can lose
+    let size = [0.1; 3];
+    let cell_mass = 2400.0 * 0.1 * 0.1 * 0.1;
+    let whole = cells_of(680..688, 0..2, 0..2);
+    let (stay, piece, destroyed) =
+        (cells_of(684..688, 0..2, 0..2), cells_of(680..682, 0..2, 0..2), cells_of(682..684, 0..2, 0..2));
+    let mut parent =
+        body(Shape3::Voxels { size, cells: whole.clone() }, whole.len() as f64 * cell_mass, BodyKind::Dynamic);
+    parent.start = Pose3::default();
+    let slot = body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, cell_mass, BodyKind::Dynamic);
+    let mut w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![parent, slot],
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+    .unwrap();
+    let cut = VoxelCut3 {
+        revision: 1,
+        destroyed,
+        parent_mass: stay.len() as f64 * cell_mass,
+        pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * cell_mass }],
+    };
+    // a torque small for a body of 16 cells of a tenth of a metre, so that it has hardly turned in the time measured
+    let (force, torque) = ([0.0, 0.0, 0.0], [0.30, 0.55, -0.45]);
+    let mut d = Pusher { script: Script { cuts: vec![(0, 0.3, None, cut)] }, from: 0.4, force, torque, closed: vec![] };
+    let (a, b) = (w.frame_at(0.41, &mut d), w.frame_at(0.45, &mut d));
+    assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?}", a.errors);
+    let props = shape_mass_properties(&Shape3::Voxels { size, cells: stay }, 16.0 * cell_mass, 1.0).unwrap();
+    let inverse = inverse3(props.inertia);
+    for i in 0..3 {
+        let alpha = (b.velocities[0].angular[i] - a.velocities[0].angular[i]).to_radians() / 0.04;
+        let wanted: f64 = (0..3).map(|j| inverse[i][j] * torque[j]).sum();
+        assert!(
+            (alpha - wanted).abs() < 2e-3 * wanted.abs().max(1e-3),
+            "axis {i}: spin-up {alpha} against {wanted}: the part that stays has lost a cell"
+        );
+    }
+}

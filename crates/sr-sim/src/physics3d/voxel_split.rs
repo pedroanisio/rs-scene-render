@@ -123,6 +123,12 @@ impl World3 {
                 self.state.bodies[self.state.handles[slot]].set_enabled(false);
             }
         }
+        for split in &splits {
+            let Shape3::Voxels { cells, .. } = &self.spec.bodies[split.parent].shape else {
+                unreachable!("checked above")
+            };
+            self.state.voxel_cells[split.parent] = Some(std::sync::Arc::new(sorted_unique(cells)));
+        }
         self.state.slots_used = vec![0; splits.len()];
         self.voxel_splits = splits;
         self.checkpoints.clear();
@@ -142,6 +148,7 @@ impl World3 {
             shape: SharedShape,
             parts: Vec<(SharedShape, Vec3, MassProperties)>,
             parent_props: Option<MassProperties>,
+            remaining: std::sync::Arc<Vec<[i32; 3]>>,
             pose: Pose,
             v: Vec3,
             w: Vec3,
@@ -191,15 +198,28 @@ impl World3 {
                 let rb = &self.state.bodies[h];
                 (*rb.position(), rb.linvel(), rb.angvel(), rb.center_of_mass())
             };
-            // the new shape of the body, edited on a private copy so that a cell that is not there fails the cut before anything changed
+            // the cells that stay: the cells the body has, less those that are destroyed and those that go to the pieces (the body's own record of
+            // its cells, not Parry's iteration over its shape, which is a half-open range of floor(p / size) that loses a cell at the edge of a chunk)
+            let Some(have) = self.state.voxel_cells[parent].clone() else {
+                return Err(format!("body {parent} has no record of its cells"));
+            };
+            let mut leaving: Vec<[i32; 3]> =
+                cut.destroyed.iter().chain(cut.pieces.iter().flat_map(|p| &p.cells)).copied().collect();
+            leaving.sort_unstable();
+            if let Some(twice) = leaving.windows(2).find(|w| w[0] == w[1]) {
+                return Err(format!("a cut of body {parent} takes the cell {:?} twice", twice[0]));
+            }
+            if let Some(missing) = leaving.iter().find(|c| have.binary_search(c).is_err()) {
+                return Err(format!("a cut of body {parent} takes the cell {missing:?}, which the body has not"));
+            }
+            let remaining: Vec<[i32; 3]> = have.iter().filter(|c| leaving.binary_search(c).is_err()).copied().collect();
+            // the new shape of the body, edited on a private copy so that nothing changed if anything after this fails
             let collider = self.state.bodies[h].colliders()[0];
             let mut shape = self.state.colliders[collider].shared_shape().clone();
             {
                 let voxels = shape.make_mut().as_voxels_mut().ok_or("a body of cells has lost its cells")?;
-                for cell in cut.destroyed.iter().chain(cut.pieces.iter().flat_map(|p| &p.cells)) {
-                    if voxels.set_voxel(voxel_key(cell), false).is_empty() {
-                        return Err(format!("a cut of body {parent} takes the cell {cell:?}, which the body has not"));
-                    }
+                for cell in &leaving {
+                    voxels.set_voxel(voxel_key(cell), false);
                 }
             }
             // the pieces: their shapes, mass properties (of their cells, exactly) and the velocity of their centres of mass
@@ -216,9 +236,9 @@ impl World3 {
             }
             // what stays: the mass properties of the cells that are left, from the shape that has been edited
             let parent_props = if cut.parent_mass > 0.0 {
-                let voxels = shape.as_voxels().ok_or("a body of cells has lost its cells")?;
+                let keys: Vec<IVector> = remaining.iter().map(voxel_key).collect();
                 Some(
-                    voxel_mass_properties(&keys_of(voxels), size.map(|c| c / ppm), cut.parent_mass)
+                    voxel_mass_properties(&keys, size.map(|c| c / ppm), cut.parent_mass)
                         .ok_or("what stays of a body of cells has no cells")?,
                 )
             } else {
@@ -227,14 +247,27 @@ impl World3 {
             if parts.iter().any(|(_, velocity, _)| !velocity.is_finite()) || !w.is_finite() {
                 return Err("a cut of a body of cells exceeds numerical range".into());
             }
-            prepared.push(Prepared { split: s, parent, cut, shape, parts, parent_props, pose, v, w, c_old });
+            prepared.push(Prepared {
+                split: s,
+                parent,
+                cut,
+                shape,
+                parts,
+                parent_props,
+                remaining: std::sync::Arc::new(remaining),
+                pose,
+                v,
+                w,
+                c_old,
+            });
         }
         // install: nothing below can fail
-        for Prepared { split, parent, cut, shape, parts, parent_props, pose, v, w, c_old } in prepared {
+        for Prepared { split, parent, cut, shape, parts, parent_props, remaining, pose, v, w, c_old } in prepared {
             let slots = self.voxel_splits[split].slots.clone();
             let h = self.state.handles[parent];
             let collider = self.state.bodies[h].colliders()[0];
             self.state.colliders[collider].set_shape(shape);
+            self.state.voxel_cells[parent] = Some(remaining);
             let body = &mut self.state.bodies[h];
             if let Some(props) = parent_props {
                 self.state.colliders[collider].set_mass_properties(props);
@@ -263,6 +296,7 @@ impl World3 {
                 body.set_angvel(w, true);
                 self.state.slot_active[slot] = true;
                 self.state.slot_since[slot] = Some(step);
+                self.state.voxel_cells[slot] = Some(std::sync::Arc::new(sorted_unique(&cut.pieces[i].cells)));
                 body.set_enabled(driver.enabled(t, slot));
                 self.state.active[slot] = true;
             }
@@ -278,4 +312,12 @@ impl World3 {
         }
         Ok(())
     }
+}
+
+/// The cells sorted by key, each once.
+fn sorted_unique(cells: &[[i32; 3]]) -> Vec<[i32; 3]> {
+    let mut v = cells.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    v
 }

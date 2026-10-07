@@ -26,11 +26,6 @@ pub(super) struct Tensor {
     pub(super) inertia: [[f64; 3]; 3],
 }
 
-/// The keys of the filled cells of a voxel shape.
-pub(super) fn keys_of(voxels: &Voxels) -> Vec<IVector> {
-    voxels.voxels().map(|v| v.grid_coords).collect()
-}
-
 /// The tensor of the cells `keys` (each cell once), or none for no cells or a mass or size that is not positive.
 pub(super) fn voxel_tensor(keys: &[IVector], size: [f64; 3], mass: f64) -> Option<Tensor> {
     if keys.is_empty() || !(mass.is_finite() && mass > 0.0) || !size.iter().all(|s| s.is_finite() && *s > 0.0) {

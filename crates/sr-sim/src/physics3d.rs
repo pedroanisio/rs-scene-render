@@ -17,7 +17,7 @@ mod fracture;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
-use voxel_mass::{keys_of, sum_mass_properties, voxel_mass_properties, voxel_tensor};
+use voxel_mass::{sum_mass_properties, voxel_mass_properties, voxel_tensor};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
@@ -324,6 +324,8 @@ struct State {
     voxel_spent: Vec<bool>,
     /// The step at which each slot was taken into use: a body that is a slot is cut from the step after, however often the step is asked for.
     slot_since: Vec<Option<u64>>,
+    /// The cells (in the body's own keys, sorted, each once) of each body that can be cut: shared with the checkpoints, replaced by a cut.
+    voxel_cells: Vec<Option<std::sync::Arc<Vec<[i32; 3]>>>>,
 }
 
 struct Checkpoint {
@@ -642,6 +644,7 @@ impl World3 {
             slot_active: vec![false; spec.bodies.len()],
             voxel_spent: vec![false; spec.bodies.len()],
             slot_since: vec![None; spec.bodies.len()],
+            voxel_cells: vec![None; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
