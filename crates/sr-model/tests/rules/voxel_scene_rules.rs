@@ -30,21 +30,22 @@ fn a_body_of_cells_has_a_density_and_no_mass_and_nothing_that_belongs_to_another
     // shape voxels belongs to the primitive
     let plain = codes(r#"<object3D id="b" primitive="box"><rigidBody shape="voxels"/></object3D>"#, "");
     assert!(plain.contains(&"VOX8".into()), "{plain:?}");
-    // the enumerations and the range of the slots
-    for bad in [
-        r#"anchor="top""#,
-        r#"fragmentOverflow="drop""#,
-        r#"maxFragments="0""#,
-        r#"maxFragments="4097""#,
-        r#"fragmentMinCells="0""#,
-        r#"density="0""#,
+    // the enumerations and the range of the slots: the schema's own code for each, and no other, the body being otherwise right (static, so that CRT5 is
+    // not what makes the list not empty). A density of 0 is refused when the number is read ("0 must be greater than 0", code XML), before any rule
+    for (bad, code) in [
+        (r#"anchor="top""#, "S06"),
+        (r#"fragmentOverflow="drop""#, "S06"),
+        (r#"maxFragments="0""#, "S06"),
+        (r#"maxFragments="4097""#, "S06"),
+        (r#"fragmentMinCells="0""#, "S06"),
+        (r#"density="0""#, "XML"),
     ] {
         let c = body(
-            &format!(r#"density="2400" {bad}"#),
+            &format!(r#"type="static" density="2400" {bad}"#),
             r#"<crater id="pit" source="ball" targetMaterial="softRock"/>"#,
             "",
         );
-        assert!(!c.is_empty(), "{bad}");
+        assert_eq!(c, [code], "{bad}");
     }
 }
 
@@ -117,9 +118,9 @@ fn a_crater_in_cells_is_cut_by_an_impact_once_and_has_no_analytic_rim() {
         assert_eq!(c.iter().filter(|k| ["CRT6", "CRT13", "CRT14"].contains(&k.as_str())).count(), 1, "{extra}: {c:?}");
     }
     assert!(ground(r#"<crater id="pit" radius="4"/>"#).contains(&"CRT15".into()));
-    // the rigid body of the owner may be the cells (CRT5), and still not a dynamic one
-    assert!(body(r#"density="2400""#, r#"<crater id="pit" source="ball" targetMaterial="softRock"/>"#, "")
-        .contains(&"CRT5".into()));
+    // the rigid body of the owner may be the cells (CRT5), and still not a dynamic one: that, and only that, is what is wrong with this one
+    let dynamic = body(r#"density="2400""#, r#"<crater id="pit" source="ball" targetMaterial="softRock"/>"#, "");
+    assert_eq!(dynamic, ["CRT5"]);
 }
 
 #[test]
