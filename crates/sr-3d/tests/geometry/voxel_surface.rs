@@ -707,3 +707,58 @@ fn a_cache_over_its_budget_is_refused_and_forgets_what_it_had() {
     assert!(update.full, "what was forgotten is made again");
     assert_eq!(cache.quads(), mesh_quads(&g, &classes));
 }
+
+#[test]
+fn a_grid_given_by_a_key_of_its_owner_is_remeshed_from_the_bricks_the_owner_says_changed() {
+    let classes = Classes::identity();
+    // the world keeps a body's cells by revision and says which bricks changed between two: each frame hands over a snapshot (a copy,
+    // so another lineage each time) with the key (body, revision) and the bricks changed since the revision the cache last read
+    let mut live = grid(block([-3, 2, -5], 24, 1));
+    let mut cache = SurfaceCache::new();
+    let first = cache.update_known(&live.clone(), &classes, usize::MAX, (7, live.revision()), None).unwrap();
+    assert!(first.full);
+    let mut read = live.revision();
+    for step in 0..12 {
+        let at = [(step * 5) % 20 - 4, (step * 3) % 16 + 2, (step * 7) % 20 - 6];
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    live.set([at[0] + x, at[1] + y, at[2] + z], u8::from(step % 3 != 0)).unwrap();
+                }
+            }
+        }
+        let changed = live.changed_bricks_since(read);
+        let update =
+            cache.update_known(&live.clone(), &classes, usize::MAX, (7, live.revision()), Some(&changed)).unwrap();
+        assert!(!update.full, "step {step}");
+        assert_eq!(
+            update.remeshed,
+            dirty_planes(&changed).len(),
+            "step {step}: the planes of the bricks the owner named"
+        );
+        assert_eq!(cache.quads(), mesh_quads(&fresh(&live), &classes), "step {step}");
+        read = live.revision();
+    }
+    // the same key is nothing to do, even for another copy of the cells
+    let again = cache.update_known(&live.clone(), &classes, usize::MAX, (7, live.revision()), Some(&[])).unwrap();
+    assert_eq!((again.remeshed, again.full), (0, false));
+    // a history the owner no longer has (no list), another body, or other classes: the whole of it, from the cells handed over
+    live.set([0, 0, 0], 0).unwrap();
+    assert!(cache.update_known(&live.clone(), &classes, usize::MAX, (7, live.revision()), None).unwrap().full);
+    assert!(cache.update_known(&live.clone(), &classes, usize::MAX, (8, live.revision()), Some(&[])).unwrap().full);
+    let glass = Classes::identity().with_see_through(&[1]);
+    assert!(cache.update_known(&live.clone(), &glass, usize::MAX, (8, live.revision()), Some(&[])).unwrap().full);
+    assert_eq!(cache.quads(), mesh_quads(&live, &glass));
+    // a key behind the one the cache holds cannot be told from what is cached
+    live.set([1, 1, 1], 0).unwrap();
+    cache
+        .update_known(
+            &live.clone(),
+            &glass,
+            usize::MAX,
+            (8, live.revision()),
+            Some(&live.changed_bricks_since(live.revision() - 1)),
+        )
+        .unwrap();
+    assert!(cache.update_known(&live.clone(), &glass, usize::MAX, (8, live.revision() - 1), Some(&[])).unwrap().full);
+}

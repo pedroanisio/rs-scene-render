@@ -43,14 +43,48 @@ impl SurfaceCache {
     /// [`mesh_quads_within`](super::mesh_quads_within)). A surface over the budget is an error and the cache forgets what it held: it
     /// would not be a surface of the grid.
     pub fn update(&mut self, grid: &Occupancy, classes: &Classes, max_bytes: usize) -> Result<Remesh, String> {
-        let incremental = matches!(&self.held, Some((lineage, revision, held)) if *lineage == grid.lineage() && *revision <= grid.revision() && held == classes);
+        let ident = (grid.lineage(), grid.revision());
         let revision = self.held.as_ref().map_or(0, |h| h.1);
-        if incremental && revision == grid.revision() {
+        let dirty = matches!(&self.held, Some((lineage, held, _)) if *lineage == ident.0 && *held <= ident.1)
+            .then(|| grid.changed_bricks_since(revision));
+        self.apply(grid, classes, max_bytes, ident, dirty)
+    }
+
+    /// As [`SurfaceCache::update`] for a grid whose owner names it: `key` is `(body, revision)` as the owner counts them (a revision that
+    /// only goes up for a body, with the same cells whenever it is asked for) and `changed` the keys of the bricks that changed between the
+    /// revision the cache last read and this one, as the owner says (`None` when it no longer has that history). `grid` may be any
+    /// copy of the cells of the revision (the lineage of a copy is its own, so it is not used). Another body, a revision behind the one held,
+    /// other classes or no list is a full remesh from `grid`; the same key is nothing to do.
+    pub fn update_known(
+        &mut self,
+        grid: &Occupancy,
+        classes: &Classes,
+        max_bytes: usize,
+        key: (u64, u64),
+        changed: Option<&[[i32; 3]]>,
+    ) -> Result<Remesh, String> {
+        let continues = matches!(&self.held, Some((body, held, _)) if *body == key.0 && *held <= key.1);
+        let dirty = if continues { changed.map(<[_]>::to_vec) } else { None };
+        self.apply(grid, classes, max_bytes, key, dirty)
+    }
+
+    /// The work of both: `ident` is what the cache will hold, `dirty` the bricks to take up (none: from the start).
+    fn apply(
+        &mut self,
+        grid: &Occupancy,
+        classes: &Classes,
+        max_bytes: usize,
+        ident: (u64, u64),
+        dirty: Option<Vec<[i32; 3]>>,
+    ) -> Result<Remesh, String> {
+        let same_classes = matches!(&self.held, Some((_, _, held)) if held == classes);
+        let incremental = dirty.is_some() && same_classes;
+        if incremental && matches!(&self.held, Some((_, held, _)) if *held == ident.1) {
             return Ok(Remesh { remeshed: 0, full: false });
         }
         let index = Index::of(grid);
-        let dirty: Option<BTreeSet<(usize, i32)>> = incremental.then(|| {
-            grid.changed_bricks_since(revision)
+        let dirty: Option<BTreeSet<(usize, i32)>> = dirty.filter(|_| incremental).map(|bricks| {
+            bricks
                 .iter()
                 .flat_map(|k| (0..3).flat_map(move |a| (0..=BRICK).map(move |i| (a, BRICK * k[a] + i))))
                 .collect()
@@ -84,7 +118,7 @@ impl SurfaceCache {
                 max_bytes / BYTES_PER_QUAD
             ));
         }
-        self.held = Some((grid.lineage(), grid.revision(), classes.clone()));
+        self.held = Some((ident.0, ident.1, classes.clone()));
         Ok(Remesh { remeshed, full })
     }
 
