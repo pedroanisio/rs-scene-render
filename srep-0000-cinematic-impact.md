@@ -3100,6 +3100,20 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
+**The pieces of a body of cells (`sr_3d::pieces`).** `partition(occupancy, rule, max_pieces)` cuts a body into pieces and finds the joints
+between them: by seeds (`Voronoi`, drawn from `(seed, index)` by splitmix64, or `VoronoiAt`, given), by up to 63 planes, or by labels the
+caller gives. The cells of a piece are keys of the occupancy that was cut (its own lattice, cells and not metres). Every cell is in exactly one
+piece; a part of the rule that is not connected by faces is split into its components; pieces are numbered by their first cell in the scan
+(z, y, x) and list their cells in it, so the result does not depend on the order of the input or on threads. Voronoi is exact integers:
+squared distance in `i128` over the doubled coordinates `u = 2 key + 1`, a tie to the seed of the lowest index. A joint `Edge { a < b, faces,
+face_sum, normal_sum }` has the faces two pieces share, the sum of the doubled coordinates of their centres and of their unit normals from `a`
+to `b`, all in integers: the area is `faces * cell_size^2`, the centroid `face_sum / (2 * faces) * cell_size`, the mean normal `normal_sum / faces`,
+one division each. More pieces than `max_pieces` is an error that names the number, never a truncation. Tests (`crates/sr-3d/tests/geometry/pieces.rs`):
+a bar cut by a plane has one joint whose four faces, face sum (16, 8, 8) and normal (4, 0, 0) are worked out by hand; the tie of two seeds; a
+U of cells whose Voronoi part is two arm tops (split into components) and a constant label (one piece, no joint); alternating labels
+(every cell a piece); the joints of a ball with a bite cut by 1, 3, 7 and 20 seeds equal a brute force over all the pairs of cells; the same graph for
+five orders of the same cells; the seeds are the reference sequence of splitmix64.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
