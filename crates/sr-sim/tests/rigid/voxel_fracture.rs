@@ -371,3 +371,73 @@ fn a_push_that_separates_the_fragments_keeps_the_angular_momentum_too_when_the_d
     // and the fragments do fly apart
     assert!((frame.velocities[1].linear[0] - frame.velocities[2].linear[0]).abs() > 0.1);
 }
+
+#[test]
+fn a_body_that_has_turned_before_it_breaks_gives_its_pieces_the_momentum_it_had() {
+    // the fracture is not at the first instant: the source has moved and turned, its pieces were stepped as bodies that are out of the world (with
+    // their colliders switched off by it), and what they have of the source is still its momentum, whatever the axis it was turning about
+    for spin in [[0.0, 30.0, 0.0], [0.0, 0.0, 30.0], [20.0, 10.0, 40.0]] {
+        let whole = cells_of(0..8, 0..4, 0..4);
+        let end = cells_of(0..3, 0..4, 0..4);
+        let step = cells_of(3..6, 0..2, 0..4);
+        let rest: Vec<[i32; 3]> = whole.iter().copied().filter(|c| !end.contains(c) && !step.contains(c)).collect();
+        let pieces = [end, step, rest];
+        let mut source = body(whole.clone());
+        source.velocity = [1.0, 0.4, -0.3];
+        source.angular_velocity = spin;
+        let mut bodies = vec![source];
+        bodies.extend(pieces.iter().map(|p| body(p.clone())));
+        let fragments = (1..=3).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
+        let mut w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 1.0 / 240.0,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies,
+        })
+        .with_fractures(vec![Fracture3 {
+            source: 0,
+            at: 0.2,
+            radial_impulse: 0.0,
+            fragments,
+            contact: None,
+            dust: None,
+        }])
+        .unwrap();
+        // just after the fracture, before the pieces have touched each other for long (the step after it)
+        let frame = w.frame_at(0.2, &mut Still);
+        assert!(frame.errors.is_empty() && frame.fractured == vec![true], "{:?}", frame.errors);
+        let props = |cells: &Vec<[i32; 3]>| {
+            shape_mass_properties(
+                &Shape3::Voxels { size: SIZE, cells: cells.clone() },
+                cells.len() as f64 * CELL_MASS,
+                1.0,
+            )
+            .unwrap()
+        };
+        // the centre of mass of every piece in the world: the pose of the source (which they have) and its own centre in the source's frame; the
+        // rotation is read from the velocity of a piece along the source's axes, so this checks the sum and not the geometry
+        let total = props(&whole);
+        let (mut p, mut m) = ([0.0; 3], 0.0);
+        for (k, cells) in pieces.iter().enumerate() {
+            let q = props(cells);
+            m += q.mass;
+            for i in 0..3 {
+                p[i] += q.mass * frame.velocities[k + 1].linear[i];
+            }
+        }
+        for (i, v) in [1.0, 0.4, -0.3].iter().enumerate() {
+            assert!(
+                (p[i] - total.mass * v).abs() < 1e-9 * total.mass,
+                "spin {spin:?}, axis {i}: {} against {}",
+                p[i],
+                total.mass * v
+            );
+        }
+        assert!((m - total.mass).abs() < 1e-9 * m);
+    }
+}

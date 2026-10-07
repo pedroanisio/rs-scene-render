@@ -53,6 +53,7 @@ pub mod voxel;
 pub mod voxel_asset;
 pub mod voxel_cache;
 pub mod voxel_crater;
+pub mod voxel_cut;
 pub mod voxels;
 
 /// Closest candidate within a small edit distance ("did you mean").

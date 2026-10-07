@@ -576,6 +576,9 @@ pub struct World3 {
     fractures: Vec<Fracture3>,
     fracture_sources: Vec<Option<usize>>,
     fragment_owners: Vec<Option<usize>>,
+    /// The mass properties that a fracture gave each body that it takes part in (a fragment's, a source's), as registered: a fragment is out of the world until
+    /// its fracture, and what the solver holds of a body that is out of the world is not to be asked for its centre of mass.
+    fracture_props: Vec<Option<MassProperties>>,
     voxel_splits: Vec<VoxelSplit3>,
     /// For each body, the split whose slot it is, if it is one.
     slot_owners: Vec<Option<usize>>,
@@ -885,6 +888,7 @@ impl World3 {
         let mut w = World3 {
             fracture_sources: vec![None; spec.bodies.len()],
             fragment_owners: vec![None; spec.bodies.len()],
+            fracture_props: vec![None; spec.bodies.len()],
             voxel_splits: Vec::new(),
             slot_owners: vec![None; spec.bodies.len()],
             contact_log: None,

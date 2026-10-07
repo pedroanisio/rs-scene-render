@@ -230,6 +230,7 @@ pub(crate) fn digest_world3(
     events: &[Fracture3],
     watches: &[ImpactWatch],
     links: &[crate::sim3d::CraterLink],
+    splits: &[sr_sim::physics3d::VoxelSplit3],
 ) -> [u8; 32] {
     let World3Spec { start, step, gravity, pixels_per_meter, iterations, bounds, bodies, joints, fix_internal_edges } =
         spec;
@@ -272,6 +273,10 @@ pub(crate) fn digest_world3(
     id.value("impacts", &watches);
     for link in links {
         id.value("crater", &(link.watch, link.owner, &*link.source));
+    }
+    // only where bodies of cells can be cut, so that the identity of every other world is what it was
+    for split in splits {
+        id.value("voxelSplit", &(split.parent, &split.slots));
     }
     id.finish()
 }

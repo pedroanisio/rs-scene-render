@@ -53,42 +53,6 @@ pub const PENDING: &[Pending] = &[
     Pending { srep: 26, what: "repeat copies placed on generated points", elements: &["points"], attributes: &[] },
 ];
 
-/// What a document that makes a body of cells is refused with (E23).
-pub const BODIES_OF_CELLS: &str = "bodies of cells are not evaluated yet by this build";
-
-/// Refuses an object of primitive voxels that is a body of cells, or that a crater or a fracture breaks, by name (E23). The schema takes them (1.3: VOX8
-/// to VOX15) and the physics that makes them is in the engine, but nothing in the evaluator builds a body, a cut or a fracture of cells from a
-/// document yet: without this a document that asks for one is evaluated as another thing (the collider of a sphere with a mass of 1, a burst of no
-/// particles, a fracture of no geometry) and renders wrong without saying so. The wiring of bodies of cells deletes this and its test.
-///
-/// An object of cells that is only drawn, or whose rigidBody is a box or a mesh (which the schema does not allow with a crater or a fracture), is
-/// not a body of cells and is evaluated as it always was. `e` is one element; the caller walks the tree.
-pub fn refuse_bodies_of_cells(e: &dyn Element, errors: &mut Vec<Diagnostic>) {
-    let raw = e.element_name();
-    if raw.strip_suffix("Type").unwrap_or(raw) != "object3D"
-        || e.get_attr("primitive").map(|v| v.to_string()).as_deref() != Some("voxels")
-    {
-        return;
-    }
-    let kids = sr_model::element::children(e);
-    let cells = |c: &&dyn Element| {
-        c.element_name().strip_suffix("Type").unwrap_or(c.element_name()) == "rigidBody"
-            && matches!(c.get_attr("shape").map(|v| v.to_string()).as_deref(), None | Some("auto" | "voxels"))
-    };
-    let breaks = |c: &&dyn Element| {
-        matches!(c.element_name().strip_suffix("Type").unwrap_or(c.element_name()), "crater" | "fracture")
-    };
-    if kids.iter().any(cells) || kids.iter().any(breaks) {
-        let id = e.element_id().unwrap_or("");
-        errors.push(Diagnostic::error(
-            "E23",
-            format!("{id}: {BODIES_OF_CELLS}: a rigidBody of the cells, a crater or a fracture of an object of primitive voxels is valid and is not made yet"),
-            e.loc(),
-            id,
-        ));
-    }
-}
-
 fn same(value: &AttrValue, default: &str) -> bool {
     match (value, default.parse::<f64>()) {
         (AttrValue::Num(v), Ok(d)) => (*v - d).abs() < 1e-12,

@@ -81,6 +81,11 @@ pub struct VoxelModel {
     pub source: Source,
 }
 
+/// The size of a cell of an object of primitive voxels, in the object's units: `cellSize` of the object, else the asset's own, else 1.
+pub fn cell_size(object: Option<f64>, model: &VoxelModel) -> f64 {
+    object.or(model.cell_size).unwrap_or(1.0)
+}
+
 /// A file as it was when it was read: where, whether it was there, how long, and when it was last written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Stat {
