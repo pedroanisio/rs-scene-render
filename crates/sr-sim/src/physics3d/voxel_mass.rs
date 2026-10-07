@@ -141,3 +141,54 @@ pub(super) fn sum_mass_properties(parts: &[MassProperties]) -> MassProperties {
     let frame = Rotation::from_mat3(&Matrix::from_cols(vec3(x), vec3(y), vec3(z)));
     MassProperties::with_principal_inertia_frame(centre, mass, vec3(moments), frame)
 }
+
+/// The mass properties of a body whose surface is the closed triangle mesh `triangles` over `points` (physics axes, metres, outward windings
+/// or all inward) and total `mass`, uniformly dense: the volume integrals of the signed tetrahedra that each triangle makes with the origin, which
+/// are exact for a polyhedron, and the tensor diagonalised as [`voxel_mass_properties`] does. A mesh that is not closed has no volume to speak of and is
+/// taken as it is (as Parry's own is).
+pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], mass: f64) -> Option<MassProperties> {
+    if triangles.is_empty() || !(mass.is_finite() && mass > 0.0) {
+        return None;
+    }
+    let (mut volume, mut moment) = (0.0f64, Vector::ZERO);
+    let mut second = [[0.0f64; 3]; 3];
+    for t in triangles {
+        let (a, b, c) = (*points.get(t[0] as usize)?, *points.get(t[1] as usize)?, *points.get(t[2] as usize)?);
+        let v = a.dot(b.cross(c)) / 6.0;
+        let sum = a + b + c;
+        volume += v;
+        moment += sum * (v / 4.0);
+        let (a, b, c, s) = ([a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z], [sum.x, sum.y, sum.z]);
+        for i in 0..3 {
+            for j in 0..3 {
+                second[i][j] += v / 20.0 * (a[i] * a[j] + b[i] * b[j] + c[i] * c[j] + s[i] * s[j]);
+            }
+        }
+    }
+    // windings that are all inward: the same body, with its signs reversed
+    if volume < 0.0 {
+        volume = -volume;
+        moment = -moment;
+        for row in second.iter_mut() {
+            for e in row.iter_mut() {
+                *e = -*e;
+            }
+        }
+    }
+    if !(volume.is_finite() && volume > 0.0) {
+        return None;
+    }
+    let centre = moment / volume;
+    let c = [centre.x, centre.y, centre.z];
+    let density = mass / volume;
+    let covariance = |i: usize, j: usize| second[i][j] - volume * c[i] * c[j];
+    let trace = covariance(0, 0) + covariance(1, 1) + covariance(2, 2);
+    let inertia: [[f64; 3]; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| density * (if i == j { trace } else { 0.0 } - covariance(i, j)))
+    });
+    let (moments, axes) = principal(inertia);
+    let (x, y) = ([axes[0][0], axes[1][0], axes[2][0]], [axes[0][1], axes[1][1], axes[2][1]]);
+    let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+    let frame = Rotation::from_mat3(&Matrix::from_cols(vec3(x), vec3(y), vec3(z)));
+    Some(MassProperties::with_principal_inertia_frame(centre, mass, vec3(moments), frame))
+}

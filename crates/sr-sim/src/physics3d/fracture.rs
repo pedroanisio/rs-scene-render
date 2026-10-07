@@ -145,7 +145,8 @@ impl World3 {
                 }
                 let points: Vec<_> =
                     vertices.iter().map(|v| vec3(flip(*v).map(|x| x / self.spec.pixels_per_meter))).collect();
-                MassProperties::from_trimesh(1., &points, indices)
+                // the closed mesh's own properties, worked out exactly (Parry's from_trimesh diagonalises with the solver that mistakes the axes of a plate)
+                mesh_mass_properties(&points, indices, spec.mass).ok_or(FractureError("fragment mesh has no volume"))?
             }
             _ => self.state.colliders[body.colliders()[0]].mass_properties(),
         };

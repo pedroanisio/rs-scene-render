@@ -98,3 +98,24 @@ fn the_source_of_a_fracture_into_meshes_spins_up_as_the_box_it_is_until_it_fract
     let alpha = spin_up(&mut w, 0, 300.0);
     assert!((alpha - 1.0).abs() < 1e-9, "the source spins up at {alpha} rad/s2, the box of 300 kg m2 at 1");
 }
+
+#[test]
+fn the_pieces_of_a_fracture_that_are_plates_spin_up_as_the_plates_they_are() {
+    // the same box in three plates thin along x (0.25 by 1 by 1 m, 600 kg: about x 600 (1 + 1) / 12 = 100, about y and z 53.125, the two smaller ones equal)
+    let (points, triangles) = cuboid([0.125, 0.5, 0.5]);
+    let plate = || Shape3::Decomposition(points.clone(), triangles.clone());
+    let bodies = vec![
+        body(Shape3::Box([0.375, 0.5, 0.5]), 1800.0, true),
+        body(plate(), 600.0, true),
+        body(plate(), 600.0, true),
+        body(plate(), 600.0, true),
+    ];
+    let mut w = world(bodies, 0.3, vec![(1, [-0.25, 0.0, 0.0]), (2, [0.0; 3]), (3, [0.25, 0.0, 0.0])]);
+    for k in 1..=3 {
+        let alpha = spin_up(&mut w, k, 300.0);
+        assert!(
+            (alpha - 3.0).abs() < 1e-9,
+            "plate {k} spins up at {alpha} rad/s2, a plate of 100 kg m2 under 300 at 3"
+        );
+    }
+}
