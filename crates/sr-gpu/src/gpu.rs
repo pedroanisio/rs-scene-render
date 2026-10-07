@@ -402,8 +402,10 @@ fn probe(device: &wgpu::Device) -> Result<(), GpuError> {
         multiview_mask: None,
         cache: None,
     });
-    let popped = pollster::block_on(validation.pop()).or_else(|| pollster::block_on(internal.pop()));
-    match popped {
+    // the scopes are a stack: both are popped, the one pushed last first, whatever the first one caught
+    let from_validation = pollster::block_on(validation.pop());
+    let from_internal = pollster::block_on(internal.pop());
+    match from_validation.or(from_internal) {
         None => Ok(()),
         Some(e) => Err(GpuError::Device(format!("the device cannot run the renderer's shaders: {e}"))),
     }
