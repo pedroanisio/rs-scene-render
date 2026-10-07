@@ -3210,7 +3210,7 @@ a document is the next step, and the physics it will call is already in the engi
 
 *The frame.* The object's origin is the minimum corner of the box of its occupied cells, the axes are the scene's with y down, and the cell `[i, j, k]` fills
 `[i, i + 1) x [j, j + 1) x [k, k + 1)` cells of `cellSize` object units; `sr_3d::voxel::cell_to_object(key, cellSize)` is the centre `(key + 1/2) * cellSize`,
-`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
+`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, where a point within 4 units in the last place of a face is on it and so in the cell above, since 0.3 / 0.1 is 2.9999999999999996 and 0.3 is a face of cells of 0.1; none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
 file's own lattice. The body's centre of mass is not the origin; the world works it out from the cells. Metres are scene units over `pixelsPerMeter`.
 
 *The body (VOX8 to VOX15).* `rigidBody@shape="voxels"` (or `auto`, which is the cells for an object of primitive voxels) makes the cells the collider: the mass is the number of
