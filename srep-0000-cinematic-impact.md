@@ -923,7 +923,9 @@ displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to one cell and
 (1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian trace neither leaves the domain
 nor crosses the sphere, and the displacement is 1.026 and 1.012 of the exact one. **The advection does not conserve the smoke**: it changes by 3.6 percent at half a metre and 0.74 at a quarter (3.0
 and 0.34 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell; it is not the 1e-6 of a
-conservative scheme. The same document through the evaluator displaces a puff by the same 0.5 m at every scene unit.
+conservative scheme. This is a limit of the smoke solver as a whole and not of the blast: any large velocity (a pulse, a gust, a fast plume) gains or loses
+smoke by the same interpolation, and a conservative advection or a correction of the mass in each step (with the puff of this test as its oracle) is
+work for the solver. The same document through the evaluator displaces a puff by the same 0.5 m at every scene unit.
 
 **Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
 flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's
