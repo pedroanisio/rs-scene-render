@@ -31,6 +31,9 @@ const LIGHT: usize = 8192;
 /// A temperature that differs from ambient by less than this share of it is the rounding of the interpolation, not
 /// heat: the window that follows a plume does not count it as smoke.
 const HEAT_NOISE: f64 = 1e-9;
+/// The share of its speed that the drift of the smoke along an axis must have for the smoke to be going one way along
+/// it: a window that follows asks for room only on the face such smoke is going toward.
+const FOLLOW_DRIFT: f64 = 0.2;
 
 #[cfg(test)]
 mod atomicity;
@@ -692,6 +695,9 @@ impl State {
         // the density and the heat of each slab of cells normal to each axis, summed in the order of the cells
         let mut mass: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
         let mut heat: [Vec<u64>; 3] = std::array::from_fn(|a| vec![0; n[a]]);
+        // and the density times the velocity of the air along the axis, to tell which way the smoke at each end is going
+        let mut flux: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
+        let mut flux_abs: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
         for z in 0..n[2] {
             for y in 0..n[1] {
                 let row = index([0, y, z], n);
@@ -702,6 +708,14 @@ impl State {
                     for (a, i) in [x, y, z].into_iter().enumerate() {
                         mass[a][i] += d;
                         heat[a][i] += hot;
+                        if d != 0.0 {
+                            let dims = face_dims(n, a);
+                            let (low, mut high) = ([x, y, z], [x, y, z]);
+                            high[a] += 1;
+                            let v = 0.5 * (self.velocity[a][index(low, dims)] + self.velocity[a][index(high, dims)]);
+                            flux[a][i] += d * v;
+                            flux_abs[a][i] += d * v.abs();
+                        }
                     }
                 }
             }
@@ -744,11 +758,19 @@ impl State {
                 trimmed += mass[a][hi];
                 hi -= 1;
             }
-            let (n, lo, hi, margin) = (n[a] as i64, lo as i64, hi as i64, (margin + reach[a]) as i64);
+            let width = margin + reach[a];
+            // Smoke that is going one way along the axis (its density-weighted air has at least a fifth of its speed
+            // as drift) asks for room only on the face it is going toward: a face behind a plume that is rising away
+            // from it is no reason to move the window, which would take the room that the plume rises into. Smoke
+            // that is not going anywhere along the axis, or spreads both ways, asks for room on both.
+            let (drift, speed): (f64, f64) = (flux[a].iter().sum(), flux_abs[a].iter().sum());
+            let directed = speed > 0.0 && drift.abs() >= FOLLOW_DRIFT * speed;
+            let (toward_low, toward_high) = (!directed || drift < 0.0, !directed || drift > 0.0);
+            let (n, lo, hi, margin) = (n[a] as i64, lo as i64, hi as i64, width as i64);
             // smoke nearer the low face than the margin: the window moves toward lower cells by what is short, at
             // most as far as the slabs at the high end that may be left behind
-            let near_low = (margin - lo).max(0);
-            let near_high = (hi + margin + 1 - n).max(0);
+            let near_low = if toward_low { (margin - lo).max(0) } else { 0 };
+            let near_high = if toward_high { (hi + margin + 1 - n).max(0) } else { 0 };
             if near_low > 0 && near_high > 0 {
                 blocked[a] = true;
             } else if near_low > 0 {
