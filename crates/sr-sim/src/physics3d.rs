@@ -1289,7 +1289,11 @@ impl World3 {
                     if impulse.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                         continue;
                     }
-                    let point = (pose1 * contact.local_p1 + pose2 * contact.local_p2) * 0.5;
+                    // a point on a composite shape that has the pose of a subshape (the cells of a body of cells) is in the frame of that subshape: its pose takes it to
+                    // the collider's, and a shape that has none (a mesh, a compound) is where it was
+                    let local1 = manifold.subshape_pos1().map_or(contact.local_p1, |p| *p * contact.local_p1);
+                    let local2 = manifold.subshape_pos2().map_or(contact.local_p2, |p| *p * contact.local_p2);
+                    let point = (pose1 * local1 + pose2 * local2) * 0.5;
                     let speed = |m: &Motion| m.linvel + m.angvel.cross(point - m.centre);
                     let relative = speed(second.1) - speed(first.1);
                     let normal = if swap { -manifold.data.normal } else { manifold.data.normal };
