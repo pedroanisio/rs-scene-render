@@ -354,6 +354,37 @@ fn a_body_of_cells_is_charged_to_the_checkpoints_by_its_cells() {
 }
 
 #[test]
+fn a_registered_parent_is_charged_to_the_checkpoints_for_the_cells_the_state_keeps_of_it_too() {
+    // the state keeps the cells of every body that can be cut (twelve bytes a cell, a new copy for every cut) on top of the shape (about two): a
+    // checkpoint of a registered parent is charged for both
+    let bytes = |n: i32| {
+        let cells = cells_of(0..n, 0..20, 0..10);
+        let w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(Shape3::Voxels { size: SIZE, cells }, 1000.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        });
+        let mut w = w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }]).unwrap();
+        let frame = w.frame_at(3.5, &mut Cutter::new(99.0));
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        (w.checkpoint_bytes(), w.progress().1)
+    };
+    let ((small, kept), (big, kept_big)) = (bytes(2), bytes(120));
+    assert_eq!(kept, kept_big);
+    let taken = kept - 1;
+    assert!(big - small >= taken * 14 * (24_000 - 400), "{} against {}", big - small, taken * 14 * 23_600);
+}
+
+#[test]
 fn a_split_that_names_a_body_that_is_not_made_of_cells_is_refused() {
     let w = World3::new(World3Spec {
         fix_internal_edges: false,

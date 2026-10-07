@@ -1245,6 +1245,10 @@ impl World3 {
         for (_, collider) in st.colliders.iter() {
             bytes = bytes.saturating_add(shape_charge(collider.shape()));
         }
+        // the cells the state keeps of every body that can be cut: twelve bytes a cell, and every cut makes a copy of its own
+        for cells in st.voxel_cells.iter().flatten() {
+            bytes = bytes.saturating_add(cells.len().saturating_mul(std::mem::size_of::<[i32; 3]>()));
+        }
         for pair in st.narrow.contact_pairs() {
             bytes = bytes.saturating_add(4096);
             for manifold in pair.manifolds() {
