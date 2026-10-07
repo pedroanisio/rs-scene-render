@@ -2979,12 +2979,15 @@ reads, so what an object looks like and what it collides as are the same cells.
 <assets>
   <voxelAsset id="castle" src="castle.vox" sha256="DIGEST" license="MIT" maxCells="2000000"/>
   <mesh id="rock" src="rock.glb"/>
-  <voxelAsset id="rock-cells" fromMesh="rock" cellSize="0.25"/>
+  <voxelAsset id="rock-cells" fromMesh="rock" cellSize="5"/>
 </assets>
 <composition>
   <object3D id="keep" primitive="voxels" voxels="castle" cellSize="2" palette="file" surface="blocks"/>
 </composition>
 ```
+
+In the example the mesh `rock` is a glb of a rock a metre across, 100 scene units, so cells of 5 units are 20 to a side and about
+8,000 cells (cells of a quarter of a unit would be 400 to a side, 64 million, far over the default `maxCells`).
 
 `voxelAsset` is version 1.3 (VOX1). It has exactly one source (VOX2): a file (`src`, with `format` `vox` or `srvol`, by extension if
 absent; `model` is the number from 0 of one model of a `vox` file; `voxelGrid` names the grid of an `srvol`) or a closed mesh asset
@@ -3065,7 +3068,10 @@ filling the grid, from a file, a cache or a mesh, refuses a cell outside the key
 coordinates of a cell are bytes, and MagicaVoxel's own models are at most 256 on a side) is refused, and every number is named in the
 message. The scene graph is checked whole before anything is placed: exactly one root that reaches every node (a cycle, a second root
 or a node off the tree is an error that names it), and the places that it makes and the cells in them are counted node by node, once,
-so that a node under two parents cannot ask for billions of places from a file of a few hundred bytes (`max_placements`, default 2^24).
+so that a node under two parents cannot ask for billions of places from a file of a few hundred bytes (`max_placements`, default 2^20,
+the cost of the walk whatever the models hold, a model with no voxel included; the places are then made one at a time and none is kept).
+The cells that the places hold are bounded as well, by the caller's limit and by the importer's own, 2^26 (the most that `maxCells` allows,
+because a default `Limits` has no bound), the bytes of the grid by the caller's and by 2^30, and the grid is built in place under them.
 The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut is a chunk and not the box.
 
 | Rule | Says |

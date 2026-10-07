@@ -332,14 +332,16 @@ fn translations_that_add_up_past_the_keys_of_an_occupancy_are_an_error_and_never
 
 #[test]
 fn the_empty_palette_index_has_no_colour_even_when_every_entry_of_the_file_has_one() {
-    // every entry of the file is [9, 9, 9, 9]: with the offset by one the index 0 has no entry and stays empty, and a reader that put
-    // the file's entry c at the index c would give the index 0 a colour (the per-index check of the fixtures is in the first test)
-    let colours = raw::chunk("RGBA", &[9u8; 256 * 4]);
+    // every entry of the file is a colour of its own, [e, 255 - e, e ^ 85, e % 251 + 1]: with the offset by one the index 0 has no entry
+    // and stays empty, and the index c has the entry c - 1; a reader that put the entry c at the index c would colour the index 0
+    // and give every other index the colour of the next
+    let entry = |e: usize| [e as u8, 255 - e as u8, (e as u8) ^ 85, (e % 251 + 1) as u8];
+    let colours = raw::chunk("RGBA", &(0..256).flat_map(entry).collect::<Vec<u8>>());
     let imported = read_raw([raw::model([2, 2, 2], &[[0, 0, 0, 1]]), colours].concat()).unwrap();
     assert_eq!(imported.colours, Colours::File);
     assert_eq!(imported.occupancy.palette().color(0), [0, 0, 0, 0]);
-    for c in 1..=255u8 {
-        assert_eq!(imported.occupancy.palette().color(c), [9, 9, 9, 9], "index {c}");
+    for c in 1..=255usize {
+        assert_eq!(imported.occupancy.palette().color(c as u8), entry(c - 1), "index {c}");
     }
 }
 
@@ -365,7 +367,12 @@ fn the_default_palette_is_the_table_of_the_description_of_the_format() {
 /// `levels` pairs of nodes, each an `nTRN` whose child is an `nGRP` that names the next pair twice, and a shape at the bottom: `2^levels`
 /// places of one model, in a file of a few hundred bytes.
 fn doubling(levels: i32) -> Vec<u8> {
-    let mut children = raw::model([2, 2, 2], &[[0, 0, 0, 1]]);
+    doubling_of(raw::model([2, 2, 2], &[[0, 0, 0, 1]]), levels)
+}
+
+/// The same graph over the model `model` (the bytes of its `SIZE` and `XYZI`).
+fn doubling_of(model: Vec<u8>, levels: i32) -> Vec<u8> {
+    let mut children = model;
     for k in 0..levels {
         children.extend(raw::transform(2 * k, 2 * k + 1, Some("1 0 0"), None));
         children.extend(raw::group(2 * k + 1, &[2 * k + 2, 2 * k + 2]));
@@ -399,13 +406,16 @@ fn a_scene_graph_that_has_no_root_or_two_or_a_node_outside_the_root_is_an_error_
     let model = raw::model([2, 2, 2], &[[0, 0, 0, 1]]);
     // the nodes only name each other: nTRN 0 -> nGRP 1 -> [0]
     let cycle = read_raw([model.clone(), raw::transform(0, 1, None, None), raw::group(1, &[0])].concat());
-    assert!(cycle.unwrap_err().contains("root"));
+    assert_eq!(
+        cycle.unwrap_err(),
+        "the scene graph has no root: every node is the child of another, and there is a cycle"
+    );
     // a good root and a second node that nobody names
     let two_roots = read_raw(
         [model.clone(), raw::transform(0, 1, None, None), raw::shape(1, &[0]), raw::transform(2, 1, None, None)]
             .concat(),
     );
-    assert!(two_roots.unwrap_err().contains("roots"));
+    assert_eq!(two_roots.unwrap_err(), "the scene graph has 2 roots, the nodes [0, 2]");
     // a good root and a cycle of two nodes off to the side
     let aside = read_raw(
         [
@@ -417,12 +427,12 @@ fn a_scene_graph_that_has_no_root_or_two_or_a_node_outside_the_root_is_an_error_
         ]
         .concat(),
     );
-    assert!(aside.unwrap_err().contains("does not reach"));
+    assert_eq!(aside.unwrap_err(), "the scene graph has the node 2, which the root does not reach");
     // a node that names a model the file does not have, and a child that is not there
     let missing = read_raw([model.clone(), raw::transform(0, 5, None, None)].concat());
-    assert!(missing.unwrap_err().contains("node 5"));
+    assert_eq!(missing.unwrap_err(), "the scene graph names the node 5 and has none");
     let unknown = read_raw([model.clone(), raw::transform(0, 1, None, None), raw::shape(1, &[3])].concat());
-    assert!(unknown.unwrap_err().contains("model 3"));
+    assert_eq!(unknown.unwrap_err(), "the scene graph uses the model 3 and the file has 1");
     // the good graph is a graph
     let good = read_raw([model, raw::transform(0, 1, None, None), raw::shape(1, &[0])].concat()).unwrap();
     assert_eq!(good.occupancy.count(), 1);
@@ -459,4 +469,29 @@ fn a_negated_axis_sends_the_cell_q_to_minus_q_minus_one_as_the_unit_boxes_of_ogt
     assert_eq!(placed([2, 2, 2], [1, 0, 0], "52", "0 0 0"), [-1, 0, -1]);
     // no negation, no change of convention: the identity (byte 4: column 0 in the first row, column 1 in the second) moves the cell by the translation alone, (0, 0, 0) of 2 x 2 x 2 is -1 about the pivot
     assert_eq!(placed([2, 2, 2], [0, 0, 0], "4", "3 4 5"), [2, 3, 4]);
+}
+
+#[test]
+fn a_graph_that_makes_many_places_of_nothing_or_of_a_full_model_is_refused_before_it_is_walked() {
+    // 2^24 places of a model with no voxel: no cell, so the limit on cells never speaks, and the places are the cost: more than the
+    // importer makes in a file (2^20), refused by the count in a file of a kilobyte or two
+    let start = std::time::Instant::now();
+    let empty = doubling_of(raw::model([2, 2, 2], &[]), 24);
+    assert!(empty.len() < 4096, "{}", empty.len());
+    let error = read_raw(empty).unwrap_err();
+    assert!(error.contains("16777216") && error.contains("places") && error.contains("1048576"), "{error}");
+    assert!(start.elapsed().as_secs_f64() < 1.0, "{:?}", start.elapsed());
+    // a model of 255 voxels placed 2^20 times is 267,386,880 cells: more than the importer builds (2^26) with no limit given by the
+    // caller (Limits::default() is no guard), and the message names the total
+    let full: Vec<[u8; 4]> = (0..255u32).map(|i| [(i % 8) as u8, (i / 8 % 8) as u8, (i / 64) as u8, 1]).collect();
+    let error = read_raw(doubling_of(raw::model([8, 8, 8], &full), 20)).unwrap_err();
+    assert!(error.contains("267386880") && error.contains("cells") && error.contains("67108864"), "{error}");
+    // and a caller's own limit on cells still speaks first when it is the smaller
+    let limits = Limits { max_cells: 1000, ..Limits::default() };
+    let error =
+        vox::import(&raw::file(doubling_of(raw::model([8, 8, 8], &full), 10)), None, limits, &vox::Bounds::default());
+    assert!(error.unwrap_err().contains("261120"));
+    // what is within the bounds is made: 2^10 places of the 255 voxels, all on the same cells
+    let made = read_raw(doubling_of(raw::model([8, 8, 8], &full), 10)).unwrap();
+    assert_eq!(made.occupancy.count(), 255);
 }

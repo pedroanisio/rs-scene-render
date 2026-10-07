@@ -24,13 +24,13 @@ fn grid_of(values: &[([i32; 3], f32)]) -> Vec<u8> {
 }
 
 #[test]
-fn a_model_goes_out_as_a_cache_and_comes_back_the_same_cells_and_the_same_revision() {
+fn a_model_goes_out_as_a_cache_and_comes_back_the_same_cells_and_the_same_fingerprint() {
     for name in ["one-model", "two-models", "nested", "rotations"] {
         let original = occupancy(name);
         let bytes = srvol::write(&original, 2.5).unwrap();
         let back = srvol::import(&bytes, srvol::GRID, Limits::default(), CacheLimits::default()).unwrap();
         assert_eq!(back.occupancy.fingerprint(), original.fingerprint(), "{name}");
-        assert_eq!(back.occupancy.revision(), original.revision(), "{name}");
+        // (a revision compares states of one grid, and grids built differently may differ in it: the fingerprint is the content)
         assert_eq!(back.occupancy.count(), original.count(), "{name}");
         assert_eq!(back.cell_size, Some(2.5), "{name}: the size of a cell is the scale of the grid");
         // the same bytes every time
