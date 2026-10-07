@@ -43,6 +43,7 @@ VOXEL_TAIL = '</composition><physics pixelsPerMeter="1"/></scene>\n'
 VOXEL_BODY = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="0.25" material="stone"><rigidBody density="2400"/></object3D>' + VOXEL_TAIL
 VOXEL_GROUND = VOXEL_HEAD + '<object3D id="ground" primitive="voxels" voxels="model" cellSize="0.25" material="stone" y="2"><rigidBody type="static" density="2400" maxFragments="128" fragmentMinCells="2" fragmentOverflow="dust" anchor="base"/><crater id="pit" source="ball" targetMaterial="softRock"/></object3D>' + VOXEL_TAIL
 VOXEL_FRACTURE = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="0.25" material="stone"><rigidBody density="2400" maxFragments="32" fragmentMinCells="1"/><fracture source="ball" pieces="8" seed="3"/></object3D>' + VOXEL_TAIL
+VOXEL_STRESS = VOXEL_FRACTURE.replace('<fracture source="ball" pieces="8" seed="3"/>', '<fracture mode="stress" strength="2e6" pieces="8" seed="3"/>')
 VOXEL_EJECTA = VOXEL_GROUND.replace(VOXEL_TAIL, '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit"/></particles3D>' + VOXEL_TAIL)
 
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
@@ -145,6 +146,10 @@ CASES = [
     ("frx11-no-partition", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'planes="1 0 0 4"')),
     ("frx11-zero-normal", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 4 0 0 0 2"')),
     ("frx11-infinite", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 1' + '0' * 400 + '"')),
+    ("frx13-no-strength", ["FRX13"], lambda _: VOXEL_STRESS.replace(' strength="2e6"', '')),
+    ("frx13-strength-alone", ["FRX13"], lambda _: VOXEL_FRACTURE.replace('<fracture ', '<fracture strength="2e6" ')),
+    ("frx14-static", ["FRX14"], lambda _: VOXEL_STRESS.replace('<rigidBody density="2400"', '<rigidBody type="static" density="2400"')),
+    ("frx15-source", ["FRX15"], lambda _: VOXEL_STRESS.replace('<fracture ', '<fracture source="ball" ')),
     ("frx12-labels", ["FRX12"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels"')),
     ("vox7-exclusion", ["VOX7"], lambda _: VOXELS.replace('surface="blocks"', 'surface="blocks" mesh="shape"')),
     ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),
@@ -546,6 +551,7 @@ VALID = {
     "voxel-ejecta": VOXEL_EJECTA,
     "voxel-crater-signed-scale": VOXEL_GROUND.replace('y="2">', 'y="2" scaleX="+3" scaleY="3" scaleZ=" 3.0 ">'),
     "voxel-fracture": VOXEL_FRACTURE,
+    "voxel-fracture-stress": VOXEL_STRESS,
     "voxel-fracture-planes": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 2 0 1 0 0.5"'),
     "voxel-fracture-labels": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels" labels="material"'),
     "pyro-colliders": PYRO_COLLIDERS,
