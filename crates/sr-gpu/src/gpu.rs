@@ -247,6 +247,21 @@ pub fn debug_layers() -> bool {
 
 static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The devices opened by this test binary: the unit tests of the crate share one.
+#[cfg(test)]
+static OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The one device that the unit tests of this crate use, opened the first time it is asked for (the reason when there is none). Tests
+/// run on the threads of one process, and several devices used at once by those threads have blocked the process for good inside the
+/// Vulkan driver (a thread waiting on the creation lock, others on the driver's own, with a group of its threads for each device: 7
+/// devices open at once in the dump of the hang, found once in 15 to 45 runs of the unit tests with the host loaded); creation is
+/// serialised by [`creation_lock`] but the use of devices is not, so a process has one.
+#[cfg(test)]
+pub(crate) fn test_gpu() -> Result<Gpu, String> {
+    static SHARED: std::sync::OnceLock<Result<Gpu, String>> = std::sync::OnceLock::new();
+    SHARED.get_or_init(|| Gpu::new().map_err(|e| e.to_string())).clone()
+}
+
 /// The process-wide lock held while a device or a pipeline is created. Several renderers are created at once by a parallel
 /// delivery, and creating pipelines concurrently on a software adapter crashed the Vulkan loader; rendering takes no lock.
 pub fn creation_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -440,6 +455,12 @@ impl Gpu {
     }
 
     fn open(adapter: wgpu::Adapter) -> Result<Gpu, GpuError> {
+        #[cfg(test)]
+        assert!(
+            OPENED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0,
+            "a unit test of sr-gpu opened a second device: they share one (crate::gpu::test_gpu()), because several devices used at \
+             once by the threads of one process have deadlocked the Vulkan driver"
+        );
         let info = adapter.get_info();
         let limits = device_limits(&adapter.limits());
         // timestamp queries, where the adapter has them, so renders can report GPU time
