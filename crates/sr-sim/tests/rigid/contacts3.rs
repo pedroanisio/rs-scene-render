@@ -408,3 +408,90 @@ fn logging_cost() {
         println!("bodies {count}: step {off:.3} ms without, {on:.3} ms with the record ({events} contacts over {steps} steps)");
     }
 }
+
+/// A body of `cells` (keys of its lattice) of cubes of 0.5 m, 1000 kg, whose lattice origin is at `at` in the scene's axes (y down).
+fn cells_body(cells: Vec<[i32; 3]>, at: [f64; 3]) -> Body3Spec {
+    let mut b = sphere(at, [0.0; 3], 1000.0);
+    b.shape = Shape3::Voxels { size: [0.5; 3], cells };
+    b
+}
+
+#[test]
+fn the_contacts_of_a_column_of_cells_standing_on_the_floor_are_at_the_corners_of_its_foot() {
+    // six cells one above the other, the origin at the top corner of the first, 3 m above the floor of y = 0 (y is down in the scene: the foot is at y = 0): the
+    // foot is the face of the last cell, x and z from 0 to 0.5
+    let column: Vec<[i32; 3]> = (0..6).map(|j| [0, j, 0]).collect();
+    let mut w = world(vec![cells_body(column, [0.0, -3.0, 0.0])], 9.80665, Bounds3::Floor { y: 0.0 })
+        .with_contact_log(limits());
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let contacts = w.contacts_at(0).unwrap();
+    assert_eq!(contacts.len(), 4, "{contacts:?}");
+    for c in contacts {
+        assert!(c.point[1].abs() < 1e-3, "the foot is on the floor: {:?}", c.point);
+        assert!(
+            (-1e-3..=0.5 + 1e-3).contains(&c.point[0]) && (-1e-3..=0.5 + 1e-3).contains(&c.point[2]),
+            "within the foot: {:?}",
+            c.point
+        );
+    }
+    // the four corners, each once
+    let mut corners: Vec<[i32; 2]> =
+        contacts.iter().map(|c| [(c.point[0] * 2.0).round() as i32, (c.point[2] * 2.0).round() as i32]).collect();
+    corners.sort();
+    assert_eq!(corners, vec![[0, 0], [0, 1], [1, 0], [1, 1]]);
+}
+
+#[test]
+fn the_contacts_of_a_bar_of_cells_lying_on_the_floor_span_the_bar() {
+    // eight cells in a row along x, the bar's bottom face on the floor: the points are along the whole length, and at y = 0
+    let bar: Vec<[i32; 3]> = (0..8).map(|i| [i, 0, 0]).collect();
+    let mut w =
+        world(vec![cells_body(bar, [0.0, -0.5, 0.0])], 9.80665, Bounds3::Floor { y: 0.0 }).with_contact_log(limits());
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let contacts = w.contacts_at(0).unwrap();
+    assert!(!contacts.is_empty());
+    let (mut lowest, mut highest) = (f64::MAX, f64::MIN);
+    for c in contacts {
+        assert!(c.point[1].abs() < 1e-3, "{:?}", c.point);
+        assert!((-1e-3..=0.5 + 1e-3).contains(&c.point[2]), "{:?}", c.point);
+        lowest = lowest.min(c.point[0]);
+        highest = highest.max(c.point[0]);
+    }
+    // the bar is 4 m long: the points reach both ends
+    assert!(lowest < 0.1 && highest > 3.9, "the points go from {lowest} to {highest}");
+}
+
+#[test]
+fn the_points_of_a_compound_body_and_of_a_mesh_are_the_bits_they_were_before_the_pose_of_a_cell_was_taken_into_account()
+{
+    // a compound of convex parts, an L-shaped prism landing flat on a floor, and a sphere on a mesh: the points of the first step of contact, to the bit, as the world
+    // gave them when only the composite shapes of cells have the pose of a subshape to take into account
+    let mut body = sphere([0.0, 0.0, 0.0], [0.0, 200.0, 0.0], 3.0);
+    body.shape = l_prism();
+    let mut w = world(vec![body], 9.81, Bounds3::Floor { y: 100.0 }).with_contact_log(limits());
+    let _ = w.frame_at(0.8, &mut Still);
+    let first = first_contact_step(&w, w.progress().0);
+    assert_eq!(first, 80);
+    let points: Vec<[u64; 3]> = w.contacts_at(first).unwrap().iter().map(|c| c.point.map(f64::to_bits)).collect();
+    assert_eq!(
+        points,
+        vec![
+            [13849694754071117824, 4636764947194687920, 13845191154443747328],
+            [13849694754071117824, 4636764947194687920, 4621819117588971520],
+            [4626322717216342016, 4636764947194687920, 13845191154443747328],
+            [4626322717216342016, 4636764947194687920, 4621819117588971520],
+        ]
+    );
+    let mut ground = sphere([0.0, 100.0, 0.0], [0.0; 3], 1.0);
+    ground.kind = BodyKind::Static;
+    ground.shape = ground_mesh(400.0, 8);
+    let ball = sphere([0.0, 0.0, 0.0], [0.0, 200.0, 0.0], 2.0);
+    let mut w = world(vec![ball, ground], 9.81, Bounds3::None).with_contact_log(limits());
+    let _ = w.frame_at(0.7, &mut Still);
+    let first = first_contact_step(&w, w.progress().0);
+    assert_eq!(first, 90);
+    let points: Vec<[u64; 3]> = w.contacts_at(first).unwrap().iter().map(|c| c.point.map(f64::to_bits)).collect();
+    assert_eq!(points, vec![[0, 4636772287209959034, 9223372036854775808]]);
+}
