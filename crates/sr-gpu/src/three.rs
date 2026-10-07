@@ -2526,7 +2526,7 @@ mod tests {
     #[test]
     fn raster_compiles_only_pipelines_used_by_the_scene() {
         use super::*;
-        let gpu = match crate::Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
