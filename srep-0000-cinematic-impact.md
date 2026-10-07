@@ -1558,13 +1558,21 @@ transmittance by one minus the same share, so opaque foam stops the sun that
 clear water lets through (in expectation: the sun's ray is not drawn at random but
 scaled, which is the mean of what the randomly drawn samples of a camera path see, and so the
 same approximation as the mix itself), and the albedo guide of the denoiser takes the mean
-albedo. The random draw costs variance at the same number of samples: on a sea
-wholly at a share of one half, 8 samples a pixel and a window of 16 x 16 pixels, the standard
-deviation of the luminance is 0.0354 (0.345 of the mean) against 0.0061 (0.111) for the
-continuous mix it replaced, and with the denoiser 0.0118 (0.125) against none that could be
-read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 against 0.0101 and
-0.0088), so the cost is the band of the surface where the share is neither, and the
-denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
+albedo. The lobe of the first hit of a sample is not drawn at random but from a
+sequence with a random offset in each pixel (the offset a hash of the pixel, so that
+neighbours are not correlated, and the sequence the golden-ratio one, so that the
+samples of a pixel are spread over the share): at 8 samples a pixel, a window of
+16 x 16 pixels and a share of one half, the standard deviation of the luminance is
+0.0155 (0.156 of the mean) where the random draw gave 0.0354 (0.345) and the
+continuous mix before it 0.0061 (0.111); with the denoiser 0.0003 (0.003) against
+0.0118 (0.125) and a mean of 0.0984 against 0.0996 of many samples (it was about
+5 % under). The correlation of the residuals of neighbouring pixels is 0.014 to the
+right, -0.002 below and 0.011 on the diagonal, and a share of 0 or of 1 is as noisy
+as before the mix (0.0101 and 0.0087). The variance that remains under a dome is
+that of the draws at the later hits of the path, which are random, and of the
+sampling of the lobes themselves; a light of the scene is evaluated at every hit
+with the lobe of the sample, so a direct light adds the draw of that lobe to the
+noise (evaluating both lobes for it is a possible further step). The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
 needs an opaque alpha mode (also an error otherwise). Three warnings say it before
 a renderer runs: W08 (a water that is not opaque, is unlit or shines, by the criterion the renderer applies,
