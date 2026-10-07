@@ -4031,9 +4031,9 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 272 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 92 of them are in the
-cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 6, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 273 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 93 of them are in the
+cinematic families OCN 14, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 6, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
 families, and the 26 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7, PYC5 and PYC6) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
