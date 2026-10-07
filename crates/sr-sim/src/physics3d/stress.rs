@@ -21,7 +21,7 @@
 use super::*;
 use crate::stress::balance::{Located, MassSum, Rigid, Step};
 use crate::stress::plan::{self, CutPlan, JointGeom, PieceGeom};
-use crate::stress::{cut_stresses, JointSection, Wrench};
+use crate::stress::{cut_stresses, JointSection};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -585,14 +585,8 @@ impl World3 {
             for cut in plans.iter() {
                 let sections: Vec<&JointSection> = cut.members.iter().map(|&j| &family.joints[j].section).collect();
                 let q_local = sections[0].centroid;
-                let q = after.world(q_local);
                 let in_part = |i: usize| cut.side.contains(i as u32, family.geoms[i].centre);
-                let wrench = step.on_part(&cut.mass, &in_part, q);
-                let local = Wrench {
-                    force: after.local_vector(wrench.force),
-                    moment: after.local_vector(wrench.moment),
-                    point: q_local,
-                };
+                let local = step.on_part_local(&cut.mass, &in_part, q_local);
                 let stresses = cut_stresses(&sections, &cut.side_has_a, &local);
                 for &target in &cut.targets {
                     let at = cut.members.iter().position(|&m| m == target).expect("a target is a member of its cut");

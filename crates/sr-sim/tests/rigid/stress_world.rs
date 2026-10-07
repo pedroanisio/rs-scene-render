@@ -323,11 +323,13 @@ pub struct Flyer {
     pub slots: usize,
     pub min_cells: usize,
     pub dust: bool,
+    /// Two walls (static boxes) at this distance from the middle on each side, along x, if any: what the halves of a beam that has broken in two fly into.
+    pub walls: Option<f64>,
 }
 
 impl Flyer {
     pub fn world(&self) -> World3 {
-        let Flyer { n, edge, strength, omega, drift, slots, min_cells, dust } = *self;
+        let Flyer { n, edge, strength, omega, drift, slots, min_cells, dust, walls } = *self;
         let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
         let mass = DENSITY * edge.powi(3);
         let size = [edge; 3];
@@ -340,6 +342,13 @@ impl Flyer {
         let mut bodies = vec![beam];
         for _ in 0..slots {
             bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0; 3]));
+        }
+        if let Some(d) = walls {
+            for side in [-1.0, 1.0] {
+                let mut wall = body(Shape3::Box([0.1, 2.0, 2.0]), 1e6, [side * (d + 0.1), 0.0, 0.0]);
+                wall.kind = BodyKind::Static;
+                bodies.push(wall);
+            }
         }
         let pieces: Vec<StressPiece3> =
             (0..n as i32).map(|i| StressPiece3::from_cells(&[[i, 0, 0]], size, mass).unwrap()).collect();
@@ -432,6 +441,7 @@ fn a_body_that_breaks_in_flight_keeps_its_momentum_its_angular_momentum_and_its_
         slots: 4,
         min_cells: 1,
         dust: false,
+        walls: None,
     }
     .world();
     let mut broke_at = None;
@@ -616,7 +626,7 @@ fn column_of_one_piece(registered: bool) -> World3 {
 fn all_apart(slots: usize, min_cells: usize, dust: bool) -> World3 {
     let n = 5;
     // it spins, so that there is a load to read at once
-    Flyer { n, edge: 0.4, strength: 1.0, omega: 12.0, drift: [0.0; 3], slots, min_cells, dust }.world()
+    Flyer { n, edge: 0.4, strength: 1.0, omega: 12.0, drift: [0.0; 3], slots, min_cells, dust, walls: None }.world()
 }
 
 #[test]
@@ -1058,4 +1068,28 @@ fn a_bar_that_slides_on_a_floor_has_contact_impulses_that_sum_to_the_momentum_it
         );
     }
     assert!(slid > 20, "{slid} steps of sliding");
+}
+
+#[test]
+fn a_beam_that_spins_has_in_each_joint_the_pull_of_the_part_beyond_it_by_the_centripetal_load_and_nothing_across_it() {
+    // six cubes of 0.4 m spinning at 12 rad/s about their centre of mass, in a step of 1/240 s (0.05 rad): the joint j holds the part up to it, whose centre is at a distance r from the
+    // axis, with m_S w^2 r over the area, along the beam (the load is read at the middle of the step, in the frame of the body at the middle of it: a frame of the end made the
+    // direction of the force turn half a step against the body, a shear of 2.5% of the pull and a bending moment that a slender beam turns into 30% of it)
+    let (n, edge, omega) = (6, 0.4f64, 12.0);
+    let mass = DENSITY * edge.powi(3);
+    let mut w =
+        Flyer { n, edge, strength: 1e15, omega, drift: [0.0; 3], slots: 5, min_cells: 1, dust: false, walls: None }
+            .world();
+    let frame = w.frame_at(1.0 / 240.0, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let levels = w.stress_levels(0);
+    assert_eq!(levels.len(), n - 1);
+    for (j, (joint, principal)) in levels.iter().enumerate() {
+        // the pieces up to the joint j are j + 1 of them, with their middle at (j + 1) edge / 2 from the end, and the whole beam's at n edge / 2
+        let part = (j + 1) as f64;
+        let r = (n as f64 / 2.0 - part / 2.0) * edge;
+        let want = part * mass * omega * omega * r / (edge * edge);
+        assert_eq!(*joint as usize, j);
+        assert!((principal / want - 1.0).abs() < 2e-3, "joint {j}: {principal} against {want}");
+    }
 }

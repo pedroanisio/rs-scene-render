@@ -107,6 +107,26 @@ impl Rigid {
     }
 }
 
+/// The rotation halfway between two (rows: world = R l): the increment `D = A B^T` turned by half its angle about its axis, then `B`.
+fn mid_rotation(before: &[V3; 3], after: &[V3; 3]) -> [V3; 3] {
+    let d: [V3; 3] = std::array::from_fn(|i| std::array::from_fn(|j| dot(after[i], before[j])));
+    let cos = ((d[0][0] + d[1][1] + d[2][2] - 1.0) / 2.0).clamp(-1.0, 1.0);
+    let axis = [d[2][1] - d[1][2], d[0][2] - d[2][0], d[1][0] - d[0][1]];
+    let sin2 = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if sin2 < 1e-12 {
+        // no turn: the start; or a half turn, whose axis this does not find, and which a step does not make
+        return *before;
+    }
+    let k = axis.map(|v| v / sin2);
+    let angle = cos.acos();
+    let (c, s) = ((angle / 2.0).cos(), (angle / 2.0).sin());
+    let skew = [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]];
+    let half: [V3; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| (if i == j { c } else { 0.0 }) + s * skew[i][j] + (1.0 - c) * k[i] * k[j])
+    });
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|m| half[i][m] * before[m][j]).sum()))
+}
+
 fn apply(m: &[V3; 3], v: V3) -> V3 {
     [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
 }
@@ -191,6 +211,24 @@ impl Step<'_> {
     /// moment of the impulses about the centre of mass; for a part `d(I_S w) + m_S (c_S - c) x dv = K_S + K_cut`, where the second term is the part's centre
     /// of mass being carried by the acceleration of the body's, and `K_cut` is what is asked for, brought to `q` by the force's own lever.
     pub fn on_part(&self, part: &MassSum, in_part: &dyn Fn(usize) -> bool, q: V3) -> Wrench {
+        let (force, about_com) = self.part_load(part, in_part);
+        Wrench { force, moment: add(about_com, cross(sub(self.after.com(), q), force)), point: q }
+    }
+
+    /// The same, in the frame of the body and about the point `q` of it (`q` in the body's frame). The load of a step is that of its middle, and so is the frame that it is taken
+    /// to: the rotation of the body halfway between the start and the end of the step (a frame of the end turns the direction of a force of a spinning body half a step against it:
+    /// a shear of half the angle turned in a step, and a bending moment that a slender body turns into a large stress), and the moment is brought from the centre of mass to
+    /// `q` by the body's own vector between them, which no pose enters.
+    pub fn on_part_local(&self, part: &MassSum, in_part: &dyn Fn(usize) -> bool, q: V3) -> Wrench {
+        let (force, about_com) = self.part_load(part, in_part);
+        let middle = mid_rotation(&self.before.rotation, &self.after.rotation);
+        let local = |v: V3| rotate_back(&middle, v);
+        let (force, about_com) = (local(force), local(about_com));
+        Wrench { force, moment: add(about_com, cross(sub(self.after.centre, q), force)), point: q }
+    }
+
+    /// The force and the moment about the centre of mass, in the world, that the rest of the body puts on the part.
+    fn part_load(&self, part: &MassSum, in_part: &dyn Fn(usize) -> bool) -> (V3, V3) {
         let dt = self.dt;
         let com = self.after.com();
         let whole_mass = self.whole.mass;
@@ -233,6 +271,6 @@ impl Step<'_> {
         );
         let force = sub(delta_force, on_force).map(|v| v / dt);
         let about_com = sub(delta_moment, on_moment).map(|v| v / dt);
-        Wrench { force, moment: add(about_com, cross(sub(com, q), force)), point: q }
+        (force, about_com)
     }
 }
