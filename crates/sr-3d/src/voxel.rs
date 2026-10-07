@@ -13,6 +13,7 @@ use crate::occupancy::Occupancy;
 use std::collections::BTreeMap;
 
 pub mod default_palette;
+pub mod material;
 pub mod srvol;
 pub mod vox;
 
