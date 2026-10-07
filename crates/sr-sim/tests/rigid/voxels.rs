@@ -140,3 +140,62 @@ fn a_stack_of_blocks_of_cells_stands_where_a_stack_of_boxes_stands() {
         println!("VOXEL STACK step {step:.4}: largest difference of a coordinate from the box stack {worst:.2e} m; tops at {:.6} and {:.6}", frame.bodies[2].pos[1], frame.bodies[5].pos[1]);
     }
 }
+
+/// A driver with one radial field.
+struct Blast(Field);
+impl Driver3 for Blast {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![self.0.clone()]
+    }
+}
+
+#[test]
+fn a_field_acts_on_a_body_of_cells_where_its_centre_of_mass_is_and_not_where_its_frame_is() {
+    // cells at 10 to 12 m along x, whose frame origin is at 0: a radial field centred at x = 9.5 m with a reach of 3 m, which the origin (9.5 m
+    // away) is outside of and the centre of mass (1.5 m away) is inside of, pushes the body along +x at its strength, whatever the falloff weight is inside
+    let cells = {
+        let mut c = Vec::new();
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 40..48 {
+                    c.push([x, y, z]);
+                }
+            }
+        }
+        c
+    };
+    let mass = cells.len() as f64 * 2400.0 * 0.25 * 0.25 * 0.25;
+    let mut w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![body(Shape3::Voxels { size: [0.25; 3], cells }, mass, Pose3::default(), [0.; 3], [0.; 3])],
+    });
+    let field = Field {
+        kind: sr_sim::fields::FieldKind::Radial,
+        pos: [9.5, 0.5],
+        force: [0.0; 2],
+        strength: 4.0,
+        falloff: 0.0,
+        radius: Some(3.0),
+        scale: 1.0,
+        path: vec![],
+        seed: 0,
+        bodies: true,
+        particles: false,
+        z: 0.5,
+        force_z: 0.0,
+    };
+    let frame = w.frame_at(0.1, &mut Blast(field));
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    // 10 steps of 4 m/s2: 0.4 m/s along +x (the centre of mass is on the far side of the field's centre from the origin)
+    assert!((frame.velocities[0].linear[0] - 0.4).abs() < 1e-9, "{:?}", frame.velocities[0].linear);
+}

@@ -246,6 +246,9 @@ pub fn excavate(
     if !(h.is_finite() && h > 0.0) {
         return Err("a cell must have a positive size".into());
     }
+    if !(ejection.angle.is_finite() && ejection.spread.is_finite()) {
+        return Err("the launch angle and its spread must be numbers".into());
+    }
     if !(kernel_unit.is_finite() && kernel_unit > 0.0) {
         return Err("the unit of the crater's lengths, in metres, must be positive".into());
     }
@@ -262,7 +265,9 @@ pub fn excavate(
         r < crest + width && a >= surface(r) && a <= ceiling
     };
     // the filled cells that the crater takes out: only the bricks that the crater's box touches are looked at
-    let reach = crest + width + prof.depth().max(prof.rim_height()) + 2.0 * h;
+    // the region that is taken out is inside the crest radius plus the width of the rim round the axis and one crest radius up it: along a lattice axis that is
+    // as far as the hypotenuse of the two when the axis is slanted
+    let reach = crest.hypot(crest + width) + prof.depth().max(prof.rim_height()) + 2.0 * h;
     let (x0, x1) = index_range(frame.centre[0], reach, h)?;
     let (y0, y1) = index_range(frame.centre[1], reach, h)?;
     let (z0, z1) = index_range(frame.centre[2], reach, h)?;

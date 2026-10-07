@@ -17,7 +17,7 @@ mod fracture;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
-use voxel_mass::{keys_of, voxel_mass_properties, voxel_tensor};
+use voxel_mass::{sum_mass_properties, voxel_mass_properties};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
@@ -324,6 +324,8 @@ struct State {
     voxel_spent: Vec<bool>,
     /// The step at which each slot was taken into use: a body that is a slot is cut from the step after, however often the step is asked for.
     slot_since: Vec<Option<u64>>,
+    /// The cells (in the body's own keys, sorted, each once) of each body that can be cut: shared with the checkpoints, replaced by a cut.
+    voxel_cells: Vec<Option<std::sync::Arc<Vec<[i32; 3]>>>>,
 }
 
 struct Checkpoint {
@@ -558,6 +560,8 @@ pub struct World3 {
     prefetch_hits: u64,
     /// How many times the state was taken back to a checkpoint, to replay from it.
     checkpoint_restores: u64,
+    /// The step of the checkpoint that the world was last taken back to.
+    last_restored: Option<u64>,
 }
 
 /// Whether a replacement surface can be built: within its memory budget, finite and with triangles that name its vertices.
@@ -642,6 +646,7 @@ impl World3 {
             slot_active: vec![false; spec.bodies.len()],
             voxel_spent: vec![false; spec.bodies.len()],
             slot_since: vec![None; spec.bodies.len()],
+            voxel_cells: vec![None; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -852,6 +857,7 @@ impl World3 {
             prefetched: Vec::new(),
             prefetch_hits: 0,
             checkpoint_restores: 0,
+            last_restored: None,
             fractures: Vec::new(),
             spec,
             params,
@@ -902,6 +908,12 @@ impl World3 {
     /// that failed after the solver ran): what a test of a replay counts to know that it replayed.
     pub fn checkpoint_restores(&self) -> u64 {
         self.checkpoint_restores
+    }
+
+    /// The step of the checkpoint that the world was last taken back to (none if it never was): a replay that started from a later checkpoint
+    /// than the first shows it.
+    pub fn last_restored_checkpoint(&self) -> Option<u64> {
+        self.last_restored
     }
 
     /// How many steps have taken a surface built ahead.
@@ -1222,6 +1234,7 @@ impl World3 {
         if let Some((_, cp)) = self.checkpoints.range(..=self.state.step).next_back() {
             self.state = cp.state.clone();
             self.checkpoint_restores += 1;
+            self.last_restored = Some(cp.state.step);
         }
     }
 
@@ -1429,6 +1442,10 @@ impl World3 {
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
         // the loads first: a step that cannot get one is not taken, and nothing has changed
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
+        // the cuts of this step come before the loads, as they do in a frame asked for at this instant (whose tail applies them): a driver that reads
+        // the state of a body to load it finds the same body however the step is reached. They are applied again after the visibility and the fractures
+        // (idempotent: what is installed is not installed twice), for a body that those have just brought in.
+        self.apply_voxel_cuts(self.state.step, t, driver)?;
         let mut loads = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {
             if b.kind == BodyKind::Dynamic {
@@ -1494,7 +1511,15 @@ impl World3 {
             if !body.is_enabled() || !body.is_dynamic() || fields.is_empty() {
                 continue;
             }
-            let p = flip(body.translation().to_array()).map(|c| c * ppm);
+            // the field is read where the body's mass is: for the bodies that have always been in the world the origin of the frame, which is what they
+            // have always had (a mesh's centre of mass is usually near it); for a body of cells the origin is that of the lattice and may be far from the
+            // cells, and the velocity that goes with the position is that of the centre of mass
+            let at = if matches!(self.spec.bodies[k].shape, Shape3::Voxels { .. }) {
+                body.center_of_mass()
+            } else {
+                body.translation()
+            };
+            let p = flip(at.to_array()).map(|c| c * ppm);
             let lv = flip(body.linvel().to_array()).map(|c| c * ppm);
             let a = fields::total3(&fields, p, lv, t);
             let mass = body.mass();
@@ -1599,6 +1624,7 @@ impl World3 {
                 if cp.state.step > self.state.step || self.state.step > target {
                     self.state = cp.state.clone();
                     self.checkpoint_restores += 1;
+                    self.last_restored = Some(cp.state.step);
                 }
             }
         }
@@ -1702,16 +1728,21 @@ pub fn shape_mass_properties(shape: &Shape3, mass: f64, pixels_per_meter: f64) -
     {
         return Err("a body of cells needs cells, a positive size, a positive mass and a positive scale".into());
     }
-    let t = voxel_tensor(&unique_keys(cells), size.map(|s| s / pixels_per_meter), mass)
+    // the properties as the world gives them to Rapier (principal moments and frame), read back as a tensor: so that what is compared with the
+    // cells is what the world simulates, the diagonalisation and the frame included, and not the tensor before them
+    let keys = unique_keys(cells);
+    let props = voxel_mass_properties(&keys, size.map(|s| s / pixels_per_meter), mass)
         .ok_or("a body of cells needs cells, a positive size, a positive mass and a positive scale")?;
+    let inertia = props.reconstruct_inertia_matrix();
     // physics axes to scene axes: a half turn about x, so a product of inertia with one of y and z (not both) changes sign
     let sign = [1.0, -1.0, -1.0];
     let scene: [[f64; 3]; 3] = std::array::from_fn(|a| {
-        std::array::from_fn(|b| t.inertia[a][b] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
+        std::array::from_fn(|b| inertia.col(b)[a] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
     });
+    let c = [props.local_com.x, props.local_com.y, props.local_com.z];
     Ok(ShapeMass {
-        mass: t.mass,
-        centre: std::array::from_fn(|a| t.centre[a] * sign[a] * pixels_per_meter),
+        mass: props.mass(),
+        centre: std::array::from_fn(|a| c[a] * sign[a] * pixels_per_meter),
         inertia: scene,
     })
 }

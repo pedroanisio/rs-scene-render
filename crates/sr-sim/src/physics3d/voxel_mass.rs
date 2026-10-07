@@ -8,12 +8,14 @@
 //! The smallest case that shows it is a block of 3 by 4 by 4 cubic cells of 0.25 m at 2400 kg/m3, whose tensor about its centre is
 //! diag(300, 234.375, 234.375): `MassProperties::with_inertia_matrix` of it, read back with `reconstruct_inertia_matrix`, gives
 //! diag(234.375, 300, 234.375), and diag(234.375, 300, 234.375) gives the very same principal moments and frame, so one of the two is wrong
-//! (it is the first: the second is read back right; `cargo run -p sr-sim --example parry_inertia_defect` prints both). What I believe, and have not traced in the solver: it sorts the moments and
-//! chooses the eigenvector of the distinct one by a rule that is right when that one is on y or on z and when the three are alike, and not when it is on x. If a
-//! later Parry returns the right thing for all of them, `voxel_mass_properties` can go back to `with_inertia_matrix`; the tests in sr-eval
-//! (`mass_properties`, `world_inertia`) compare with exact moments and would show it.
-//! So the tensor is worked out here from the cells: sums of integers, in `i128`, one
-//! division each, the same bits in any order of the cells, and diagonalised by Jacobi rotations that leave a diagonal tensor as it is.
+//! (it is the first: the second is read back right; `cargo run -p sr-sim --example parry_inertia_defect` prints both). The cause, read in
+//! `glamx` 0.3.1 `eigen3.rs` (the review of this branch by Urano found it): `eigenvector1` returns the x axis whenever every column cross product of
+//! `M - l1 I` is zero, which is the case for any repeated smallest eigenvalue, not only for three equal ones; the x axis is then right only if the
+//! distinct, larger moment is not on x. The same solver is behind `MassProperties`' `Sum` (and `Add`), which `with_fractures` used to give a
+//! source the tensor of its fragments: for fragments that are bodies of cells it now uses [`sum_mass_properties`]. If a later Parry returns
+//! the right thing for all of them, `voxel_mass_properties` can go back to `with_inertia_matrix`; the tests in sr-eval (`mass_properties`,
+//! `world_inertia`) compare with exact moments and would show it.
+//!
 use super::*;
 
 /// Mass, centre of mass and inertia tensor about it of the union of cubes `keys` of side `size` (metres, along each axis) and total `mass`, in the
@@ -22,11 +24,6 @@ pub(super) struct Tensor {
     pub(super) mass: f64,
     pub(super) centre: [f64; 3],
     pub(super) inertia: [[f64; 3]; 3],
-}
-
-/// The keys of the filled cells of a voxel shape.
-pub(super) fn keys_of(voxels: &Voxels) -> Vec<IVector> {
-    voxels.voxels().map(|v| v.grid_coords).collect()
 }
 
 /// The tensor of the cells `keys` (each cell once), or none for no cells or a mass or size that is not positive.
@@ -118,4 +115,29 @@ pub(super) fn voxel_mass_properties(keys: &[IVector], size: [f64; 3], mass: f64)
     let z = cross(x, y);
     let frame = Rotation::from_mat3(&Matrix::from_cols(vec3(x), vec3(y), vec3(z)));
     Some(MassProperties::with_principal_inertia_frame(vec3(t.centre), t.mass, vec3(moments), frame))
+}
+
+/// The mass properties of a body that is the union of `parts` (each in the frame of the body): the masses added, the centre of mass as the mean
+/// weighted by mass, and the tensor about it as the sum of the tensors of the parts (each read back from its principal moments and frame) and their
+/// parallel-axis terms, diagonalised as [`voxel_mass_properties`] does. Arithmetic in `f64`, in the order of the parts.
+pub(super) fn sum_mass_properties(parts: &[MassProperties]) -> MassProperties {
+    let mass: f64 = parts.iter().map(|p| p.mass()).sum();
+    let centre = parts.iter().fold(Vector::ZERO, |sum, p| sum + p.local_com * p.mass()) / mass;
+    let mut inertia = [[0.0; 3]; 3];
+    for p in parts {
+        let own = p.reconstruct_inertia_matrix();
+        let d = p.local_com - centre;
+        let d2 = d.length_squared();
+        let d = [d.x, d.y, d.z];
+        for (i, row) in inertia.iter_mut().enumerate() {
+            for (j, entry) in row.iter_mut().enumerate() {
+                *entry += own.col(j)[i] + p.mass() * (if i == j { d2 } else { 0.0 } - d[i] * d[j]);
+            }
+        }
+    }
+    let (moments, axes) = principal(inertia);
+    let (x, y) = ([axes[0][0], axes[1][0], axes[2][0]], [axes[0][1], axes[1][1], axes[2][1]]);
+    let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+    let frame = Rotation::from_mat3(&Matrix::from_cols(vec3(x), vec3(y), vec3(z)));
+    MassProperties::with_principal_inertia_frame(centre, mass, vec3(moments), frame)
 }

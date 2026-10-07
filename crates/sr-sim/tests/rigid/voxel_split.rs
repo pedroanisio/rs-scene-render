@@ -683,6 +683,17 @@ fn the_same_four_ways<D: Driver3>(
         let restored = replay.checkpoint_restores();
         let got = replay.frame_at(t, &mut d);
         assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
+        // and from the checkpoint just before it (one is taken each second, every 100 steps), a later one than the first for the steps from 100 on
+        let expected = (*s / 100) * 100;
+        assert_eq!(
+            replay.last_restored_checkpoint(),
+            Some(expected),
+            "step {s} was replayed from the checkpoint at {:?}",
+            replay.last_restored_checkpoint()
+        );
+        if expected > 0 {
+            assert!(replay.progress().1 >= 3, "{} checkpoints", replay.progress().1);
+        }
         same(&got, &wanted[i], &format!("replayed, step {s}"));
     }
     wanted
@@ -1051,18 +1062,301 @@ fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
             VoxelSplit3 { parent: 1, slots: vec![3] },
         ])
         .is_ok());
-    // a body that a fracture will replace cannot also be cut
-    let fractured = make().with_fractures(vec![Fracture3 {
-        source: 0,
+    // a body that a fracture will replace cannot also be cut, and one that is cut cannot be fractured, in whichever order they are registered
+    let fracture = |source: usize, pieces: Vec<usize>| Fracture3 {
+        source,
         at: 1.0,
         radial_impulse: 0.0,
-        fragments: vec![Fragment3 { body: 1, offset: [0.0; 3], impulse: [0.0; 3] }],
+        fragments: pieces.into_iter().map(|body| Fragment3 { body, offset: [0.0; 3], impulse: [0.0; 3] }).collect(),
         contact: None,
-    }]);
-    if let Ok(w) = fractured {
+    };
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).is_err(),
+        "a fracture's source as the parent of a split"
+    );
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 2, slots: vec![1] }]).is_err(),
+        "a fracture's piece as the slot of a split"
+    );
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 1, slots: vec![2] }]).is_err(),
+        "a fracture's piece as the parent of a split"
+    );
+    let split = || make().with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }]).unwrap();
+    assert!(
+        split().with_fractures(vec![fracture(0, vec![2])]).is_err(),
+        "the parent of a split as the source of a fracture"
+    );
+    assert!(
+        split().with_fractures(vec![fracture(2, vec![1])]).is_err(),
+        "the slot of a split as a piece of a fracture"
+    );
+    assert!(
+        split().with_fractures(vec![fracture(1, vec![2])]).is_err(),
+        "the slot of a split as the source of a fracture"
+    );
+    assert!(split().with_fractures(vec![fracture(2, vec![3])]).is_ok(), "bodies that no split owns");
+}
+
+/// A driver that cuts as a [`Script`] does and loads every body with a torque that depends on where its centre of mass is, which is what a driver
+/// that reads the state of the body would do: so a step in which a body is cut finds a different load if the load is asked before the cut and
+/// if it is asked after.
+struct Leaning {
+    script: Script,
+}
+
+impl Driver3 for Leaning {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.script.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.script.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.script.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, _: u64, _: f64, _: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        let c = state.centre;
+        Ok(Some(Load3 {
+            force: [3.0 * c[1], -2.0 * c[0], 5.0 * c[2]],
+            torque: [7.0 * c[0], 11.0 * c[2], -13.0 * c[1]],
+        }))
+    }
+}
+
+#[test]
+fn a_load_that_reads_the_state_of_a_body_finds_the_same_world_in_the_step_of_a_cut_however_the_step_is_reached() {
+    // the cut is at 1.5 s; a load is asked at the start of each step, from the body as it is then
+    let steps: Vec<u64> = (147..=153).collect();
+    the_same_four_ways(
+        &|frames| world_logging(2, None, frames),
+        &|| Leaning { script: Script { cuts: vec![first_cut(1.5)] } },
+        &steps,
+    );
+}
+
+#[test]
+fn the_part_that_stays_after_a_cut_has_all_its_cells_when_they_end_at_the_edge_of_a_chunk_of_the_shape() {
+    // cells of 0.1 m, 8 along x from key 680 to 687: Parry keeps its cells in chunks of 8 and its iterator over them is a half-open range of
+    // floor(p / size), which for 688 * 0.1 / 0.1 comes out as 687.999...: the last column is the one it can lose
+    let size = [0.1; 3];
+    let cell_mass = 2400.0 * 0.1 * 0.1 * 0.1;
+    let whole = cells_of(680..688, 0..2, 0..2);
+    let (stay, piece, destroyed) =
+        (cells_of(684..688, 0..2, 0..2), cells_of(680..682, 0..2, 0..2), cells_of(682..684, 0..2, 0..2));
+    let mut parent =
+        body(Shape3::Voxels { size, cells: whole.clone() }, whole.len() as f64 * cell_mass, BodyKind::Dynamic);
+    parent.start = Pose3::default();
+    let slot = body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, cell_mass, BodyKind::Dynamic);
+    let mut w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![parent, slot],
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+    .unwrap();
+    let cut = VoxelCut3 {
+        revision: 1,
+        destroyed,
+        parent_mass: stay.len() as f64 * cell_mass,
+        pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * cell_mass }],
+    };
+    // a torque small for a body of 16 cells of a tenth of a metre, so that it has hardly turned in the time measured
+    let (force, torque) = ([0.0, 0.0, 0.0], [0.30, 0.55, -0.45]);
+    let mut d = Pusher { script: Script { cuts: vec![(0, 0.3, None, cut)] }, from: 0.4, force, torque, closed: vec![] };
+    let (a, b) = (w.frame_at(0.41, &mut d), w.frame_at(0.45, &mut d));
+    assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?}", a.errors);
+    let props = shape_mass_properties(&Shape3::Voxels { size, cells: stay }, 16.0 * cell_mass, 1.0).unwrap();
+    let inverse = inverse3(props.inertia);
+    for i in 0..3 {
+        let alpha = (b.velocities[0].angular[i] - a.velocities[0].angular[i]).to_radians() / 0.04;
+        let wanted: f64 = (0..3).map(|j| inverse[i][j] * torque[j]).sum();
         assert!(
-            w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).is_err(),
-            "a fracture source as the parent"
+            (alpha - wanted).abs() < 2e-3 * wanted.abs().max(1e-3),
+            "axis {i}: spin-up {alpha} against {wanted}: the part that stays has lost a cell"
         );
     }
+}
+
+/// A driver that cuts as a [`Cutter`] does and remembers, for each body, the state it was asked to load at each step.
+struct History {
+    inner: Cutter,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Driver3 for History {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.inner.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.inner.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.inner.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_piece_is_a_body_with_its_own_mass_and_centre_at_the_first_step_it_is_asked_about() {
+    // a slot that has been stepped as a disabled body has its collider disabled by its parent until the pipeline runs again: the mass properties that
+    // the cut gives it have to be those that the very next question about the body finds (its centre of mass), not the ones of an empty body
+    let mut w = world(2, None);
+    let mut d = History { inner: Cutter::new(0.2), seen: vec![vec![]; 3] };
+    let frame = w.frame_at(0.3, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let first =
+        d.seen[1].iter().find(|(step, state)| *step >= 20 && state.enabled).expect("the piece was asked about").1;
+    let wanted = shape_mass_properties(
+        &Shape3::Voxels { size: SIZE, cells: cells_of(6..12, 0..2, 0..2) },
+        24.0 * CELL_MASS,
+        1.0,
+    )
+    .unwrap()
+    .centre;
+    let local = local_centre(&first.pose, first.centre);
+    for k in 0..3 {
+        assert!(
+            (local[k] - wanted[k]).abs() < 1e-9,
+            "axis {k}: the centre of mass of the piece at its first step is {} and its cells' is {}",
+            local[k],
+            wanted[k]
+        );
+    }
+}
+
+#[test]
+fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
+    let make = |parent: Shape3| {
+        World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(parent, 1.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        })
+    };
+    let split = || vec![VoxelSplit3 { parent: 0, slots: vec![1] }];
+    assert!(make(Shape3::Voxels { size: SIZE, cells: bar() }).with_voxel_splits(split()).is_ok());
+    assert!(
+        make(Shape3::Voxels { size: SIZE, cells: vec![] }).with_voxel_splits(split()).is_err(),
+        "no cells: the collider would not be one of cells"
+    );
+    assert!(
+        make(Shape3::Voxels { size: [0.0, 0.25, 0.25], cells: bar() }).with_voxel_splits(split()).is_err(),
+        "no size"
+    );
+}
+
+/// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of
+/// the floor beyond it comes away as a piece.
+struct Undermine;
+
+impl Driver3 for Undermine {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        _: f64,
+        parent: usize,
+        revision: Option<u64>,
+        impact: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        let (Some(impact), None, 0) = (impact, revision, parent) else { return Ok(None) };
+        // the column of cells that the impact is over (the point is in the floor's own frame, in metres, scene axes)
+        let column = (impact.point[0] / 0.25).floor() as i32;
+        let piece = cells_of(column + 1..24, 0..3, 0..8);
+        Ok(Some(VoxelCut3 {
+            revision: 1,
+            destroyed: cells_of(column..column + 1, 0..3, 0..8),
+            parent_mass: (column as usize * 24) as f64 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * CELL_MASS }],
+        }))
+    }
+}
+
+fn floor_and_ball(frames: Option<usize>) -> World3 {
+    let floor = Body3Spec {
+        kind: BodyKind::Static,
+        ..body(Shape3::Voxels { size: SIZE, cells: cells_of(0..24, 0..3, 0..8) }, 144.0 * CELL_MASS, BodyKind::Static)
+    };
+    let mut ball = body(Shape3::Sphere(0.3), 20.0, BodyKind::Dynamic);
+    ball.start = Pose3 { pos: [2.1, -3.0, 1.0], rot: [0., 0., 0., 1.] };
+    let slot = body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic);
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.0, -9.80665, 0.0],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![floor, ball, slot],
+    })
+    .with_impact_watches(vec![ImpactWatch { source: 1, owner: 0, min_impulse: 1.0 }])
+    .unwrap();
+    let w = match frames {
+        Some(b) => w.with_frame_log_budget(b),
+        None => w,
+    };
+    w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).unwrap()
+}
+
+#[test]
+fn a_cut_that_is_a_function_of_the_impact_the_world_noticed_is_the_same_however_the_frames_are_asked() {
+    // a ball dropped on a static floor of cells; the impact is noticed by the world, reported from the step after it, and the driver cuts the floor from it
+    let mut reference = floor_and_ball(None);
+    let mut d = Undermine;
+    reference.frame_at(2.0, &mut d);
+    let first = (0..200u64)
+        .find(|s| reference.frame_at(*s as f64 * 0.01, &mut d).enabled[2])
+        .expect("the floor was cut: the piece took its slot");
+    let impact_step =
+        reference.frame_at(first as f64 * 0.01, &mut d).impacts[0].expect("with the impact reported").step;
+    assert!(
+        impact_step < first && first - impact_step <= 2,
+        "the cut is one or two steps after the impact: {impact_step}, {first}"
+    );
+    // the frames around the cut, asked four ways, are the same to the bit (the slot is a dynamic body that falls under gravity once cut)
+    let steps: Vec<u64> = (first - 2..=first + 3).collect();
+    let wanted = the_same_four_ways(&floor_and_ball, &|| Undermine, &steps);
+    assert!(!wanted[0].enabled[2] && wanted[5].enabled[2]);
+    // and the piece falls: its height after the cut is below where it started
+    assert!(wanted[5].velocities[2].linear[1] > 0.0 || wanted[5].bodies[2].pos[1] != 0.0, "the piece is moving");
 }
