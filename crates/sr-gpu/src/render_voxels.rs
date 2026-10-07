@@ -56,9 +56,10 @@ pub(in crate::render) struct VoxelState {
     hash: u64,
 }
 
+/// A mesh of the quads of one group. What it is drawn with is read from the group at each frame, so that a material that animates is
+/// the frame's and not that of the frame that made the mesh.
 struct GroupDraw {
-    material: MaterialParams,
-    maps: Maps,
+    group: GroupKey,
     mesh: Arc<crate::three::MeshGpu>,
 }
 
@@ -134,6 +135,26 @@ struct Body<'a> {
 }
 
 impl Renderer {
+    /// What a group of cells is drawn with at this frame: the document's material as it is now, or the file's or the emission's numbers.
+    fn group_material(
+        &self,
+        group: &GroupKey,
+        document: &BTreeMap<String, (MaterialParams, Maps)>,
+    ) -> (MaterialParams, Maps) {
+        match group {
+            GroupKey::Document(id) => document[id].clone(),
+            GroupKey::File { kind, numbers } => (file_params(*kind, numbers), Maps::default()),
+            GroupKey::Emit { colour, strength } => {
+                let c = self.literal_linear(colour.map(|v| f64::from(v) / 255.0));
+                let mut p =
+                    MaterialParams { base_color: [c[0] as f32, c[1] as f32, c[2] as f32, 1.0], ..Default::default() };
+                p.emissive = [c[0] as f32, c[1] as f32, c[2] as f32];
+                p.emissive_strength = f64::from_bits(*strength) as f32;
+                (p, Maps::default())
+            }
+        }
+    }
+
     /// The draws of an `object3D` of primitive `voxels`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn voxel_draws(
@@ -277,7 +298,9 @@ impl Renderer {
         let class_of = |i: u8| looks.get(&i).map_or(i, |l| label[l]);
         let see_through: Vec<u8> = label.iter().filter(|(l, _)| see(l)).map(|(_, i)| *i).collect();
         let classes = Classes::new(class_of, &see_through);
-        let looks_hash = sr_eval::rng::hash_str(&format!("{palette:?}|{object_material:?}|{looks:?}"));
+        // the classes are what the surface is made from: the looks of the indices and which of them let light through, which a document
+        // material that animates its transmission or alpha mode can change between frames
+        let looks_hash = sr_eval::rng::hash_str(&format!("{palette:?}|{object_material:?}|{looks:?}|{see_through:?}"));
         let group_of_class: BTreeMap<u8, &GroupKey> = label.iter().map(|(l, i)| (*i, &l.group)).collect();
         let colour_of_class: BTreeMap<u8, Option<[u8; 4]>> = label.iter().map(|(l, i)| (*i, l.colour)).collect();
         let mut drawn_groups = 0;
@@ -328,20 +351,6 @@ impl Renderer {
                 let mut out = Vec::new();
                 let limit = self.gpu.device.limits().max_buffer_size;
                 for (group, quads) in by_group {
-                    let (material, maps) = match group {
-                        GroupKey::Document(id) => document[id].clone(),
-                        GroupKey::File { kind, numbers } => (file_params(*kind, numbers), Maps::default()),
-                        GroupKey::Emit { colour, strength } => {
-                            let c = self.literal_linear(colour.map(|v| f64::from(v) / 255.0));
-                            let mut p = MaterialParams {
-                                base_color: [c[0] as f32, c[1] as f32, c[2] as f32, 1.0],
-                                ..Default::default()
-                            };
-                            p.emissive = [c[0] as f32, c[1] as f32, c[2] as f32];
-                            p.emissive_strength = f64::from_bits(*strength) as f32;
-                            (p, Maps::default())
-                        }
-                    };
                     let colour = |class: u8| -> [f32; 4] {
                         match colour_of_class.get(&class).copied().flatten() {
                             Some(c) => {
@@ -360,7 +369,7 @@ impl Renderer {
                         break;
                     }
                     let mesh = self.three_engine().upload_mesh(&primitive.vertices, &primitive.indices);
-                    out.push(GroupDraw { material, maps, mesh });
+                    out.push(GroupDraw { group: group.clone(), mesh });
                 }
                 let state = self.voxel_surfaces.get_mut(&state_key).expect("the state of this body");
                 state.groups = out;
@@ -369,11 +378,12 @@ impl Renderer {
             let state = &self.voxel_surfaces[&state_key];
             let model_matrix = body.world * Mat4::from_scale(Vec3::splat(cell_size));
             for g in &state.groups {
+                let (material, maps) = self.group_material(&g.group, &document);
                 draws.push(Draw3 {
                     mesh: MeshSrc::Cached(g.mesh.clone()),
                     model: model_matrix,
-                    material: g.material.clone(),
-                    maps: g.maps.clone(),
+                    material,
+                    maps,
                     opacity,
                     cast_shadow: cast,
                     receive_shadow: receive,

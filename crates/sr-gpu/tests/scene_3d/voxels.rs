@@ -326,3 +326,63 @@ fn the_shadow_of_a_block_is_the_same_whatever_the_size_of_its_cells_down_to_the_
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------- animated materials
+
+fn shot_at(renderer: &mut sr_gpu::Renderer, ev: &sr_eval::Evaluator, t: f64) -> Shot {
+    let frame = ev.evaluate(t);
+    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+    let out = renderer.render(&frame, ev.program());
+    Shot {
+        pixels: renderer.read(&out.texture),
+        triangles: out.stats.triangles,
+        draws: out.stats.objects3d,
+        groups: out.stats.voxel_groups,
+        errors: out.stats.errors.clone(),
+    }
+}
+
+#[test]
+fn an_animated_material_of_a_voxels_object_changes_the_picture_and_does_not_depend_on_the_frames_the_renderer_drew_before(
+) {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("animated.vox", &block(8, 1), &[RED]);
+    // the object's own material turns from red to blue and its roughness and transmission animate too: what a frame draws is that frame's
+    let materials = r##"<material id="paint" unlit="true" baseColor="#FF0000"><animate property="baseColor"><key time="0" value="#FF0000"/><key time="1" value="#0000FF"/></animate></material>"##;
+    for camera in ["", r#"renderer="pathtrace" pathSamples="8" maxBounces="2""#] {
+        let xml = document(&file, r#"material="paint""#, camera, materials);
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let mut worn = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let first = shot_at(&mut worn, &ev, 0.0);
+        let last = shot_at(&mut worn, &ev, 1.0);
+        let (a, b) = (centre(&first), centre(&last));
+        assert!(a[0] > 0.15 && a[2] < 0.05, "{camera}: red at the start: {a:?}");
+        assert!(b[2] > 0.15 && b[0] < 0.05, "{camera}: blue at the end: {b:?}");
+        let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let alone = shot_at(&mut fresh, &ev, 1.0);
+        assert_eq!(
+            last.pixels, alone.pixels,
+            "{camera}: a renderer that drew the first frame draws the last as one that did not"
+        );
+    }
+}
+
+#[test]
+fn a_material_that_starts_to_let_light_through_changes_which_faces_are_made() {
+    let Some(gpu) = gpu() else { return };
+    // two cells side by side: while both are opaque the faces between them are not made, and when the first lets light through the
+    // second's face toward it is (the faces of a see-through cell toward a neighbour are not)
+    let file = vox_file("seethrough.vox", &[([0, 0, 0], 1), ([1, 0, 0], 2)], &[RED, BLUE]);
+    let materials = r##"<material id="a" baseColor="#FF0000"><animate property="transmission"><key time="0" value="0"/><key time="1" value="1"/></animate></material><material id="b" baseColor="#0000FF"/>"##;
+    let xml = document(&file, r#"palette="a b""#, "", materials);
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let mut worn = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let first = shot_at(&mut worn, &ev, 0.0);
+    let last = shot_at(&mut worn, &ev, 1.0);
+    assert!(first.errors.is_empty() && last.errors.is_empty(), "{:?} {:?}", first.errors, last.errors);
+    assert_eq!((first.triangles, last.triangles), (20, 22), "ten quads, then eleven");
+    let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    assert_eq!(shot_at(&mut fresh, &ev, 1.0).triangles, 22);
+}
