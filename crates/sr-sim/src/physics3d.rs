@@ -214,8 +214,9 @@ pub trait Driver3 {
     ///
     /// The revision of a cut is a function of the time: the driver gives one revision at one instant, so that asking again finds it installed
     /// and returns `None` (or the same revision, which the world skips). A driver that gives a new revision for cells it has already destroyed is
-    /// refused with an error that names the cell, the same one however the frame is asked. The world asks twice a step (at its start and for the
-    /// frame's own time) and clones the slots of each split to do it, so the cost of a step grows with the slots reserved.
+    /// refused with an error that names the cell, the same one however the frame is asked. The world asks twice inside every step (at its start and
+    /// again after the loads) and once more in the tail of a frame asked for an instant, and clones the slots of each split every time, so the cost of
+    /// a step grows with the slots reserved.
     fn voxel_cut(
         &mut self,
         _t: f64,
@@ -1252,7 +1253,7 @@ impl World3 {
         }
         // the cells the state keeps of every body that can be cut: twelve bytes a cell, and every cut makes a copy of its own
         for cells in st.voxel_cells.iter().flatten() {
-            bytes = bytes.saturating_add(cells.len().saturating_mul(std::mem::size_of::<[i32; 3]>()));
+            bytes = bytes.saturating_add(cells.capacity().saturating_mul(std::mem::size_of::<[i32; 3]>()));
         }
         for pair in st.narrow.contact_pairs() {
             bytes = bytes.saturating_add(4096);
@@ -1456,7 +1457,8 @@ impl World3 {
     }
 
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
-        // the loads first: a step that cannot get one is not taken, and nothing has changed
+        // a step that cannot get a load is not taken (its number does not advance), but what its start applied (the visibility, the fractures, the cuts)
+        // stays applied: asked again at this instant the world finds it installed and does the same, so the retry is deterministic
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
         // what a frame asked for at this instant has (its tail: the visibility, the fractures and the cuts, in that order) comes before the loads, so that a
         // driver that reads a body to load it finds the same body however the step is reached: after the world has been asked for the frame at this
