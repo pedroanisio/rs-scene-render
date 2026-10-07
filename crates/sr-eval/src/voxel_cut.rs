@@ -78,6 +78,8 @@ pub fn seed_of(id: &str) -> u64 {
 /// have come away from it.
 #[derive(Debug)]
 pub struct SimVoxels {
+    /// Whether the body takes part at this frame: an object of cells that has broken into its pieces does not.
+    pub enabled: bool,
     pub revision: u64,
     pub grid: Arc<Occupancy>,
     pub changed_bricks: Vec<[i32; 3]>,
@@ -92,6 +94,7 @@ pub struct SimVoxels {
 #[derive(Debug)]
 pub struct SimVoxelPiece {
     pub body: usize,
+    pub enabled: bool,
     pub revision: u64,
     pub grid: Arc<Occupancy>,
     pub pose3: [f64; 16],
@@ -102,7 +105,7 @@ pub struct SimVoxelPiece {
 #[derive(Debug)]
 pub(crate) struct VoxelOwner {
     pub(crate) model: Arc<crate::voxel_asset::VoxelModel>,
-    pub(crate) settings: Settings,
+    settings: Settings,
     /// The bodies of the world that take the pieces of its cuts, in order.
     pub(crate) slots: Vec<usize>,
     cut: std::sync::Mutex<Option<(sr_sim::physics3d::Impact3, Arc<CraterCut>)>>,
@@ -110,8 +113,18 @@ pub(crate) struct VoxelOwner {
 }
 
 impl VoxelOwner {
-    pub(crate) fn new(model: Arc<crate::voxel_asset::VoxelModel>, settings: Settings) -> Self {
-        VoxelOwner { model, settings, slots: Vec::new(), cut: Default::default(), grids: Default::default() }
+    pub(crate) fn new(info: &CellsInfo) -> Self {
+        VoxelOwner {
+            model: info.model.clone(),
+            settings: info.settings(),
+            slots: Vec::new(),
+            cut: Default::default(),
+            grids: Default::default(),
+        }
+    }
+
+    pub(crate) fn settings(&self) -> Settings {
+        self.settings
     }
 
     /// The cut that `impact` makes in the cells of the asset.
@@ -155,4 +168,69 @@ impl VoxelOwner {
         grids.insert((body, revision), grid.clone());
         Ok(grid)
     }
+}
+
+/// What the rigidBody of an object of cells says of it: its cells, how big they are, its density and what is done with the parts that come away.
+#[derive(Debug)]
+pub(crate) struct CellsInfo {
+    pub(crate) model: Arc<crate::voxel_asset::VoxelModel>,
+    pub(crate) size: [f64; 3],
+    pub(crate) density: f64,
+    pub(crate) pixels_per_meter: f64,
+    pub(crate) min_cells: usize,
+    pub(crate) max_fragments: usize,
+    pub(crate) overflow: crate::voxels::Overflow,
+    pub(crate) anchor: Anchor,
+}
+
+impl CellsInfo {
+    pub(crate) fn settings(&self) -> Settings {
+        Settings {
+            rock: Rock {
+                size: self.size,
+                density: self.density,
+                pixels_per_meter: self.pixels_per_meter,
+                policy: crate::voxels::Policy {
+                    stay: Stay::Largest,
+                    min_cells: self.min_cells,
+                    max_fragments: self.max_fragments,
+                    overflow: self.overflow,
+                },
+            },
+            anchor: self.anchor,
+        }
+    }
+}
+
+/// An object of cells that breaks into pieces at its time (`fracture`): the event of the world it is, and the pieces' bodies with their cells.
+#[derive(Debug)]
+pub(crate) struct CellFracture {
+    pub(crate) event: usize,
+    pub(crate) source: Arc<Occupancy>,
+    pub(crate) pieces: Vec<(usize, Arc<Occupancy>)>,
+}
+
+/// The planes of a `fracture@planes` (groups of nx ny nz offset in object units: a cell is on the positive side if its centre has n . p >= offset),
+/// as the integer planes of a partition over doubled cell coordinates. The normal is scaled by 2^20 and rounded, so a plane whose numbers are multiples
+/// of 2^-20 is exact and any other is rounded to the cell side that its rounded numbers say; the offset is 2 offset / cellSize scaled the same.
+pub(crate) fn planes_of(text: &str, cell_size: f64) -> Result<Vec<sr_3d::pieces::Plane>, String> {
+    const K: f64 = 1_048_576.0;
+    let numbers: Vec<f64> = text
+        .split_whitespace()
+        .map(|t| t.parse::<f64>().map_err(|_| format!("the plane number {t:?} is not a number")))
+        .collect::<Result<_, _>>()?;
+    if numbers.is_empty() || !numbers.len().is_multiple_of(4) || numbers.len() > 4 * sr_3d::pieces::MAX_PLANES {
+        return Err(format!("planes takes from one to {} planes of four numbers", sr_3d::pieces::MAX_PLANES));
+    }
+    numbers
+        .chunks(4)
+        .map(|q| {
+            let normal = [q[0], q[1], q[2]].map(|c| (c * K).round());
+            let offset = (q[3] * 2.0 / cell_size * K).round();
+            if !normal.iter().chain(&[offset]).all(|v| v.is_finite() && v.abs() < 1e15) {
+                return Err("a plane has a number out of range".to_string());
+            }
+            Ok(sr_3d::pieces::Plane { normal: normal.map(|c| c as i64), offset: offset as i128 })
+        })
+        .collect()
 }
