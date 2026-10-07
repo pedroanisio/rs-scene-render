@@ -70,6 +70,7 @@ struct Shot {
     draws: usize,
     groups: usize,
     errors: Vec<String>,
+    notes: Vec<String>,
 }
 
 fn render(gpu: &sr_gpu::Gpu, xml: &str) -> Shot {
@@ -85,6 +86,7 @@ fn render(gpu: &sr_gpu::Gpu, xml: &str) -> Shot {
         draws: out.stats.objects3d,
         groups: out.stats.voxel_groups,
         errors: out.stats.errors.clone(),
+        notes: out.stats.unsupported.clone(),
     }
 }
 
@@ -107,6 +109,7 @@ fn a_block_of_voxels_is_six_quads_in_the_colour_of_its_palette_whichever_rendere
     for camera in ["", r#"renderer="pathtrace" pathSamples="8" maxBounces="2""#] {
         let shot = render(&gpu, &document(&file, "", camera, ""));
         assert!(shot.errors.is_empty(), "{:?}", shot.errors);
+        assert!(shot.notes.is_empty(), "cells of a unit have nothing to say: {:?}", shot.notes);
         assert_eq!((shot.triangles, shot.draws, shot.groups), (12, 1, 1), "six quads, one draw: {camera}");
         let c = centre(&shot);
         assert!(
@@ -311,18 +314,26 @@ fn the_shadow_of_a_block_is_the_same_whatever_the_size_of_its_cells_down_to_the_
         println!("{renderer}: pixels that differ from the picture of cells of 1, by cell size, of {shadow} that are the shadow's: {by_size:?}");
         // above a unit nothing changes; below it the raster renderer's shadow loses its offsets (the SREP says from which size, and why
         // the path tracer's holds longer); these are the measured limits: a fix that scales them with the scene fails the last two
+        // every measurement is a band around what was measured (the SREP states them): raster 6, 5, 9, 23, 51, 51, 51 and path tracer
+        // 0, 0, 0, 2, 5, 5, 12 at 4, 2, 0.5, 0.25, 0.1, 0.05, 0.02
         for (size, diff) in &by_size {
-            match (renderer, *size) {
-                // the shadow map's texels follow the size of the scene, so the raster edge moves by a few pixels (6 measured at 4)
-                ("raster", s) if s >= 2.0 => assert!(*diff <= 8, "{renderer}: {diff} pixels differ at {s}"),
-                ("raster", s) if s >= 0.5 => assert!(*diff <= 12, "{renderer}: {diff} pixels differ at {s}"),
-                (_, s) if s >= 2.0 => assert!(*diff <= 2, "{renderer}: {diff} pixels differ at {s}"),
-                ("raster", s) if s <= 0.1 => {
-                    assert!(*diff >= shadow * 9 / 10, "{renderer}: the shadow is gone at {s}: {diff} of {shadow}")
-                }
-                ("path tracer", s) if s >= 0.25 => assert!(*diff <= 4, "{renderer}: {diff} pixels differ at {s}"),
-                _ => {}
-            }
+            let (lo, hi) = match (renderer, (*size * 100.0).round() as u32) {
+                // the shadow map's texels follow the size of the scene, so the raster edge moves by a few pixels
+                ("raster", 400 | 200) => (0, 8),
+                ("raster", 50) => (0, 12),
+                ("raster", 25) => (15, 30),
+                // the shadow is gone: the pixels that differ are the shadow's
+                ("raster", 10 | 5 | 2) => (shadow * 9 / 10, usize::MAX),
+                ("path tracer", 400 | 200 | 50) => (0, 2),
+                ("path tracer", 25) => (0, 4),
+                ("path tracer", 10 | 5) => (0, 8),
+                ("path tracer", 2) => (6, 16),
+                other => panic!("a size that is not measured: {other:?}"),
+            };
+            assert!(
+                (lo..=hi).contains(diff),
+                "{renderer}: {diff} pixels differ at {size}, measured between {lo} and {hi}"
+            );
         }
     }
 }
@@ -339,6 +350,7 @@ fn shot_at(renderer: &mut sr_gpu::Renderer, ev: &sr_eval::Evaluator, t: f64) -> 
         draws: out.stats.objects3d,
         groups: out.stats.voxel_groups,
         errors: out.stats.errors.clone(),
+        notes: out.stats.unsupported.clone(),
     }
 }
 

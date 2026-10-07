@@ -1501,13 +1501,25 @@ impl<'a> Eval<'a> {
                     || "voxels, cellSize, palette, surface and surfaceMemoryMiB belong to primitive=\"voxels\".".into(),
                 );
                 // measured: the raster renderer's shadow of a block of cells of 0.25 differs in 23 pixels of 51 from that of cells of 1, and is
-                // gone at 0.1 (its offsets and biases do not follow the size of the cells); from 0.5 up the difference is that of a unit
-                if voxels && a("cellSize").map(xpath_number).is_some_and(|c| c < 0.5) {
-                    self.warn(
-                        n,
-                        "W09",
-                        "a voxels object with cellSize below 0.5 casts a raster shadow that is displaced or lost (the path tracer's holds down to 0.05): make the cells 0.5 or larger and scale the object.".into(),
-                    );
+                // gone at 0.1 (its offsets and biases are fixed in the units of the scene); from 0.5 up the difference is that of a unit. The
+                // size that counts is the cell's in the scene: the object's cellSize, else its asset's, times the smallest side of the object's scale
+                if voxels {
+                    let asset_size = a("voxels").and_then(|id| {
+                        n.document()
+                            .root_element()
+                            .descendants()
+                            .find(|d| d.is_element() && is(*d, "voxelAsset") && d.attribute("id") == Some(id))
+                            .and_then(|d| d.attribute("cellSize"))
+                    });
+                    let scale = ["scaleX", "scaleY", "scaleZ"].map(|k| a(k).map_or(1.0, xpath_number).abs());
+                    let size = a("cellSize").or(asset_size).map(xpath_number);
+                    if size.is_some_and(|c| c * scale.into_iter().fold(f64::INFINITY, f64::min) < 0.5) {
+                        self.warn(
+                            n,
+                            "W09",
+                            "the cells of a voxels object are smaller than 0.5 in the scene (the cell size times the object's scale): the shadow the raster renderer casts from them is displaced or lost, and the path tracer's holds down to 0.05; larger cells in the scene (a coarser model or a larger object) or the path tracer avoid it.".into(),
+                        );
+                    }
                 }
                 let palette_ok = a("palette").is_none_or(|p| {
                     let tokens: Vec<&str> = p.split_whitespace().collect();

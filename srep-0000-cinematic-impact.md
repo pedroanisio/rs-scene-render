@@ -3200,8 +3200,7 @@ two quads is more likely; the surface is not conformed (no vertex is added on th
 the same picture at any size if the shadow scales with the scene. Measured against the picture of cells of 1 (the shadow is 51 pixels in the raster renderer and 61
 in the path tracer): the raster picture differs by 6, 5, 9, 23 and 51 pixels at cells of 4, 2, 0.5, 0.25 and 0.1 (and 51 at 0.05 and 0.02, where the shadow is gone), because
 the offsets and biases of its shadow map are fixed in the units of the scene; the path tracer differs by 0, 0, 0, 2, 5, 5 and 12 pixels at 4, 2, 0.5, 0.25, 0.1, 0.05 and
-0.02. A voxels object with `cellSize` below 0.5 has the warning W09 (the point from which the raster difference is more than a unit's of noise); the remedy is larger cells
-and an object scaled down, which gives the same picture. The measurement is one scene and one sun angle.
+0.02. The size that matters is the cell's in the scene: the object's `cellSize` (else the asset's, else the file's) times the smallest side of the object's scale. A voxels object whose cells are smaller than 0.5 in the scene has the warning W09 where the document says it (the `cellSize` of the object or of its asset, and the object's `scaleX`, `scaleY` and `scaleZ`; the scale of a parent group and the grid scale of a file are not in it), and the renderer reports it in its notes for any object, with the size in the scene, since the file's is not in the document. Cells of 1 on an object scaled to a quarter are cells of 0.25 and are warned; the remedy is larger cells in the scene (a coarser model or a larger object) or the path tracer, not a change of `cellSize` that a scale undoes. The measurement is one scene and one sun angle.
 
 **Measured cost** (`crates/sr-3d/examples/voxel_surface_probe.rs`, `ci` profile, one core of the host, the CPU side only: the exposed faces, their merge
 into quads and the expansion into 96-byte vertices; the upload and the draw are not in it):

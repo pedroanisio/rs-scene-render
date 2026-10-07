@@ -180,7 +180,20 @@ impl Renderer {
                 return;
             }
         };
-        let cell_size = a.opt("cellSize").or(model.cell_size).unwrap_or(1.0) as f32;
+        let cell_size = sr_eval::voxel_asset::cell_size(a.opt("cellSize"), &model) as f32;
+        // measured (see the SREP): the raster shadow of cells smaller than 0.5 in the scene is displaced or lost. The size comes from the file
+        // as well as from the document, so the renderer says it where the validator cannot
+        let scale = (0..3).map(|c| world.col(c).truncate().length()).fold(f32::INFINITY, f32::min);
+        let in_scene = (cell_size * scale * 1e4).round() / 1e4;
+        if in_scene < 0.5 {
+            let note = format!(
+                "{}: cells of {in_scene} in the scene (the cell size times the scale of the object), below 0.5: the shadow that the raster renderer casts from them is displaced or lost, and the path tracer's holds down to 0.05",
+                n.id
+            );
+            if !plan.stats.unsupported.contains(&note) {
+                plan.stats.unsupported.push(note);
+            }
+        }
         let budget = (a.num("surfaceMemoryMiB", 128.0) as usize) << 20;
         // the bodies: what the simulation says when it cuts this object, else the asset's cells
         let mut bodies: Vec<Body> = Vec::new();

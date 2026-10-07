@@ -56,6 +56,7 @@ struct Frames {
     pixels: Vec<[f32; 4]>,
     surfaces: Vec<sr_gpu::VoxelSurfaceStat>,
     errors: Vec<String>,
+    notes: Vec<String>,
 }
 
 fn draw(renderer: &mut sr_gpu::Renderer, ev: &sr_eval::Evaluator, t: f64) -> (Frames, sr_eval::FrameGraph) {
@@ -67,6 +68,7 @@ fn draw(renderer: &mut sr_gpu::Renderer, ev: &sr_eval::Evaluator, t: f64) -> (Fr
             pixels: renderer.read(&out.texture),
             surfaces: out.stats.voxel_surfaces.clone(),
             errors: out.stats.errors.clone(),
+            notes: out.stats.unsupported.clone(),
         },
         frame,
     )
@@ -97,6 +99,13 @@ fn the_surface_of_the_ground_after_the_cut_is_the_surface_of_a_full_remesh_of_it
         let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
         let (before, frame) = draw(&mut renderer, &ev, 0.05);
         assert!(before.errors.is_empty(), "{:?}", before.errors);
+        // the cells of the file are a quarter of a unit in the scene, below the size the raster shadow is measured down to: the renderer says so
+        // (the document does not, for the size is in the file) and a size at or above it says nothing
+        assert!(
+            before.notes.iter().any(|n| n.contains("ground") && n.contains("cells of 0.25 in the scene")),
+            "{camera}: {:?}",
+            before.notes
+        );
         let ground = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap().voxels.clone().unwrap();
         assert_eq!(before.surfaces.len(), 1, "the ground, whole");
         assert_eq!((before.surfaces[0].revision, before.surfaces[0].full), (0, true));

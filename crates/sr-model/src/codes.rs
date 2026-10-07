@@ -68,7 +68,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     (
         "W09",
         "rules",
-        "An object3D of primitive=\"voxels\" has a cellSize below 0.5: the shadow the raster renderer casts from such small cells is displaced or lost (measured: 23 of 51 pixels differ at 0.25, all at 0.1 and below); the path tracer's holds down to 0.05.",
+        "The cells of an object3D of primitive=\"voxels\" are smaller than 0.5 in the scene (cellSize of the object or of its asset times the smallest side of its scale): the shadow the raster renderer casts from such small cells is displaced or lost (measured: 23 of 51 pixels differ at 0.25, all at 0.1 and below); the path tracer's holds down to 0.05.",
     ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
