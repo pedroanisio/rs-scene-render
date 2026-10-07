@@ -51,8 +51,8 @@ fn every_cell_and_every_kilogram_of_the_source_is_in_exactly_one_piece() {
     assert_eq!(cells_of(&f.source.shape).len(), o.count() as usize);
     // the pieces are the graph's, in its order, with its joints
     assert_eq!(f.graph, partition(&o, Partition::Voronoi { seeds: 5, seed: 7 }, 16).unwrap());
-    assert_eq!(f.graph.pieces.len(), f.pieces.len());
-    assert!(!f.graph.edges.is_empty());
+    assert_eq!(f.graph.pieces().len(), f.pieces.len());
+    assert!(!f.graph.edges().is_empty());
 }
 
 #[test]

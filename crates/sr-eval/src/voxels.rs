@@ -173,9 +173,9 @@ pub fn fracture(
     let graph = sr_3d::pieces::partition(occupancy, rule, max_pieces)?;
     let one = cell_mass(size, density, pixels_per_meter)?;
     let pieces = graph
-        .pieces
+        .pieces()
         .iter()
-        .map(|p| Body { shape: Shape3::Voxels { size, cells: p.cells.clone() }, mass: p.cells.len() as f64 * one })
+        .map(|p| Body { shape: Shape3::Voxels { size, cells: p.cells().to_vec() }, mass: p.cells().len() as f64 * one })
         .collect();
     Ok(Fractured { source, pieces, graph })
 }
