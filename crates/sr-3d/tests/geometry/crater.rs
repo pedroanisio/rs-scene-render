@@ -415,3 +415,18 @@ fn the_profile_of_the_bowl_and_of_the_rim_are_readable_and_hold_the_volumes_of_t
     assert_eq!(plain.bowl_exponent(), 2.0);
     assert!(crater.bowl_exponent() >= 2.0);
 }
+
+#[test]
+fn the_readable_profile_is_the_surface_the_map_gives_to_a_point_on_the_original_ground() {
+    // with no mantle the grown surface over a point of the original ground is the rim less the bowl, and `map` is what draws it: the two
+    // accessors are that surface, which is what a voxel crater has to follow
+    let (spec, budget) = authored();
+    let crater = Crater::conserving(spec, Budget { ejecta: 0.0, bulking: Some(1.0), ..budget }).unwrap();
+    for r in [0.0, 1.0, 3.3, 5.0, 5.6, 6.0, 6.6, 7.0, 7.9, 8.1, 9.5, 12.0] {
+        let moved = crater.map([r, 0.0, 0.0], 1.0).unwrap().position;
+        // the axis is minus z: the height gained along it is minus the change of z
+        let height = -moved[2];
+        let wanted = -crater.bowl_depth_at(r) + crater.rim_height_at(r);
+        assert!((height - wanted).abs() < 1e-12, "r = {r}: the map gives {height}, the profile {wanted}");
+    }
+}

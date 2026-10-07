@@ -1,22 +1,30 @@
-//! A crater in ground made of cells: what the law's bowl takes out, what is thrown and what is heaped on the rim, counted in cells.
+//! A crater in ground made of cells: what the law's crater takes out, what is thrown and what is heaped on the rim, counted in cells.
 //!
 //! Pure functions of an [`Occupancy`] and the kernel of the crater ([`sr_3d::crater::Crater`], which holds the law's bowl, its rim and
 //! its volume budget), in metres in the frame of the cells: the cell `[i, j, k]` has its centre at `(i + 1/2, j + 1/2, k + 1/2)` cells.
+//! The kernel is the conserving one of a crater with a bulking of 1 (`Crater::conserving` with `Budget::bulking = Some(1.0)`), whose bowl
+//! holds the law's volume and whose rim holds what the law does not throw out (0.2 of it): a cell is a cell of the same mass, so
+//! nothing can be heaped that was not taken out. The kernel and the cells must be in the same units (metres): a crater of the scene's units
+//! (100 to a metre) over cells in metres is refused.
 //!
-//! * **Removal.** A cell is taken out when its centre is inside the crest radius and between the floor of the bowl
-//!   ([`Crater::bowl_depth_at`]) and one crest radius above the crater's plane: so the removed cells are the law's bowl, to the half cell
-//!   that a centre decides, and what stands in its way above the plane.
+//! * **Removal.** The surface the grown crater leaves over the original ground at distance `r` from the axis is the kernel's own:
+//!   `S(r) = rim_height_at(r) - bowl_depth_at(r)` along the axis. A filled cell is taken out when its centre is inside the crest radius plus the width of
+//!   the rim, over that surface, and under one crest radius above the crater's plane: so what is taken out is the law's bowl to the half cell that a
+//!   centre decides, less the wall that the lip stands on, and what stands in the way above the plane.
 //! * **The budget, in cells.** Of the `N` cells removed, the law says its share (0.8) is thrown out; the rest is uplift, which is not lost: it is
 //!   heaped on the rim, so exactly `N - T` cells are made on the rim, with the palette of the cells that were uplifted. Cells are neither made nor
-//!   lost, and no kilogram is: a cell is always a cell of the same mass.
-//! * **Which cells are thrown.** The cells are ordered by their distance from the axis, then by height, then by the scan. The first `T` are
-//!   thrown (the middle of the crater, which the law launches fastest), the others are the uplift (the wall).
+//!   lost, and no kilogram is.
+//! * **Which cells are thrown.** The cells are ordered by their distance from the axis, then by height (the highest first), then by the scan. The
+//!   first `T` are thrown: the middle of the crater, and at one distance the shallowest, which is what the law launches fastest (the Z-model of
+//!   Maxwell: the speed of the ejecta falls with the depth they come from). The others are the uplift (the wall).
 //! * **Speeds.** Not from the cells: the energy of the impact is not in them. The engine's launch model ([`sr_sim::cratering::ejecta`])
 //!   gives the distribution of mass over speed, and the thrown cells take it by quantiles: cell `i` of `T` has the speed above which
 //!   the fraction `(i + 1/2) / T` of the law's mass lies. So the mass is the cells' to the last bit, the distribution is the law's to a
 //!   cell, and nothing depends on a random draw but the launch angle, which is a hash of the seed and the cell.
-//! * **The rim.** Cells are added one by one where the rim of the law stands (within its width of the crest radius, up to its height and a
-//!   little more), each held up by ground or by a cell already added, nearest the crest first and lowest first.
+//! * **The rim.** The law's rim is the surface `S` raised by `rim_height_at(r)` over the bowl: the height of a cell over the floor of the bowl in units
+//!   of the height of the rim is its *level*, and the rim is the level set of the first `N - T` cells that are held up, lowest level first: the surface of
+//!   the law's rim, scaled by [`Excavation::rim_scale`] (near 1 when the budget is the law's), on both sides of the crest radius. A cell is held up when the
+//!   face-neighbour under it (the one most nearly against the axis) is ground or another cell of the rim.
 //!
 //! The result does not depend on the order the cells were put in the grid.
 
@@ -93,6 +101,8 @@ pub struct Excavation {
     pub uplift: Vec<[i32; 3]>,
     /// The cells made on the rim with their palette index, as many as the uplift, in the order of the scan.
     pub rim: Vec<([i32; 3], u8)>,
+    /// The level of the highest cell of the rim: how much the law's rim was scaled to hold the cells that were not thrown (0 with none).
+    pub rim_scale: f64,
 }
 
 fn scan(c: &[i32; 3]) -> (i32, i32, i32) {
@@ -115,6 +125,27 @@ fn unit(seed: u64, cell: [i32; 3]) -> f64 {
     (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// The order cells are added to the rim in: the level, then the scan, on a total order of floats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rank {
+    level: f64,
+    scan: (i32, i32, i32),
+}
+
+impl Eq for Rank {}
+
+impl PartialOrd for Rank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Rank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.level.total_cmp(&other.level).then(self.scan.cmp(&other.scan))
+    }
+}
+
 struct Frame {
     centre: [f64; 3],
     axis: [f64; 3],
@@ -134,34 +165,42 @@ impl Frame {
         let r2: f64 = (0..3).map(|i| (d[i] - a * self.axis[i]).powi(2)).sum();
         (a, r2.sqrt())
     }
-}
 
-/// Ordered by total order on floats, for the ranks of the rim.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Rank {
-    distance: f64,
-    height: f64,
-    scan: (i32, i32, i32),
-}
-
-impl Eq for Rank {}
-
-impl PartialOrd for Rank {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+    /// The face direction of the lattice most nearly against the axis: what is under a cell.
+    fn down(&self) -> [i32; 3] {
+        let mut best = ([0, 0, 0], f64::NEG_INFINITY);
+        for a in 0..3 {
+            for d in [-1i32, 1] {
+                let against = -f64::from(d) * self.axis[a];
+                if against > best.1 {
+                    let mut v = [0; 3];
+                    v[a] = d;
+                    best = (v, against);
+                }
+            }
+        }
+        best.0
     }
 }
 
-impl Ord for Rank {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.distance
-            .total_cmp(&other.distance)
-            .then(self.height.total_cmp(&other.height))
-            .then(self.scan.cmp(&other.scan))
+/// The largest crest radius, in cells, that a crater may have: a bigger one means that the crater is in other units than the cells.
+const MAX_CREST_CELLS: f64 = 2000.0;
+/// The rim is looked for up to this level: a rim that would need more is an error (the law's rim has not the room).
+const MAX_LEVEL: f64 = 4.0;
+
+/// The range of cell indices, inclusive, that a span of `centre` plus or minus `reach` metres covers.
+fn index_range(centre: f64, reach: f64, h: f64) -> Result<(i32, i32), String> {
+    let (lo, hi) = (((centre - reach) / h).floor(), ((centre + reach) / h).ceil());
+    let limit = f64::from(sr_3d::occupancy::KEY_LIMIT) - 4.0;
+    if !(lo.is_finite() && hi.is_finite()) || lo < -limit || hi > limit {
+        return Err(
+            "the crater is out of the range of the cells' keys, or in other units than the cells' (metres)".into()
+        );
     }
+    Ok((lo as i32, hi as i32))
 }
 
-/// Takes the crater's bowl out of `before` (cells of `h` metres a side), throws its share and heaps the rest on the rim.
+/// Takes the crater out of `before` (cells of `h` metres a side), throws its share and heaps the rest on the rim.
 pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection) -> Result<Excavation, String> {
     if !(h.is_finite() && h > 0.0) {
         return Err("a cell must have a positive size".into());
@@ -172,29 +211,38 @@ pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection
     let spec = crater.spec();
     let frame = Frame { centre: spec.center, axis: crater.axis(), h };
     let (crest, width) = (spec.radius, spec.rim_width);
+    if crest / h > MAX_CREST_CELLS {
+        return Err(format!(
+            "the crest radius of the crater is {:.0} cells: the crater is in other units than the cells' (metres)",
+            crest / h
+        ));
+    }
     let ceiling = crest;
-    let in_bowl = |p: [f64; 3]| {
+    let surface = |r: f64| crater.rim_height_at(r) - crater.bowl_depth_at(r);
+    let taken = |p: [f64; 3]| {
         let (a, r) = frame.polar(p);
-        r < crest && a >= -crater.bowl_depth_at(r) && a <= ceiling
+        r < crest + width && a >= surface(r) && a <= ceiling
     };
-    // the filled cells that are in the bowl: only the bricks that the crater's box touches are looked at
-    let reach = crest + spec.depth + width + 2.0 * h;
-    let (lo, hi): ([i32; 3], [i32; 3]) = (
-        std::array::from_fn(|i| ((frame.centre[i] - reach) / h).floor() as i32 - 1),
-        std::array::from_fn(|i| ((frame.centre[i] + reach) / h).ceil() as i32 + 1),
-    );
+    // the filled cells that the crater takes out: only the bricks that the crater's box touches are looked at
+    let reach = crest + width + spec.depth.max(spec.rim_height) + 2.0 * h;
+    let (x0, x1) = index_range(frame.centre[0], reach, h)?;
+    let (y0, y1) = index_range(frame.centre[1], reach, h)?;
+    let (z0, z1) = index_range(frame.centre[2], reach, h)?;
+    let (lo, hi) = ([i64::from(x0), i64::from(y0), i64::from(z0)], [i64::from(x1), i64::from(y1), i64::from(z1)]);
+    let brick = i64::from(sr_3d::occupancy::BRICK);
     let mut removed: Vec<[i32; 3]> = Vec::new();
     for (key, cells) in before.bricks() {
-        let corner = key.map(|k| k * sr_3d::occupancy::BRICK);
-        if (0..3).any(|i| corner[i] + sr_3d::occupancy::BRICK <= lo[i] || corner[i] > hi[i]) {
+        let corner = key.map(|k| i64::from(k) * brick);
+        if (0..3).any(|i| corner[i] + brick <= lo[i] || corner[i] > hi[i]) {
             continue;
         }
         for (i, palette) in cells.iter().enumerate() {
             if *palette == 0 {
                 continue;
             }
-            let cell = [corner[0] + (i % 8) as i32, corner[1] + ((i / 8) % 8) as i32, corner[2] + (i / 64) as i32];
-            if in_bowl(frame.point(cell)) {
+            let cell = [corner[0] + (i % 8) as i64, corner[1] + ((i / 8) % 8) as i64, corner[2] + (i / 64) as i64]
+                .map(|c| c as i32);
+            if taken(frame.point(cell)) {
                 removed.push(cell);
             }
         }
@@ -202,10 +250,10 @@ pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection
     removed.sort_by_key(scan);
     let n = removed.len();
     let thrown_count = ((ejection.share * n as f64).round() as usize).min(n);
-    // the middle first: by distance from the axis, then by height, then by the scan
+    // the middle first: by distance from the axis, then the highest, then the scan
     let key = |c: &[i32; 3]| {
         let (a, r) = frame.polar(frame.point(*c));
-        (r, a, scan(c))
+        (r, -a, scan(c))
     };
     let mut ranked: Vec<[i32; 3]> = removed.clone();
     ranked.sort_by(|x, y| {
@@ -228,92 +276,78 @@ pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection
     }
     let mut uplift: Vec<[i32; 3]> = ranked[thrown_count..].to_vec();
     uplift.sort_by_key(scan);
-    let rim = heap_rim(before, crater, &frame, &removed, uplift.len())?
-        .into_iter()
-        .zip(uplift.iter())
-        .map(|(cell, source)| (cell, before.get(*source)))
-        .collect::<Vec<_>>();
-    let mut rim = rim;
+    let (heaped, rim_scale) = heap_rim(before, crater, &frame, &removed, uplift.len(), (lo, hi))?;
+    let mut rim: Vec<([i32; 3], u8)> =
+        heaped.into_iter().zip(uplift.iter()).map(|(cell, source)| (cell, before.get(*source))).collect();
     rim.sort_by_key(|(c, _)| scan(c));
-    Ok(Excavation { removed, thrown, uplift, rim })
+    Ok(Excavation { removed, thrown, uplift, rim, rim_scale })
 }
 
-/// The `count` cells to add on the rim, in the order they are added.
+/// The `count` cells to add on the rim, in the order they are added, and the level of the last: the lowest level first, each held up.
 fn heap_rim(
     before: &Occupancy,
     crater: &Crater,
     frame: &Frame,
     removed: &[[i32; 3]],
     count: usize,
-) -> Result<Vec<[i32; 3]>, String> {
+    (lo, hi): ([i64; 3], [i64; 3]),
+) -> Result<(Vec<[i32; 3]>, f64), String> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0.0));
     }
     let spec = crater.spec();
-    let (crest, width, h) = (spec.radius, spec.rim_width, frame.h);
+    let (crest, width) = (spec.radius, spec.rim_width);
     let gone: BTreeSet<(i32, i32, i32)> = removed.iter().map(scan).collect();
-    let solid = |c: [i32; 3], chosen: &BTreeSet<(i32, i32, i32)>| {
-        (before.get(c) != 0 && !gone.contains(&scan(&c))) || chosen.contains(&scan(&c))
-    };
-    let eligible = |c: [i32; 3]| -> Option<Rank> {
+    let down = frame.down();
+    let below = |c: [i32; 3]| [c[0] + down[0], c[1] + down[1], c[2] + down[2]];
+    let above = |c: [i32; 3]| [c[0] - down[0], c[1] - down[1], c[2] - down[2]];
+    let ground = |c: [i32; 3]| before.get(c) != 0 && !gone.contains(&scan(&c));
+    // the level of a cell that the rim could hold: empty, not taken out, over the floor of the bowl, under the highest level looked for
+    let level = |c: [i32; 3]| -> Option<f64> {
         if before.get(c) != 0 || gone.contains(&scan(&c)) {
             return None;
         }
         let (a, r) = frame.polar(frame.point(c));
-        let in_bowl = r < crest && a >= -crater.bowl_depth_at(r) && a <= crest;
-        if in_bowl || (r - crest).abs() > width + h || a > spec.rim_height + 2.0 * h {
+        let rim = crater.rim_height_at(r);
+        if r >= crest + width || rim <= 0.0 {
             return None;
         }
-        Some(Rank { distance: (r - crest).abs(), height: a, scan: scan(&c) })
+        let g = (a + crater.bowl_depth_at(r)) / rim;
+        (g > 0.0 && g < MAX_LEVEL).then_some(g)
     };
-    let neighbours = |c: [i32; 3]| {
-        (0..3).flat_map(move |a| {
-            [-1i32, 1].into_iter().map(move |d| {
-                let mut n = c;
-                n[a] += d;
-                n
-            })
-        })
-    };
-    // the cells of the region, and which of them stand on the ground
-    let reach = crest + width + spec.rim_height + 3.0 * h;
-    let (lo, hi): ([i32; 3], [i32; 3]) = (
-        std::array::from_fn(|i| ((frame.centre[i] - reach) / h).floor() as i32),
-        std::array::from_fn(|i| ((frame.centre[i] + reach) / h).ceil() as i32),
-    );
     let mut heap: BinaryHeap<Reverse<(Rank, [i32; 3])>> = BinaryHeap::new();
     let mut queued: BTreeSet<(i32, i32, i32)> = BTreeSet::new();
-    let none = BTreeSet::new();
+    let rank = |g: f64, c: [i32; 3]| Rank { level: g, scan: scan(&c) };
     for k in lo[2]..=hi[2] {
         for j in lo[1]..=hi[1] {
             for i in lo[0]..=hi[0] {
-                let cell = [i, j, k];
-                if let Some(rank) = eligible(cell) {
-                    if neighbours(cell).any(|n| solid(n, &none)) && queued.insert(scan(&cell)) {
-                        heap.push(Reverse((rank, cell)));
+                let cell = [i as i32, j as i32, k as i32];
+                if let Some(g) = level(cell) {
+                    if ground(below(cell)) && queued.insert(scan(&cell)) {
+                        heap.push(Reverse((rank(g, cell), cell)));
                     }
                 }
             }
         }
     }
-    let mut chosen: BTreeSet<(i32, i32, i32)> = BTreeSet::new();
     let mut order = Vec::with_capacity(count);
+    let mut last = 0.0;
     while order.len() < count {
-        let Some(Reverse((_, cell))) = heap.pop() else {
+        let Some(Reverse((r, cell))) = heap.pop() else {
             return Err(format!(
                 "the rim has room for {} of the {count} cells that are to be heaped on it",
                 order.len()
             ));
         };
-        chosen.insert(scan(&cell));
+        last = r.level;
         order.push(cell);
-        for next in neighbours(cell) {
-            if let Some(rank) = eligible(next) {
-                if queued.insert(scan(&next)) {
-                    heap.push(Reverse((rank, next)));
-                }
+        // the cell over this one is held up now
+        let up = above(cell);
+        if let Some(g) = level(up) {
+            if queued.insert(scan(&up)) {
+                heap.push(Reverse((rank(g, up), up)));
             }
         }
     }
-    Ok(order)
+    Ok((order, last))
 }
