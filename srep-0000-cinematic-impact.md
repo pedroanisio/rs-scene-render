@@ -841,14 +841,21 @@ zero lets go of nothing, never makes room and holds 158 at the top face at 6 s, 
 hero film follows to its end needs 145 units and its margins, about 240 for a margin of 12 cells, and that is 64 x 80 x 64 cells
 against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with them.
 
+The hero scene sets `follow="true" followMargin="3" followLoss="0.001"` on its `<pyro>`: the default margin of 12 cells (36
+units there) does not fit a window of 52 rows with a plume of 145 units, and a loss above zero is what makes the window follow
+at all. The margin is in cells, so a copy of the scene with cells of 1.5 units (`hero-hires.scene.xml`) needs a margin of 6 for the
+same distance. Whether the frame at 3 s of the 720p probe changes with the window is for the render to say (the window does not
+move before the plume nears a face, so the smoke may be bit for bit the same until then).
+
 Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to its
 source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit between
 its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and `follow` is the
 saving in cells for a plume that has left its source behind, not a free height. A `followLoss` large enough to let go of the stem
 loses visible smoke: the stem is part of the plume (a heated puff keeps 11 % of its smoke in a stem below the rows its head has
 left). The margin and the loss are the engine's values with no published source. The decision reads the density, the velocity and
-the temperature of every cell once a step (one serial pass), and its cost at 128 x 104 x 128 against a step of 485 ms is not yet
-measured here.
+the temperature of every cell once a step (one serial pass), and its cost, measured (sr-sim `follow`, ignored test `cost_of_the_decision_against_a_step`, ci profile, one core for the
+decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
+and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
 
 ### Three-dimensional particles
 

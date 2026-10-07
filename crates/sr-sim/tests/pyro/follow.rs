@@ -365,3 +365,54 @@ fn a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it(
         sim.step(&input).unwrap();
     }
 }
+
+/// What a decision of the window costs against a step of the solver, on the grid of the heaviest cinematic plume.
+/// Run it with `-- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn cost_of_the_decision_against_a_step() {
+    for (cells, size) in [([128usize, 104, 128], 1.5), ([192, 156, 192], 1.0)] {
+        cost_at(cells, size);
+    }
+}
+
+fn cost_at(cells: [usize; 3], voxel_size: f64) {
+    let spec = Spec {
+        cells,
+        origin: cells.map(|n| -0.5 * n as f64 * voxel_size),
+        voxel_size,
+        dt: 1.0 / 24.0,
+        boundary: Boundary::Open,
+        buoyancy: 0.003,
+        solver: sr_sim::pyro::PressureSolver::Multigrid,
+        pressure_iterations: 200,
+        pressure_tolerance: 1e-3,
+        max_bytes: 4 << 30,
+        follow: Some(Follow { margin: 6, loss: 1e-3 }),
+        ..Spec::default()
+    };
+    let mut sim = Simulation::new(spec).unwrap();
+    let source = Source {
+        shape: Shape::Sphere { center: [0.0, 30.0, 0.0], radius: 14.0 },
+        density_rate: 4.0,
+        temperature_rate: 1200.0,
+        velocity_rate: [0.0, -20.0, 0.0],
+        expansion: 2.0,
+        ..Source::default()
+    };
+    let input = Inputs { sources: vec![source], ..Inputs::default() };
+    let mut steps = Vec::new();
+    let mut decisions = Vec::new();
+    for _ in 0..8 {
+        let started = std::time::Instant::now();
+        sim.step(&input).unwrap();
+        steps.push(started.elapsed().as_secs_f64());
+        let started = std::time::Instant::now();
+        let decided = sim.state().follow_decision(6, 1e-3, 1.0 / 24.0, &[]);
+        decisions.push(started.elapsed().as_secs_f64());
+        std::hint::black_box(decided);
+    }
+    let best = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
+    let (step, decision) = (best(&steps[3..]), best(&decisions[3..]));
+    println!("COST {cells:?}: step {step:.4} s, decision {decision:.4} s, {:.1} % of a step", 100.0 * decision / step);
+}
