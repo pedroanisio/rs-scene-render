@@ -683,6 +683,17 @@ fn the_same_four_ways<D: Driver3>(
         let restored = replay.checkpoint_restores();
         let got = replay.frame_at(t, &mut d);
         assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
+        // and from the checkpoint just before it (one is taken each second, every 100 steps), a later one than the first for the steps from 100 on
+        let expected = (*s / 100) * 100;
+        assert_eq!(
+            replay.last_restored_checkpoint(),
+            Some(expected),
+            "step {s} was replayed from the checkpoint at {:?}",
+            replay.last_restored_checkpoint()
+        );
+        if expected > 0 {
+            assert!(replay.progress().1 >= 3, "{} checkpoints", replay.progress().1);
+        }
         same(&got, &wanted[i], &format!("replayed, step {s}"));
     }
     wanted
@@ -1236,4 +1247,116 @@ fn a_piece_is_a_body_with_its_own_mass_and_centre_at_the_first_step_it_is_asked_
             wanted[k]
         );
     }
+}
+
+#[test]
+fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
+    let make = |parent: Shape3| {
+        World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(parent, 1.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        })
+    };
+    let split = || vec![VoxelSplit3 { parent: 0, slots: vec![1] }];
+    assert!(make(Shape3::Voxels { size: SIZE, cells: bar() }).with_voxel_splits(split()).is_ok());
+    assert!(
+        make(Shape3::Voxels { size: SIZE, cells: vec![] }).with_voxel_splits(split()).is_err(),
+        "no cells: the collider would not be one of cells"
+    );
+    assert!(
+        make(Shape3::Voxels { size: [0.0, 0.25, 0.25], cells: bar() }).with_voxel_splits(split()).is_err(),
+        "no size"
+    );
+}
+
+/// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of
+/// the floor beyond it comes away as a piece.
+struct Undermine;
+
+impl Driver3 for Undermine {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        _: f64,
+        parent: usize,
+        revision: Option<u64>,
+        impact: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        let (Some(impact), None, 0) = (impact, revision, parent) else { return Ok(None) };
+        // the column of cells that the impact is over (the point is in the floor's own frame, in metres, scene axes)
+        let column = (impact.point[0] / 0.25).floor() as i32;
+        let piece = cells_of(column + 1..24, 0..3, 0..8);
+        Ok(Some(VoxelCut3 {
+            revision: 1,
+            destroyed: cells_of(column..column + 1, 0..3, 0..8),
+            parent_mass: (column as usize * 24) as f64 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * CELL_MASS }],
+        }))
+    }
+}
+
+fn floor_and_ball(frames: Option<usize>) -> World3 {
+    let floor = Body3Spec {
+        kind: BodyKind::Static,
+        ..body(Shape3::Voxels { size: SIZE, cells: cells_of(0..24, 0..3, 0..8) }, 144.0 * CELL_MASS, BodyKind::Static)
+    };
+    let mut ball = body(Shape3::Sphere(0.3), 20.0, BodyKind::Dynamic);
+    ball.start = Pose3 { pos: [2.1, -3.0, 1.0], rot: [0., 0., 0., 1.] };
+    let slot = body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic);
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.0, -9.80665, 0.0],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![floor, ball, slot],
+    })
+    .with_impact_watches(vec![ImpactWatch { source: 1, owner: 0, min_impulse: 1.0 }])
+    .unwrap();
+    let w = match frames {
+        Some(b) => w.with_frame_log_budget(b),
+        None => w,
+    };
+    w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).unwrap()
+}
+
+#[test]
+fn a_cut_that_is_a_function_of_the_impact_the_world_noticed_is_the_same_however_the_frames_are_asked() {
+    // a ball dropped on a static floor of cells; the impact is noticed by the world, reported from the step after it, and the driver cuts the floor from it
+    let mut reference = floor_and_ball(None);
+    let mut d = Undermine;
+    reference.frame_at(2.0, &mut d);
+    let first = (0..200u64)
+        .find(|s| reference.frame_at(*s as f64 * 0.01, &mut d).enabled[2])
+        .expect("the floor was cut: the piece took its slot");
+    let impact_step =
+        reference.frame_at(first as f64 * 0.01, &mut d).impacts[0].expect("with the impact reported").step;
+    assert!(
+        impact_step < first && first - impact_step <= 2,
+        "the cut is one or two steps after the impact: {impact_step}, {first}"
+    );
+    // the frames around the cut, asked four ways, are the same to the bit (the slot is a dynamic body that falls under gravity once cut)
+    let steps: Vec<u64> = (first - 2..=first + 3).collect();
+    let wanted = the_same_four_ways(&floor_and_ball, &|| Undermine, &steps);
+    assert!(!wanted[0].enabled[2] && wanted[5].enabled[2]);
+    // and the piece falls: its height after the cut is below where it started
+    assert!(wanted[5].velocities[2].linear[1] > 0.0 || wanted[5].bodies[2].pos[1] != 0.0, "the piece is moving");
 }

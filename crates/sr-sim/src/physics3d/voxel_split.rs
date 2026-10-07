@@ -9,7 +9,7 @@
 //! A piece starts in the frame of the body it came out of, so its cells keep their keys, and moves as its cells moved: its centre of mass has
 //! the velocity `v + w x (c - c0)` of that point of the body, `c0` the centre of mass of the body before the cut, and it has the same spin.
 //! What stays of the body gets the same rule for its new centre of mass (the centre of mass of a body is where its velocity is kept).
-//! Mass, centre of mass and inertia of every part are those of its cells (Rapier's, which are the exact ones: tested to 1e-12).
+//! Mass, centre of mass and inertia of every part are those of its cells, worked out exactly (`voxel_mass`; Parry's own are wrong for some shapes).
 use super::*;
 use std::collections::BTreeSet;
 
@@ -65,9 +65,14 @@ impl World3 {
         let n = self.spec.bodies.len();
         let mut taken = BTreeSet::new();
         for split in &splits {
-            let Some(Shape3::Voxels { size, .. }) = self.spec.bodies.get(split.parent).map(|b| &b.shape) else {
+            let Some(Shape3::Voxels { size, cells }) = self.spec.bodies.get(split.parent).map(|b| &b.shape) else {
                 return Err(VoxelSplitError("a parent must be a body of cells"));
             };
+            if cells.is_empty() || !size.iter().all(|s| s.is_finite() && *s > 0.0) {
+                return Err(VoxelSplitError(
+                    "a parent must have cells and a positive size: the collider of a body without is not one of cells",
+                ));
+            }
             if split.slots.len() > 4096 {
                 return Err(VoxelSplitError("too many slots"));
             }
