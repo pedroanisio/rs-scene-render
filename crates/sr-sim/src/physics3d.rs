@@ -1501,7 +1501,15 @@ impl World3 {
             if !body.is_enabled() || !body.is_dynamic() || fields.is_empty() {
                 continue;
             }
-            let p = flip(body.translation().to_array()).map(|c| c * ppm);
+            // the field is read where the body's mass is: for the bodies that have always been in the world the origin of the frame, which is what they
+            // have always had (a mesh's centre of mass is usually near it); for a body of cells the origin is that of the lattice and may be far from the
+            // cells, and the velocity that goes with the position is that of the centre of mass
+            let at = if matches!(self.spec.bodies[k].shape, Shape3::Voxels { .. }) {
+                body.center_of_mass()
+            } else {
+                body.translation()
+            };
+            let p = flip(at.to_array()).map(|c| c * ppm);
             let lv = flip(body.linvel().to_array()).map(|c| c * ppm);
             let a = fields::total3(&fields, p, lv, t);
             let mass = body.mass();
