@@ -1,9 +1,18 @@
 //! Mass properties of a body of cells, from exact integer moments.
 //!
-//! Parry gives a voxel shape the mass properties of its cells, but it diagonalises the tensor with a general eigen solver, and for a tensor that is
-//! already diagonal with two equal moments and the third larger (a plate that is thin along one axis, a block that is shorter along x than it is
-//! wide) it returns principal values and a frame that do not belong together: the tensor that the world simulates is then another body's (a plate
-//! with a hole, thin along x, had half its moment about x). So the tensor is worked out here from the cells: sums of integers, in `i128`, one
+//! Parry gives a voxel shape the mass properties of its cells, but it diagonalises the tensor (`MassProperties::with_inertia_matrix`, which calls
+//! `symmetric_eigen` of the `glamx` crate) and for a tensor that is already diagonal with two equal moments that are smaller than the third, which is
+//! on x (a plate that is thin along x, a block that is shorter along x than it is wide) the principal values and the frame it returns do not
+//! belong together: the tensor that the world simulates is then another body's (a plate with a hole, thin along x, had half its moment about x).
+//!
+//! The smallest case that shows it is a block of 3 by 4 by 4 cubic cells of 0.25 m at 2400 kg/m3, whose tensor about its centre is
+//! diag(300, 234.375, 234.375): `MassProperties::with_inertia_matrix` of it, read back with `reconstruct_inertia_matrix`, gives
+//! diag(234.375, 300, 234.375), and diag(234.375, 300, 234.375) gives the very same principal moments and frame, so one of the two is wrong
+//! (it is the first: the second is read back right; `cargo run -p sr-sim --example parry_inertia_defect` prints both). What I believe, and have not traced in the solver: it sorts the moments and
+//! chooses the eigenvector of the distinct one by a rule that is right when that one is on y or on z and when the three are alike, and not when it is on x. If a
+//! later Parry returns the right thing for all of them, `voxel_mass_properties` can go back to `with_inertia_matrix`; the tests in sr-eval
+//! (`mass_properties`, `world_inertia`) compare with exact moments and would show it.
+//! So the tensor is worked out here from the cells: sums of integers, in `i128`, one
 //! division each, the same bits in any order of the cells, and diagonalised by Jacobi rotations that leave a diagonal tensor as it is.
 use super::*;
 

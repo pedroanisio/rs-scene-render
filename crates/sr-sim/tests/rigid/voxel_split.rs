@@ -632,35 +632,44 @@ fn same(a: &Frame3, b: &Frame3, why: &str) {
     }
 }
 
-#[test]
-fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_order_and_replayed_from_a_checkpoint() {
-    // the cut is at 1.5 s, step 150; a checkpoint is taken each second, so the frames around it are replayed from the one at step 100
-    let steps: Vec<u64> = (145..=156).collect();
+/// The frame at each of `steps` (around a cut), asked four ways, all equal to the bit: from a world run to 3 s whose log holds it (the reference),
+/// from a fresh world asked for that time and nothing else, from a world asked for it, then for a later time, then for it again, and from a world
+/// that keeps no frames and replays from a checkpoint (which has to have been taken and used). Returns the reference frames.
+fn the_same_four_ways<D: Driver3>(
+    make: &dyn Fn(Option<usize>) -> World3,
+    driver: &dyn Fn() -> D,
+    steps: &[u64],
+) -> Vec<Frame3> {
     let at = |s: u64| s as f64 * 0.01;
-    // the reference: a world run to 3 s, whose frames are the ones it logged
-    let mut reference = world(2, None);
-    reference.frame_at(3.0, &mut Cutter::new(1.5));
-    let wanted: Vec<Frame3> = steps.iter().map(|s| reference.frame_at(at(*s), &mut Cutter::new(1.5))).collect();
-    assert!(
-        wanted[0].enabled == vec![true, false, false] && wanted[11].enabled == vec![true, true, false],
-        "the cut is inside the steps"
-    );
+    let mut reference = make(None);
+    reference.frame_at(3.0, &mut driver());
+    let wanted: Vec<Frame3> = steps.iter().map(|s| reference.frame_at(at(*s), &mut driver())).collect();
     for (i, s) in steps.iter().enumerate() {
         let t = at(*s);
         // (1) a world asked for this time and nothing else: nothing has been logged, the frame is computed
-        let fresh = world(2, None).frame_at(t, &mut Cutter::new(1.5));
+        let fresh = make(None).frame_at(t, &mut driver());
         same(&fresh, &wanted[i], &format!("fresh, step {s}"));
         // (2) asked, then asked later, then asked again: the second answer comes from what the later request logged
-        let mut w = world(2, None);
-        let mut d = Cutter::new(1.5);
+        let mut w = make(None);
+        let mut d = driver();
         let first = w.frame_at(t, &mut d);
         w.frame_at(t + 0.2, &mut d);
         let again = w.frame_at(t, &mut d);
         same(&first, &wanted[i], &format!("first, step {s}"));
         same(&again, &wanted[i], &format!("after a later request, step {s}"));
+        // (2b) asked many times: the answer does not change with how often it is asked
+        let mut w = make(None);
+        let mut d = driver();
+        let times: Vec<Frame3> = (0..4).map(|_| w.frame_at(t, &mut d)).collect();
+        for (k, f) in times.iter().enumerate() {
+            same(f, &wanted[i], &format!("asked {} times, step {s}", k + 1));
+        }
+        let after = w.frame_at(t + 0.03, &mut d);
+        let later = make(None).frame_at(t + 0.03, &mut driver());
+        same(&after, &later, &format!("a later time after {s} was asked four times"));
         // (3) a world that keeps no frames, run to 3 s: the frame is computed from a checkpoint, which has to have been taken and used
-        let mut replay = world_logging(2, None, Some(0));
-        let mut d = Cutter::new(1.5);
+        let mut replay = make(Some(0));
+        let mut d = driver();
         replay.frame_at(3.0, &mut d);
         assert!(replay.progress().1 >= 3, "{} checkpoints", replay.progress().1);
         let restored = replay.checkpoint_restores();
@@ -668,6 +677,76 @@ fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_or
         assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
         same(&got, &wanted[i], &format!("replayed, step {s}"));
     }
+    wanted
+}
+
+#[test]
+fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_order_and_replayed_from_a_checkpoint() {
+    // the cut is at 1.5 s, step 150; a checkpoint is taken each second, so the frames around it are replayed from the one at step 100
+    let steps: Vec<u64> = (145..=156).collect();
+    let wanted = the_same_four_ways(&|frames| world_logging(2, None, frames), &|| Cutter::new(1.5), &steps);
+    assert!(
+        wanted[0].enabled == vec![true, false, false] && wanted[11].enabled == vec![true, true, false],
+        "the cut is inside the steps"
+    );
+}
+
+#[test]
+fn chained_splits_cut_the_slot_one_step_after_it_is_used_however_often_and_in_whatever_order_the_frames_are_asked() {
+    // body 0 is the bar, 1 and 2 are its slots, 3 is the slot of the split whose parent is body 1; the child's cut is scripted at the same instant as
+    // the parent's, so it has to wait for the step after: the piece is not a body in use before the step the parent is cut in is over
+    let make = |frames: Option<usize>| {
+        let mut parent = body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+        parent.velocity = [1.0, 0.4, -0.3];
+        parent.angular_velocity = [20.0, 10.0, 40.0];
+        let mut bodies = vec![parent];
+        for _ in 0..3 {
+            bodies.push(body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic));
+        }
+        let w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies,
+        });
+        let w = match frames {
+            Some(b) => w.with_frame_log_budget(b),
+            None => w,
+        };
+        w.with_voxel_splits(vec![
+            VoxelSplit3 { parent: 0, slots: vec![1, 2] },
+            VoxelSplit3 { parent: 1, slots: vec![3] },
+        ])
+        .unwrap()
+    };
+    let script = || Script {
+        cuts: vec![
+            first_cut(1.5),
+            (
+                1,
+                1.5,
+                None,
+                VoxelCut3 {
+                    revision: 1,
+                    destroyed: cells_of(9..10, 0..2, 0..2),
+                    parent_mass: 12.0 * CELL_MASS,
+                    pieces: vec![VoxelPiece3 { cells: cells_of(10..12, 0..2, 0..2), mass: 8.0 * CELL_MASS }],
+                },
+            ),
+        ],
+    };
+    let steps: Vec<u64> = (147..=153).collect();
+    let wanted = the_same_four_ways(&make, &script, &steps);
+    // the parent is cut at step 150 and the child, scripted for the same instant, in the step after
+    let enabled: Vec<Vec<bool>> = wanted.iter().map(|f| f.enabled.clone()).collect();
+    assert_eq!(enabled[2], vec![true, false, false, false], "step 149: nothing yet");
+    assert_eq!(enabled[3], vec![true, true, false, false], "step 150: the parent is cut, the child waits");
+    assert_eq!(enabled[4], vec![true, true, false, true], "step 151: the child is cut");
 }
 
 /// A driver that cuts as a [`Script`] does and pushes every body from a time on with a force and a torque, which is how a test sees the

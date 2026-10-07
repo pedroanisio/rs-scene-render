@@ -133,7 +133,7 @@ impl World3 {
     /// Installs the cuts that the driver says the bodies of cells have suffered, before the step that starts at `t`. Every cut of the call is
     /// asked for and checked before any of them is applied: if one cannot be installed none is, and the world is as it was. (A body that
     /// becomes a slot in use in this call is cut from the next step: the splits are independent within a call.)
-    pub(super) fn apply_voxel_cuts(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
+    pub(super) fn apply_voxel_cuts(&mut self, step: u64, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         struct Prepared {
             split: usize,
@@ -151,6 +151,11 @@ impl World3 {
         for s in 0..self.voxel_splits.len() {
             let (parent, slots) = (self.voxel_splits[s].parent, self.voxel_splits[s].slots.clone());
             if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
+                continue;
+            }
+            // a body that is a slot is cut from the step after the one it was taken into use in, however often that step is asked for: what a
+            // second request of the step would find is not what the first did
+            if self.state.slot_since[parent].is_some_and(|since| since >= step) {
                 continue;
             }
             let impact = self.impact_of(parent);
@@ -257,6 +262,7 @@ impl World3 {
                 body.set_linvel(velocity, true);
                 body.set_angvel(w, true);
                 self.state.slot_active[slot] = true;
+                self.state.slot_since[slot] = Some(step);
                 body.set_enabled(driver.enabled(t, slot));
                 self.state.active[slot] = true;
             }

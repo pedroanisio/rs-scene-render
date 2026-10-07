@@ -322,6 +322,8 @@ struct State {
     slot_active: Vec<bool>,
     /// Bodies of cells that a cut left with nothing: out of the world for good.
     voxel_spent: Vec<bool>,
+    /// The step at which each slot was taken into use: a body that is a slot is cut from the step after, however often the step is asked for.
+    slot_since: Vec<Option<u64>>,
 }
 
 struct Checkpoint {
@@ -639,6 +641,7 @@ impl World3 {
             slots_used: Vec::new(),
             slot_active: vec![false; spec.bodies.len()],
             voxel_spent: vec![false; spec.bodies.len()],
+            slot_since: vec![None; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -1454,7 +1457,7 @@ impl World3 {
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
-        self.apply_voxel_cuts(t, driver)?;
+        self.apply_voxel_cuts(self.state.step, t, driver)?;
         self.record_frame();
         let st = &mut self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -1616,7 +1619,7 @@ impl World3 {
         }
         // the cuts of the step that has not been taken yet are in the frame as the step would put them (it is idempotent: a cut
         // that is installed is not installed again), so that a frame is the same whether the world has been asked past it or not
-        if let Err(error) = self.apply_voxel_cuts(self.spec.start + target as f64 * self.spec.step, driver) {
+        if let Err(error) = self.apply_voxel_cuts(target, self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
         self.snapshot()
