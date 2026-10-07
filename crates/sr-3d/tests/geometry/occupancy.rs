@@ -460,7 +460,12 @@ fn keys_beyond_the_documented_range_are_refused_where_they_would_overflow_and_th
     assert!(o.moments().properties([1.0; 3], 1.0).is_ok());
     // bulk builders refuse them too, by cell and by brick
     assert!(Occupancy::from_cells([([hi + 1, 0, 0], 1u8)]).is_err());
-    let brick = |key: [i32; 3]| (key, dense(key, &[[key[0] * 8, key[1] * 8, key[2] * 8]], 1));
+    // a brick with one cell, the first (local index 0), whatever its key: the cell's own key is not computed in the test, which would overflow
+    let brick = |key: [i32; 3]| {
+        let mut cells = [0u8; 512];
+        cells[0] = 1;
+        (key, cells)
+    };
     assert!(Occupancy::from_bricks([brick([1 << 28, 0, 0])]).is_err(), "the brick whose cells are past the range");
     assert!(Occupancy::from_bricks([brick([(1 << 27) - 1, 0, 0]), brick([-(1 << 27), 0, 0])]).is_ok());
 }
