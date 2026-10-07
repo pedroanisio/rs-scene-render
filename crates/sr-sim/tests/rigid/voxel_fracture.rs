@@ -267,11 +267,17 @@ fn what_the_dust_took_is_the_same_however_the_frame_is_asked_and_is_not_there_be
     let mut fresh = dusty(0.0, 0.5, 16.0 * CELL_MASS).unwrap();
     fresh.frame_at(0.9, &mut Still);
     let wanted = fresh.fracture_lost(0).unwrap();
-    // asked for later, then for earlier: the same figure (the figure is of the world's state, as of the last step it took, and a replay fires it again)
-    let mut later = dusty(0.0, 0.5, 16.0 * CELL_MASS).unwrap();
+    // asked for later, then for earlier, by a world that keeps no frames and so replays from a checkpoint: the same figure, and none at all when it is
+    // taken back to before the fracture (the figure is part of the state that a checkpoint restores)
+    let mut later = dusty(0.0, 0.5, 16.0 * CELL_MASS).unwrap().with_frame_log_budget(0);
     later.frame_at(2.0, &mut Still);
+    assert_eq!(later.checkpoint_restores(), 0);
+    assert!(later.fracture_lost(0).is_some());
     later.frame_at(0.9, &mut Still);
+    assert!(later.checkpoint_restores() > 0, "the world went back to a checkpoint and fired the fracture again");
     assert_eq!(later.fracture_lost(0), Some(wanted));
+    later.frame_at(0.4, &mut Still);
+    assert_eq!(later.fracture_lost(0), None, "taken back to before the fracture the world has not lost anything yet");
 }
 
 #[test]
@@ -293,5 +299,75 @@ fn the_push_that_separates_the_fragments_adds_no_momentum_to_them_and_the_dust_d
         assert!((p[i] - wanted).abs() < 1e-9 * wanted.abs().max(1.0), "momentum {i}: {} against {wanted}", p[i]);
     }
     // and the pieces do move apart
+    assert!((frame.velocities[1].linear[0] - frame.velocities[2].linear[0]).abs() > 0.1);
+}
+
+/// A source of four columns in a square (8 cells each, the second twice as tall), three of them fragments and the fourth, in the corner opposite
+/// the first, dust: no three centres are in line with the dust, and the masses are unequal, so that the mean of a push does not point at the dust.
+fn corners(radial_impulse: f64) -> (World3, Vec<Vec<[i32; 3]>>) {
+    let (a, b, c, d) = (
+        cells_of(0..2, 0..2, 0..2),
+        cells_of(2..4, 0..2, 0..4),
+        cells_of(0..2, 2..4, 0..2),
+        cells_of(2..4, 2..4, 0..2),
+    );
+    let whole: Vec<[i32; 3]> = [&a, &b, &c, &d].into_iter().flatten().copied().collect();
+    let mut source = body(whole.clone());
+    source.velocity = [1.0, 0.4, -0.3];
+    source.angular_velocity = [20.0, 10.0, 40.0];
+    let mut bodies = vec![source];
+    bodies.extend([a.clone(), b.clone(), c.clone()].map(body));
+    let fragments = (1..=3).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
+    let q = shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: d.clone() }, 8.0 * CELL_MASS, 1.0).unwrap();
+    let dust = Dust3 { mass: 8.0 * CELL_MASS, centre: q.centre, inertia: q.inertia };
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies,
+    })
+    .with_fractures(vec![Fracture3 { source: 0, at: 0.0, radial_impulse, fragments, contact: None, dust: Some(dust) }])
+    .unwrap();
+    (w, vec![a, b, c, whole])
+}
+
+#[test]
+fn a_push_that_separates_the_fragments_keeps_the_angular_momentum_too_when_the_dust_is_off_their_line() {
+    let (mut w, cells) = corners(400.0);
+    let frame = w.frame_at(0.0, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let lost = w.fracture_lost(0).unwrap();
+    let props = |cells: &Vec<[i32; 3]>| {
+        shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: cells.clone() }, cells.len() as f64 * CELL_MASS, 1.0)
+            .unwrap()
+    };
+    let at = |p: &Pose3, c: [f64; 3]| [p.pos[0] + c[0], p.pos[1] + c[1], p.pos[2] + c[2]];
+    let total = props(&cells[3]);
+    let c0 = at(&frame.bodies[0], total.centre);
+    let (v0, w0) = ([1.0, 0.4, -0.3], [20.0f64, 10.0, 40.0].map(f64::to_radians));
+    let (mut p, mut l) = (lost.momentum, lost.angular_momentum);
+    for k in 1..=3 {
+        let q = props(&cells[k - 1]);
+        let (v, spin) = (frame.velocities[k].linear, frame.velocities[k].angular.map(f64::to_radians));
+        let d = [0, 1, 2].map(|i| at(&frame.bodies[k], q.centre)[i] - c0[i]);
+        let own = times(q.inertia, spin);
+        let orbit = cross(d, [0, 1, 2].map(|i| q.mass * v[i]));
+        for i in 0..3 {
+            p[i] += q.mass * v[i];
+            l[i] += own[i] + orbit[i];
+        }
+    }
+    let (wanted_p, wanted_l) = ([0, 1, 2].map(|i| total.mass * v0[i]), times(total.inertia, w0));
+    let scale = wanted_l.iter().map(|c| c.abs()).fold(1.0, f64::max);
+    for i in 0..3 {
+        assert!((p[i] - wanted_p[i]).abs() < 1e-9 * total.mass, "momentum {i}: {} against {}", p[i], wanted_p[i]);
+        assert!((l[i] - wanted_l[i]).abs() < 1e-9 * scale, "angular momentum {i}: {} against {}", l[i], wanted_l[i]);
+    }
+    // and the fragments do fly apart
     assert!((frame.velocities[1].linear[0] - frame.velocities[2].linear[0]).abs() > 0.1);
 }

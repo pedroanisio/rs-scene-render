@@ -459,7 +459,9 @@ fn the_cells_a_cut_leaves_in_the_state_are_charged_for_what_they_hold_and_not_fo
     .unwrap();
     w.frame_at(0.6, &mut FirstColumn);
     let (len, capacity) = w.voxel_cells_held(0).unwrap();
-    assert_eq!((len, capacity), (140 * 200, 140 * 200), "after the cut the cells and the room for them");
+    // (the allocator may round a shrunk vector up a little: a slack of a sixteenth, where the vector that was not shrunk has 1.17 times its length)
+    assert_eq!(len, 140 * 200);
+    assert!(capacity <= len + len / 16, "after the cut the room for the cells is {capacity} for {len}");
     let ((small, kept), (big, kept_big)) = (bytes(21), bytes(141));
     assert_eq!(kept, kept_big);
     // checkpoints 1.. are taken after the cut at 0.5 s (a world keeps one a second)

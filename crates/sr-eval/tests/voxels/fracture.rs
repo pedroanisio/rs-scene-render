@@ -140,6 +140,17 @@ fn piece_spec(b: &Body) -> Body3Spec {
 
 /// The world of a fracture made by [`fracture`]: the source, then its pieces as the fragments, at `at`.
 fn world_of(f: &Fractured, velocity: [f64; 3], spin: [f64; 3], at: f64) -> Result<World3, FractureError> {
+    world_at_scale(f, velocity, spin, at, 1.0)
+}
+
+/// The same in a world of `ppm` scene units to a metre (the velocities are in units a second).
+fn world_at_scale(
+    f: &Fractured,
+    velocity: [f64; 3],
+    spin: [f64; 3],
+    at: f64,
+    ppm: f64,
+) -> Result<World3, FractureError> {
     let mut bodies = vec![source_spec(&f.source, velocity, spin)];
     bodies.extend(f.pieces.iter().map(piece_spec));
     let fragments = (1..=f.pieces.len()).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
@@ -148,7 +159,7 @@ fn world_of(f: &Fractured, velocity: [f64; 3], spin: [f64; 3], at: f64) -> Resul
         start: 0.,
         step: 0.01,
         gravity: [0.; 3],
-        pixels_per_meter: 1.,
+        pixels_per_meter: ppm,
         iterations: 8,
         bounds: Bounds3::None,
         joints: vec![],
@@ -179,15 +190,11 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
-#[test]
-fn the_world_given_the_pieces_puts_each_where_its_cells_were_with_the_velocity_of_that_point_of_the_source() {
-    // the source spins and moves: at the instant of the fracture (the first, so that it has not turned) each piece's centre of mass is where its cells'
-    // centre of mass was and it moves as that point of the body did, v + w x d, and has the body's spin
-    let o = block(10, 6, 6);
-    let f = fracture(&o, Partition::Voronoi { seeds: 4, seed: 11 }, &keep(8), SIZE, DENSITY, 1.0).unwrap();
-    assert!(f.pieces.len() >= 3);
+/// The pieces of `f` in a world, at the first instant, with the source moving and spinning: each piece's centre of mass is where its cells' was and it
+/// moves as that point of the body did, v + w x d, with the body's spin.
+fn assert_pieces_move_as_the_body_did(f: &Fractured) {
     let (v0, w0) = ([1.0, 0.4, -0.3], [20.0, 10.0, 40.0]);
-    let mut w = world_of(&f, v0, w0, 0.0).unwrap();
+    let mut w = world_of(f, v0, w0, 0.0).unwrap();
     let frame = w.frame_at(0.0, &mut Still);
     assert!(frame.errors.is_empty(), "{:?}", frame.errors);
     assert_eq!(frame.fractured, vec![true]);
@@ -213,6 +220,24 @@ fn the_world_given_the_pieces_puts_each_where_its_cells_were_with_the_velocity_o
 }
 
 #[test]
+fn the_world_given_the_pieces_puts_each_where_its_cells_were_with_the_velocity_of_that_point_of_the_source() {
+    let o = block(10, 6, 6);
+    let f = fracture(&o, Partition::Voronoi { seeds: 4, seed: 11 }, &keep(8), SIZE, DENSITY, 1.0).unwrap();
+    assert!(f.pieces.len() >= 3 && f.dust.is_empty());
+    assert_pieces_move_as_the_body_did(&f);
+}
+
+#[test]
+fn the_same_with_dust_the_pieces_still_move_as_the_body_did_about_the_centre_of_all_its_cells() {
+    // the centre of mass of the source is that of all its cells, the dust's included, and the pieces' velocities are measured from it
+    let (o, planes) = columns();
+    let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
+    let f = fracture(&o, Partition::Planes(&planes), &policy, SIZE, DENSITY, 1.0).unwrap();
+    assert_eq!(f.dust.len(), 72);
+    assert_pieces_move_as_the_body_did(&f);
+}
+
+#[test]
 fn the_pieces_with_fewer_cells_than_the_least_are_dust_that_leaves_with_the_fracture() {
     let (o, planes) = columns();
     let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
@@ -235,6 +260,7 @@ fn the_pieces_with_fewer_cells_than_the_least_are_dust_that_leaves_with_the_frac
     let dust = f.dust_body.as_ref().unwrap();
     let total: f64 = f.pieces.iter().map(|p| p.mass).sum::<f64>() + dust.mass;
     assert!((total - f.source.mass).abs() < 1e-9 * total, "{total} against {}", f.source.mass);
+    assert_dust_is_the_column(dust, 1.0);
     // the dust's centre is that of its column (cells 0 and 1 of x, 6 by 6 of the others, a quarter of a metre each): at x = 0.25 m, y and z at 0.75 m
     for (got, wanted) in dust.centre.iter().zip([0.25, 0.75, 0.75]) {
         assert!((got - wanted).abs() < 1e-12, "{:?}", dust.centre);
@@ -255,7 +281,7 @@ fn of_too_many_pieces_the_smallest_are_dust_or_it_is_an_error_that_says_how_many
     assert_eq!(equal.dust.len(), 144);
     let error = FracturePolicy { overflow: Overflow::Error, ..dust };
     let e = fracture(&o, Partition::Planes(&planes), &error, SIZE, DENSITY, 1.0).unwrap_err();
-    assert!(e.contains("maxFragments") && e.contains('3') && e.contains('2'), "{e}");
+    assert_eq!(e, "a fracture makes 3 pieces and there are 2 slots for them (maxFragments)");
 }
 
 #[test]
@@ -311,4 +337,82 @@ fn a_world_with_a_fracture_made_here_is_the_same_to_the_bit_however_its_frames_a
     let wanted = fresh.fracture_lost(0).expect("the dust took something");
     replay.frame_at(0.5, &mut Still);
     assert_eq!(replay.fracture_lost(0), Some(wanted));
+}
+
+/// The dust of [`columns`] is a box of 2 by 6 by 6 cells of a quarter of a metre (0.5 by 1.5 by 1.5 m) of 72 cells at the mass of a cell: its tensor is
+/// the box's, m (b^2 + c^2) / 12 about each axis, and not a number that the cells' own moments gave back to themselves; its centre is in the units of the
+/// scene (`scale` of them to a metre).
+fn assert_dust_is_the_column(dust: &Dust3, scale: f64) {
+    let m = 72.0 * CELL_MASS;
+    assert!((dust.mass - m).abs() < 1e-9 * m);
+    for (got, wanted) in dust.centre.iter().zip([0.25, 0.75, 0.75]) {
+        assert!((got - wanted * scale).abs() < 1e-9 * scale, "{:?}", dust.centre);
+    }
+    let diagonal = [
+        m * (1.5f64.powi(2) + 1.5f64.powi(2)) / 12.0,
+        m * (0.5f64.powi(2) + 1.5f64.powi(2)) / 12.0,
+        m * (0.5f64.powi(2) + 1.5f64.powi(2)) / 12.0,
+    ];
+    for i in 0..3 {
+        for j in 0..3 {
+            let wanted = if i == j { diagonal[i] } else { 0.0 };
+            assert!(
+                (dust.inertia[i][j] - wanted).abs() < 1e-9 * diagonal[0],
+                "inertia [{i}][{j}] is {} and the box's is {wanted}",
+                dust.inertia[i][j]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_dust_is_told_to_the_world_in_the_units_of_the_scene_with_the_tensor_of_its_cells() {
+    // a metre is a hundred units: the cells are 25 units a side, the centre of the dust is in units, and its mass and its tensor are in kilograms and
+    // metres whatever the scale
+    let (o, planes) = columns();
+    let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
+    let scene = |ppm: f64| {
+        let units = [0.25 * ppm; 3];
+        // the same cells on a lattice of the cell size in units
+        fracture(&o, Partition::Planes(&planes), &policy, units, DENSITY, ppm).unwrap()
+    };
+    for ppm in [1.0, 100.0] {
+        let f = scene(ppm);
+        assert_dust_is_the_column(f.dust_body.as_ref().unwrap(), ppm);
+        assert!(
+            (f.source.mass - 432.0 * CELL_MASS).abs() < 1e-9 * f.source.mass,
+            "the mass of a cell does not depend on the scale"
+        );
+    }
+}
+
+#[test]
+fn what_the_dust_took_is_in_the_units_of_the_scene_whatever_its_scale() {
+    // the same physical body (cells of a quarter of a metre, moving at the same metres a second) in a world of a hundred units to a metre: the
+    // momentum is in kilograms units a second, a hundred times that of the world in metres, and the angular momentum in kilograms units squared a
+    // second, ten thousand times
+    let (o, planes) = columns();
+    let policy = FracturePolicy { min_cells: 100, max_fragments: 8, overflow: Overflow::Error };
+    let lost = |ppm: f64| {
+        let f = fracture(&o, Partition::Planes(&planes), &policy, [0.25 * ppm; 3], DENSITY, ppm).unwrap();
+        let mut w = world_at_scale(&f, [1.0 * ppm, 0.4 * ppm, -0.3 * ppm], [20.0, 10.0, 40.0], 0.0, ppm).unwrap();
+        let frame = w.frame_at(0.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        w.fracture_lost(0).unwrap()
+    };
+    let (metres, units) = (lost(1.0), lost(100.0));
+    for i in 0..3 {
+        assert!(
+            (units.momentum[i] - 100.0 * metres.momentum[i]).abs() < 1e-9 * (100.0 * metres.momentum[i]).abs().max(1.0),
+            "momentum {i}"
+        );
+        assert!(
+            (units.angular_momentum[i] - 1e4 * metres.angular_momentum[i]).abs()
+                < 1e-9 * (1e4 * metres.angular_momentum[i]).abs().max(1.0),
+            "angular momentum {i}: {} against {}",
+            units.angular_momentum[i],
+            1e4 * metres.angular_momentum[i]
+        );
+    }
+    assert!(metres.momentum.iter().any(|c| c.abs() > 1.0));
 }

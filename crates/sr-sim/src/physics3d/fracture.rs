@@ -258,12 +258,31 @@ impl World3 {
             let source_mass = m_source;
             // the mean that is taken off is over the fragments (the dust is not pushed): without it the push would add the momentum of the dust's share
             let fragment_mass: f64 = e.fragments.iter().map(|p| self.spec.bodies[p.body].mass).sum();
-            for p in &e.fragments {
-                let rb = &self.state.bodies[self.state.handles[p.body]];
-                let position =
-                    *source.position() * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
-                let com = rb.mass_properties().local_mprops.world_com(&position);
-                let direction = (com - source.center_of_mass()).try_normalize().unwrap_or_default();
+            // where each fragment is: its pose and its centre of mass
+            let placed: Vec<(Pose, Vec3)> = e
+                .fragments
+                .iter()
+                .map(|p| {
+                    let rb = &self.state.bodies[self.state.handles[p.body]];
+                    let position = *source.position()
+                        * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
+                    (position, rb.mass_properties().local_mprops.world_com(&position))
+                })
+                .collect();
+            // the push comes out of the centre of mass of what it pushes: the source's when every cell is a fragment (they are the same point, and the
+            // bits are what they were), the fragments' own when there is dust, because the mean that is taken off is over the fragments and the push has to
+            // leave no angular momentum about the centre of mass it is measured from
+            let centre = if e.dust.is_some() {
+                let mut sum = Vec3::ZERO;
+                for (p, (_, com)) in e.fragments.iter().zip(&placed) {
+                    sum += *com * (self.spec.bodies[p.body].mass / fragment_mass);
+                }
+                sum
+            } else {
+                source.center_of_mass()
+            };
+            for (p, (position, com)) in e.fragments.iter().zip(placed) {
+                let direction = (com - centre).try_normalize().unwrap_or_default();
                 // by impulse: the same speed for every piece; by contact the speed is found below
                 let radial = direction * (e.radial_impulse / ppm / source_mass);
                 mean += radial * (self.spec.bodies[p.body].mass / fragment_mass);
