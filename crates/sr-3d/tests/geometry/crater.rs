@@ -1,5 +1,5 @@
 use glam::{DMat3, DVec3};
-use sr_3d::crater::{Budget, Crater, Spec};
+use sr_3d::crater::{Budget, Crater, Deposit, Spec};
 
 fn spec() -> Spec {
     Spec {
@@ -273,4 +273,100 @@ fn a_budget_that_cannot_be_met_or_makes_no_sense_is_an_error() {
     assert!(crater.spec().depth > spec.depth && (crater.volumes().bowl - 150.).abs() < 1e-9 * 150.);
     // and one that the envelope cannot carry is refused
     assert!(Crater::conserving(spec, Budget { volume: 400., ..budget }).is_err());
+}
+
+/// A deposit of 16 by 16 cells of 0.5, its corner at (-4, -4) of the plane of the crater, with a heap in the middle and some low
+/// ground to one side.
+fn heap() -> Deposit {
+    let heights = (0..256)
+        .map(|i| {
+            let (x, y) = ((i % 16) as f64 - 7.5, (i / 16) as f64 - 7.5);
+            (1.2 - 0.25 * x.hypot(y)).max(0.0) + if x > 4.0 { 0.1 } else { 0.0 }
+        })
+        .collect();
+    Deposit::new([-4.0, -4.0], 0.5, [16, 16], heights).unwrap()
+}
+
+#[test]
+fn a_deposit_raises_the_ground_where_it_lies_by_its_height_and_by_its_volume() {
+    let (spec, budget) = authored();
+    let plain = Crater::conserving(spec, budget).unwrap();
+    let deposit = heap();
+    let with = plain.clone().with_deposit(deposit.clone());
+    let (u, v) = plain.plane_basis();
+    let at = |crater: &Crater, a: f64, b: f64| {
+        let p = [a * u[0] + b * v[0], a * u[1] + b * v[1], a * u[2] + b * v[2]];
+        let moved = crater.map(p, 1.).unwrap().position;
+        // along the outward axis, which is minus z here
+        -(moved[2] - p[2])
+    };
+    for (a, b) in [(0.0, 0.0), (1.3, -0.7), (-2.2, 2.9), (3.1, 3.1), (-6.0, 6.0), (20.0, 20.0)] {
+        let raised = at(&with, a, b) - at(&plain, a, b);
+        let (wanted, _) = deposit.height(a, b);
+        assert!((raised - wanted).abs() < 1e-12, "({a}, {b}): {raised} against {wanted}");
+    }
+    // outside the grid there is none, and at the middle there is
+    assert_eq!(deposit.height(20.0, 20.0).0, 0.0);
+    assert!(deposit.height(0.0, 0.0).0 > 1.0);
+    // the ground has the volume of the deposit more: the integral of the rise over the plane, with a quadrature of the interpolant
+    let n = 800;
+    let h = 12.0 / n as f64;
+    let mut volume = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            let (a, b) = (-6.0 + (i as f64 + 0.5) * h, -6.0 + (j as f64 + 0.5) * h);
+            volume += (at(&with, a, b) - at(&plain, a, b)) * h * h;
+        }
+    }
+    println!("DEPOSIT volume of the heights {:.6}, integral of the rise {volume:.6}", deposit.volume());
+    assert!((volume - deposit.volume()).abs() < 1e-3 * deposit.volume(), "{volume} against {}", deposit.volume());
+}
+
+#[test]
+fn the_deposit_keeps_the_map_smooth_enough_for_its_normals_and_orientation() {
+    let (spec, budget) = authored();
+    let crater = Crater::conserving(spec, budget).unwrap().with_deposit(heap());
+    let (u, v) = crater.plane_basis();
+    let at =
+        |a: f64, b: f64, c: f64| -> [f64; 3] { std::array::from_fn(|i| a * u[i] + b * v[i] + c * [0., 0., -1.][i]) };
+    // inside cells, away from their borders, the jacobian is the derivative of the map
+    for (a, b) in [(0.13, 0.21), (1.31, -0.77), (-2.21, 2.93), (3.11, 1.07), (-1.43, -3.1), (2.2, 2.7)] {
+        let p = at(a, b, 0.0);
+        let m = crater.map(p, 1.).unwrap();
+        let e = 1e-6;
+        for k in 0..3 {
+            let mut d = [0.0; 3];
+            d[k] = e;
+            let (hi, lo) = (
+                crater.map([p[0] + d[0], p[1] + d[1], p[2] + d[2]], 1.).unwrap(),
+                crater.map([p[0] - d[0], p[1] - d[1], p[2] - d[2]], 1.).unwrap(),
+            );
+            for i in 0..3 {
+                let numeric = (hi.position[i] - lo.position[i]) / (2.0 * e);
+                assert!(
+                    (numeric - m.jacobian.col(k)[i]).abs() < 1e-5,
+                    "({a}, {b}) d{k} of {i}: {numeric} against {}",
+                    m.jacobian.col(k)[i]
+                );
+            }
+        }
+        assert!(m.jacobian.determinant() > 0.0);
+    }
+}
+
+#[test]
+fn a_deposit_that_makes_no_sense_is_an_error_and_none_is_the_crater_as_it_was() {
+    assert!(Deposit::new([0.0; 2], 0.5, [0, 4], vec![]).is_err());
+    assert!(Deposit::new([0.0; 2], 0.5, [2, 2], vec![0.0; 3]).is_err());
+    assert!(Deposit::new([0.0; 2], 0.0, [2, 2], vec![0.0; 4]).is_err());
+    assert!(Deposit::new([f64::NAN, 0.0], 0.5, [2, 2], vec![0.0; 4]).is_err());
+    assert!(Deposit::new([0.0; 2], 0.5, [2, 2], vec![0.0, 0.0, f64::NAN, 0.0]).is_err());
+    assert!(Deposit::new([0.0; 2], 0.5, [2, 2], vec![0.0, 0.0, -0.1, 0.0]).is_err());
+    let (spec, budget) = authored();
+    let plain = Crater::conserving(spec, budget).unwrap();
+    let empty = plain.clone().with_deposit(Deposit::new([-4.0; 2], 0.5, [16, 16], vec![0.0; 256]).unwrap());
+    for p in [[0.0; 3], [3.0, 1.0, 0.0], [9.0, 0.0, 0.0], [1.0, 2.0, 0.5]] {
+        let (a, b) = (plain.map(p, 1.).unwrap(), empty.map(p, 1.).unwrap());
+        assert_eq!(a.position.map(f64::to_bits), b.position.map(f64::to_bits), "{p:?}");
+    }
 }

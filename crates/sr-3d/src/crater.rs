@@ -61,11 +61,67 @@ struct Mantle {
 /// How far, in crest radii, the mantle reaches before it is cut.
 const MANTLE_REACH: f64 = 20.;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Crater {
     spec: Spec,
     axis: DVec3,
     profile: Profile,
+    deposit: Option<Deposit>,
+}
+
+/// Material that lies on the ground of a crater, as a height above the ground in the plane of the crater: the heights
+/// of a regular grid of square cells, at the cells' centres, with none beyond the grid and bilinear weights between
+/// the centres (so that the field is continuous, and is zero a half cell outside the grid).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Deposit {
+    origin: [f64; 2],
+    cell: f64,
+    cells: [usize; 2],
+    heights: std::sync::Arc<[f64]>,
+}
+
+impl Deposit {
+    /// `heights` is row by row (`cells[0]` to a row), the corner of the grid is at `origin` in the plane's axes
+    /// ([`Crater::plane_basis`]) from the crater's centre. Heights are finite and not negative.
+    pub fn new(origin: [f64; 2], cell: f64, cells: [usize; 2], heights: Vec<f64>) -> Result<Self, String> {
+        if cells[0] == 0 || cells[1] == 0 || cells[0].checked_mul(cells[1]) != Some(heights.len()) {
+            return Err("a deposit needs a height for each of its cells".into());
+        }
+        if !(cell.is_finite() && cell > 0.) || origin.iter().any(|v| !v.is_finite()) {
+            return Err("a deposit needs a finite corner and cells of a positive size".into());
+        }
+        if heights.iter().any(|h| !h.is_finite() || *h < 0.) {
+            return Err("the heights of a deposit are finite and not negative".into());
+        }
+        Ok(Self { origin, cell, cells, heights: heights.into() })
+    }
+
+    /// Cubic units that it holds: the integral of its height, which is the sum over its cells.
+    pub fn volume(&self) -> f64 {
+        self.heights.iter().sum::<f64>() * self.cell * self.cell
+    }
+
+    /// The height at plane coordinates `(a, b)` and its derivatives along them.
+    pub fn height(&self, a: f64, b: f64) -> (f64, [f64; 2]) {
+        let (fx, fz) = ((a - self.origin[0]) / self.cell - 0.5, (b - self.origin[1]) / self.cell - 0.5);
+        let (ix, iz) = (fx.floor(), fz.floor());
+        if ix < -1. || iz < -1. || ix >= self.cells[0] as f64 || iz >= self.cells[1] as f64 {
+            return (0., [0.; 2]);
+        }
+        let (tx, tz) = (fx - ix, fz - iz);
+        let at = |x: f64, z: f64| {
+            if x < 0. || z < 0. || x >= self.cells[0] as f64 || z >= self.cells[1] as f64 {
+                0.
+            } else {
+                self.heights[z as usize * self.cells[0] + x as usize]
+            }
+        };
+        let (h00, h10, h01, h11) = (at(ix, iz), at(ix + 1., iz), at(ix, iz + 1.), at(ix + 1., iz + 1.));
+        let height = (h00 * (1. - tx) + h10 * tx) * (1. - tz) + (h01 * (1. - tx) + h11 * tx) * tz;
+        let da = ((h10 - h00) * (1. - tz) + (h11 - h01) * tz) / self.cell;
+        let db = ((h01 - h00) * (1. - tx) + (h11 - h10) * tx) / self.cell;
+        (height, [da, db])
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +157,7 @@ impl Crater {
         }
         // Normalize without squaring potentially enormous authored components.
         let axis = (axis / max).normalize();
-        Ok(Self { spec, axis, profile: Profile { bowl_exponent: 2., mantle: None } })
+        Ok(Self { spec, axis, profile: Profile { bowl_exponent: 2., mantle: None }, deposit: None })
     }
 
     /// A crater whose volumes add up (see [`Budget`]): the bowl is given the exponent that makes it excavate exactly
@@ -146,6 +202,38 @@ impl Crater {
         }
         crater.profile.mantle = Some(mantle);
         Ok(crater)
+    }
+
+    /// The same crater with `deposit` lying on its ground: added to the height the crater gives, whatever its progress
+    /// (it is what came down, not what grew).
+    pub fn with_deposit(mut self, deposit: Deposit) -> Self {
+        self.deposit = Some(deposit);
+        self
+    }
+
+    pub fn deposit(&self) -> Option<&Deposit> {
+        self.deposit.as_ref()
+    }
+
+    /// The two unit axes of the plane of the crater, perpendicular to its axis and to each other, from which the
+    /// coordinates of a [`Deposit`] are taken: the first is the axis crossed with the coordinate axis it is least aligned
+    /// with, and the second is the axis crossed with the first.
+    pub fn plane_basis(&self) -> ([f64; 3], [f64; 3]) {
+        let (u, v) = self.plane_axes();
+        (u.to_array(), v.to_array())
+    }
+
+    fn plane_axes(&self) -> (DVec3, DVec3) {
+        let a = self.axis.abs();
+        let helper = if a.x <= a.y && a.x <= a.z {
+            DVec3::X
+        } else if a.y <= a.z {
+            DVec3::Y
+        } else {
+            DVec3::Z
+        };
+        let u = self.axis.cross(helper).normalize();
+        (u, self.axis.cross(u))
     }
 
     /// The volumes of the grown crater.
@@ -201,17 +289,24 @@ impl Crater {
             return Err("crater growth dimensions underflow".into());
         }
         let mantle = self.profile.mantle;
-        if r / radius >= 1. + width / radius && mantle.is_none_or(|m| r >= m.reach * progress) {
+        // what lies on the ground, where it does: it does not grow with the crater
+        let (lift, lift_slope) = self.deposit.as_ref().map_or((0., [0.; 2]), |d| {
+            let (u, v) = self.plane_axes();
+            d.height(delta.dot(u), delta.dot(v))
+        });
+        let beyond = r / radius >= 1. + width / radius && mantle.is_none_or(|m| r >= m.reach * progress);
+        if beyond && lift == 0. {
             return Ok(identity);
         }
-        let (bowl, bowl_derivative) = bowl(r / radius, self.profile.bowl_exponent);
-        let (rim, rim_derivative) = bump((r - radius) / width);
+        let (bowl, bowl_derivative) = if beyond { (0., 0.) } else { bowl(r / radius, self.profile.bowl_exponent) };
+        let (rim, rim_derivative) = if beyond { (0., 0.) } else { bump((r - radius) / width) };
         // the mantle grows with the crater as the rest of it does: its crest and its width are the grown ones
-        let (heap, heap_derivative) = mantle.map_or((0., 0.), |m| {
+        let (heap, heap_derivative) = mantle.filter(|_| !beyond).map_or((0., 0.), |m| {
             let (shape, slope) = mantle_shape(r, radius, width);
             (m.thickness * shape, m.thickness * slope)
         });
         let amount = (-self.spec.depth * bowl + self.spec.rim_height * rim + heap) * progress;
+        let amount = if self.deposit.is_some() { amount + lift } else { amount };
         // Cancel progress analytically instead of dividing two tiny dimensions.
         let derivative = |height: f64, scale: f64, slope: f64| {
             if slope == 0. || height == 0. {
@@ -224,8 +319,12 @@ impl Crater {
             + derivative(self.spec.rim_height, self.spec.rim_width, rim_derivative)
             + heap_derivative * progress;
         let (envelope, de) = bump(q);
-        let gradient = self.axis * (amount / self.spec.influence_depth * de)
+        let mut gradient = self.axis * (amount / self.spec.influence_depth * de)
             + if r > 0. { radial / r * (dr * envelope) } else { DVec3::ZERO };
+        if self.deposit.is_some() {
+            let (u, v) = self.plane_axes();
+            gradient += (u * lift_slope[0] + v * lift_slope[1]) * envelope;
+        }
         let position = p + self.axis * (amount * envelope);
         let jacobian =
             DMat3::IDENTITY + DMat3::from_cols(self.axis * gradient.x, self.axis * gradient.y, self.axis * gradient.z);
