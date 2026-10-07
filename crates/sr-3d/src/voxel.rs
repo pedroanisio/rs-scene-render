@@ -12,6 +12,7 @@
 use crate::occupancy::Occupancy;
 use std::collections::BTreeMap;
 
+pub mod default_palette;
 pub mod srvol;
 pub mod vox;
 
@@ -20,10 +21,20 @@ pub mod vox;
 pub struct Imported {
     /// The cells, with the palette beside them if the file has colours.
     pub occupancy: Occupancy,
-    /// Whether the file had colours, which are in the palette of `occupancy` (palette index c, 1 to 255, is the file's colour c - 1).
-    pub colours: bool,
+    /// Where the palette of `occupancy` comes from: the file's own colours (palette index c, 1 to 255, is the file's colour c - 1) or, for a
+    /// file with no RGBA chunk, the default palette of the format.
+    pub colours: Colours,
     /// The properties of the materials the file names, by palette index, as the file spells them (`_type`, `_rough`, ...).
     pub materials: BTreeMap<u8, BTreeMap<String, String>>,
+}
+
+/// Where the colours of a model come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colours {
+    /// The RGBA chunk of the file.
+    File,
+    /// The default palette of the format, which a file with no RGBA chunk has (see [`default_palette`]).
+    Default,
 }
 
 /// The cell of the scene that a cell of MagicaVoxel's axes (x right, y forward, z up) is.

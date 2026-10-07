@@ -220,6 +220,24 @@ def main():
     body = size_chunk(*s_size) + xyzi_chunk(s_voxels) + graph + rgba_chunk(palette)
     emit("rotations", file(150, body), expected("rotations", [(s_size, s_voxels)], palette, cells, {"rotation_bytes": [b for b, _ in rotations()]}))
 
+    # the example of the description of the file format (MagicaVoxel-file-format-vox-extension.txt, ROTATION type):
+    #   R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]  ==>  _r = (1 << 0) | (2 << 2) | (0 << 4) | (1 << 5) | (1 << 6)
+    spec_matrix = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]
+    spec_byte = (1 << 0) | (2 << 2) | (0 << 4) | (1 << 5) | (1 << 6)
+    assert spec_byte == 105
+    assert any(b == spec_byte and [[0] * 3 for _ in range(3)] and all(sum(abs(v) for v in row) == 1 for row in spec_matrix) for b, _ in rotations())
+    for k, (row, (col, sign)) in enumerate(zip(spec_matrix, dict((b, r) for b, r in rotations())[spec_byte])):
+        assert row[col] == sign and sum(abs(v) for v in row) == 1, k
+    r_size, r_voxels = (3, 3, 3), [(0, 0, 0, 1), (2, 1, 0, 2), (1, 2, 2, 3)]
+    graph = ntrn(0, 1) + ngrp(1, [2]) + ntrn(2, 3, rotation=spec_byte, translation=(5, 6, 7)) + nshp(3, 0)
+    body = size_chunk(*r_size) + xyzi_chunk(r_voxels) + graph + rgba_chunk(palette)
+    cells = []
+    for v in r_voxels:
+        q = [v[i] - r_size[i] // 2 for i in range(3)]
+        p = [sum(spec_matrix[k][c] * q[c] for c in range(3)) + (5, 6, 7)[k] for k in range(3)]
+        cells.append((scene_cell(p), v[3]))
+    emit("spec-rotation", file(150, body), expected("spec-rotation", [(r_size, r_voxels)], palette, cells))
+
     print(json.dumps(files, sort_keys=True))
 
 

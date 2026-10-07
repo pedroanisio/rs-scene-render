@@ -4,7 +4,8 @@
 //! rotation byte, the MATL id) is in the `unproved` list of each expected file, and the proposal says so.
 
 use sr_3d::occupancy::Limits;
-use sr_3d::voxel::{scene_cell, vox};
+use sr_3d::voxel::default_palette::DEFAULT_PALETTE;
+use sr_3d::voxel::{scene_cell, vox, Colours};
 
 fn fixture(name: &str) -> (Vec<u8>, serde_json::Value) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vox");
@@ -38,7 +39,7 @@ fn every_fixture_gives_the_cells_the_palette_and_the_materials_that_its_script_w
         assert_eq!(imported.occupancy.count() as usize, want.len(), "{name}");
         // the colour of palette index c is the file's entry c - 1
         let palette = expected["palette"].as_array().unwrap();
-        assert!(imported.colours, "{name}");
+        assert_eq!(imported.colours, Colours::File, "{name}");
         for c in 1..=255usize {
             let entry: [i64; 4] = numbers(&palette[c - 1]);
             let got = imported.occupancy.palette().color(c as u8).map(i64::from);
@@ -88,10 +89,13 @@ fn the_models_are_what_the_file_holds_and_a_single_model_is_unplaced() {
 }
 
 #[test]
-fn a_file_with_no_colours_says_so_and_gives_the_cells() {
+fn a_file_with_no_colours_has_the_default_palette_of_the_format_and_says_so() {
     let (bytes, expected) = fixture("no-rgba");
     let imported = vox::import(&bytes, None, Limits::default(), &vox::Bounds::default()).unwrap();
-    assert!(!imported.colours);
+    assert_eq!(imported.colours, Colours::Default);
+    for (c, want) in DEFAULT_PALETTE.iter().enumerate().skip(1) {
+        assert_eq!(imported.occupancy.palette().color(c as u8), *want, "index {c}");
+    }
     let want: Vec<[i64; 4]> = expected["cells"].as_array().unwrap().iter().map(numbers::<4>).collect();
     assert_eq!(cells(&imported.occupancy), want);
 }

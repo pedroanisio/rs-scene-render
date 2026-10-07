@@ -8,7 +8,8 @@
 //!   and the version, 150 or 200.
 //! * A model is a `SIZE` (x, y, z) and the `XYZI` that follows it: a count and that many cells of four bytes, x, y, z and a colour
 //!   index 1 to 255, each cell inside the size and no cell twice.
-//! * The `RGBA` chunk is 256 colours; the colour of index `c` is the entry `c - 1` (the file's palette is stored offset by one).
+//! * The `RGBA` chunk is 256 colours; the colour of index `c` is the entry `c - 1` (the description of the format: "color [0-254] are
+//!   mapped to palette index [1-255]"). A file with no RGBA chunk has the default palette of the description (`default_palette`).
 //! * A `MATL` chunk is a palette index and a dictionary of strings, kept as they are spelt.
 //! * The scene graph: `nTRN` (a transform of one child: frame 0 only, `_r` the rotation byte and `_t` the translation in cells),
 //!   `nGRP` (children), `nSHP` (the models). The cells of a model are placed about its centre, `size / 2` with integer division,
@@ -17,10 +18,16 @@
 //!   Where cells of two models fall on one place the later one in the graph wins. Layers, hidden nodes, animation (frames after the
 //!   first) and cameras are not read.
 //!
-//! **No real file has proved** the offset of the palette, the centre of a model under the scene graph, the rotation byte and that a
-//! `MATL` id is a palette index: the fixtures are written by an independent script from the same reading of the format.
+//! Where each of these comes from: the palette offset and the default palette, from section 7 and 8 of the description of the file
+//! format by the author of MagicaVoxel (<https://github.com/ephtracy/voxel-model>, `MagicaVoxel-file-format-vox.txt`); the rotation byte,
+//! from section (c) of its extension file (the example `R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]` is the byte 105) and applied as
+//! `p = R q`, the centre of a model at `floor(size / 2)` and a `MATL` id as the palette index, from `ogt_vox.h` of
+//! opengametools (<https://github.com/jpaver/opengametools>, MIT: "the centre pivot for that model is located at floor(size.xyz / 2)"; its
+//! `materials.matl[color_index]` beside `palette.color[color_index]`). The fixtures written by `tools/make_vox.py` follow the same
+//! reading; the files of MagicaVoxel's author and of the `dot_vox` crate that are next to them are real.
 
-use super::{scene_cell, Imported};
+use super::default_palette::DEFAULT_PALETTE;
+use super::{scene_cell, Colours, Imported};
 use crate::occupancy::{Limits, Occupancy};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -177,8 +184,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// The largest side of a model that is accepted: the cells of a model are bytes, so a model is at most 256 to a side, and a
-/// size beyond a few thousand is not a model.
+/// The largest side of a model that is accepted: a size beyond a few thousand is not a model.
 const MAX_SIDE: u32 = 4096;
 
 /// Reads the file: the models, the palette, the materials and the scene graph, validated.
@@ -463,14 +469,13 @@ impl Vox {
             },
         }
         let mut occupancy = Occupancy::from_cells_with_limits(limits, cells)?;
-        let colours = self.palette.is_some();
-        if let Some(file) = &self.palette {
-            let mut colors = [[0u8; 4]; 256];
-            for c in 1..=255usize {
-                colors[c] = file[c - 1];
-            }
-            occupancy.set_palette(colors);
+        // the colour of palette index c is the file's entry c - 1; with no RGBA chunk it is the default palette's entry c
+        let colours = if self.palette.is_some() { Colours::File } else { Colours::Default };
+        let mut colors = [[0u8; 4]; 256];
+        for c in 1..=255usize {
+            colors[c] = self.palette.as_ref().map_or(DEFAULT_PALETTE[c], |file| file[c - 1]);
         }
+        occupancy.set_palette(colors);
         let materials = self
             .materials
             .iter()
