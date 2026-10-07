@@ -8,10 +8,12 @@ usage: tools/check_release_hygiene.py --all             every tracked file
 
 Rule A rejects files that are working material (agent instructions, plans, notes, logs).
 Rule B rejects text that refers to private locations, delivery phases, documents that are not
-shipped, or the development session. Rule D lists past-tense phrases for a human to judge.
+shipped, or the development session. Rule D lists past-tense phrases for a human to judge. Rule L
+rejects an acceptance ledger that is not whole (a repeated key, a milestone with a field missing, two with one name).
 Exit status 1 when a rule A or B match remains. Legitimate exceptions go in ALLOW with a reason.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -143,6 +145,49 @@ def check(paths, base, staged=False):
     return bad, warn
 
 
+LEDGER = os.path.join("tools", "evidence", "cinematic-impact.json")
+LEDGER_FIELDS = ("name", "evidence", "validation", "limits")
+
+
+def _refuse_repeats(pairs):
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"the key {key!r} is repeated in one object")
+        seen.add(key)
+    return dict(pairs)
+
+
+def check_ledger(base):
+    """Rule L: the acceptance ledger is whole. It is read by a parser that refuses a repeated key (a merge of two lists of milestones can leave a
+    file that loads and has lost an entry, because the second copy of a key wins); every milestone has a name, evidence, validation and limits, and
+    no two have the same name. A repository with no ledger is not asked for one."""
+    path = os.path.join(base, LEDGER)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f, object_pairs_hook=_refuse_repeats)
+    except ValueError as e:
+        return [f"{LEDGER}: L1 the ledger does not parse whole: {e}"]
+    errors = []
+    names = {}
+    milestones = data.get("milestones", []) if isinstance(data, dict) else []
+    for n, m in enumerate(milestones, 1):
+        if not isinstance(m, dict):
+            errors.append(f"{LEDGER}: L2 milestone {n} is not an object")
+            continue
+        label = m.get("name", "(no name)")
+        for field in LEDGER_FIELDS:
+            if field not in m:
+                errors.append(f"{LEDGER}: L2 milestone {n} ({label[:60]}) has no {field}")
+        if "name" in m:
+            if m["name"] in names:
+                errors.append(f"{LEDGER}: L3 milestones {names[m['name']]} and {n} have the same name ({label[:60]})")
+            names.setdefault(m["name"], n)
+    return errors
+
+
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
@@ -163,6 +208,7 @@ def main():
             bad.append(f"{a.dir}: E1 no LICENSE file in the package")
     else:
         bad, warn = check(files_from_git(a.staged, a.root), a.root, staged=a.staged)
+        bad += check_ledger(a.root)
     for w in warn:
         print("warning:", w)
     for b in bad:

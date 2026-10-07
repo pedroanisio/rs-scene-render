@@ -136,5 +136,68 @@ class Staged(unittest.TestCase):
         self.assertEqual(other.check("--staged").returncode, 0)
 
 
+LEDGER = "tools/evidence/cinematic-impact.json"
+
+
+def milestone(called="one", without=()):
+    entry = {"name": called, "evidence": ["a.rs"], "validation": "v", "limits": "l"}
+    for key in without:
+        del entry[key]
+    return entry
+
+
+class Ledger(unittest.TestCase):
+    """The acceptance ledger is read by a parser that refuses a repeated key: a merge that splices two lists of milestones can leave a file that loads
+    and has lost an entry (the second copy of a key wins), and a file that loads is not a file that is whole."""
+
+    def check_text(self, text):
+        repo = Repo()
+        repo.write(LEDGER, text)
+        repo.write("a.md", "clean\n")
+        repo.stage("a.md")
+        return repo.check("--all")
+
+    def check_milestones(self, milestones):
+        import json
+        return self.check_text(json.dumps({"milestones": milestones}, indent=2))
+
+    def test_a_whole_ledger_passes(self):
+        result = self.check_milestones([milestone("one"), milestone("two")])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_ledger_of_this_repository_is_whole(self):
+        self.assertEqual(hygiene.check_ledger(str(ROOT)), [])
+
+    def test_a_key_that_is_repeated_in_an_object_is_refused(self):
+        text = '{"milestones": [{"name": "a", "evidence": [], "validation": "v", "limits": "l", "name": "b"}]}'
+        result = self.check_text(text)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("L1", result.stdout)
+        self.assertIn("name", result.stdout)
+
+    def test_a_milestone_that_lacks_a_field_or_a_name_is_refused(self):
+        for missing in ("name", "evidence", "validation", "limits"):
+            result = self.check_milestones([milestone("one"), milestone("two", without=(missing,))])
+            self.assertEqual(result.returncode, 1, f"{missing}: {result.stdout}{result.stderr}")
+            self.assertIn("L2", result.stdout, missing)
+            self.assertIn(missing, result.stdout)
+
+    def test_two_milestones_of_one_name_are_refused(self):
+        result = self.check_milestones([milestone("one"), milestone("two"), milestone("one")])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("L3", result.stdout)
+
+    def test_a_ledger_that_does_not_parse_is_refused_by_name(self):
+        result = self.check_text('{"milestones": [')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("L1", result.stdout)
+
+    def test_a_repository_with_no_ledger_is_not_asked_for_one(self):
+        repo = Repo()
+        repo.write("a.md", "clean\n")
+        repo.stage("a.md")
+        self.assertEqual(repo.check("--all").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
