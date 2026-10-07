@@ -561,7 +561,7 @@
   </sch:pattern>
   <sch:pattern id="cinematic-voxel-assets">
     <sch:rule context="assets/voxelAsset">
-      <sch:assert id="VOX2" test="count(@src|@fromMesh)=1 and (not(@format|@model) or @src) and (not(@model) or @format='vox' or (not(@format) and substring(@src,string-length(@src) - 3)='.vox')) and (not(@voxelGrid) or @format='srvol' or (not(@format) and substring(@src,string-length(@src) - 4)='.srvol')) and ((@fromMesh and @cellSize) or not(@fromMesh|@cellSize))">a voxelAsset has exactly one of src and fromMesh; format, model and voxelGrid belong to src (model to a vox file, voxelGrid to an srvol file), and cellSize is required with fromMesh and not given with src.</sch:assert>
+      <sch:assert id="VOX2" test="count(@src|@fromMesh)=1 and (not(@format|@model) or @src) and (not(@model) or @format='vox' or (not(@format) and substring(@src,string-length(@src) - 3)='.vox')) and (not(@voxelGrid) or @format='srvol' or (not(@format) and substring(@src,string-length(@src) - 5)='.srvol')) and ((@fromMesh and @cellSize) or not(@fromMesh|@cellSize))">a voxelAsset has exactly one of src and fromMesh; format, model and voxelGrid belong to src (model to a vox file, voxelGrid to an srvol file), and cellSize is required with fromMesh and not given with src.</sch:assert>
       <sch:assert id="VOX3" test="not(@fromMesh) or /scene/assets/mesh[@id=current()/@fromMesh]">voxelAsset/@fromMesh must name a mesh asset.</sch:assert>
     </sch:rule>
   </sch:pattern>

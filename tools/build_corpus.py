@@ -108,6 +108,7 @@ CASES = [
     ("vox2-cellsize-with-src", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/voxels.vox" cellSize="1"')),
     ("vox2-model-of-mesh", ["VOX2"], lambda _: VOXELS_FROM_MESH.replace('fromMesh="shape"', 'fromMesh="shape" model="0"')),
     ("vox2-grid-of-vox", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/voxels.vox" voxelGrid="voxels"')),
+    ("vox2-model-of-srvol", ["VOX2"], lambda _: VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" model="0"')),
     ("vox3-frommesh", ["VOX3"], lambda _: VOXELS_FROM_MESH.replace('fromMesh="shape"', 'fromMesh="stone"')),
     ("vox4-asset", ["VOX4"], lambda _: VOXELS.replace('voxels="model"', 'voxels="shape"')),
     ("vox4-no-asset", ["VOX4"], lambda _: VOXELS.replace(' voxels="model"', '')),
@@ -493,6 +494,9 @@ VALID = {
     "pyro-follow": PYRO_FOLLOW,
     "voxels": VOXELS,
     "voxels-from-mesh": VOXELS_FROM_MESH,
+    # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it
+    "voxels-srvol": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" voxelGrid="voxels"'),
+    "voxels-srvol-format": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" format="srvol" voxelGrid="voxels"'),
     "pyro-colliders": PYRO_COLLIDERS,
     "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
     "baked-volume": VOLUME_BAKED,

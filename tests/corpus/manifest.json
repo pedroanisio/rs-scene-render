@@ -916,6 +916,9 @@
     "vox2-model-of-mesh.scene.xml": [
       "VOX2"
     ],
+    "vox2-model-of-srvol.scene.xml": [
+      "VOX2"
+    ],
     "vox2-no-source.scene.xml": [
       "VOX2"
     ],
@@ -999,6 +1002,8 @@
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
     "voxels-from-mesh.scene.xml": [],
+    "voxels-srvol-format.scene.xml": [],
+    "voxels-srvol.scene.xml": [],
     "voxels.scene.xml": [],
     "whitewater-checkpoint.scene.xml": []
   },

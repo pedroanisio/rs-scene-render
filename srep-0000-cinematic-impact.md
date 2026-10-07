@@ -3067,7 +3067,7 @@ not a model and is refused, and every number is named in the message.
 | VOX6 | `palette` is `file` or at most 255 material IDs |
 | VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 373 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 ## SRVOL cache version 1
