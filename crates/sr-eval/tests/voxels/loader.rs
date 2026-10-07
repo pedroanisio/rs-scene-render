@@ -107,6 +107,12 @@ fn cube_cells() -> Vec<[u8; 4]> {
     (0..8u8).map(|i| [i & 1, i >> 1 & 1, i >> 2 & 1, 3]).collect()
 }
 
+/// The file's modification time set to `base` plus `seconds` (so that a rewrite is a change of time whatever the clock's grain).
+fn stamp(path: &Path, base: std::time::SystemTime, seconds: u64) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(base + std::time::Duration::from_secs(seconds)).unwrap();
+}
+
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
@@ -155,6 +161,8 @@ fn the_cells_are_at_the_origin_and_the_origin_says_how_far_they_were_from_it() {
     let (first, second) = (load(ev.program(), "a").unwrap(), load(ev.program(), "b").unwrap());
     // the same cells, and so the same fingerprint
     assert_eq!(first.occupancy.cells().collect::<Vec<_>>(), second.occupancy.cells().collect::<Vec<_>>());
+    // all three cells of the model, in both
+    assert_eq!((first.occupancy.count(), second.occupancy.count()), (3, 3));
     assert_eq!(first.fingerprint, second.fingerprint);
     assert_eq!(first.occupancy.bounds().unwrap().0, [0, 0, 0]);
     // the origins differ by the translations in the scene's axes: [x, y, z] of MagicaVoxel is [x, -z, y]
@@ -210,14 +218,15 @@ fn the_limits_of_the_asset_are_checked_and_say_what_was_over() {
     dir.write("big.vox", &vec![0u8; 2 << 20]);
     let ev = evaluator(
         &dir,
-        r#"<voxelAsset id="few" src="cube.vox" maxCells="7"/><voxelAsset id="exact" src="cube.vox" maxCells="8"/><voxelAsset id="big" src="big.vox" maxMemoryMiB="1"/><voxelAsset id="remote" src="https://example.com/cube.vox"/><voxelAsset id="gone" src="missing.vox"/><voxelAsset id="odd" src="cube.bin"/>"#,
+        r#"<voxelAsset id="few" src="cube.vox" maxCells="7"/><voxelAsset id="exact" src="cube.vox" maxCells="8"/><voxelAsset id="big" src="big.vox" maxMemoryMiB="1"/><voxelAsset id="web" src="https://example.com/cube.vox"/><voxelAsset id="gone" src="missing.vox"/><voxelAsset id="odd" src="cube.bin"/>"#,
     );
     let error = load(ev.program(), "few").unwrap_err();
     assert!(error.contains('8') && error.contains('7') && error.contains("cells"), "{error}");
     assert_eq!(load(ev.program(), "exact").unwrap().occupancy.count(), 8);
     let error = load(ev.program(), "big").unwrap_err();
     assert!(error.contains("2097152") && error.contains("1048576") && error.contains("maxMemoryMiB"), "{error}");
-    assert!(load(ev.program(), "remote").unwrap_err().contains("remote"));
+    let error = load(ev.program(), "web").unwrap_err();
+    assert!(error.contains("is remote (https)"), "{error}");
     assert!(load(ev.program(), "gone").unwrap_err().contains("missing.vox"));
     dir.write("cube.bin", &file(model([2, 2, 2], &cube_cells())));
     assert!(load(ev.program(), "odd").unwrap_err().contains("format"));
@@ -225,23 +234,30 @@ fn the_limits_of_the_asset_are_checked_and_say_what_was_over() {
 }
 
 #[test]
-fn an_asset_is_read_once_and_read_again_when_its_bytes_are_not_the_ones_that_were_read() {
+fn an_asset_is_read_once_and_read_again_when_its_length_or_its_time_changes_and_the_bytes_with_them() {
     let dir = Dir::new("cache");
     let a = file(model([2, 2, 2], &cube_cells()));
     let path = dir.write("m.vox", &a);
+    let base = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+    stamp(&path, base, 0);
     let ev = evaluator(&dir, r#"<voxelAsset id="m" src="m.vox"/>"#);
     let first = load(ev.program(), "m").unwrap();
-    // the same bytes: the same model, not read again
+    // the same file: the same model, not read again (a file of the same length and time is taken for the same: the cache is "parse once")
     assert!(Arc::ptr_eq(&first, &load(ev.program(), "m").unwrap()));
-    // the file touched and not changed: still the same model (the decision is of the bytes, not of the time)
+    std::fs::write(&path, vec![0u8; a.len()]).unwrap();
+    stamp(&path, base, 0);
+    assert!(Arc::ptr_eq(&first, &load(ev.program(), "m").unwrap()));
+    // the time changed and the bytes did not: the file is read and hashed, and it is the same model
     std::fs::write(&path, &a).unwrap();
+    stamp(&path, base, 10);
     assert!(Arc::ptr_eq(&first, &load(ev.program(), "m").unwrap()));
-    // the same length, one voxel moved: the model is read again and its fingerprint is another
+    // the time and the bytes changed at the same length (the colour of one voxel, 3 to 9): the model is read again and is another
     let mut cells = cube_cells();
-    cells[7] = [1, 1, 1, 9];
+    cells[7][3] = 9;
     let b = file(model([2, 2, 2], &cells));
     assert_eq!(a.len(), b.len());
     std::fs::write(&path, &b).unwrap();
+    stamp(&path, base, 20);
     let second = load(ev.program(), "m").unwrap();
     assert!(!Arc::ptr_eq(&first, &second));
     assert_ne!(first.fingerprint, second.fingerprint);
@@ -249,6 +265,7 @@ fn an_asset_is_read_once_and_read_again_when_its_bytes_are_not_the_ones_that_wer
     assert_eq!(second.source.bytes, b.len() as u64);
     // and back
     std::fs::write(&path, &a).unwrap();
+    stamp(&path, base, 30);
     assert_eq!(load(ev.program(), "m").unwrap().fingerprint, first.fingerprint);
     // another program has its own cache
     let other = evaluator(&dir, r#"<voxelAsset id="m" src="m.vox"/>"#);
@@ -274,10 +291,13 @@ fn the_materials_of_the_file_are_numbers_by_index_with_a_fingerprint_of_their_ow
     )
     .unwrap();
     assert_eq!(m.materials_fingerprint, fingerprint(&parse_all(&imported.materials).unwrap()));
+    // and the value is the one that tools/vox_materials_hash.py works out from the description of the hash, with none of this code
+    assert_eq!(m.materials_fingerprint, 10385904548290088009);
     // a file with no material has the fingerprint of none, and it is not that of this one
     let plain = load(ev.program(), "p").unwrap();
     assert!(plain.materials.is_empty());
     assert_eq!(plain.materials_fingerprint, fingerprint(&Default::default()));
+    assert_eq!(plain.materials_fingerprint, 3530818670739341123);
     assert_ne!(plain.materials_fingerprint, m.materials_fingerprint);
 }
 
@@ -316,4 +336,111 @@ fn a_mesh_asset_cut_into_cells_is_cut_in_the_frame_it_is_drawn_in_and_a_cache_ha
     for i in 0..5 {
         assert_eq!(cache.occupancy.get([i, 2 * i, 4 - i]), (i + 1) as u8, "cell {i}");
     }
+}
+
+#[test]
+fn a_from_mesh_asset_of_an_included_document_reads_the_mesh_of_its_own_document() {
+    let dir = Dir::new("include");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    // the included document's `rock` is a cube of a metre; the main document has a `rock` of its own, a cube of two metres
+    dir.write("rock-1m.glb", &std::fs::read(fixtures.join("cube-1m.glb")).unwrap());
+    dir.write("rock-2m.glb", &std::fs::read(fixtures.join("cube-2m.glb")).unwrap());
+    dir.write(
+        "lib.scene.xml",
+        br##"<scene version="1.3"><project width="64" height="64" fps="24" duration="1"/>
+<assets><mesh id="rock" src="rock-1m.glb"/><voxelAsset id="v" fromMesh="rock" cellSize="10"/></assets>
+<materials><material id="stone" baseColor="#808080"/></materials>
+<symbols><symbol id="s" width="32" height="32"><object3D id="o" primitive="voxels" voxels="v" material="stone"/></symbol></symbols><composition/></scene>"##,
+    );
+    let main = r##"<scene version="1.3"><project width="64" height="64" fps="24" duration="1"/>
+<assets><mesh id="rock" src="rock-2m.glb"/></assets>
+<composition><object3D id="big" primitive="mesh" mesh="rock"/><include id="inc" src="lib.scene.xml" symbol="s"/></composition></scene>"##;
+    let doc = sr_model::load_str(main, &sr_model::LoadOptions { verify_assets: false, base_dir: Some(dir.0.clone()) })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let ev = Evaluator::new(&doc, &Default::default()).unwrap();
+    // the key of an asset of an included document is its namespace and its id; the mesh it names is in the same document
+    let cut = load(ev.program(), "inc/v").unwrap();
+    assert_eq!(
+        cut.occupancy.count(),
+        1000,
+        "a cube of a metre at cells of 10 is 10 a side, not the 20 of the main document's rock"
+    );
+    assert_eq!(cut.occupancy.bounds().unwrap(), ([0, 0, 0], [9, 9, 9]));
+}
+
+#[test]
+fn the_digest_of_a_mesh_is_checked_on_the_bytes_and_includes_the_files_that_it_reads() {
+    let dir = Dir::new("mesh-digest");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let cube = std::fs::read(fixtures.join("cube-1m.glb")).unwrap();
+    dir.write("cube.glb", &cube);
+    let wrong = sha256(b"something else");
+    let right = sha256(&cube);
+    let ev = evaluator(
+        &dir,
+        &format!(
+            r#"<mesh id="bad" src="cube.glb" sha256="{wrong}"/><mesh id="good" src="cube.glb" sha256="{right}"/><voxelAsset id="from-bad" fromMesh="bad" cellSize="10"/><voxelAsset id="from-good" fromMesh="good" cellSize="10"/>"#
+        ),
+    );
+    // the digest the document declares for the mesh is the mesh file's, checked before the mesh is cut
+    let error = load(ev.program(), "from-bad").unwrap_err();
+    assert!(error.contains("sha256") && error.contains(&wrong) && error.contains(&right), "{error}");
+    let good = load(ev.program(), "from-good").unwrap();
+    assert_eq!(good.occupancy.count(), 1000);
+    assert_eq!(good.source.sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(), right);
+
+    // a .gltf with its buffer in another file: the digest of the source covers both, so a change of the buffer is a change of the model
+    let positions = dir.0.join("cube.bin");
+    let corners: Vec<[f32; 3]> = (0..8).map(|i| [(i & 1) as f32, (i >> 1 & 1) as f32, (i >> 2 & 1) as f32]).collect();
+    let quads: [[u16; 4]; 6] = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let triangles: Vec<u16> = quads.iter().flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]]).collect();
+    let buffer = |scale: f32| -> Vec<u8> {
+        let mut bin: Vec<u8> = corners.iter().flatten().flat_map(|v| (v * scale).to_le_bytes()).collect();
+        bin.extend(triangles.iter().flat_map(|i| i.to_le_bytes()));
+        bin
+    };
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"accessors":[{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3","min":[0,0,0],"max":[2,2,2]},{"bufferView":1,"componentType":5123,"count":36,"type":"SCALAR"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":96},{"buffer":0,"byteOffset":96,"byteLength":72}],"buffers":[{"byteLength":168,"uri":"cube.bin"}]}"#;
+    dir.write("split.gltf", json.as_bytes());
+    let base = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+    std::fs::write(&positions, buffer(1.0)).unwrap();
+    stamp(&positions, base, 0);
+    let ev =
+        evaluator(&dir, r#"<mesh id="split" src="split.gltf"/><voxelAsset id="v" fromMesh="split" cellSize="10"/>"#);
+    let first = load(ev.program(), "v").unwrap();
+    assert_eq!(first.occupancy.count(), 1000);
+    // the buffer changes (the cube is two metres now) and the .gltf does not: the model is another, and so is the digest of its source
+    std::fs::write(&positions, buffer(2.0)).unwrap();
+    stamp(&positions, base, 10);
+    let second = load(ev.program(), "v").unwrap();
+    assert_eq!(second.occupancy.count(), 8000);
+    assert_ne!(first.source.sha256, second.source.sha256);
+    assert_ne!(first.fingerprint, second.fingerprint);
+    assert_eq!(second.source.bytes, (json.len() + 168) as u64);
+}
+
+#[test]
+fn cells_that_are_too_far_apart_for_an_occupancy_are_an_error_that_names_the_span() {
+    let dir = Dir::new("span");
+    let key_limit = sr_3d::occupancy::KEY_LIMIT;
+    let grid = |cells: &[[i32; 3]]| {
+        let mut grid = sr_volume::SparseGrid::new(sr_volume::Transform::identity(), 0.0, 1000).unwrap();
+        for c in cells {
+            grid.set(*c, 1.0).unwrap();
+        }
+        let mut volume = sr_volume::Volume::new();
+        volume.insert("voxels", grid).unwrap();
+        let mut out = Vec::new();
+        volume.write(&mut out).unwrap();
+        out
+    };
+    // the first and the last key that an occupancy has: 2^31 cells apart, one more than the keys of an axis allow once the first is the origin
+    dir.write("wide.srvol", &grid(&[[-key_limit, 0, 0], [key_limit - 1, 0, 0]]));
+    // 2^30 cells wide, which is as wide as an occupancy can be
+    dir.write("widest.srvol", &grid(&[[0, 0, 0], [key_limit - 1, 0, 0]]));
+    let ev = evaluator(&dir, r#"<voxelAsset id="wide" src="wide.srvol"/><voxelAsset id="widest" src="widest.srvol"/>"#);
+    let error = load(ev.program(), "wide").unwrap_err();
+    assert!(error.contains("span") && error.contains("2147483648") && error.contains("axis 0"), "{error}");
+    let widest = load(ev.program(), "widest").unwrap();
+    assert_eq!(widest.occupancy.count(), 2);
+    assert_eq!(widest.occupancy.bounds().unwrap(), ([0, 0, 0], [key_limit - 1, 0, 0]));
 }

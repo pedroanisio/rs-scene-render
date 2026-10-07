@@ -7,16 +7,26 @@
 //! * `maxCells` and `maxMemoryMiB` (the engine's 4,194,304 and 128) are the limits of the grid; over either is an error that names the
 //!   number, and the importers add their own bounds (see `sr_3d::voxel::vox::Bounds`).
 //! * `fromMesh` cuts the mesh asset in the frame it is drawn in ([`crate::voxel::from_model`] and the same flattening), the cells on a lattice
-//!   of multiples of `cellSize` scene units; it has no palette and no materials, and its `sha256` is the mesh file's bytes' (the `sha256`
-//!   of a `voxelAsset` that has `fromMesh` is not read: the mesh asset has its own).
+//!   of multiples of `cellSize` scene units; it has no palette and no materials. The mesh asset is the one of the same document as the voxel
+//!   asset (an asset of an included document is named by its namespace and its id, and so is the mesh it cuts); the `sha256` of a
+//!   `voxelAsset` that has `fromMesh` is not read, the mesh asset's is.
 //! * The cells are moved so that the corner of the box of the occupied cells is the origin ([`VoxelModel::origin_cells`] is how far they
 //!   were from it: the minimum key in the lattice of the scene after the scene graph, so the cells of the file are `occupancy` plus that,
 //!   and the pivot of a model of the file, `floor(size / 2)`, can be worked out again by whoever needs it).
-//! * Every asset is read once for a program and key, and again when its bytes are not the ones that were read: an entry is reused only
-//!   if the hash of the bytes is the same (with the length and the modification time that were seen kept on it, for whoever reports them).
+//! * Every asset is read once for a program and key ("parse once"): a later call finds the file as it was (the same length and modification
+//!   time, for the file and for every file it reads) and returns the model without reading it. If the length or the time changed the bytes
+//!   are read and hashed, and the entry is reused only if the hash is the same (a rewrite of the same bytes is not a change); a file that
+//!   changes with the same length AND the same time is taken for the same, which is the price of not hashing up to `maxMemoryMiB` on every
+//!   call. A `fromMesh` source is the mesh file and every file the importer reads for it (a `.bin` beside a `.gltf`, the materials and textures
+//!   of an `.obj`), and its digest covers all of them; the mesh is cut after its digest is taken and the digest is taken again after, and a
+//!   file that changed between the two is an error and not a model that its digest does not describe. The `sha256` that a mesh asset declares
+//!   is checked against its own file's bytes.
+//! * The peak memory of a load is up to about three times `maxMemoryMiB`: the bytes of the file, the grid that the importer builds and, when
+//!   the corner of the cells is not already at the origin, the copy that is moved.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -24,7 +34,7 @@ use sha2::{Digest, Sha256};
 use sr_3d::occupancy::{Limits, Occupancy};
 use sr_3d::voxel::material::{self, Material};
 use sr_3d::voxel::{srvol, vox, Colours};
-use sr_model::model::{AssetsChild, VoxelAsset, VoxelAssetFormat};
+use sr_model::model::{AssetsChild, MeshAsset, VoxelAsset, VoxelAssetFormat};
 
 use crate::program::Program;
 
@@ -61,33 +71,74 @@ pub struct VoxelModel {
     pub source: Source,
 }
 
+/// A file as it was when it was read: where, how long, and when it was last written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Stat {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stat {
+    fn of(path: &Path) -> Option<Stat> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Stat { path: path.to_path_buf(), len: meta.len(), modified: meta.modified().ok() })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Entry {
     source: Source,
+    /// The files that the model was made from, as they were; none that is missing (a missing file is read again, and is an error).
+    stats: Vec<Stat>,
     model: Arc<VoxelModel>,
 }
 
 /// Models read for a program, by asset key; they live as long as the compiled scene.
 pub(crate) type Cache = Mutex<HashMap<String, Arc<Entry>>>;
 
-fn asset<'a>(p: &'a Program, key: &str) -> Result<(&'a VoxelAsset, std::path::PathBuf), String> {
+fn document<'a>(p: &'a Program, key: &str) -> Result<(&'a sr_model::model::Scene, PathBuf, String), String> {
     let (doc, id) = p.assets.get(key).ok_or_else(|| format!("asset {key} not found"))?;
     let scene = if *doc == 0 { &p.scene } else { &p.includes.get(*doc as usize - 1).ok_or("include missing")?.1 };
+    Ok((scene, p.base_dirs.get(*doc as usize).cloned().unwrap_or_default(), id.clone()))
+}
+
+fn asset<'a>(p: &'a Program, key: &str) -> Result<(&'a VoxelAsset, PathBuf), String> {
+    let (scene, base, id) = document(p, key)?;
     let found = scene
         .assets
         .as_ref()
         .and_then(|a| {
             a.children.iter().find_map(|c| match c {
-                AssetsChild::VoxelAsset(v) if v.id == *id => Some(v),
+                AssetsChild::VoxelAsset(v) if v.id == id => Some(v),
                 _ => None,
             })
         })
         .ok_or_else(|| format!("asset {id} is not a voxelAsset"))?;
-    Ok((found, p.base_dirs.get(*doc as usize).cloned().unwrap_or_default()))
+    Ok((found, base))
+}
+
+fn mesh_asset<'a>(p: &'a Program, key: &str) -> Result<(&'a MeshAsset, PathBuf), String> {
+    let (scene, base, id) = document(p, key)?;
+    let found = scene
+        .assets
+        .as_ref()
+        .and_then(|a| {
+            a.children.iter().find_map(|c| match c {
+                AssetsChild::Mesh(m) if m.id == id => Some(m),
+                _ => None,
+            })
+        })
+        .ok_or_else(|| format!("asset {id} is not a mesh"))?;
+    Ok((found, base))
+}
+
+fn hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The bytes of a file, no more than `max` of them: a longer file is an error before it is read whole.
-fn read_bounded(path: &std::path::Path, max: u64) -> Result<(Vec<u8>, Source), String> {
+fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let meta = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?;
     if meta.len() > max {
@@ -102,12 +153,54 @@ fn read_bounded(path: &std::path::Path, max: u64) -> Result<(Vec<u8>, Source), S
     if bytes.len() as u64 > max {
         return Err(format!("{}: the file is longer than the limit of {max} bytes (maxMemoryMiB)", path.display()));
     }
-    let sha256: [u8; 32] = Sha256::digest(&bytes).into();
-    let source = Source { sha256, bytes: bytes.len() as u64, modified: meta.modified().ok() };
-    Ok((bytes, source))
+    Ok(bytes)
 }
 
-fn local(src: &str, base: &std::path::Path, what: &str) -> Result<std::path::PathBuf, String> {
+/// What the source of a model is: the bytes of its main file (kept, for a format that is read from them), and the digest of the main
+/// file and of every other file that it reads, in the order of their names (a file that is missing counts as missing, so that creating it
+/// is a change). With no other file the digest is the main file's own SHA-256.
+struct Sourced {
+    bytes: Vec<u8>,
+    /// SHA-256 of the main file, which is what a document declares.
+    main: [u8; 32],
+    source: Source,
+    stats: Vec<Stat>,
+}
+
+fn read_source(main: &Path, others: &[PathBuf], max: u64) -> Result<Sourced, String> {
+    let bytes = read_bounded(main, max)?;
+    let main_sha: [u8; 32] = Sha256::digest(&bytes).into();
+    let mut stats: Vec<Stat> = Stat::of(main).into_iter().collect();
+    let mut total = bytes.len() as u64;
+    let mut modified = stats.first().and_then(|s| s.modified);
+    let mut digest = main_sha;
+    if !others.is_empty() {
+        let mut h = Sha256::new();
+        h.update(main_sha);
+        for path in others {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            h.update((name.len() as u64).to_le_bytes());
+            h.update(name.as_bytes());
+            match read_bounded(path, max.saturating_sub(total)) {
+                Ok(data) => {
+                    total += data.len() as u64;
+                    h.update([1u8]);
+                    h.update(Sha256::digest(&data));
+                    if let Some(stat) = Stat::of(path) {
+                        modified = modified.max(stat.modified);
+                        stats.push(stat);
+                    }
+                }
+                Err(_) if !path.exists() => h.update([0u8]),
+                Err(e) => return Err(e),
+            }
+        }
+        digest = h.finalize().into();
+    }
+    Ok(Sourced { bytes, main: main_sha, source: Source { sha256: digest, bytes: total, modified }, stats })
+}
+
+fn local(src: &str, base: &Path, what: &str) -> Result<PathBuf, String> {
     match sr_model::assets::resolve(src, base) {
         sr_model::assets::Resolved::Local(path) => Ok(path),
         sr_model::assets::Resolved::Remote(scheme) => {
@@ -116,21 +209,35 @@ fn local(src: &str, base: &std::path::Path, what: &str) -> Result<std::path::Pat
     }
 }
 
-/// Moves the cells so that the minimum corner of their box is the origin; the minimum key is what was taken away.
+/// Moves the cells so that the minimum corner of their box is the origin; the minimum key is what was taken away. The box can be at most
+/// as wide as the keys of an occupancy are on an axis (2^30 cells), and a wider one is an error that says how wide it is.
 fn at_origin(occupancy: Occupancy, limits: Limits) -> Result<(Occupancy, [i64; 3]), String> {
-    let Some((min, _)) = occupancy.bounds() else {
+    let Some((min, max)) = occupancy.bounds() else {
         return Err("the voxel asset has no cell".into());
     };
+    let limit = i64::from(sr_3d::occupancy::KEY_LIMIT);
+    for axis in 0..3 {
+        let span = i64::from(max[axis]) - i64::from(min[axis]) + 1;
+        if span > limit {
+            return Err(format!(
+                "the cells span {span} cells along axis {axis} and an occupancy has at most {limit} keys on an axis once its corner is at the origin"
+            ));
+        }
+    }
+    let origin = min.map(i64::from);
+    if min == [0, 0, 0] {
+        return Ok((occupancy, origin));
+    }
     let mut moved = Occupancy::with_limits(limits);
     for cell in occupancy.cells() {
-        // the keys are within 2^30 of the origin, so a cell minus the minimum is not negative and is inside an i32
+        // the box is at most 2^30 wide, so a cell minus the minimum is not negative and is a key of an occupancy
         moved.set([cell[0] - min[0], cell[1] - min[1], cell[2] - min[2]], occupancy.get(cell))?;
     }
     moved.set_palette(*occupancy.palette().colors());
-    Ok((moved, min.map(i64::from)))
+    Ok((moved, origin))
 }
 
-/// The cells of the voxel asset `key` of `program`, read once and read again only if the bytes of the file are not the ones that were.
+/// The cells of the voxel asset `key` of `program`, read once and read again only if the file is not the one that was read.
 pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
     let (asset, base) = asset(program, key)?;
     let name = &asset.id;
@@ -139,28 +246,49 @@ pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
     let limits =
         Limits { max_bricks: usize::MAX, max_cells, max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX) };
     let with = |e: String| format!("voxelAsset {name}: {e}");
-    let (bytes, source) = match (&asset.src, &asset.from_mesh) {
-        (Some(src), None) => read_bounded(&local(src, &base, "the voxel asset")?, max_bytes).map_err(with)?,
-        (None, Some(mesh)) => {
-            let (path, _) = crate::sim3d::mesh_path(program, mesh).map_err(with)?;
-            read_bounded(&path, max_bytes).map_err(with)?
+    // the files: the one a file asset names, or the mesh asset's (of the same document, so under the same namespace) and what it reads
+    let namespace = key.strip_suffix(name.as_str()).unwrap_or("");
+    let mesh_key = asset.from_mesh.as_ref().map(|m| format!("{namespace}{m}"));
+    let (main, others, declared) = match (&asset.src, &mesh_key) {
+        (Some(src), None) => (local(src, &base, "the voxel asset")?, Vec::new(), asset.sha256),
+        (None, Some(mesh_key)) => {
+            let (mesh, mesh_base) = mesh_asset(program, mesh_key).map_err(with)?;
+            let path = local(&mesh.src, &mesh_base, "the mesh").map_err(with)?;
+            let format = mesh.format.map(|f| f.to_string());
+            let mut others = sr_3d::import::dependencies_as(&path, format.as_deref()).map_err(with)?;
+            others.retain(|p| *p != path);
+            others.sort();
+            others.dedup();
+            (path, others, mesh.sha256)
         }
         _ => return Err(with("has exactly one of src and fromMesh (VOX2)".into())),
     };
-    if let (Some(declared), None) = (&asset.sha256, &asset.from_mesh) {
-        if declared.0 != source.sha256 {
-            let got: String = source.sha256.iter().map(|b| format!("{b:02x}")).collect();
-            return Err(with(format!(
-                "the file is not the one the document names: its sha256 is {got} and the document says {declared}"
-            )));
-        }
-    }
+    // the file is as it was when the model was made: the model, with no reading of it
     if let Some(entry) = program.voxel_models.lock().unwrap().get(key) {
-        if entry.source.sha256 == source.sha256 {
+        if !entry.stats.is_empty() && entry.stats.iter().all(|s| Stat::of(&s.path).as_ref() == Some(s)) {
             return Ok(entry.model.clone());
         }
     }
-    let (occupancy, colours, materials, cell_size) = match (&asset.src, &asset.from_mesh) {
+    let read = read_source(&main, &others, max_bytes).map_err(with)?;
+    if let Some(declared) = declared {
+        if declared.0 != read.main {
+            return Err(with(format!(
+                "the file is not the one the document names: its sha256 is {} and the document says {declared}",
+                hex(&read.main)
+            )));
+        }
+    }
+    // the file was written again without a change of its bytes: the model is the same, and the entry is of the file as it is now
+    let known =
+        program.voxel_models.lock().unwrap().get(key).filter(|e| e.source.sha256 == read.source.sha256).cloned();
+    if let Some(entry) = known {
+        let model = entry.model.clone();
+        let renewed = Entry { source: read.source, stats: read.stats, model: model.clone() };
+        program.voxel_models.lock().unwrap().insert(key.to_string(), Arc::new(renewed));
+        return Ok(model);
+    }
+    let bytes = &read.bytes;
+    let (occupancy, colours, materials, cell_size) = match (&asset.src, &mesh_key) {
         (Some(src), _) => {
             let by_extension = match src.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
                 Some("vox") => Some(VoxelAssetFormat::Vox),
@@ -171,26 +299,33 @@ pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
                 Some(VoxelAssetFormat::Vox) => {
                     let bounds = vox::Bounds { max_file_bytes: bytes.len(), ..vox::Bounds::default() };
                     let model = asset.model.map(|m| m as usize);
-                    let imported = vox::import(&bytes, model, limits, &bounds).map_err(with)?;
+                    let imported = vox::import(bytes, model, limits, &bounds).map_err(with)?;
                     let materials = material::parse_all(&imported.materials).map_err(with)?;
                     (imported.occupancy, Some(imported.colours), materials, None)
                 }
                 Some(VoxelAssetFormat::Srvol) => {
                     let grid = asset.voxel_grid.as_deref().unwrap_or(srvol::GRID);
                     let cache = sr_volume::CacheLimits { max_bytes, ..Default::default() };
-                    let imported = srvol::import(&bytes, grid, limits, cache).map_err(with)?;
+                    let imported = srvol::import(bytes, grid, limits, cache).map_err(with)?;
                     (imported.occupancy, None, BTreeMap::new(), imported.cell_size)
                 }
                 None => return Err(with(format!("the format of {src} is not vox or srvol: say it with format"))),
             }
         }
-        (None, Some(mesh)) => {
+        (None, Some(mesh_key)) => {
             let cell = asset.cell_size.ok_or_else(|| with("fromMesh needs cellSize (VOX2)".into()))?.get();
-            let (points, triangles) =
-                crate::sim3d::mesh_asset_triangles(program, mesh, usize::try_from(max_bytes).unwrap_or(usize::MAX))
-                    .map_err(with)?;
+            let budget = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+            let (points, triangles) = crate::sim3d::mesh_asset_triangles(program, mesh_key, budget).map_err(with)?;
             let bounds = crate::voxel::Bounds::default();
             let occupancy = crate::voxel::from_triangles(&points, &triangles, cell, limits, &bounds).map_err(with)?;
+            // the importer read the files itself: they are the ones that the digest was taken of, or the digest does not describe the cells
+            let again = read_source(&main, &others, max_bytes).map_err(with)?;
+            if again.source.sha256 != read.source.sha256 {
+                return Err(with(
+                    "the mesh changed while it was read, and the cells are not those of the digest that was taken"
+                        .into(),
+                ));
+            }
             (occupancy, None, BTreeMap::new(), Some(cell))
         }
         _ => unreachable!("one source was checked above"),
@@ -204,8 +339,12 @@ pub fn load(program: &Program, key: &str) -> Result<Arc<VoxelModel>, String> {
         colours,
         materials,
         cell_size,
-        source: source.clone(),
+        source: read.source.clone(),
     });
-    program.voxel_models.lock().unwrap().insert(key.to_string(), Arc::new(Entry { source, model: model.clone() }));
+    program
+        .voxel_models
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), Arc::new(Entry { source: read.source, stats: read.stats, model: model.clone() }));
     Ok(model)
 }

@@ -3060,7 +3060,7 @@ reads nothing, rather than failing, when the files are not there.
 says so), and a program knows the voxel assets that its objects of primitive `voxels` name (and the mesh asset of a `fromMesh`). The bytes
 are read bounded by `maxMemoryMiB` (default 128), hashed, and the declared `sha256` is checked on the bytes that were read before
 anything is parsed, so a file that is not the one the document names is refused as that and not as a malformed `.vox` (a `voxelAsset`
-with `fromMesh` has no digest of its own: the mesh asset has). `maxCells` (default 4,194,304) is the limit of the grid; over either
+with `fromMesh` has no digest of its own: the digest that the mesh asset declares is checked against its file). `maxCells` (default 4,194,304) is the limit of the grid; over either
 limit is an error that names the number. The cells are moved so that the minimum corner of the box of the occupied cells is the origin
 (the object's origin, as the XSD says), and `VoxelModel::origin_cells` is the minimum key before the move, in the lattice of the scene
 after the scene graph: the cells of the file are the cells of the model plus it, and the pivot of a model of the file, `floor(size / 2)`,
@@ -3068,8 +3068,18 @@ can be worked out again from it. A model has the materials of the file as number
 and the properties `ogt_vox.h` reads, dimensionless, the values of MagicaVoxel's sliders, and the keys it does not read as spelt), a
 fingerprint of them for a cache of surfaces, the fingerprint of the cells, the colours' origin (the file's or the default palette; none
 for a cache or a mesh), the size of a cell that the asset says, and where the bytes came from (digest, length, modification time). An
-asset is read once for a program and key and read again when the digest of its bytes is not the one that was read (a rewrite of the same
-bytes is not a change; a change of one voxel with the same length is). Tests (`crates/sr-eval/tests/voxels/loader.rs`): a cube of two cells
+asset is read once for a program and key ("parse once"): a later call finds the file as it was, the same length and modification time (for
+every file the model was made from), and returns the model without reading it; if either changed the bytes are read and hashed and the
+model is reused only if the hash is the same (a rewrite of the same bytes is not a change, a change of one voxel with the same length is),
+and a file changed with the same length AND the same time is taken for the same, the price of not hashing up to `maxMemoryMiB` on each
+call. The source of a `fromMesh` is the mesh and every file the importer reads for it (a `.bin` beside a `.gltf`, the materials and
+textures of an `.obj`), its digest covers all of them, and it is taken again after the mesh is cut: a file that changed in between is an
+error and not a model that its digest does not describe. The mesh asset is the one of the document that has the voxel asset (an asset of
+an included document is named by its namespace and its id, and so is its mesh). A box of cells wider than 2^30 along an axis is an error that
+names its span (an occupancy has 2^30 keys on an axis once its corner is at the origin). The peak memory of a load is up to about three
+times `maxMemoryMiB` (the bytes, the grid, and the copy that is moved when the corner is not already at the origin). `_ri` wins over
+`_ior` where a material has both (`refractive_index`), and a negative zero and a zero are one number in the fingerprint of the materials,
+which `tools/vox_materials_hash.py` works out again from the description of the hash. Tests (`crates/sr-eval/tests/voxels/loader.rs`): a cube of two cells
 a side from a file, through the loader and the world's collider, has the mass `8 rho s^3` and the inertia `m L^2 / 6` (L = 2 s) about
 each axis through its centre, with no products, to 1e-12; one model under two scene graphs that translate it differently has the same
 cells and fingerprint and origins that differ by the translations in the scene's axes, the origin worked out by hand; a wrong digest, a
