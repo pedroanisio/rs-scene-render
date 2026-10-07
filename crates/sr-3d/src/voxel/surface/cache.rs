@@ -27,7 +27,9 @@ type Slice = Arc<[Quad]>;
 /// which classes it was made with, and makes the whole surface again when any of them is not the one it was given: another grid, a
 /// revision of the same grid that is not past the one it holds (it cannot tell what changed), other classes. It reads the bricks
 /// changed since its revision from the grid, so the grid must not be compacted past the revision of the cache before the cache has been
-/// brought up to date (`compact(revision)` after the update is the order).
+/// brought up to date (`compact(revision)` after the update is the order). When the planes to be meshed again are more than half of
+/// all the planes, the whole surface is made again instead (`Remesh::full`): the quads are the same either way, and the work is that of the
+/// whole surface at most.
 #[derive(Default)]
 pub struct SurfaceCache {
     held: Option<(u64, u64, Classes)>,

@@ -865,3 +865,28 @@ fn a_grid_compacted_past_the_revision_the_cache_read_is_meshed_again_whole() {
     assert!(!update.full);
     assert_eq!(cache.quads(), mesh_quads(&fresh(&live), &classes));
 }
+
+#[test]
+fn an_update_that_would_mesh_more_than_half_of_the_planes_again_meshes_all_of_them_with_the_same_result() {
+    let classes = Classes::identity();
+    // 16 cubed: 51 planes, 27 of them in the nine planes of the slab of the brick that is edited along each axis, more than half
+    let mut small = grid(block([0, 0, 0], 16, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&small, &classes, usize::MAX).unwrap();
+    let read = small.revision();
+    small.set([3, 3, 3], 0).unwrap();
+    let dirty = dirty_planes(&small.changed_bricks_since(read));
+    assert_eq!(dirty.len(), 27);
+    let update = cache.update(&small, &classes, usize::MAX).unwrap();
+    assert!(update.full, "27 planes of 51 are the whole of it");
+    assert_eq!(update.remeshed, 51);
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&small), &classes));
+    // 48 cubed: 147 planes, 27 of them are 18 %, so the planes of the brick are all that is made again
+    let mut large = grid(block([0, 0, 0], 48, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&large, &classes, usize::MAX).unwrap();
+    large.set([3, 3, 3], 0).unwrap();
+    let update = cache.update(&large, &classes, usize::MAX).unwrap();
+    assert_eq!((update.full, update.remeshed), (false, 27));
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&large), &classes));
+}
