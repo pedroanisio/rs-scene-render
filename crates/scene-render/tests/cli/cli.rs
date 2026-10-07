@@ -1225,11 +1225,22 @@ fn three_d_fixture(name: &str) -> PathBuf {
     dir
 }
 
-/// True when the machine exposes an OpenGL adapter (the test needs one to select).
+/// True when the machine exposes an OpenGL adapter that can open a device (the test needs one to select): a listed adapter
+/// whose device cannot be created, as on a WSL2 host without a working D3D12 driver, is a skip like a missing one.
 fn has_gl_adapter() -> bool {
     let o = run_env(&["gpus", "--json"], &[("SR_GPU_BACKEND", "gl")]);
     let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return false };
-    r["adapters"].as_array().is_some_and(|a| !a.is_empty())
+    if !r["adapters"].as_array().is_some_and(|a| !a.is_empty()) {
+        return false;
+    }
+    let dir = render_fixture("gl-probe");
+    let scene = dir.join("r.scene.xml").display().to_string();
+    let o = run_env(&["render", &scene, "--bench", "--frames", "0..1"], &[("SR_GPU_BACKEND", "gl")]);
+    let refused = String::from_utf8_lossy(&o.stderr).contains("refused to create a device");
+    if refused {
+        eprintln!("skipping: the OpenGL adapter cannot create a device");
+    }
+    !refused
 }
 
 #[test]

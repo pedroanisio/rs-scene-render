@@ -346,6 +346,69 @@ pub struct Gpu {
     pub scalar_target: wgpu::TextureFormat,
 }
 
+/// What the renderer's shaders need of a device, tried on a minimal pipeline: a fragment shader that reads a runtime-sized
+/// storage buffer. An OpenGL adapter older than 4.3 (the one a WSL2 host without a D3D12 driver falls back to) opens a
+/// device and then fails the first pipeline the renderer creates, which wgpu treats as fatal; made inside an error scope it
+/// is an error here, so that the adapter is refused with its reason, as a caller (a test of the OpenGL backend, the
+/// adapter choice) can act on.
+fn probe(device: &wgpu::Device) -> Result<(), GpuError> {
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("scene-render-probe"),
+        source: wgpu::ShaderSource::Wgsl(
+            "@group(0) @binding(0) var<storage, read> data: array<u32>;\n\
+             @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }\n\
+             @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(f32(data[0]) + f32(arrayLength(&data))); }"
+                .into(),
+        ),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scene-render-probe"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("scene-render-probe"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let _pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("scene-render-probe"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let popped = pollster::block_on(validation.pop()).or_else(|| pollster::block_on(internal.pop()));
+    match popped {
+        None => Ok(()),
+        Some(e) => Err(GpuError::Device(format!("the device cannot run the renderer's shaders: {e}"))),
+    }
+}
+
 impl Gpu {
     /// Opens the best adapter without a window, following `SR_GPU_BACKEND` and `SR_GPU_ADAPTER`.
     pub fn new() -> Result<Gpu, GpuError> {
@@ -388,6 +451,7 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
+        probe(&device)?;
         let timestamps = features.contains(wgpu::Features::TIMESTAMP_QUERY);
         let renderable = |f: wgpu::TextureFormat| {
             adapter.get_texture_format_features(f).allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
