@@ -3056,6 +3056,26 @@ the centre `floor(size / 2)` and is the evidence of it, not a proof. The real fi
 the licence texts and the sources (`SOURCES.md`); the test that reads all thirteen sample files is run with `VOX_SAMPLES` set and
 reads nothing, rather than failing, when the files are not there.
 
+**The loader (`sr_eval::voxel_asset::load`).** The asset key resolves as a mesh asset's does (a local file; a remote scheme is an error that
+says so), and a program knows the voxel assets that its objects of primitive `voxels` name (and the mesh asset of a `fromMesh`). The bytes
+are read bounded by `maxMemoryMiB` (default 128), hashed, and the declared `sha256` is checked on the bytes that were read before
+anything is parsed, so a file that is not the one the document names is refused as that and not as a malformed `.vox` (a `voxelAsset`
+with `fromMesh` has no digest of its own: the mesh asset has). `maxCells` (default 4,194,304) is the limit of the grid; over either
+limit is an error that names the number. The cells are moved so that the minimum corner of the box of the occupied cells is the origin
+(the object's origin, as the XSD says), and `VoxelModel::origin_cells` is the minimum key before the move, in the lattice of the scene
+after the scene graph: the cells of the file are the cells of the model plus it, and the pivot of a model of the file, `floor(size / 2)`,
+can be worked out again from it. A model has the materials of the file as numbers by palette index (`sr_3d::voxel::material`: `_type`
+and the properties `ogt_vox.h` reads, dimensionless, the values of MagicaVoxel's sliders, and the keys it does not read as spelt), a
+fingerprint of them for a cache of surfaces, the fingerprint of the cells, the colours' origin (the file's or the default palette; none
+for a cache or a mesh), the size of a cell that the asset says, and where the bytes came from (digest, length, modification time). An
+asset is read once for a program and key and read again when the digest of its bytes is not the one that was read (a rewrite of the same
+bytes is not a change; a change of one voxel with the same length is). Tests (`crates/sr-eval/tests/voxels/loader.rs`): a cube of two cells
+a side from a file, through the loader and the world's collider, has the mass `8 rho s^3` and the inertia `m L^2 / 6` (L = 2 s) about
+each axis through its centre, with no products, to 1e-12; one model under two scene graphs that translate it differently has the same
+cells and fingerprint and origins that differ by the translations in the scene's axes, the origin worked out by hand; a wrong digest, a
+file that is not a model with a wrong digest, the limits, a remote source and a missing file are errors that say what they are; the
+cache; the materials; a glb cube of a metre cut at 10 (the frame it is drawn in); a cache with the scale of its grid.
+
 **Limitation: an SRVOL file has no checksum of its own.** The `sha256` of a `voxelAsset` is the evaluator's to check on the bytes it
 reads (the loader of the next step); SRVOL version 1 has no field for the provenance of the file a cache was made from, and gets one,
 as a version 2 or an optional chunk, when something needs to say where the cells came from.

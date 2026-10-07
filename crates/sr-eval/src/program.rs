@@ -508,6 +508,8 @@ pub struct Program {
     pub(crate) joint_sockets: std::sync::OnceLock<crate::joints::Sockets>,
     /// Stroke fonts read for `stroke-text` shapes.
     pub(crate) stroke_fonts: crate::stroke_font::Cache,
+    /// Voxel assets read, by asset key (see `voxel_asset`).
+    pub(crate) voxel_models: crate::voxel_asset::Cache,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -1354,6 +1356,7 @@ impl Builder {
                 "layer" => attr_str(e, "asset"),
                 // Shared assets retain their namespace when objects occur in included documents.
                 "object3D" if attr_str(e, "primitive").as_deref() == Some("volume") => attr_str(e, "volume"),
+                "object3D" if attr_str(e, "primitive").as_deref() == Some("voxels") => attr_str(e, "voxels"),
                 "object3D" | "particles3D" => attr_str(e, "mesh"),
                 "ocean" => attr_str(e, "bathymetry"),
                 _ => None,
@@ -1383,6 +1386,20 @@ impl Builder {
                 }
             }
             if name == "object3D" {
+                // a voxel asset cut from a mesh reads that mesh asset, which is therefore an asset of the program too
+                if let Some(v) = attr_str(e, "voxels") {
+                    let from_mesh = self.doc(ctx.doc).scene.assets.as_ref().and_then(|a| {
+                        a.children.iter().find_map(|c| match c {
+                            m::AssetsChild::VoxelAsset(x) if x.id == v => x.from_mesh.clone(),
+                            _ => None,
+                        })
+                    });
+                    if let Some(r) = from_mesh {
+                        let ns = &self.doc(ctx.doc).ns;
+                        let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                        self.assets.insert(key, (ctx.doc, r));
+                    }
+                }
                 if let Some(r) = attr_str(e, "terrain") {
                     let ns = &self.doc(ctx.doc).ns;
                     let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
@@ -3201,6 +3218,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         joint_models: Default::default(),
         joint_sockets: Default::default(),
         stroke_fonts: Default::default(),
+        voxel_models: Default::default(),
         base_dirs,
         safe_area,
         safe_enforce,
