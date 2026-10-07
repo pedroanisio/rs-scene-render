@@ -1051,20 +1051,43 @@ fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
             VoxelSplit3 { parent: 1, slots: vec![3] },
         ])
         .is_ok());
-    // a body that a fracture will replace cannot also be cut
-    let fractured = make().with_fractures(vec![Fracture3 {
-        source: 0,
+    // a body that a fracture will replace cannot also be cut, and one that is cut cannot be fractured, in whichever order they are registered
+    let fracture = |source: usize, pieces: Vec<usize>| Fracture3 {
+        source,
         at: 1.0,
         radial_impulse: 0.0,
-        fragments: vec![Fragment3 { body: 1, offset: [0.0; 3], impulse: [0.0; 3] }],
+        fragments: pieces.into_iter().map(|body| Fragment3 { body, offset: [0.0; 3], impulse: [0.0; 3] }).collect(),
         contact: None,
-    }]);
-    if let Ok(w) = fractured {
-        assert!(
-            w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).is_err(),
-            "a fracture source as the parent"
-        );
-    }
+    };
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).is_err(),
+        "a fracture's source as the parent of a split"
+    );
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 2, slots: vec![1] }]).is_err(),
+        "a fracture's piece as the slot of a split"
+    );
+    let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
+    assert!(
+        fractured.with_voxel_splits(vec![VoxelSplit3 { parent: 1, slots: vec![2] }]).is_err(),
+        "a fracture's piece as the parent of a split"
+    );
+    let split = || make().with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }]).unwrap();
+    assert!(
+        split().with_fractures(vec![fracture(0, vec![2])]).is_err(),
+        "the parent of a split as the source of a fracture"
+    );
+    assert!(
+        split().with_fractures(vec![fracture(2, vec![1])]).is_err(),
+        "the slot of a split as a piece of a fracture"
+    );
+    assert!(
+        split().with_fractures(vec![fracture(1, vec![2])]).is_err(),
+        "the slot of a split as the source of a fracture"
+    );
+    assert!(split().with_fractures(vec![fracture(2, vec![3])]).is_ok(), "bodies that no split owns");
 }
 
 /// A driver that cuts as a [`Script`] does and loads every body with a torque that depends on where its centre of mass is, which is what a driver

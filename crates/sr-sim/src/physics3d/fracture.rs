@@ -77,6 +77,7 @@ impl World3 {
                 || e.contact.is_some_and(|c| !c.energy_fraction.is_finite() || !(0. ..=1.).contains(&c.energy_fraction))
                 || e.source >= self.spec.bodies.len()
                 || !owned.insert(e.source)
+                || self.owned_by_a_split(e.source)
                 || e.fragments.is_empty()
                 || e.fragments.len() > 4096
             {
@@ -87,6 +88,7 @@ impl World3 {
             for p in &e.fragments {
                 if p.body >= self.spec.bodies.len()
                     || !owned.insert(p.body)
+                    || self.owned_by_a_split(p.body)
                     || self.spec.bodies[p.body].kind != BodyKind::Dynamic
                     || p.offset.iter().chain(&p.impulse).any(|v| !v.is_finite() || !(v / ppm).is_finite())
                 {
@@ -97,7 +99,11 @@ impl World3 {
                 combined.push(props.transform_by(&pose));
                 properties.push((p.body, props));
             }
-            let total: MassProperties = combined.into_iter().sum();
+            // the sum of the fragments' tensors: for fragments that are bodies of cells it is worked out exactly (Parry's Sum diagonalises with the
+            // solver whose mistake voxel_mass works around, and would give the source a tensor that is not its cells'); for any other, as it always was
+            let all_cells = e.fragments.iter().all(|p| matches!(self.spec.bodies[p.body].shape, Shape3::Voxels { .. }));
+            let total: MassProperties =
+                if all_cells { sum_mass_properties(&combined) } else { combined.into_iter().sum() };
             valid_properties(&total)?;
             if !source_mass.is_finite() || source_mass <= 0. || (total.mass() / source_mass - 1.).abs() > 1e-9 {
                 return Err(FractureError("fragment masses must conserve source mass"));
@@ -149,6 +155,11 @@ impl World3 {
         props.set_mass(spec.mass, true);
         valid_properties(&props)?;
         Ok(props)
+    }
+
+    /// Whether body `k` is the parent or a slot of a split of bodies of cells: it cannot be part of a fracture too.
+    fn owned_by_a_split(&self, k: usize) -> bool {
+        self.slot_owners[k].is_some() || self.voxel_splits.iter().any(|s| s.parent == k)
     }
 
     pub(super) fn fracture_enabled(&self, k: usize) -> bool {

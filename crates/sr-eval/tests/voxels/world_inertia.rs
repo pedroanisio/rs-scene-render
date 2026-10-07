@@ -160,3 +160,23 @@ fn a_thin_plate_cut_off_a_block_spins_up_as_its_cells_say() {
         assert_spin_up((&a, &b), 0.04, 0, &stays, torque, &format!("the block that stays, torque {torque:?}"));
     }
 }
+
+#[test]
+fn a_body_of_cells_that_will_fracture_spins_up_as_its_cells_say_until_it_does() {
+    // the tensor of the source is built from its fragments': the block of 3 by 4 by 4 cells whose tensor is diag(300, 234.375, 234.375), in two
+    // halves cut along z so that the sum is exactly diagonal, which is the case in which a general eigen solver puts the 300 on the wrong axis
+    let block = cells_of(0..3, 0..4, 0..4);
+    let (low, high) = (cells_of(0..3, 0..4, 0..2), cells_of(0..3, 0..4, 2..4));
+    for torque in [[40.0, 0.0, 0.0], [0.0, 40.0, 0.0], [30.0, -20.0, 50.0]] {
+        let w = world(vec![body(block.clone()), body(low.clone()), body(high.clone())], 0);
+        let fragments = (1..=2).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
+        let mut w = w
+            .with_fractures(vec![Fracture3 { source: 0, at: 2.0, radial_impulse: 0.0, fragments, contact: None }])
+            .unwrap();
+        let mut d = Push { torque, cut: None };
+        let (a, b) = (w.frame_at(0.41, &mut d), w.frame_at(0.45, &mut d));
+        assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?}", a.errors);
+        assert_eq!(b.enabled, vec![true, false, false], "before the fracture the source is the body");
+        assert_spin_up((&a, &b), 0.04, 0, &block, torque, &format!("the source of a fracture, torque {torque:?}"));
+    }
+}
