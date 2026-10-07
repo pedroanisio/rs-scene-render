@@ -68,6 +68,33 @@ impl SurfaceCache {
         self.apply(grid, classes, max_bytes, key, dirty)
     }
 
+    /// As [`SurfaceCache::update_known`] for an owner that counts cuts and keeps the bricks each made: `steps` is `(r, bricks)` for the cuts
+    /// `r` it has the history of, and the bricks to take up are those of the cuts after the revision the cache read, up to `revision`. A cut
+    /// missing from the history is a whole remesh from `grid`.
+    pub fn update_steps(
+        &mut self,
+        grid: &Occupancy,
+        classes: &Classes,
+        max_bytes: usize,
+        body: u64,
+        revision: u64,
+        steps: &[(u64, Vec<[i32; 3]>)],
+    ) -> Result<Remesh, String> {
+        let read = match &self.held {
+            Some((held_body, held, _)) if *held_body == body && *held <= revision => *held,
+            _ => return self.update_known(grid, classes, max_bytes, (body, revision), None),
+        };
+        let mut changed = Vec::new();
+        let mut complete = true;
+        for r in read + 1..=revision {
+            match steps.iter().find(|(s, _)| *s == r) {
+                Some((_, bricks)) => changed.extend_from_slice(bricks),
+                None => complete = false,
+            }
+        }
+        self.update_known(grid, classes, max_bytes, (body, revision), complete.then_some(changed.as_slice()))
+    }
+
     /// The work of both: `ident` is what the cache will hold, `dirty` the bricks to take up (none: from the start).
     fn apply(
         &mut self,

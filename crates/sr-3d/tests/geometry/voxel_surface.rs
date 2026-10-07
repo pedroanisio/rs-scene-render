@@ -762,3 +762,49 @@ fn a_grid_given_by_a_key_of_its_owner_is_remeshed_from_the_bricks_the_owner_says
         .unwrap();
     assert!(cache.update_known(&live.clone(), &glass, usize::MAX, (8, live.revision() - 1), Some(&[])).unwrap().full);
 }
+
+#[test]
+fn a_frame_that_reads_the_steps_of_an_owner_remeshes_the_union_of_the_bricks_of_the_cuts_it_missed() {
+    let classes = Classes::identity();
+    // an owner counts cuts: revision r has the cells after r cuts, and steps lists the bricks each cut changed, as `(r, bricks)`
+    let mut live = grid(block([-3, 2, -5], 24, 1));
+    let mut by_cut = vec![live.clone()];
+    let mut steps: Vec<(u64, Vec<[i32; 3]>)> = Vec::new();
+    for cut in 0..6i32 {
+        let before = live.revision();
+        for z in 0..5 {
+            for y in 0..5 {
+                for x in 0..5 {
+                    live.set([cut * 4 - 3 + x, 3 + y, 2 * cut - 5 + z], 0).unwrap();
+                }
+            }
+        }
+        steps.push((cut as u64 + 1, live.changed_bricks_since(before)));
+        by_cut.push(live.clone());
+    }
+    let mut cache = SurfaceCache::new();
+    let ask = |cache: &mut SurfaceCache, body: u64, r: usize, steps: &[(u64, Vec<[i32; 3]>)]| {
+        cache.update_steps(&by_cut[r], &classes, usize::MAX, body, r as u64, steps)
+    };
+    assert!(ask(&mut cache, 7, 0, &[]).unwrap().full, "the first read is the whole of it");
+    // reads that skip cuts (0 to 2, then 3, then 5): the planes of the union of the bricks of the cuts after the one read
+    let mut held = 0;
+    for read in [2usize, 3, 5] {
+        let union: Vec<[i32; 3]> = steps[held..read].iter().flat_map(|(_, b)| b.iter().copied()).collect();
+        let update = ask(&mut cache, 7, read, &steps[..read]).unwrap();
+        assert!(!update.full, "revision {read}");
+        assert_eq!(update.remeshed, dirty_planes(&union).len(), "revision {read}");
+        assert_eq!(cache.quads(), mesh_quads(&fresh(&by_cut[read]), &classes), "revision {read}");
+        held = read;
+    }
+    let again = ask(&mut cache, 7, 5, &steps[..5]).unwrap();
+    assert_eq!((again.remeshed, again.full), (0, false), "the same revision is nothing to do");
+    // a cut whose history the owner no longer has (the steps stop short of the revision), a revision behind, another body: the whole of it
+    assert!(ask(&mut cache, 7, 6, &steps[..4]).unwrap().full, "a step missing");
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&by_cut[6]), &classes));
+    assert!(ask(&mut cache, 7, 4, &steps[..4]).unwrap().full, "behind");
+    assert!(ask(&mut cache, 8, 4, &steps[..4]).unwrap().full, "another body");
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&by_cut[4]), &classes));
+    ask(&mut cache, 8, 6, &steps).unwrap();
+    assert_eq!(ask(&mut cache, 8, 6, &steps).unwrap().remeshed, 0);
+}
