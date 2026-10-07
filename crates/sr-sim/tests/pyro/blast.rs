@@ -327,8 +327,8 @@ fn smoke_outside_the_sphere_is_displaced_by_the_volume_the_front_swept_and_the_s
     for cell in [0.5, 0.25] {
         let (x0, x1, m0, m1, radius) = puff_and_pulse(ENERGY, 6.0, 1.0, cell);
         let want = exact(6.0, radius);
-        // the displacement is the exact one to 5 percent at half a metre and to 3 at a quarter (0.984 and 0.990 of it, measured)
-        let tolerance = if cell == 0.5 { 0.05 } else { 0.03 };
+        // the displacement is the exact one to 2 percent at half a metre and to 1.5 at a quarter (0.984 and 0.990 of it, measured)
+        let tolerance = if cell == 0.5 { 0.02 } else { 0.015 };
         assert!(
             (x1 - x0) / want > 1.0 - tolerance && (x1 - x0) / want < 1.0 + tolerance,
             "cell {cell}: the smoke moved {} m of {want} m",
@@ -491,11 +491,11 @@ fn a_window_that_the_sphere_cuts_is_pushed_from_the_blast_and_not_from_its_own_m
     }
     // inside the sphere the flow is linear in the distance from the blast: u(4) / u(2) = (4 - 7) / (2 - 7) = 0.6
     let ratio = ux(4.0) / ux(2.0);
-    assert!((ratio - 0.6).abs() < 0.03, "{ratio}");
+    assert!((ratio - 0.6).abs() < 0.01, "{ratio}");
     // and its divergence is the one that the whole sphere makes in free space, the volume swept over the volume of the sphere and over dt (u = d (x - c) / 3)
     let free = swept / DT / (4.0 / 3.0 * std::f64::consts::PI * r1.powi(3));
     let d = 3.0 * (ux(4.0) - ux(2.0)) / 2.0;
-    assert!((d / free - 1.0).abs() < 0.1, "{d} against {free}");
+    assert!((d / free - 1.0).abs() < 0.02, "{d} against {free}");
 }
 
 #[test]
@@ -648,4 +648,122 @@ fn the_velocity_of_the_smoke_is_what_it_would_have_been_with_no_blast_to_the_bit
         assert_eq!(a, b, "step {step}: the velocity of the smoke is not the one with no blast");
     }
     // (with no buoyancy: a smoke that the blast has made warmer or colder in a place would be pushed by it, which is the smoke's own dynamics)
+}
+
+/// The sum of the density, and of the excess of temperature over ambient, after one step in which a blast is made, for a puff of smoke 6 m from it.
+fn totals_after_a_blast(dissipation: f64, cooling: f64) -> (f64, f64) {
+    let spec = Spec { dissipation, cooling, ..domain(32, 0.5, Boundary::Open) };
+    let mut sim = Simulation::new(spec).unwrap();
+    let puff = Impulse {
+        shape: Shape::Sphere { center: [6.0, 0.0, 0.0], radius: 1.5 },
+        time: 0.0,
+        density: 1.0,
+        temperature: 600.0,
+        velocity: [0.0; 3],
+        expansion: 0.0,
+    };
+    // the puff is made in the step before the blast, and the blast is made in the next
+    sim.step(&Inputs { impulses: vec![puff], ..Inputs::default() }).unwrap();
+    sim.step(&Inputs { blasts: vec![blast(1.0, [0.0; 3], DT)], ..Inputs::default() }).unwrap();
+    let s = sim.state();
+    (s.density().iter().sum(), s.temperature().iter().map(|t| t - 300.0).sum())
+}
+
+#[test]
+fn the_decay_of_the_smoke_and_the_cooling_of_its_heat_are_made_once_in_a_step_with_a_blast() {
+    // a decay of 1000 a second over a step of half a millisecond is e^-0.5 once and e^-1 twice: the blast's own carrying of the smoke makes none
+    let (still_density, still_heat) = totals_after_a_blast(0.0, 0.0);
+    let (decayed_density, _) = totals_after_a_blast(1000.0, 0.0);
+    let (_, cooled_heat) = totals_after_a_blast(0.0, 1000.0);
+    let once = (-0.5f64).exp();
+    // the puff is made after the advection of its step, so it decays in the step of the blast alone: e^-0.5 once, against e^-1 if the blast's own carrying of the smoke
+    // decayed it again (which is what the step did before: the density lost 4 percent more at a decay of 1 a second, and the 9 steps of a blast of 1e15 J 31)
+    let wanted = once;
+    let twice = (-1.0f64).exp();
+    assert!(
+        (decayed_density / still_density / wanted - 1.0).abs() < 1e-6,
+        "{} against {wanted} (and not {twice})",
+        decayed_density / still_density
+    );
+    assert!((cooled_heat / still_heat / wanted - 1.0).abs() < 1e-6, "{} against {wanted}", cooled_heat / still_heat);
+}
+
+#[test]
+fn a_collider_that_moves_is_at_rest_for_the_flow_of_the_blast_and_the_smoke_is_carried_by_it_once() {
+    use sr_sim::pyro::Obstacle;
+    let h = 0.5;
+    let n = 32;
+    // a box outside the sphere of the first front (3.9 m), 5 to 6 m to the left of the blast, moving to the right at 3 m/s
+    let wall = |velocity: [f64; 3]| Obstacle {
+        shape: Shape::Box { min: [-6.0, -1.0, -1.0], max: [-5.0, 1.0, 1.0] },
+        velocity,
+        velocity_origin: [0.0; 3],
+        velocity_gradient: [[0.0; 3]; 3],
+    };
+    let run = |blasts: Vec<Blast>| {
+        let mut sim = Simulation::new(domain(n, h, Boundary::Open)).unwrap();
+        sim.step(&Inputs { blasts, obstacles: vec![wall([3.0, 0.0, 0.0])], ..Inputs::default() }).unwrap();
+        sim
+    };
+    let with = run(vec![blast(1.0, [0.0; 3], 0.0)]);
+    let without = run(vec![]);
+    // the smoke's own flow is the one the collider makes, with the blast and without it, to the bit
+    assert_eq!(bits(&with).2, bits(&without).2);
+    // the faces of the box: x = -6, -5.5 and -5 are the faces 4, 5 and 6 of the axis (the domain begins at -8, in cells of half a metre), on the row that crosses it
+    let at = |x: usize, y: usize, z: usize| x + (n + 1) * (y + n * z);
+    for face in [4usize, 5, 6] {
+        let (y, z) = (n / 2, n / 2);
+        let own = with.state().velocity_faces(0)[at(face, y, z)];
+        let blast_part = with.blast_flow(0).unwrap()[at(face, y, z)];
+        assert_eq!(own, 3.0, "the collider's velocity on the face {face}");
+        assert!(blast_part.abs() < 1e-9, "the blast's flow on the face {face} of the collider is {blast_part}");
+    }
+    // and the blast's flow is not that of the collider: the net flow of the blast out of the domain is the volume swept, as with no collider
+    let (_, swept) = blast(1.0, [0.0; 3], 0.0).swept(DT, 0).unwrap();
+    assert!((outflow(&with, h) / (swept / DT) - 1.0).abs() < 2e-3, "{}", outflow(&with, h));
+}
+
+#[test]
+fn the_identity_of_the_velocity_is_the_identity_of_a_blast_that_did_something() {
+    let run = |blasts: Vec<Blast>, buoyancy: f64| {
+        let spec = Spec { buoyancy, turbulence: 0.5, seed: 9, ..domain(32, 0.5, Boundary::Open) };
+        let mut sim = Simulation::new(spec).unwrap();
+        let puff = Impulse {
+            shape: Shape::Sphere { center: [4.0, 1.0, 0.0], radius: 1.5 },
+            time: 0.0,
+            density: 1.0,
+            temperature: 600.0,
+            velocity: [0.0; 3],
+            expansion: 0.0,
+        };
+        let mut seen = Vec::new();
+        for step in 0..4 {
+            let inputs = Inputs {
+                impulses: if step == 0 { vec![puff.clone()] } else { vec![] },
+                blasts: blasts.clone(),
+                ..Inputs::default()
+            };
+            sim.step(&inputs).unwrap();
+            seen.push((bits(&sim), sim.blast_flow(0).is_some()));
+        }
+        seen
+    };
+    let with = run(vec![blast(1.0, [0.0; 3], 0.0)], 0.0);
+    let without = run(vec![], 0.0);
+    // the blast did something (the smoke was carried, and the flow was made in the steps that have a pulse) and left the velocity as it was
+    assert!(with[1].1 && !without[1].1, "the blast flow is there in the steps of the pulses");
+    for step in 0..4 {
+        assert_eq!(with[step].0 .2, without[step].0 .2, "step {step}");
+        assert_ne!(with[step].0 .0, without[step].0 .0, "step {step}: the smoke is carried");
+    }
+    // with buoyancy the warm smoke that the blast has carried pushes the air in the steps after it: the velocity of the step of the blast is still the one with
+    // no blast (the buoyancy of that step acted on the smoke before the blast), the smoke differs, and the later velocities are the smoke's own dynamics
+    let with = run(vec![blast(1.0, [0.0; 3], DT)], 2.0);
+    let without = run(vec![], 2.0);
+    assert_eq!(with[1].0 .2, without[1].0 .2, "the step of the first pulse");
+    assert_ne!(with[1].0 .0, without[1].0 .0);
+    assert_ne!(
+        with[3].0 .2, without[3].0 .2,
+        "the carried smoke is warmer or colder where it is: buoyancy makes it the smoke's own dynamics"
+    );
 }

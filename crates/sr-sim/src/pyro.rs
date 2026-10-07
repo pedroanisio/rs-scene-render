@@ -41,6 +41,8 @@ mod determinism;
 #[cfg(test)]
 mod export;
 #[cfg(test)]
+mod lattice;
+#[cfg(test)]
 mod pockets;
 #[cfg(test)]
 mod sampling;
@@ -1289,6 +1291,8 @@ pub struct StepProfile {
     pub project_update: Duration,
     /// Pressure-gradient subtraction and the final divergence check.
     pub project_finish: Duration,
+    /// The flow of the blasts of the step (their pistons projected alone and the smoke carried by them), in the time of no other field above.
+    pub blast: Duration,
     pub total: Duration,
     pub pressure_iterations: usize,
 }
@@ -1360,6 +1364,8 @@ impl Simulation {
         // (six CG vectors, open-face mask, divergence target) + ~26 for the
         // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
         // for allocator overhead and transient volume metadata.
+        // A step with a blast makes two more states while it holds the first (the piston's flow projected alone, ~41 bytes a cell each, and the copies of the
+        // density and the temperature that carry the smoke) and advects three faces that it discards: about 222 bytes a cell at the peak, inside the 288.
         let bytes =
             count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
@@ -1397,6 +1403,8 @@ impl Simulation {
     /// the background of an open face. A move that would leave smoke behind is an error and changes nothing.
     pub fn shift_window(&mut self, by: [i64; 3]) -> Result<(), Error> {
         self.state = self.state.shifted(by, true)?;
+        // the flow of the last blasts is indexed on the window it was made in
+        self.blast_flow = None;
         Ok(())
     }
     /// Move the window as far as the smoke of the state asks for, if the spec follows its plume (see
@@ -1540,6 +1548,8 @@ impl Simulation {
         // velocity is therefore what it would have been without the blast, to the bit.
         let mut blast_flow = None;
         if !pulses.is_empty() {
+            let blast_started = Instant::now();
+            let mut scratch = StepProfile::default();
             let mut flow = state.clone();
             for axis in &mut flow.velocity {
                 axis.iter_mut().for_each(|v| *v = 0.0);
@@ -1548,17 +1558,25 @@ impl Simulation {
             for (center, reach, volume) in &pulses {
                 inject_piston(&mut flow, &mut flow_target, *center, *reach, *volume, dt);
             }
-            boundaries(&mut flow, &solids);
-            project(&mut flow, &flow_target, &self.spec, &mut profile)?;
+            // a solid is at rest for the blast's own flow: what a moving collider does to the air is the smoke's own flow, made above (the blast's part
+            // is zero on its faces, so that the two add up to the whole)
+            let at_rest: Vec<SolidFaces> =
+                solids.iter().map(|f| SolidFaces { cell: f.cell, low: [0.0; 3], high: [0.0; 3] }).collect();
+            boundaries(&mut flow, &at_rest);
+            project(&mut flow, &flow_target, &self.spec, &mut scratch)?;
             validate_state(&flow)?;
+            // the smoke is carried once: the advection that carries it here is the same one, with no decay of the density and no cooling of the heat (the step
+            // has made those already, above)
+            let calm = Spec { dissipation: 0.0, cooling: 0.0, ..self.spec.clone() };
             let mut carried = flow.clone();
             carried.density = state.density.clone();
             carried.temperature = state.temperature.clone();
-            advect(&mut carried, dt, &self.spec, &solids, &mut profile)?;
+            advect(&mut carried, dt, &calm, &at_rest, &mut scratch)?;
             state.density = carried.density;
             state.temperature = carried.temperature;
             validate_state(&state)?;
             blast_flow = Some(flow.velocity);
+            profile.blast = blast_started.elapsed();
         }
         self.blast_flow = blast_flow;
         self.state = state;
@@ -2362,28 +2380,46 @@ fn inject_piston(state: &mut State, target: &mut [f64], center: [f64; 3], reach:
 }
 
 /// The number of cell centres of the infinite lattice (`origin` plus half a cell, every `h`) in the sphere, by columns (a cost of the square of the
-/// radius in cells; a sphere of more than 30000 cells across is its volume over `h^3`).
+/// radius in cells; a sphere of more than 30000 cells across is its volume over `h^3`). The test of a centre is the very one that counts the cells of the
+/// window, so that a centre exactly on the sphere is in or out in both.
 fn lattice_count(center: [f64; 3], origin: [f64; 3], h: f64, reach: f64) -> usize {
     if 2.0 * reach / h > 30_000.0 {
         return (4.0 / 3.0 * std::f64::consts::PI * (reach / h).powi(3)) as usize;
     }
     let index = |v: f64, a: usize| (v - origin[a]) / h - 0.5;
-    let (lo_x, hi_x) = (index(center[0] - reach, 0).ceil() as i64, index(center[0] + reach, 0).floor() as i64);
-    let (lo_y, hi_y) = (index(center[1] - reach, 1).ceil() as i64, index(center[1] + reach, 1).floor() as i64);
-    let mut total = 0i64;
+    let inside = |i: i64, j: i64, k: i64| {
+        let p = world_point(origin, h, [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5]);
+        (0..3).map(|a| (p[a] - center[a]).powi(2)).sum::<f64>() <= reach * reach
+    };
+    let (lo_x, hi_x) = (index(center[0] - reach, 0).floor() as i64 - 1, index(center[0] + reach, 0).ceil() as i64 + 1);
+    let (lo_y, hi_y) = (index(center[1] - reach, 1).floor() as i64 - 1, index(center[1] + reach, 1).ceil() as i64 + 1);
+    let mut total = 0usize;
     for i in lo_x..=hi_x {
-        let dx = origin[0] + (i as f64 + 0.5) * h - center[0];
         for j in lo_y..=hi_y {
-            let dy = origin[1] + (j as f64 + 0.5) * h - center[1];
+            // the column's cells are those from the centre's own level, up and down, while they are inside: the cells in a column are contiguous
+            let (dx, dy) = (origin[0] + (i as f64 + 0.5) * h - center[0], origin[1] + (j as f64 + 0.5) * h - center[1]);
             let rest = reach * reach - dx * dx - dy * dy;
-            if rest < 0.0 {
+            if rest < -h * h {
                 continue;
             }
-            let half = rest.sqrt();
-            let lo = index(center[2] - half, 2).ceil() as i64;
-            let hi = index(center[2] + half, 2).floor() as i64;
-            total += (hi - lo + 1).max(0);
+            let half = rest.max(0.0).sqrt();
+            // the ends of the column from the square root, then moved by the very test of a centre (a centre that the root puts a rounding off is put right)
+            let mut lo = index(center[2] - half, 2).ceil() as i64;
+            let mut hi = index(center[2] + half, 2).floor() as i64;
+            while inside(i, j, lo - 1) {
+                lo -= 1;
+            }
+            while lo <= hi && !inside(i, j, lo) {
+                lo += 1;
+            }
+            while inside(i, j, hi + 1) {
+                hi += 1;
+            }
+            while hi >= lo && !inside(i, j, hi) {
+                hi -= 1;
+            }
+            total += (hi - lo + 1).max(0) as usize;
         }
     }
-    total as usize
+    total
 }

@@ -905,7 +905,11 @@ the step, and it is NOT kept in the velocity of the smoke. Kept, it would stay f
 no divergence (the first design of the blast kept it and left 50 to 200 percent of the pulse a step after the front had stopped), so the velocity of the smoke is what it
 would have been with no blast, to the bit, at every step (`Simulation::blast_flow` gives the flow of the last step to whoever wants it). A window that the sphere cuts, or that is
 not centred on the blast, is pushed from the blast and not from its own middle. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
-`pyroImpulse` that the author adds), and the velocity of the air does not carry the blast's momentum on (the momentum of the air in a blast is not modelled).
+`pyroImpulse` that the author adds). The order of a step with a blast is the smoke's own (advection, sources, forces, projection) and then the blast's: its flow is projected alone, with
+the solids of the step at rest for it (what a moving collider does to the air is the smoke's own flow, made first, and the two add up to the whole), and it carries the density and the
+temperature once, by the same advection with no decay and no cooling (the step has made those: a decay of 1 a second would otherwise be made twice in a step with a blast). The cost of a step with
+a blast is a second projection and two more states while the first is held (about 41 bytes a cell each, the copies of the density and the temperature, and three faces advected and
+thrown away: about 222 bytes a cell at the peak, inside the 288 of the budget; 1.6 GB transient at 256^3), and the time is in the profile as `blast`.
 
 **Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
 `pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
@@ -949,7 +953,7 @@ flow, and the smoke is moved by the displacement and not by a shock. (2) The int
 profile, and only the displacement of the front is the blast's: the energy of the flow is the energy of the displacement. (3) The strong phase is shorter
 than a step of the pyro for any `E` below `E*`; a blast faithful in time needs a `dt` of the pyro smaller than a tenth of the time of the strong phase (`dt` of 3e-5 s
 for 1e6 J), at the cost of that many steps. (4) After `R_max` nothing is modelled: no negative phase, no reflection, and the walls are the solver's. (5) No heat and
-no smoke are injected. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
+no smoke are injected. (6) Because the blast's flow is not kept in the velocity, the smoke's own velocity gets no impulse from it: an updraft or a vortex stays where it was while the density and the temperature move, a plume made after the blast is not deflected by its wind, and the two advections in a step (the smoke's, then the blast's) are a first-order splitting with the numerical diffusion of both. A blast has no compressible after-flow and no negative phase. In a potential incompressible flow no velocity is left when the source stops, which is right. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
 world's own conservation test can check) and to the ocean (the same pressure as a `waterImpulse`): each its own step with its own oracle.
 
 ### Three-dimensional particles
