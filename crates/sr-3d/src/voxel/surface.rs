@@ -12,9 +12,11 @@
 //!   class is the lesser, so that an interface has one owner and no two faces coincide. Two cells of the same see-through class are
 //!   one body, with no face between them.
 
+mod expand;
 mod exposure;
 mod greedy;
 
+pub use expand::expand;
 pub use exposure::{exposed_faces, Face};
 pub use greedy::{mesh_quads, quads_hash, Quad};
 

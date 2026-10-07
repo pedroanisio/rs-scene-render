@@ -384,3 +384,124 @@ fn a_quad_never_runs_past_what_a_u16_can_say_and_is_cut_in_two() {
     assert!(q.iter().all(|q| q.w <= 65535 && q.h <= 65535));
     assert_eq!(covered(&q).len(), 2 + 4 * 70000);
 }
+
+// ---------------------------------------------------------------------------------------------------------- the vertices
+
+use sr_3d::voxel::surface::expand;
+use sr_3d::Vertex;
+
+/// The colour of a class in the tests: exact in f32, so that the reference script can write the same bits.
+fn colour(class: u8) -> [f32; 4] {
+    [f32::from(class) / 16.0, 0.5, 1.0 - f32::from(class) / 16.0, 1.0]
+}
+
+/// FNV-1a 64 over the bytes of the vertices and then those of the indices (the hash of tools/voxel_reference_mesher.py).
+fn expanded_hash(p: &sr_3d::Primitive) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for b in bytemuck::cast_slice::<Vertex, u8>(&p.vertices).iter().chain(bytemuck::cast_slice::<u32, u8>(&p.indices)) {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[test]
+fn the_vertex_the_gpu_reads_is_ninety_six_bytes() {
+    assert_eq!(std::mem::size_of::<Vertex>(), 96);
+}
+
+#[test]
+fn the_expanded_bytes_are_the_ones_the_reference_script_writes_for_a_block_a_hole_and_a_wall() {
+    let classes = Classes::identity();
+    let block = expand(&mesh_quads(&grid(block([0, 0, 0], 8, 1)), &classes), colour);
+    assert_eq!((block.vertices.len(), block.indices.len()), (24, 36));
+    assert_eq!(format!("{:016x}", expanded_hash(&block)), "a3ef39dada818385", "a block of 8");
+    let holed = expand(&mesh_quads(&grid(holed(8, 2, 3)), &classes), colour);
+    assert_eq!((holed.vertices.len(), holed.indices.len()), (64, 96));
+    assert_eq!(format!("{:016x}", expanded_hash(&holed)), "004a4e2ff70cae05", "a block of 8 with a hole of 2");
+    let wall = expand(&mesh_quads(&wall(), &classes), colour);
+    assert_eq!((wall.vertices.len(), wall.indices.len()), (496, 744));
+    assert_eq!(format!("{:016x}", expanded_hash(&wall)), "e757453f72afe9c5", "the wall");
+}
+
+#[test]
+fn a_quad_is_four_vertices_of_one_colour_with_a_unit_normal_a_tangent_along_u_and_a_front_that_looks_out() {
+    let classes = Classes::identity();
+    let mut cells = Vec::new();
+    for z in -5i32..6 {
+        for y in -3i32..5 {
+            for x in -4i32..7 {
+                if (x * 7 + y * 13 + z * 3).rem_euclid(5) < 3 {
+                    cells.push(([x, y, z], 1 + (x + y + z).rem_euclid(3) as u8));
+                }
+            }
+        }
+    }
+    let g = grid(cells);
+    let quads = mesh_quads(&g, &classes);
+    let p = expand(&quads, colour);
+    assert_eq!((p.vertices.len(), p.indices.len()), (4 * quads.len(), 6 * quads.len()));
+    assert!(p.indices.iter().all(|i| (*i as usize) < p.vertices.len()));
+    let mut area = 0.0f64;
+    for (n, q) in quads.iter().enumerate() {
+        let v = &p.vertices[4 * n..4 * n + 4];
+        let sign = if q.positive { 1.0 } else { -1.0 };
+        let mut normal = [0.0; 3];
+        normal[q.axis as usize] = sign;
+        let mut along_u = [0.0; 3];
+        along_u[(q.axis as usize + 1) % 3] = 1.0;
+        let mut along_v = [0.0; 3];
+        along_v[(q.axis as usize + 2) % 3] = 1.0;
+        for vertex in v {
+            assert_eq!(vertex.normal, normal);
+            assert_eq!(vertex.color, colour(q.class), "the colour of the class, the same at the four corners");
+            assert_eq!(vertex.map_uv, [[0.0; 2]; 4]);
+            assert_eq!(
+                vertex.tangent,
+                [along_u[0], along_u[1], along_u[2], sign],
+                "the tangent runs along +u, its sign is the facing's"
+            );
+            // the bitangent cross(n, t) * w is +v, the convention of compute_tangents
+            let b = cross(vertex.normal, [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]);
+            assert_eq!([b[0] * sign, b[1] * sign, b[2] * sign], along_v);
+            assert_eq!(vertex.pos[q.axis as usize], q.plane as f32);
+        }
+        assert_eq!(v[0].uv, [q.u0 as f32, q.v0 as f32]);
+        assert_eq!(v[2].uv, [(q.u0 + q.w as i32) as f32, (q.v0 + q.h as i32) as f32]);
+        // both triangles wind counter-clockwise seen from outside: (b - a) x (c - a) points along the normal
+        for t in p.indices[6 * n..6 * n + 6].chunks(3) {
+            let (a, b, c) =
+                (p.vertices[t[0] as usize].pos, p.vertices[t[1] as usize].pos, p.vertices[t[2] as usize].pos);
+            let cr = cross(sub(b, a), sub(c, a));
+            assert!(dot(cr, normal) > 0.0, "the front of quad {n} looks in");
+            area += f64::from(0.5 * dot(cr, normal));
+        }
+    }
+    // every exposed face is one square of the surface: the area of the triangles is their count
+    assert_eq!(area, exposed_faces(&g, &classes).len() as f64);
+    // the box of the positions is the box of the cells, each cell a unit
+    let (lo, hi) = g.bounds().unwrap();
+    for a in 0..3 {
+        let (min, max) =
+            p.vertices.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v.pos[a]), hi.max(v.pos[a])));
+        assert_eq!((min, max), (lo[a] as f32, (hi[a] + 1) as f32), "axis {a}");
+    }
+}
+
+#[test]
+fn no_quads_make_an_empty_primitive() {
+    let p = expand(&[], colour);
+    assert!(p.vertices.is_empty() && p.indices.is_empty());
+}
