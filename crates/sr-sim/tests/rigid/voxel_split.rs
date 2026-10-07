@@ -67,6 +67,7 @@ impl Driver3 for Cutter {
             ];
         }
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -453,6 +454,7 @@ fn first_cut(at: f64) -> (usize, f64, Option<u64>, VoxelCut3) {
         at,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -474,6 +476,7 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
         1.0,
         Some(1),
         VoxelCut3 {
+            added: vec![],
             revision: 2,
             destroyed: cells_of(2..3, 0..2, 0..2),
             parent_mass: 8.0 * CELL_MASS,
@@ -516,6 +519,7 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
         1.5,
         Some(2),
         VoxelCut3 {
+            added: vec![],
             revision: 3,
             destroyed: cells_of(3..4, 0..2, 0..2),
             parent_mass: 4.0 * CELL_MASS,
@@ -593,6 +597,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
         1.0,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(9..10, 0..2, 0..2),
             parent_mass: 12.0 * CELL_MASS,
@@ -782,6 +787,7 @@ fn chained_splits_cut_the_slot_one_step_after_it_is_used_however_often_and_in_wh
                 1.5,
                 None,
                 VoxelCut3 {
+                    added: vec![],
                     revision: 1,
                     destroyed: cells_of(9..10, 0..2, 0..2),
                     parent_mass: 12.0 * CELL_MASS,
@@ -917,6 +923,7 @@ fn the_l_cut(at: f64) -> (Scripted, Vec<[i32; 3]>, Vec<[i32; 3]>) {
     let mut destroyed = cells_of(5..6, 0..2, 0..2);
     destroyed.extend(notch);
     let cut = VoxelCut3 {
+        added: vec![],
         revision: 1,
         destroyed,
         parent_mass: 20.0 * CELL_MASS,
@@ -964,6 +971,7 @@ fn a_body_that_loses_all_its_cells_stays_out_of_the_world_and_its_pieces_are_the
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: vec![],
             parent_mass: 0.0,
@@ -1022,6 +1030,7 @@ fn a_step_whose_second_cut_cannot_be_installed_does_not_install_the_first() {
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: vec![[40, 0, 0]],
             parent_mass: 20.0 * CELL_MASS,
@@ -1041,6 +1050,7 @@ fn a_step_whose_second_cut_cannot_be_installed_does_not_install_the_first() {
         0.5,
         None,
         VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 20.0 * CELL_MASS,
@@ -1202,6 +1212,7 @@ fn the_part_that_stays_after_a_cut_has_all_its_cells_when_they_end_at_the_edge_o
     .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
     .unwrap();
     let cut = VoxelCut3 {
+        added: vec![],
         revision: 1,
         destroyed,
         parent_mass: stay.len() as f64 * cell_mass,
@@ -1332,6 +1343,7 @@ impl Driver3 for Counting {
             return Ok(None);
         }
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: revision.map_or(1, |r| r + 1),
             destroyed: cells_of(5..6, 0..2, 0..2),
             parent_mass: 44.0 * CELL_MASS,
@@ -1377,6 +1389,7 @@ impl Driver3 for Undermine {
         let column = (impact.point[0] / 0.25).floor() as i32;
         let piece = cells_of(column + 1..24, 0..3, 0..8);
         Ok(Some(VoxelCut3 {
+            added: vec![],
             revision: 1,
             destroyed: cells_of(column..column + 1, 0..3, 0..8),
             parent_mass: (column as usize * 24) as f64 * CELL_MASS,
@@ -1554,4 +1567,158 @@ fn a_piece_cut_while_hidden_is_a_body_with_its_own_centre_of_mass_at_the_first_s
             wanted[k]
         );
     }
+}
+
+/// A driver that heaps cells on the bar at `at` (what a crater's rim does) and, if `destroyed` is not empty, destroys some of the cells that are heaped
+/// and some of those that were there in the same cut, and remembers the state of every body at every load.
+struct Heap {
+    at: f64,
+    added: Vec<[i32; 3]>,
+    destroyed: Vec<[i32; 3]>,
+    mass: f64,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Heap {
+    fn on_the_bar(at: f64) -> Self {
+        Heap {
+            at,
+            added: cells_of(0..12, 2..3, 0..2),
+            destroyed: vec![],
+            mass: 72.0 * CELL_MASS,
+            seen: vec![vec![]; 2],
+        }
+    }
+}
+
+impl Driver3 for Heap {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 || revision == Some(1) || t + 1e-9 < self.at {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            added: self.added.clone(),
+            revision: 1,
+            destroyed: self.destroyed.clone(),
+            parent_mass: self.mass,
+            pieces: vec![],
+        }))
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+/// The centre of mass of the bar, in its own frame, in the last step that was asked about it.
+fn local_centre_of_the_bar(d: &Heap) -> [f64; 3] {
+    let state = d.seen[0].last().unwrap().1;
+    local_centre(&state.pose, state.centre)
+}
+
+fn assert_close(got: [f64; 3], wanted: [f64; 3], what: &str) {
+    for k in 0..3 {
+        assert!((got[k] - wanted[k]).abs() < 1e-9, "{what}, axis {k}: {} against {}", got[k], wanted[k]);
+    }
+}
+
+#[test]
+fn cells_heaped_on_a_body_are_part_of_it_with_their_mass_and_their_place_in_its_centre_of_mass() {
+    let mut w = world(1, None);
+    let mut d = Heap::on_the_bar(0.2);
+    let frame = w.frame_at(0.4, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let mut all = bar();
+    all.extend(cells_of(0..12, 2..3, 0..2));
+    let wanted =
+        shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: all }, 72.0 * CELL_MASS, 1.0).unwrap().centre;
+    assert_close(local_centre_of_the_bar(&d), wanted, "the bar with the cells on it");
+}
+
+#[test]
+fn a_cell_heaped_in_the_cut_that_destroys_it_is_never_part_of_the_body() {
+    // the cells are added before anything leaves: a destroyed cell may be one that was heaped in the same cut, and what stays is the bar and the rest
+    let mut w = world(1, None);
+    let mut d = Heap::on_the_bar(0.2);
+    d.destroyed = cells_of(0..6, 2..3, 0..2);
+    d.mass = 60.0 * CELL_MASS;
+    let frame = w.frame_at(0.4, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let mut stays = bar();
+    stays.extend(cells_of(6..12, 2..3, 0..2));
+    let wanted =
+        shape_mass_properties(&Shape3::Voxels { size: SIZE, cells: stays }, 60.0 * CELL_MASS, 1.0).unwrap().centre;
+    assert_close(local_centre_of_the_bar(&d), wanted, "the bar with half the cells on it");
+}
+
+#[test]
+fn a_cut_that_heaps_a_cell_the_body_has_or_the_same_cell_twice_is_refused_and_installs_nothing() {
+    for (added, says) in [
+        (cells_of(5..6, 0..1, 0..1), "has"),
+        ([cells_of(0..2, 2..3, 0..1), cells_of(1..3, 2..3, 0..1)].concat(), "twice"),
+    ] {
+        let mut w = world(1, None);
+        let mut d = Heap::on_the_bar(0.2);
+        d.added = added;
+        let failed = w.frame_at(0.4, &mut d);
+        assert!(failed.errors.iter().any(|e| e.contains(says)), "{says}: {:?}", failed.errors);
+        // nothing was installed: a driver that cuts nothing finds the bar as it was
+        let after = w.frame_at(0.4, &mut Cutter::new(99.0));
+        assert!(after.errors.is_empty(), "{:?}", after.errors);
+    }
+}
+
+#[test]
+fn a_cut_that_heaps_cells_is_the_same_however_the_frames_are_asked() {
+    let steps: Vec<u64> = (18..=24).collect();
+    let make = |frames: Option<usize>| world_logging(1, None, frames);
+    the_same_four_ways(&make, &|| Heap::on_the_bar(0.2), &steps);
+}
+
+#[test]
+fn a_ball_comes_to_rest_on_the_cells_that_were_heaped_on_the_floor_and_not_on_the_floor() {
+    // a static floor that has half a metre of cells heaped on it by a cut at the start: a ball dropped on it rests on the heap (scene y points down,
+    // the floor's top is at 0 and the ball is 0.3 m in radius)
+    struct Rim(Heap);
+    impl Driver3 for Rim {
+        fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+            self.0.kinematic(t, which)
+        }
+        fn fields(&mut self, t: f64) -> Vec<Field> {
+            self.0.fields(t)
+        }
+        fn voxel_cut(
+            &mut self,
+            t: f64,
+            p: usize,
+            r: Option<u64>,
+            i: Option<&Impact3>,
+        ) -> Result<Option<VoxelCut3>, String> {
+            self.0.voxel_cut(t, p, r, i)
+        }
+    }
+    let rest = |heap: bool| {
+        let mut w = floor_and_ball(None);
+        let mut inner = Heap::on_the_bar(0.0);
+        inner.added = if heap { cells_of(0..24, -2..0, 0..8) } else { vec![] };
+        inner.mass = if heap { 960.0 } else { 576.0 } * CELL_MASS;
+        let frame = w.frame_at(3.0, &mut Rim(inner));
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        frame.bodies[1].pos[1]
+    };
+    let (bare, heaped) = (rest(false), rest(true));
+    assert!((bare + 0.3).abs() < 0.02, "the ball rests on the bare floor: {bare}");
+    assert!((heaped + 0.8).abs() < 0.02, "the ball rests on the heap: {heaped}");
 }
