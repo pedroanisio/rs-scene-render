@@ -3,3 +3,4 @@
 mod crater;
 mod mass_properties;
 mod split;
+mod world_inertia;

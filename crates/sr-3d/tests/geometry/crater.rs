@@ -430,3 +430,29 @@ fn the_readable_profile_is_the_surface_the_map_gives_to_a_point_on_the_original_
         assert!((height - wanted).abs() < 1e-12, "r = {r}: the map gives {height}, the profile {wanted}");
     }
 }
+
+#[test]
+fn with_a_mantle_the_map_is_the_bowl_the_rim_and_the_mantle_and_the_voxel_crater_follows_the_first_two() {
+    // the kernel that the evaluator uses has a mantle (the law's ejecta volume): the surface that the map gives over the original ground is the
+    // bowl, the rim AND the mantle's height, which is half its thickness at the crest. A crater in cells follows the bowl and the rim only: the
+    // ejecta are particles there and settle as cells, so the mantle is not part of the ground it excavates. Both are stated by the accessors.
+    let (spec, budget) = authored();
+    let crater = Crater::conserving(spec, Budget { bulking: Some(1.0), ..budget }).unwrap();
+    assert!(crater.mantle_thickness() > 0.0);
+    let mut at_crest = 0.0;
+    for r in [0.0, 3.3, 5.6, 6.0, 6.6579307496549855, 7.0, 7.9, 8.1, 9.5, 12.0, 30.0, 100.0, 133.0] {
+        let moved = crater.map([r, 0.0, 0.0], 1.0).unwrap().position;
+        let height = -moved[2];
+        let wanted = -crater.bowl_depth_at(r) + crater.rim_height_at(r) + crater.mantle_height_at(r);
+        assert!((height - wanted).abs() < 1e-12, "r = {r}: the map gives {height}, the three accessors {wanted}");
+        if (r - spec.radius).abs() < 1e-9 {
+            at_crest = crater.mantle_height_at(r);
+        }
+    }
+    // half the thickness at the crest, and nothing under the crest or beyond the reach
+    assert!((at_crest - 0.5 * crater.mantle_thickness()).abs() < 1e-12, "{at_crest}");
+    assert_eq!(crater.mantle_height_at(0.5 * spec.radius), 0.0);
+    assert_eq!(crater.mantle_height_at(crater.reach() * 1.01), 0.0);
+    // without a mantle the accessor says nothing
+    assert_eq!(Crater::new(spec).unwrap().mantle_height_at(spec.radius), 0.0);
+}

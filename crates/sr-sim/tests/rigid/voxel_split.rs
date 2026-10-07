@@ -513,6 +513,10 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
             "{} restores for {backward} steps back",
             replay.checkpoint_restores()
         );
+        // with the default budget a checkpoint other than the first was taken (each second), so the replays could start from one
+        if budget.is_none() {
+            assert!(replay.progress().1 > 1, "{} checkpoints", replay.progress().1);
+        }
     }
 }
 
@@ -608,6 +612,10 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
             "{} restores for {backward} steps back",
             replay.checkpoint_restores()
         );
+        // with the default budget a checkpoint other than the first was taken (each second), so the replays could start from one
+        if budget.is_none() {
+            assert!(replay.progress().1 > 1, "{} checkpoints", replay.progress().1);
+        }
     }
 }
 
@@ -632,35 +640,44 @@ fn same(a: &Frame3, b: &Frame3, why: &str) {
     }
 }
 
-#[test]
-fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_order_and_replayed_from_a_checkpoint() {
-    // the cut is at 1.5 s, step 150; a checkpoint is taken each second, so the frames around it are replayed from the one at step 100
-    let steps: Vec<u64> = (145..=156).collect();
+/// The frame at each of `steps` (around a cut), asked four ways, all equal to the bit: from a world run to 3 s whose log holds it (the reference),
+/// from a fresh world asked for that time and nothing else, from a world asked for it, then for a later time, then for it again, and from a world
+/// that keeps no frames and replays from a checkpoint (which has to have been taken and used). Returns the reference frames.
+fn the_same_four_ways<D: Driver3>(
+    make: &dyn Fn(Option<usize>) -> World3,
+    driver: &dyn Fn() -> D,
+    steps: &[u64],
+) -> Vec<Frame3> {
     let at = |s: u64| s as f64 * 0.01;
-    // the reference: a world run to 3 s, whose frames are the ones it logged
-    let mut reference = world(2, None);
-    reference.frame_at(3.0, &mut Cutter::new(1.5));
-    let wanted: Vec<Frame3> = steps.iter().map(|s| reference.frame_at(at(*s), &mut Cutter::new(1.5))).collect();
-    assert!(
-        wanted[0].enabled == vec![true, false, false] && wanted[11].enabled == vec![true, true, false],
-        "the cut is inside the steps"
-    );
+    let mut reference = make(None);
+    reference.frame_at(3.0, &mut driver());
+    let wanted: Vec<Frame3> = steps.iter().map(|s| reference.frame_at(at(*s), &mut driver())).collect();
     for (i, s) in steps.iter().enumerate() {
         let t = at(*s);
         // (1) a world asked for this time and nothing else: nothing has been logged, the frame is computed
-        let fresh = world(2, None).frame_at(t, &mut Cutter::new(1.5));
+        let fresh = make(None).frame_at(t, &mut driver());
         same(&fresh, &wanted[i], &format!("fresh, step {s}"));
         // (2) asked, then asked later, then asked again: the second answer comes from what the later request logged
-        let mut w = world(2, None);
-        let mut d = Cutter::new(1.5);
+        let mut w = make(None);
+        let mut d = driver();
         let first = w.frame_at(t, &mut d);
         w.frame_at(t + 0.2, &mut d);
         let again = w.frame_at(t, &mut d);
         same(&first, &wanted[i], &format!("first, step {s}"));
         same(&again, &wanted[i], &format!("after a later request, step {s}"));
+        // (2b) asked many times: the answer does not change with how often it is asked
+        let mut w = make(None);
+        let mut d = driver();
+        let times: Vec<Frame3> = (0..4).map(|_| w.frame_at(t, &mut d)).collect();
+        for (k, f) in times.iter().enumerate() {
+            same(f, &wanted[i], &format!("asked {} times, step {s}", k + 1));
+        }
+        let after = w.frame_at(t + 0.03, &mut d);
+        let later = make(None).frame_at(t + 0.03, &mut driver());
+        same(&after, &later, &format!("a later time after {s} was asked four times"));
         // (3) a world that keeps no frames, run to 3 s: the frame is computed from a checkpoint, which has to have been taken and used
-        let mut replay = world_logging(2, None, Some(0));
-        let mut d = Cutter::new(1.5);
+        let mut replay = make(Some(0));
+        let mut d = driver();
         replay.frame_at(3.0, &mut d);
         assert!(replay.progress().1 >= 3, "{} checkpoints", replay.progress().1);
         let restored = replay.checkpoint_restores();
@@ -668,6 +685,76 @@ fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_or
         assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
         same(&got, &wanted[i], &format!("replayed, step {s}"));
     }
+    wanted
+}
+
+#[test]
+fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_order_and_replayed_from_a_checkpoint() {
+    // the cut is at 1.5 s, step 150; a checkpoint is taken each second, so the frames around it are replayed from the one at step 100
+    let steps: Vec<u64> = (145..=156).collect();
+    let wanted = the_same_four_ways(&|frames| world_logging(2, None, frames), &|| Cutter::new(1.5), &steps);
+    assert!(
+        wanted[0].enabled == vec![true, false, false] && wanted[11].enabled == vec![true, true, false],
+        "the cut is inside the steps"
+    );
+}
+
+#[test]
+fn chained_splits_cut_the_slot_one_step_after_it_is_used_however_often_and_in_whatever_order_the_frames_are_asked() {
+    // body 0 is the bar, 1 and 2 are its slots, 3 is the slot of the split whose parent is body 1; the child's cut is scripted at the same instant as
+    // the parent's, so it has to wait for the step after: the piece is not a body in use before the step the parent is cut in is over
+    let make = |frames: Option<usize>| {
+        let mut parent = body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+        parent.velocity = [1.0, 0.4, -0.3];
+        parent.angular_velocity = [20.0, 10.0, 40.0];
+        let mut bodies = vec![parent];
+        for _ in 0..3 {
+            bodies.push(body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic));
+        }
+        let w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies,
+        });
+        let w = match frames {
+            Some(b) => w.with_frame_log_budget(b),
+            None => w,
+        };
+        w.with_voxel_splits(vec![
+            VoxelSplit3 { parent: 0, slots: vec![1, 2] },
+            VoxelSplit3 { parent: 1, slots: vec![3] },
+        ])
+        .unwrap()
+    };
+    let script = || Script {
+        cuts: vec![
+            first_cut(1.5),
+            (
+                1,
+                1.5,
+                None,
+                VoxelCut3 {
+                    revision: 1,
+                    destroyed: cells_of(9..10, 0..2, 0..2),
+                    parent_mass: 12.0 * CELL_MASS,
+                    pieces: vec![VoxelPiece3 { cells: cells_of(10..12, 0..2, 0..2), mass: 8.0 * CELL_MASS }],
+                },
+            ),
+        ],
+    };
+    let steps: Vec<u64> = (147..=153).collect();
+    let wanted = the_same_four_ways(&make, &script, &steps);
+    // the parent is cut at step 150 and the child, scripted for the same instant, in the step after
+    let enabled: Vec<Vec<bool>> = wanted.iter().map(|f| f.enabled.clone()).collect();
+    assert_eq!(enabled[2], vec![true, false, false, false], "step 149: nothing yet");
+    assert_eq!(enabled[3], vec![true, true, false, false], "step 150: the parent is cut, the child waits");
+    assert_eq!(enabled[4], vec![true, true, false, true], "step 151: the child is cut");
 }
 
 /// A driver that cuts as a [`Script`] does and pushes every body from a time on with a force and a torque, which is how a test sees the
@@ -737,18 +824,25 @@ fn resting(slots: usize) -> World3 {
     .unwrap()
 }
 
-/// What the world made of the mass and the inertia of the part of the bar that stays and of the piece: pushed from 0.4 s, a body speeds up
-/// as F / m and spins up as I^-1 tau, with the m and I of its own cells.
-fn push_and_measure(closed: Vec<(usize, f64)>, from: f64, ask: (f64, f64)) {
+/// What the world made of the mass and the inertia of the part of the bar that stays and of the piece: pushed from `from` s, a body speeds up
+/// as F / m and spins up as I^-1 tau, with the m and I of its own cells. `stay` and `piece` are the cells the cut leaves in the parent and gives
+/// the piece.
+fn push_and_measure(
+    closed: Vec<(usize, f64)>,
+    from: f64,
+    ask: (f64, f64),
+    cut: (usize, f64, Option<u64>, VoxelCut3),
+    stay: Vec<[i32; 3]>,
+    piece: Vec<[i32; 3]>,
+) {
     let (force, torque) = ([120.0, -40.0, 75.0], [30.0, 55.0, -45.0]);
     let mut w = resting(1);
-    let mut d = Pusher { script: Script { cuts: vec![first_cut(0.3)] }, from, force, torque, closed };
+    let mut d = Pusher { script: Script { cuts: vec![cut] }, from, force, torque, closed };
     let (a, b) = (w.frame_at(ask.0, &mut d), w.frame_at(ask.1, &mut d));
     assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?} {:?}", a.errors, b.errors);
     let dt = ask.1 - ask.0;
-    for (k, cells, mass) in
-        [(0usize, cells_of(0..5, 0..2, 0..2), 20.0 * CELL_MASS), (1, cells_of(6..12, 0..2, 0..2), 24.0 * CELL_MASS)]
-    {
+    for (k, cells) in [(0usize, stay), (1, piece)] {
+        let mass = cells.len() as f64 * CELL_MASS;
         let props = shape_mass_properties(&Shape3::Voxels { size: SIZE, cells }, mass, 1.0).unwrap();
         for i in 0..3 {
             let accel = (b.velocities[k].linear[i] - a.velocities[k].linear[i]) / dt;
@@ -770,16 +864,54 @@ fn push_and_measure(closed: Vec<(usize, f64)>, from: f64, ask: (f64, f64)) {
     }
 }
 
+/// A cut whose piece is an L, which has products of inertia, so that a swap or a rotation of the axes shows: the slice x = 5 is destroyed, and so is
+/// the notch of the far end (x 9 to 11, y = 1), which leaves the cells x 6 to 11 with the notch out as the piece.
+/// A cut as the script holds it: the parent, the time from which it applies, the revision it is made against, and the cut.
+type Scripted = (usize, f64, Option<u64>, VoxelCut3);
+
+fn the_l_cut(at: f64) -> (Scripted, Vec<[i32; 3]>, Vec<[i32; 3]>) {
+    let notch = cells_of(9..12, 1..2, 0..2);
+    let piece: Vec<[i32; 3]> = cells_of(6..12, 0..2, 0..2).into_iter().filter(|c| !notch.contains(c)).collect();
+    let mut destroyed = cells_of(5..6, 0..2, 0..2);
+    destroyed.extend(notch);
+    let cut = VoxelCut3 {
+        revision: 1,
+        destroyed,
+        parent_mass: 20.0 * CELL_MASS,
+        pieces: vec![VoxelPiece3 { cells: piece.clone(), mass: piece.len() as f64 * CELL_MASS }],
+    };
+    ((0, at, None, cut), cells_of(0..5, 0..2, 0..2), piece)
+}
+
 #[test]
 fn what_the_world_gives_the_part_that_stays_and_the_piece_is_the_mass_and_the_inertia_of_their_cells() {
     // pushed from 0.4 s, a tenth of a second after the cut, with the measurement over four steps
-    push_and_measure(vec![], 0.4, (0.41, 0.45));
+    push_and_measure(
+        vec![],
+        0.4,
+        (0.41, 0.45),
+        first_cut(0.3),
+        cells_of(0..5, 0..2, 0..2),
+        cells_of(6..12, 0..2, 0..2),
+    );
+    // and with a piece that is an L, whose tensor has products
+    let (cut, stay, piece) = the_l_cut(0.3);
+    push_and_measure(vec![], 0.4, (0.41, 0.45), cut, stay, piece);
 }
 
 #[test]
 fn a_piece_whose_slot_is_hidden_when_it_is_cut_has_the_mass_and_the_inertia_of_its_cells_when_it_shows() {
     // the slot is hidden by the driver until 0.8 s, the cut is at 0.3 s: it is a body that the world has made and does not yet show
-    push_and_measure(vec![(1, 0.8)], 0.9, (0.91, 0.95));
+    push_and_measure(
+        vec![(1, 0.8)],
+        0.9,
+        (0.91, 0.95),
+        first_cut(0.3),
+        cells_of(0..5, 0..2, 0..2),
+        cells_of(6..12, 0..2, 0..2),
+    );
+    let (cut, stay, piece) = the_l_cut(0.3);
+    push_and_measure(vec![(1, 0.8)], 0.9, (0.91, 0.95), cut, stay, piece);
 }
 
 #[test]

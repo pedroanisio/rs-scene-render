@@ -289,6 +289,15 @@ impl Crater {
         }
     }
 
+    /// How far the grown mantle stands over the original surface at distance `r` from the axis: nothing for a crater without one, nothing
+    /// under the crest radius's ramp or beyond its reach, and half its thickness at the crest radius.
+    pub fn mantle_height_at(&self, r: f64) -> f64 {
+        match self.profile.mantle {
+            Some(m) if r < m.reach => m.thickness * mantle_shape(r, self.spec.radius, self.spec.rim_width).0,
+            _ => 0.0,
+        }
+    }
+
     /// The dimensions this crater was made from; the axis is the one given, not normalised.
     pub fn spec(&self) -> Spec {
         self.spec

@@ -13,6 +13,7 @@ mod internal_edges;
 mod sim;
 mod surface3;
 mod surface_prefetch;
+mod voxel_fracture;
 mod voxel_split;
 mod voxels;
 mod watch_flood;
