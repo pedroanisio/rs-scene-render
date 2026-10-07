@@ -84,6 +84,21 @@ fn scene(name: &str, camera: &str) -> (std::path::PathBuf, sr_eval::Evaluator) {
     (dir, sr_eval::Evaluator::new(&doc, &Default::default()).unwrap())
 }
 
+/// The faces of the cells of `grid` that have an empty neighbour, counted cell by cell with no plane, brick or merge in it.
+fn naive_faces(grid: &Occupancy) -> u64 {
+    let mut faces = 0;
+    for c in grid.cells() {
+        for axis in 0..3 {
+            for step in [-1, 1] {
+                let mut n = c;
+                n[axis] += step;
+                faces += u64::from(grid.get(n) == 0);
+            }
+        }
+    }
+    faces
+}
+
 /// What a surface of these cells is when it is made from nothing: the classes of the document material (every index is the stone's).
 fn full_remesh_hash(grid: &Occupancy) -> (usize, u64) {
     let classes = Classes::new(|_| 1, &[]);
@@ -130,11 +145,21 @@ fn the_surface_of_the_ground_after_the_cut_is_the_surface_of_a_full_remesh_of_it
             (quads, hash),
             "{camera}: the surface after the cut is that of the cells made again"
         );
-        assert!(
-            owner.remeshed > 0 && owner.remeshed < 3 * 130,
-            "{camera}: only the planes of the bricks of the cut: {}",
-            owner.remeshed
-        );
+        // the planes made again are those of the bricks the cut touched (nine along each axis for a brick), the bricks the frame says
+        assert_eq!(cut.steps.len(), 1, "one cut, one step");
+        let bricks = &cut.steps[0].1;
+        assert_eq!(bricks.len(), 83, "{camera}: the bricks the cut touched");
+        let planes: std::collections::BTreeSet<(usize, i32)> =
+            bricks.iter().flat_map(|k| (0..3).flat_map(move |a| (0..=8).map(move |i| (a, 8 * k[a] + i)))).collect();
+        assert_eq!(owner.remeshed, planes.len(), "{camera}: the planes of the bricks of the cut and no others");
+        // the cells are checked against a naive extractor, not only against the mesher's own plane code: the area of the quads of the surface
+        // is the number of faces of cells that have an empty neighbour, and so is it for each piece
+        for grid in std::iter::once(&cut.grid).chain(cut.pieces.iter().map(|p| &p.grid)) {
+            let naive = naive_faces(grid);
+            let area: u64 =
+                mesh_quads(grid, &Classes::new(|_| 1, &[])).iter().map(|q| u64::from(q.w) * u64::from(q.h)).sum();
+            assert_eq!(area, naive, "{camera}: the faces that the quads cover");
+        }
         // the part of the pillar that came away is drawn from its own cells
         assert!(!cut.pieces.is_empty());
         for piece in cut.pieces.iter().filter(|p| p.enabled) {
@@ -167,8 +192,8 @@ fn the_raster_renderer_and_the_path_tracer_cover_the_same_pixels_but_for_the_edg
     println!("COVERAGE: {covered} pixels by the raster renderer, {} differ from the path tracer's", differ.len());
     assert!(covered > 96 * 96 / 4, "the ground fills a good part of the picture: {covered}");
     assert!(
-        differ.len() * 100 <= covered,
-        "at most one pixel in a hundred of what is covered: {} of {covered}",
+        differ.len() * 1000 <= covered,
+        "at most one pixel in a thousand of what is covered: {} of {covered}",
         differ.len()
     );
     let edge = |mask: &[bool], i: usize| {
