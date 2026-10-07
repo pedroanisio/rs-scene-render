@@ -137,6 +137,10 @@ impl World3 {
             };
             self.state.voxel_cells[split.parent] = Some(std::sync::Arc::new(sorted_unique(cells)));
         }
+        for split in &splits {
+            let cells = self.state.voxel_cells[split.parent].clone().expect("just made");
+            self.record_voxel_cells(split.parent, 0, &cells);
+        }
         self.state.slots_used = vec![0; splits.len()];
         self.voxel_splits = splits;
         self.checkpoints.clear();
@@ -297,7 +301,10 @@ impl World3 {
             let h = self.state.handles[parent];
             let collider = self.state.bodies[h].colliders()[0];
             self.state.colliders[collider].set_shape(shape);
-            self.state.voxel_cells[parent] = Some(remaining);
+            self.state.voxel_edits[parent] += 1;
+            self.state.voxel_cells[parent] = Some(remaining.clone());
+            let edit = self.state.voxel_edits[parent];
+            self.record_voxel_cells(parent, edit, &remaining);
             let body = &mut self.state.bodies[h];
             if let Some(props) = parent_props {
                 self.state.colliders[collider].set_mass_properties(props);
@@ -335,7 +342,10 @@ impl World3 {
                 body.set_angvel(w, true);
                 self.state.slot_active[slot] = true;
                 self.state.slot_since[slot] = Some(step);
-                self.state.voxel_cells[slot] = Some(std::sync::Arc::new(sorted_unique(&cut.pieces[i].cells)));
+                let piece_cells = std::sync::Arc::new(sorted_unique(&cut.pieces[i].cells));
+                self.state.voxel_edits[slot] = 1;
+                self.state.voxel_cells[slot] = Some(piece_cells.clone());
+                self.record_voxel_cells(slot, 1, &piece_cells);
                 self.state.active[slot] = true;
             }
             self.state.slots_used[split] = used + cut.pieces.len();
