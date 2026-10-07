@@ -36,6 +36,7 @@ pub mod rng;
 pub mod sedov;
 pub mod slime;
 pub mod soft;
+pub mod stress;
 pub mod surface;
 pub mod timeline;
 
