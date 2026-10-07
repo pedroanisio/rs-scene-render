@@ -504,3 +504,28 @@ fn a_brick_given_twice_is_an_error_even_when_the_second_copy_is_empty_and_index_
     assert!(o.set_palette(colours));
     assert_eq!(o.palette().color(0), [0; 4]);
 }
+
+#[test]
+fn two_clones_edited_differently_reach_the_same_revision_in_different_lineages() {
+    // the revision is a counter of one grid: two grids may share a number, so whoever caches by revision also needs to
+    // know which grid it was a revision of
+    let base = Occupancy::from_cells([([0, 0, 0], 1)]).unwrap();
+    let (mut a, mut b) = (base.clone(), base.clone());
+    a.set([1, 0, 0], 2).unwrap();
+    b.set([5, 5, 5], 3).unwrap();
+    assert_eq!(a.revision(), b.revision(), "both are one edit past the grid they were copied from");
+    assert_ne!(a.lineage(), b.lineage(), "and are not the same grid");
+    assert_ne!(a.lineage(), base.lineage());
+    assert_ne!(b.lineage(), base.lineage());
+    // a lineage belongs to a grid for its whole life: editing, reading and recolouring leave it alone
+    let kept = a.lineage();
+    a.set([2, 0, 0], 1).unwrap();
+    a.set([2, 0, 0], 0).unwrap();
+    let _ = (a.get([1, 0, 0]), a.fingerprint(), a.cells().count(), a.palette());
+    a.set_color(1, [1, 2, 3, 4]);
+    assert_eq!(a.lineage(), kept);
+    // grids built separately, however alike, are different grids
+    assert_ne!(Occupancy::new().lineage(), Occupancy::new().lineage());
+    let cells = || [([0, 0, 0], 1u8), ([1, 0, 0], 1u8)];
+    assert_ne!(Occupancy::from_cells(cells()).unwrap().lineage(), Occupancy::from_cells(cells()).unwrap().lineage());
+}

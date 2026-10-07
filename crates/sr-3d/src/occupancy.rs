@@ -23,12 +23,15 @@
 //!   one, and every brick of it is new to a reader at revision 0.
 //! * The **revision** is a counter of this grid that changes when, and only when, a cell changes; the bricks that changed
 //!   since a revision are told by [`Occupancy::changed_bricks_since`], in key order, a brick that was emptied included until it
-//!   is compacted away. A revision compares states of one grid only (grids built differently may have the same one); the **fingerprint** is the hash of the content
+//!   is compacted away. A revision compares states of one grid only (grids built differently may have the same one, and two copies
+//!   of a grid that are edited differently reach the same one): whoever caches by revision keys it by the grid's
+//!   [`Occupancy::lineage`] as well. The **fingerprint** is the hash of the content
 //!   (cells and palette indices, in the order of the scan) and is equal for equal content, whatever its history.
 //! * What is derived from the cells (mass, centre of mass, inertia, connected components) is computed from integers in a fixed
 //!   order, so equal occupancy gives equal bits ([`Moments`], [`components`]).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cells to a side of a brick.
 pub const BRICK: i32 = 8;
@@ -91,8 +94,10 @@ impl Palette {
     }
 }
 
+static NEXT_LINEAGE: AtomicU64 = AtomicU64::new(1);
+
 /// A sparse grid of filled cells, with a palette index in each.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Occupancy {
     bricks: BTreeMap<[i32; 3], Brick>,
     filled: u64,
@@ -102,6 +107,25 @@ pub struct Occupancy {
     live: usize,
     palette: Palette,
     palette_revision: u64,
+    /// Which grid this is: its own for each grid built and each copy made, for the whole of its life.
+    lineage: u64,
+}
+
+/// A copy has the cells, the palette and the revision of the grid it was made from and a lineage of its own: from then on the two are
+/// edited separately, and a revision of one is not a revision of the other.
+impl Clone for Occupancy {
+    fn clone(&self) -> Self {
+        Self {
+            bricks: self.bricks.clone(),
+            filled: self.filled,
+            revision: self.revision,
+            limits: self.limits,
+            live: self.live,
+            palette: self.palette.clone(),
+            palette_revision: self.palette_revision,
+            lineage: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 impl Default for Occupancy {
@@ -140,6 +164,7 @@ impl Occupancy {
             live: 0,
             palette: Palette::default(),
             palette_revision: 0,
+            lineage: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -408,6 +433,13 @@ impl Occupancy {
         self.revision
     }
 
+    /// Which grid this is, for as long as it lives: every grid built, and every copy made of one, has a lineage of its own (a number
+    /// for this process, never part of a hash, and so of no consequence for a result). A revision is a revision of one lineage; the
+    /// state of a grid is told by the two together.
+    pub fn lineage(&self) -> u64 {
+        self.lineage
+    }
+
     /// The bricks that hold something, in key order, with their 512 palette indices (x runs fastest, then y, then z).
     pub fn bricks(&self) -> impl Iterator<Item = ([i32; 3], &[u8; BRICK_CELLS])> {
         self.bricks.iter().filter(|(_, b)| b.filled > 0).map(|(k, b)| (*k, &*b.cells))
@@ -418,7 +450,9 @@ impl Occupancy {
         self.bricks.iter().filter(|(_, b)| b.changed > revision).map(|(k, _)| *k).collect()
     }
 
-    /// Forgets the emptied bricks last edited at or before `revision`: whoever read the grid up to then has been told.
+    /// Forgets the emptied bricks last edited at or before `revision`: whoever read the grid up to then has been told. The mesher of the
+    /// surface reads `changed_bricks_since` up to the revision it built, so that revision is the one to give here: a brick emptied after
+    /// it stays until it has been read.
     pub fn compact(&mut self, revision: u64) {
         self.bricks.retain(|_, b| b.filled > 0 || b.changed > revision);
     }
