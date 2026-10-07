@@ -385,6 +385,69 @@ fn a_registered_parent_is_charged_to_the_checkpoints_for_the_cells_the_state_kee
     assert!(big - small >= taken * 14 * (24_000 - 400), "{} against {}", big - small, taken * 14 * 23_600);
 }
 
+/// Takes the first column of cells (x = 0) off the parent at 0.5 s.
+struct FirstColumn;
+
+impl Driver3 for FirstColumn {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 || revision.is_some() || t + 1e-9 < 0.5 {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            added: vec![],
+            revision: 1,
+            destroyed: cells_of(0..1, 0..20, 0..10),
+            parent_mass: 1.0,
+            pieces: vec![],
+        }))
+    }
+}
+
+#[test]
+fn the_cells_a_cut_leaves_in_the_state_are_charged_for_what_they_hold_and_not_for_the_room_the_vector_has() {
+    // the cells that stay are collected over a filter, which leaves the vector up to twice as long as it is full: held by every checkpoint taken
+    // after the cut, they are charged at twelve bytes a cell and the shape's two, not at the capacity
+    let bytes = |n: i32| {
+        let mut w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(Shape3::Voxels { size: SIZE, cells: cells_of(0..n, 0..20, 0..10) }, 1000.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        })
+        .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+        .unwrap();
+        let frame = w.frame_at(3.5, &mut FirstColumn);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        (w.checkpoint_bytes(), w.progress().1)
+    };
+    let ((small, kept), (big, kept_big)) = (bytes(21), bytes(141));
+    assert_eq!(kept, kept_big);
+    // checkpoints 1.. are taken after the cut at 0.5 s (a world keeps one a second)
+    let taken = kept - 1;
+    let per_cell = (big - small) as f64 / (taken as f64 * 200.0 * 120.0);
+    assert!((14.0..=14.6).contains(&per_cell), "{per_cell} bytes a cell in every checkpoint");
+}
+
 #[test]
 fn a_split_that_names_a_body_that_is_not_made_of_cells_is_refused() {
     let w = World3::new(World3Spec {
@@ -1325,6 +1388,9 @@ fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
 /// cut it gives at one instant is a new one every time, and takes the cells it took before.
 struct Counting;
 
+/// The instant from which [`Counting`] cuts: after the first steps, so that a world asked for 0.03 s installs the first cut in the tail of its frame.
+const COUNTING_FROM: f64 = 0.03;
+
 impl Driver3 for Counting {
     fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
         vec![Pose3::default(); which.len()]
@@ -1334,12 +1400,12 @@ impl Driver3 for Counting {
     }
     fn voxel_cut(
         &mut self,
-        _: f64,
+        t: f64,
         parent: usize,
         revision: Option<u64>,
         _: Option<&Impact3>,
     ) -> Result<Option<VoxelCut3>, String> {
-        if parent != 0 {
+        if parent != 0 || t + 1e-9 < COUNTING_FROM {
             return Ok(None);
         }
         Ok(Some(VoxelCut3 {
@@ -1355,15 +1421,19 @@ impl Driver3 for Counting {
 #[test]
 fn a_driver_whose_revision_is_not_a_function_of_the_time_gets_the_same_error_however_the_frame_is_asked() {
     // the contract: at one instant the driver gives one revision, so that asking again finds it installed. One that gives a new revision with the
-    // cells it destroyed before is refused for taking cells the body has not, in a fresh world and in one asked twice, and never half installs it
+    // cells it destroyed before is refused for taking cells the body has not, and never half installs it. The first cut is from 0.03 s: a world that
+    // is asked for that instant installs it in the tail of its frame and fails in the prefix of the next step (the path the doc of voxel_cut
+    // describes), a fresh world asked for a later one installs it in a prefix and fails in the next, and both say the same
     let mut fresh = world(1, None);
     let first = fresh.frame_at(0.05, &mut Counting);
     assert!(first.errors.iter().any(|e| e.contains("has not")), "{:?}", first.errors);
-    let mut twice = world(1, None);
-    twice.frame_at(0.02, &mut Counting);
-    let second = twice.frame_at(0.05, &mut Counting);
+    let mut tail = world(1, None);
+    let at_the_cut = tail.frame_at(COUNTING_FROM, &mut Counting);
+    assert!(at_the_cut.errors.is_empty(), "the cut itself is fine: {:?}", at_the_cut.errors);
+    assert!(tail.frame_at(0.02, &mut Counting).errors.is_empty(), "and earlier frames are not touched");
+    let second = tail.frame_at(0.05, &mut Counting);
     assert_eq!(first.errors, second.errors);
-    assert_eq!(first, twice.frame_at(0.05, &mut Counting));
+    assert_eq!(first, tail.frame_at(0.05, &mut Counting));
 }
 
 /// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of

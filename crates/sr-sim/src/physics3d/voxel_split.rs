@@ -236,7 +236,10 @@ impl World3 {
             if let Some(missing) = leaving.iter().find(|c| have.binary_search(c).is_err()) {
                 return Err(format!("a cut of body {parent} takes the cell {missing:?}, which the body has not"));
             }
-            let remaining: Vec<[i32; 3]> = have.iter().filter(|c| leaving.binary_search(c).is_err()).copied().collect();
+            let mut remaining: Vec<[i32; 3]> =
+                have.iter().filter(|c| leaving.binary_search(c).is_err()).copied().collect();
+            // what is kept is charged to the checkpoints by its capacity, which a collect over a filter leaves up to twice the length
+            remaining.shrink_to_fit();
             // the new shape of the body, edited on a private copy so that nothing changed if anything after this fails
             let collider = self.state.bodies[h].colliders()[0];
             let mut shape = self.state.colliders[collider].shared_shape().clone();
@@ -354,5 +357,6 @@ fn sorted_unique(cells: &[[i32; 3]]) -> Vec<[i32; 3]> {
     let mut v = cells.to_vec();
     v.sort_unstable();
     v.dedup();
+    v.shrink_to_fit();
     v
 }
