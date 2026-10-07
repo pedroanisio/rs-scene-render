@@ -119,7 +119,7 @@ fn the_cells_above_the_surface_of_the_crater_are_taken_out_to_the_reach_of_the_c
     let law = law();
     let cells = ground();
     let before = occupancy(&cells);
-    let x = excavate(&before, &law.kernel, H, &ejection(&law)).unwrap();
+    let x = excavate(&before, &law.kernel, 1.0, H, &ejection(&law)).unwrap();
     let n = x.removed.len();
     let spec = law.kernel.spec();
     // exactly the filled cells inside the crest radius whose centres are over the grown surface of the crater and under one crest radius
@@ -160,7 +160,7 @@ fn what_is_taken_out_is_thrown_or_heaped_in_counts_of_cells_and_the_materials_ar
     let law = law();
     let cells = ground();
     let before = occupancy(&cells);
-    let x = excavate(&before, &law.kernel, H, &ejection(&law)).unwrap();
+    let x = excavate(&before, &law.kernel, 1.0, H, &ejection(&law)).unwrap();
     let n = x.removed.len();
     assert_eq!(
         (x.thrown.len(), x.uplift.len(), x.rim.len()),
@@ -237,7 +237,7 @@ fn the_thrown_cells_leave_with_the_speeds_of_the_law_the_shallowest_and_the_near
     let cells = ground();
     let before = occupancy(&cells);
     let e = ejection(&law);
-    let x = excavate(&before, &law.kernel, H, &e).unwrap();
+    let x = excavate(&before, &law.kernel, 1.0, H, &e).unwrap();
     let t = x.thrown.len();
     let speed = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     // the middle first: the distance from the axis does not fall; at one distance the shallower cell first, since the material that is launched
@@ -291,7 +291,7 @@ fn the_thrown_cells_leave_with_the_speeds_of_the_law_the_shallowest_and_the_near
     // the same whatever the order the cells were put in
     let mut shuffled = cells.clone();
     shuffled.reverse();
-    let again = excavate(&occupancy(&shuffled), &law.kernel, H, &e).unwrap();
+    let again = excavate(&occupancy(&shuffled), &law.kernel, 1.0, H, &e).unwrap();
     assert_eq!(again, x);
 }
 
@@ -301,30 +301,30 @@ fn nothing_taken_out_or_all_of_it_thrown_and_what_does_not_make_sense_is_an_erro
     let before = occupancy(&ground());
     // a crater far from the ground takes nothing out
     let far = Occupancy::from_cells([([500, 500, 500], 1u8)]).unwrap();
-    let x = excavate(&far, &law.kernel, H, &ejection(&law)).unwrap();
+    let x = excavate(&far, &law.kernel, 1.0, H, &ejection(&law)).unwrap();
     assert!(x.removed.is_empty() && x.thrown.is_empty() && x.rim.is_empty());
     // the whole of it thrown leaves no rim
     let all = Ejection { share: 1.0, ..ejection(&law) };
-    let x = excavate(&before, &law.kernel, H, &all).unwrap();
+    let x = excavate(&before, &law.kernel, 1.0, H, &all).unwrap();
     assert_eq!((x.thrown.len(), x.rim.len(), x.uplift.len()), (x.removed.len(), 0, 0));
     // less thrown is more heaped, as far as the rim has room for it: 40 percent thrown leaves 60 percent to heap, which fits
     let less = Ejection { share: 0.4, ..ejection(&law) };
-    let x = excavate(&before, &law.kernel, H, &less).unwrap();
+    let x = excavate(&before, &law.kernel, 1.0, H, &less).unwrap();
     assert_eq!((x.thrown.len() + x.rim.len(), x.rim.len()), (x.removed.len(), x.uplift.len()));
     assert!(x.rim.len() > x.thrown.len() && x.rim_scale > 1.0);
     // none thrown asks the rim to hold the whole of the bowl, which the rim of the law has not the room for: an error that says so, not a
     // rim that is cut short and a bowl whose material is lost
     let none = Ejection { share: 0.0, ..ejection(&law) };
-    let err = excavate(&before, &law.kernel, H, &none).unwrap_err();
+    let err = excavate(&before, &law.kernel, 1.0, H, &none).unwrap_err();
     assert!(err.contains("rim"), "{err}");
     for bad in [-0.1, 1.1, f64::NAN] {
-        assert!(excavate(&before, &law.kernel, H, &Ejection { share: bad, ..ejection(&law) }).is_err());
+        assert!(excavate(&before, &law.kernel, 1.0, H, &Ejection { share: bad, ..ejection(&law) }).is_err());
     }
-    assert!(excavate(&before, &law.kernel, 0.0, &ejection(&law)).is_err());
-    assert!(excavate(&before, &law.kernel, f64::NAN, &ejection(&law)).is_err());
+    assert!(excavate(&before, &law.kernel, 1.0, 0.0, &ejection(&law)).is_err());
+    assert!(excavate(&before, &law.kernel, 1.0, f64::NAN, &ejection(&law)).is_err());
     assert!(SpeedLaw::from_ejecta(&[]).is_err());
-    // a crater in the units of the scene (100 to a metre) with cells in metres: a box of thousands of cells to a side, refused with the
-    // reason, not scanned
+    // a crater in the units of the scene (100 to a metre) declared as being in metres: a box of thousands of cells to a side, refused at once with the
+    // reason (a cap on the box that is scanned), not scanned
     let big = Spec {
         radius: 665.0,
         depth: 279.0,
@@ -334,10 +334,72 @@ fn nothing_taken_out_or_all_of_it_thrown_and_what_does_not_make_sense_is_an_erro
         ..law.kernel.spec()
     };
     let kernel = Crater::new(big).unwrap();
-    let err = excavate(&before, &kernel, H, &ejection(&law)).unwrap_err();
-    assert!(err.contains("units"), "{err}");
+    let started = std::time::Instant::now();
+    let err = excavate(&before, &kernel, 1.0, H, &ejection(&law)).unwrap_err();
+    assert!(err.contains("box") && err.contains("unit"), "{err}");
+    assert!(started.elapsed().as_secs_f64() < 1.0, "it was scanned before it was refused");
+    // a crest of 1 600 cells, which no threshold on the radius told from a crater that is that big in metres, is refused by the same cap
+    let wide = Spec {
+        radius: 400.0,
+        depth: 100.0,
+        rim_height: 10.0,
+        rim_width: 60.0,
+        influence_depth: 800.0,
+        ..law.kernel.spec()
+    };
+    assert!(excavate(&before, &Crater::new(wide).unwrap(), 1.0, H, &ejection(&law)).is_err());
     // and a centre so far out that the box is not a box of cells
     let away = Spec { center: [1e12, 0.0, 0.0], ..law.kernel.spec() };
-    let err = excavate(&before, &Crater::new(away).unwrap(), H, &ejection(&law)).unwrap_err();
-    assert!(err.contains("range") || err.contains("units"), "{err}");
+    let err = excavate(&before, &Crater::new(away).unwrap(), 1.0, H, &ejection(&law)).unwrap_err();
+    assert!(err.contains("range") || err.contains("box"), "{err}");
+}
+
+/// The kernel of the law with every length multiplied by `k` and the volumes by `k` cubed: the same crater in another unit.
+fn scaled_kernel(law: &Law, k: f64) -> Crater {
+    let s = law.kernel.spec();
+    let spec = Spec {
+        center: s.center.map(|c| c * k),
+        outward: s.outward,
+        radius: s.radius * k,
+        depth: s.depth * k,
+        rim_height: s.rim_height * k,
+        rim_width: s.rim_width * k,
+        influence_depth: s.influence_depth * k,
+    };
+    // the rim height of the law's kernel came from the bulking of 1 and the volumes of the budget: rebuild it the same way in the unit
+    let v = law.volume * k.powi(3);
+    let kernel = Crater::conserving(spec, Budget { volume: v, ejecta: 0.8 * v, bulking: Some(1.0) }).unwrap();
+    // (the law's own ejecta volume is 0.8 of it)
+    let _ = &law.kernel;
+    kernel
+}
+
+#[test]
+fn a_crater_in_another_unit_is_the_same_crater_when_it_says_what_its_unit_is() {
+    let law = law();
+    let before = occupancy(&ground());
+    let e = ejection(&law);
+    let in_metres = excavate(&before, &law.kernel, 1.0, H, &e).unwrap();
+    // in units of half a metre (an exact scaling in binary), the same bits
+    let half = excavate(&before, &scaled_kernel(&law, 2.0), 0.5, H, &e).unwrap();
+    assert_eq!(
+        (half.removed.len(), half.thrown.len(), half.rim.len()),
+        (in_metres.removed.len(), in_metres.thrown.len(), in_metres.rim.len())
+    );
+    assert_eq!(half.removed, in_metres.removed);
+    assert_eq!(half.rim, in_metres.rim);
+    assert_eq!(half.uplift, in_metres.uplift);
+    // in the units of the scene, 100 to a metre, the crater is the same to a cell or two where the scaling is not exact
+    let scene = excavate(&before, &scaled_kernel(&law, 100.0), 0.01, H, &e).unwrap();
+    assert!(
+        (scene.removed.len() as i64 - in_metres.removed.len() as i64).abs() <= 8,
+        "{} against {}",
+        scene.removed.len(),
+        in_metres.removed.len()
+    );
+    assert!((scene.rim_scale - in_metres.rim_scale).abs() < 0.05);
+    // a unit that is not a number or not positive is an error
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(excavate(&before, &law.kernel, bad, H, &e).is_err());
+    }
 }

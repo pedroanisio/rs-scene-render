@@ -4,8 +4,9 @@
 //! its volume budget), in metres in the frame of the cells: the cell `[i, j, k]` has its centre at `(i + 1/2, j + 1/2, k + 1/2)` cells.
 //! The kernel is the conserving one of a crater with a bulking of 1 (`Crater::conserving` with `Budget::bulking = Some(1.0)`), whose bowl
 //! holds the law's volume and whose rim holds what the law does not throw out (0.2 of it): a cell is a cell of the same mass, so
-//! nothing can be heaped that was not taken out. The kernel and the cells must be in the same units (metres): a crater of the scene's units
-//! (100 to a metre) over cells in metres is refused.
+//! nothing can be heaped that was not taken out. The kernel's lengths are in a unit that the caller declares (`kernel_unit`, metres a unit: 1 for a kernel in metres, 0.01
+//! for one in the units of a scene of 100 to a metre), and the function reads them in metres: a kernel that is in the scene's units and declared as being in metres
+//! is a crater of kilometres over cells of a quarter of a metre, whose box is refused (the box that is scanned has a cap) rather than scanned.
 //!
 //! * **Removal.** The surface the grown crater leaves over the original ground at distance `r` from the axis is the kernel's own:
 //!   `S(r) = rim_height_at(r) - bowl_depth_at(r)` along the axis. A filled cell is taken out when its centre is inside the crest radius plus the width of
@@ -183,8 +184,42 @@ impl Frame {
     }
 }
 
-/// The largest crest radius, in cells, that a crater may have: a bigger one means that the crater is in other units than the cells.
-const MAX_CREST_CELLS: f64 = 2000.0;
+/// The kernel of the crater read in metres: its lengths are in `unit` metres (1 for a kernel in metres, 0.01 for one in the units of a scene of
+/// 100 to a metre), and the cells are in metres.
+struct Profile<'a> {
+    crater: &'a Crater,
+    unit: f64,
+}
+
+impl Profile<'_> {
+    fn crest(&self) -> f64 {
+        self.crater.spec().radius * self.unit
+    }
+    fn width(&self) -> f64 {
+        self.crater.spec().rim_width * self.unit
+    }
+    fn depth(&self) -> f64 {
+        self.crater.spec().depth * self.unit
+    }
+    fn rim_height(&self) -> f64 {
+        self.crater.spec().rim_height * self.unit
+    }
+    fn centre(&self) -> [f64; 3] {
+        self.crater.spec().center.map(|c| c * self.unit)
+    }
+    /// How far under the original surface the bowl's floor is, at distance `r` metres from the axis.
+    fn bowl(&self, r: f64) -> f64 {
+        self.unit * self.crater.bowl_depth_at(r / self.unit)
+    }
+    /// How far over the original surface the rim stands, at distance `r` metres from the axis.
+    fn rim(&self, r: f64) -> f64 {
+        self.unit * self.crater.rim_height_at(r / self.unit)
+    }
+}
+
+/// The most cells that the box around a crater may hold: the rim is looked for by a pass over it. A crater in other units than the cells' makes a box
+/// of billions, which is refused here and not scanned.
+const MAX_SCAN_CELLS: u128 = 1 << 27;
 /// The rim is looked for up to this level: a rim that would need more is an error (the law's rim has not the room).
 const MAX_LEVEL: f64 = 4.0;
 
@@ -201,34 +236,44 @@ fn index_range(centre: f64, reach: f64, h: f64) -> Result<(i32, i32), String> {
 }
 
 /// Takes the crater out of `before` (cells of `h` metres a side), throws its share and heaps the rest on the rim.
-pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection) -> Result<Excavation, String> {
+pub fn excavate(
+    before: &Occupancy,
+    crater: &Crater,
+    kernel_unit: f64,
+    h: f64,
+    ejection: &Ejection,
+) -> Result<Excavation, String> {
     if !(h.is_finite() && h > 0.0) {
         return Err("a cell must have a positive size".into());
+    }
+    if !(kernel_unit.is_finite() && kernel_unit > 0.0) {
+        return Err("the unit of the crater's lengths, in metres, must be positive".into());
     }
     if !(ejection.share.is_finite() && (0.0..=1.0).contains(&ejection.share)) {
         return Err("the share that is thrown is between 0 and 1".into());
     }
-    let spec = crater.spec();
-    let frame = Frame { centre: spec.center, axis: crater.axis(), h };
-    let (crest, width) = (spec.radius, spec.rim_width);
-    if crest / h > MAX_CREST_CELLS {
-        return Err(format!(
-            "the crest radius of the crater is {:.0} cells: the crater is in other units than the cells' (metres)",
-            crest / h
-        ));
-    }
+    let prof = Profile { crater, unit: kernel_unit };
+    let frame = Frame { centre: prof.centre(), axis: crater.axis(), h };
+    let (crest, width) = (prof.crest(), prof.width());
     let ceiling = crest;
-    let surface = |r: f64| crater.rim_height_at(r) - crater.bowl_depth_at(r);
+    let surface = |r: f64| prof.rim(r) - prof.bowl(r);
     let taken = |p: [f64; 3]| {
         let (a, r) = frame.polar(p);
         r < crest + width && a >= surface(r) && a <= ceiling
     };
     // the filled cells that the crater takes out: only the bricks that the crater's box touches are looked at
-    let reach = crest + width + spec.depth.max(spec.rim_height) + 2.0 * h;
+    let reach = crest + width + prof.depth().max(prof.rim_height()) + 2.0 * h;
     let (x0, x1) = index_range(frame.centre[0], reach, h)?;
     let (y0, y1) = index_range(frame.centre[1], reach, h)?;
     let (z0, z1) = index_range(frame.centre[2], reach, h)?;
     let (lo, hi) = ([i64::from(x0), i64::from(y0), i64::from(z0)], [i64::from(x1), i64::from(y1), i64::from(z1)]);
+    let box_cells: u128 = (0..3).map(|i| (hi[i] - lo[i] + 1) as u128).product();
+    if box_cells > MAX_SCAN_CELLS {
+        return Err(format!(
+            "the box that the crater reaches holds {box_cells} cells, over the {MAX_SCAN_CELLS} that are scanned: the crater is in other units than \
+             the unit {kernel_unit} m that it was declared in, or it is too large for cells of {h} m"
+        ));
+    }
     let brick = i64::from(sr_3d::occupancy::BRICK);
     let mut removed: Vec<[i32; 3]> = Vec::new();
     for (key, cells) in before.bricks() {
@@ -276,7 +321,7 @@ pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection
     }
     let mut uplift: Vec<[i32; 3]> = ranked[thrown_count..].to_vec();
     uplift.sort_by_key(scan);
-    let (heaped, rim_scale) = heap_rim(before, crater, &frame, &removed, uplift.len(), (lo, hi))?;
+    let (heaped, rim_scale) = heap_rim(before, &prof, &frame, &removed, uplift.len(), (lo, hi))?;
     let mut rim: Vec<([i32; 3], u8)> =
         heaped.into_iter().zip(uplift.iter()).map(|(cell, source)| (cell, before.get(*source))).collect();
     rim.sort_by_key(|(c, _)| scan(c));
@@ -286,7 +331,7 @@ pub fn excavate(before: &Occupancy, crater: &Crater, h: f64, ejection: &Ejection
 /// The `count` cells to add on the rim, in the order they are added, and the level of the last: the lowest level first, each held up.
 fn heap_rim(
     before: &Occupancy,
-    crater: &Crater,
+    prof: &Profile,
     frame: &Frame,
     removed: &[[i32; 3]],
     count: usize,
@@ -295,8 +340,7 @@ fn heap_rim(
     if count == 0 {
         return Ok((Vec::new(), 0.0));
     }
-    let spec = crater.spec();
-    let (crest, width) = (spec.radius, spec.rim_width);
+    let (crest, width) = (prof.crest(), prof.width());
     let gone: BTreeSet<(i32, i32, i32)> = removed.iter().map(scan).collect();
     let down = frame.down();
     let below = |c: [i32; 3]| [c[0] + down[0], c[1] + down[1], c[2] + down[2]];
@@ -308,11 +352,11 @@ fn heap_rim(
             return None;
         }
         let (a, r) = frame.polar(frame.point(c));
-        let rim = crater.rim_height_at(r);
+        let rim = prof.rim(r);
         if r >= crest + width || rim <= 0.0 {
             return None;
         }
-        let g = (a + crater.bowl_depth_at(r)) / rim;
+        let g = (a + prof.bowl(r)) / rim;
         (g > 0.0 && g < MAX_LEVEL).then_some(g)
     };
     let mut heap: BinaryHeap<Reverse<(Rank, [i32; 3])>> = BinaryHeap::new();
