@@ -3100,6 +3100,29 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 The Schematron and `sr-model`'s `rules.rs` agree on all 380 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
+**The pieces of a body of cells (`sr_3d::pieces`).** `partition(occupancy, rule, max_pieces)` cuts a body into pieces and finds the joints
+between them: by seeds (`Voronoi`, drawn from `(seed, index)` by splitmix64, or `VoronoiAt`, given; at most 4096 and within 2^40 of the origin in
+doubled coordinates, an error that names the number or the seed otherwise), by up to 63 planes, or by labels the caller gives. This module has
+two users that were written apart and share it, the fracture of a body of cells into rigid pieces and the fracture by stress that breaks the joints
+by their area, so its fields are private and what it returns cannot be edited into something that breaks its rules. The cells of a piece are keys
+of the occupancy that was cut (its own lattice, cells and not metres); a body with no cell has no pieces and is an error. Every cell is in exactly
+one piece; a part of the rule that is not connected by faces is split into its components; pieces are numbered by their first cell in the scan (z, y,
+x) and list their cells in it, so the result does not depend on the order of the input or on threads, and nothing depends on the order of a hash.
+A piece has the exact moments of its cells (`Piece::moments`), `PieceGraph::piece_of(cell)` says which piece a cell is in, and Voronoi is exact
+integers: squared distance in `i128` over the doubled coordinates `u = 2 key + 1`, a tie to the seed of the lowest index; a plane puts a cell on its
+positive side if `normal . u >= offset`, compared and not subtracted, so that no offset overflows. A joint (`Edge`, `a < b`, sorted by `(a, b)`) has
+the faces two pieces share BY AXIS (`faces: [u32; 3]`, so that the area is right where the cells are not cubes: `Edge::area(size)` is the faces of
+each axis times the product of the two other sizes, and `Edge::centroid(size)` the mean of the centres of the faces weighted by their areas), the
+sum of the doubled coordinates of their centres by axis and the sum of their unit normals from `a` to `b` (which is not an area: the faces on the
+two sides of a piece wrapped round another cancel in it), all in integers. More pieces than `max_pieces` is an error that names the number, never
+a truncation. What it does not do: merge or cut pieces again, give the centre of the pieces of a joint (it is in their moments), or know a material.
+Tests (`crates/sr-3d/tests/geometry/pieces.rs`): a bar cut by a plane has one joint whose four faces, face sum and normal are worked out by hand;
+the tie of two seeds; a U of cells whose Voronoi part is two arm tops (split into components), a constant label, alternating labels, two cells that
+touch only by an edge or a corner (no joint); a ring wrapped round two cells, whose normals cancel along y and whose area and centre are worked out
+by hand; the cells of a ball with a bite go to the nearest seed by a brute-force argmin over the seeds and no two pieces of one part touch, and the
+joints equal a brute force over all the pairs of cells, for 1, 3, 7 and 20 seeds; a single cell; cells at the last keys of an occupancy, seeds, offsets
+and normals at the extremes; the seeds are the reference sequence of splitmix64.
+
 ## SRVOL cache version 1
 
 This engine interchange/cache format is independent of the scene XML version.
