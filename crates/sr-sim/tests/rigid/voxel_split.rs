@@ -1419,3 +1419,62 @@ fn a_body_born_and_cut_at_the_same_step_gives_pieces_of_the_same_pose_and_loads_
         }
     }
 }
+
+/// A driver that cuts as a [`Cutter`] does, hides body 1 (the first slot) until `shown`, and remembers the state of every body at every load.
+struct Hidden {
+    inner: Cutter,
+    shown: f64,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Driver3 for Hidden {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.inner.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.inner.fields(t)
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        which != 1 || t + 1e-9 >= self.shown
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.inner.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_piece_cut_while_hidden_is_a_body_with_its_own_centre_of_mass_at_the_first_step_it_is_shown() {
+    // the cut is at 0.2 s and the slot is hidden until 0.5 s: when the driver shows it, nothing in the pipeline has run since, and the first question
+    // about it (the load of the step) has to find the piece and not an empty body
+    let mut w = world(2, None);
+    let mut d = Hidden { inner: Cutter::new(0.2), shown: 0.5, seen: vec![vec![]; 3] };
+    let frame = w.frame_at(0.6, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let first = d.seen[1].iter().find(|(_, state)| state.enabled).expect("the piece was asked about once shown").1;
+    let wanted = shape_mass_properties(
+        &Shape3::Voxels { size: SIZE, cells: cells_of(6..12, 0..2, 0..2) },
+        24.0 * CELL_MASS,
+        1.0,
+    )
+    .unwrap()
+    .centre;
+    let local = local_centre(&first.pose, first.centre);
+    for k in 0..3 {
+        assert!(
+            (local[k] - wanted[k]).abs() < 1e-9,
+            "axis {k}: the centre of mass of the piece when first shown is {} and its cells' is {}",
+            local[k],
+            wanted[k]
+        );
+    }
+}

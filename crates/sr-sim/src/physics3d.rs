@@ -1301,6 +1301,13 @@ impl World3 {
                 // A fragment keeps its inherited motion when a visibility
                 // window reopens; its authored placeholder pose is never used.
                 if self.fragment_owners[k].is_some() || self.slot_owners[k].is_some() {
+                    // its collider was left disabled by the body that was: switched off and on it counts again in the body's mass at once, so
+                    // the first step the piece is shown has its mass and its centre of mass and not an empty body at the origin
+                    for &c in body.colliders() {
+                        self.state.colliders[c].set_enabled(false);
+                        self.state.colliders[c].set_enabled(true);
+                    }
+                    body.recompute_mass_properties_from_colliders(&self.state.colliders);
                     body.wake_up(true);
                     continue;
                 }
