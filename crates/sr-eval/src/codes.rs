@@ -23,6 +23,5 @@ pub const CODES: &[(&str, &str)] = &[
     ("E20", "A mask lies entirely outside the box of the node it masks (warning): masks use the node's own coordinates, so the node shows nothing."),
     ("E21", "A key takes cubic-bezier from the animation's defaultInterpolation and gives no handles (warning): the engine's default handles (influence 1/3, speed 1) are used."),
     ("E22", "A feature of an accepted SREP that this engine does not implement yet is used (warning, --strict fails): the document is valid and the feature is ignored. The SREP number is in the message."),
-    ("E23", "A body of cells (an object of primitive voxels whose rigidBody collider is the cells, or that has a crater or a fracture) is used and this build does not evaluate it yet (error): the document is valid and is refused by name, and not evaluated as another thing."),
     ("E16", "A {{placeholder}} names no parameter or repeat variable (warning; the text is left unchanged)."),
 ];
