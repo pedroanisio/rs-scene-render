@@ -3005,7 +3005,10 @@ right, y down, z away from the camera. MagicaVoxel is x right, y forward, z up, 
 `[x, -z-1, y]`: a half turn about x composed with a swap of y and z, determinant 1, so no face is mirrored and every cell stays
 exactly on the lattice.
 
-**A mesh cut into cells (`fromMesh`).** The lattice is aligned to multiples of `cellSize` in the mesh's own coordinates, and a
+**A mesh cut into cells (`fromMesh`).** The mesh is taken in the frame it is drawn in: the vertices as the renderer places them (the
+basis of the import times the node's transform), in scene units (an asset in metres is 100 to the metre) and scene axes (y and z turned
+about x), and `cellSize` is in scene units; a cube of one metre in a glb, cut at 10, is 1000 cells, x 0 to 9, y -10 to -1 and z -10 to -1
+(`sr_eval::voxel::from_model`, test `a_mesh_asset_is_cut_in_the_frame_it_is_drawn_in...`). The lattice is aligned to multiples of `cellSize` in those coordinates, and a
 cell is filled, with the palette index 1, when its centre is inside the mesh by the test that the colliders of the smoke use
 (`sr_sim::pyro::mesh::Mesh`: a closed, validated surface, the nearest oriented surface decides), so a mesh that is not closed is the
 collider's error. The box of the lattice and the limits are checked before any cell is looked at, and the rows are cut in parallel
@@ -3050,12 +3053,20 @@ the centre `floor(size / 2)` and is the evidence of it, not a proof. The real fi
 the licence texts and the sources (`SOURCES.md`); the test that reads all thirteen sample files is run with `VOX_SAMPLES` set and
 reads nothing, rather than failing, when the files are not there.
 
+**Limitation: an SRVOL file has no checksum of its own.** The `sha256` of a `voxelAsset` is the evaluator's to check on the bytes it
+reads (the loader of the next step); SRVOL version 1 has no field for the provenance of the file a cache was made from, and gets one,
+as a version 2 or an optional chunk, when something needs to say where the cells came from.
+
 **Bounds before allocation.** The reader checks, before it builds anything: the size of the file (default 1 GiB), the models
 (65,536), the nodes of the scene graph (1,048,576), its depth (64) with a cycle check, and the count of cells that a graph places
 (one model as many times as it is used, capped before it is built), then the limits of the grid. A translation or a placed cell
 more than 2^24 cells from the origin is an error (so that the translations of a graph at its deepest cannot wrap), and every way of
-filling the grid, from a file, a cache or a mesh, refuses a cell outside the keys of an occupancy, `[-2^30, 2^30)`, by name. A model with a side over 4,096 is
-not a model and is refused, and every number is named in the message.
+filling the grid, from a file, a cache or a mesh, refuses a cell outside the keys of an occupancy, `[-2^30, 2^30)`, by name. A model with a side over 256 (the
+coordinates of a cell are bytes, and MagicaVoxel's own models are at most 256 on a side) is refused, and every number is named in the
+message. The scene graph is checked whole before anything is placed: exactly one root that reaches every node (a cycle, a second root
+or a node off the tree is an error that names it), and the places that it makes and the cells in them are counted node by node, once,
+so that a node under two parents cannot ask for billions of places from a file of a few hundred bytes (`max_placements`, default 2^24).
+The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut is a chunk and not the box.
 
 | Rule | Says |
 |---|---|

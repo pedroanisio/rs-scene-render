@@ -206,8 +206,9 @@ impl<'a> Cursor<'a> {
 /// the translations of a scene graph at its deepest add up in 64 bits.
 const REACH: i64 = 1 << 24;
 
-/// The largest side of a model that is accepted: a size beyond a few thousand is not a model.
-const MAX_SIDE: u32 = 4096;
+/// The largest side of a model that is accepted: the coordinates of a cell in an `XYZI` chunk are bytes, so a model has no cell past 255,
+/// and MagicaVoxel's own models are at most 256 on a side.
+const MAX_SIDE: u32 = 256;
 
 /// Reads the file: the models, the palette, the materials and the scene graph, validated.
 pub fn parse(bytes: &[u8], bounds: &Bounds) -> Result<Vox, String> {

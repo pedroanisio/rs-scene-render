@@ -20,7 +20,7 @@ Inventory (magic, version, SIZE chunks, chunk ids):
 | dotvox_placeholder-with-materials.vox | 29021 | 150 | 2x2x2 | same set |
 | dotvox_single-voxel-with-material.vox | 28993 | 150 | 1x1x1 | same set |
 | dotvox_metal-material.vox | 29101 | 150 | 3x3x3 | same set |
-| dotvox_axes.vox | 44053 | 200 | 4 models 40x40x40 | nTRN(14) nGRP(4) nSHP(10) LAYR(16) MATL(256) rCAM rOBJ NOTE |
+| dotvox_axes.vox | 44053 | 200 | 4 models: 3 of 40x40x40 and 1 of 32x32x32 | nTRN(14) nGRP(4) nSHP(10) LAYR(16) MATL(256) rCAM rOBJ NOTE |
 | dotvox_not_a.vox | 4471 | (magic DOOD) | none | negative case |
 cd686ce1fd0d66975d4fb97a20fff1fbb43763cec0cf4eb327248c5ce7690d2a  dotvox_axes.vox
 7ed3b4debf4baa0e1d74e592c1dda60995c2207a8f74d903dce402cc653434fc  dotvox_metal-material.vox

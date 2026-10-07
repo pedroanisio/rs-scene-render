@@ -192,7 +192,9 @@ fn a_voxel_outside_its_model_an_index_of_zero_a_voxel_twice_and_a_model_without_
     let mut lie = xyzi(&[[0, 0, 0, 1]]);
     lie[12..16].copy_from_slice(&1000i32.to_le_bytes());
     assert!(read(file([size(2, 2, 2), lie].concat())).unwrap_err().contains("voxels"));
-    // a model larger than the format allows
+    // a model larger than the format allows: the coordinates of a cell are bytes, so 256 to a side is the most
+    assert!(read(file([size(256, 2, 2), xyzi(&[[255, 0, 0, 1]])].concat())).is_ok());
+    assert!(read(file([size(257, 2, 2), xyzi(&[[0, 0, 0, 1]])].concat())).unwrap_err().contains("256"));
     assert!(read(file([size(100_000, 2, 2), xyzi(&[[0, 0, 0, 1]])].concat())).is_err());
     // a file with no model at all
     assert!(read(file(Vec::new())).unwrap_err().contains("model"));
@@ -329,11 +331,34 @@ fn translations_that_add_up_past_the_keys_of_an_occupancy_are_an_error_and_never
 }
 
 #[test]
-fn the_empty_palette_index_has_no_colour_whatever_the_file_says() {
-    for name in NAMES {
-        let (bytes, _) = fixture(name);
-        let imported = vox::import(&bytes, None, Limits::default(), &vox::Bounds::default()).unwrap();
-        assert_eq!(imported.occupancy.palette().color(0), [0, 0, 0, 0], "{name}");
+fn the_empty_palette_index_has_no_colour_even_when_every_entry_of_the_file_has_one() {
+    // every entry of the file is [9, 9, 9, 9]: with the offset by one the index 0 has no entry and stays empty, and a reader that put
+    // the file's entry c at the index c would give the index 0 a colour (the per-index check of the fixtures is in the first test)
+    let colours = raw::chunk("RGBA", &[9u8; 256 * 4]);
+    let imported = read_raw([raw::model([2, 2, 2], &[[0, 0, 0, 1]]), colours].concat()).unwrap();
+    assert_eq!(imported.colours, Colours::File);
+    assert_eq!(imported.occupancy.palette().color(0), [0, 0, 0, 0]);
+    for c in 1..=255u8 {
+        assert_eq!(imported.occupancy.palette().color(c), [9, 9, 9, 9], "index {c}");
+    }
+}
+
+#[test]
+fn the_default_palette_is_the_table_of_the_description_of_the_format() {
+    // The literals are the entries of `default_palette` of section 8 of MagicaVoxel-file-format-vox.txt, as written there (0xAABBGGRR),
+    // read by hand from the text and not from the table that is tested.
+    for (index, abgr) in [
+        (0usize, 0x0000_0000u32),
+        (1, 0xffff_ffff),
+        (2, 0xffcc_ffff),
+        (37, 0xffff_ffcc),
+        (100, 0xff66_3399),
+        (150, 0xff00_ff33),
+        (216, 0xff00_00ee),
+        (255, 0xff11_1111),
+    ] {
+        let [r, g, b, a] = abgr.to_le_bytes();
+        assert_eq!(DEFAULT_PALETTE[index], [r, g, b, a], "index {index}");
     }
 }
 

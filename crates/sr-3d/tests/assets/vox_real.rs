@@ -28,9 +28,9 @@ fn the_files_of_the_author_and_of_dot_vox_are_what_their_sources_say_they_are() 
     // (file, version, models as (size, voxels), colours)
     type Model = ([u32; 3], usize);
     let table: [(&str, i32, Vec<Model>, Colours); 6] = [
-        ("ephtracy_chr_cat.vox", 150, vec![([20, 20, 20], 0)], Colours::Default),
-        ("ephtracy_chr_sol.vox", 150, vec![([20, 21, 20], 0)], Colours::Default),
-        ("ephtracy_chr_knight.vox", 150, vec![([20, 21, 20], 0)], Colours::File),
+        ("ephtracy_chr_cat.vox", 150, vec![([20, 20, 20], 563)], Colours::Default),
+        ("ephtracy_chr_sol.vox", 150, vec![([20, 21, 20], 294)], Colours::Default),
+        ("ephtracy_chr_knight.vox", 150, vec![([20, 21, 20], 398)], Colours::File),
         ("dotvox_single-voxel-with-material.vox", 150, vec![([1, 1, 1], 1)], Colours::File),
         ("dotvox_metal-material.vox", 150, vec![([3, 3, 3], 20)], Colours::File),
         (
@@ -47,9 +47,7 @@ fn the_files_of_the_author_and_of_dot_vox_are_what_their_sources_say_they_are() 
         assert_eq!(file.models.len(), models.len(), "{name}");
         for (got, (size, count)) in file.models.iter().zip(&models) {
             assert_eq!(&got.size, size, "{name}");
-            if *count > 0 {
-                assert_eq!(got.voxels.len(), *count, "{name}");
-            }
+            assert_eq!(got.voxels.len(), *count, "{name}");
             assert!(!got.voxels.is_empty(), "{name}");
         }
         assert_eq!(import(name).colours, colours, "{name}");

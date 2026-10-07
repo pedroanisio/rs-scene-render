@@ -127,3 +127,20 @@ fn a_cell_outside_the_keys_of_an_occupancy_is_an_error_that_names_the_brick_and_
     let model = read(grid_of(&[([0, 0, 0], 1.0)])).unwrap();
     assert_eq!(model.occupancy.palette().color(0), [0, 0, 0, 0]);
 }
+
+#[test]
+fn every_palette_index_goes_out_as_itself_and_comes_back_as_itself() {
+    // 255 cells, the cell i with the index i: a writer or reader that moved an index would show in the cell that has it
+    let mut original = Occupancy::new();
+    for i in 1..=255u8 {
+        original.set([i32::from(i) - 128, 0, i32::from(i % 7)], i).unwrap();
+    }
+    let bytes = srvol::write(&original, 0.5).unwrap();
+    let back = srvol::import(&bytes, srvol::GRID, Limits::default(), CacheLimits::default()).unwrap();
+    assert_eq!(back.cell_size, Some(0.5));
+    assert_eq!(back.occupancy.count(), 255);
+    for i in 1..=255u8 {
+        assert_eq!(back.occupancy.get([i32::from(i) - 128, 0, i32::from(i % 7)]), i, "index {i}");
+    }
+    assert_eq!(back.occupancy.fingerprint(), original.fingerprint());
+}
