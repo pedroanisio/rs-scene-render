@@ -969,3 +969,18 @@ fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accou
     assert!(broken > 0 && bodies >= 1, "{broken} joints broke, in {bodies} bodies");
     assert!(seen.iter().all(|c| *c == 1), "every piece is in exactly one body");
 }
+
+#[test]
+fn a_block_at_rest_on_the_four_corners_that_the_solver_gives_it_reads_the_bending_of_a_beam_on_two_supports() {
+    // the block of 2 m by 2 m by 1 m (256 cubes of 0.25 m) rests on the floor, and the solver holds it up at the four corners of its foot, a quarter of its weight at each
+    // (98.1 N s a step against 392.3): the block is a deep beam of a span of 2 m on two supports, whose bending moment at the middle is W L / 8 and whose principal
+    // tension there is 6 M / (b h^2) with b = 1 m and h = 2 m. The compression of its base, rho g h = 4.7e4 Pa, is another stress
+    let (span, depth, height) = (2.0f64, 1.0f64, 2.0f64);
+    let weight = DENSITY * span * depth * height * G;
+    let bending = 6.0 * (weight * span / 8.0) / (depth * height * height);
+    assert!((bending - 3.53e4).abs() < 1e2, "{bending}");
+    let mut w = struck_block_with(true, true, 1e15, 0.0);
+    let _ = w.frame_at(4.0 / 240.0, &mut Still);
+    let top = w.stress_levels(0).iter().map(|(_, v)| *v).fold(0.0, f64::max);
+    assert!((top / bending - 1.0).abs() < 0.03, "{top} against {bending}");
+}

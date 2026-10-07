@@ -3370,8 +3370,10 @@ makes the body that the world takes, and the physics is in the engine:
   breaks nothing; the same bits in a fresh world, by jumps and after a seek back; a body registered as one piece, or a body that does not break, is the body it was to the bit; 640 joints of 256 pieces read
   add about 0.05 ms to a step when the block is awake (the first reading, which makes the cuts, 1.5 ms), against the 5 ms asked.
 * *Limits.* The body is rigid until it breaks: no stress wave (a load is carried by the whole body at once), no energy kept in the joints (a piece that is bent springs back for nothing), and an impact is
-  one step of load. The stress of a body at rest on its contacts is that of the way the solver spread the pressure over them: a block of 2 m on a floor reads about 3.5e4 Pa of principal tension, the order of its
-  own weight over its section, so a strength under that breaks it where it lies (a real material has a tensile strength of megapascals). A joint in a cycle is the plane's cut, not the true load path. At most one
+  one step of load. The stress of a body at rest on its contacts is that of the way the solver spread the pressure over them: the solver holds a block of 2 m by 2 m by 1 m on a floor at the four
+  corners of its foot, a quarter of its weight at each (98.1 N s a step against 392.3), so the block is a deep beam of span 2 m on two supports, whose bending moment at the middle is W L / 8 = 23.5 kN m and whose
+  principal tension there is 6 M / (b h^2) = 3.53e4 Pa (read: within 3%, a test). The compression at its base, rho g h = 4.7e4 Pa, is another stress, and the 3.5e4 is not the weight over a section: a
+  strength under 3.5e4 Pa breaks the block where it lies, a real material has megapascals. A joint in a cycle is the plane's cut, not the true load path. At most one
   joint of the world holds the body (the load of two is not determined by the balance of the body) and at most 1024 pieces (the cuts are worked out for every joint: 12.8 ms at the worst for 256 pieces under
   load, once and after every break). A joint of the world stays on the body that was the parent even when the piece it was anchored in is not the one that stays (the part that the joint holds stays). The dust's
   momentum leaves with it and is not recorded. A twist is read by the polar moment, which understates a rectangle's. The contact points of a body of cells are taken through the pose of the cell's subshape,

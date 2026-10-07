@@ -4875,7 +4875,7 @@
         the world that may hold the body), so there is no `source`, no time and no push (FRX15); the body is a dynamic body of cells (FRX14). Not an XSD default, so that
         `strength` can be refused without it. The model is a rigid one: no stress wave, no energy kept in the joints, a joint that is in a cycle takes the share of its plane's cut by
         its area and its distance from the centre of the cut, and the stress of a body at rest on its contacts is the one of the way the solver spread the pressure over them
-        (of the order of the stress of its own weight).
+        (a block on a floor is held at the corners of its foot, and reads the bending of a beam on two supports).
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="impact"/><xs:enumeration value="stress"/></xs:restriction></xs:simpleType>
     </xs:attribute>
