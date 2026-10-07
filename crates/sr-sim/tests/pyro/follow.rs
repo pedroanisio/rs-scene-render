@@ -317,8 +317,7 @@ fn any_order_of_times_a_fresh_run_and_a_tight_budget_give_the_same_window_and_ce
 #[test]
 fn a_window_with_smoke_going_toward_both_faces_says_so_and_stays() {
     // smoke fills the column from the bottom to the top and the air in it expands: it is going toward both faces
-    // and cannot be moved from either; smoke at rest has no way to go and asks for room on both, and cannot be
-    // given it either
+    // and cannot be moved from either; smoke at rest is going toward no face and asks for none
     let spec = || Spec { buoyancy: 0.0, ..column(16, Some(Follow { margin: 3, loss: 0.0 })) };
     let full = |expansion: f64| Source {
         shape: Shape::Box { min: [-4.0, 0.0, -4.0], max: [4.0, 8.0, 4.0] },
@@ -328,8 +327,7 @@ fn a_window_with_smoke_going_toward_both_faces_says_so_and_stays() {
     };
     let mut resting = Simulation::new(spec()).unwrap();
     resting.step(&Inputs { sources: vec![full(0.0)], ..Inputs::default() }).unwrap();
-    assert_eq!(resting.state().follow_decision(3, 0.0, 0.05, &[]).0, [0, 0, 0]);
-    assert!(resting.state().follow_decision(3, 0.0, 0.05, &[]).1[1]);
+    assert_eq!(resting.state().follow_decision(3, 0.0, 0.05, &[]), ([0, 0, 0], [false; 3]));
     let mut sim = Simulation::new(spec()).unwrap();
     sim.step(&Inputs { sources: vec![full(1.0)], ..Inputs::default() }).unwrap();
     let before = sim.state().clone();
