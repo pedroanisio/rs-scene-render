@@ -1284,7 +1284,7 @@ fn three_d_fixture(name: &str) -> PathBuf {
 fn has_gl_adapter() -> bool {
     let o = run_env(&["gpus", "--json"], &[("SR_GPU_BACKEND", "gl")]);
     let Ok(r) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else { return false };
-    if !r["adapters"].as_array().is_some_and(|a| !a.is_empty()) {
+    if r["adapters"].as_array().is_none_or(|a| a.is_empty()) {
         return false;
     }
     let dir = render_fixture("gl-probe");

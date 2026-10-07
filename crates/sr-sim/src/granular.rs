@@ -109,8 +109,10 @@ impl Bed {
     /// the volume is exactly what is given.
     pub fn deposit(&mut self, point: [f64; 2], volume: f64) -> Result<(), String> {
         let extent = [self.cells[0] as f64 * self.cell, self.cells[1] as f64 * self.cell];
-        if !(point[0].is_finite() && point[1].is_finite() && (0.0..=extent[0]).contains(&point[0]))
-            || !(0.0..=extent[1]).contains(&point[1])
+        if !(point[0].is_finite()
+            && point[1].is_finite()
+            && (0.0..=extent[0]).contains(&point[0])
+            && (0.0..=extent[1]).contains(&point[1]))
         {
             return Err("the point where material is poured is outside the bed".into());
         }

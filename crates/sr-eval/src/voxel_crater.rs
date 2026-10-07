@@ -47,7 +47,7 @@ impl SpeedLaw {
     /// From the particles the engine's model launches: their speeds and their masses.
     pub fn from_ejecta(list: &[Ejecta]) -> Result<Self, String> {
         let speed = |p: &Ejecta| p.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if list.is_empty() || list.iter().any(|p| !(p.mass.is_finite() && p.mass > 0.0) || !speed(p).is_finite()) {
+        if list.is_empty() || list.iter().any(|p| !(p.mass.is_finite() && p.mass > 0.0 && speed(p).is_finite())) {
             return Err("a speed law needs particles with a mass and a speed".into());
         }
         let mut order: Vec<usize> = (0..list.len()).collect();
