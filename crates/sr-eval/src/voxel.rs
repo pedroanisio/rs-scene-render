@@ -18,11 +18,14 @@ pub struct Bounds {
     pub max_box_cells: u64,
     /// Bytes of the region built from the mesh.
     pub max_mesh_bytes: usize,
+    /// Cells of the box that are cut at a time (at least one row): the working memory of a cut is a chunk, whatever the box, and the
+    /// chunk is no part of the answer.
+    pub chunk_cells: u64,
 }
 
 impl Default for Bounds {
     fn default() -> Self {
-        Self { max_box_cells: 1 << 28, max_mesh_bytes: 1 << 30 }
+        Self { max_box_cells: 1 << 28, max_mesh_bytes: 1 << 30, chunk_cells: 1 << 20 }
     }
 }
 
@@ -81,22 +84,47 @@ pub fn from_triangles(
     }
     let region = Mesh::new(points, triangles, bounds.max_mesh_bytes)
         .map_err(|e| format!("the mesh is not a closed surface that can be cut into cells: {e}"))?;
-    let rows: Vec<(i32, i32)> = (lo[2]..=hi[2]).flat_map(|z| (lo[1]..=hi[1]).map(move |y| (y, z))).collect();
-    let filled: Vec<Vec<i32>> = rows
-        .par_iter()
-        .map(|&(y, z)| {
-            (lo[0]..=hi[0])
-                .filter(|&x| {
-                    let centre = [
-                        (f64::from(x) + 0.5) * cell_size,
-                        (f64::from(y) + 0.5) * cell_size,
-                        (f64::from(z) + 0.5) * cell_size,
-                    ];
-                    region.contains(centre)
-                })
-                .collect()
-        })
-        .collect();
-    let cells = rows.iter().zip(&filled).flat_map(|(&(y, z), xs)| xs.iter().map(move |&x| ([x, y, z], 1u8)));
-    Occupancy::from_cells_with_limits(limits, cells)
+    // the rows of the box (y, z) in the order of the scan, a chunk of them at a time: each chunk is cut in parallel and its cells put in
+    // the grid in order, so that the memory in flight is a chunk, whatever the box, and the grid is the same for any chunk
+    let rows_y = (hi[1] - lo[1] + 1).max(0) as u64;
+    let rows_z = (hi[2] - lo[2] + 1).max(0) as u64;
+    let row_cells = (hi[0] - lo[0] + 1).max(0) as u64;
+    let rows_per_chunk = (bounds.chunk_cells / row_cells.max(1)).max(1);
+    let mut occupancy = Occupancy::with_limits(limits);
+    let total = rows_y * rows_z;
+    let mut first = 0u64;
+    while first < total {
+        let rows: Vec<(i32, i32)> = (first..(first + rows_per_chunk).min(total))
+            .map(|r| (lo[1] + (r % rows_y) as i32, lo[2] + (r / rows_y) as i32))
+            .collect();
+        let filled: Vec<Vec<i32>> = rows
+            .par_iter()
+            .map(|&(y, z)| {
+                (lo[0]..=hi[0])
+                    .filter(|&x| {
+                        let centre = [
+                            (f64::from(x) + 0.5) * cell_size,
+                            (f64::from(y) + 0.5) * cell_size,
+                            (f64::from(z) + 0.5) * cell_size,
+                        ];
+                        region.contains(centre)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (&(y, z), xs) in rows.iter().zip(&filled) {
+            for &x in xs {
+                occupancy.set([x, y, z], 1)?;
+            }
+        }
+        first += rows_per_chunk;
+    }
+    Ok(occupancy)
+}
+
+/// The cells of the mesh of an imported model, in the frame it is drawn in: scene units (an asset in metres is 100 to the metre) and
+/// scene axes (y and z turned), the vertices placed as the renderer places them. `cell_size` is in scene units too.
+pub fn from_model(model: &sr_3d::Model, cell_size: f64, limits: Limits, bounds: &Bounds) -> Result<Occupancy, String> {
+    let (points, triangles) = crate::sim3d::model_triangles(model, bounds.max_mesh_bytes)?;
+    from_triangles(&points, &triangles, cell_size, limits, bounds)
 }

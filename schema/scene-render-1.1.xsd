@@ -4294,8 +4294,9 @@
     <xs:annotation><xs:documentation>
       Version 1.3 (VOX1). A model of cells, each with a palette index 1 to 255: either a file (`src`, `format` vox, MagicaVoxel, or srvol, the
       engine's volume cache with the indices as exact values of the grid `voxelGrid`) or a closed mesh asset cut into cells (`fromMesh` and
-      `cellSize`, the cells whose centres are inside the mesh, on a lattice of multiples of the cell size in the mesh's own coordinates, by the
-      test that the smoke's colliders use), exactly one of the two (VOX2, VOX3). A `vox` file with a scene graph is the whole scene, the models
+      `cellSize`, the cells whose centres are inside the mesh, on a lattice of multiples of the cell size, by the test that the smoke's colliders use,
+      with the mesh in the frame it is drawn in: scene units, an imported asset in metres being 100 to the metre, and scene axes, so `cellSize`
+      is in scene units), exactly one of the two (VOX2, VOX3). A `vox` file with a scene graph is the whole scene, the models
       placed as the graph says, unless `model` names one (its number from 0), which is then unplaced. MagicaVoxel's axes (z up) are turned into the
       scene's (y down, z forward) by a proper rotation. `maxCells` and `maxMemoryMiB` bound what is built, before it is allocated, and over
       either is an error that names the number, never a model cut short. The engine's defaults are 4194304 cells, 128 MiB and the grid

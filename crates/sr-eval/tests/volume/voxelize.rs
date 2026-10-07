@@ -216,3 +216,91 @@ fn a_mesh_is_cut_up_to_the_last_key_of_an_occupancy_and_no_further() {
         assert!(error.contains("far"), "{min:?}: {error}");
     }
 }
+
+#[test]
+fn the_cells_do_not_depend_on_how_many_rows_are_cut_at_a_time() {
+    // the rows of a box are cut a chunk at a time, so that the memory of a cut is a chunk and not the whole box: the chunk is no
+    // part of the answer
+    let mesh = sphere([0.37, -0.21, 0.52], 5.0, 24, 36);
+    let reference = voxelize(&mesh, 0.5).unwrap();
+    assert!(reference.count() > 1000);
+    for chunk_cells in [1, 7, 20, 1000, 1 << 20] {
+        let bounds = Bounds { chunk_cells, ..Bounds::default() };
+        let cut = from_triangles(&mesh.0, &mesh.1, 0.5, Limits::default(), &bounds).unwrap();
+        assert_eq!(cut.fingerprint(), reference.fingerprint(), "{chunk_cells}");
+        assert_eq!(cut.cells().collect::<Vec<_>>(), reference.cells().collect::<Vec<_>>(), "{chunk_cells}");
+    }
+    // and a chunk is never nothing
+    let bounds = Bounds { chunk_cells: 0, ..Bounds::default() };
+    assert!(from_triangles(&mesh.0, &mesh.1, 0.5, Limits::default(), &bounds).is_ok());
+}
+
+/// A glb of a cube of one metre, [0, 1] in each axis, as the importer reads it: eight vertices and twelve triangles.
+fn glb_cube() -> Vec<u8> {
+    let corners: Vec<[f32; 3]> = (0..8).map(|i| [(i & 1) as f32, (i >> 1 & 1) as f32, (i >> 2 & 1) as f32]).collect();
+    let quads: [[u16; 4]; 6] = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let indices: Vec<u16> = quads.iter().flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]]).collect();
+    let mut bin: Vec<u8> = corners.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+    let positions = bin.len();
+    bin.extend(indices.iter().flat_map(|i| i.to_le_bytes()));
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3","min":[0,0,0],"max":[1,1,1]}},{{"bufferView":1,"componentType":5123,"count":36,"type":"SCALAR"}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{positions}}},{{"buffer":0,"byteOffset":{positions},"byteLength":72}}],"buffers":[{{"byteLength":{}}}]}}"#,
+        bin.len()
+    );
+    let mut json = json.into_bytes();
+    json.resize(json.len().div_ceil(4) * 4, b' ');
+    bin.resize(bin.len().div_ceil(4) * 4, 0);
+    let total = 12 + 8 + json.len() + 8 + bin.len();
+    let mut out = b"glTF".to_vec();
+    out.extend(2u32.to_le_bytes());
+    out.extend((total as u32).to_le_bytes());
+    out.extend((json.len() as u32).to_le_bytes());
+    out.extend(b"JSON");
+    out.extend(json);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(b"BIN\0");
+    out.extend(bin);
+    out
+}
+
+#[test]
+fn a_mesh_asset_is_cut_in_the_frame_it_is_drawn_in_so_a_unit_cube_covers_the_same_box_as_the_rendered_one() {
+    // An imported mesh is in scene units, 100 to the metre, with y and z turned (a half turn about x): a cube of one metre at the origin
+    // fills x 0 to 100, y -100 to 0, z -100 to 0, and cells of 10 scene units are 10 along each axis: x 0..9, y -10..-1, z -10..-1.
+    let dir = std::env::temp_dir().join(format!("voxelize-glb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cube.glb");
+    std::fs::write(&path, glb_cube()).unwrap();
+    let model = match sr_3d::import::load(&path, None).unwrap() {
+        sr_3d::Asset::Model(m) => m,
+        sr_3d::Asset::Splats(_) => panic!("a cube is not splats"),
+    };
+    std::fs::remove_dir_all(&dir).unwrap();
+    let cut = sr_eval::voxel::from_model(&model, 10.0, Limits::default(), &Bounds::default()).unwrap();
+    let cells: Vec<[i32; 3]> = cut.cells().collect();
+    assert_eq!(cells.len(), 1000);
+    let (min, max) = cells.iter().fold(([i32::MAX; 3], [i32::MIN; 3]), |(lo, hi), c| {
+        (std::array::from_fn(|k| lo[k].min(c[k])), std::array::from_fn(|k| hi[k].max(c[k])))
+    });
+    assert_eq!((min, max), ([0, -10, -10], [9, -1, -1]));
+    // the box that the rendered mesh fills, from the vertices as the renderer places them (basis times node transform), is the cells'
+    let locals: Vec<_> = model.nodes.iter().map(|n| n.local).collect();
+    let worlds = model.world_matrices(&locals);
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for (k, node) in model.nodes.iter().enumerate() {
+        for &p in &node.primitives {
+            for v in &model.primitives[p].vertices {
+                let at = (model.basis * worlds[k]).transform_point3(glam::Vec3::from(v.pos));
+                for a in 0..3 {
+                    lo[a] = lo[a].min(at[a]);
+                    hi[a] = hi[a].max(at[a]);
+                }
+            }
+        }
+    }
+    for a in 0..3 {
+        assert_eq!(f64::from(lo[a]), f64::from(min[a]) * 10.0, "min {a}");
+        assert_eq!(f64::from(hi[a]), f64::from(max[a] + 1) * 10.0, "max {a}");
+    }
+}
