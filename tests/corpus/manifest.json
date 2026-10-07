@@ -901,6 +901,42 @@
     "vol9.scene.xml": [
       "VOL9"
     ],
+    "vox1-version.scene.xml": [
+      "VOX1"
+    ],
+    "vox2-both-sources.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-cellsize-with-src.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-grid-of-vox.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-model-of-mesh.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-no-source.scene.xml": [
+      "VOX2"
+    ],
+    "vox3-frommesh.scene.xml": [
+      "VOX3"
+    ],
+    "vox4-asset.scene.xml": [
+      "VOX4"
+    ],
+    "vox4-no-asset.scene.xml": [
+      "VOX4"
+    ],
+    "vox5-orphan.scene.xml": [
+      "VOX5"
+    ],
+    "vox6-palette.scene.xml": [
+      "VOX6"
+    ],
+    "vox7-exclusion.scene.xml": [
+      "VOX7"
+    ],
     "whitewater-checkpoint-range.scene.xml": [
       "S06"
     ]
@@ -962,6 +998,8 @@
     "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
+    "voxels-from-mesh.scene.xml": [],
+    "voxels.scene.xml": [],
     "whitewater-checkpoint.scene.xml": []
   },
   "warnings": {

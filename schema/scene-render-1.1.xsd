@@ -1482,6 +1482,7 @@
       <xs:element name="pdf" type="pdfAssetType"/>
       <xs:element name="meshSequence" type="meshSequenceAssetType"/>
       <xs:element name="volume" type="volumeAssetType"/>
+      <xs:element name="voxelAsset" type="voxelAssetType"/>
     </xs:choice>
   </xs:complexType>
 
@@ -2348,7 +2349,7 @@
         <xs:enumeration value="torus"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
         <xs:enumeration value="clay"/><xs:enumeration value="map"/><xs:enumeration value="globe"/>
-        <xs:enumeration value="volume"/>
+        <xs:enumeration value="volume"/><xs:enumeration value="voxels"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
@@ -2466,6 +2467,33 @@
     <xs:attribute name="terrainZoom"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="22"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="terrainMissing" default="error"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="zero"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="terrainMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="voxels" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        Version 1.3. With primitive="voxels" (VOX4): the voxelAsset whose cells this object is made of. Position, scale and the other
+        transform attributes are those of every object3D; the origin of the cells is the corner of the bounding box of the occupied cells.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="cellSize" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): scene units a cell. Absent, the voxelAsset's own cellSize if it has one, else the cell size that
+        an srvol asset's grid says, else 1.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="palette" type="xs:string">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): the token `file` (the colours of the file, which needs a file that has them) or the materials,
+        as IDs separated by spaces, of the palette indices 1, 2, ... in order, at most 255 (VOX6). The material of a cell is the one of its
+        index, else the object's own `material`, else the colour of the file; an index with none of the three is an error that names it.
+        Absent, `file` if the file has colours and otherwise the object's `material`.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="surface">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): `blocks`, the only value so far, draws every exposed face of a cell as a quad. The engine's default
+        is `blocks`; it is not an XSD default so that it can be refused on any other primitive.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="blocks"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="volume" type="xs:IDREF"/>
   </xs:complexType>
 
@@ -4261,6 +4289,34 @@
     <xs:attribute name="boundsMaxX" type="xs:double"/>
     <xs:attribute name="boundsMaxY" type="xs:double"/>
     <xs:attribute name="boundsMaxZ" type="xs:double"/>
+  </xs:complexType>
+  <xs:complexType name="voxelAssetType">
+    <xs:annotation><xs:documentation>
+      Version 1.3 (VOX1). A model of cells, each with a palette index 1 to 255: either a file (`src`, `format` vox, MagicaVoxel, or srvol, the
+      engine's volume cache with the indices as exact values of the grid `voxelGrid`) or a closed mesh asset cut into cells (`fromMesh` and
+      `cellSize`, the cells whose centres are inside the mesh, on a lattice of multiples of the cell size in the mesh's own coordinates, by the
+      test that the smoke's colliders use), exactly one of the two (VOX2, VOX3). A `vox` file with a scene graph is the whole scene, the models
+      placed as the graph says, unless `model` names one (its number from 0), which is then unplaced. MagicaVoxel's axes (z up) are turned into the
+      scene's (y down, z forward) by a proper rotation. `maxCells` and `maxMemoryMiB` bound what is built, before it is allocated, and over
+      either is an error that names the number, never a model cut short. The engine's defaults are 4194304 cells, 128 MiB and the grid
+      `voxels`; they are not XSD defaults so that the attributes that belong to one source can be refused on the other (VOX2).
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI"/>
+    <xs:attribute name="format">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="vox"/><xs:enumeration value="srvol"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="model" type="xs:nonNegativeInteger"/>
+    <xs:attribute name="fromMesh" type="xs:IDREF"/>
+    <xs:attribute name="cellSize" type="positiveDecimal"/>
+    <xs:attribute name="voxelGrid" type="volumeChannelType"/>
+    <xs:attribute name="maxCells">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="67108864"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="maxMemoryMiB">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
   <xs:complexType name="meshSequenceAssetType">
     <xs:attribute name="id" type="xs:ID" use="required"/>
