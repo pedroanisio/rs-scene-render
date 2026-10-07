@@ -3168,10 +3168,15 @@ absent; `model` is the number from 0 of one model of a `vox` file; `voxelGrid` n
 128 MiB and the grid `voxels`, and over either is an error that names the number, never a model cut short. The provenance
 attributes are those of the other assets.
 
-An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette` and `surface` belong to that primitive (VOX5).
+An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette`, `surface` and `surfaceMemoryMiB` belong to that primitive (VOX5).
 `palette` is the word `file` or at most 255 material IDs, in the order of the palette indices 1, 2, ... (VOX6); the material of a
 cell is the one of its index, else the object's `material`, else the colour of the file, and an index with none of the three is an
-error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. The object has no `mesh`,
+error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. `surfaceMemoryMiB` (1 to 4096; the engine's default is 128) is the most memory the
+surface may take while it is made and drawn, at 1,240 bytes for each quad at the peak (16 in the compact list, 408 in the builder, 408 for the copy of
+the upload, 408 on the device): the quads that a budget admits are its bytes over 1,240, rounded down (108,240 at 128 MiB), the surface is made plane by
+plane in a fixed order and the first plane that takes it over the budget stops the work with an error that says what the budget admits. Faces that
+lie on one plane, look one way and are of one class merge into rectangles, scanning the plane by `v` and then by `u` and taking the widest run first;
+the result is a function of the cells alone. The object has no `mesh`,
 `volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
 every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
 
@@ -3282,7 +3287,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX2 | exactly one of `src` and `fromMesh`; `format`, `model`, `voxelGrid` only with a file of that format; `fromMesh` and `cellSize` together |
 | VOX3 | `fromMesh` names a mesh asset |
 | VOX4 | an object of primitive `voxels` names a `voxelAsset` in `voxels` |
-| VOX5 | `voxels`, `cellSize`, `palette`, `surface` belong to primitive `voxels` |
+| VOX5 | `voxels`, `cellSize`, `palette`, `surface`, `surfaceMemoryMiB` belong to primitive `voxels` |
 | VOX6 | `palette` is `file` or at most 255 material IDs |
 | VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
 | VOX8 | `rigidBody@shape="voxels"` belongs to an object of primitive `voxels` |

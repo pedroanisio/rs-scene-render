@@ -121,6 +121,7 @@ CASES = [
     ("vox4-asset", ["VOX4"], lambda _: VOXELS.replace('voxels="model"', 'voxels="shape"')),
     ("vox4-no-asset", ["VOX4"], lambda _: VOXELS.replace(' voxels="model"', '')),
     ("vox5-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box"')),
+    ("vox5-surface-memory-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box" surfaceMemoryMiB="64"')),
     ("vox6-palette", ["VOX6"], lambda _: VOXELS.replace('palette="stone moss"', 'palette="stone nothing"')),
     ("vox8-shape", ["VOX8"], lambda _: CRATER_IMPACT.replace('<rigidBody type="static"/>', '<rigidBody type="static" shape="voxels"/>')),
     ("vox9-density", ["VOX9"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '<rigidBody mass="8" density="2400"/>')),
@@ -540,6 +541,7 @@ VALID = {
     "voxels-from-mesh": VOXELS_FROM_MESH,
     # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it
     "voxels-srvol": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" voxelGrid="voxels"'),
+    "voxels-surface-memory": VOXELS.replace('surface="blocks"', 'surface="blocks" surfaceMemoryMiB="64"'),
     "voxels-srvol-format": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" format="srvol" voxelGrid="voxels"'),
     "voxel-body": VOXEL_BODY,
     "voxel-crater": VOXEL_GROUND,

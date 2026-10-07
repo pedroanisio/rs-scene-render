@@ -85,3 +85,14 @@ fn the_voxels_need_version_one_point_three() {
     let old = scene(FILE, SOLID).replace(r#"version="1.3""#, r#"version="1.2""#);
     assert!(codes(&old).contains(&"VOX1".into()));
 }
+
+#[test]
+fn the_surface_memory_of_a_voxels_object_is_a_whole_number_of_mib_from_1_to_4096_and_belongs_to_it() {
+    for ok in ["1", "128", "4096"] {
+        assert!(codes_of(FILE, &format!(r#"{SOLID} surfaceMemoryMiB="{ok}""#)).is_empty(), "{ok}");
+    }
+    for bad in ["0", "4097", "1.5", "-3", "big", ""] {
+        assert!(!codes_of(FILE, &format!(r#"{SOLID} surfaceMemoryMiB="{bad}""#)).is_empty(), "{bad:?}");
+    }
+    assert!(codes_of(FILE, r#"primitive="box" surfaceMemoryMiB="64""#).contains(&"VOX5".into()));
+}

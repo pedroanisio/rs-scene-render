@@ -1012,6 +1012,9 @@
     "vox5-orphan.scene.xml": [
       "VOX5"
     ],
+    "vox5-surface-memory-orphan.scene.xml": [
+      "VOX5"
+    ],
     "vox6-palette.scene.xml": [
       "VOX6"
     ],
@@ -1103,6 +1106,7 @@
     "voxels-from-mesh.scene.xml": [],
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],
+    "voxels-surface-memory.scene.xml": [],
     "voxels.scene.xml": [],
     "whitewater-checkpoint.scene.xml": [],
     "whitewater-foam-albedo.scene.xml": []

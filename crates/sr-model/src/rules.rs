@@ -1495,10 +1495,10 @@ impl<'a> Eval<'a> {
                     "an object3D of primitive voxels names a voxelAsset in voxels.".into()
                 });
                 self.check(
-                    voxels || !["voxels", "cellSize", "palette", "surface"].iter().any(|k| has(k)),
+                    voxels || !["voxels", "cellSize", "palette", "surface", "surfaceMemoryMiB"].iter().any(|k| has(k)),
                     n,
                     "VOX5",
-                    || "voxels, cellSize, palette and surface belong to primitive=\"voxels\".".into(),
+                    || "voxels, cellSize, palette, surface and surfaceMemoryMiB belong to primitive=\"voxels\".".into(),
                 );
                 let palette_ok = a("palette").is_none_or(|p| {
                     let tokens: Vec<&str> = p.split_whitespace().collect();

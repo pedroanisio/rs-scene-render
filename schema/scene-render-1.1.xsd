@@ -2528,6 +2528,15 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="blocks"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="surfaceMemoryMiB">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): the most memory, in MiB, that the surface of the cells may take while it is made and drawn (1,240 bytes
+        for each quad at the peak: its compact form, the builder's vertices and indices, the copy a mesh upload keeps and the buffers on the
+        device). The engine's default is 128; it is not an XSD default so that it can be refused on any other primitive. A surface over it is an
+        error that names the cause, never a surface cut short.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="volume" type="xs:IDREF"/>
   </xs:complexType>
 
