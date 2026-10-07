@@ -224,7 +224,10 @@ fn the_cells_do_not_depend_on_how_many_rows_are_cut_at_a_time() {
     let mesh = sphere([0.37, -0.21, 0.52], 5.0, 24, 36);
     let reference = voxelize(&mesh, 0.5).unwrap();
     assert!(reference.count() > 1000);
-    for chunk_cells in [1, 7, 20, 1000, 1 << 20] {
+    // a row of this box is 21 cells (x from -10 to 10) and there are 441 rows (y -11 to 9, z -9 to 11): a chunk of 1 or 7 or 20 cells is one
+    // row (never less), 21 is exactly one row, 126 is six rows (73 chunks and a last one of three), 987 is 47 rows (nine chunks and a last one
+    // of eighteen), 9261 and 2^20 are the whole box in one chunk
+    for chunk_cells in [1, 7, 20, 21, 126, 987, 9261, 1 << 20] {
         let bounds = Bounds { chunk_cells, ..Bounds::default() };
         let cut = from_triangles(&mesh.0, &mesh.1, 0.5, Limits::default(), &bounds).unwrap();
         assert_eq!(cut.fingerprint(), reference.fingerprint(), "{chunk_cells}");

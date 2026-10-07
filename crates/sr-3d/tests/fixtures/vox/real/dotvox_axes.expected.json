@@ -23,5 +23,5 @@
   24
  ],
  "checksum_formula": "wrapping 64-bit sum over cells of ((x+1000)*73856093) ^ ((y+1000)*19349663) ^ ((z+1000)*83492791) ^ (index*1315423911), in the scene cells (x, -z-1, y) of the voxel cell (x, y, z)",
- "note": "worked out by an independent decoder of dotvox_axes.vox (python): pivot floor(size/2), translations only (the file has no rotation), the file has no RGBA chunk issue: it has one"
+ "note": "Worked out by an independent decoder, tools/vox_axes.py with tools/vox_dump.py, which share no code with the importer: the pivot of a model is floor(size / 2); the nodes of this file have translations only, so it does not test the rotation byte; the file has an RGBA chunk."
 }

@@ -43,13 +43,26 @@ pub struct Bounds {
     pub max_nodes: usize,
     /// Depth of the scene graph.
     pub max_depth: usize,
-    /// Places of models that the scene graph makes, a model used many times counting many times.
+    /// Places of models that the scene graph makes, a model used many times counting many times: the cost of the walk, whatever the models hold.
     pub max_placements: u64,
+    /// Cells that the places of a file hold together, whatever limit the caller gives (a default `Limits` has none): 2^26, the most that the
+    /// schema's `maxCells` allows, so that no file asks for more than a document could; the smaller of this and the caller's limit is used.
+    pub max_placed_cells: u64,
+    /// Bytes of the grid that an import builds, whatever limit the caller gives (a default `Limits` has none): 2^30, the bound on the file.
+    pub max_built_bytes: usize,
 }
 
 impl Default for Bounds {
     fn default() -> Self {
-        Self { max_file_bytes: 1 << 30, max_models: 65_536, max_nodes: 1 << 20, max_depth: 64, max_placements: 1 << 24 }
+        Self {
+            max_file_bytes: 1 << 30,
+            max_models: 65_536,
+            max_nodes: 1 << 20,
+            max_depth: 64,
+            max_placements: 1 << 20,
+            max_placed_cells: 1 << 26,
+            max_built_bytes: 1 << 30,
+        }
     }
 }
 
@@ -391,11 +404,11 @@ fn insert_node(vox: &mut Vox, bounds: &Bounds, id: i32, node: Node) -> Result<()
 }
 
 impl Vox {
-    /// The shapes the scene graph places, in the order of the walk from its root: the model and where it is. `None` if the file has no
-    /// scene graph. The graph is checked whole before anything is placed: one root, no node that the root does not reach, no cycle, and
-    /// the places that it makes (a node under two parents counts under both) and the cells in them counted, by node and once, against
-    /// the bounds and `max_cells`, so that a file of a few hundred bytes cannot ask for billions of places.
-    fn placed(&self, bounds: &Bounds, max_cells: u64) -> Result<Option<Vec<(usize, Placement)>>, String> {
+    /// The root of the scene graph, `None` if the file has no scene graph. The graph is checked whole before anything is placed: one
+    /// root, no node that the root does not reach, no cycle, and the places that it makes (a node under two parents counts under both) and
+    /// the cells in them counted, by node and once, against the bounds and `max_cells`, so that a file of a few hundred bytes cannot ask
+    /// for billions of places, and the walk that follows (which makes the places one at a time and keeps none) is of a size known.
+    fn root(&self, bounds: &Bounds, max_cells: u64) -> Result<Option<i32>, String> {
         if self.nodes.is_empty() {
             return Ok(None);
         }
@@ -433,9 +446,7 @@ impl Vox {
         if cells > max_cells {
             return Err(format!("the file places {cells} cells and the limit is {max_cells} cells"));
         }
-        let mut out = Vec::new();
-        self.walk(root, Placement::IDENTITY, &mut Vec::new(), bounds, &mut out)?;
-        Ok(Some(out))
+        Ok(Some(root))
     }
 
     /// The places of models and the cells in them under `id`, each node worked out once (saturating: a count that big is over any bound).
@@ -481,13 +492,14 @@ impl Vox {
         Ok(total)
     }
 
+    /// Visits the places under `id` in the order of the walk, each as the model and where it is, one at a time.
     fn walk(
         &self,
         id: i32,
         above: Placement,
         path: &mut Vec<i32>,
         bounds: &Bounds,
-        out: &mut Vec<(usize, Placement)>,
+        visit: &mut dyn FnMut(usize, &Placement) -> Result<(), String>,
     ) -> Result<(), String> {
         if path.len() >= bounds.max_depth {
             return Err(format!("the scene graph is more than {} deep", bounds.max_depth));
@@ -498,13 +510,17 @@ impl Vox {
         let node = self.nodes.get(&id).ok_or_else(|| format!("the scene graph names the node {id} and has none"))?;
         path.push(id);
         match node {
-            Node::Transform { child, placement } => self.walk(*child, above.after(placement), path, bounds, out)?,
+            Node::Transform { child, placement } => self.walk(*child, above.after(placement), path, bounds, visit)?,
             Node::Group { children } => {
                 for child in children {
-                    self.walk(*child, above, path, bounds, out)?;
+                    self.walk(*child, above, path, bounds, visit)?;
                 }
             }
-            Node::Shape { models } => out.extend(models.iter().map(|m| (*m, above))),
+            Node::Shape { models } => {
+                for m in models {
+                    visit(*m, &above)?;
+                }
+            }
         }
         path.pop();
         Ok(())
@@ -512,7 +528,13 @@ impl Vox {
 
     /// The cells of the file in the scene's lattice: one model, unplaced, or every model as the scene graph places it.
     pub fn occupancy(&self, model: Option<usize>, limits: Limits, bounds: &Bounds) -> Result<Imported, String> {
-        let mut cells: BTreeMap<[i32; 3], u8> = BTreeMap::new();
+        // the grid is built in place, the cells put in as the places are made, under the caller's limits and the importer's own
+        let limits = Limits {
+            max_cells: limits.max_cells.min(bounds.max_placed_cells),
+            max_bytes: limits.max_bytes.min(bounds.max_built_bytes),
+            ..limits
+        };
+        let mut occupancy = Occupancy::with_limits(limits);
         let cap = |count: u64| -> Result<(), String> {
             if count > limits.max_cells {
                 return Err(format!("the file places {count} cells and the limit is {} cells", limits.max_cells));
@@ -526,10 +548,10 @@ impl Vox {
                 })?;
                 cap(model.voxels.len() as u64)?;
                 for v in &model.voxels {
-                    cells.insert(scene_cell([i32::from(v[0]), i32::from(v[1]), i32::from(v[2])]), v[3]);
+                    occupancy.set(scene_cell([i32::from(v[0]), i32::from(v[1]), i32::from(v[2])]), v[3])?;
                 }
             }
-            None => match self.placed(bounds, limits.max_cells)? {
+            None => match self.root(bounds, limits.max_cells)? {
                 None => {
                     if self.models.len() != 1 {
                         return Err(format!(
@@ -539,12 +561,13 @@ impl Vox {
                     }
                     cap(self.models[0].voxels.len() as u64)?;
                     for v in &self.models[0].voxels {
-                        cells.insert(scene_cell([i32::from(v[0]), i32::from(v[1]), i32::from(v[2])]), v[3]);
+                        occupancy.set(scene_cell([i32::from(v[0]), i32::from(v[1]), i32::from(v[2])]), v[3])?;
                     }
                 }
-                Some(shapes) => {
-                    // the places and their cells were counted, node by node, against the bounds before they were made
-                    for (m, placement) in shapes {
+                Some(root) => {
+                    // the places and their cells were counted, node by node, against the bounds before any is made, and are made one
+                    // at a time here, none kept
+                    let mut place = |m: usize, placement: &Placement| -> Result<(), String> {
                         let model = &self.models[m];
                         let centre = model.size.map(|s| i64::from(s / 2));
                         for v in &model.voxels {
@@ -555,13 +578,14 @@ impl Vox {
                             if p.iter().any(|c| !(-REACH..=REACH).contains(c)) {
                                 return Err(format!("the scene graph places a cell at {p:?}, too far from the origin"));
                             }
-                            cells.insert(scene_cell([p[0] as i32, p[1] as i32, p[2] as i32]), v[3]);
+                            occupancy.set(scene_cell([p[0] as i32, p[1] as i32, p[2] as i32]), v[3])?;
                         }
-                    }
+                        Ok(())
+                    };
+                    self.walk(root, Placement::IDENTITY, &mut Vec::new(), bounds, &mut place)?;
                 }
             },
         }
-        let mut occupancy = Occupancy::from_cells_with_limits(limits, cells)?;
         // the colour of palette index c is the file's entry c - 1; with no RGBA chunk it is the default palette's entry c
         let colours = if self.palette.is_some() { Colours::File } else { Colours::Default };
         let mut colors = [[0u8; 4]; 256];
