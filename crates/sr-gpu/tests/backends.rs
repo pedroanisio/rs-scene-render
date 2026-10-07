@@ -117,6 +117,18 @@ fn render_doc_on(gpu: &Gpu, d: &sr_model::Document, t: f64) -> Option<Shot> {
     Some(Shot { px: r.read(&f.texture), size: f.texture.size, stats: f.stats })
 }
 
+/// The valid documents of the corpus that the evaluator refuses by name (E23: bodies of cells are not evaluated yet by this build). They are not rendered, on
+/// either backend, and a document that is not rendered would be skipped without a word, so the ones that are refused are listed here and the test says
+/// when the list and the refusals differ in either direction. The wiring of bodies of cells deletes this list with the refusal.
+const REFUSED_AS_BODIES_OF_CELLS: [&str; 6] = [
+    "voxel-body.scene.xml",
+    "voxel-crater.scene.xml",
+    "voxel-ejecta.scene.xml",
+    "voxel-fracture-labels.scene.xml",
+    "voxel-fracture-planes.scene.xml",
+    "voxel-fracture.scene.xml",
+];
+
 #[test]
 fn gl_matches_the_native_backend_on_the_conformance_corpus() {
     // every valid corpus document that loads here (remote assets may not), at its start and
@@ -126,7 +138,7 @@ fn gl_matches_the_native_backend_on_the_conformance_corpus() {
     let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
     files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
     files.sort();
-    let (mut compared, mut failures, mut declared) = (0, Vec::new(), Vec::new());
+    let (mut compared, mut failures, mut declared, mut refused) = (0, Vec::new(), Vec::new(), Vec::new());
     for path in files {
         let doc = match sr_model::load_file(&path, &sr_model::LoadOptions::default()) {
             Ok(d) => d,
@@ -135,6 +147,13 @@ fn gl_matches_the_native_backend_on_the_conformance_corpus() {
                 continue;
             }
         };
+        // a document that the evaluator refuses by name is not rendered, and is accounted for in the list above
+        if let Err(report) = sr_eval::Evaluator::new(&doc, &sr_eval::EvalOptions::default()) {
+            if report.diagnostics.iter().any(|d| d.code == "E23") {
+                refused.push(path.file_name().unwrap().to_string_lossy().to_string());
+                continue;
+            }
+        }
         for t in [0.0, doc.duration() / 2.0] {
             let (Some(a), Some(b)) = (render_doc_on(&g, &doc, t), render_doc_on(&n, &doc, t)) else { continue };
             // what GL cannot draw it must say (so --strict fails); such frames are not compared
@@ -153,6 +172,7 @@ fn gl_matches_the_native_backend_on_the_conformance_corpus() {
     for d in &declared {
         eprintln!("declared GL gap, not compared: {d}");
     }
+    assert_eq!(refused, REFUSED_AS_BODIES_OF_CELLS, "the documents refused as bodies of cells are not the listed ones");
     assert!(compared > 0, "no corpus document rendered");
     assert!(failures.is_empty(), "GL vs native:\n{}", failures.join("\n"));
 }
