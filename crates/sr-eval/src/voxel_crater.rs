@@ -400,3 +400,62 @@ fn heap_rim(
     }
     Ok((order, last))
 }
+
+/// What the ground is, for the body that a crater cuts: the cells' size in scene units, its density, the scene's units to a metre and what becomes of
+/// the parts that the crater leaves loose.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rock {
+    pub size: [f64; 3],
+    pub density: f64,
+    pub pixels_per_meter: f64,
+    pub policy: crate::voxels::Policy,
+}
+
+/// A crater in a body of cells as the rigid world is told of it, with what it threw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CraterCut {
+    pub excavation: Excavation,
+    pub cut: crate::voxels::Cut,
+}
+
+/// The crater of `crater` (its lengths in `kernel_unit` metres) in the ground `before`, as the cut the rigid world is given: the cells it takes out are
+/// destroyed, the rim is heaped on (`added`, before anything leaves, so that a part of the rim that the crater leaves loose goes with its piece), and
+/// what is left is divided as [`crate::voxels::cut`] does. The cells are cubes of `rock.size` scene units, a metre being `rock.pixels_per_meter` of them.
+/// `revision` is the world's name for the result: it has to be a function of the time of the cut, as the contract of the driver says.
+pub fn crater_cut(
+    before: &Occupancy,
+    crater: &Crater,
+    kernel_unit: f64,
+    ejection: &Ejection,
+    revision: u64,
+    rock: &Rock,
+    anchored: &dyn Fn(&[i32; 3]) -> bool,
+) -> Result<CraterCut, String> {
+    let [sx, sy, sz] = rock.size;
+    if !(sx.is_finite() && sx > 0.0) || sx != sy || sx != sz {
+        return Err("the cells of the ground must be cubes of a positive size".into());
+    }
+    if !(rock.pixels_per_meter.is_finite() && rock.pixels_per_meter > 0.0) {
+        return Err("the scale of the ground must be positive".into());
+    }
+    if before.count() == 0 {
+        return Err("a crater needs ground made of cells".into());
+    }
+    let excavation = excavate(before, crater, kernel_unit, sx / rock.pixels_per_meter, ejection)?;
+    // the ground with the rim on it: the body the cut divides (the rim is on empty cells, so no cell is made twice)
+    let after =
+        Occupancy::from_cells(before.cells().map(|c| (c, before.get(c))).chain(excavation.rim.iter().copied()))?;
+    let mut cut = crate::voxels::cut(
+        &after,
+        &excavation.removed,
+        revision,
+        rock.size,
+        rock.density,
+        rock.pixels_per_meter,
+        &rock.policy,
+        anchored,
+    )?;
+    cut.cut.added = excavation.rim.iter().map(|r| r.0).collect();
+    cut.cut.added.sort_unstable();
+    Ok(CraterCut { excavation, cut })
+}

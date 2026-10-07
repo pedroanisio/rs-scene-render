@@ -141,7 +141,7 @@ pub fn cut(
     let pieces: Vec<VoxelPiece3> =
         pieces.iter().map(|i| VoxelPiece3 { cells: parts[*i].clone(), mass: parts[*i].len() as f64 * one }).collect();
     Ok(Cut {
-        cut: VoxelCut3 { revision, destroyed: leaving, parent_mass: stays.len() as f64 * one, pieces },
+        cut: VoxelCut3 { added: vec![], revision, destroyed: leaving, parent_mass: stays.len() as f64 * one, pieces },
         stays,
         dust,
     })

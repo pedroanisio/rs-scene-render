@@ -9,16 +9,16 @@ use sr_sim::cratering::{crater, Impact, Material, Target};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Metres a side of a cell.
-const H: f64 = 0.25;
+pub(super) const H: f64 = 0.25;
 
 /// The authored rock (90 478 kg of 2700 kg/m3, 100 m/s at 60 degrees) in soft rock: the law's crater and the ejecta the engine launches.
-struct Law {
-    kernel: Crater,
-    volume: f64,
-    list: Vec<sr_sim::cratering::ejecta::Ejecta>,
+pub(super) struct Law {
+    pub(super) kernel: Crater,
+    pub(super) volume: f64,
+    pub(super) list: Vec<sr_sim::cratering::ejecta::Ejecta>,
 }
 
-fn law() -> Law {
+pub(super) fn law() -> Law {
     let theta = 60f64.to_radians();
     let impact = Impact { mass: 90_478.0, density: 2700.0, normal_speed: 100.0 * theta.sin() };
     let c = crater(&impact, &Target { material: Material::SoftRock, density: None, strength: None, gravity: 9.80665 })
@@ -57,7 +57,7 @@ fn law() -> Law {
 
 /// A slab of ground 30 m by 30 m by 10 m under the plane y = 0, with palette indices 1 to 3 in a pattern, and a pillar of 15 m on it near the
 /// axis (so that something stands over the plane inside the crater, and something stands higher than the crater reaches).
-fn ground() -> Vec<([i32; 3], u8)> {
+pub(super) fn ground() -> Vec<([i32; 3], u8)> {
     let mut cells = Vec::new();
     for k in -60..60 {
         for j in 0..40 {
@@ -76,7 +76,7 @@ fn ground() -> Vec<([i32; 3], u8)> {
     cells
 }
 
-fn occupancy(cells: &[([i32; 3], u8)]) -> Occupancy {
+pub(super) fn occupancy(cells: &[([i32; 3], u8)]) -> Occupancy {
     Occupancy::from_cells(cells.iter().copied()).unwrap()
 }
 
@@ -84,7 +84,7 @@ fn centre(c: [i32; 3]) -> [f64; 3] {
     c.map(|k| (f64::from(k) + 0.5) * H)
 }
 
-fn ejection(law: &Law) -> Ejection {
+pub(super) fn ejection(law: &Law) -> Ejection {
     Ejection {
         share: 0.8,
         speeds: SpeedLaw::from_ejecta(&law.list).unwrap(),
