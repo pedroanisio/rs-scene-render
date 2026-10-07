@@ -12,15 +12,15 @@ const DOCUMENT: &str = r##"<scene version="1.3"><project width="64" height="64" 
     </composition>
     <physics gravityY="0" pixelsPerMeter="1" CACHE/></scene>"##;
 
-fn dir() -> Dir {
-    let dir = Dir::new("cache");
+fn dir(name: &str) -> Dir {
+    let dir = Dir::new(name);
     std::fs::write(dir.0.join("block.srvol"), srvol::write(&cube(4), 0.25).unwrap()).unwrap();
     dir
 }
 
 #[test]
 fn a_world_with_a_body_of_cells_is_not_baked_into_a_physics_cache_and_the_message_says_why() {
-    let dir = dir();
+    let dir = dir("cache-bake");
     let ev = evaluator(&dir, &DOCUMENT.replace("CACHE", ""));
     let error = ev.physics_cache().expect_err("a cache of cells is refused");
     assert!(error.contains("bodies of cells") && error.contains("revisions") && error.contains("cuts"), "{error}");
@@ -28,7 +28,7 @@ fn a_world_with_a_body_of_cells_is_not_baked_into_a_physics_cache_and_the_messag
 
 #[test]
 fn a_document_with_a_body_of_cells_that_names_a_physics_cache_is_refused_by_the_attribute() {
-    let dir = dir();
+    let dir = dir("cache-attribute");
     std::fs::write(dir.0.join("world.cache"), b"not a cache").unwrap();
     let ev = evaluator(&dir, &DOCUMENT.replace("CACHE", r#"cache="world.cache""#));
     let frame = ev.evaluate(0.2);

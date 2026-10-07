@@ -158,9 +158,9 @@ fn the_ball_cuts_the_ground_as_the_cut_of_the_crater_it_makes_says() {
     );
 }
 
-/// (added, destroyed, pieces, thrown) of the crater of the document, pinned from the run: a fifth of the cells taken out is heaped on the rim (1 416 of 7 080) and the
-/// rest thrown (5 664), and the top of the pillar (136 cells) is the one loose part.
-const PINNED: (usize, usize, usize, usize) = (1416, 7080, 1, 5664);
+/// (added, destroyed, pieces, thrown) of the crater of the document, pinned from the run: a fifth of the cells taken out is heaped on the rim (1 292 of 6 460) and the
+/// rest thrown (5 168), and the top of the pillar (132 cells) is the one loose part: the same cut, cell for cell in number, as the pure function makes of the law's crater at the surface (6 460 cells, 100.94 m3).
+const PINNED: (usize, usize, usize, usize) = (1292, 6460, 1, 5168);
 
 #[test]
 fn the_same_frame_whoever_asks_and_in_whatever_order_and_a_second_impact_is_not_a_second_cut() {
@@ -226,7 +226,7 @@ fn the_burst_of_the_crater_of_cells_is_the_cells_that_the_cut_threw() {
 
 #[test]
 fn the_dust_of_a_cut_leaves_as_particles_with_the_cells_that_were_thrown() {
-    // the top of the pillar is 136 cells and the least of a body is 200: it is dust, which leaves the ground and is no piece, and the burst has it as well as the
+    // the top of the pillar is 132 cells and the least of a body is 200: it is dust, which leaves the ground and is no piece, and the burst has it as well as the
     // cells the crater threw (their mass is all that left the ground by the cut, without the heap)
     let dir = Dir::new("dust");
     std::fs::write(dir.0.join("ground.srvol"), srvol::write(&ground(), 0.25).unwrap()).unwrap();
@@ -240,12 +240,12 @@ fn the_dust_of_a_cut_leaves_as_particles_with_the_cells_that_were_thrown() {
     assert!(frame.failures.is_empty() && frame.problems.is_empty(), "{:?} {:?}", frame.failures, frame.problems);
     let ground_node = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap();
     let state = ground_node.voxels.as_ref().unwrap();
-    assert!(state.pieces.is_empty(), "136 cells are under the least of a body");
+    assert!(state.pieces.is_empty(), "132 cells are under the least of a body");
     let mut settings = settings();
     settings.rock.policy.min_cells = 200;
     let wanted =
         crater_cut_of(ground_node.crater_impact.as_ref().unwrap(), &ground(), &settings, seed_of("ground")).unwrap();
-    assert_eq!(wanted.cut.dust.len(), 136);
+    assert_eq!(wanted.cut.dust.len(), 132);
     let particles = frame.nodes.iter().find(|n| &*n.id == "debris").unwrap().particles3d.clone().expect("particles");
     assert_eq!(
         particles.frame.emitted as usize,

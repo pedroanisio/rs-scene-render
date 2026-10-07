@@ -29,8 +29,13 @@ pub fn crater_cut_of(
     let cause = &grown.cause;
     let law = &cause.law;
     let cubic = grown.units.powi(3);
+    // the contact point lies inside the ground by as far as the body went on before the contact was found (up to a rigid step of its motion), and the
+    // crater is made at the surface: the plane of the kernel is where the axis through the point meets the cells' surface
+    let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
+    let mut spec = grown.spec;
+    spec.center = surface_along(before, spec.center, spec.outward, cell);
     let kernel = sr_3d::crater::Crater::conserving(
-        grown.spec,
+        spec,
         sr_3d::crater::Budget { volume: law.volume * cubic, ejecta: law.ejecta_volume * cubic, bulking: Some(1.0) },
     )?;
     let (angle, spread) = (EJECTA_ANGLE, EJECTA_SPREAD);
@@ -41,7 +46,7 @@ pub fn crater_cut_of(
         target_density: cause.target_density,
         impact_speed: cause.speed,
         velocity_direction: cause.velocity,
-        normal: grown.spec.outward,
+        normal: spec.outward,
         crater_volume: law.volume,
         crater_radius: law.radius,
         crater_duration: law.duration,
@@ -61,6 +66,35 @@ pub fn crater_cut_of(
     let base = before.bounds().map_or(i32::MAX, |(_, max)| max[1]);
     let anchored = move |c: &[i32; 3]| c[1] == base;
     crater_cut(before, &kernel, 1.0 / grown.units, &ejection, 1, &rock, &anchored)
+}
+
+/// Where the line through `point` along `outward` (object units, unit) meets the surface of the cells of `before`, `cell` object units a side: from a point in a
+/// filled cell out along the axis to the first empty one, from an empty one in against it to the first filled; the boundary found by halving. The point
+/// itself if the line meets no boundary within six cells.
+pub(crate) fn surface_along(before: &Occupancy, point: [f64; 3], outward: [f64; 3], cell: f64) -> [f64; 3] {
+    let filled = |p: [f64; 3]| sr_3d::voxel::object_to_cell(p, cell).is_some_and(|k| before.get(k) != 0);
+    let at = |t: f64| -> [f64; 3] { std::array::from_fn(|i| point[i] + outward[i] * t) };
+    let inside = filled(point);
+    // along the axis outward from filled ground, inward from empty
+    let sign = if inside { 1.0 } else { -1.0 };
+    let step = 0.05 * cell;
+    let mut t = 0.0;
+    while t < 6.0 * cell {
+        if filled(at(sign * (t + step))) != inside {
+            let (mut lo, mut hi) = (t, t + step);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if filled(at(sign * mid)) == inside {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return at(sign * 0.5 * (lo + hi));
+        }
+        t += step;
+    }
+    point
 }
 
 /// The launch angle above the ground and its spread, degrees, of the cells a crater throws (those of a burst's defaults).
