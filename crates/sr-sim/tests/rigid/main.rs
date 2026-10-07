@@ -12,6 +12,7 @@ mod impacts3;
 mod internal_edges;
 mod mesh_fracture_inertia;
 mod sim;
+mod stress_spike;
 mod surface3;
 mod surface_prefetch;
 mod voxel_fracture;

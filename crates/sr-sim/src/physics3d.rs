@@ -969,6 +969,21 @@ impl World3 {
         self.voxel_history_bytes
     }
 
+    /// The reaction of every joint at the end of the last step that was made: `[fx, fy, fz, mx, my, mz]`, the force in newtons and the torque in newton
+    /// metres of the constraint on its second body, in the solver's frame (y up) and from the impulses of the last solver substep (the step over the number of
+    /// iterations) that the world already reads to break a joint by `breakForce`; none for a joint that has been removed or that was never made.
+    pub fn joint_reactions(&self) -> Vec<Option<[f64; 6]>> {
+        let substep = self.spec.step / self.params.num_solver_iterations.max(1) as f64;
+        self.state
+            .joint_handles
+            .iter()
+            .map(|h| {
+                let joint = self.state.joints.get((*h)?)?;
+                Some(std::array::from_fn(|k| joint.impulses[k] / substep))
+            })
+            .collect()
+    }
+
     /// The cells (keys of the body's own lattice, sorted by key: x first, then y, then z, which is not the order of an `Occupancy`'s cells, z first) that body `body` had when `revision` cuts had been installed in it, for a
     /// revision that a frame ([`Frame3::voxel_revision`]) has told of and that the world has kept: the history is held under a budget of bytes
     /// ([`World3::with_voxel_history_budget`]) and the oldest go first, so a revision that is gone is None and the frame has to be made again. A cut
