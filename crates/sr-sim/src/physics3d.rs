@@ -14,7 +14,10 @@ use rapier3d_f64::prelude::*;
 use crate::fields::{self, Field};
 
 mod fracture;
+mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
+use voxel_split::voxel_key;
+pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
 /// A pose in scene space: position (px) and rotation (unit quaternion x, y, z, w, scene axes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -202,6 +205,19 @@ pub trait Driver3 {
     ) -> Result<Option<f64>, String> {
         Ok(None)
     }
+    /// What the body of cells `parent` (see [`World3::with_voxel_splits`]) has lost by time `t`, relative to the state the world has installed
+    /// (`revision`, none before the first cut), or `None` if nothing is new: cells that are gone and parts that separate into the slots
+    /// reserved for them. `impact` is the first impact the world has noticed on it. It must depend only on its arguments and on records
+    /// that no longer change, so that a world restored to a checkpoint finds the same cut at the same step. The default cuts nothing.
+    fn voxel_cut(
+        &mut self,
+        _t: f64,
+        _parent: usize,
+        _revision: Option<u64>,
+        _impact: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        Ok(None)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -298,6 +314,10 @@ struct State {
     collider_revisions: Vec<Option<u64>>,
     fractured: Vec<bool>,
     impacts: Vec<Option<Impact3>>,
+    /// The revision of the cut installed in each body of cells (none before its first), the slots used by each split, and which slots are in use.
+    voxel_revisions: Vec<Option<u64>>,
+    slots_used: Vec<usize>,
+    slot_active: Vec<bool>,
 }
 
 struct Checkpoint {
@@ -517,6 +537,9 @@ pub struct World3 {
     fractures: Vec<Fracture3>,
     fracture_sources: Vec<Option<usize>>,
     fragment_owners: Vec<Option<usize>>,
+    voxel_splits: Vec<VoxelSplit3>,
+    /// For each body, the split whose slot it is, if it is one.
+    slot_owners: Vec<Option<usize>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
@@ -606,6 +629,9 @@ impl World3 {
             collider_revisions: vec![None; spec.bodies.len()],
             fractured: Vec::new(),
             impacts: Vec::new(),
+            voxel_revisions: vec![None; spec.bodies.len()],
+            slots_used: Vec::new(),
+            slot_active: vec![false; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -656,10 +682,7 @@ impl World3 {
                 // the half turn about x that turns scene axes into physics axes maps the lattice onto itself: a cell
                 // [i, j, k] is the cell [i, -j - 1, -k - 1] there, so no cell moves by half a cell
                 Shape3::Voxels { size, cells } if !cells.is_empty() && size.iter().all(|s| *s > 0.0) => {
-                    let keys: Vec<IVector> = cells
-                        .iter()
-                        .map(|c| IVector::new(i64::from(c[0]), -i64::from(c[1]) - 1, -i64::from(c[2]) - 1))
-                        .collect();
+                    let keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
                     Some(ColliderBuilder::voxels(vec3(size.map(|s| s / ppm)), &keys))
                 }
                 Shape3::Voxels { .. } => None,
@@ -803,6 +826,8 @@ impl World3 {
         let mut w = World3 {
             fracture_sources: vec![None; spec.bodies.len()],
             fragment_owners: vec![None; spec.bodies.len()],
+            voxel_splits: Vec::new(),
+            slot_owners: vec![None; spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
@@ -1238,7 +1263,7 @@ impl World3 {
                 born = true;
                 // A fragment keeps its inherited motion when a visibility
                 // window reopens; its authored placeholder pose is never used.
-                if self.fragment_owners[k].is_some() {
+                if self.fragment_owners[k].is_some() || self.slot_owners[k].is_some() {
                     body.wake_up(true);
                     continue;
                 }
@@ -1408,6 +1433,7 @@ impl World3 {
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
+        self.apply_voxel_cuts(t, driver)?;
         self.record_frame();
         let st = &mut self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -1646,8 +1672,7 @@ pub fn shape_mass_properties(shape: &Shape3, mass: f64, pixels_per_meter: f64) -
     {
         return Err("a body of cells needs cells, a positive size, a positive mass and a positive scale".into());
     }
-    let keys: Vec<IVector> =
-        cells.iter().map(|c| IVector::new(i64::from(c[0]), -i64::from(c[1]) - 1, -i64::from(c[2]) - 1)).collect();
+    let keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
     let collider = ColliderBuilder::voxels(vec3(size.map(|s| s / pixels_per_meter)), &keys).mass(mass).build();
     let props = collider.mass_properties();
     let inertia = props.reconstruct_inertia_matrix();
@@ -1724,6 +1749,10 @@ fn shape_charge(shape: &dyn rapier3d_f64::parry::shape::Shape) -> usize {
             .shapes()
             .iter()
             .fold(4096usize, |sum, (_, part)| sum.saturating_add(512).saturating_add(shape_charge(part.as_ref())))
+    } else if let Some(voxels) = shape.as_voxels() {
+        // about two bytes a cell, which is what a private copy of the shape holds (an edited body of cells keeps its old copy in the
+        // checkpoints taken before the edit); counted as the meshes are, in full for every checkpoint
+        voxels.voxels().count().saturating_mul(2).saturating_add(4096)
     } else if let Some(poly) = shape.as_convex_polyhedron() {
         poly.points()
             .len()
