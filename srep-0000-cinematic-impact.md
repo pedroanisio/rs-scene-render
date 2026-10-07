@@ -873,6 +873,66 @@ the temperature of every cell once a step (one serial pass), and its cost, measu
 decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
 and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
 
+#### A blast in the smoke (`pyroBlast`)
+
+`<pyroBlast time energy x y z ambientDensity ambientPressure gamma/>` is a child of `<pyro>` (version 1.3 with it): at `time` seconds `energy`
+joules are released at (x, y, z) in the pyro's own axes into air of `ambientDensity` kg/m^3 (1.2) and `ambientPressure` Pa (101325), a gas of
+`gamma` (1.4, from 1.05 to 3). A pyro with a blast needs `boundary="open"` (PYC5: a blast is a source of divergence, which a closed domain cannot let
+out; the evaluator and the solver refuse it too) and the blast's place is in the domain (PYC6). An energy of zero is a blast that does nothing, and a
+pyro with no blast is bit for bit the pyro it was (the reference hashes of the solver, and a test of a puff with turbulence).
+
+**What is solved.** The front is the Sedov-Taylor blast: `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres, where the constant is not quoted but found
+(`sr_sim::sedov`): with `xi = r / R`, `u = Rdot U`, `rho = rho0 G` and `p = rho0 Rdot^2 P` the equations of an ideal gas reduce to three ordinary
+differential equations that are integrated from the shock (`U = P = 2 / (gamma + 1)`, `G = (gamma + 1) / (gamma - 1)`) to the centre, and the
+energy inside the front, `E = (16 pi / 25) J rho0 R^5 / t^2` with `J` the integral of `G U^2 / 2 + P / (gamma - 1)` over `xi^2 dxi`, gives
+`xi0 = (25 / (16 pi J))^(1/5)`: 1.0328 for gamma 1.4 (Landau and Lifshitz print alpha = 0.851) and 1.1517 for 5/3 (published 1.15), the mass inside the
+front is that of the sphere of ambient gas to 1e-6 (it is not given), the pressure at the centre of the monatomic blast is 0.3062 of the one behind
+the shock (published 0.306), and an independent integration in Python agrees to 2e-6. The front stops at `0.3 (E / p0)^(1/3)`, the end of the strong
+phase (an order of magnitude, and not a boundary).
+The smoke solver is incompressible, so the shock is not carried. What is carried is the displacement of the air by the front, as an incompressible
+spherical piston: in each step the cells whose centres are in the sphere of the radius the front has at the end of the step are given the divergence
+`1 - (R0 / R1)^3` over the step (a ratio of volumes, with no unit), which is exactly the volume the front swept in the step, and the projection makes
+the potential flow `u = Rdot R^2 / r^2` outside. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or `pyroImpulse` that the author
+adds). A front smaller than a cell is the sphere of one cell.
+
+**Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
+`pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
+axis has no sphere, and is an error). The radius is worked out in metres and then multiplied by that; the divergence is a ratio of volumes per second and
+needs no conversion. Tested at 1, 100 and 37 pixels to the metre: the same radius in metres, the same displacement of a puff of smoke in metres
+(to 1e-3, the density being a single float), and the same kinetic energy in joules to 1e-6.
+
+**The time step.** With `dt` of the pyro (1/24 s) the strong phase of a plausible blast is over within the first step: the energy above which it is not is
+`E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2)`, which goes as `dt^3`: 1.4e12 J at 1/24 s and 1.9e10 J at 1/100 s (the test states the value at 1/24 s), and below it the blast is ONE PULSE of the volume of `R_max`, in the step that contains `time`. Sub-steps would not change what the projection
+gives (it depends on the volume swept, not on its history within the step), so there are none. The front, for three energies in air at 1/24 s:
+
+| energy (J) | R(dt) (m) | R(2 dt) (m) | R_max (m) | R_max reached at | steps of the strong phase |
+|---|---|---|---|---|---|
+| 1e6 | 4.43 | 5.84 | 0.64 | 0.3 ms | one pulse of R_max |
+| 1e9 | 17.6 | 23.3 | 6.44 | 3.4 ms | one pulse of R_max |
+| 1e15 | 279 | 369 | 643 | 0.336 s | 8 |
+
+A pulse bigger than the domain is clipped to it: every cell of the domain that the sphere covers is given the same divergence (not normalised by the
+volume covered), so the window sees its part of the flow of the full sphere. The sphere of the front passes through a domain of 5.76 m (the hero's, at 100 pixels to the metre) in one step above 1.2e5 J and one of 576 m above 1.2e15 J.
+
+**What it does.** Measured on a domain of 64 cells with the blast of 3.75e9 J (the strong phase ends at 10 m; `crates/sr-sim/tests/pyro/blast.rs`): the air that
+the domain lets out is the volume of the cells over `dt` to 1e-6, and those cells are the volume of the sphere to 5 percent; the speed outside the
+sphere is `Q / (4 pi r^2)` to 15 percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); the kinetic energy in a ball of 1.5 radii is
+`rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.55 at a quarter (the piston's own energy is `2 pi rho Rdot^2 R^3` outside and a fifth of
+that inside: for the strong phase the energy that the solver's flow has is that of the displacement, which is part of the blast's `E`, not all); a puff of smoke at 6 m is
+displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to one cell and to 2 percent at a quarter of a metre. With a pulse of many cells in one step
+(1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian trace neither leaves the domain
+nor crosses the sphere, and the displacement is 1.026 and 1.012 of the exact one. **The advection does not conserve the smoke**: it changes by 3.6 percent at half a metre and 0.74 at a quarter (3.0
+and 0.34 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell; it is not the 1e-6 of a
+conservative scheme. The same document through the evaluator displaces a puff by the same 0.5 m at every scene unit.
+
+**Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
+flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's
+profile, and only the displacement of the front is the blast's: the energy of the flow is the energy of the displacement. (3) The strong phase is shorter
+than a step of the pyro for any `E` below `E*`; a blast faithful in time needs a `dt` of the pyro smaller than a tenth of the time of the strong phase (`dt` of 3e-5 s
+for 1e6 J), at the cost of that many steps. (4) After `R_max` nothing is modelled: no negative phase, no reflection, and the walls are the solver's. (5) No heat and
+no smoke are injected. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
+world's own conservation test can check) and to the ocean (the same pressure as a `waterImpulse`): each its own step with its own oracle.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -3420,6 +3480,19 @@ Also includes `pyroShape`, inventoried below.
 | `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
 | `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
+### `pyroBlastType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Required |
+| `energy` | nonNegativeDecimal | Required; joules |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `ambientDensity` | positiveDecimal | Default `1.2`; kg/m^3 |
+| `ambientPressure` | positiveDecimal | Default `101325`; Pa |
+| `gamma` | positiveDecimal; minInclusive=1.05, maxInclusive=3 | Default `1.4` |
+
 ### `particles3DType`
 
 | Attribute | XSD type or inline restriction | Presence/default |
@@ -3939,11 +4012,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 270 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 90 of them are in the
-cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 272 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 92 of them are in the
+cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 6, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 24 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7) are this repository's. At commit 349d371,
+families, and the 26 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7, PYC5 and PYC6) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

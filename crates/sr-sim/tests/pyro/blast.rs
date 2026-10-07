@@ -336,7 +336,7 @@ fn smoke_outside_the_sphere_is_displaced_by_the_volume_the_front_swept_and_the_s
 fn a_pulse_of_many_cells_in_one_step_still_displaces_the_smoke_by_the_volume_swept_to_the_trace_of_the_advection() {
     // 1e11 J: the front of one step is at about 7.5 m, and smoke at 9 m is pushed to about 10.5 m: 3 cells in the step at half a metre (a Courant
     // number of 3) and 6 at a quarter. What the semi-Lagrangian trace does with it, measured: it neither runs out of the domain nor crosses the
-    // sphere, and the displacement is the exact one to 3 percent (a little over, 1.016 and 1.012 of it), the smoke changing by 3.0 and 0.34 percent
+    // sphere, and the displacement is the exact one to 3 percent (a little over, 1.026 and 1.012 of it), the smoke changing by 3.0 and 0.34 percent
     let mut errors = Vec::new();
     for cell in [0.5, 0.25] {
         let (x0, x1, m0, m1, radius) = puff_and_pulse(1e11, 9.0, 1.0, cell);
