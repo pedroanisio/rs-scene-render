@@ -84,7 +84,9 @@ pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, sett
 }
 
 /// The nearest axis of the lattice if `normal` is within two degrees of it: the estimate of a surface of cells that is flat along a face has the noise of
-/// the cells' rounding, a few tenths of a degree, and a face of cells has the normal of the face.
+/// the cells' rounding (a few tenths of a degree on flat ground, 0.1 in the tests), and a face of cells has the normal of the face. The consequence is a
+/// discontinuity: ground that slopes by less than two degrees is cut along the axis of the lattice as if it were flat, and one that slopes by two or more
+/// is cut along its own normal; the volume cut differs between them by the few cells that a tilt of two degrees moves (the ledger gives the figures).
 fn snap_to_lattice(normal: [f64; 3]) -> [f64; 3] {
     let (axis, along) = (0..3).map(|i| (i, normal[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).expect("three axes");
     if along >= 2.0f64.to_radians().cos() {
@@ -245,10 +247,27 @@ impl VoxelOwner {
                 return Ok(cut.clone());
             }
         }
-        let grown = crate::crater::impact_crater(source, impact, 0.0)?;
+        let grown = crate::crater::impact_crater(source, &self.aligned(source, impact)?, 0.0)?;
         let cut = Arc::new(crater_cut_of(&grown, &self.model.occupancy, &self.settings, seed_of(id))?);
         *memo = Some((*impact, cut.clone()));
         Ok(cut)
+    }
+
+    /// The impact as the crater of an object of cells takes it: its normal is the axis of the surface of the cells (not the contact's, which is that of the
+    /// first face or edge touched) and the speed that the law is given is the body's along that axis. The law reads the speed along the normal, and the
+    /// contact's, 13 to 15 degrees off on a slope of cells, gave a crater from a speed 3 percent low.
+    pub(crate) fn aligned(
+        &self,
+        source: &crate::crater::CraterSource,
+        impact: &sr_sim::physics3d::Impact3,
+    ) -> Result<sr_sim::physics3d::Impact3, String> {
+        let first = crate::crater::impact_crater(source, impact, 0.0)?;
+        let axis = crater_axis(&first, &self.model.occupancy, &self.settings);
+        let closing = -(0..3).map(|i| impact.owner_velocity[i] * axis[i]).sum::<f64>();
+        if closing.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return Ok(*impact);
+        }
+        Ok(sr_sim::physics3d::Impact3 { normal: axis, closing_speed: closing, ..*impact })
     }
 
     /// The grid of body `body` at `revision`, made of its `cells`: the palette index of a cell is the asset's, or the rim's for a cell that the cut heaped.

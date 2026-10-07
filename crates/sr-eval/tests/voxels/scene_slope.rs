@@ -93,6 +93,8 @@ fn hit(degrees: f64) -> (sr_eval::FrameNode, Occupancy) {
 #[test]
 fn the_ball_that_comes_along_the_normal_of_a_slope_cuts_the_law_s_crater_in_the_cells_with_its_axis_along_that_normal()
 {
+    // the ball comes at the same speed along the normal whatever the slope: the law's crater is the flat ground's
+    let flat = hit(0.0).0.crater_impact.as_ref().expect("the impact").law().volume;
     for degrees in [10.0f64, 20.0, 30.0] {
         let (node, ground) = hit(degrees);
         let grown = node.crater_impact.as_ref().expect("the impact");
@@ -118,7 +120,10 @@ fn the_ball_that_comes_along_the_normal_of_a_slope_cuts_the_law_s_crater_in_the_
             cut.cut.cut.destroyed.len(),
             cut.cut.cut.added.len()
         );
-        assert!((volume - law).abs() < 0.07 * law, "{degrees} degrees: {volume} m3 against the law's {law}");
+        assert!((law - flat).abs() < 0.005 * flat, "{degrees} degrees: the law's volume is {law} m3 and the flat ground's {flat}: it reads the speed along the normal");
+        // what is left over is the staircase: the surface of the cells is a step of a quarter of a metre every few cells, the plane of the kernel is put where
+        // the axis meets it, and the cells under the plane's mean are more or fewer than the plane's: +5.4, +2.0 and -1.3 percent at 10, 20 and 30 degrees
+        assert!((volume - law).abs() < 0.065 * law, "{degrees} degrees: {volume} m3 against the law's {law}");
         let spec = grown.spec;
         for c in &cut.cut.cut.destroyed {
             let p: [f64; 3] = std::array::from_fn(|i| (f64::from(c[i]) + 0.5) * 0.25 - spec.center[i]);
