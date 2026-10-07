@@ -108,6 +108,9 @@ fn polar(c: [i32; 3]) -> (f64, f64) {
     (p[0].hypot(p[2]), -p[1])
 }
 
+/// Cells that the crater takes out of the flat ground alone.
+const FLAT_CELLS: usize = 6352;
+
 /// The surface the grown crater leaves over the original ground at distance `r` from the axis, along the axis (positive out of the ground).
 fn surface(law: &Law, r: f64) -> f64 {
     -law.kernel.bowl_depth_at(r) + law.kernel.rim_height_at(r)
@@ -150,9 +153,26 @@ fn the_cells_above_the_surface_of_the_crater_are_taken_out_to_the_reach_of_the_c
         "VOXEL CRATER {n} cells, volume {volume:.4} m3 against the law's {:.4}, which is {cells_of_law:.2} cells",
         law.volume
     );
+    // on flat ground alone (without the pillar, whose cells are over the plane and are not part of the law's bowl) the volume is a little under the law's, by the
+    // part of the bowl wall that the lip stands on
+    let flat: Vec<([i32; 3], u8)> =
+        cells.iter().filter(|c| !(c.0[0] >= 4 && c.0[0] < 6 && c.0[1] < 0)).copied().collect();
+    let on_flat = excavate(&occupancy(&flat), &law.kernel, 1.0, H, &ejection(&law)).unwrap().removed.len();
+    println!(
+        "VOXEL CRATER on flat ground alone {on_flat} cells = {:.4} m3, {:.2} percent of the law's",
+        on_flat as f64 * H * H * H,
+        100.0 * on_flat as f64 * H * H * H / law.volume
+    );
+    assert_eq!(on_flat, FLAT_CELLS, "the flat ground alone (pinned from the run)");
     assert_eq!(n, 6460, "the number of cells the crater takes out (pinned from the run)");
     assert!((volume - 100.9375).abs() < 1e-9, "{volume}");
+    // the ground with the pillar is within a cell of the law's volume only because the pillar's cells over the plane make up for the wall that the lip stands on:
+    // the flat ground alone is 1.7 percent under it
     assert!((n as f64 - cells_of_law).abs() < 1.0, "within a cell of the law's volume: {n} against {cells_of_law}");
+    assert!(
+        (on_flat as f64 / cells_of_law - 1.0).abs() < 0.02,
+        "the flat ground alone within 2 percent: {on_flat} against {cells_of_law}"
+    );
 }
 
 #[test]
@@ -347,7 +367,10 @@ fn nothing_taken_out_or_all_of_it_thrown_and_what_does_not_make_sense_is_an_erro
         influence_depth: 800.0,
         ..law.kernel.spec()
     };
-    assert!(excavate(&before, &Crater::new(wide).unwrap(), 1.0, H, &ejection(&law)).is_err());
+    let started = std::time::Instant::now();
+    let err = excavate(&before, &Crater::new(wide).unwrap(), 1.0, H, &ejection(&law)).unwrap_err();
+    assert!(err.contains("box") && err.contains("cells"), "{err}");
+    assert!(started.elapsed().as_secs_f64() < 1.0, "it was scanned before it was refused");
     // and a centre so far out that the box is not a box of cells
     let away = Spec { center: [1e12, 0.0, 0.0], ..law.kernel.spec() };
     let err = excavate(&before, &Crater::new(away).unwrap(), 1.0, H, &ejection(&law)).unwrap_err();
@@ -391,15 +414,78 @@ fn a_crater_in_another_unit_is_the_same_crater_when_it_says_what_its_unit_is() {
     assert_eq!(half.uplift, in_metres.uplift);
     // in the units of the scene, 100 to a metre, the crater is the same to a cell or two where the scaling is not exact
     let scene = excavate(&before, &scaled_kernel(&law, 100.0), 0.01, H, &e).unwrap();
+    // the same cells, but for the few that sit on the surface of the bowl where the scaling by 100 is not exact in binary: the cells that are in one and
+    // not in the other are a handful, and the same for the rim and the uplift
+    let diff = |a: &[[i32; 3]], b: &[[i32; 3]]| {
+        let (a, b): (BTreeSet<_>, BTreeSet<_>) = (a.iter().copied().collect(), b.iter().copied().collect());
+        a.symmetric_difference(&b).count()
+    };
+    let rim = |x: &sr_eval::voxel_crater::Excavation| x.rim.iter().map(|r| r.0).collect::<Vec<_>>();
     assert!(
-        (scene.removed.len() as i64 - in_metres.removed.len() as i64).abs() <= 8,
-        "{} against {}",
-        scene.removed.len(),
-        in_metres.removed.len()
+        diff(&scene.removed, &in_metres.removed) <= 8,
+        "removed differ by {} cells",
+        diff(&scene.removed, &in_metres.removed)
     );
+    assert!(
+        diff(&rim(&scene), &rim(&in_metres)) <= 40,
+        "the rim differs by {} cells",
+        diff(&rim(&scene), &rim(&in_metres))
+    );
+    assert!(diff(&scene.uplift, &in_metres.uplift) <= 40);
     assert!((scene.rim_scale - in_metres.rim_scale).abs() < 0.05);
     // a unit that is not a number or not positive is an error
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(excavate(&before, &law.kernel, bad, H, &e).is_err());
+    }
+}
+
+#[test]
+fn a_crater_whose_axis_is_slanted_takes_out_what_a_brute_force_over_the_whole_ground_says() {
+    // a shallow crater with its axis at 45 degrees to the ground (a plain kernel: only the removal is looked at, all of it thrown): the region that it takes
+    // out reaches further, along the lattice axes, than its crest radius and its depth, and the box that is scanned has to hold it
+    let law = law();
+    let before = occupancy(&ground());
+    let spec = Spec {
+        center: [1.0, 0.0, -1.0],
+        outward: [1.0, -1.0, 0.0],
+        radius: 6.5,
+        depth: 0.4,
+        rim_height: 0.2,
+        rim_width: 1.5,
+        influence_depth: 4.0,
+    };
+    let kernel = Crater::new(spec).unwrap();
+    let all = Ejection { share: 1.0, ..ejection(&law) };
+    let x = excavate(&before, &kernel, 1.0, H, &all).unwrap();
+    let axis = kernel.axis();
+    let expected: BTreeSet<[i32; 3]> = ground()
+        .iter()
+        .map(|c| c.0)
+        .filter(|c| {
+            let p = centre(*c);
+            let d = [p[0] - spec.center[0], p[1] - spec.center[1], p[2] - spec.center[2]];
+            let a = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+            let r = (0..3).map(|i| (d[i] - a * axis[i]).powi(2)).sum::<f64>().sqrt();
+            r < spec.radius + spec.rim_width
+                && a >= kernel.rim_height_at(r) - kernel.bowl_depth_at(r)
+                && a <= spec.radius
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(
+        x.removed.iter().copied().collect::<BTreeSet<_>>(),
+        expected,
+        "the box that is scanned missed cells of the region"
+    );
+    assert_eq!((x.thrown.len(), x.uplift.len(), x.rim.len()), (x.removed.len(), 0, 0));
+}
+
+#[test]
+fn a_launch_angle_or_spread_that_is_not_a_number_is_an_error_and_not_a_cloud_of_nans() {
+    let law = law();
+    let before = occupancy(&ground());
+    for (angle, spread) in [(f64::NAN, 15.0), (45.0, f64::INFINITY), (f64::NEG_INFINITY, 0.0), (45.0, f64::NAN)] {
+        let e = Ejection { angle, spread, ..ejection(&law) };
+        assert!(excavate(&before, &law.kernel, 1.0, H, &e).is_err(), "angle {angle}, spread {spread}");
     }
 }
