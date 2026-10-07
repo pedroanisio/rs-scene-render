@@ -10,5 +10,6 @@ mod sequence;
 mod skinning;
 mod srvol;
 mod vox;
+mod vox_frame;
 mod vox_materials;
 mod vox_real;

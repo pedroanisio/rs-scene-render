@@ -38,6 +38,12 @@ VOXELS = '<scene version="1.3"><project width="32" height="32" fps="30" duration
 VOXELS_FROM_MESH = VOXELS.replace('<voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/>', '<voxelAsset id="model" fromMesh="shape" cellSize="0.5"/>').replace(' palette="stone moss"', ' palette="file"')
 
 PYRO_BLAST = PYRO.replace('<pyro ', '<pyro boundary="open" ').replace('</pyro>', '<pyroBlast time="0.3" energy="1000000" x="1" y="-1"/></pyro>')
+VOXEL_HEAD = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><assets><voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/></assets><materials><material id="stone" baseColor="#808080"/></materials><composition><object3D id="ball" primitive="sphere" radius="1" y="-8"><rigidBody mass="1"/></object3D>'
+VOXEL_TAIL = '</composition><physics pixelsPerMeter="1"/></scene>\n'
+VOXEL_BODY = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="2" material="stone"><rigidBody density="2400"/></object3D>' + VOXEL_TAIL
+VOXEL_GROUND = VOXEL_HEAD + '<object3D id="ground" primitive="voxels" voxels="model" cellSize="2" material="stone" y="2"><rigidBody type="static" density="2400" maxFragments="128" fragmentMinCells="2" fragmentOverflow="dust" anchor="base"/><crater id="pit" source="ball" targetMaterial="softRock"/></object3D>' + VOXEL_TAIL
+VOXEL_FRACTURE = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="2" material="stone"><rigidBody density="2400" maxFragments="32" fragmentMinCells="2"/><fracture source="ball" pieces="8" seed="3"/></object3D>' + VOXEL_TAIL
+VOXEL_EJECTA = VOXEL_GROUND.replace(VOXEL_TAIL, '<particles3D id="debris" rate="0" gravityY="9.8" lifetime="3" maxParticles="500"><burst crater="pit"/></particles3D>' + VOXEL_TAIL)
 
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
 
@@ -116,6 +122,30 @@ CASES = [
     ("vox4-no-asset", ["VOX4"], lambda _: VOXELS.replace(' voxels="model"', '')),
     ("vox5-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box"')),
     ("vox6-palette", ["VOX6"], lambda _: VOXELS.replace('palette="stone moss"', 'palette="stone nothing"')),
+    ("vox8-shape", ["VOX8"], lambda _: CRATER_IMPACT.replace('<rigidBody type="static"/>', '<rigidBody type="static" shape="voxels"/>')),
+    ("vox9-density", ["VOX9"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '<rigidBody mass="8" density="2400"/>')),
+    ("vox10-no-density", ["VOX10"], lambda _: VOXEL_BODY.replace(' density="2400"', '')),
+    ("vox10-mass", ["VOX10"], lambda _: VOXEL_BODY.replace('density="2400"', 'density="2400" mass="5"')),
+    ("vox11-slots", ["VOX11"], lambda _: VOXEL_BODY.replace('density="2400"', 'density="2400" maxFragments="8"')),
+    ("vox12-anchor", ["VOX12"], lambda _: VOXEL_BODY.replace('density="2400"', 'density="2400" anchor="base"')),
+    ("vox13-scale", ["VOX13"], lambda _: VOXEL_GROUND.replace('y="2">', 'y="2" scaleX="2">')),
+    ("vox15-mesh-collider", ["VOX15"], lambda _: VOXEL_GROUND.replace('type="static" density="2400"', 'type="static" shape="trimesh"').replace(' maxFragments="128" fragmentMinCells="2" fragmentOverflow="dust" anchor="base"', '').replace('y="2">', 'y="2" scaleX="2">')),
+    ("vox15-fracture-box", ["VOX15"], lambda _: VOXEL_FRACTURE.replace('<rigidBody density="2400" maxFragments="32" fragmentMinCells="2"/>', '<rigidBody shape="box"/>')),
+    ("vox14-both", ["VOX14"], lambda _: VOXEL_GROUND.replace('</object3D>' + VOXEL_TAIL, '<fracture source="ball" pieces="4"/></object3D>' + VOXEL_TAIL)),
+    ("crt13-mantle", ["CRT13"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" mantle="true"')),
+    ("crt14-curve", ["CRT14"], lambda _: VOXEL_GROUND.replace('targetMaterial="softRock"', 'targetMaterial="softRock" curve="linear"')),
+    ("crt15-no-source", ["CRT15"], lambda _: VOXEL_GROUND.replace('<crater id="pit" source="ball" targetMaterial="softRock"/>', '<crater id="pit" radius="4" rimWidth="1"/>')),
+    ("crt17-angle", ["CRT17"], lambda _: VOXEL_EJECTA.replace('<burst crater="pit"/>', '<burst crater="pit" angle="30" angleSpread="5"/>')),
+    ("crt16-count", ["CRT16"], lambda _: VOXEL_EJECTA.replace('<burst crater="pit"/>', '<burst crater="pit" count="200"/>')),
+    ("crt16-no-count", ["CRT16"], lambda _: EJECTA_CRATER.replace('<burst crater="pit" count="200"/>', '<burst crater="pit"/>')),
+    ("frx8-interior", ["FRX8"], lambda _: VOXEL_FRACTURE.replace('<fracture ', '<fracture interiorMaterial="stone" ')),
+    ("frx9-partition", ["FRX9"], lambda _: FRACTURE_CONTACT.replace('<fracture ', '<fracture partition="voronoi" ')),
+    ("frx10-pieces", ["FRX10"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels" labels="material" pieces="8"')),
+    ("frx11-planes", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0"')),
+    ("frx11-no-partition", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'planes="1 0 0 4"')),
+    ("frx11-zero-normal", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 4 0 0 0 2"')),
+    ("frx11-infinite", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 1' + '0' * 400 + '"')),
+    ("frx12-labels", ["FRX12"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels"')),
     ("vox7-exclusion", ["VOX7"], lambda _: VOXELS.replace('surface="blocks"', 'surface="blocks" mesh="shape"')),
     ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),
     ("frx2", ["FRX2"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '')),
@@ -511,6 +541,13 @@ VALID = {
     # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it
     "voxels-srvol": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" voxelGrid="voxels"'),
     "voxels-srvol-format": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" format="srvol" voxelGrid="voxels"'),
+    "voxel-body": VOXEL_BODY,
+    "voxel-crater": VOXEL_GROUND,
+    "voxel-ejecta": VOXEL_EJECTA,
+    "voxel-crater-signed-scale": VOXEL_GROUND.replace('y="2">', 'y="2" scaleX="+3" scaleY="3" scaleZ=" 3.0 ">'),
+    "voxel-fracture": VOXEL_FRACTURE,
+    "voxel-fracture-planes": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 4 0 1 0 2"'),
+    "voxel-fracture-labels": VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels" labels="material"'),
     "pyro-colliders": PYRO_COLLIDERS,
     "pyro-fields": PYRO.replace('<pyro ', '<pyro forceFields="wind" useForceFields="true" ').replace('</scene>', '<physics><forceField id="wind" type="wind" forceX="1" affects="particles" start="0.1" end="0.8"/></physics></scene>'),
     "baked-volume": VOLUME_BAKED,

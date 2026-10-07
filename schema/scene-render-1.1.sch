@@ -576,6 +576,21 @@
       <sch:assert id="VOX5" test="@primitive='voxels' or not(@voxels|@cellSize|@palette|@surface)">voxels, cellSize, palette and surface belong to primitive="voxels".</sch:assert>
       <sch:assert id="VOX6" test="not(@palette) or normalize-space(@palette)='file' or (count(str:tokenize(normalize-space(@palette),' '))&lt;=255 and count(str:tokenize(normalize-space(@palette),' ')[. = $materials/@id])=count(str:tokenize(normalize-space(@palette),' ')))">palette is the word file or at most 255 material ids.</sch:assert>
       <sch:assert id="VOX7" test="not(@primitive='voxels') or not(@mesh|@volume|@terrain|@map|@text|@path|medium|pyro)">a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child.</sch:assert>
+      <sch:assert id="VOX15" test="not(@primitive='voxels' and (crater or fracture)) or (rigidBody and not(rigidBody[@shape and not(@shape='auto' or @shape='voxels')]))">an object of cells that a crater or a fracture breaks has a rigidBody whose collider is the cells (shape voxels or auto, or no shape).</sch:assert>
+    </sch:rule>
+    <sch:rule context="object3D/rigidBody">
+      <sch:let name="voxels" value="boolean(parent::object3D[@primitive='voxels'])"/>
+      <sch:let name="cells" value="boolean(parent::object3D[@primitive='voxels'] and (not(@shape) or @shape='auto' or @shape='voxels'))"/>
+      <sch:let name="sx" value="number(concat(substring(normalize-space(../@scaleX), 1 + number(starts-with(normalize-space(../@scaleX), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleX)))))"/>
+      <sch:let name="sy" value="number(concat(substring(normalize-space(../@scaleY), 1 + number(starts-with(normalize-space(../@scaleY), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleY)))))"/>
+      <sch:let name="sz" value="number(concat(substring(normalize-space(../@scaleZ), 1 + number(starts-with(normalize-space(../@scaleZ), '+'))), substring('1', 1 + string-length(normalize-space(../@scaleZ)))))"/>
+      <sch:assert id="VOX8" test="not(@shape='voxels') or $voxels">a rigidBody with shape voxels belongs to an object3D of primitive voxels.</sch:assert>
+      <sch:assert id="VOX9" test="$cells or not(@density or @maxFragments or @fragmentMinCells or @fragmentOverflow or @anchor)">density, maxFragments, fragmentMinCells, fragmentOverflow and anchor belong to a rigidBody whose collider is the cells of an object of primitive voxels.</sch:assert>
+      <sch:assert id="VOX10" test="not($cells) or (@density and not(@mass))">a body of cells has a density and no mass (its mass is its cells').</sch:assert>
+      <sch:assert id="VOX11" test="not(@maxFragments or @fragmentMinCells or @fragmentOverflow) or ../crater or ../fracture">maxFragments, fragmentMinCells and fragmentOverflow belong to a body of cells that a crater or a fracture can break.</sch:assert>
+      <sch:assert id="VOX12" test="not(@anchor) or ../crater">anchor belongs to a body of cells that has a crater.</sch:assert>
+      <sch:assert id="VOX13" test="not($cells and (../crater or ../fracture)) or ($sx = $sy and $sy = $sz)">a body of cells that a crater or a fracture breaks is scaled the same on every axis.</sch:assert>
+      <sch:assert id="VOX14" test="not($voxels and ../crater and ../fracture)">a body of cells has a crater or a fracture, not both.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-mesh-sequence">
@@ -615,6 +630,8 @@
       <sch:assert id="P3D8" test="not(@crater) or /scene//crater[@id=current()/@crater and @source]">a burst from a crater must name a crater that grows from an impact.</sch:assert>
       <sch:assert id="P3D9" test="@crater or not(@angle or @angleSpread)">angle and angleSpread belong to a burst from a crater.</sch:assert>
       <sch:assert id="P3D10" test="not(@crater) or ($angle - $spread &gt;= 0 and $angle + $spread &lt;= 90)">the launch angle of a burst from a crater (default 45) and its spread (default 15) must stay between 0 and 90 degrees.</sch:assert>
+      <sch:assert id="CRT17" test="not(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater]) or not(@angle or @angleSpread)">a burst from the crater of an object of cells launches the cells that the cut throws with the cut's own velocities, so angle and angleSpread have no meaning there.</sch:assert>
+      <sch:assert id="CRT16" test="(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater] and not(@count)) or (not(@crater and /scene//object3D[@primitive='voxels' and crater/@id=current()/@crater]) and @count)">a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-ocean">
@@ -665,7 +682,10 @@
       <sch:assert id="CRT10" test="not(@mantle or @bulking or @repose) or @source">crater mantle, bulking and repose belong to a crater that grows from a source.</sch:assert>
       <sch:assert id="CRT11" test="not(@bulking) or @mantle='true'">crater bulking belongs to a crater with a mantle (mantle="true").</sch:assert>
       <sch:assert id="CRT12" test="not(@repose) or not(@mantle='true')">a crater that gives its settled ejecta a repose angle has no mantle: the ejecta are the ground once, as one or the other.</sch:assert>
-      <sch:assert id="CRT5" test="not(../rigidBody[not(@type='static' or @type='kinematic') or (@shape and not(@shape='auto' or @shape='trimesh'))])">crater rigid bodies require static/kinematic type with auto or trimesh collision geometry.</sch:assert>
+      <sch:assert id="CRT5" test="not(../rigidBody[not(@type='static' or @type='kinematic') or (@shape and not(@shape='auto' or @shape='trimesh' or @shape='voxels'))])">crater rigid bodies require static/kinematic type with auto, trimesh or voxels collision geometry.</sch:assert>
+      <sch:assert id="CRT13" test="not(parent::object3D[@primitive='voxels']) or not(@mantle or @bulking or @repose)">a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.</sch:assert>
+      <sch:assert id="CRT14" test="not(parent::object3D[@primitive='voxels']) or not(@curve)">the cut of a crater in an object of cells is instantaneous at the impact, so curve has no meaning there (start and end are refused by CRT6 for a crater with a source, which CRT15 requires).</sch:assert>
+      <sch:assert id="CRT15" test="not(parent::object3D[@primitive='voxels']) or @source">a crater in an object of cells grows from a source: it is cut by an impact.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-black-hole-version">
@@ -700,11 +720,16 @@
     <sch:rule context="fracture">
       <sch:assert id="FRX1" test="/scene/@version='1.3'">fracture requires version="1.3".</sch:assert>
       <sch:assert id="FRX2" test="parent::object3D[not(@primitive='volume' or @primitive='plane' or @primitive='map')] and count(../fracture)=1 and count(../rigidBody)=1">fracture requires one closed surface object3D owner and exactly one rigidBody.</sch:assert>
-      <sch:assert id="FRX3" test="@interiorMaterial=/scene/materials/material/@id">fracture interiorMaterial must reference a declared material.</sch:assert>
-      <sch:assert id="FRX4" test="not(@*[name()!='interiorMaterial' and name()!='source' and not((number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))) - number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))))=0)])">fracture numeric values must be finite.</sch:assert>
+      <sch:assert id="FRX3" test="parent::object3D[@primitive='voxels'] or @interiorMaterial=/scene/materials/material/@id">fracture interiorMaterial must reference a declared material.</sch:assert>
+      <sch:assert id="FRX4" test="not(@*[name()!='interiorMaterial' and name()!='source' and name()!='partition' and name()!='planes' and name()!='labels' and not((number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))) - number(substring(normalize-space(.),1+number(starts-with(normalize-space(.),'+')))))=0)])">fracture numeric values must be finite.</sch:assert>
       <sch:assert id="FRX5" test="not(@source) or (/scene//object3D[@id=current()/@source and not(@id=current()/../@id)]/rigidBody[not(@type) or @type='dynamic'])">fracture source must name another object3D whose rigidBody is dynamic.</sch:assert>
       <sch:assert id="FRX6" test="not(@source and (@at or @radialImpulse or @impulseX or @impulseY or @impulseZ))">a fracture that comes from a source derives its time and its push, so at, radialImpulse and impulseX, impulseY and impulseZ may not be given.</sch:assert>
       <sch:assert id="FRX7" test="@source or not(@minImpulse or @energyFraction)">minImpulse and energyFraction belong to a fracture with a source.</sch:assert>
+      <sch:assert id="FRX8" test="not(parent::object3D[@primitive='voxels']) or not(@interiorMaterial or @interiorUvScale)">a fracture of an object of cells has no interior material: its pieces have the material of their cells.</sch:assert>
+      <sch:assert id="FRX9" test="parent::object3D[@primitive='voxels'] or not(@partition or @planes or @labels)">partition, planes and labels belong to the fracture of an object of primitive voxels.</sch:assert>
+      <sch:assert id="FRX10" test="not(@partition) or @partition='voronoi' or not(@pieces or @seed)">pieces and seed belong to a voronoi partition.</sch:assert>
+      <sch:assert id="FRX11" test="(@partition='planes' or not(@planes)) and (not(@partition='planes') or (@planes and count(str:tokenize(normalize-space(@planes),' '))&gt;=4 and count(str:tokenize(normalize-space(@planes),' '))&lt;=252 and count(str:tokenize(normalize-space(@planes),' ')) mod 4 = 0 and count(str:tokenize(normalize-space(@planes),' ')[number(.) - number(.) = 0]) = count(str:tokenize(normalize-space(@planes),' ')) and not(str:tokenize(normalize-space(@planes),' ')[position() mod 4 = 1 and number(.)=0 and number(following-sibling::*[1])=0 and number(following-sibling::*[2])=0])))">partition planes takes planes, from one to 63 planes of four finite numbers (nx ny nz offset, the normal not all zeros), and planes belongs to that partition.</sch:assert>
+      <sch:assert id="FRX12" test="(@partition='labels' or not(@labels)) and (not(@partition='labels') or @labels='material')">partition labels takes labels="material", and labels belongs to that partition.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-globe">

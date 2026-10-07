@@ -117,17 +117,56 @@ fn render_doc_on(gpu: &Gpu, d: &sr_model::Document, t: f64) -> Option<Shot> {
     Some(Shot { px: r.read(&f.texture), size: f.texture.size, stats: f.stats })
 }
 
+/// The valid documents of the corpus that the evaluator refuses by name (E23: bodies of cells are not evaluated yet by this build). They are not rendered, on
+/// either backend, and a document that is not rendered would be skipped without a word, so the ones that are refused are listed here and a test says when the
+/// list and the refusals differ in either direction. The wiring of bodies of cells deletes this list with the refusal.
+const REFUSED_AS_BODIES_OF_CELLS: [&str; 7] = [
+    "voxel-body.scene.xml",
+    "voxel-crater-signed-scale.scene.xml",
+    "voxel-crater.scene.xml",
+    "voxel-ejecta.scene.xml",
+    "voxel-fracture-labels.scene.xml",
+    "voxel-fracture-planes.scene.xml",
+    "voxel-fracture.scene.xml",
+];
+
+fn valid_corpus() -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
+    files.sort();
+    files
+}
+
+/// Whether the evaluator refuses the document by name as a body of cells.
+fn refused_as_bodies_of_cells(doc: &sr_model::Document) -> bool {
+    match sr_eval::Evaluator::new(doc, &sr_eval::EvalOptions::default()) {
+        Err(report) => report.diagnostics.iter().any(|d| d.code == "E23"),
+        Ok(_) => false,
+    }
+}
+
+/// No adapter is needed for this: it is the evaluator's, and it is what the corpus test below would skip on a machine with no GL adapter.
+#[test]
+fn the_documents_the_evaluator_refuses_as_bodies_of_cells_are_the_listed_ones_and_no_others() {
+    let mut refused = Vec::new();
+    for path in valid_corpus() {
+        // a document that does not load here (remote assets) is not one of these
+        let Ok(doc) = sr_model::load_file(&path, &sr_model::LoadOptions::default()) else { continue };
+        if refused_as_bodies_of_cells(&doc) {
+            refused.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    assert_eq!(refused, REFUSED_AS_BODIES_OF_CELLS, "the documents refused as bodies of cells are not the listed ones");
+}
+
 #[test]
 fn gl_matches_the_native_backend_on_the_conformance_corpus() {
     // every valid corpus document that loads here (remote assets may not), at its start and
     // its middle
     let (Some(g), Some(n)) = (gl(), native()) else { return };
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-    files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
-    files.sort();
     let (mut compared, mut failures, mut declared) = (0, Vec::new(), Vec::new());
-    for path in files {
+    for path in valid_corpus() {
         let doc = match sr_model::load_file(&path, &sr_model::LoadOptions::default()) {
             Ok(d) => d,
             Err(e) => {
@@ -135,6 +174,10 @@ fn gl_matches_the_native_backend_on_the_conformance_corpus() {
                 continue;
             }
         };
+        // a document that the evaluator refuses by name is not rendered, and is accounted for in the list above (and its own test)
+        if refused_as_bodies_of_cells(&doc) {
+            continue;
+        }
         for t in [0.0, doc.duration() / 2.0] {
             let (Some(a), Some(b)) = (render_doc_on(&g, &doc, t), render_doc_on(&n, &doc, t)) else { continue };
             // what GL cannot draw it must say (so --strict fails); such frames are not compared
