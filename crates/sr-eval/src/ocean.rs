@@ -33,6 +33,8 @@ struct Runtime {
     /// The radius of the coverage that foam tracers give the surface, and the most distances it may take a frame (the whitewater's
     /// `maxWork`), when whitewater foam is mixed into the water's albedo (`foamMode="albedo"`) instead of drawn as triangles.
     foam_coverage: Option<(f64, u64)>,
+    /// The whitewater is in `foamMode="albedo"`: its foam is not drawn as triangles whether or not the coverage is made.
+    foam_albedo: bool,
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
@@ -73,6 +75,14 @@ impl WaterAttrs {
             density: num(e, "density", 1000.0),
         }
     }
+}
+
+/// Whether a camera of the composition path-traces: what draws the foam of `foamMode="albedo"`.
+fn any_path_traced_camera(node: &dyn sr_model::element::Element) -> bool {
+    children(node).into_iter().any(|c| {
+        (c.element_name() == "camera" && text(c, "renderer").as_deref() == Some("pathtrace"))
+            || any_path_traced_camera(c)
+    })
 }
 
 fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
@@ -206,12 +216,25 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             sim::whitewater::Whitewater::new(spec.clone(), bed.clone(), cfg).map_err(|e| e.to_string())
         })
         .transpose()?;
-    let foam_coverage = e.children.iter().find_map(|c| match c {
+    let albedo = e.children.iter().find_map(|c| match c {
         sr_model::model::OceanChild::Whitewater(w) if text(w, "foamMode").as_deref() == Some("albedo") => {
             Some((num(w, "foamRadius", spec.cell_size), num(w, "maxWork", 100_000_000.) as u64))
         }
         _ => None,
     });
+    // the coverage is made only where it will be drawn: a water the renderer refuses for the foam (not opaque, unlit, shining) or a scene with
+    // no path-traced camera get the specific error of the renderer and not a failure of the budget of a coverage nobody reads
+    let material = text(e, "material").and_then(|id| p.scene.materials.as_ref()?.materials.iter().find(|m| m.id == id));
+    let takes_foam = material.is_none_or(|m| {
+        sr_model::foam::water_takes_foam(
+            text(m, "alphaMode").as_deref(),
+            text(m, "unlit").as_deref(),
+            text(m, "emissive").as_deref(),
+            text(m, "emissiveStrength").as_deref(),
+        )
+    });
+    let foam_coverage = albedo.filter(|_| takes_foam && any_path_traced_camera(&p.scene.composition));
+    let foam_albedo = albedo.is_some();
     Ok(Runtime {
         solver,
         spec,
@@ -219,6 +242,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         waves,
         whitewater,
         foam_coverage,
+        foam_albedo,
         surface_bytes: bytes("surfaceMemoryMiB", 128.)?,
         last: None,
         colliders,
@@ -293,6 +317,7 @@ impl Sims {
                     waves,
                     whitewater,
                     foam_coverage,
+                    foam_albedo,
                     surface_bytes,
                     last,
                     colliders,
@@ -430,7 +455,7 @@ impl Sims {
                         }
                         key = crate::rng::hash(&[key, radius.to_bits(), foam.time.to_bits()]);
                     }
-                    whitewater::meshes(foam, available, foam_coverage.is_none())?
+                    whitewater::meshes(foam, available, !*foam_albedo)?
                 } else {
                     Default::default()
                 };

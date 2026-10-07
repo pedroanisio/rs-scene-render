@@ -1541,7 +1541,8 @@ combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
 The coverage is made on the CPU for every surface vertex, per frame, and is
 budgeted (the distances against a budget of their own, equal to the whitewater's
 `maxWork` for each frame, that is not shared with the solver's): it counts the distances it will take (every living tracer takes one
-for each vertex of the 3 x 3 squares of side `foamRadius` around it) before
+for each vertex of the 3 x 3 squares around the one it is in, of a grid of squares that are at least
+`foamRadius` a side and at most about as many as there are vertices) before
 taking any, and fails with its cause when they pass the whitewater's `maxWork`;
 and the arrays of the coverage (16 bytes a vertex and 4 for each square of its
 grid, exactly) count in the surface's `surfaceMemoryMiB`.
@@ -1566,7 +1567,8 @@ read (0.0000); at a share of 0 or of 1 it is what it was (0.0101 and 0.0091 agai
 denoiser's mean there is about 5 % under the mean of many samples (0.0946 against 0.0996). The mix is the path tracer's: the raster renderer reports an error for
 a scene with `foamMode="albedo"` instead of drawing no foam, and the water
 needs an opaque alpha mode (also an error otherwise). Three warnings say it before
-a renderer runs: W08 (an unlit or emissive water), W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
+a renderer runs: W08 (a water that is not opaque, is unlit or shines, by the criterion the renderer applies,
+read from the document's attributes at the start: a material attribute that animates is read by the renderer at each frame and not seen by it), W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
 used) and W07 (`foamMode="albedo"` in a scene where no camera has
 `renderer="pathtrace"`); the corpus has a document for each, and the valid
 albedo document has the path-traced camera. A metallic water is covered by foam like any other (the foam sample is a

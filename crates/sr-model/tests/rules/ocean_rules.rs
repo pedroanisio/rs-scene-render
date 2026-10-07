@@ -226,7 +226,7 @@ fn a_foam_material_in_the_albedo_mode_and_albedo_foam_without_a_path_traced_came
 }
 
 #[test]
-fn an_unlit_or_emissive_water_with_albedo_foam_is_warned_about_and_a_lit_one_is_not() {
+fn a_water_that_is_not_opaque_lit_and_dark_with_albedo_foam_is_warned_about_and_a_lit_one_is_not() {
     let scene = |material: &str, foam: &str| {
         format!(
             r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><materials><material id="w" {material}/></materials><composition>{PATH_TRACER}<ocean id="o" material="w"><whitewater {foam}/></ocean></composition></scene>"#
@@ -250,8 +250,15 @@ fn an_unlit_or_emissive_water_with_albedo_foam_is_warned_about_and_a_lit_one_is_
             "{shining}: the particles mode draws the water as it always did"
         );
     }
-    assert!(
-        codes_of(scene(r##"emissive="#FFFFFF" emissiveStrength="0""##, r#"foamMode="albedo""#)).is_empty(),
-        "no strength, no emission"
-    );
+    for none in [
+        r##"emissive="#FFFFFF" emissiveStrength="0""##,
+        r##"emissive="#FFFFFF" emissiveStrength="0.0""##,
+        r##"emissive="#000000" emissiveStrength="2""##,
+    ] {
+        assert!(codes_of(scene(none, r#"foamMode="albedo""#)).is_empty(), "{none}: no light, so no emission");
+    }
+    // a blended or masked water is refused as well, by the same criterion as the renderer's
+    for not_opaque in [r#"alphaMode="blend""#, r#"alphaMode="mask""#] {
+        assert_eq!(codes_of(scene(not_opaque, r#"foamMode="albedo""#)), ["W08"], "{not_opaque}");
+    }
 }

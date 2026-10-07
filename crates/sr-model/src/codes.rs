@@ -58,7 +58,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     (
         "W08",
         "rules",
-        "A whitewater with foamMode=\"albedo\" is in an ocean whose material is unlit or emissive: the foam mix needs a lit material without emission, and a renderer reports an error.",
+        "A whitewater with foamMode=\"albedo\" is in an ocean whose material is not opaque, is unlit or is emissive: the foam mix needs an opaque, lit material without emission, and a renderer reports an error.",
     ),
     (
         "W07",

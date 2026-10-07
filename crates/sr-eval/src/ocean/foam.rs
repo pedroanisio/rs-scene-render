@@ -61,13 +61,18 @@ impl Bins {
         for i in 1..counts.len() {
             counts[i] += counts[i - 1];
         }
-        let mut next = counts.clone();
+        // the vertices are placed with each square's first slot as its cursor, and the array of firsts is shifted back after: no second
+        // array of the squares is held
         let mut indices = vec![0u32; vertices.len()];
         for (i, v) in vertices.iter().enumerate() {
             let q = square(v);
-            indices[next[q] as usize] = i as u32;
-            next[q] += 1;
+            indices[counts[q] as usize] = i as u32;
+            counts[q] += 1;
         }
+        for q in (1..counts.len()).rev() {
+            counts[q] = counts[q - 1];
+        }
+        counts[0] = 0;
         debug_assert!(side >= radius);
         Self { x0, z0, side, nx, nz, starts: counts, indices }
     }
@@ -117,7 +122,13 @@ pub(super) fn coverage_within(
     }
     let bins = Bins::of(vertices, radius, grid);
     let mut bare = vec![1.0f64; vertices.len()];
-    let living = |p: &&Particle| p.kind == Kind::Foam && (0.0..1.0).contains(&((time - p.birth) / p.lifetime));
+    // a tracer at a place that is not a number covers nothing (the solver refuses such a place before it gets here)
+    let living = |p: &&Particle| {
+        p.kind == Kind::Foam
+            && (0.0..1.0).contains(&((time - p.birth) / p.lifetime))
+            && p.position[0].is_finite()
+            && p.position[2].is_finite()
+    };
     let mut work = 0u64;
     for p in particles.iter().filter(living) {
         let (bx, bz) = bins.square_of(p.position[0], p.position[2]);
@@ -320,5 +331,17 @@ mod tests {
         assert!(coverage_within(&vertices, &[], 1.0, 1.0, u64::MAX, needed).is_ok());
         let refused = coverage_within(&vertices, &[], 1.0, 1.0, u64::MAX, needed - 1).unwrap_err();
         assert!(refused.contains("foam coverage") && refused.contains("surfaceMemoryMiB"), "{refused}");
+    }
+
+    #[test]
+    fn a_tracer_at_a_place_that_is_not_a_number_covers_nothing_and_does_not_panic() {
+        let v = grid();
+        let mut tracers = vec![tracer(1, Kind::Foam, 1.0, 1.0, 0.0)];
+        let alone = coverage(&v, &tracers, 0.5, 0.6);
+        for place in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            tracers.push(tracer(2, Kind::Foam, place, 1.0, 0.0));
+            tracers.push(tracer(3, Kind::Foam, 1.0, place, 0.0));
+        }
+        assert_eq!(coverage(&v, &tracers, 0.5, 0.6), alone, "the same coverage as the tracer that has a place");
     }
 }

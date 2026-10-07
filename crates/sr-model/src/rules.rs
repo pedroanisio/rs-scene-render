@@ -1077,8 +1077,8 @@ impl<'a> Eval<'a> {
                     .root_element()
                     .descendants()
                     .any(|c| c.is_element() && is(c, "camera") && c.attribute("renderer") == Some("pathtrace"));
-                // an unlit or emissive water is refused by a renderer (it draws its own colour, and the foam would be in the guide of the
-                // denoiser only): a warning where the document says so
+                // a water that is not opaque, is unlit or shines is refused by a renderer (an unlit one draws its own colour, and the foam would
+                // be in the guide of the denoiser only): a warning where the document says so, by the criterion the renderer applies
                 let ocean_material = a("material").and_then(|id| {
                     n.document()
                         .root_element()
@@ -1087,14 +1087,18 @@ impl<'a> Eval<'a> {
                 });
                 if !albedo.is_empty()
                     && ocean_material.is_some_and(|m| {
-                        matches!(m.attribute("unlit"), Some("true" | "1"))
-                            || (m.attribute("emissive").is_some() && m.attribute("emissiveStrength") != Some("0"))
+                        !crate::foam::water_takes_foam(
+                            m.attribute("alphaMode"),
+                            m.attribute("unlit"),
+                            m.attribute("emissive"),
+                            m.attribute("emissiveStrength"),
+                        )
                     })
                 {
                     self.warn(
                         n,
                         "W08",
-                        "whitewater with foamMode=\"albedo\" needs a lit water material without emission: a renderer reports an error for an unlit or emissive one.".into(),
+                        "whitewater with foamMode=\"albedo\" needs an opaque, lit water material without emission: a renderer reports an error for another (read from the document's attributes at the start: one that animates is read by the renderer at each frame).".into(),
                     );
                 }
                 if !albedo.is_empty() && !path_traced {

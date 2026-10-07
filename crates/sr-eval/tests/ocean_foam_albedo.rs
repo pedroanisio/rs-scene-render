@@ -6,7 +6,7 @@ use sr_sim::ocean::whitewater::Kind;
 /// A basin of 8 x 8 with a wave and an impulse, whose whitewater (many tracers, a low threshold) is `whitewater`.
 fn ocean(whitewater: &str) -> sr_eval::Evaluator {
     let xml = format!(
-        r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="4"/><composition>
+        r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="4"/><composition><camera id="cam" renderer="pathtrace"/>
           <ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="2" dt="0.05">
             <waterImpulse time="0.1" radius="2" amplitude="0.3"/><wave wavelength="4" amplitude="0.2" phase="0"/>
             <whitewater emissionRate="6" threshold="0.2" lifetime="3" seed="5" {whitewater}/>
@@ -92,8 +92,13 @@ fn the_default_coverage_radius_is_one_cell() {
 
 /// A basin of `size` by `size` cells of side 1 whose whitewater is `whitewater`, with the ocean's own attributes `ocean_attrs`.
 fn basin(size: u32, ocean_attrs: &str, whitewater: &str) -> sr_eval::Evaluator {
+    basin_of(size, ocean_attrs, whitewater, "", r#"<camera id="cam" renderer="pathtrace"/>"#)
+}
+
+/// The same basin with `materials` (a whole `<materials>` element or nothing) and `camera` (the elements before the ocean).
+fn basin_of(size: u32, ocean_attrs: &str, whitewater: &str, materials: &str, camera: &str) -> sr_eval::Evaluator {
     let xml = format!(
-        r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="4"/><composition>
+        r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="4"/>{materials}<composition>{camera}
           <ocean id="sea" width="{size}" depth="{size}" cellSize="1" bottomDepth="2" dt="0.1" {ocean_attrs}>
             <waterImpulse time="0.1" radius="3" amplitude="0.3"/>
             <whitewater emissionRate="60" threshold="0.05" lifetime="3" seed="5" {whitewater}/>
@@ -120,4 +125,36 @@ fn the_memory_of_the_coverage_counts_in_the_surface_budget() {
     );
     let (failures, made_albedo) = made(r#"surfaceMemoryMiB="128""#, r#"foamMode="albedo""#);
     assert!(made_albedo, "with room for it: {failures:?}");
+}
+
+#[test]
+fn the_coverage_is_not_made_for_a_water_the_renderer_will_refuse_and_the_foam_is_still_not_drawn_as_triangles() {
+    // 601 x 601 vertices under 108 MiB: the coverage does not fit (see the test above), and nobody will draw it where the water is unlit,
+    // not opaque, shining, or seen by a raster camera: the surface is made without it, and the renderer's own error is the one said
+    let made = |materials: &str, ocean: &str, camera: &str| {
+        let f = basin_of(600, &format!(r#"surfaceMemoryMiB="108" {ocean}"#), r#"foamMode="albedo""#, materials, camera)
+            .evaluate(1.0);
+        let sea = f.nodes.iter().find(|n| &*n.id == "sea").and_then(|n| n.sim_ocean.clone());
+        (f.failures.clone(), sea)
+    };
+    let traced = r#"<camera id="cam" renderer="pathtrace"/>"#;
+    let (failures, lit) =
+        made(r##"<materials><material id="w" baseColor="#102040"/></materials>"##, r#"material="w""#, traced);
+    assert!(
+        lit.is_none() && failures.iter().any(|m| m.contains("foam coverage")),
+        "a lit water has the coverage made: {failures:?}"
+    );
+    for (name, materials, ocean, camera) in [
+        ("unlit", r#"<materials><material id="w" unlit="true"/></materials>"#, r#"material="w""#, traced),
+        ("blended", r#"<materials><material id="w" alphaMode="blend"/></materials>"#, r#"material="w""#, traced),
+        ("emissive", r##"<materials><material id="w" emissive="#FFFFFF"/></materials>"##, r#"material="w""#, traced),
+        ("a raster camera", "", "", r#"<camera id="cam"/>"#),
+        ("no camera", "", "", ""),
+    ] {
+        let (failures, sea) = made(materials, ocean, camera);
+        let sea = sea.unwrap_or_else(|| panic!("{name}: no surface was made: {failures:?}"));
+        assert!(failures.is_empty(), "{name}: {failures:?}");
+        assert!(sea.mesh.vertices.iter().all(|v| v.color == [1.0; 4]), "{name}: no coverage is made");
+        assert!(sea.whitewater_mesh[0].indices.is_empty(), "{name}: the foam is not drawn as triangles either");
+    }
 }
