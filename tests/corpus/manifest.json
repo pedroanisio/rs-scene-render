@@ -1141,6 +1141,9 @@
     ],
     "w08-foam-unlit.scene.xml": [
       "W08"
+    ],
+    "w09-voxel-cells-small.scene.xml": [
+      "W09"
     ]
   }
 }

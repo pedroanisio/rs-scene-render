@@ -483,6 +483,7 @@ WARN_CASES = [
     ("w06-foam-material", ["W06"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('</ocean>', '<whitewater foamMode="albedo" foamMaterial="foam"/></ocean>').replace('<composition>', '<materials><material id="foam"/></materials><composition>')),
     ("w08-foam-unlit", ["W08"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('<ocean id="sea" ', '<ocean id="sea" material="glow" ').replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>').replace('<composition>', '<materials><material id="glow" unlit="true"/></materials><composition>')),
     ("w07-foam-raster", ["W07"], lambda _: OCEAN.replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>')),
+    ("w09-voxel-cells-small", ["W09"], lambda _: VOXELS.replace('cellSize="2"', 'cellSize="0.25"', 1)),
     ("w03-no-lens", ["W03"], lambda _: BLACKHOLE.replace(' geodesics="true"', '')),
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]

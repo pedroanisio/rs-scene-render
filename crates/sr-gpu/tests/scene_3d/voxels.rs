@@ -266,3 +266,63 @@ fn a_closed_voxel_body_has_no_cracks_between_its_merged_quads_at_any_pose_in_eit
     }
     assert_eq!(worst, 0, "a crack shows the background through the closed body");
 }
+
+// -------------------------------------------------------------------------------------------------------------- cellSize
+
+/// The picture of a block of 4 cells lit from above by a sun that casts shadows, with cells of `size` scene units and the camera
+/// moved in proportion: the same picture if the shading did not depend on the scale.
+fn scaled_block(gpu: &sr_gpu::Gpu, file: &Path, size: f32, camera: &str, shadows: bool) -> Shot {
+    let d = 40.0 * size;
+    let xml = format!(
+        r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#202020"/><assets><voxelAsset id="model" src="{}"/></assets><composition><camera id="cam" x="0" y="{}" z="{}" target="mid" fov="30" {camera}/><object3D id="obj" primitive="voxels" voxels="model" cellSize="{size}" x="{}" y="{}" z="{}"/><object3D id="ground" primitive="plane" width="{ground}" height="{ground}" y="{floor}" rotationX="-90" castShadow="false"/><object3D id="mid" primitive="box" width="0.1" height="0.1" depth="0.1" visible="false"/></composition><lights><light id="sun" type="directional" intensity="3" castShadow="{shadows}" yaw="90" pitch="-50"/><light id="fill" type="ambient" intensity="0.3"/></lights></scene>"##,
+        file.display(),
+        -0.5 * d,
+        -0.87 * d,
+        -2.0 * size,
+        -2.0 * size,
+        -2.0 * size,
+        ground = 40.0 * size,
+        floor = 2.0 * size,
+    );
+    render(gpu, &xml)
+}
+
+#[test]
+fn the_shadow_of_a_block_is_the_same_whatever_the_size_of_its_cells_down_to_the_sizes_the_srep_states() {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("scaled.vox", &block(4, 1), &[RED]);
+    for (renderer, camera) in
+        [("raster", ""), ("path tracer", r#"renderer="pathtrace" pathSamples="16" maxBounces="2""#)]
+    {
+        // a block of 4 cells on a floor under a sun that casts shadows, the camera and the floor moved in proportion: the same picture
+        // whatever the size of a cell, if the shadows (their offsets and biases) scale with the scene
+        let reference = scaled_block(&gpu, &file, 1.0, camera, true);
+        let unshadowed = scaled_block(&gpu, &file, 1.0, camera, false);
+        let differ =
+            |a: &Shot, b: &Shot| a.pixels.iter().zip(&b.pixels).filter(|(x, y)| (x[0] - y[0]).abs() > 0.02).count();
+        let shadow = differ(&reference, &unshadowed);
+        assert!(shadow > 40, "{renderer}: the picture has a shadow in it ({shadow} pixels differ without it)");
+        let mut by_size = Vec::new();
+        for size in [4.0f32, 2.0, 0.5, 0.25, 0.1, 0.05, 0.02] {
+            let shot = scaled_block(&gpu, &file, size, camera, true);
+            assert!(shot.errors.is_empty(), "{:?}", shot.errors);
+            by_size.push((size, differ(&shot, &reference)));
+        }
+        println!("{renderer}: pixels that differ from the picture of cells of 1, by cell size, of {shadow} that are the shadow's: {by_size:?}");
+        // above a unit nothing changes; below it the raster renderer's shadow loses its offsets (the SREP says from which size, and why
+        // the path tracer's holds longer); these are the measured limits: a fix that scales them with the scene fails the last two
+        for (size, diff) in &by_size {
+            match (renderer, *size) {
+                // the shadow map's texels follow the size of the scene, so the raster edge moves by a few pixels (6 measured at 4)
+                ("raster", s) if s >= 2.0 => assert!(*diff <= 8, "{renderer}: {diff} pixels differ at {s}"),
+                ("raster", s) if s >= 0.5 => assert!(*diff <= 12, "{renderer}: {diff} pixels differ at {s}"),
+                (_, s) if s >= 2.0 => assert!(*diff <= 2, "{renderer}: {diff} pixels differ at {s}"),
+                ("raster", s) if s <= 0.1 => {
+                    assert!(*diff >= shadow * 9 / 10, "{renderer}: the shadow is gone at {s}: {diff} of {shadow}")
+                }
+                ("path tracer", s) if s >= 0.25 => assert!(*diff <= 4, "{renderer}: {diff} pixels differ at {s}"),
+                _ => {}
+            }
+        }
+    }
+}

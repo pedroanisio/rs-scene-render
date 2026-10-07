@@ -1500,6 +1500,15 @@ impl<'a> Eval<'a> {
                     "VOX5",
                     || "voxels, cellSize, palette, surface and surfaceMemoryMiB belong to primitive=\"voxels\".".into(),
                 );
+                // measured: the raster renderer's shadow of a block of cells of 0.25 differs in 23 pixels of 51 from that of cells of 1, and is
+                // gone at 0.1 (its offsets and biases do not follow the size of the cells); from 0.5 up the difference is that of a unit
+                if voxels && a("cellSize").map(xpath_number).is_some_and(|c| c < 0.5) {
+                    self.warn(
+                        n,
+                        "W09",
+                        "a voxels object with cellSize below 0.5 casts a raster shadow that is displaced or lost (the path tracer's holds down to 0.05): make the cells 0.5 or larger and scale the object.".into(),
+                    );
+                }
                 let palette_ok = a("palette").is_none_or(|p| {
                     let tokens: Vec<&str> = p.split_whitespace().collect();
                     p.trim() == "file"

@@ -96,3 +96,17 @@ fn the_surface_memory_of_a_voxels_object_is_a_whole_number_of_mib_from_1_to_4096
     }
     assert!(codes_of(FILE, r#"primitive="box" surfaceMemoryMiB="64""#).contains(&"VOX5".into()));
 }
+
+#[test]
+fn a_voxels_object_with_cells_smaller_than_half_a_unit_has_a_warning_because_the_raster_shadow_does_not_scale() {
+    let warned = |size: &str| {
+        codes(&scene(FILE, &format!(r#"primitive="voxels" voxels="model" cellSize="{size}""#))).contains(&"W09".into())
+    };
+    for small in ["0.49", "0.25", "0.1", "0.02"] {
+        assert!(warned(small), "{small}");
+    }
+    for fine in ["0.5", "1", "2", "10"] {
+        assert!(!warned(fine), "{fine}");
+    }
+    assert!(!codes(&scene(FILE, r#"primitive="voxels" voxels="model""#)).contains(&"W09".into()), "the default is 1");
+}

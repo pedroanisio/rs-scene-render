@@ -65,6 +65,11 @@ const FIXED: &[(&str, &str, &str)] = &[
         "rules",
         "A whitewater with foamMode=\"albedo\" is in a scene where no camera has renderer=\"pathtrace\": the mix is the path tracer's, and the raster renderer reports an error.",
     ),
+    (
+        "W09",
+        "rules",
+        "An object3D of primitive=\"voxels\" has a cellSize below 0.5: the shadow the raster renderer casts from such small cells is displaced or lost (measured: 23 of 51 pixels differ at 0.25, all at 0.1 and below); the path tracer's holds down to 0.05.",
+    ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),
     ("A03", "assets", "A remote input (http, https, s3, …) could not be verified offline."),

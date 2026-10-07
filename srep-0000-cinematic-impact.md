@@ -3197,6 +3197,13 @@ The surface is made once for a grid, a palette and its materials and kept betwee
 no crack shows at that size. The probe says nothing of larger pictures or of bodies with larger flat faces, where a sub-pixel gap between the edges of
 two quads is more likely; the surface is not conformed (no vertex is added on the longer edge).
 
+**Small cells (W09).** A block of 4 cells on a floor under a sun that casts shadows, with the camera and the floor moved in proportion to the cell size, is
+the same picture at any size if the shadow scales with the scene. Measured against the picture of cells of 1 (the shadow is 51 pixels in the raster renderer and 61
+in the path tracer): the raster picture differs by 6, 5, 9, 23 and 51 pixels at cells of 4, 2, 0.5, 0.25 and 0.1 (and 51 at 0.05 and 0.02, where the shadow is gone), because
+the offsets and biases of its shadow map are fixed in the units of the scene; the path tracer differs by 0, 0, 0, 2, 5, 5 and 12 pixels at 4, 2, 0.5, 0.25, 0.1, 0.05 and
+0.02. A voxels object with `cellSize` below 0.5 has the warning W09 (the point from which the raster difference is more than a unit's of noise); the remedy is larger cells
+and an object scaled down, which gives the same picture. The measurement is one scene and one sun angle.
+
 **Measured cost** (`crates/sr-3d/examples/voxel_surface_probe.rs`, `ci` profile, one core of the host, the CPU side only: the exposed faces, their merge
 into quads and the expansion into 96-byte vertices; the upload and the draw are not in it):
 
