@@ -17,7 +17,7 @@ mod fracture;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
-use voxel_mass::{sum_mass_properties, voxel_mass_properties};
+use voxel_mass::{mesh_mass_properties, sum_mass_properties, voxel_mass_properties};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
@@ -211,6 +211,11 @@ pub trait Driver3 {
     /// (`revision`, none before the first cut), or `None` if nothing is new: cells that are gone and parts that separate into the slots
     /// reserved for them. `impact` is the first impact the world has noticed on it. It must depend only on its arguments and on records
     /// that no longer change, so that a world restored to a checkpoint finds the same cut at the same step. The default cuts nothing.
+    ///
+    /// The revision of a cut is a function of the time: the driver gives one revision at one instant, so that asking again finds it installed
+    /// and returns `None` (or the same revision, which the world skips). A driver that gives a new revision for cells it has already destroyed is
+    /// refused with an error that names the cell, the same one however the frame is asked. The world asks twice a step (at its start and for the
+    /// frame's own time) and clones the slots of each split to do it, so the cost of a step grows with the slots reserved.
     fn voxel_cut(
         &mut self,
         _t: f64,
@@ -1245,6 +1250,10 @@ impl World3 {
         for (_, collider) in st.colliders.iter() {
             bytes = bytes.saturating_add(shape_charge(collider.shape()));
         }
+        // the cells the state keeps of every body that can be cut: twelve bytes a cell, and every cut makes a copy of its own
+        for cells in st.voxel_cells.iter().flatten() {
+            bytes = bytes.saturating_add(cells.len().saturating_mul(std::mem::size_of::<[i32; 3]>()));
+        }
         for pair in st.narrow.contact_pairs() {
             bytes = bytes.saturating_add(4096);
             for manifold in pair.manifolds() {
@@ -1301,6 +1310,13 @@ impl World3 {
                 // A fragment keeps its inherited motion when a visibility
                 // window reopens; its authored placeholder pose is never used.
                 if self.fragment_owners[k].is_some() || self.slot_owners[k].is_some() {
+                    // its collider was left disabled by the body that was: switched off and on it counts again in the body's mass at once, so
+                    // the first step the piece is shown has its mass and its centre of mass and not an empty body at the origin
+                    for &c in body.colliders() {
+                        self.state.colliders[c].set_enabled(false);
+                        self.state.colliders[c].set_enabled(true);
+                    }
+                    body.recompute_mass_properties_from_colliders(&self.state.colliders);
                     body.wake_up(true);
                     continue;
                 }
@@ -1442,9 +1458,13 @@ impl World3 {
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
         // the loads first: a step that cannot get one is not taken, and nothing has changed
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
-        // the cuts of this step come before the loads, as they do in a frame asked for at this instant (whose tail applies them): a driver that reads
-        // the state of a body to load it finds the same body however the step is reached. They are applied again after the visibility and the fractures
-        // (idempotent: what is installed is not installed twice), for a body that those have just brought in.
+        // what a frame asked for at this instant has (its tail: the visibility, the fractures and the cuts, in that order) comes before the loads, so that a
+        // driver that reads a body to load it finds the same body however the step is reached: after the world has been asked for the frame at this
+        // instant, or by stepping straight through to it. They are applied again below, as they always were (each is idempotent: what is installed,
+        // shown or fired is not again), for what the loads or the others have changed. The colliders of the static and kinematic bodies are not
+        // among them: they are asked at the end of the step (the contract of `Driver3::surface`), and a load reads dynamic bodies only.
+        self.sync_visibility(t, driver);
+        self.apply_fractures(t, driver)?;
         self.apply_voxel_cuts(self.state.step, t, driver)?;
         let mut loads = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {

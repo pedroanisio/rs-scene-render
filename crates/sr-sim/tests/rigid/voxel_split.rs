@@ -354,6 +354,37 @@ fn a_body_of_cells_is_charged_to_the_checkpoints_by_its_cells() {
 }
 
 #[test]
+fn a_registered_parent_is_charged_to_the_checkpoints_for_the_cells_the_state_keeps_of_it_too() {
+    // the state keeps the cells of every body that can be cut (twelve bytes a cell, a new copy for every cut) on top of the shape (about two): a
+    // checkpoint of a registered parent is charged for both
+    let bytes = |n: i32| {
+        let cells = cells_of(0..n, 0..20, 0..10);
+        let w = World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![
+                body(Shape3::Voxels { size: SIZE, cells }, 1000.0, BodyKind::Dynamic),
+                body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+            ],
+        });
+        let mut w = w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }]).unwrap();
+        let frame = w.frame_at(3.5, &mut Cutter::new(99.0));
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        (w.checkpoint_bytes(), w.progress().1)
+    };
+    let ((small, kept), (big, kept_big)) = (bytes(2), bytes(120));
+    assert_eq!(kept, kept_big);
+    let taken = kept - 1;
+    assert!(big - small >= taken * 14 * (24_000 - 400), "{} against {}", big - small, taken * 14 * 23_600);
+}
+
+#[test]
 fn a_split_that_names_a_body_that_is_not_made_of_cells_is_refused() {
     let w = World3::new(World3Spec {
         fix_internal_edges: false,
@@ -1279,6 +1310,50 @@ fn a_parent_with_no_cells_or_no_size_is_refused_at_registration() {
     );
 }
 
+/// A driver that breaks the contract of `voxel_cut`: its revision is not a function of the time but counts how often it has been asked, so that the
+/// cut it gives at one instant is a new one every time, and takes the cells it took before.
+struct Counting;
+
+impl Driver3 for Counting {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn voxel_cut(
+        &mut self,
+        _: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        if parent != 0 {
+            return Ok(None);
+        }
+        Ok(Some(VoxelCut3 {
+            revision: revision.map_or(1, |r| r + 1),
+            destroyed: cells_of(5..6, 0..2, 0..2),
+            parent_mass: 44.0 * CELL_MASS,
+            pieces: vec![],
+        }))
+    }
+}
+
+#[test]
+fn a_driver_whose_revision_is_not_a_function_of_the_time_gets_the_same_error_however_the_frame_is_asked() {
+    // the contract: at one instant the driver gives one revision, so that asking again finds it installed. One that gives a new revision with the
+    // cells it destroyed before is refused for taking cells the body has not, in a fresh world and in one asked twice, and never half installs it
+    let mut fresh = world(1, None);
+    let first = fresh.frame_at(0.05, &mut Counting);
+    assert!(first.errors.iter().any(|e| e.contains("has not")), "{:?}", first.errors);
+    let mut twice = world(1, None);
+    twice.frame_at(0.02, &mut Counting);
+    let second = twice.frame_at(0.05, &mut Counting);
+    assert_eq!(first.errors, second.errors);
+    assert_eq!(first, twice.frame_at(0.05, &mut Counting));
+}
+
 /// A driver whose cut is a function of the impact that the world noticed: a slice of the floor through the impact point is destroyed and the part of
 /// the floor beyond it comes away as a piece.
 struct Undermine;
@@ -1357,6 +1432,126 @@ fn a_cut_that_is_a_function_of_the_impact_the_world_noticed_is_the_same_however_
     let steps: Vec<u64> = (first - 2..=first + 3).collect();
     let wanted = the_same_four_ways(&floor_and_ball, &|| Undermine, &steps);
     assert!(!wanted[0].enabled[2] && wanted[5].enabled[2]);
-    // and the piece falls: its height after the cut is below where it started
-    assert!(wanted[5].velocities[2].linear[1] > 0.0 || wanted[5].bodies[2].pos[1] != 0.0, "the piece is moving");
+    // and the piece falls under gravity from rest (the floor was static; scene y points down): three steps after the first with it, its speed is g
+    // times the steps it has been free, three of 0.01 s (0.2942) and in any case between two and three
+    let vy = wanted[5].velocities[2].linear[1];
+    assert!((0.2..=0.31).contains(&vy), "the piece falls: {vy}");
+}
+
+/// A driver that cuts as a [`Script`] does for a body that does not exist until `born`: it is hidden before, and when it comes in it takes the pose
+/// that the driver gives it then (which is not the one it was authored at) and loads itself by where its centre of mass is.
+struct Born {
+    script: Script,
+    born: f64,
+}
+
+impl Driver3 for Born {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        which.iter().map(|_| Pose3 { pos: [2.0, -1.5, 0.5], rot: [0.0, 0.0, 0.0, 1.0] }).collect()
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.script.fields(t)
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        which != 0 || t + 1e-9 >= self.born
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.script.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, _: u64, _: f64, _: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        let c = state.centre;
+        Ok(Some(Load3 {
+            force: [3.0 * c[1], -2.0 * c[0], 5.0 * c[2]],
+            torque: [7.0 * c[0], 11.0 * c[2], -13.0 * c[1]],
+        }))
+    }
+}
+
+#[test]
+fn a_body_born_and_cut_at_the_same_step_gives_pieces_of_the_same_pose_and_loads_however_the_step_is_reached() {
+    // the bar comes into the world at 1.5 s, with the pose that the driver gives it then, and is cut at the same instant: the pieces start where the
+    // bar is born, not where it was authored, and the loads of the step read the bar as it is born, whichever way the step is reached
+    let steps: Vec<u64> = (147..=153).collect();
+    let wanted = the_same_four_ways(
+        &|frames| world_logging(2, None, frames),
+        &|| Born { script: Script { cuts: vec![first_cut(1.5)] }, born: 1.5 },
+        &steps,
+    );
+    // before it is born only the slots exist... and none takes part; at the step it is born the bar and its piece do, at the birth pose
+    assert_eq!(wanted[2].enabled, vec![false, false, false], "step 149: nothing yet");
+    assert_eq!(wanted[3].enabled, vec![true, true, false], "step 150: born and cut");
+    for k in 0..2 {
+        for (axis, want) in [2.0, -1.5, 0.5].into_iter().enumerate() {
+            assert!(
+                (wanted[3].bodies[k].pos[axis] - want).abs() < 1e-9,
+                "body {k} is at {:?}, the birth pose",
+                wanted[3].bodies[k].pos
+            );
+        }
+    }
+}
+
+/// A driver that cuts as a [`Cutter`] does, hides body 1 (the first slot) until `shown`, and remembers the state of every body at every load.
+struct Hidden {
+    inner: Cutter,
+    shown: f64,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Driver3 for Hidden {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.inner.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.inner.fields(t)
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        which != 1 || t + 1e-9 >= self.shown
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.inner.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_piece_cut_while_hidden_is_a_body_with_its_own_centre_of_mass_at_the_first_step_it_is_shown() {
+    // the cut is at 0.2 s and the slot is hidden until 0.5 s: when the driver shows it, nothing in the pipeline has run since, and the first question
+    // about it (the load of the step) has to find the piece and not an empty body
+    let mut w = world(2, None);
+    let mut d = Hidden { inner: Cutter::new(0.2), shown: 0.5, seen: vec![vec![]; 3] };
+    let frame = w.frame_at(0.6, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let first = d.seen[1].iter().find(|(_, state)| state.enabled).expect("the piece was asked about once shown").1;
+    let wanted = shape_mass_properties(
+        &Shape3::Voxels { size: SIZE, cells: cells_of(6..12, 0..2, 0..2) },
+        24.0 * CELL_MASS,
+        1.0,
+    )
+    .unwrap()
+    .centre;
+    let local = local_centre(&first.pose, first.centre);
+    for k in 0..3 {
+        assert!(
+            (local[k] - wanted[k]).abs() < 1e-9,
+            "axis {k}: the centre of mass of the piece when first shown is {} and its cells' is {}",
+            local[k],
+            wanted[k]
+        );
+    }
 }

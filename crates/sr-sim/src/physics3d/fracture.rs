@@ -99,11 +99,9 @@ impl World3 {
                 combined.push(props.transform_by(&pose));
                 properties.push((p.body, props));
             }
-            // the sum of the fragments' tensors: for fragments that are bodies of cells it is worked out exactly (Parry's Sum diagonalises with the
-            // solver whose mistake voxel_mass works around, and would give the source a tensor that is not its cells'); for any other, as it always was
-            let all_cells = e.fragments.iter().all(|p| matches!(self.spec.bodies[p.body].shape, Shape3::Voxels { .. }));
-            let total: MassProperties =
-                if all_cells { sum_mass_properties(&combined) } else { combined.into_iter().sum() };
+            // the sum of the fragments' tensors, worked out exactly (Parry's Sum diagonalises with the solver whose mistake voxel_mass works around: for
+            // a sum that is diagonal with a repeated smallest moment it would give the source another body's tensor)
+            let total: MassProperties = sum_mass_properties(&combined);
             valid_properties(&total)?;
             if !source_mass.is_finite() || source_mass <= 0. || (total.mass() / source_mass - 1.).abs() > 1e-9 {
                 return Err(FractureError("fragment masses must conserve source mass"));
@@ -147,7 +145,8 @@ impl World3 {
                 }
                 let points: Vec<_> =
                     vertices.iter().map(|v| vec3(flip(*v).map(|x| x / self.spec.pixels_per_meter))).collect();
-                MassProperties::from_trimesh(1., &points, indices)
+                // the closed mesh's own properties, worked out exactly (Parry's from_trimesh diagonalises with the solver that mistakes the axes of a plate)
+                mesh_mass_properties(&points, indices, spec.mass).ok_or(FractureError("fragment mesh has no volume"))?
             }
             _ => self.state.colliders[body.colliders()[0]].mass_properties(),
         };
