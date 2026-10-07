@@ -678,15 +678,15 @@ mod tests {
         // water, the hook only for foam
         assert_eq!(variant_source(&plain, false, false), plain);
         let foam_only = variant_source(&plain, false, true);
-        assert!(foam_only.contains("rnd() < foam") && !foam_only.contains("fn light_through("));
+        assert!(foam_only.contains("pick < foam") && !foam_only.contains("fn light_through("));
         let water_only = variant_source(&plain, true, false);
-        assert!(water_only.contains("fn light_through(") && !water_only.contains("rnd() < foam"));
+        assert!(water_only.contains("fn light_through(") && !water_only.contains("pick < foam"));
         assert!(
             water_only.contains("override FOAM: bool = false;"),
             "the water shader declares the override the constant sets"
         );
         let both = variant_source(&plain, true, true);
-        assert!(both.contains("fn light_through(") && both.contains("rnd() < foam"));
+        assert!(both.contains("fn light_through(") && both.contains("pick < foam"));
         assert!(
             !foam_only.contains("override FOAM"),
             "the foam-only shader has no override: a constant for it would be an error"
@@ -701,10 +701,11 @@ mod tests {
             include_str!("pathtrace.wgsl"),
             include_str!("volume.wgsl")
         );
-        assert!(!plain.contains("rnd() < foam"), "scenes without foam keep their shader text");
+        assert!(!plain.contains("foam_u"), "scenes without foam keep their shader text");
         for base in [plain.clone(), grid_source(), water_source(&plain)] {
             let foamy = foam_source(&base);
-            assert!(foamy.contains("var s = surf_of(m);") && foamy.contains("if (foam > 0.0 && rnd() < foam) {"));
+            assert!(foamy.contains("var s = surf_of(m);") && foamy.contains("if (pick < foam) {"));
+            assert!(foamy.contains("foam_u = fract("), "the stratified number is set for every sample");
             assert!(foamy.contains("guide_albedo = mix(guide_albedo"), "the denoiser's guide is the mean albedo");
             // the light that gets through keeps the water's tint: the foam sample is the one that lets nothing through
             assert!(foamy.contains("s.trans = 0.0;") && !foamy.contains("s.albedo = mix("));
@@ -1049,33 +1050,49 @@ fn water_source(base: &str) -> String {
 /// (and then the light that gets through keeps the water's tint), so the picture is the mean of the two, weighted by the share. The
 /// albedo guide of the denoiser takes the mean albedo. Scenes without such a surface keep the text, and so the compiled code, they had.
 fn foam_source(base: &str) -> String {
+    const TRACE: &str = "        rng = pcg(global_pix * 9781u + pcg(si * 6271u + 1u));\n";
     const GUIDE: &str = "            guide[pix * 2u] += vec4(m.base.rgb, 1.0);\n";
     const SURFACE: &str = "        let s = surf_of(m);\n";
-    for hook in [GUIDE, SURFACE] {
+    for hook in [TRACE, GUIDE, SURFACE] {
         assert_eq!(base.matches(hook).count(), 1, "one place hooks in the foam: {hook}");
     }
-    base.replace(
-        GUIDE,
-        "            var guide_albedo = m.base.rgb;\n\
-         \x20           if (m.extra.w > 0.5) { guide_albedo = mix(guide_albedo, vec3(m.attenuation.w), clamp(color.a, 0.0, 1.0)); }\n\
-         \x20           guide[pix * 2u] += vec4(guide_albedo, 1.0);\n",
-    )
-    .replace(
-        SURFACE,
-        "        var s = surf_of(m);\n\
-         \x20       if (m.extra.w > 0.5) {\n\
-         \x20           let foam = clamp(color.a, 0.0, 1.0);\n\
-         \x20           if (foam > 0.0 && rnd() < foam) {\n\
-         \x20               let r0 = (s.ior - 1.0) / (s.ior + 1.0);\n\
-         \x20               s.albedo = vec3(m.attenuation.w);\n\
-         \x20               s.metallic = 0.0;\n\
-         \x20               s.a = max((m.extra.w - 1.0) * (m.extra.w - 1.0), 1e-3);\n\
-         \x20               s.trans = 0.0;\n\
-         \x20               s.f0 = vec3(r0 * r0);\n\
-         \x20               s.specw = clamp(m.extra.x, 0.0, 1.0);\n\
-         \x20           }\n\
-         \x20       }\n",
-    )
+    let hooked = base
+        // the number that picks the lobe at the first hit of a sample: a sequence with a random offset for each pixel (a hash of it, so
+        // that neighbours are not correlated), so the samples of a pixel are spread over the share instead of being drawn
+        .replace(
+            TRACE,
+            &format!(
+                "{TRACE}        foam_u = fract(f32(pcg(global_pix * 2654435761u + 40503u)) * (1.0 / 4294967296.0) + f32(si) * 0.6180339887);\n"
+            ),
+        )
+        .replace(
+            GUIDE,
+            "            var guide_albedo = m.base.rgb;\n\
+             \x20           if (m.extra.w > 0.5) { guide_albedo = mix(guide_albedo, vec3(m.attenuation.w), clamp(color.a, 0.0, 1.0)); }\n\
+             \x20           guide[pix * 2u] += vec4(guide_albedo, 1.0);\n",
+        )
+        .replace(
+            SURFACE,
+            "        var s = surf_of(m);\n\
+             \x20       if (m.extra.w > 0.5) {\n\
+             \x20           let foam = clamp(color.a, 0.0, 1.0);\n\
+             \x20           if (foam > 0.0) {\n\
+             \x20               // the first hit of a sample takes the stratified number, the later ones a random one\n\
+             \x20               var pick = foam_u;\n\
+             \x20               if (met != 1u || !first) { pick = rnd(); }\n\
+             \x20               if (pick < foam) {\n\
+             \x20                   let r0 = (s.ior - 1.0) / (s.ior + 1.0);\n\
+             \x20                   s.albedo = vec3(m.attenuation.w);\n\
+             \x20                   s.metallic = 0.0;\n\
+             \x20                   s.a = max((m.extra.w - 1.0) * (m.extra.w - 1.0), 1e-3);\n\
+             \x20                   s.trans = 0.0;\n\
+             \x20                   s.f0 = vec3(r0 * r0);\n\
+             \x20                   s.specw = clamp(m.extra.x, 0.0, 1.0);\n\
+             \x20               }\n\
+             \x20           }\n\
+             \x20       }\n",
+        );
+    format!("var<private> foam_u: f32 = 0.0;\n{hooked}")
 }
 
 /// The variant of the trace shader the materials of a scene need beyond the plain one: `(water, foam)`, where `water` is a
