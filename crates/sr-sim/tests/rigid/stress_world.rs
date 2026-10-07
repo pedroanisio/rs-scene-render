@@ -984,3 +984,78 @@ fn a_block_at_rest_on_the_four_corners_that_the_solver_gives_it_reads_the_bendin
     let top = w.stress_levels(0).iter().map(|(_, v)| *v).fold(0.0, f64::max);
     assert!((top / bending - 1.0).abs() < 0.03, "{top} against {bending}");
 }
+
+/// A bar of four cubes of 0.25 m on a floor, sliding along x at `speed` m/s, with the friction of `friction`, registered with a strength that nothing reaches.
+pub fn sliding_bar(speed: f64, friction: f64) -> World3 {
+    let (n, edge) = (4usize, 0.25f64);
+    let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
+    let mass = DENSITY * edge.powi(3);
+    let size = [edge; 3];
+    let mut bar = body(Shape3::Voxels { size, cells }, mass * n as f64, [0.0, -edge, 0.0]);
+    bar.velocity = [speed, 0.0, 0.0];
+    bar.friction = friction;
+    let mut bodies = vec![bar];
+    for _ in 1..n {
+        bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0; 3]));
+    }
+    let pieces: Vec<StressPiece3> =
+        (0..n as i32).map(|i| StressPiece3::from_cells(&[[i, 0, 0]], size, mass).unwrap()).collect();
+    let joints: Vec<StressJoint3> = (0..n as u32 - 1).map(|i| row_joint(i, edge)).collect();
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::Floor { y: 0.0 },
+        joints: vec![],
+        bodies,
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..n).collect() }])
+    .unwrap()
+    .with_stress(vec![Stress3 { parent: 0, strength: 1e15, pieces, joints, min_cells: 1, overflow_to_dust: false }])
+    .unwrap()
+}
+
+#[test]
+fn a_bar_that_slides_on_a_floor_has_contact_impulses_that_sum_to_the_momentum_it_changes() {
+    let mass = DENSITY * 0.25f64.powi(3) * 4.0;
+    let mut w = sliding_bar(3.0, 0.5);
+    let mut slid = 0;
+    for step in 1..=60u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let Some(balance) = w.stress_balance(0) else { continue };
+        let speed = frame.velocities[0].linear[0];
+        if speed < 1.0 {
+            continue;
+        }
+        slid += 1;
+        let weight = mass * G / 240.0;
+        // the vertical: the weight and the normal impulses (whose sum is the step's total, whatever the number of sub-steps) leave nothing; across the sliding, nothing is left
+        assert!(balance.force[1].abs() < 1e-6 * weight, "step {step}: vertical {} of {weight}", balance.force[1]);
+        assert!(balance.force[2].abs() < 1e-6 * weight, "step {step}: across {} of {weight}", balance.force[2]);
+        // along it, the friction takes what the body loses, mu m g dt, and the last sub-step's friction is 1/8 of the step's when it is steady
+        assert!(balance.force[0].abs() < 1e-6 * weight, "step {step}: along {} of {weight}", balance.force[0]);
+        assert!(
+            (balance.friction_scale / 8.0 - 1.0).abs() < 0.02,
+            "step {step}: the friction of the step is {} times the last sub-step's",
+            balance.friction_scale
+        );
+        // and the moment: the friction (at the base, 0.125 m under the centre of mass: 0.5 * 6.13 * 0.125 = 0.38 N m s) and the normal impulses, at the points of the body that
+        // they act on (not the middle of the two surfaces, which comes apart by what the contact slides: that left a fifth of the friction's moment), leave a thousandth of it
+        let friction_moment = 0.5 * weight * 0.125;
+        assert!(
+            balance.moment[0].abs() < 1e-5 * weight && balance.moment[1].abs() < 1e-5 * weight,
+            "step {step}: moment {:?}",
+            balance.moment
+        );
+        assert!(
+            balance.moment[2].abs() < 1e-3 * friction_moment,
+            "step {step}: moment {:?} of {friction_moment}",
+            balance.moment
+        );
+    }
+    assert!(slid > 20, "{slid} steps of sliding");
+}

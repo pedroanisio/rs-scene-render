@@ -167,6 +167,15 @@ fn fingerprint(held: &[u32], broken: &[bool]) -> u64 {
     h
 }
 
+/// What the last step left unexplained in a body that breaks by stress: the impulse (newton seconds) and the moment about the centre of mass that the balance of the whole body
+/// leaves after the weight, the fields and the contacts, and the scale by which the friction of the last sub-step was taken to the step's. For a test or a probe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StressBalance {
+    pub force: [f64; 3],
+    pub moment: [f64; 3],
+    pub friction_scale: f64,
+}
+
 /// What a break of joints does to the body that has them, ready to install.
 pub(super) struct StressInstall {
     /// The cut that separates the pieces, none if the joints that broke leave the body in one piece.
@@ -342,6 +351,12 @@ impl World3 {
         self.stress_levels.get(body).map_or(&[], Vec::as_slice)
     }
 
+    /// What the last step left unexplained in the body `body`, if the stress was read on it ([`StressBalance`]).
+    #[doc(hidden)]
+    pub fn stress_balance(&self, body: usize) -> Option<StressBalance> {
+        self.stress_balance.get(body).copied().flatten()
+    }
+
     /// The split whose slots take the pieces of the family `family`.
     pub(super) fn stress_split(&self, family: usize) -> usize {
         self.stresses[family].split
@@ -388,11 +403,20 @@ impl World3 {
         }
     }
 
-    /// The contacts on the body `k` in the step that was just solved, with the impulse that each put on it over the step.
-    fn stress_contacts(&self, k: usize, after: &Rigid, family: &StressFamily, held: &[u32]) -> Vec<Located> {
+    /// The contacts on the body `k` in the step that was just solved. The normal impulses are the step's totals, point by point, on the piece that each is on. The friction is
+    /// one tangent impulse for each manifold (the world's friction model, the solver's simplified one, solves a single friction constraint for the whole manifold, at its middle)
+    /// and the solver gives only the vector of its last sub-step, so it is returned as that, at the middle of the manifold's loaded points, for the caller to scale to the step's
+    /// total. The twist of the manifold (a torque about its normal) is not given and is not read.
+    fn stress_contacts(
+        &self,
+        k: usize,
+        after: &Rigid,
+        family: &StressFamily,
+        held: &[u32],
+    ) -> (Vec<Located>, Vec<Located>) {
         let st = &self.state;
         let handle = st.handles[k];
-        let mut out = Vec::new();
+        let (mut normal_loads, mut friction_loads) = (Vec::new(), Vec::new());
         for pair in st.narrow.contact_pairs() {
             let (c1, c2) = (&st.colliders[pair.collider1], &st.colliders[pair.collider2]);
             if c1.is_sensor() || c2.is_sensor() {
@@ -406,39 +430,57 @@ impl World3 {
             let (Some(b1), Some(b2)) = (st.bodies.get(h1), st.bodies.get(h2)) else { continue };
             let (pose1, pose2) = (*b1.position() * lever(c1), *b2.position() * lever(c2));
             let mine_first = h1 == handle;
+            let side = if mine_first { -1.0 } else { 1.0 };
             for manifold in pair.solver_manifolds() {
+                let normal = manifold.data.normal;
+                // into the body: against the normal for the first body, with it for the second, in the body's frame
+                let inward = after.local_vector([side * normal.x, side * normal.y, side * normal.z]);
+                // the loaded points of the manifold, each on a material point of the body (not the middle of the two surfaces: they come apart by what the contact slides between
+                // the solver's updates of it)
+                let mut loaded: Vec<([f64; 3], [f64; 3])> = Vec::new();
                 for contact in &manifold.points {
-                    let normal = manifold.data.normal;
                     // the force that the contact puts on the first body is along -normal (it is pushed away from the second), and on the second along +normal
-                    let along = contact.data.impulse * if mine_first { -1.0 } else { 1.0 };
-                    let friction = contact.data.warmstart_tangent_world * if mine_first { -1.0 } else { 1.0 };
-                    let impulse =
-                        [normal.x * along + friction.x, normal.y * along + friction.y, normal.z * along + friction.z];
-                    if impulse.iter().all(|v| *v == 0.0) {
+                    let along = contact.data.impulse * side;
+                    if along == 0.0 {
                         continue;
                     }
                     // a point of a body of cells is in the frame of the cell that it is on (the shape is a composite): the pose of that subshape takes it to the collider's
                     let local1 = manifold.subshape_pos1().map_or(contact.local_p1, |p| *p * contact.local_p1);
                     let local2 = manifold.subshape_pos2().map_or(contact.local_p2, |p| *p * contact.local_p2);
-                    let at = (pose1 * local1 + pose2 * local2) * 0.5;
-                    let at = at.to_array();
-                    let local = after.local(at);
-                    // into the body: against the normal for the first body, with it for the second
-                    let inward = {
-                        let v =
-                            if mine_first { [-normal.x, -normal.y, -normal.z] } else { [normal.x, normal.y, normal.z] };
-                        // the body's frame
-                        std::array::from_fn(|c| {
-                            after.rotation[0][c] * v[0] + after.rotation[1][c] * v[1] + after.rotation[2][c] * v[2]
-                        })
-                    };
-                    let Some(piece) = family.piece_at(local, inward, held) else { continue };
-                    out.push(Located { at, impulse, piece: piece as usize });
+                    let at = if mine_first { pose1 * local1 } else { pose2 * local2 }.to_array();
+                    loaded.push((at, [normal.x * along, normal.y * along, normal.z * along]));
+                }
+                if loaded.is_empty() {
+                    continue;
+                }
+                let middle: [f64; 3] =
+                    std::array::from_fn(|c| loaded.iter().map(|(p, _)| p[c]).sum::<f64>() / loaded.len() as f64);
+                // the piece of a point is looked for a little toward the middle of the patch: the points of a patch that are on the edge of the cells that it lies on, which is where the
+                // corners of a box on a body of cells are, belong to the cells under the patch and not to the ones beside it
+                let toward = |p: [f64; 3]| -> [f64; 3] { std::array::from_fn(|c| p[c] + 1e-3 * (middle[c] - p[c])) };
+                for (at, impulse) in &loaded {
+                    if let Some(piece) = family.piece_at(after.local(toward(*at)), inward, held) {
+                        normal_loads.push(Located { at: *at, impulse: *impulse, piece: piece as usize });
+                    }
+                }
+                // the friction of the manifold, once, at the middle of its loaded points
+                let Some(first) = manifold.points.first() else { continue };
+                // the friction vector is the impulse on the first body (the normal's sign above is the other way: it is along the normal, and the first body is pushed against it)
+                let vector = first.data.warmstart_tangent_world * -side;
+                if vector.x == 0.0 && vector.y == 0.0 && vector.z == 0.0 {
+                    continue;
+                }
+                if let Some(piece) = family.piece_at(after.local(middle), inward, held) {
+                    friction_loads.push(Located {
+                        at: middle,
+                        impulse: [vector.x, vector.y, vector.z],
+                        piece: piece as usize,
+                    });
                 }
             }
         }
         // the order of the pairs is the solver's; the sum is not, so the order is made
-        out.sort_by(|a, b| {
+        let order = |a: &Located, b: &Located| {
             a.piece.cmp(&b.piece).then_with(|| {
                 a.at.iter()
                     .zip(&b.at)
@@ -446,8 +488,10 @@ impl World3 {
                     .find(|o| o.is_ne())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-        });
-        out
+        };
+        normal_loads.sort_by(order);
+        friction_loads.sort_by(order);
+        (normal_loads, friction_loads)
     }
 
     /// The cuts of the body `k`, worked out once for the pieces it holds and the joints that are gone.
@@ -486,7 +530,7 @@ impl World3 {
             let held = self.state.stress_held[k].clone();
             let plans = self.stress_plan(k);
             let family = &self.stresses[fam];
-            let contacts = self.stress_contacts(k, &after, family, &held);
+            let (mut contacts, friction) = self.stress_contacts(k, &after, family, &held);
             let anchor = if k == family.parent
                 && self.spec.joints.iter().enumerate().any(|(i, j)| {
                     (j.a == family.parent || j.b == Some(family.parent)) && self.state.joint_handles[i].is_some()
@@ -517,7 +561,25 @@ impl World3 {
             };
             let whole = family.mass_of(&held);
             let accel = [g[0] + field[0], g[1] + field[1], g[2] + field[2]];
+            // the friction: the solver gives, for each manifold, the vector of the last sub-step. The total of the step is that, times the sub-steps, when the friction is steady
+            // (a body that slides or holds still), and in a body with no joint the balance of the whole body says what it is: the part of what it leaves along the friction
+            let substeps = self.params.num_solver_iterations.max(1) as f64;
+            let mut friction_scale = substeps;
+            if !friction.is_empty() {
+                let along: [f64; 3] = std::array::from_fn(|c| friction.iter().map(|f| f.impulse[c]).sum::<f64>());
+                if anchor.is_none() && crate::stress::dot(along, along) > 0.0 {
+                    let probe = Step { whole, before: start, after, dt, accel, contacts: &contacts, anchor };
+                    let (left, _) = probe.unbalanced();
+                    friction_scale =
+                        (crate::stress::dot(left, along) / crate::stress::dot(along, along)).clamp(0.0, 4.0 * substeps);
+                }
+                for f in &friction {
+                    contacts.push(Located { impulse: f.impulse.map(|v| v * friction_scale), ..*f });
+                }
+            }
             let step = Step { whole, before: start, after, dt, accel, contacts: &contacts, anchor };
+            let (left, left_moment) = step.unbalanced();
+            self.stress_balance[k] = Some(StressBalance { force: left, moment: left_moment, friction_scale });
             let mut pending: Vec<u32> = Vec::new();
             let mut levels: Vec<(u32, f64)> = Vec::new();
             for cut in plans.iter() {

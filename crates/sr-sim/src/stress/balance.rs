@@ -166,6 +166,24 @@ fn solve3(m: &[V3; 3], b: V3) -> Option<V3> {
 }
 
 impl Step<'_> {
+    /// What the balance of the whole body leaves after the loads that are known (the weight and the fields, the contacts): an impulse and its moment about the centre of
+    /// mass. With one joint of the world that is its load; with none, what is not a load on the points of the body (damping, a velocity that was set) and, when a load is not
+    /// known (the friction at a contact, whose total the solver does not give), what it is.
+    pub fn unbalanced(&self) -> (V3, V3) {
+        let com = self.after.com();
+        let dv = sub(self.after.linear, self.before.linear);
+        let mut known = self.accel.map(|a| a * self.whole.mass * self.dt);
+        let mut known_moment = [0.0; 3];
+        for c in self.contacts {
+            known = add(known, c.impulse);
+            known_moment = add(known_moment, cross(sub(c.at, com), c.impulse));
+        }
+        let left = sub(dv.map(|v| v * self.whole.mass), known);
+        let left_moment =
+            sub(sub(spin_momentum(&self.whole, &self.after), spin_momentum(&self.whole, &self.before)), known_moment);
+        (left, left_moment)
+    }
+
     /// The load that the rest of the body puts on the part `part` of it, whose pieces are those for which `in_part` is true, as a force (the impulse over
     /// the step, per second of it) and the moment of it about the point `q` of the world (a point of the body at the end of the step).
     ///
@@ -178,15 +196,7 @@ impl Step<'_> {
         let whole_mass = self.whole.mass;
         let dv = sub(self.after.linear, self.before.linear);
         // the whole body: what the balance leaves after the loads that are known (the weight and the fields, the contacts)
-        let mut known = self.accel.map(|a| a * whole_mass * dt);
-        let mut known_moment = [0.0; 3];
-        for c in self.contacts {
-            known = add(known, c.impulse);
-            known_moment = add(known_moment, cross(sub(c.at, com), c.impulse));
-        }
-        let left = sub(dv.map(|v| v * whole_mass), known);
-        let left_moment =
-            sub(sub(spin_momentum(&self.whole, &self.after), spin_momentum(&self.whole, &self.before)), known_moment);
+        let (left, left_moment) = self.unbalanced();
         // the part's own loads that are known
         let centre = self.after.world(part.centre());
         let arm = sub(centre, com);

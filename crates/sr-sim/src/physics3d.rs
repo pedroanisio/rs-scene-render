@@ -18,7 +18,7 @@ mod stress;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Dust3, Fracture3, FractureContact, FractureError, FractureLost3, Fragment3};
-pub use stress::{Stress3, StressError, StressJoint3, StressPiece3, MAX_STRESS_PIECES};
+pub use stress::{Stress3, StressBalance, StressError, StressJoint3, StressPiece3, MAX_STRESS_PIECES};
 use voxel_mass::{
     hull_mass_properties, mesh_mass_properties, sum_mass_properties, tensor_mass_properties, voxel_mass_properties,
 };
@@ -596,6 +596,7 @@ pub struct World3 {
     stress_plans: std::collections::HashMap<(usize, u64), std::sync::Arc<Vec<crate::stress::plan::CutPlan>>>,
     /// What the last step read on each body of a family: the principal tension of each of its intact joints.
     stress_levels: Vec<Vec<(u32, f64)>>,
+    stress_balance: Vec<Option<stress::StressBalance>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
@@ -912,6 +913,7 @@ impl World3 {
             stress_of: vec![None; spec.bodies.len()],
             stress_plans: std::collections::HashMap::new(),
             stress_levels: vec![Vec::new(); spec.bodies.len()],
+            stress_balance: vec![None; spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
