@@ -1066,3 +1066,46 @@ fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
         );
     }
 }
+
+/// A driver that cuts as a [`Script`] does and loads every body with a torque that depends on where its centre of mass is, which is what a driver
+/// that reads the state of the body would do: so a step in which a body is cut finds a different load if the load is asked before the cut and
+/// if it is asked after.
+struct Leaning {
+    script: Script,
+}
+
+impl Driver3 for Leaning {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.script.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.script.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.script.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, _: u64, _: f64, _: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        let c = state.centre;
+        Ok(Some(Load3 {
+            force: [3.0 * c[1], -2.0 * c[0], 5.0 * c[2]],
+            torque: [7.0 * c[0], 11.0 * c[2], -13.0 * c[1]],
+        }))
+    }
+}
+
+#[test]
+fn a_load_that_reads_the_state_of_a_body_finds_the_same_world_in_the_step_of_a_cut_however_the_step_is_reached() {
+    // the cut is at 1.5 s; a load is asked at the start of each step, from the body as it is then
+    let steps: Vec<u64> = (147..=153).collect();
+    the_same_four_ways(
+        &|frames| world_logging(2, None, frames),
+        &|| Leaning { script: Script { cuts: vec![first_cut(1.5)] } },
+        &steps,
+    );
+}
