@@ -18,7 +18,7 @@ mod greedy;
 
 pub use expand::expand;
 pub use exposure::{exposed_faces, Face};
-pub use greedy::{mesh_quads, quads_hash, Quad};
+pub use greedy::{mesh_quads, mesh_quads_within, quads_hash, Quad, BYTES_PER_QUAD};
 
 /// What the palette indices of a grid look like to the extraction: the class of each index (indices of one class merge into one quad,
 /// and the face between two cells of one see-through class is not made) and whether a class lets light through. Index 0 is empty and

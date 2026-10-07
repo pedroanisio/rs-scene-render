@@ -505,3 +505,50 @@ fn no_quads_make_an_empty_primitive() {
     let p = expand(&[], colour);
     assert!(p.vertices.is_empty() && p.indices.is_empty());
 }
+
+// ------------------------------------------------------------------------------------------------------------------ budget
+
+use sr_3d::voxel::surface::{mesh_quads_within, BYTES_PER_QUAD};
+
+/// A checkerboard of `n` cells a side: every cell has its six faces, none of which merge.
+fn checkerboard(n: i32) -> Occupancy {
+    grid(block([0, 0, 0], n, 1).into_iter().filter(|(c, _)| (c[0] + c[1] + c[2]) % 2 == 0).collect())
+}
+
+#[test]
+fn a_surface_that_fits_its_budget_is_made_and_one_a_quad_over_is_refused_with_its_cause() {
+    assert_eq!(
+        BYTES_PER_QUAD, 1240,
+        "16 for the quad, 408 for the builder's vertices, 408 for the copy of the upload, 408 on the device"
+    );
+    // the quads that a budget admits are its bytes over the bytes a quad costs at its peak, rounded down
+    assert_eq!((128usize << 20) / BYTES_PER_QUAD, 108_240);
+    assert_eq!((256usize << 20) / BYTES_PER_QUAD, 216_480);
+    let g = checkerboard(6);
+    let quads = mesh_quads(&g, &Classes::identity()).len();
+    assert_eq!(quads, 6 * 108, "six faces for each of the 108 cells");
+    let fits =
+        mesh_quads_within(&g, &Classes::identity(), quads * BYTES_PER_QUAD).expect("a budget of exactly its quads");
+    assert_eq!(fits, mesh_quads(&g, &Classes::identity()), "the same quads as with no budget");
+    let refused = mesh_quads_within(&g, &Classes::identity(), quads * BYTES_PER_QUAD - 1).unwrap_err();
+    assert!(
+        refused.contains("voxel surface exceeds memory budget") && refused.contains("surfaceMemoryMiB"),
+        "{refused}"
+    );
+    assert!(refused.contains(&format!("{} quads", quads - 1)), "it says how many the budget admits: {refused}");
+}
+
+#[test]
+fn a_surface_over_its_budget_is_refused_with_an_error_that_does_not_depend_on_how_far_over_it_is() {
+    // checkerboards of 40 and of 20 under a budget of 1,000 quads: both over it, by 191,000 quads and by 5,000, and the same error
+    // (the work stops at the first plane that takes the surface over, so it never counted the rest)
+    let budget = 1000 * BYTES_PER_QUAD;
+    let (big, small) = (checkerboard(40), checkerboard(20));
+    assert_eq!(mesh_quads(&big, &Classes::identity()).len(), 6 * 32_000);
+    assert_eq!(mesh_quads(&small, &Classes::identity()).len(), 6 * 4_000);
+    let refused = mesh_quads_within(&big, &Classes::identity(), budget).unwrap_err();
+    assert_eq!(refused, mesh_quads_within(&small, &Classes::identity(), budget).unwrap_err());
+    assert!(refused.contains("1000 quads"), "{refused}");
+    // nothing to draw is nothing to pay
+    assert!(mesh_quads_within(&Occupancy::new(), &Classes::identity(), 0).unwrap().is_empty());
+}

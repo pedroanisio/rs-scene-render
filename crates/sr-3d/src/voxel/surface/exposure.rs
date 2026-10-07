@@ -3,6 +3,7 @@
 use super::Classes;
 use crate::occupancy::{Occupancy, BRICK};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::ControlFlow;
 
 /// A face of a cell that is exposed: on the plane `plane` along `axis` (facing `+axis` when `positive`), at `u`, `v` of the two other
 /// coordinates in cyclic order, of the class of the cell that owns it.
@@ -29,6 +30,7 @@ pub fn exposed_faces(grid: &Occupancy, classes: &Classes) -> Vec<Face> {
                 out.push(Face { axis, positive, plane, u, v, class });
             }
         }
+        ControlFlow::Continue(())
     });
     out.sort_by_key(|f| (f.axis, f.positive, f.plane, f.v, f.u));
     out
@@ -54,12 +56,13 @@ impl<'a> Bricks<'a> {
     }
 }
 
-/// Calls `f(axis, plane, minus, plus)` for every plane of the lattice that has a face, with the faces that look toward `-axis` (owned
-/// by the layer above the plane) and toward `+axis` (owned by the layer below) as `(u, v, class)`, in no particular order.
+/// Calls `f(axis, plane, minus, plus)` for every plane of the lattice that has a face (by axis and then by plane, ascending), with the
+/// faces that look toward `-axis` (owned by the layer above the plane) and toward `+axis` (owned by the layer below) as
+/// `(u, v, class)`, in no particular order, until `f` says to stop.
 pub(super) fn for_each_plane(
     grid: &Occupancy,
     classes: &Classes,
-    mut f: impl FnMut(u8, i32, &[(i32, i32, u8)], &[(i32, i32, u8)]),
+    mut f: impl FnMut(u8, i32, &[(i32, i32, u8)], &[(i32, i32, u8)]) -> ControlFlow<()>,
 ) {
     let bricks = Bricks::of(grid);
     for axis in 0..3usize {
@@ -100,8 +103,8 @@ pub(super) fn for_each_plane(
                     }
                 }
             }
-            if !minus.is_empty() || !plus.is_empty() {
-                f(axis as u8, plane, &minus, &plus);
+            if (!minus.is_empty() || !plus.is_empty()) && f(axis as u8, plane, &minus, &plus).is_break() {
+                return;
             }
         }
     }

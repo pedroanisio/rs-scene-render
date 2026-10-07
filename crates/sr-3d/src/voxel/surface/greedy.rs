@@ -4,6 +4,7 @@ use super::exposure::for_each_plane;
 use super::Classes;
 use crate::occupancy::Occupancy;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 /// The most cells a quad spans along either side: what a `u16` can say (the compact list of quads keeps them in 16 bits).
 const MOST: i32 = u16::MAX as i32;
@@ -29,13 +30,38 @@ pub struct Quad {
 /// it is of that class and not taken. The scan order is the whole of the rule (another order merges a different set of quads out of
 /// the same faces), so it is fixed here and by the hashes the tests state. A quad is cut where a side would pass 65,535 cells.
 pub fn mesh_quads(grid: &Occupancy, classes: &Classes) -> Vec<Quad> {
+    mesh_quads_within(grid, classes, usize::MAX).expect("a surface with no budget to exceed")
+}
+
+/// What a quad costs at the most, in bytes: the 16 of the compact list, the 408 of its four vertices and six indices in the builder, the
+/// 408 of the copy a mesh upload keeps on the host and the 408 of the buffers on the device. A surface budget in bytes admits that
+/// many quads divided by this.
+pub const BYTES_PER_QUAD: usize = 16 + 3 * 408;
+
+/// [`mesh_quads`] under a budget of `max_bytes` (the object's `surfaceMemoryMiB`): the quads are counted as the planes are merged, in
+/// a fixed order, and the first plane that takes the surface over the budget stops the work with an error that says how many quads the
+/// budget admits, so a surface that cannot fit costs the time of the quads it was allowed and the error does not depend on how many
+/// there would have been. Nothing is returned for a surface that does not fit, not even a part.
+pub fn mesh_quads_within(grid: &Occupancy, classes: &Classes, max_bytes: usize) -> Result<Vec<Quad>, String> {
+    let admitted = max_bytes / BYTES_PER_QUAD;
     let mut quads = Vec::new();
+    let mut over = false;
     for_each_plane(grid, classes, |axis, plane, minus, plus| {
         merge(axis, false, plane, minus, &mut quads);
         merge(axis, true, plane, plus, &mut quads);
+        if quads.len() > admitted {
+            over = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     });
+    if over {
+        return Err(format!(
+            "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {admitted} quads, and the surface has more"
+        ));
+    }
     quads.sort_by_key(|q| (q.axis, q.positive, q.plane, q.v0, q.u0));
-    quads
+    Ok(quads)
 }
 
 fn merge(axis: u8, positive: bool, plane: i32, faces: &[(i32, i32, u8)], out: &mut Vec<Quad>) {
