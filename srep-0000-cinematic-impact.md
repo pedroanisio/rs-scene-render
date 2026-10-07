@@ -873,6 +873,91 @@ the temperature of every cell once a step (one serial pass), and its cost, measu
 decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
 and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
 
+#### A blast in the smoke (`pyroBlast`)
+
+`<pyroBlast time energy x y z ambientDensity ambientPressure gamma/>` is a child of `<pyro>` (version 1.3 with it): at `time` seconds `energy`
+joules are released at (x, y, z) in the pyro's own axes into air of `ambientDensity` kg/m^3 (1.2) and `ambientPressure` Pa (101325), a gas of
+`gamma` (1.4, from 1.1 to 3). A pyro with a blast needs `boundary="open"` (PYC5: a blast is a source of divergence, which a closed domain cannot let
+out; the evaluator and the solver refuse it too) and the blast's place is in the domain (PYC6). An energy of zero is a blast that does nothing, and a
+pyro with no blast is bit for bit the pyro it was (the reference hashes of the solver, and a test of a puff with turbulence).
+
+**What is solved.** The front is the Sedov-Taylor blast: `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres, where the constant is not quoted but found
+(`sr_sim::sedov`): with `xi = r / R`, `u = Rdot U`, `rho = rho0 G` and `p = rho0 Rdot^2 P` the equations of an ideal gas reduce to three ordinary
+differential equations that are integrated from the shock (`U = P = 2 / (gamma + 1)`, `G = (gamma + 1) / (gamma - 1)`) to the centre, and the
+energy inside the front, `E = (16 pi / 25) J rho0 R^5 / t^2` with `J` the integral of `G U^2 / 2 + P / (gamma - 1)` over `xi^2 dxi`, gives
+`xi0 = (25 / (16 pi J))^(1/5)`: 1.0328 for gamma 1.4 (Landau and Lifshitz print alpha = 0.851) and 1.1517 for 5/3 (published 1.15), the mass inside the
+front is that of the sphere of ambient gas to 1e-6 (it is not given), the pressure at the centre of the monatomic blast is 0.3062 of the one behind
+the shock (published 0.306), and an independent integration in Python agrees to 2e-6. The front stops at `0.3 (E / p0)^(1/3)`, the end of the strong
+phase: the radius at which the pressure behind the strong shock, `2 rho0 D^2 / (gamma + 1)` with `D = 2 R / (5 t)`, has fallen to `11.85 xi0^5 / (gamma + 1)`
+times `p0` (5.8 for air, 9.0 for the monatomic gas): a few times the ambient pressure, where the blast stops being strong. It is a choice of the radius
+and not a result: the engine's, with no published value (the constant 0.3 is not the 0.3 to 0.6 m per cube root of a kilogram of the fireballs of explosives:
+`0.3 (E / p0)^(1/3)` is 1.04 m per cube root of a kilogram of TNT).
+The smoke solver is incompressible, so the shock is not carried. What is carried is the displacement of the air by the front, as an incompressible
+spherical piston. In each step the volume that the front swept, `4 pi (R1^3 - R0^3) / 3` between the sphere it began the step in and the one it ends it in,
+is given to the sphere's cells (the cells whose centres are in the sphere of the end of the step; at least a cell: a front smaller than that is the sphere of one cell,
+and the volume given is still the volume swept), spread evenly over them: each is given the divergence `volume / (cells h^3 dt)`, so that the air the domain lets out is
+exactly the volume swept whatever the cells make of the sphere, an energy of 1 J included (1.1e-6 cubic metres, not the volume of a cell). The cells that share the volume are the
+sphere's WHOLE (a window that the sphere cuts holds only some of them, and the others take their share), so that the divergence in the window is the one that the sphere
+makes in free space and agrees with the flow outside. The analytic flow of the piston (inside the sphere `u = d (x - c) / 3`, outside `u = Q / (4 pi r^2)` away from the centre `c` of
+the blast, `Q` the volume over the step) is put in a velocity of its own and projected ALONE (the projection is linear, so this is the share of the step's flow
+that the blast makes), with the faces open at zero pressure and the solids and obstacles of the step; that flow carries the smoke (the density and the temperature) once, over
+the step, and it is NOT kept in the velocity of the smoke. Kept, it would stay for ever: a potential flow with open faces is not removed by a projection with
+no divergence (the first design of the blast kept it and left 50 to 200 percent of the pulse a step after the front had stopped), so the velocity of the smoke is what it
+would have been with no blast, to the bit, at every step (`Simulation::blast_flow` gives the flow of the last step to whoever wants it). A window that the sphere cuts, or that is
+not centred on the blast, is pushed from the blast and not from its own middle. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
+`pyroImpulse` that the author adds). The order of a step with a blast is the smoke's own (advection, sources, forces, projection) and then the blast's: its flow is projected alone, with
+the solids of the step at rest for it (what a moving collider does to the air is the smoke's own flow, made first, and the two add up to the whole), and it carries the density and the
+temperature once, by the same advection with no decay and no cooling (the step has made those: a decay of 1 a second would otherwise be made twice in a step with a blast). The cost of a step with
+a blast is a second projection and one more state while the first is held (about 41 bytes a cell, which carries the smoke by exchange of its density and temperature and not by copy, and a copy of the
+three faces of its flow, which the advection replaces): the live bytes at the peak of a step are counted by an allocator (`tests/pyro_blast_memory.rs`, 48^3 cells) at 206 bytes a cell with a blast and 141
+without, inside the 288 of the budget (a first version of this, which copied the whole state and kept the last step's flow through this one, was 248; 1.1 GB more than a step with no blast at 256^3),
+the simulation holds 66.6 bytes a cell after a step with a blast (its state, 42, and the flow of that step, 24, which is dropped when the next begins or the window moves), and the time is in the profile as `blast`.
+
+**Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
+`pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
+axis has no sphere, and is an error: the images of the three axes must have one length and be at right angles, so a shear is refused as well as a stretch). The radius is worked out in metres and then multiplied by that; the divergence is a ratio of volumes per second and
+needs no conversion. Tested at 1, 100 and 37 pixels to the metre: the same radius in metres, the same displacement of a puff of smoke in metres
+(to 1e-3, the density being a single float), and the same kinetic energy in joules to 1e-6.
+
+**The time step.** With `dt` of the pyro (1/24 s) the strong phase of a plausible blast is over within the first step: the energy above which it is not is
+`E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2)`, which goes as `dt^3`: 1.91e12 J at 1/24 s and 2.64e10 J at 1/100 s, and below it the blast is ONE PULSE of the volume
+of `R_max`, in the step that contains `time`. Sub-steps would not change what the projection gives (the potential flow depends on the volume swept, not on its
+history within the step), so there are none. The front, for three energies in air at 1/24 s:
+
+| energy (J) | R(dt) (m) | R(2 dt) (m) | R_max (m) | R_max reached at | steps of the strong phase |
+|---|---|---|---|---|---|
+| 1e6 | 4.43 | 5.84 | 0.64 | 0.3 ms | one pulse of R_max |
+| 1e9 | 17.6 | 23.3 | 6.44 | 3.4 ms | one pulse of R_max |
+| 1e15 | 279 | 369 | 643 | 0.336 s (8.06 steps) | 9 (the ninth is the last to sweep) |
+
+The sphere of the front, which stops at `R_max`, reaches the centres of the faces of a window of side `L` if `R_max` is `L / 2`, `E = p0 (L / 0.6)^3`: 9.0e7 J for the
+hero's domain of 5.76 m (at 100 pixels to the metre) and 9.0e13 J for one of 576 m; it covers the whole window, corners included, at `R_max = sqrt(3) L / 2`, 4.66e8 J for
+5.76 m. A window that the sphere does not cover whole holds the cells it has of the sphere, each given the divergence that the whole sphere gives in free space (the window's
+flow is the free-space flow of the sphere, to 5 percent in the test), and the flow of the piston from the centre of the blast.
+
+**What it does.** Measured on a domain of 64 cells with the blast of 3.75e9 J (the strong phase ends at 10 m; `crates/sr-sim/tests/pyro/blast.rs`): the air that
+the blast's flow lets out of the domain is the volume swept over `dt` to 1e-6, over one step and over all the steps of the strong phase (the sum is the volume of the sphere of `R_max`), with
+a solid in the sphere, and the smoke's own flow in the same step lets out the source's (the two are made apart); the cells of the sphere are its volume to 5 percent; the speed outside the sphere is `Q / (4 pi r^2)` to 15
+percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); a window cut by the sphere, with the blast 1 m from its face, has the air go away from the blast, the flow inside linear in the distance from it (0.6 to 3 percent) with the divergence
+of the whole sphere (10 percent), and the flow at the middle the one that free space gives (5 percent); the kinetic energy in a ball of 1.5 radii is `rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.85 at a
+quarter (the piston's own energy is `2 pi rho Rdot^2 R^3` outside and a fifth of that inside: for the strong phase the energy that the solver's flow has is that of the displacement,
+which is part of the blast's `E`, not all); a puff of smoke at 6 m is displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to 0.984 and 0.990 of it at half a metre
+and a quarter. With a pulse of many cells in one step (1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian
+trace neither leaves the domain nor crosses the sphere, and the displacement is 0.990 and 0.981 of the exact one. **The advection does not conserve the smoke**: it changes by
+3.6 percent at half a metre and 0.70 at a quarter (1.8 and 1.4 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell;
+it is not the 1e-6 of a conservative scheme. This is a limit of the smoke solver as a whole and not of the blast: any large velocity (a pulse, a gust, a fast plume) gains or loses
+smoke by the same interpolation, and a conservative advection or a correction of the mass in each step (with the puff of this test as its oracle) is work for the solver. The same
+document through the evaluator, after the puff and the first two pulses (the front at 5.14 m; the volume swept says 1.06 m for the puff as a whole), moves the centre of the smoke on the line
+through the puff by 1.19 m (the centre of the line, not of the whole puff: 12 percent over) at every scene unit; the test fixes that number to 0.05 m.
+
+**Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
+flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's
+profile, and only the displacement of the front is the blast's: the energy of the flow is the energy of the displacement. (3) The strong phase is shorter
+than a step of the pyro for any `E` below `E*`; a blast faithful in time needs a `dt` of the pyro smaller than a tenth of the time of the strong phase (`dt` of 3e-5 s
+for 1e6 J), at the cost of that many steps. (4) After `R_max` nothing is modelled: no negative phase, no reflection, and the walls are the solver's. (5) No heat and
+no smoke are injected. (6) Because the blast's flow is not kept in the velocity, the smoke's own velocity gets no impulse from it: an updraft or a vortex stays where it was while the density and the temperature move, a plume made after the blast is not deflected by its wind, and the two advections in a step (the smoke's, then the blast's) are a first-order splitting with the numerical diffusion of both. A blast has no compressible after-flow and no negative phase. In a potential incompressible flow no velocity is left when the source stops, which is right. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
+world's own conservation test can check) and to the ocean (the same pressure as a `waterImpulse`): each its own step with its own oracle.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -3428,6 +3513,19 @@ Also includes `pyroShape`, inventoried below.
 | `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
 | `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
 
+### `pyroBlastType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Required |
+| `energy` | nonNegativeDecimal | Required; joules |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `ambientDensity` | positiveDecimal | Default `1.2`; kg/m^3 |
+| `ambientPressure` | positiveDecimal | Default `101325`; Pa |
+| `gamma` | positiveDecimal; minInclusive=1.1, maxInclusive=3 | Default `1.4` |
+
 ### `particles3DType`
 
 | Attribute | XSD type or inline restriction | Presence/default |
@@ -3947,11 +4045,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 270 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 90 of them are in the
-cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 273 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 93 of them are in the
+cinematic families OCN 14, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, VOX 7, PYC 6, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 24 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7) are this repository's. At commit 349d371,
+families, and the 26 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11, VOX1 to VOX7, PYC5 and PYC6) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

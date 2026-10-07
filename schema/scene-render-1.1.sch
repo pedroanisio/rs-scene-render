@@ -528,6 +528,10 @@
       <sch:assert id="PYRO9" test="not(@follow='true' or @follow='1') or @boundary='open'">a pyro whose window follows its plume needs boundary="open".</sch:assert>
       <sch:assert id="PYRO10" test="@follow='true' or @follow='1' or not(@followMargin or @followLoss)">followMargin and followLoss belong to a pyro that follows its plume.</sch:assert>
       <sch:assert id="PYRO11" test="not(@followMargin) or (2 * number(@followMargin) * number(@voxelSize) &lt; number(@width) and 2 * number(@followMargin) * number(@voxelSize) &lt; number(@height) and 2 * number(@followMargin) * number(@voxelSize) &lt; number(@depth))">followMargin must leave a cell between the faces of the window on every axis.</sch:assert>
+      <sch:assert id="PYC5" test="not(pyroBlast) or @boundary='open'">a pyro with a blast needs boundary="open": a blast is a source of divergence, which a closed domain cannot let out.</sch:assert>
+    </sch:rule>
+    <sch:rule context="pyroBlast">
+      <sch:assert id="PYC6" test="(not(@x) or (number(@x) &gt;= -number(../@width) div 2 and number(@x) &lt;= number(../@width) div 2)) and (not(@y) or (number(@y) &gt;= -number(../@height) div 2 and number(@y) &lt;= number(../@height) div 2)) and (not(@z) or (number(@z) &gt;= -number(../@depth) div 2 and number(@z) &lt;= number(../@depth) div 2))">a blast is released inside the domain of its pyro (x between plus and minus half the width, and likewise y with the height and z with the depth).</sch:assert>
     </sch:rule>
     <sch:rule context="pyroSource|pyroImpulse">
       <sch:assert id="PYRO5" test="(@shape='mesh' and /scene/assets/mesh[@id=current()/@mesh]) or (not(@shape='mesh') and not(@mesh))">a mesh pyro source must name a mesh asset; @mesh is valid only for shape=mesh.</sch:assert>

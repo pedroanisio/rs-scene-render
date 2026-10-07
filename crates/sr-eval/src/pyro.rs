@@ -193,6 +193,10 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
         *count += 1;
         let props = n.parts.iter().find(|p| *p.key == key).map(|p| &p.props);
         let v = |name: &str, default: f64| value(child, props, name, default);
+        if name == "pyroBlast" {
+            // a blast is not a shape: it is made from the scene's units by `blast_inputs`
+            continue;
+        }
         if child.get_attr("crater").is_some() {
             // what a crater causes comes from its impact, not from the source's own attributes
             continue;
@@ -239,6 +243,47 @@ fn inputs(n: &FrameNode, meshes: &HashMap<String, Arc<pyro::mesh::Mesh>>) -> Res
     Ok(result)
 }
 
+/// The length in the volume's own units of `length` scene units, if the map from the scene to the volume is a rotation and the same scale on
+/// every axis (the images of the three axes have one length and are at right angles: a shear, as well as a stretch, is refused), else none.
+fn uniform_length(domain: &DMat4, length: f64) -> Option<f64> {
+    let columns = [DVec3::X, DVec3::Y, DVec3::Z].map(|axis| domain.transform_vector3(axis * length));
+    let along = columns[0].length();
+    let conformal = along.is_finite()
+        && along > 0.0
+        && columns.iter().all(|c| (c.length() - along).abs() <= 1e-6 * along)
+        && (0..3).all(|i| (i + 1..3).all(|j| columns[i].dot(columns[j]).abs() <= 1e-6 * along * along));
+    conformal.then_some(along)
+}
+
+/// The blasts of a volume, in the volume's own units: each `pyroBlast` is released at its place (`x`, `y`, `z`, in the volume's axes) at its
+/// `time`, and a metre is the scene's `pixelsPerMeter` (the physics element's, 100 if there is none) scene units, which the volume's axes make
+/// into `along` of its own units: the radius of the front is worked out in metres and turned into the volume's units by that. A volume
+/// that is not scaled the same on every axis has no sphere in its own units, and is an error (as for a crater's smoke).
+fn blast_inputs(p: &Program, frame: &FrameGraph, node: usize, input: &mut Inputs) -> Result<(), pyro::Error> {
+    let Some(e) = config(&frame.nodes[node]) else { return Ok(()) };
+    let blasts: Vec<_> = children(e).into_iter().filter(|c| c.element_name() == "pyroBlast").collect();
+    if blasts.is_empty() {
+        return Ok(());
+    }
+    let domain = inverse_transform(crate::sim3d::world3(frame, node, 0))?;
+    let pixels_per_meter = p.scene.physics.as_ref().map(|ph| ph.pixels_per_meter.get()).unwrap_or(100.0);
+    let along = uniform_length(&domain, pixels_per_meter)
+        .ok_or(pyro::Error::Invalid("a blast needs a volume that is scaled the same on every axis and not sheared"))?;
+    for child in blasts {
+        let number = |name: &str, default: f64| num(child, name, default);
+        input.blasts.push(pyro::Blast::new(
+            [number("x", 0.0), number("y", 0.0), number("z", 0.0)],
+            number("time", 0.0),
+            number("energy", 0.0),
+            number("ambientDensity", 1.2),
+            number("ambientPressure", 101_325.0),
+            number("gamma", 1.4),
+            along,
+        )?);
+    }
+    Ok(())
+}
+
 /// The sources and impulses that craters cause, from the impacts the rigid world has found: for
 /// each `pyroSource` or `pyroImpulse` with a crater whose impact has happened, a sphere of
 /// the crater's radius at the impact point, with the dust and heat the engine makes of the
@@ -265,14 +310,10 @@ fn crater_inputs(frame: &FrameGraph, node: usize, start: f64, dt: f64, input: &m
         let owner_world = crate::sim3d::world3(frame, j, 0);
         let centre = domain.transform_point3(owner_world.transform_point3(DVec3::from(grown.spec.center)));
         let radius_world = cause.law.radius * cause.pixels_per_meter;
-        let along = domain.transform_vector3(DVec3::new(radius_world, 0.0, 0.0)).length();
-        let across = domain.transform_vector3(DVec3::new(0.0, radius_world, 0.0)).length();
-        if !centre.is_finite()
-            || (along - across).abs() > 1e-6 * along.max(across)
-            || along.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
-        {
+        let uniform = if centre.is_finite() { uniform_length(&domain, radius_world) } else { None };
+        let Some(along) = uniform else {
             return Err(pyro::Error::Invalid("smoke from a crater needs a uniformly scaled volume"));
-        }
+        };
         // a sphere smaller than a voxel would cover no cell centre: it is never smaller than one
         let h = num(e, "voxelSize", 1.0);
         let used = along.max(0.9 * h);
@@ -354,6 +395,7 @@ fn state_at<'r>(
                 Some(i) => {
                     let mut input = inputs(&frame.nodes[i], meshes)?;
                     crater_inputs(&frame, i, volume_start, dt, &mut input)?;
+                    blast_inputs(p, &frame, i, &mut input)?;
                     field_inputs(&mut input, state, &frame, i, fields)?;
                     if !colliders.is_empty() {
                         let (next_t, next_clocks) =

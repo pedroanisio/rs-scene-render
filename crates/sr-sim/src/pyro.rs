@@ -41,6 +41,8 @@ mod determinism;
 #[cfg(test)]
 mod export;
 #[cfg(test)]
+mod lattice;
+#[cfg(test)]
 mod pockets;
 #[cfg(test)]
 mod sampling;
@@ -384,10 +386,114 @@ pub struct Impulse {
     pub expansion: f64,
 }
 
+/// A blast: the front of a Sedov-Taylor blast (see [`crate::sedov`]) as an incompressible spherical piston in the smoke.
+///
+/// `energy` is released at `center` (scene units) at `time` (seconds from the start of the simulation) into air of density `ambient_density`
+/// (kg/m^3) and pressure `ambient_pressure` (Pa), a gas of `gamma`; a metre is `pixels_per_meter` scene units. The front is at
+/// `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres until it reaches `0.3 (E / p0)^(1/3)` (the end of the strong phase: the radius at which the pressure
+/// behind the front has fallen to a few times the ambient one, 5.8 for air), and stays there. Each step the air that the front swept in the step
+/// is displaced: the volume `4 pi (R1^3 - R0^3) / 3` is given to the cells whose centres are in the sphere of the radius that the front has at
+/// the end of the step (at least a cell: a front smaller than that is the sphere of one cell, and the volume is still the volume swept), spread
+/// evenly over the cells that the sphere has (all of them: a window that the sphere cuts holds some, and the divergence is the one that the whole sphere
+/// makes in free space, which agrees with the flow outside), so that the air given is exactly the volume swept whatever the cells make of the sphere.
+/// The flow is that of the piston, made apart from the smoke's own: the analytic flow (inside, `u = d (x - c) / 3` for the divergence `d`; outside,
+/// `u = Q / (4 pi r^2)` away from the centre `c` of the blast, `Q` the volume over the step) is projected alone, which is linear, and carries the
+/// smoke (the density and the temperature) once over the step. It is not kept in the velocity of the smoke: a potential flow with open faces is not
+/// removed by a projection with no divergence, so it would stay for ever, and the velocity is what it would have been with no blast, to the bit
+/// ([`Simulation::blast_flow`] gives the flow of the last step). The shock is not carried (the solver is incompressible), nothing is heated and no smoke
+/// is made. It needs an open domain.
+#[derive(Clone, Debug)]
+pub struct Blast {
+    center: [f64; 3],
+    time: f64,
+    energy: f64,
+    ambient_density: f64,
+    ambient_pressure: f64,
+    gamma: f64,
+    pixels_per_meter: f64,
+    law: std::sync::Arc<crate::sedov::Sedov>,
+}
+
+impl Blast {
+    pub fn new(
+        center: [f64; 3],
+        time: f64,
+        energy: f64,
+        ambient_density: f64,
+        ambient_pressure: f64,
+        gamma: f64,
+        pixels_per_meter: f64,
+    ) -> Result<Blast, Error> {
+        if !finite3(center) || !nonnegative(time) {
+            return Err(Error::Invalid("a blast has a finite place and a time from zero"));
+        }
+        if !nonnegative(energy) || !(ambient_density.is_finite() && ambient_density > 0.0) {
+            return Err(Error::Invalid("a blast has an energy that is not negative and an air of positive density"));
+        }
+        if !(ambient_pressure.is_finite() && ambient_pressure > 0.0)
+            || !(pixels_per_meter.is_finite() && pixels_per_meter > 0.0)
+        {
+            return Err(Error::Invalid("a blast has a positive ambient pressure and pixels to the metre"));
+        }
+        let law = crate::sedov::solve_cached(gamma)
+            .map_err(|_| Error::Invalid("a blast needs a ratio of specific heats from 1.1 to 3"))?;
+        Ok(Blast { center, time, energy, ambient_density, ambient_pressure, gamma, pixels_per_meter, law })
+    }
+
+    pub fn center(&self) -> [f64; 3] {
+        self.center
+    }
+
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
+    pub fn energy(&self) -> f64 {
+        self.energy
+    }
+
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
+    /// The front `t` seconds after the release, in scene units.
+    fn front(&self, t: f64) -> f64 {
+        if t <= 0.0 || self.energy == 0.0 {
+            return 0.0;
+        }
+        let strong = self
+            .law
+            .radius(self.energy, self.ambient_density, t)
+            .min(self.law.max_radius(self.energy, self.ambient_pressure));
+        strong * self.pixels_per_meter
+    }
+
+    /// The radius of the front at the start and at the end of the fixed step `step`, in scene units: nothing before the step in which the blast is
+    /// released, and the front at the end of that step (the time since the release) after it.
+    pub fn radii(&self, dt: f64, step: u64) -> (f64, f64) {
+        let first = fixed_step_index(self.time / dt);
+        if step < first {
+            return (0.0, 0.0);
+        }
+        let end = self.front((step + 1) as f64 * dt - self.time);
+        let start = if step == first { 0.0 } else { self.front(step as f64 * dt - self.time) };
+        (start, end)
+    }
+
+    /// What the front sweeps in the step, if it moved: the radius that it ends the step at and the volume between the two spheres, in cubic scene
+    /// units.
+    pub fn swept(&self, dt: f64, step: u64) -> Option<(f64, f64)> {
+        let (r0, r1) = self.radii(dt, step);
+        (r1 > r0).then(|| (r1, 4.0 / 3.0 * std::f64::consts::PI * (r1.powi(3) - r0.powi(3))))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Inputs {
     pub sources: Vec<Source>,
     pub impulses: Vec<Impulse>,
+    /// Blasts, which need an open domain.
+    pub blasts: Vec<Blast>,
     /// Sources whose expansion follows from their heat rather than being given: smoke heated at
     /// constant pressure, as an ideal gas, expands at `(dT/dt) / T` in every cell it heats, so
     /// `expansion` must be zero. Their `density_rate` is a total: the sum of the volume fractions
@@ -1185,6 +1291,8 @@ pub struct StepProfile {
     pub project_update: Duration,
     /// Pressure-gradient subtraction and the final divergence check.
     pub project_finish: Duration,
+    /// The flow of the blasts of the step (their pistons projected alone and the smoke carried by them), in the time of no other field above.
+    pub blast: Duration,
     pub total: Duration,
     pub pressure_iterations: usize,
 }
@@ -1200,6 +1308,9 @@ pub struct Simulation {
     spec: Spec,
     state: State,
     step: u64,
+    /// The flow that the blasts of the last step made (the velocity of the faces, by axis), if there were any: not part of the state. It is dropped when a
+    /// step starts (so a step that fails leaves none) and when the window moves.
+    blast_flow: Option<[Vec<f64>; 3]>,
 }
 
 impl Simulation {
@@ -1254,6 +1365,9 @@ impl Simulation {
         // (six CG vectors, open-face mask, divergence target) + ~26 for the
         // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
         // for allocator overhead and transient volume metadata.
+        // A step with a blast makes one more state while it holds the first (the piston's flow projected alone, ~41 bytes a cell, which carries the
+        // smoke by exchange and not by copy) and keeps a copy of the three faces of the flow that the advection would replace: 206 bytes a cell at the peak
+        // measured (tests/pyro_blast_memory.rs, 48^3 cells), 141 for a step with no blast, inside the 288.
         let bytes =
             count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
@@ -1273,7 +1387,13 @@ impl Simulation {
             velocity: std::array::from_fn(|a| vec![0.0; face_dims(s.cells, a).iter().product()]),
             solid: vec![false; count],
         };
-        Ok(Self { spec, state, step: 0 })
+        Ok(Self { spec, state, step: 0, blast_flow: None })
+    }
+
+    /// The velocity of the faces, by axis, of the flow that the blasts of the last step made (none if there was none). It is the flow that carried the smoke
+    /// in that step, and is not kept in the state: the velocity of the state is what it would have been with no blast.
+    pub fn blast_flow(&self, axis: usize) -> Option<&[f64]> {
+        self.blast_flow.as_ref().map(|f| f[axis].as_slice())
     }
 
     pub fn state(&self) -> &State {
@@ -1285,6 +1405,8 @@ impl Simulation {
     /// the background of an open face. A move that would leave smoke behind is an error and changes nothing.
     pub fn shift_window(&mut self, by: [i64; 3]) -> Result<(), Error> {
         self.state = self.state.shifted(by, true)?;
+        // the flow of the last blasts is indexed on the window it was made in
+        self.blast_flow = None;
         Ok(())
     }
     /// Move the window as far as the smoke of the state asks for, if the spec follows its plume (see
@@ -1298,6 +1420,8 @@ impl Simulation {
         let (by, _) = self.state.follow_decision(margin, loss, self.spec.dt, &keep);
         if by != [0; 3] {
             self.state = self.state.shifted(by, false)?;
+            // the flow of the last blasts is indexed on the window it was made in
+            self.blast_flow = None;
         }
         Ok(by)
     }
@@ -1329,9 +1453,12 @@ impl Simulation {
             return Err(Error::Invalid("fixed-step clock cannot advance"));
         }
         let dt = self.spec.dt;
+        // the flow of the last step is dropped before this one makes its own (24 bytes a cell that the peak of the step would hold for nothing); a step
+        // that fails leaves no flow, and its state and clock as they were
+        self.blast_flow = None;
         let mut state = self.state.working_copy();
         profile.clone = lap(&mut clock);
-        let (solid, solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
+        let (solid, mut solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
         state.solid = solid;
         for cell in &solids {
             state.density[cell.cell] = 0.0;
@@ -1399,6 +1526,16 @@ impl Simulation {
                 );
             }
         }
+        // the blasts that sweep air in this step: their flow is made apart from the smoke's, after it (see `blast_flow`)
+        let mut pulses = Vec::new();
+        for blast in &input.blasts {
+            if self.spec.boundary != Boundary::Open {
+                return Err(Error::Invalid("a blast needs an open domain"));
+            }
+            if let Some((radius, volume)) = blast.swept(dt, self.step) {
+                pulses.push((blast.center, radius.max(self.spec.voxel_size), volume));
+            }
+        }
         profile.inject = lap(&mut clock);
         forces(&mut state, &self.spec, input, self.step);
         profile.forces = lap(&mut clock);
@@ -1412,6 +1549,50 @@ impl Simulation {
         clock = Instant::now();
         validate_state(&state)?;
         profile.boundaries_validate += lap(&mut clock);
+        // The flow of the blasts is made apart: the analytic flow of each piston projected alone (the projection is linear, so this is the share of
+        // the step's flow that the blasts make), and it carries the smoke (the density and the temperature) once, over this step. It is not kept in the
+        // velocity: a potential flow with open faces is not removed by a projection with no divergence, so it would stay for ever, and the smoke's own
+        // velocity is therefore what it would have been without the blast, to the bit.
+        let mut blast_flow = None;
+        if !pulses.is_empty() {
+            let blast_started = Instant::now();
+            let mut scratch = StepProfile::default();
+            let mut flow = state.clone();
+            for axis in &mut flow.velocity {
+                axis.iter_mut().for_each(|v| *v = 0.0);
+            }
+            let mut flow_target = vec![0.0; flow.density.len()];
+            for (center, reach, volume) in &pulses {
+                inject_piston(&mut flow, &mut flow_target, *center, *reach, *volume, dt);
+            }
+            // a solid is at rest for the blast's own flow: what a moving collider does to the air is the smoke's own flow, made above (the blast's part
+            // is zero on its faces, so that the two add up to the whole). The list of the solid faces is not used again, so it is made to rest where it
+            // is and not copied (up to 56 bytes a cell if every cell were solid)
+            for f in &mut solids {
+                f.low = [0.0; 3];
+                f.high = [0.0; 3];
+            }
+            boundaries(&mut flow, &solids);
+            project(&mut flow, &flow_target, &self.spec, &mut scratch)?;
+            validate_state(&flow)?;
+            // the smoke is carried once: the advection that carries it here is the same one, with no decay of the density and no cooling of the heat (the step
+            // has made those already, above)
+            let calm = Spec { dissipation: 0.0, cooling: 0.0, ..self.spec.clone() };
+            // the advection replaces the velocity of the state it advects, and the flow that carried the smoke is what `blast_flow` gives: the one copy
+            let flow_velocity = flow.velocity.clone();
+            // the flow's state takes the smoke by exchange and not by copy (its own density and temperature are of no use: they are what the step's
+            // were before the smoke went in)
+            let mut carried = flow;
+            std::mem::swap(&mut carried.density, &mut state.density);
+            std::mem::swap(&mut carried.temperature, &mut state.temperature);
+            advect(&mut carried, dt, &calm, &solids, &mut scratch)?;
+            state.density = carried.density;
+            state.temperature = carried.temperature;
+            validate_state(&state)?;
+            blast_flow = Some(flow_velocity);
+            profile.blast = blast_started.elapsed();
+        }
+        self.blast_flow = blast_flow;
         self.state = state;
         self.step += 1;
         profile.pressure_iterations = report.pressure_iterations;
@@ -2161,4 +2342,98 @@ fn inject(state: &mut State, target: &mut [f64], shape: &Shape, add: Injection) 
             }
         });
     }
+}
+
+/// Puts the flow of a spherical piston that has swept `volume` (cubic scene units) in a step of `dt` seconds, as the sphere of radius `reach` about
+/// `center`: the cells whose centres are in the sphere and that are not solid are given the divergence that makes the volume that they let out the
+/// volume swept (`volume / (cells * h^3 * dt)`, 1/second), and the faces of the whole domain are given the analytic velocity of the piston, inside
+/// `d (x - c) / 3` and outside `Q / (4 pi r^2)` along `x - c` (`Q = volume / dt`), so that the projection that follows has only the faces and the
+/// discretization to correct and pushes from the centre of the blast wherever the window is.
+fn inject_piston(state: &mut State, target: &mut [f64], center: [f64; 3], reach: f64, volume: f64, dt: f64) {
+    let (cells, origin, h) = (state.cells, state.origin, state.h);
+    let State { velocity: faces, solid, .. } = state;
+    let solid = &*solid;
+    let inside = |p: [f64; 3]| (0..3).map(|a| (p[a] - center[a]).powi(2)).sum::<f64>() <= reach * reach;
+    let in_sphere = |k: usize| inside(world_point(origin, h, coords(k, cells).map(|v| v as f64 + 0.5)));
+    let in_window = (0..solid.len()).into_par_iter().with_min_len(HEAVY).filter(|&k| in_sphere(k)).count();
+    let covered = (0..solid.len()).into_par_iter().with_min_len(HEAVY).filter(|&k| !solid[k] && in_sphere(k)).count();
+    if covered == 0 {
+        return;
+    }
+    // the cells that the volume is shared among are the sphere's whole: a window that the sphere cuts holds only some of them, and the cells of the
+    // sphere that it does not hold take their share (so that the divergence in the window is what the sphere makes in free space, and agrees with the flow
+    // outside). A sphere that is inside the window has its cells counted here (the same number); the solid ones take none.
+    let whole = (0..3).all(|a| center[a] - reach >= origin[a] && center[a] + reach <= origin[a] + cells[a] as f64 * h);
+    let shared = if whole {
+        covered
+    } else {
+        lattice_count(center, origin, h, reach).saturating_sub(in_window - covered).max(covered)
+    };
+    let rate = volume / dt;
+    let divergence = rate / (shared as f64 * h * h * h);
+    target.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, t)| {
+        if !solid[k] && in_sphere(k) {
+            *t += divergence;
+        }
+    });
+    let outside = rate / (4.0 * std::f64::consts::PI);
+    for (a, axis) in faces.iter_mut().enumerate() {
+        let dims = face_dims(cells, a);
+        axis.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, v)| {
+            let cell = coords(k, dims);
+            let p = world_point(origin, h, std::array::from_fn(|i| cell[i] as f64 + if i == a { 0.0 } else { 0.5 }));
+            let d: [f64; 3] = std::array::from_fn(|i| p[i] - center[i]);
+            let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if r2 <= reach * reach {
+                *v += divergence / 3.0 * d[a];
+            } else {
+                *v += outside / (r2 * r2.sqrt()) * d[a];
+            }
+        });
+    }
+}
+
+/// The number of cell centres of the infinite lattice (`origin` plus half a cell, every `h`) in the sphere, by columns (a cost of the square of the
+/// radius in cells; a sphere of more than 30000 cells across is its volume over `h^3`). The test of a centre is the very one that counts the cells of the
+/// window, so that a centre exactly on the sphere is in or out in both.
+fn lattice_count(center: [f64; 3], origin: [f64; 3], h: f64, reach: f64) -> usize {
+    if 2.0 * reach / h > 30_000.0 {
+        return (4.0 / 3.0 * std::f64::consts::PI * (reach / h).powi(3)) as usize;
+    }
+    let index = |v: f64, a: usize| (v - origin[a]) / h - 0.5;
+    let inside = |i: i64, j: i64, k: i64| {
+        let p = world_point(origin, h, [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5]);
+        (0..3).map(|a| (p[a] - center[a]).powi(2)).sum::<f64>() <= reach * reach
+    };
+    let (lo_x, hi_x) = (index(center[0] - reach, 0).floor() as i64 - 1, index(center[0] + reach, 0).ceil() as i64 + 1);
+    let (lo_y, hi_y) = (index(center[1] - reach, 1).floor() as i64 - 1, index(center[1] + reach, 1).ceil() as i64 + 1);
+    let mut total = 0usize;
+    for i in lo_x..=hi_x {
+        for j in lo_y..=hi_y {
+            // the column's cells are those from the centre's own level, up and down, while they are inside: the cells in a column are contiguous
+            let (dx, dy) = (origin[0] + (i as f64 + 0.5) * h - center[0], origin[1] + (j as f64 + 0.5) * h - center[1]);
+            let rest = reach * reach - dx * dx - dy * dy;
+            if rest < -h * h {
+                continue;
+            }
+            let half = rest.max(0.0).sqrt();
+            // the ends of the column from the square root, then moved by the very test of a centre (a centre that the root puts a rounding off is put right)
+            let mut lo = index(center[2] - half, 2).ceil() as i64;
+            let mut hi = index(center[2] + half, 2).floor() as i64;
+            while inside(i, j, lo - 1) {
+                lo -= 1;
+            }
+            while lo <= hi && !inside(i, j, lo) {
+                lo += 1;
+            }
+            while inside(i, j, hi + 1) {
+                hi += 1;
+            }
+            while hi >= lo && !inside(i, j, hi) {
+                hi -= 1;
+            }
+            total += (hi - lo + 1).max(0) as usize;
+        }
+    }
+    total
 }

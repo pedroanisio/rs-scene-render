@@ -1199,6 +1199,10 @@ impl<'a> Eval<'a> {
                 self.check(grid, n, "PYRO1", || {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
                 });
+                let blasts = n.children().any(|c| is(c, "pyroBlast"));
+                self.check(!blasts || a("boundary") == Some("open"), n, "PYC5", || {
+                    "a pyro with a blast needs boundary=\"open\": a blast is a source of divergence, which a closed domain cannot let out.".into()
+                });
                 let follows = matches!(a("follow"), Some("true" | "1"));
                 self.check(!follows || a("boundary") == Some("open"), n, "PYRO9", || {
                     "a pyro whose window follows its plume needs boundary=\"open\".".into()
@@ -1278,6 +1282,19 @@ impl<'a> Eval<'a> {
                     "OCN12",
                     || "a body makes one cavity: at most one water impulse names it.".into(),
                 );
+            }
+            "pyroBlast" => {
+                let parent = n.parent_element();
+                let inside = [("x", "width"), ("y", "height"), ("z", "depth")].iter().all(|(axis, size)| {
+                    a(axis).is_none_or(|v| {
+                        let half = parent.and_then(|p| p.attribute(*size)).map_or(f64::NAN, xpath_number) / 2.0;
+                        let v = xpath_number(v);
+                        v >= -half && v <= half
+                    })
+                });
+                self.check(inside, n, "PYC6", || {
+                    "a blast is released inside the domain of its pyro (x between plus and minus half the width, and likewise y with the height and z with the depth).".into()
+                });
             }
             "pyroSource" | "pyroImpulse" => {
                 self.pyro_source_near_open_face(n);
