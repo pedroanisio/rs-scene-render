@@ -1308,7 +1308,8 @@ pub struct Simulation {
     spec: Spec,
     state: State,
     step: u64,
-    /// The flow that the blasts of the last step made (the velocity of the faces, by axis), if there were any: not part of the state.
+    /// The flow that the blasts of the last step made (the velocity of the faces, by axis), if there were any: not part of the state. It is dropped when a
+    /// step starts (so a step that fails leaves none) and when the window moves.
     blast_flow: Option<[Vec<f64>; 3]>,
 }
 
@@ -1364,8 +1365,9 @@ impl Simulation {
         // (six CG vectors, open-face mask, divergence target) + ~26 for the
         // multigrid hierarchy, level vectors and component labels = ~229, plus ~25%
         // for allocator overhead and transient volume metadata.
-        // A step with a blast makes two more states while it holds the first (the piston's flow projected alone, ~41 bytes a cell each, and the copies of the
-        // density and the temperature that carry the smoke) and advects three faces that it discards: about 222 bytes a cell at the peak, inside the 288.
+        // A step with a blast makes one more state while it holds the first (the piston's flow projected alone, ~41 bytes a cell, which carries the
+        // smoke by exchange and not by copy) and keeps a copy of the three faces of the flow that the advection would replace: 206 bytes a cell at the peak
+        // measured (tests/pyro_blast_memory.rs, 48^3 cells), 141 for a step with no blast, inside the 288.
         let bytes =
             count.checked_mul(288).and_then(|v| v.checked_add(8192)).ok_or(Error::Limit("grid memory overflow"))?;
         if bytes > s.max_bytes {
@@ -1418,6 +1420,8 @@ impl Simulation {
         let (by, _) = self.state.follow_decision(margin, loss, self.spec.dt, &keep);
         if by != [0; 3] {
             self.state = self.state.shifted(by, false)?;
+            // the flow of the last blasts is indexed on the window it was made in
+            self.blast_flow = None;
         }
         Ok(by)
     }
@@ -1449,9 +1453,12 @@ impl Simulation {
             return Err(Error::Invalid("fixed-step clock cannot advance"));
         }
         let dt = self.spec.dt;
+        // the flow of the last step is dropped before this one makes its own (24 bytes a cell that the peak of the step would hold for nothing); a step
+        // that fails leaves no flow, and its state and clock as they were
+        self.blast_flow = None;
         let mut state = self.state.working_copy();
         profile.clone = lap(&mut clock);
-        let (solid, solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
+        let (solid, mut solids) = voxelize(state.cells, state.origin, state.h, &input.obstacles)?;
         state.solid = solid;
         for cell in &solids {
             state.density[cell.cell] = 0.0;
@@ -1559,23 +1566,30 @@ impl Simulation {
                 inject_piston(&mut flow, &mut flow_target, *center, *reach, *volume, dt);
             }
             // a solid is at rest for the blast's own flow: what a moving collider does to the air is the smoke's own flow, made above (the blast's part
-            // is zero on its faces, so that the two add up to the whole)
-            let at_rest: Vec<SolidFaces> =
-                solids.iter().map(|f| SolidFaces { cell: f.cell, low: [0.0; 3], high: [0.0; 3] }).collect();
-            boundaries(&mut flow, &at_rest);
+            // is zero on its faces, so that the two add up to the whole). The list of the solid faces is not used again, so it is made to rest where it
+            // is and not copied (up to 56 bytes a cell if every cell were solid)
+            for f in &mut solids {
+                f.low = [0.0; 3];
+                f.high = [0.0; 3];
+            }
+            boundaries(&mut flow, &solids);
             project(&mut flow, &flow_target, &self.spec, &mut scratch)?;
             validate_state(&flow)?;
             // the smoke is carried once: the advection that carries it here is the same one, with no decay of the density and no cooling of the heat (the step
             // has made those already, above)
             let calm = Spec { dissipation: 0.0, cooling: 0.0, ..self.spec.clone() };
-            let mut carried = flow.clone();
-            carried.density = state.density.clone();
-            carried.temperature = state.temperature.clone();
-            advect(&mut carried, dt, &calm, &at_rest, &mut scratch)?;
+            // the advection replaces the velocity of the state it advects, and the flow that carried the smoke is what `blast_flow` gives: the one copy
+            let flow_velocity = flow.velocity.clone();
+            // the flow's state takes the smoke by exchange and not by copy (its own density and temperature are of no use: they are what the step's
+            // were before the smoke went in)
+            let mut carried = flow;
+            std::mem::swap(&mut carried.density, &mut state.density);
+            std::mem::swap(&mut carried.temperature, &mut state.temperature);
+            advect(&mut carried, dt, &calm, &solids, &mut scratch)?;
             state.density = carried.density;
             state.temperature = carried.temperature;
             validate_state(&state)?;
-            blast_flow = Some(flow.velocity);
+            blast_flow = Some(flow_velocity);
             profile.blast = blast_started.elapsed();
         }
         self.blast_flow = blast_flow;

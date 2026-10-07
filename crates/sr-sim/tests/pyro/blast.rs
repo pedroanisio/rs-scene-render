@@ -650,6 +650,68 @@ fn the_velocity_of_the_smoke_is_what_it_would_have_been_with_no_blast_to_the_bit
     // (with no buoyancy: a smoke that the blast has made warmer or colder in a place would be pushed by it, which is the smoke's own dynamics)
 }
 
+#[test]
+fn a_step_that_makes_no_pulse_has_no_blast_flow_and_the_first_after_the_front_has_stopped_is_one() {
+    // every step of the identity test above is a step of a pulse (the strong phase of this blast is over after a few): here the steps go on past R_max,
+    // and the flow of a step is there exactly when the step has a pulse
+    let b = blast(1.0, [0.0; 3], 0.0);
+    let mut sim = Simulation::new(domain(32, 0.5, Boundary::Open)).unwrap();
+    let (mut with, mut without) = (0, 0);
+    for step in 0..14u64 {
+        sim.step(&Inputs { blasts: vec![b.clone()], ..Inputs::default() }).unwrap();
+        let pulse = b.swept(DT, step).is_some();
+        assert_eq!(sim.blast_flow(0).is_some(), pulse, "step {step}");
+        if pulse {
+            with += 1;
+        } else {
+            without += 1;
+        }
+    }
+    assert!(with > 0 && without > 0, "{with} steps with a pulse and {without} without: the test must have both");
+}
+
+#[test]
+fn a_window_that_follows_its_plume_drops_the_flow_that_was_made_on_the_window_it_had() {
+    use sr_sim::pyro::{Follow, Source};
+    // a hot column that rises in a tall window and is followed, with a blast made at every step (a blast that starts at the instant of the step): the
+    // step makes its flow, and the move of the window, when it comes, is of a window that the flow is not indexed on any more
+    let dt = 0.05;
+    let spec = Spec {
+        cells: [16, 64, 16],
+        origin: [-4.0, -16.0, -4.0],
+        voxel_size: 0.5,
+        dt,
+        boundary: Boundary::Open,
+        buoyancy: 3.0,
+        pressure_iterations: 300,
+        pressure_tolerance: 1e-6,
+        follow: Some(Follow { margin: 4, loss: 1e-3 }),
+        ..Spec::default()
+    };
+    let mut sim = Simulation::new(spec).unwrap();
+    let source = Source {
+        shape: Shape::Sphere { center: [0.0, 6.0, 0.0], radius: 1.0 },
+        density_rate: 6.0,
+        temperature_rate: 500.0,
+        ..Source::default()
+    };
+    let mut moved = 0;
+    for step in 0..120u64 {
+        let input = Inputs {
+            sources: if step < 20 { vec![source.clone()] } else { vec![] },
+            blasts: vec![Blast::new([0.0, 6.0, 0.0], step as f64 * dt, 1e3, RHO0, P0, GAMMA, 1.0).unwrap()],
+            ..Inputs::default()
+        };
+        sim.step(&input).unwrap();
+        assert!(sim.blast_flow(0).is_some(), "step {step} made a flow");
+        if sim.follow(&input).unwrap() != [0, 0, 0] {
+            moved += 1;
+            assert!(sim.blast_flow(0).is_none(), "step {step}: the flow is of the window before the move");
+        }
+    }
+    assert!(moved > 0, "the window moved {moved} times: the test is about a move");
+}
+
 /// The sum of the density, and of the excess of temperature over ambient, after one step in which a blast is made, for a puff of smoke 6 m from it.
 fn totals_after_a_blast(dissipation: f64, cooling: f64) -> (f64, f64) {
     let spec = Spec { dissipation, cooling, ..domain(32, 0.5, Boundary::Open) };
@@ -709,7 +771,10 @@ fn a_collider_that_moves_is_at_rest_for_the_flow_of_the_blast_and_the_smoke_is_c
     let without = run(vec![]);
     // the smoke's own flow is the one the collider makes, with the blast and without it, to the bit
     assert_eq!(bits(&with).2, bits(&without).2);
-    // the faces of the box: x = -6, -5.5 and -5 are the faces 4, 5 and 6 of the axis (the domain begins at -8, in cells of half a metre), on the row that crosses it
+    // the faces of the box: x = -6, -5.5 and -5 are the faces 4, 5 and 6 of the axis (the domain begins at -8, in cells of half a metre), on the row that crosses it.
+    // This is the only place where the defect that this test is for shows (the collider's velocity in the blast's own flow, which the first design took from the
+    // smoke's solid faces): the smoke's velocity above is the one with no blast by design, whatever the blast's flow is, and the net outflow below is zero for a
+    // box that only translates, with the velocity in the flow or without it. So it is asserted to be zero on the box's own faces, to 1e-9
     let at = |x: usize, y: usize, z: usize| x + (n + 1) * (y + n * z);
     for face in [4usize, 5, 6] {
         let (y, z) = (n / 2, n / 2);

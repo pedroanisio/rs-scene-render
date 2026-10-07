@@ -908,8 +908,10 @@ not centred on the blast, is pushed from the blast and not from its own middle. 
 `pyroImpulse` that the author adds). The order of a step with a blast is the smoke's own (advection, sources, forces, projection) and then the blast's: its flow is projected alone, with
 the solids of the step at rest for it (what a moving collider does to the air is the smoke's own flow, made first, and the two add up to the whole), and it carries the density and the
 temperature once, by the same advection with no decay and no cooling (the step has made those: a decay of 1 a second would otherwise be made twice in a step with a blast). The cost of a step with
-a blast is a second projection and two more states while the first is held (about 41 bytes a cell each, the copies of the density and the temperature, and three faces advected and
-thrown away: about 222 bytes a cell at the peak, inside the 288 of the budget; 1.6 GB transient at 256^3), and the time is in the profile as `blast`.
+a blast is a second projection and one more state while the first is held (about 41 bytes a cell, which carries the smoke by exchange of its density and temperature and not by copy, and a copy of the
+three faces of its flow, which the advection replaces): the live bytes at the peak of a step are counted by an allocator (`tests/pyro_blast_memory.rs`, 48^3 cells) at 206 bytes a cell with a blast and 141
+without, inside the 288 of the budget (a first version of this, which copied the whole state and kept the last step's flow through this one, was 248; 1.1 GB more than a step with no blast at 256^3),
+the simulation holds 66.6 bytes a cell after a step with a blast (its state, 42, and the flow of that step, 24, which is dropped when the next begins or the window moves), and the time is in the profile as `blast`.
 
 **Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
 `pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
