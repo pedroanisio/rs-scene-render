@@ -206,7 +206,7 @@ struct Identified<'a>(&'a Fracture3);
 
 impl Debug for Identified<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Fracture3 { source, at, radial_impulse, fragments, contact } = self.0;
+        let Fracture3 { source, at, radial_impulse, fragments, contact, dust } = self.0;
         let mut text = f.debug_struct("Fracture3");
         text.field("source", source)
             .field("at", at)
@@ -214,6 +214,10 @@ impl Debug for Identified<'_> {
             .field("fragments", fragments);
         if let Some(contact) = contact {
             text.field("contact", contact);
+        }
+        // only when there is dust, so that the identity of every fracture without it is what it was
+        if let Some(dust) = dust {
+            text.field("dust", dust);
         }
         text.finish()
     }
@@ -284,6 +288,7 @@ mod tests {
             radial_impulse: 2.0,
             fragments: vec![Fragment3 { body: 2, offset: [0.0; 3], impulse: [0.0; 3] }],
             contact,
+            dust: None,
         }
     }
 

@@ -440,6 +440,28 @@ fn the_cells_a_cut_leaves_in_the_state_are_charged_for_what_they_hold_and_not_fo
         assert!(frame.errors.is_empty(), "{:?}", frame.errors);
         (w.checkpoint_bytes(), w.progress().1)
     };
+    // what the state holds after the cut has no room to spare: the figure below would be the same for the length alone
+    let mut w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![
+            body(Shape3::Voxels { size: SIZE, cells: cells_of(0..141, 0..20, 0..10) }, 1000.0, BodyKind::Dynamic),
+            body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, 1.0, BodyKind::Dynamic),
+        ],
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+    .unwrap();
+    w.frame_at(0.6, &mut FirstColumn);
+    let (len, capacity) = w.voxel_cells_held(0).unwrap();
+    // (the allocator may round a shrunk vector up a little: a slack of a sixteenth, where the vector that was not shrunk has 1.17 times its length)
+    assert_eq!(len, 140 * 200);
+    assert!(capacity <= len + len / 16, "after the cut the room for the cells is {capacity} for {len}");
     let ((small, kept), (big, kept_big)) = (bytes(21), bytes(141));
     assert_eq!(kept, kept_big);
     // checkpoints 1.. are taken after the cut at 0.5 s (a world keeps one a second)
@@ -1173,6 +1195,7 @@ fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
         radial_impulse: 0.0,
         fragments: pieces.into_iter().map(|body| Fragment3 { body, offset: [0.0; 3], impulse: [0.0; 3] }).collect(),
         contact: None,
+        dust: None,
     };
     let fractured = make().with_fractures(vec![fracture(0, vec![1])]).unwrap();
     assert!(
@@ -1431,6 +1454,11 @@ fn a_driver_whose_revision_is_not_a_function_of_the_time_gets_the_same_error_how
     let at_the_cut = tail.frame_at(COUNTING_FROM, &mut Counting);
     assert!(at_the_cut.errors.is_empty(), "the cut itself is fine: {:?}", at_the_cut.errors);
     assert!(tail.frame_at(0.02, &mut Counting).errors.is_empty(), "and earlier frames are not touched");
+    assert_eq!(
+        tail.checkpoint_restores(),
+        0,
+        "the earlier frame came from the log: the world was not taken back, so the cut is installed from the tail"
+    );
     let second = tail.frame_at(0.05, &mut Counting);
     assert_eq!(first.errors, second.errors);
     assert_eq!(first, tail.frame_at(0.05, &mut Counting));

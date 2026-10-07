@@ -52,6 +52,7 @@ fn event(at: f64) -> Fracture3 {
             Fragment3 { body: 2, offset: [1., 0., 0.], impulse: [0.; 3] },
         ],
         contact: None,
+        dust: None,
     }
 }
 
@@ -373,6 +374,7 @@ fn asymmetric() -> (World3Spec, Fracture3) {
             Fragment3 { body: 3, offset: [-4. / 3., -2., 0.], impulse: [0.; 3] },
         ],
         contact: None,
+        dust: None,
     };
     (s, e)
 }

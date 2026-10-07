@@ -94,6 +94,7 @@ fn fracture() -> Fracture3 {
             Fragment3 { body: 3, offset: [3.0, 0.0, 0.0], impulse: [0.0; 3] },
         ],
         contact: None,
+        dust: None,
     }
 }
 

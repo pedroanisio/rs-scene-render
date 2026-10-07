@@ -146,7 +146,11 @@ pub(super) fn sum_mass_properties(parts: &[MassProperties]) -> MassProperties {
 /// or all inward) and total `mass`, uniformly dense: the volume integrals of the signed tetrahedra that each triangle makes with the origin, which
 /// are exact for a polyhedron, and the tensor diagonalised as [`voxel_mass_properties`] does. A mesh that is not closed and consistently wound has no
 /// volume to speak of (the integrals depend on where the origin is) and is refused: every edge must be met once in each direction, the corners
-/// that are at one place being one (a mesh cut apart has corners of its own for every triangle).
+/// that are at one place being one (a mesh cut apart has corners of its own for every triangle), and the shells (parts that share no corner) all wound the same
+/// way, which is a rule about signs and not about containment: a solid in several parts is taken; a shell wound inward is refused, which refuses a cavity
+/// that is apart from the outer shell and not one that touches it at a corner (that is one shell); two nested shells both wound outward are taken, and
+/// the inner volume is counted twice. The caller supplies geometry that is a solid. Two solids that touch only along an edge are
+/// one shell with an edge met four times, and are refused too, though their integrals would be right.
 pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], mass: f64) -> Option<MassProperties> {
     if triangles.is_empty() || !(mass.is_finite() && mass > 0.0) || !closed_and_consistent(points, triangles)? {
         return None;
@@ -187,6 +191,17 @@ pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], ma
     let inertia: [[f64; 3]; 3] = std::array::from_fn(|i| {
         std::array::from_fn(|j| density * (if i == j { trace } else { 0.0 } - covariance(i, j)))
     });
+    tensor_mass_properties(centre, mass, inertia)
+}
+
+/// The mass properties of a body of `mass` with its centre of mass at `centre` and the tensor `inertia` about it (in the same axes), the tensor
+/// diagonalised as [`voxel_mass_properties`] does. `None` for one that is not symmetric or not a number.
+pub(super) fn tensor_mass_properties(centre: Vector, mass: f64, inertia: [[f64; 3]; 3]) -> Option<MassProperties> {
+    let scale = inertia.iter().flatten().fold(0.0f64, |m, e| m.max(e.abs()));
+    let symmetric = (0..3).all(|i| (0..3).all(|j| (inertia[i][j] - inertia[j][i]).abs() <= 1e-9 * scale));
+    if !(mass.is_finite() && mass > 0.0 && centre.is_finite() && scale.is_finite() && symmetric) {
+        return None;
+    }
     let (moments, axes) = principal(inertia);
     let (x, y) = ([axes[0][0], axes[1][0], axes[2][0]], [axes[0][1], axes[1][1], axes[2][1]]);
     let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
@@ -195,7 +210,7 @@ pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], ma
 }
 
 /// Whether the surface is closed and its triangles are wound alike: every directed edge is met exactly once and so is its reverse (corners at the same
-/// place are the same corner). `None` if a triangle names a corner that is not there.
+/// place are the same corner), and every shell has a volume of the same sign. `None` if a triangle names a corner that is not there.
 fn closed_and_consistent(points: &[Vector], triangles: &[[u32; 3]]) -> Option<bool> {
     let mut ids: std::collections::HashMap<[u64; 3], u32> = std::collections::HashMap::new();
     let mut corner = Vec::with_capacity(points.len());
@@ -214,11 +229,38 @@ fn closed_and_consistent(points: &[Vector], triangles: &[[u32; 3]]) -> Option<bo
             }
         }
     }
-    Some(seen.iter().all(|(&(a, b), &n)| n == 1 && seen.get(&(b, a)) == Some(&1)))
+    if !seen.iter().all(|(&(a, b), &n)| n == 1 && seen.get(&(b, a)) == Some(&1)) {
+        return Some(false);
+    }
+    // the shells (triangles that share a corner are one shell) must all be wound the same way: the integrals add the signed volumes of the
+    // shells, so one turned inward would be taken off the others, and a piece with a cavity is refused with it
+    let mut parent: Vec<u32> = (0..ids.len() as u32).collect();
+    fn root(parent: &mut [u32], mut i: u32) -> u32 {
+        while parent[i as usize] != i {
+            parent[i as usize] = parent[parent[i as usize] as usize];
+            i = parent[i as usize];
+        }
+        i
+    }
+    for t in triangles {
+        let (a, b, c) = (corner[t[0] as usize], corner[t[1] as usize], corner[t[2] as usize]);
+        for other in [b, c] {
+            let (ra, ro) = (root(&mut parent, a), root(&mut parent, other));
+            parent[ro as usize] = ra;
+        }
+    }
+    let mut volumes: std::collections::BTreeMap<u32, f64> = std::collections::BTreeMap::new();
+    for t in triangles {
+        let (a, b, c) = (points[t[0] as usize], points[t[1] as usize], points[t[2] as usize]);
+        let shell = root(&mut parent, corner[t[0] as usize]);
+        *volumes.entry(shell).or_insert(0.0) += a.dot(b.cross(c)) / 6.0;
+    }
+    let first = volumes.values().next().copied().unwrap_or(0.0);
+    Some(first != 0.0 && volumes.values().all(|v| *v != 0.0 && (*v > 0.0) == (first > 0.0)))
 }
 
-/// The mass properties of a convex hull of total `mass`, from the exact integrals over its faces (fanned into triangles, wound as their face's
-/// normal says), and not from Parry's hull routine, which diagonalises with the solver whose mistake the rest of this module works around.
+/// The mass properties of a convex hull of total `mass`, from the exact integrals over its faces (fanned into triangles, in the order of the ring of
+/// each face, which Parry keeps counter-clockwise about its normal), and not from Parry's hull routine, which diagonalises with the solver whose mistake the rest of this module works around.
 pub(super) fn hull_mass_properties(
     hull: &rapier3d_f64::parry::shape::ConvexPolyhedron,
     mass: f64,
@@ -230,12 +272,7 @@ pub(super) fn hull_mass_properties(
         let first = face.first_vertex_or_edge as usize;
         let ring = adjacent.get(first..first + face.num_vertices_or_edges as usize)?;
         for w in 1..ring.len().saturating_sub(1) {
-            let mut t = [ring[0], ring[w], ring[w + 1]];
-            let (a, b, c) = (*points.get(t[0] as usize)?, *points.get(t[1] as usize)?, *points.get(t[2] as usize)?);
-            if (b - a).cross(c - a).dot(face.normal) < 0.0 {
-                t.swap(1, 2);
-            }
-            triangles.push(t);
+            triangles.push([ring[0], ring[w], ring[w + 1]]);
         }
     }
     mesh_mass_properties(points, &triangles, mass)

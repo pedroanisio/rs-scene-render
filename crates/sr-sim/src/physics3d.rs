@@ -16,8 +16,10 @@ use crate::fields::{self, Field};
 mod fracture;
 mod voxel_mass;
 mod voxel_split;
-pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
-use voxel_mass::{hull_mass_properties, mesh_mass_properties, sum_mass_properties, voxel_mass_properties};
+pub use fracture::{Dust3, Fracture3, FractureContact, FractureError, FractureLost3, Fragment3};
+use voxel_mass::{
+    hull_mass_properties, mesh_mass_properties, sum_mass_properties, tensor_mass_properties, voxel_mass_properties,
+};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
@@ -321,6 +323,8 @@ struct State {
     active: Vec<bool>,
     collider_revisions: Vec<Option<u64>>,
     fractured: Vec<bool>,
+    /// What the dust of each fracture took away when it fired (none before, and none for a fracture without dust).
+    fracture_lost: Vec<Option<FractureLost3>>,
     impacts: Vec<Option<Impact3>>,
     /// The revision of the cut installed in each body of cells (none before its first), the slots used by each split, and which slots are in use.
     voxel_revisions: Vec<Option<u64>>,
@@ -646,6 +650,7 @@ impl World3 {
             active: Vec::new(),
             collider_revisions: vec![None; spec.bodies.len()],
             fractured: Vec::new(),
+            fracture_lost: Vec::new(),
             impacts: Vec::new(),
             voxel_revisions: vec![None; spec.bodies.len()],
             slots_used: Vec::new(),
@@ -908,6 +913,18 @@ impl World3 {
         self.prefetch = on;
         self.prefetched.clear();
         self
+    }
+
+    /// The cells the state keeps of the body `body` of a split, and the room the vector that holds them has: what a checkpoint is charged for them
+    /// is the room, so a test of the accounting looks at both.
+    pub fn voxel_cells_held(&self, body: usize) -> Option<(usize, usize)> {
+        self.state.voxel_cells.get(body)?.as_ref().map(|c| (c.len(), c.capacity()))
+    }
+
+    /// The momentum that the dust of the fracture `event` took away when it fired, if it has fired and has dust: the counter that says what the world
+    /// did not keep: part of the world's state, as of the last step it took, restored with a checkpoint (so a frame served from the log says nothing of it).
+    pub fn fracture_lost(&self, event: usize) -> Option<FractureLost3> {
+        self.state.fracture_lost.get(event).copied().flatten()
     }
 
     /// How many times the world has been taken back to a checkpoint to replay from it (a frame asked for that is not in the log, or a step

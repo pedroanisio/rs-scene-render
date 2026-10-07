@@ -172,7 +172,14 @@ fn a_body_of_cells_that_will_fracture_spins_up_as_its_cells_say_until_it_does() 
         let w = world(vec![body(block.clone()), body(low.clone()), body(high.clone())], 0);
         let fragments = (1..=2).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
         let mut w = w
-            .with_fractures(vec![Fracture3 { source: 0, at: 2.0, radial_impulse: 0.0, fragments, contact: None }])
+            .with_fractures(vec![Fracture3 {
+                source: 0,
+                at: 2.0,
+                radial_impulse: 0.0,
+                fragments,
+                contact: None,
+                dust: None,
+            }])
             .unwrap();
         let mut d = Push { torque, cut: None };
         let (a, b) = (w.frame_at(0.41, &mut d), w.frame_at(0.45, &mut d));
@@ -238,7 +245,14 @@ fn the_pieces_of_a_fractured_body_spin_up_as_their_cells_say_each_with_its_own_i
     let w = world(bodies, 0);
     let fragments = (1..=3).map(|k| Fragment3 { body: k, offset: [0.0; 3], impulse: [0.0; 3] }).collect();
     let mut w = w
-        .with_fractures(vec![Fracture3 { source: 0, at: 0.3, radial_impulse: 0.0, fragments, contact: None }])
+        .with_fractures(vec![Fracture3 {
+            source: 0,
+            at: 0.3,
+            radial_impulse: 0.0,
+            fragments,
+            contact: None,
+            dust: None,
+        }])
         .unwrap();
     // gentle for the smallest piece, whose inertia is a twentieth of the body's: the others are pushed less than that
     let torque = gentle(&whole, SIZE, 1.0).map(|t| t * 0.1);

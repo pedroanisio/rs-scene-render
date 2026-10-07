@@ -51,6 +51,7 @@ pub mod terrain;
 pub mod value;
 pub mod voxel;
 pub mod voxel_asset;
+pub mod voxel_cache;
 pub mod voxel_crater;
 pub mod voxels;
 

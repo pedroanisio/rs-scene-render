@@ -74,7 +74,7 @@ fn world(bodies: Vec<Body3Spec>, at: f64, pieces: Vec<(usize, [f64; 3])>) -> Wor
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at, radial_impulse: 0.0, fragments, contact: None }])
+    .with_fractures(vec![Fracture3 { source: 0, at, radial_impulse: 0.0, fragments, contact: None, dust: None }])
     .unwrap()
 }
 
@@ -141,7 +141,14 @@ fn plates_with(plate: impl Fn() -> Shape3) -> Result<World3, FractureError> {
         joints: vec![],
         bodies,
     })
-    .with_fractures(vec![Fracture3 { source: 0, at: 0.3, radial_impulse: 0.0, fragments, contact: None }])
+    .with_fractures(vec![Fracture3 {
+        source: 0,
+        at: 0.3,
+        radial_impulse: 0.0,
+        fragments,
+        contact: None,
+        dust: None,
+    }])
 }
 
 #[test]
@@ -176,4 +183,41 @@ fn a_piece_whose_mesh_is_open_or_wound_both_ways_is_refused_and_one_with_unwelde
     let mut w = plates_with(|| Shape3::Decomposition(loose.clone(), faces.clone())).unwrap();
     let alpha = spin_up(&mut w, 1, 300.0);
     assert!((alpha - 3.0).abs() < 1e-9, "{alpha}");
+}
+
+#[test]
+fn a_piece_of_several_shells_wound_alike_is_taken_and_one_with_a_shell_turned_inward_is_refused() {
+    // two disjoint boxes in one piece: a solid in two parts, taken; with the second turned inside out the integrals would be V1 - V2 with a centre and a
+    // tensor that belong to no body, and a cavity (a shell wound inward) is refused with it: the pieces of a fracture of cells have none
+    let (one, faces) = cuboid([0.125, 0.5, 0.5]);
+    // (the second smaller: equal boxes would cancel to no volume at all and be refused for that)
+    let two: Vec<[f64; 3]> = one.iter().map(|p| [p[0] * 0.3 + 0.5, p[1] * 0.3, p[2] * 0.3]).collect();
+    let mut points = one.clone();
+    points.extend(two);
+    let shell = |turned: bool| {
+        let mut triangles = faces.clone();
+        triangles.extend(faces.iter().map(|t| {
+            if turned {
+                [t[0] + 8, t[2] + 8, t[1] + 8]
+            } else {
+                [t[0] + 8, t[1] + 8, t[2] + 8]
+            }
+        }));
+        triangles
+    };
+    assert!(plates_with(|| Shape3::Decomposition(points.clone(), shell(false))).is_ok(), "two shells wound alike");
+    let turned = plates_with(|| Shape3::Decomposition(points.clone(), shell(true)));
+    assert!(turned.is_err(), "a shell turned inward");
+}
+
+#[test]
+fn a_hull_that_is_not_a_box_has_the_tensor_of_the_same_solid_as_a_mesh() {
+    // a tetrahedron with its corner off the origin, as a hull of four points and as the closed mesh of its four faces: the same solid, to the last digits
+    let corners = vec![[0.1, 0.2, 0.3], [1.1, 0.2, 0.3], [0.1, 1.5, 0.3], [0.1, 0.2, 0.9]];
+    let faces = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    let spin = |shape: Shape3| spin_up(&mut plates_with(|| shape.clone()).unwrap(), 1, 300.0);
+    let (hull, mesh) =
+        (spin(Shape3::Convex(corners.clone())), spin(Shape3::Decomposition(corners.clone(), faces.clone())));
+    assert!((hull - mesh).abs() < 1e-9 * mesh.abs(), "the hull spins up at {hull} rad/s2 and the mesh at {mesh}");
+    assert!(mesh.is_finite() && mesh > 0.0);
 }
