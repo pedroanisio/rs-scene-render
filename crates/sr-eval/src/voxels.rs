@@ -146,3 +146,36 @@ pub fn cut(
         dust,
     })
 }
+
+/// A body of cells divided into pieces that are bodies of cells: the source and the pieces that take its place, with the joints between them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fractured {
+    /// The body before it breaks: all its cells and their mass.
+    pub source: Body,
+    /// The pieces in the order of [`sr_3d::pieces::partition`], each a body of its own cells (keys of the source's lattice) and their mass.
+    pub pieces: Vec<Body>,
+    /// The pieces' cells and the faces they share.
+    pub graph: sr_3d::pieces::PieceGraph,
+}
+
+/// Divides the body of `occupancy` by `rule` (see [`sr_3d::pieces::partition`]: at most `max_pieces`) into pieces that are bodies of cells of the same
+/// lattice, each with the mass of its cells, and the source with all of them. Every cell is in exactly one piece, the pieces are in the order of
+/// the partition (by their first cell in the scan), and the result is the same for the same cells in any order.
+pub fn fracture(
+    occupancy: &Occupancy,
+    rule: sr_3d::pieces::Partition,
+    max_pieces: usize,
+    size: [f64; 3],
+    density: f64,
+    pixels_per_meter: f64,
+) -> Result<Fractured, String> {
+    let source = body(occupancy, size, density, pixels_per_meter)?;
+    let graph = sr_3d::pieces::partition(occupancy, rule, max_pieces)?;
+    let one = cell_mass(size, density, pixels_per_meter)?;
+    let pieces = graph
+        .pieces
+        .iter()
+        .map(|p| Body { shape: Shape3::Voxels { size, cells: p.cells.clone() }, mass: p.cells.len() as f64 * one })
+        .collect();
+    Ok(Fractured { source, pieces, graph })
+}

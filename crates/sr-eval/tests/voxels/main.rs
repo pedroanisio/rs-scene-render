@@ -2,6 +2,7 @@
 
 mod crater;
 mod crater_cut;
+mod fracture;
 mod mass_properties;
 mod split;
 mod world_inertia;
