@@ -3654,11 +3654,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 260 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 80 of them are in the
-cinematic families OCN 13, P3D 11, CRT 9, PYRO 11, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 263 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 83 of them are in the
+cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 14 that it does not (BH1 to BH8, FRX5 to FRX7, PYRO9 to PYRO11) are this repository's. At commit 349d371,
+families, and the 17 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
