@@ -1442,9 +1442,13 @@ impl World3 {
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
         // the loads first: a step that cannot get one is not taken, and nothing has changed
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
-        // the cuts of this step come before the loads, as they do in a frame asked for at this instant (whose tail applies them): a driver that reads
-        // the state of a body to load it finds the same body however the step is reached. They are applied again after the visibility and the fractures
-        // (idempotent: what is installed is not installed twice), for a body that those have just brought in.
+        // what a frame asked for at this instant has (its tail: the visibility, the fractures and the cuts, in that order) comes before the loads, so that a
+        // driver that reads a body to load it finds the same body however the step is reached: after the world has been asked for the frame at this
+        // instant, or by stepping straight through to it. They are applied again below, as they always were (each is idempotent: what is installed,
+        // shown or fired is not again), for what the loads or the others have changed. The colliders of the static and kinematic bodies are not
+        // among them: they are asked at the end of the step (the contract of `Driver3::surface`), and a load reads dynamic bodies only.
+        self.sync_visibility(t, driver);
+        self.apply_fractures(t, driver)?;
         self.apply_voxel_cuts(self.state.step, t, driver)?;
         let mut loads = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {

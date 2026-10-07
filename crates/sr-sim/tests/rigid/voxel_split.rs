@@ -1360,3 +1360,62 @@ fn a_cut_that_is_a_function_of_the_impact_the_world_noticed_is_the_same_however_
     // and the piece falls: its height after the cut is below where it started
     assert!(wanted[5].velocities[2].linear[1] > 0.0 || wanted[5].bodies[2].pos[1] != 0.0, "the piece is moving");
 }
+
+/// A driver that cuts as a [`Script`] does for a body that does not exist until `born`: it is hidden before, and when it comes in it takes the pose
+/// that the driver gives it then (which is not the one it was authored at) and loads itself by where its centre of mass is.
+struct Born {
+    script: Script,
+    born: f64,
+}
+
+impl Driver3 for Born {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        which.iter().map(|_| Pose3 { pos: [2.0, -1.5, 0.5], rot: [0.0, 0.0, 0.0, 1.0] }).collect()
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.script.fields(t)
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        which != 0 || t + 1e-9 >= self.born
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.script.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, _: u64, _: f64, _: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        let c = state.centre;
+        Ok(Some(Load3 {
+            force: [3.0 * c[1], -2.0 * c[0], 5.0 * c[2]],
+            torque: [7.0 * c[0], 11.0 * c[2], -13.0 * c[1]],
+        }))
+    }
+}
+
+#[test]
+fn a_body_born_and_cut_at_the_same_step_gives_pieces_of_the_same_pose_and_loads_however_the_step_is_reached() {
+    // the bar comes into the world at 1.5 s, with the pose that the driver gives it then, and is cut at the same instant: the pieces start where the
+    // bar is born, not where it was authored, and the loads of the step read the bar as it is born, whichever way the step is reached
+    let steps: Vec<u64> = (147..=153).collect();
+    let wanted = the_same_four_ways(
+        &|frames| world_logging(2, None, frames),
+        &|| Born { script: Script { cuts: vec![first_cut(1.5)] }, born: 1.5 },
+        &steps,
+    );
+    // before it is born only the slots exist... and none takes part; at the step it is born the bar and its piece do, at the birth pose
+    assert_eq!(wanted[2].enabled, vec![false, false, false], "step 149: nothing yet");
+    assert_eq!(wanted[3].enabled, vec![true, true, false], "step 150: born and cut");
+    for k in 0..2 {
+        for (axis, want) in [2.0, -1.5, 0.5].into_iter().enumerate() {
+            assert!(
+                (wanted[3].bodies[k].pos[axis] - want).abs() < 1e-9,
+                "body {k} is at {:?}, the birth pose",
+                wanted[3].bodies[k].pos
+            );
+        }
+    }
+}
