@@ -262,3 +262,9 @@ fn a_product_that_cannot_be_kept_is_not_copied_and_what_is_kept_is_charged_by_it
     short.body(&o, SIZE, DENSITY, 1.0).unwrap();
     assert_eq!((short.bytes(), short.evicted()), (0, 0));
 }
+
+#[test]
+fn the_brick_that_the_world_counts_bricks_in_is_the_brick_of_an_occupancy() {
+    // sr-sim does not depend on sr-3d and says the side of a brick itself: the two must not part
+    assert_eq!(sr_sim::physics3d::VOXEL_BRICK, sr_3d::occupancy::BRICK);
+}

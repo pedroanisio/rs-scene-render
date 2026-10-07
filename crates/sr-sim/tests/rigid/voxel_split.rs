@@ -744,6 +744,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
 fn same(a: &Frame3, b: &Frame3, why: &str) {
     assert!(a.errors.is_empty() && b.errors.is_empty(), "{why}: {:?} {:?}", a.errors, b.errors);
     assert_eq!(a.enabled, b.enabled, "{why}: who takes part");
+    assert_eq!(a.voxel_revision, b.voxel_revision, "{why}: how many cuts each body of cells has had");
     assert_eq!(a.bodies.len(), b.bodies.len());
     for k in 0..a.bodies.len() {
         assert_eq!(a.bodies[k].pos.map(f64::to_bits), b.bodies[k].pos.map(f64::to_bits), "{why}: position of body {k}");
@@ -1896,12 +1897,70 @@ fn what_a_mesher_has_to_look_at_again_between_two_revisions_is_the_bricks_with_c
 
 #[test]
 fn the_history_is_kept_under_a_budget_and_the_oldest_revisions_go_first() {
-    let mut w = world(1, None).with_voxel_history_budget(44 * 12);
+    let mut w = world(1, None).with_voxel_history_budget(44 * 12 * 3 / 2);
     let mut d = Cutter::new(0.2);
     let frame = w.frame_at(0.5, &mut d);
     assert_eq!(frame.voxel_revision, vec![Some(1), Some(1)]);
     // 48 cells at the start, 20 after the cut and 24 in the piece, and room for fewer than all of them: the start is dropped, what the frame is of stays
     assert_eq!(w.voxel_cells_at(0, 0), None, "the oldest is gone");
     assert!(w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some(), "what the world is in is kept");
-    assert!(w.voxel_history_bytes() <= 44 * 12, "the bytes kept");
+    assert!(w.voxel_history_bytes() <= 44 * 12 * 3 / 2, "the bytes kept");
+}
+
+#[test]
+fn a_frame_from_the_log_whose_revision_the_history_dropped_is_made_again_so_that_its_cells_can_be_asked_for() {
+    // the log of frames and the history of cells have budgets of their own: a frame can be in the log with a revision that the history no longer has
+    let mut w = world(2, None);
+    let mut d = Cutter::new(0.2);
+    w.frame_at(1.0, &mut d);
+    assert!(w.voxel_cells_at(0, 0).is_some());
+    let mut w = w.with_voxel_history_budget(1);
+    assert_eq!(
+        w.voxel_cells_at(0, 0),
+        None,
+        "the history dropped the cells the bar started with, and kept those the world is in"
+    );
+    assert!(w.voxel_cells_at(0, 1).is_some());
+    // the frame at 0.1 s is in the log and says revision 0: asking for it makes it again, and its cells are there to ask for
+    let frame = w.frame_at(0.1, &mut d);
+    assert_eq!(frame.voxel_revision[0], Some(0));
+    assert_eq!(w.voxel_cells_at(0, 0).as_deref(), Some(&sorted(bar())));
+}
+
+#[test]
+fn the_cells_of_a_revision_are_sorted_by_key_with_x_first_which_is_not_the_scan_order_of_an_occupancy() {
+    let mut w = world(1, None);
+    w.frame_at(0.1, &mut Cutter::new(0.2));
+    let cells = w.voxel_cells_at(0, 0).unwrap();
+    assert_eq!(*cells, sorted(bar()), "by x, then y, then z");
+    assert_ne!(
+        *cells,
+        bar(),
+        "the order of an Occupancy's cells is z, then y, then x: do not pair the two by position"
+    );
+}
+
+#[test]
+fn with_no_room_for_a_history_only_what_the_world_is_in_is_kept_and_a_later_revision_survives_a_replay_to_an_earlier_time(
+) {
+    // a budget of nothing keeps the revision each body is in and no other
+    let mut w = world_logging(2, None, Some(0)).with_voxel_history_budget(0);
+    let mut d = Cutter::new(0.2);
+    w.frame_at(1.0, &mut d);
+    assert!(w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some());
+    assert_eq!(w.voxel_cells_at(0, 0), None);
+    // a replay to an earlier time (no frames are kept, so the world goes back to a checkpoint) makes the cells of that time as well
+    let restored = w.checkpoint_restores();
+    let early = w.frame_at(0.1, &mut d);
+    assert!(w.checkpoint_restores() > restored, "the frame was replayed");
+    assert_eq!(early.voxel_revision, vec![Some(0), None, None]);
+    assert_eq!(w.voxel_cells_at(0, 0).as_deref(), Some(&sorted(bar())), "the revision the frame is of");
+    // and with room for them, a later revision asked after that replay is still there
+    let mut w = world_logging(2, None, Some(0));
+    w.frame_at(1.0, &mut d);
+    w.frame_at(0.1, &mut d);
+    assert!(
+        w.voxel_cells_at(0, 1).is_some() && w.voxel_cells_at(1, 1).is_some(),
+        "the later revisions after a replay to an earlier time"
+    );
 }
