@@ -14,8 +14,10 @@ use rapier3d_f64::prelude::*;
 use crate::fields::{self, Field};
 
 mod fracture;
+mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Fracture3, FractureContact, FractureError, Fragment3};
+use voxel_mass::{keys_of, voxel_mass_properties, voxel_tensor};
 use voxel_split::voxel_key;
 pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
@@ -703,13 +705,19 @@ impl World3 {
                 };
                 InteractionGroups::new(member, filter, InteractionTestMode::And)
             };
-            let c = collider
-                .friction(b.friction)
-                .restitution(b.restitution)
-                .sensor(b.sensor)
-                .collision_groups(groups)
-                .mass(b.mass.max(1e-6))
-                .build();
+            let collider =
+                collider.friction(b.friction).restitution(b.restitution).sensor(b.sensor).collision_groups(groups);
+            // a body of cells has the mass properties of its cells, worked out exactly (see voxel_mass), not the ones Parry diagonalises
+            let collider = match &b.shape {
+                Shape3::Voxels { size, cells } if !cells.is_empty() && size.iter().all(|s| *s > 0.0) => {
+                    match voxel_mass_properties(&unique_keys(cells), size.map(|s| s / ppm), b.mass.max(1e-6)) {
+                        Some(props) => collider.mass_properties(props),
+                        None => collider.mass(b.mass.max(1e-6)),
+                    }
+                }
+                _ => collider.mass(b.mass.max(1e-6)),
+            };
+            let c = collider.build();
             st.colliders.insert_with_parent(c, h, &mut st.bodies);
             st.handles.push(h);
             st.active.push(!follows);
@@ -1691,21 +1699,26 @@ pub fn shape_mass_properties(shape: &Shape3, mass: f64, pixels_per_meter: f64) -
     {
         return Err("a body of cells needs cells, a positive size, a positive mass and a positive scale".into());
     }
-    let keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
-    let collider = ColliderBuilder::voxels(vec3(size.map(|s| s / pixels_per_meter)), &keys).mass(mass).build();
-    let props = collider.mass_properties();
-    let inertia = props.reconstruct_inertia_matrix();
+    let t = voxel_tensor(&unique_keys(cells), size.map(|s| s / pixels_per_meter), mass)
+        .ok_or("a body of cells needs cells, a positive size, a positive mass and a positive scale")?;
     // physics axes to scene axes: a half turn about x, so a product of inertia with one of y and z (not both) changes sign
     let sign = [1.0, -1.0, -1.0];
     let scene: [[f64; 3]; 3] = std::array::from_fn(|a| {
-        std::array::from_fn(|b| inertia.col(b)[a] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
+        std::array::from_fn(|b| t.inertia[a][b] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
     });
-    let centre = props.local_com;
     Ok(ShapeMass {
-        mass: props.mass(),
-        centre: [centre.x * pixels_per_meter, -centre.y * pixels_per_meter, -centre.z * pixels_per_meter],
+        mass: t.mass,
+        centre: std::array::from_fn(|a| t.centre[a] * sign[a] * pixels_per_meter),
         inertia: scene,
     })
+}
+
+/// The keys of the cells in the physics lattice, each once, in order.
+fn unique_keys(cells: &[[i32; 3]]) -> Vec<IVector> {
+    let mut keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
+    keys.sort_by_key(|k| (k.z, k.y, k.x));
+    keys.dedup();
+    keys
 }
 
 /// The volume a shape encloses, in the cube of the shape's own length unit. A mesh counts as

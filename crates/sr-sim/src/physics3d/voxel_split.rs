@@ -140,7 +140,8 @@ impl World3 {
             parent: usize,
             cut: VoxelCut3,
             shape: SharedShape,
-            parts: Vec<(SharedShape, Vec3, Vec3, f64)>,
+            parts: Vec<(SharedShape, Vec3, MassProperties)>,
+            parent_props: Option<MassProperties>,
             pose: Pose,
             v: Vec3,
             w: Vec3,
@@ -196,28 +197,42 @@ impl World3 {
                     }
                 }
             }
-            // the pieces: their shapes and the velocity of their centres of mass
+            // the pieces: their shapes, mass properties (of their cells, exactly) and the velocity of their centres of mass
             let mut parts = Vec::with_capacity(cut.pieces.len());
             for p in &cut.pieces {
-                let keys: Vec<IVector> = p.cells.iter().map(voxel_key).collect();
+                let mut keys: Vec<IVector> = p.cells.iter().map(voxel_key).collect();
+                keys.sort_by_key(|k| (k.z, k.y, k.x));
+                keys.dedup();
                 let piece = SharedShape::voxels(vsize, &keys);
-                let centre = pose * piece.mass_properties(1.0).local_com;
-                parts.push((piece, centre, v + w.cross(centre - c_old), p.mass));
+                let props = voxel_mass_properties(&keys, size.map(|c| c / ppm), p.mass)
+                    .ok_or("a piece of a cut has no cells or no mass")?;
+                let centre = pose * props.local_com;
+                parts.push((piece, v + w.cross(centre - c_old), props));
             }
-            if parts.iter().any(|(_, c, velocity, _)| !c.is_finite() || !velocity.is_finite()) || !w.is_finite() {
+            // what stays: the mass properties of the cells that are left, from the shape that has been edited
+            let parent_props = if cut.parent_mass > 0.0 {
+                let voxels = shape.as_voxels().ok_or("a body of cells has lost its cells")?;
+                Some(
+                    voxel_mass_properties(&keys_of(voxels), size.map(|c| c / ppm), cut.parent_mass)
+                        .ok_or("what stays of a body of cells has no cells")?,
+                )
+            } else {
+                None
+            };
+            if parts.iter().any(|(_, velocity, _)| !velocity.is_finite()) || !w.is_finite() {
                 return Err("a cut of a body of cells exceeds numerical range".into());
             }
-            prepared.push(Prepared { split: s, parent, cut, shape, parts, pose, v, w, c_old });
+            prepared.push(Prepared { split: s, parent, cut, shape, parts, parent_props, pose, v, w, c_old });
         }
         // install: nothing below can fail
-        for Prepared { split, parent, cut, shape, parts, pose, v, w, c_old } in prepared {
+        for Prepared { split, parent, cut, shape, parts, parent_props, pose, v, w, c_old } in prepared {
             let slots = self.voxel_splits[split].slots.clone();
             let h = self.state.handles[parent];
             let collider = self.state.bodies[h].colliders()[0];
             self.state.colliders[collider].set_shape(shape);
             let body = &mut self.state.bodies[h];
-            if cut.parent_mass > 0.0 {
-                self.state.colliders[collider].set_mass(cut.parent_mass);
+            if let Some(props) = parent_props {
+                self.state.colliders[collider].set_mass_properties(props);
                 body.recompute_mass_properties_from_colliders(&self.state.colliders);
                 if body.is_dynamic() {
                     let c_new = body.center_of_mass();
@@ -229,12 +244,12 @@ impl World3 {
                 self.state.voxel_spent[parent] = true;
             }
             let used = self.state.slots_used[split];
-            for (i, (piece, _, velocity, mass)) in parts.into_iter().enumerate() {
+            for (i, (piece, velocity, props)) in parts.into_iter().enumerate() {
                 let slot = slots[used + i];
                 let hs = self.state.handles[slot];
                 let cs = self.state.bodies[hs].colliders()[0];
                 self.state.colliders[cs].set_shape(piece);
-                self.state.colliders[cs].set_mass(mass);
+                self.state.colliders[cs].set_mass_properties(props);
                 let body = &mut self.state.bodies[hs];
                 body.set_body_type(RigidBodyType::Dynamic, true);
                 body.set_position(pose, true);
