@@ -5,3 +5,4 @@ mod pyro;
 mod pyro_gas;
 mod pyro_heat;
 mod pyro_mesh;
+mod sedov;

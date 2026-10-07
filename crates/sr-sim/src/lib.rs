@@ -33,6 +33,7 @@ pub mod physics;
 pub mod physics3d;
 pub mod pyro;
 pub mod rng;
+pub mod sedov;
 pub mod slime;
 pub mod soft;
 pub mod surface;
