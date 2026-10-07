@@ -52,6 +52,20 @@ use crate::types::{self, flag, src, Draw, Gen, Globals, Mask, Vertex};
 use crate::vector::Attrs;
 use sr_vector::{Scene, Xf};
 
+/// What the surface of one body of cells is at a frame: the revision of its cells, its quads and their fingerprint
+/// ([`sr_3d::voxel::surface::quads_hash`]), and what the update that made it did (`remeshed` planes, or `full`).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct VoxelSurfaceStat {
+    pub id: String,
+    /// The body of a piece that came away from the object; none for the object itself.
+    pub body: Option<usize>,
+    pub revision: u64,
+    pub quads: usize,
+    pub hash: u64,
+    pub remeshed: usize,
+    pub full: bool,
+}
+
 /// Counters for one rendered frame.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RenderStats {
@@ -101,6 +115,8 @@ pub struct RenderStats {
     /// Groups of voxel cells drawn (one draw each) and the CPU seconds spent preparing the surfaces of voxel objects this frame.
     pub voxel_groups: usize,
     pub voxel_mesh_seconds: f64,
+    /// The surface of each body of cells drawn this frame (an object of cells and the pieces that came away from it).
+    pub voxel_surfaces: Vec<VoxelSurfaceStat>,
     /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
     /// rigid-body stepping its colliders trigger.
     pub sim_smoke_seconds: f64,
@@ -353,7 +369,7 @@ pub struct Renderer {
     /// The current mesh key of each clay object (its old meshes are dropped when it changes).
     clay_keys: HashMap<Arc<str>, String>,
     /// The surface of each voxels object between frames, by node id.
-    voxel_surfaces: HashMap<Arc<str>, render_three::VoxelState>,
+    voxel_surfaces: HashMap<(Arc<str>, Option<usize>), render_three::VoxelState>,
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
     /// Burn only this caption track (an output's `burnCaptions`); otherwise tracks with mode burn or both.
     pub burn_captions: Option<String>,

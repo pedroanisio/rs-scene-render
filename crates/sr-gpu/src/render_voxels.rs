@@ -5,6 +5,10 @@
 //! where the cells changed), and this module is what turns the object's attributes and the asset's palette into the table of classes the
 //! mesher reads, the quads into one mesh for each group of cells that share a material, and the groups into draws.
 //!
+//! A body of cells that a simulation cuts comes with the frame (`FrameNode::voxels`): its grid at the frame's revision, the bricks that each cut changed, and
+//! the pieces that came away with their own grids and poses. Each of them is a surface of its own, kept between frames and brought up to date from the bricks
+//! of the cuts since the revision it last read; an object that no simulation touches is drawn from the asset.
+//!
 //! * **Material of a palette index**: the material that the object's `palette` names for it (the i-th id of the list), else the object's
 //!   own `material`, else the colour and the material of the file; an index with none of the three is an error that names it.
 //! * **Groups** are the draws: one for every document material in use, one for the file's indices that look alike but for their colour
@@ -19,7 +23,7 @@
 use super::*;
 use sr_3d::voxel::material::{Kind, Material};
 use sr_3d::voxel::surface::{expand, Classes, SurfaceCache};
-use sr_3d::{AlphaMode, MaterialParams};
+use sr_3d::{AlphaMode, MaterialParams, Occupancy};
 use std::collections::BTreeMap;
 
 /// What a group of cells is drawn with.
@@ -47,6 +51,9 @@ pub(in crate::render) struct VoxelState {
     cache: SurfaceCache,
     signature: Option<u64>,
     groups: Vec<GroupDraw>,
+    /// The quads of the surface held and their fingerprint, for the frame's statistics.
+    quads: usize,
+    hash: u64,
 }
 
 struct GroupDraw {
@@ -112,6 +119,20 @@ fn file_params(kind: u8, numbers: &[Option<u64>; 4]) -> MaterialParams {
     p
 }
 
+/// The bricks that each cut of a body changed, by the revision it made.
+type Steps<'a> = &'a [(u64, Vec<[i32; 3]>)];
+
+/// A body of cells to draw: the object itself or a piece that came away from it.
+struct Body<'a> {
+    /// The piece's body; none for the object.
+    id: Option<usize>,
+    grid: &'a Occupancy,
+    revision: u64,
+    /// The bricks each cut changed, for a body that a simulation cuts; none for the asset's cells.
+    steps: Option<Steps<'a>>,
+    world: Mat4,
+}
+
 impl Renderer {
     /// The draws of an `object3D` of primitive `voxels`.
     #[allow(clippy::too_many_arguments)]
@@ -140,6 +161,33 @@ impl Renderer {
         };
         let cell_size = a.opt("cellSize").or(model.cell_size).unwrap_or(1.0) as f32;
         let budget = (a.num("surfaceMemoryMiB", 128.0) as usize) << 20;
+        // the bodies: what the simulation says when it cuts this object, else the asset's cells
+        let mut bodies: Vec<Body> = Vec::new();
+        match n.voxels.as_deref() {
+            None => bodies.push(Body {
+                id: None,
+                grid: &model.occupancy,
+                revision: model.occupancy.revision(),
+                steps: None,
+                world,
+            }),
+            Some(v) => {
+                if v.enabled {
+                    bodies.push(Body { id: None, grid: &v.grid, revision: v.revision, steps: Some(&v.steps), world });
+                }
+                for piece in v.pieces.iter().filter(|p| p.enabled) {
+                    let pose = Mat4::from_cols_array(&piece.pose3.map(|c| c as f32));
+                    bodies.push(Body {
+                        id: Some(piece.body),
+                        grid: &piece.grid,
+                        revision: piece.revision,
+                        steps: Some(&[]),
+                        world: pose,
+                    });
+                }
+            }
+        }
+        self.voxel_surfaces.retain(|(id, body), _| *id != n.id || bodies.iter().any(|b| b.id == *body));
         // the material of each palette index in use
         let palette = a.str("palette");
         let tokens: Vec<String> = match palette.as_deref().map(str::trim) {
@@ -153,9 +201,11 @@ impl Renderer {
         };
         let object_material = a.str("material");
         let mut used = [false; 256];
-        for (_, cells) in model.occupancy.bricks() {
-            for c in cells.iter() {
-                used[usize::from(*c)] = true;
+        for body in &bodies {
+            for (_, cells) in body.grid.bricks() {
+                for c in cells.iter() {
+                    used[usize::from(*c)] = true;
+                }
             }
         }
         let mut looks: BTreeMap<u8, Look> = BTreeMap::new();
@@ -227,90 +277,121 @@ impl Renderer {
         let class_of = |i: u8| looks.get(&i).map_or(i, |l| label[l]);
         let see_through: Vec<u8> = label.iter().filter(|(l, _)| see(l)).map(|(_, i)| *i).collect();
         let classes = Classes::new(class_of, &see_through);
-        // what the meshes depend on: the cells, the colours, the materials and how the object reads them
-        let signature = h(&[
-            model.occupancy.lineage(),
-            model.occupancy.revision(),
-            model.occupancy.palette_revision(),
-            model.materials_fingerprint,
-            sr_eval::rng::hash_str(&format!("{palette:?}|{object_material:?}|{looks:?}")),
-        ]);
-        let state = self.voxel_surfaces.entry(n.id.clone()).or_default();
-        if state.signature != Some(signature) {
-            let update = match state.cache.update(&model.occupancy, &classes, budget) {
-                Ok(u) => u,
-                Err(e) => {
-                    state.signature = None;
-                    state.groups.clear();
-                    plan.stats.errors.push(format!("{}: {e}", n.id));
-                    return;
-                }
-            };
-            let _ = update;
-            let quads = state.cache.quads();
-            let mut by_group: BTreeMap<&GroupKey, Vec<sr_3d::voxel::surface::Quad>> = BTreeMap::new();
-            let group_of_class: BTreeMap<u8, &GroupKey> = label.iter().map(|(l, i)| (*i, &l.group)).collect();
-            let colour_of_class: BTreeMap<u8, Option<[u8; 4]>> = label.iter().map(|(l, i)| (*i, l.colour)).collect();
-            for q in quads {
-                if let Some(g) = group_of_class.get(&q.class) {
-                    by_group.entry(g).or_default().push(q);
-                }
-            }
-            let mut out = Vec::new();
-            let limit = self.gpu.device.limits().max_buffer_size;
-            for (group, quads) in by_group {
-                let (material, maps) = match group {
-                    GroupKey::Document(id) => document[id].clone(),
-                    GroupKey::File { kind, numbers } => (file_params(*kind, numbers), Maps::default()),
-                    GroupKey::Emit { colour, strength } => {
-                        let c = self.literal_linear(colour.map(|v| f64::from(v) / 255.0));
-                        let mut p = MaterialParams {
-                            base_color: [c[0] as f32, c[1] as f32, c[2] as f32, 1.0],
-                            ..Default::default()
-                        };
-                        p.emissive = [c[0] as f32, c[1] as f32, c[2] as f32];
-                        p.emissive_strength = f64::from_bits(*strength) as f32;
-                        (p, Maps::default())
-                    }
+        let looks_hash = sr_eval::rng::hash_str(&format!("{palette:?}|{object_material:?}|{looks:?}"));
+        let group_of_class: BTreeMap<u8, &GroupKey> = label.iter().map(|(l, i)| (*i, &l.group)).collect();
+        let colour_of_class: BTreeMap<u8, Option<[u8; 4]>> = label.iter().map(|(l, i)| (*i, l.colour)).collect();
+        let mut drawn_groups = 0;
+        for body in &bodies {
+            let tag = body.id.map_or(0, |b| b as u64 + 1);
+            // what the meshes depend on: the cells, the colours, the materials and how the object reads them
+            let signature = h(&[
+                model.occupancy.lineage(),
+                tag,
+                body.revision,
+                model.occupancy.palette_revision(),
+                model.materials_fingerprint,
+                looks_hash,
+            ]);
+            let state_key = (n.id.clone(), body.id);
+            let mut remeshed = (0, false);
+            if self.voxel_surfaces.get(&state_key).and_then(|s| s.signature) != Some(signature) {
+                let state = self.voxel_surfaces.entry(state_key.clone()).or_default();
+                let update = match body.steps {
+                    None => state.cache.update(body.grid, &classes, budget),
+                    Some(steps) => state.cache.update_steps(
+                        body.grid,
+                        &classes,
+                        budget,
+                        h(&[model.occupancy.lineage(), tag]),
+                        body.revision,
+                        steps,
+                    ),
                 };
-                let colour = |class: u8| -> [f32; 4] {
-                    match colour_of_class.get(&class).copied().flatten() {
-                        Some(c) => {
-                            let l = self.literal_linear(c.map(|v| f64::from(v) / 255.0));
-                            [l[0] as f32, l[1] as f32, l[2] as f32, l[3] as f32]
+                match update {
+                    Ok(u) => remeshed = (u.remeshed, u.full),
+                    Err(e) => {
+                        state.signature = None;
+                        state.groups.clear();
+                        plan.stats.errors.push(format!("{}: {e}", n.id));
+                        continue;
+                    }
+                }
+                let quads = state.cache.quads();
+                state.quads = quads.len();
+                state.hash = sr_3d::voxel::surface::quads_hash(&quads);
+                let mut by_group: BTreeMap<&GroupKey, Vec<sr_3d::voxel::surface::Quad>> = BTreeMap::new();
+                for q in quads {
+                    if let Some(g) = group_of_class.get(&q.class) {
+                        by_group.entry(g).or_default().push(q);
+                    }
+                }
+                let mut out = Vec::new();
+                let limit = self.gpu.device.limits().max_buffer_size;
+                for (group, quads) in by_group {
+                    let (material, maps) = match group {
+                        GroupKey::Document(id) => document[id].clone(),
+                        GroupKey::File { kind, numbers } => (file_params(*kind, numbers), Maps::default()),
+                        GroupKey::Emit { colour, strength } => {
+                            let c = self.literal_linear(colour.map(|v| f64::from(v) / 255.0));
+                            let mut p = MaterialParams {
+                                base_color: [c[0] as f32, c[1] as f32, c[2] as f32, 1.0],
+                                ..Default::default()
+                            };
+                            p.emissive = [c[0] as f32, c[1] as f32, c[2] as f32];
+                            p.emissive_strength = f64::from_bits(*strength) as f32;
+                            (p, Maps::default())
                         }
-                        None => [1.0; 4],
+                    };
+                    let colour = |class: u8| -> [f32; 4] {
+                        match colour_of_class.get(&class).copied().flatten() {
+                            Some(c) => {
+                                let l = self.literal_linear(c.map(|v| f64::from(v) / 255.0));
+                                [l[0] as f32, l[1] as f32, l[2] as f32, l[3] as f32]
+                            }
+                            None => [1.0; 4],
+                        }
+                    };
+                    let primitive = expand(&quads, colour);
+                    if primitive.vertices.len() as u64 * std::mem::size_of::<sr_3d::Vertex>() as u64 > limit
+                        || primitive.indices.len() as u64 * 4 > limit
+                    {
+                        plan.stats.errors.push(format!("{}: voxel surface exceeds device buffer limits", n.id));
+                        out.clear();
+                        break;
                     }
-                };
-                let primitive = expand(&quads, colour);
-                if primitive.vertices.len() as u64 * std::mem::size_of::<sr_3d::Vertex>() as u64 > limit
-                    || primitive.indices.len() as u64 * 4 > limit
-                {
-                    plan.stats.errors.push(format!("{}: voxel surface exceeds device buffer limits", n.id));
-                    return;
+                    let mesh = self.three_engine().upload_mesh(&primitive.vertices, &primitive.indices);
+                    out.push(GroupDraw { material, maps, mesh });
                 }
-                let mesh = self.three_engine().upload_mesh(&primitive.vertices, &primitive.indices);
-                out.push(GroupDraw { material, maps, mesh });
+                let state = self.voxel_surfaces.get_mut(&state_key).expect("the state of this body");
+                state.groups = out;
+                state.signature = Some(signature);
             }
-            let state = self.voxel_surfaces.get_mut(&n.id).expect("the state of this node");
-            state.groups = out;
-            state.signature = Some(signature);
-        }
-        let state = &self.voxel_surfaces[&n.id];
-        let model = world * Mat4::from_scale(Vec3::splat(cell_size));
-        for g in &state.groups {
-            draws.push(Draw3 {
-                mesh: MeshSrc::Cached(g.mesh.clone()),
-                model,
-                material: g.material.clone(),
-                maps: g.maps.clone(),
-                opacity,
-                cast_shadow: cast,
-                receive_shadow: receive,
-                shadow_catcher: catcher,
+            let state = &self.voxel_surfaces[&state_key];
+            let model_matrix = body.world * Mat4::from_scale(Vec3::splat(cell_size));
+            for g in &state.groups {
+                draws.push(Draw3 {
+                    mesh: MeshSrc::Cached(g.mesh.clone()),
+                    model: model_matrix,
+                    material: g.material.clone(),
+                    maps: g.maps.clone(),
+                    opacity,
+                    cast_shadow: cast,
+                    receive_shadow: receive,
+                    shadow_catcher: catcher,
+                });
+            }
+            drawn_groups += state.groups.len();
+            plan.stats.voxel_surfaces.push(crate::render::VoxelSurfaceStat {
+                id: n.id.to_string(),
+                body: body.id,
+                revision: body.revision,
+                quads: state.quads,
+                hash: state.hash,
+                remeshed: remeshed.0,
+                full: remeshed.1,
             });
         }
-        plan.stats.voxel_groups += state.groups.len();
+        plan.stats.voxel_groups += drawn_groups;
         plan.stats.voxel_mesh_seconds += started.elapsed().as_secs_f64();
     }
 }
