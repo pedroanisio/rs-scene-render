@@ -96,6 +96,11 @@ fn body(shape: Shape3, mass: f64, kind: BodyKind) -> Body3Spec {
 
 /// A world in space with the bar and `slots` placeholders for its pieces.
 fn world(slots: usize, budget: Option<usize>) -> World3 {
+    world_logging(slots, budget, None)
+}
+
+/// The same with a budget for the frames it keeps (none: the default); with 0 every frame asked for is computed, from a checkpoint.
+fn world_logging(slots: usize, budget: Option<usize>, frames: Option<usize>) -> World3 {
     let mut parent = body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
     parent.velocity = [1.0, 0.4, -0.3];
     parent.angular_velocity = [20.0, 10.0, 40.0];
@@ -117,6 +122,10 @@ fn world(slots: usize, budget: Option<usize>) -> World3 {
     });
     let w = match budget {
         Some(b) => w.with_checkpoint_budget(b),
+        None => w,
+    };
+    let w = match frames {
+        Some(b) => w.with_frame_log_budget(b),
         None => w,
     };
     w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..=slots).collect() }]).unwrap()
@@ -238,33 +247,35 @@ fn the_pieces_take_the_slots_in_order_and_there_must_be_slots_for_them() {
 
 #[test]
 fn the_world_replays_the_cut_the_same_from_any_checkpoint_and_in_any_order_of_asking() {
-    let times = [1.5, 0.3, 0.9, 1.2, 0.5, 1.5, 0.45, 2.0];
+    // the cut is at 1.5 s; the times go back and forth across it, and across the checkpoints taken each second
+    let times = [3.5, 1.4, 2.2, 1.5, 1.6, 0.2, 3.0, 1.45, 1.51, 2.0];
     let reference: Vec<_> = {
         let mut w = world(2, None);
-        let mut driver = Cutter::new(0.5);
+        let mut driver = Cutter::new(1.5);
+        w.frame_at(3.5, &mut driver);
         times.iter().map(|t| w.frame_at(*t, &mut driver)).collect()
     };
-    // a world that keeps next to no checkpoints replays from the start each time, and one asked in another order
-    for budget in [Some(0), Some(4_000), None] {
-        let mut w = world(2, budget);
-        let mut driver = Cutter::new(0.5);
+    // worlds that keep no frames, so that every frame asked for is computed by replaying from a checkpoint: with the default budget for
+    // checkpoints, with one that keeps next to none (only the first, which every world has) and with none
+    for budget in [None, Some(4_000), Some(0)] {
+        let mut w = world_logging(2, budget, Some(0));
+        let mut driver = Cutter::new(1.5);
+        let mut restores = 0;
         for (t, want) in times.iter().zip(&reference) {
             let got = w.frame_at(*t, &mut driver);
-            assert!(got.errors.is_empty(), "{:?}", got.errors);
-            assert_eq!(got.enabled, want.enabled, "t = {t}");
-            for k in 0..3 {
-                assert_eq!(
-                    got.bodies[k].pos.map(f64::to_bits),
-                    want.bodies[k].pos.map(f64::to_bits),
-                    "t = {t}, body {k}"
-                );
-                assert_eq!(
-                    got.bodies[k].rot.map(f64::to_bits),
-                    want.bodies[k].rot.map(f64::to_bits),
-                    "t = {t}, body {k}"
-                );
-                assert_eq!(got.velocities[k], want.velocities[k], "t = {t}, body {k}");
-            }
+            same(&got, want, &format!("budget {budget:?}, t = {t}"));
+            assert!(w.checkpoint_restores() >= restores, "the count does not go down");
+            restores = w.checkpoint_restores();
+        }
+        // it did replay: frames that are before the world's state were taken from a checkpoint, and with the default budget there were
+        // checkpoints other than the first to take them from
+        let backward = times.windows(2).filter(|w| w[1] < w[0]).count() as u64;
+        assert!(
+            restores >= backward && restores > 0,
+            "budget {budget:?}: {restores} restores for {backward} steps back"
+        );
+        if budget.is_none() {
+            assert!(w.progress().1 >= 4, "{} checkpoints", w.progress().1);
         }
     }
 }
@@ -401,9 +412,6 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
     assert!(before.errors.is_empty(), "{:?}", before.errors);
     assert_eq!(before.enabled, vec![true, true, false]);
     // the state of the remaining part just before its second cut, and just after
-    // (a frame is the state at the start of a step, which a cut of that step has already changed: the world has to have taken the step
-    // for the frame to show the cut, so it is asked past it first)
-    w.frame_at(1.2, &mut driver);
     let at_cut = w.frame_at(1.0, &mut driver);
     assert!(at_cut.errors.is_empty(), "{:?}", at_cut.errors);
     assert_eq!(at_cut.enabled, vec![true, true, true], "the second piece took the second slot");
@@ -449,21 +457,19 @@ fn a_second_cut_is_the_difference_from_the_first_and_the_next_piece_takes_the_ne
     let mut two = Script { cuts: vec![first_cut(0.5), driver.cuts[1].clone()] };
     let times = [1.4, 0.6, 1.0, 0.95, 1.4, 0.2, 1.1];
     let wanted: Vec<_> = times.iter().map(|t| reference.frame_at(*t, &mut two)).collect();
-    for budget in [Some(0), Some(4_000)] {
-        let mut replay = world(2, budget);
+    for budget in [None, Some(0)] {
+        // no frames kept, so each is replayed from a checkpoint (counted)
+        let mut replay = world_logging(2, budget, Some(0));
         let mut script = Script { cuts: vec![first_cut(0.5), driver.cuts[1].clone()] };
         for (t, want) in times.iter().zip(&wanted) {
-            let got = replay.frame_at(*t, &mut script);
-            assert!(got.errors.is_empty(), "{:?}", got.errors);
-            for k in 0..3 {
-                assert_eq!(
-                    got.bodies[k].pos.map(f64::to_bits),
-                    want.bodies[k].pos.map(f64::to_bits),
-                    "t = {t}, body {k}"
-                );
-                assert_eq!(got.velocities[k], want.velocities[k], "t = {t}, body {k}");
-            }
+            same(&replay.frame_at(*t, &mut script), want, &format!("budget {budget:?}, t = {t}"));
         }
+        let backward = times.windows(2).filter(|w| w[1] < w[0]).count() as u64;
+        assert!(
+            replay.checkpoint_restores() >= backward,
+            "{} restores for {backward} steps back",
+            replay.checkpoint_restores()
+        );
     }
 }
 
@@ -477,7 +483,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
     for _ in 0..3 {
         bodies.push(body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic));
     }
-    let make = |budget: Option<usize>| {
+    let make = |budget: Option<usize>, frames: Option<usize>| {
         let w = World3::new(World3Spec {
             fix_internal_edges: false,
             start: 0.,
@@ -491,6 +497,10 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
         });
         let w = match budget {
             Some(b) => w.with_checkpoint_budget(b),
+            None => w,
+        };
+        let w = match frames {
+            Some(b) => w.with_frame_log_budget(b),
             None => w,
         };
         w.with_voxel_splits(vec![
@@ -512,7 +522,7 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
         },
     );
     let script = || Script { cuts: vec![first_cut(0.5), piece_cut.clone()] };
-    let mut w = make(None);
+    let mut w = make(None, None);
     let mut driver = script();
     // before the first cut the slot is not a body of the world and its split does nothing, whatever the driver would say
     let early = w.frame_at(0.4, &mut driver);
@@ -520,7 +530,6 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
     assert_eq!(early.enabled, vec![true, false, false, false]);
     let mid = w.frame_at(0.9, &mut driver);
     assert_eq!(mid.enabled, vec![true, true, false, false]);
-    w.frame_at(1.2, &mut driver);
     let after = w.frame_at(1.0, &mut driver);
     assert!(after.errors.is_empty(), "{:?}", after.errors);
     assert_eq!(
@@ -539,25 +548,81 @@ fn a_slot_can_be_the_parent_of_another_split_once_it_has_been_used() {
     for k in 0..3 {
         assert!((got[k] - wanted[k]).abs() < 1e-9, "velocity {k}: {} against {}", got[k], wanted[k]);
     }
-    // the replay of both levels is the same to the bit
+    // the replay of both levels is the same to the bit, from worlds that keep no frames and so replay from a checkpoint each time
     let times = [1.3, 0.45, 0.95, 1.0, 1.3, 0.2];
-    let mut first = make(None);
+    let mut first = make(None, None);
     let mut d = script();
     let wanted: Vec<_> = times.iter().map(|t| first.frame_at(*t, &mut d)).collect();
-    for budget in [Some(0), Some(6_000)] {
-        let mut replay = make(budget);
+    for budget in [None, Some(0)] {
+        let mut replay = make(budget, Some(0));
         let mut d = script();
         for (t, want) in times.iter().zip(&wanted) {
-            let got = replay.frame_at(*t, &mut d);
-            assert!(got.errors.is_empty(), "{:?}", got.errors);
-            for k in 0..4 {
-                assert_eq!(
-                    got.bodies[k].pos.map(f64::to_bits),
-                    want.bodies[k].pos.map(f64::to_bits),
-                    "t = {t}, body {k}"
-                );
-                assert_eq!(got.velocities[k], want.velocities[k], "t = {t}, body {k}");
-            }
+            same(&replay.frame_at(*t, &mut d), want, &format!("budget {budget:?}, t = {t}"));
         }
+        let backward = times.windows(2).filter(|w| w[1] < w[0]).count() as u64;
+        assert!(
+            replay.checkpoint_restores() >= backward,
+            "{} restores for {backward} steps back",
+            replay.checkpoint_restores()
+        );
+    }
+}
+
+/// Two frames are the same: the poses, the velocities and who takes part, to the bit.
+fn same(a: &Frame3, b: &Frame3, why: &str) {
+    assert!(a.errors.is_empty() && b.errors.is_empty(), "{why}: {:?} {:?}", a.errors, b.errors);
+    assert_eq!(a.enabled, b.enabled, "{why}: who takes part");
+    assert_eq!(a.bodies.len(), b.bodies.len());
+    for k in 0..a.bodies.len() {
+        assert_eq!(a.bodies[k].pos.map(f64::to_bits), b.bodies[k].pos.map(f64::to_bits), "{why}: position of body {k}");
+        assert_eq!(a.bodies[k].rot.map(f64::to_bits), b.bodies[k].rot.map(f64::to_bits), "{why}: rotation of body {k}");
+        assert_eq!(
+            a.velocities[k].linear.map(f64::to_bits),
+            b.velocities[k].linear.map(f64::to_bits),
+            "{why}: velocity of body {k}"
+        );
+        assert_eq!(
+            a.velocities[k].angular.map(f64::to_bits),
+            b.velocities[k].angular.map(f64::to_bits),
+            "{why}: spin of body {k}"
+        );
+    }
+}
+
+#[test]
+fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_order_and_replayed_from_a_checkpoint() {
+    // the cut is at 1.5 s, step 150; a checkpoint is taken each second, so the frames around it are replayed from the one at step 100
+    let steps: Vec<u64> = (145..=156).collect();
+    let at = |s: u64| s as f64 * 0.01;
+    // the reference: a world run to 3 s, whose frames are the ones it logged
+    let mut reference = world(2, None);
+    reference.frame_at(3.0, &mut Cutter::new(1.5));
+    let wanted: Vec<Frame3> = steps.iter().map(|s| reference.frame_at(at(*s), &mut Cutter::new(1.5))).collect();
+    assert!(
+        wanted[0].enabled == vec![true, false, false] && wanted[11].enabled == vec![true, true, false],
+        "the cut is inside the steps"
+    );
+    for (i, s) in steps.iter().enumerate() {
+        let t = at(*s);
+        // (1) a world asked for this time and nothing else: nothing has been logged, the frame is computed
+        let fresh = world(2, None).frame_at(t, &mut Cutter::new(1.5));
+        same(&fresh, &wanted[i], &format!("fresh, step {s}"));
+        // (2) asked, then asked later, then asked again: the second answer comes from what the later request logged
+        let mut w = world(2, None);
+        let mut d = Cutter::new(1.5);
+        let first = w.frame_at(t, &mut d);
+        w.frame_at(t + 0.2, &mut d);
+        let again = w.frame_at(t, &mut d);
+        same(&first, &wanted[i], &format!("first, step {s}"));
+        same(&again, &wanted[i], &format!("after a later request, step {s}"));
+        // (3) a world that keeps no frames, run to 3 s: the frame is computed from a checkpoint, which has to have been taken and used
+        let mut replay = world_logging(2, None, Some(0));
+        let mut d = Cutter::new(1.5);
+        replay.frame_at(3.0, &mut d);
+        assert!(replay.progress().1 >= 3, "{} checkpoints", replay.progress().1);
+        let restored = replay.checkpoint_restores();
+        let got = replay.frame_at(t, &mut d);
+        assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
+        same(&got, &wanted[i], &format!("replayed, step {s}"));
     }
 }

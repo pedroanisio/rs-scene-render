@@ -550,6 +550,8 @@ pub struct World3 {
     prefetched: Vec<(usize, ColliderUpdate3, SharedShape)>,
     /// How many steps took a shape that had been built ahead.
     prefetch_hits: u64,
+    /// How many times the state was taken back to a checkpoint, to replay from it.
+    checkpoint_restores: u64,
 }
 
 /// Whether a replacement surface can be built: within its memory budget, finite and with triangles that name its vertices.
@@ -835,6 +837,7 @@ impl World3 {
             prefetch: true,
             prefetched: Vec::new(),
             prefetch_hits: 0,
+            checkpoint_restores: 0,
             fractures: Vec::new(),
             spec,
             params,
@@ -879,6 +882,12 @@ impl World3 {
         self.prefetch = on;
         self.prefetched.clear();
         self
+    }
+
+    /// How many times the world has been taken back to a checkpoint to replay from it (a frame asked for that is not in the log, or a step
+    /// that failed after the solver ran): what a test of a replay counts to know that it replayed.
+    pub fn checkpoint_restores(&self) -> u64 {
+        self.checkpoint_restores
     }
 
     /// How many steps have taken a surface built ahead.
@@ -1198,6 +1207,7 @@ impl World3 {
     fn restore_nearest_checkpoint(&mut self) {
         if let Some((_, cp)) = self.checkpoints.range(..=self.state.step).next_back() {
             self.state = cp.state.clone();
+            self.checkpoint_restores += 1;
         }
     }
 
@@ -1574,6 +1584,7 @@ impl World3 {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
                 if cp.state.step > self.state.step || self.state.step > target {
                     self.state = cp.state.clone();
+                    self.checkpoint_restores += 1;
                 }
             }
         }
@@ -1590,6 +1601,11 @@ impl World3 {
         }
         self.sync_visibility(self.spec.start + target as f64 * self.spec.step, driver);
         if let Err(error) = self.apply_fractures(self.spec.start + target as f64 * self.spec.step, driver) {
+            return Frame3 { errors: vec![error], ..Default::default() };
+        }
+        // the cuts of the step that has not been taken yet are in the frame as the step would put them (it is idempotent: a cut
+        // that is installed is not installed again), so that a frame is the same whether the world has been asked past it or not
+        if let Err(error) = self.apply_voxel_cuts(self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
         self.snapshot()
