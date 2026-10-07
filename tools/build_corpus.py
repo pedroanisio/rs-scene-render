@@ -141,6 +141,8 @@ CASES = [
     ("frx10-pieces", ["FRX10"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels" labels="material" pieces="8"')),
     ("frx11-planes", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0"')),
     ("frx11-no-partition", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'planes="1 0 0 4"')),
+    ("frx11-zero-normal", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 4 0 0 0 2"')),
+    ("frx11-infinite", ["FRX11"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="planes" planes="1 0 0 1' + '0' * 400 + '"')),
     ("frx12-labels", ["FRX12"], lambda _: VOXEL_FRACTURE.replace('pieces="8" seed="3"', 'partition="labels"')),
     ("vox7-exclusion", ["VOX7"], lambda _: VOXELS.replace('surface="blocks"', 'surface="blocks" mesh="shape"')),
     ("frx1", ["FRX1"], lambda _: FRACTURE.replace('version="1.3"', 'version="1.2"')),

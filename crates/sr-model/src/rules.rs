@@ -808,12 +808,13 @@ impl<'a> Eval<'a> {
                 let planes_ok = !numbers.is_empty()
                     && numbers.len() <= 252
                     && numbers.len() & 3 == 0
-                    && numbers.iter().all(|x| !x.is_nan());
+                    && numbers.iter().all(|x| x.is_finite())
+                    && numbers.chunks(4).all(|plane| plane[..3].iter().any(|c| *c != 0.0));
                 self.check(
                     (a("partition") == Some("planes") || !has("planes")) && (a("partition") != Some("planes") || (has("planes") && planes_ok)),
                     n,
                     "FRX11",
-                    || "partition planes takes planes, from one to 63 planes of four numbers (nx ny nz offset), and planes belongs to that partition.".into(),
+                    || "partition planes takes planes, from one to 63 planes of four finite numbers (nx ny nz offset, the normal not all zeros), and planes belongs to that partition.".into(),
                 );
                 self.check(
                     (a("partition") == Some("labels") || !has("labels"))

@@ -3201,7 +3201,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX14 | a body of cells has a crater or a fracture, not both |
 | VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 414 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 416 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 **Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
@@ -3230,7 +3230,7 @@ cells that the cut throws, each with its place, velocity and palette colour: the
 has one as before.
 
 *The fracture (FRX3, FRX8 to FRX12).* The partition is `voronoi` (the engine's: `pieces` seeds drawn from `seed`, at most 4096), `planes` (up to 63 planes of `nx ny nz offset`
-in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component)
+in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component, is not all zeros and every number is finite: FRX11)
 or `labels="material"` (the palette index of a cell is its label, so a model breaks along its materials); a part that is not connected is split into its components. `pieces` and `seed`
 belong to voronoi (FRX10). The pieces have the material of their cells: there is no cut surface to paint, so `interiorMaterial` and `interiorUvScale` are refused for cells (FRX8; the
 exposed face of a piece is drawn from the palette like any other, and a surface that is to look different is a palette index, or a later `surface` value) and `interiorMaterial` stays

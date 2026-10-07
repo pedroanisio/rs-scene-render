@@ -4835,7 +4835,7 @@
       <xs:annotation><xs:documentation>
         With partition="planes" (FRX11): up to 63 planes, each four numbers `nx ny nz offset`, in object units (the object's own axes, before its scale, the
         origin at the corner of the cells): a cell is on the positive side of a plane if the dot product of the normal with the centre of the cell, `(key + 1/2) * cellSize`,
-        is at least the offset. The normal is not unit and need not be; it is taken to 2^-32 of its largest component.
+        is at least the offset. The normal is not unit and need not be, but it is not all zeros (a plane with no direction cuts nothing), and all the numbers are finite; it is taken to 2^-32 of its largest component.
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="labels">

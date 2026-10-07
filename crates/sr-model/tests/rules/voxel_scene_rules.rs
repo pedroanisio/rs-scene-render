@@ -144,9 +144,25 @@ fn a_fracture_of_cells_is_cut_by_seeds_planes_or_materials_and_has_no_interior()
     // the planes: 63 are the most, a plane is four numbers and numbers are numbers
     let many = |n: usize| (0..n).map(|i| format!("1 0 0 {i}")).collect::<Vec<_>>().join(" ");
     assert!(cut(&format!(r#"<fracture source="ball" partition="planes" planes="{}"/>"#, many(63))).is_empty());
-    for planes in [many(64), "1 0 0".to_string(), "1 0 0 4 0".to_string(), "1 0 x 4".to_string(), String::new()] {
+    // a plane has a direction (a normal that is all zeros cuts nothing: every cell is on one side of it) and numbers that are finite
+    for planes in [
+        many(64),
+        "1 0 0".to_string(),
+        "1 0 0 4 0".to_string(),
+        "1 0 x 4".to_string(),
+        String::new(),
+        "0 0 0 4".to_string(),
+        "1 0 0 4 0 0 0 2".to_string(),
+        "1 0 0 1e999".to_string(),
+        format!("1 0 0 {}", "9".repeat(400)),
+    ] {
         let c = cut(&format!(r#"<fracture source="ball" partition="planes" planes="{planes}"/>"#));
         assert!(c.contains(&"FRX11".into()), "{planes:?}: {c:?}");
+    }
+    // the directions that are fine: any axis, a slanted normal, a zero offset, a normal that is not a unit vector
+    for planes in ["0 0 1 0", "0 -1 0 -3.5", "3 4 0 12", "0 0 0.001 1"] {
+        let c = cut(&format!(r#"<fracture source="ball" partition="planes" planes="{planes}"/>"#));
+        assert!(c.is_empty(), "{planes:?}: {c:?}");
     }
     // what belongs to which
     assert!(cut(r#"<fracture source="ball" partition="planes"/>"#).contains(&"FRX11".into()));

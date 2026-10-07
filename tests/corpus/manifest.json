@@ -316,10 +316,16 @@
     "frx10-pieces.scene.xml": [
       "FRX10"
     ],
+    "frx11-infinite.scene.xml": [
+      "FRX11"
+    ],
     "frx11-no-partition.scene.xml": [
       "FRX11"
     ],
     "frx11-planes.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-zero-normal.scene.xml": [
       "FRX11"
     ],
     "frx12-labels.scene.xml": [
