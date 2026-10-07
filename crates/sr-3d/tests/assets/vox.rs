@@ -402,3 +402,36 @@ fn a_scene_graph_that_has_no_root_or_two_or_a_node_outside_the_root_is_an_error_
     let good = read_raw([model, raw::transform(0, 1, None, None), raw::shape(1, &[0])].concat()).unwrap();
     assert_eq!(good.occupancy.count(), 1);
 }
+
+#[test]
+fn a_negated_axis_sends_the_cell_q_to_minus_q_minus_one_as_the_unit_boxes_of_ogt_vox_do() {
+    // The values are worked out by hand from the box convention (the cell x of a model with the pivot c fills [x - c, x - c + 1); a
+    // placement is the affine map p = R q + t of space; the cell is the one that holds the centre of the box), not by tools/make_vox.py.
+    let placed = |size: [i32; 3], cell: [u8; 3], rotation: &str, t: &str| {
+        let imported = read_raw(
+            [
+                raw::model(size, &[[cell[0], cell[1], cell[2], 1]]),
+                raw::transform(0, 1, Some(t), Some(rotation)),
+                raw::shape(1, &[0]),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let cells: Vec<[i32; 3]> = imported.occupancy.cells().collect();
+        assert_eq!(cells.len(), 1);
+        // back to MagicaVoxel's axes: the scene's [x, -z - 1, y] of the cell [x, y, z]
+        let c = cells[0];
+        [c[0], c[2], -c[1] - 1]
+    };
+    // the example of the description of the format, R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]] (byte 105), a model of 3 x 3 x 3 (pivot
+    // 1, 1, 1), the cell (0, 0, 0), q = (-1, -1, -1), centre (-0.5, -0.5, -0.5):
+    // R c = (c_y, -c_z, -c_x) = (-0.5, 0.5, 0.5), plus (5, 6, 7) = (4.5, 6.5, 7.5): the cell (4, 6, 7). Not (4, 7, 8).
+    assert_eq!(placed([3, 3, 3], [0, 0, 0], "105", "5 6 7"), [4, 6, 7]);
+    // a half turn about z, R = diag(-1, -1, 1) (byte 52 = 0 | 1 << 2 | 1 << 4 | 1 << 5), the cell (2, 1, 0) of 3 x 3 x 3:
+    // q = (1, 0, -1), centre (1.5, 0.5, -0.5), R c = (-1.5, -0.5, -0.5): the cell (-2, -1, -1)
+    assert_eq!(placed([3, 3, 3], [2, 1, 0], "52", "0 0 0"), [-2, -1, -1]);
+    // a model of 2 x 2 x 2 (pivot 1, 1, 1), the cell (1, 0, 0): q = (0, -1, -1), centre (0.5, -0.5, -0.5), R c = (-0.5, 0.5, -0.5): (-1, 0, -1)
+    assert_eq!(placed([2, 2, 2], [1, 0, 0], "52", "0 0 0"), [-1, 0, -1]);
+    // no negation, no change of convention: the identity (byte 4: column 0 in the first row, column 1 in the second) moves the cell by the translation alone, (0, 0, 0) of 2 x 2 x 2 is -1 about the pivot
+    assert_eq!(placed([2, 2, 2], [0, 0, 0], "4", "3 4 5"), [2, 3, 4]);
+}

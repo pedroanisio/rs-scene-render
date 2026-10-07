@@ -9,16 +9,24 @@ named in `UNPROVED` (the importer's tests and the proposal say the same):
   * the palette stored in the file is offset by one: the colour of palette index c (1 to 255) is the file's entry c - 1;
   * the cells of a model are placed about its centre, size / 2 with integer division, by the scene graph;
   * the rotation byte: bits 0-1 the column of the nonzero entry of the first row, bits 2-3 that of the second, the third is
-    the column left, bits 4, 5, 6 the signs (1 negative) of the three rows, and a point is placed by p[k] = sign[k] * q[c[k]];
+    the column left, bits 4, 5, 6 the signs (1 negative) of the three rows;
+  * a voxel is a unit box: the cell x of a model whose pivot is the cell c fills [x - c, x - c + 1) in the pivot's axes
+    (ogt_vox.h, "EXPLANATION OF MODEL PIVOTS", lines 123 to 170: the pivot is a corner, each face is on an integer coordinate, and
+    the pivot is subtracted from the geometry), the whole placement is one affine map of space p = R q + t, and the cell
+    that a placed voxel is in is the one that holds its centre. A negated axis therefore sends the cell q to -q - 1, not -q;
+    this script works with the centres (q + 1/2) as exact fractions and floors at the end, and shares nothing with the reader's
+    arithmetic;
   * a MATL chunk names the palette index it is for, from 1.
 
 Usage: tools/make_vox.py [OUT_DIR]   (default crates/sr-3d/tests/fixtures/vox)
 """
 import itertools
 import json
+import math
 import os
 import struct
 import sys
+from fractions import Fraction
 
 UNPROVED = [
     "palette offset by one",
@@ -110,10 +118,24 @@ def centre(size):
     return [size[0] // 2, size[1] // 2, size[2] // 2]
 
 
-def place(voxel, size, rows, t):
-    local = [voxel[i] - centre(size)[i] for i in range(3)]
-    r = rotate(rows, local)
+def middle(voxel, size):
+    """The centre of the box of a voxel, in the axes of the model's pivot, exactly."""
+    return [Fraction(voxel[i] - centre(size)[i]) + Fraction(1, 2) for i in range(3)]
+
+
+def move(point, rows, t):
+    """One node of the graph, the affine map p = R q + t of a point."""
+    r = rotate(rows, point)
     return [r[i] + t[i] for i in range(3)]
+
+
+def cell_of(point):
+    """The cell that holds a point."""
+    return [math.floor(v) for v in point]
+
+
+def place(voxel, size, rows, t):
+    return cell_of(move(middle(voxel, size), rows, t))
 
 
 def scene_cell(p):
@@ -126,6 +148,8 @@ def rgba(i):
 
 
 def default_palette():
+    # synthetic: NOT MagicaVoxel's default palette (the importer's is the table of the description of the format); it only has to be
+    # a palette that a file stores, with 256 distinct entries, so that the offset by one is seen
     return [rgba(i) for i in range(256)]
 
 
@@ -204,10 +228,10 @@ def main():
     body = size_chunk(*m_size) + xyzi_chunk(m_voxels) + graph + rgba_chunk(palette)
     cells = []
     for v in m_voxels:
-        inner = place(v[:3], m_size, r2[1], (-2, 7, 1))  # the model's own transform
-        outer = [rotate(r1[1], inner)[i] + (5, 5, 5)[i] for i in range(3)]
-        outer = [outer[i] + (100, 0, 0)[i] for i in range(3)]
-        cells.append((scene_cell(outer), v[3]))
+        point = middle(v[:3], m_size)
+        for rows, t in ((r2[1], (-2, 7, 1)), (r1[1], (5, 5, 5)), ([(0, 1), (1, 1), (2, 1)], (100, 0, 0))):  # the graph, innermost first
+            point = move(point, rows, t)
+        cells.append((scene_cell(cell_of(point)), v[3]))
     emit("nested", file(150, body), expected("nested", [(m_size, m_voxels)], palette, cells))
 
     # all 24 rotations of one asymmetric model, side by side
@@ -233,9 +257,9 @@ def main():
     body = size_chunk(*r_size) + xyzi_chunk(r_voxels) + graph + rgba_chunk(palette)
     cells = []
     for v in r_voxels:
-        q = [v[i] - r_size[i] // 2 for i in range(3)]
+        q = middle(v[:3], r_size)
         p = [sum(spec_matrix[k][c] * q[c] for c in range(3)) + (5, 6, 7)[k] for k in range(3)]
-        cells.append((scene_cell(p), v[3]))
+        cells.append((scene_cell(cell_of(p)), v[3]))
     emit("spec-rotation", file(150, body), expected("spec-rotation", [(r_size, r_voxels)], palette, cells))
 
     print(json.dumps(files, sort_keys=True))

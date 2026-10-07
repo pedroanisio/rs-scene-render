@@ -3032,15 +3032,20 @@ has its source:
    the colour index 85 and the one material that is not the default is the `MATL` with id 85, and in
    `single-voxel-with-material` the cell is 249 and the odd material is the `MATL` 249.
 4. *Placement under a scene graph.* A model's cells are placed about its centre, `floor(size / 2)` ("the centre pivot for that model
-   is located at floor(size.xyz / 2)", `ogt_vox.h`, line 125), by `p = R q + t`, where `R` comes from the rotation byte of the `nTRN`:
+   is located at floor(size.xyz / 2)", `ogt_vox.h`, line 125), by `p = R q + t`, where `R` comes from the rotation byte of the `nTRN` and a voxel is a unit box (the pivot is a corner of the
+   grid, every face is on an integer coordinate, the pivot is subtracted from the geometry and the transform then applied to it:
+   `ogt_vox.h`, "EXPLANATION OF MODEL PIVOTS", lines 123 to 170), so that a negated axis sends the cell `q` to `-q - 1`, not
+   `-q` (a model of 3 x 3 x 3, the cell (0, 0, 0), the byte 105 and the translation (5, 6, 7) give the cell (4, 6, 7), worked
+   out by hand in the test and not by the script that writes the fixtures):
    bits 0 and 1 are the column of the nonzero entry of the first row, bits 2 and 3 those of the second (the third is the column that
    is left), bits 4, 5 and 6 the signs of the three rows (section (c) of the extension file of the same repository, whose example
    `R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]` is the byte 105 and is the fixture `spec-rotation`). Where the cells of two models fall
    on one place the later one in the graph wins.
 
-*What is evidence and what is proof.* Fact 4 is proved by the description and by the fixtures that `tools/make_vox.py` writes (an
-independent script that shares no code with the reader: 24 rotations, nesting, several models), not by a real file: none of the real
-files has a rotation. The layout of `axes.vox` of the `dot_vox` crate, with its cube on the plane z = 0 and about x = y = 0, fits
+*What is evidence and what is proof.* Fact 4 is proved by the description, by `ogt_vox.h` and by the fixtures that `tools/make_vox.py`
+writes (an independent script that shares no code with the reader and works with the centres of the boxes as exact fractions: 24 rotations,
+nesting, several models), and by cells worked out by hand in a test, not by a real file: none of the real files has a rotation (`axes.vox`
+has translations only), so the convention of the negated axis is the reference's and is not checked against a file that MagicaVoxel wrote. The layout of `axes.vox` of the `dot_vox` crate, with its cube on the plane z = 0 and about x = y = 0, fits
 the centre `floor(size / 2)` and is the evidence of it, not a proof. The real files are in `crates/sr-3d/tests/fixtures/vox/real`, with
 the licence texts and the sources (`SOURCES.md`); the test that reads all thirteen sample files is run with `VOX_SAMPLES` set and
 reads nothing, rather than failing, when the files are not there.

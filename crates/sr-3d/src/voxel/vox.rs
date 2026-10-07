@@ -13,7 +13,8 @@
 //! * A `MATL` chunk is a palette index and a dictionary of strings, kept as they are spelt.
 //! * The scene graph: `nTRN` (a transform of one child: frame 0 only, `_r` the rotation byte and `_t` the translation in cells),
 //!   `nGRP` (children), `nSHP` (the models). The cells of a model are placed about its centre, `size / 2` with integer division,
-//!   by `p[k] = sign[k] * q[column[k]] + t[k]`. The rotation byte holds the column of the nonzero entry of the first row in bits 0
+//!   by `p[k] = sign[k] * q[column[k]] + t[k]` where the sign is positive, and by `-q[column[k]] - 1 + t[k]` where it is negative:
+//!   a voxel is a unit box, and a negated axis turns the box `[q, q + 1)` into `[-q - 1, -q)`. The rotation byte holds the column of the nonzero entry of the first row in bits 0
 //!   and 1, that of the second row in bits 2 and 3 (the third is the column that is left) and the three signs in bits 4 to 6.
 //!   Where cells of two models fall on one place the later one in the graph wins. Layers, hidden nodes, animation (frames after the
 //!   first) and cameras are not read.
@@ -81,6 +82,21 @@ impl Rotation {
 
     fn apply(&self, q: [i64; 3]) -> [i64; 3] {
         std::array::from_fn(|k| i64::from(self.sign[k]) * q[usize::from(self.column[k])])
+    }
+
+    /// The cell that the cell `q` (about the pivot of its model) is turned into. A voxel is a unit box, `[q, q + 1)`, and a negated axis
+    /// turns that box into `[-q - 1, -q)`: the cell is `-q - 1` and not `-q` (a point `q + 1/2` goes to `-q - 1/2`, which `-q - 1`
+    /// holds). `ogt_vox.h` treats a voxel so (the pivot is a corner of the grid, every face is on an integer coordinate, the pivot
+    /// is subtracted from the geometry and the transform then applied to it: "EXPLANATION OF MODEL PIVOTS", lines 123 to 170).
+    fn apply_cell(&self, q: [i64; 3]) -> [i64; 3] {
+        std::array::from_fn(|k| {
+            let v = q[usize::from(self.column[k])];
+            if self.sign[k] < 0 {
+                -v - 1
+            } else {
+                v
+            }
+        })
     }
 
     /// `self` after `inner`: the rotation that does `inner` and then `self`.
@@ -533,7 +549,7 @@ impl Vox {
                         for v in &model.voxels {
                             let local =
                                 [i64::from(v[0]) - centre[0], i64::from(v[1]) - centre[1], i64::from(v[2]) - centre[2]];
-                            let r = placement.rotation.apply(local);
+                            let r = placement.rotation.apply_cell(local);
                             let p: [i64; 3] = std::array::from_fn(|k| r[k] + placement.translation[k]);
                             if p.iter().any(|c| !(-REACH..=REACH).contains(c)) {
                                 return Err(format!("the scene graph places a cell at {p:?}, too far from the origin"));
