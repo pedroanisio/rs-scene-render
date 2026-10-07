@@ -107,17 +107,17 @@ fn basin(size: u32, ocean_attrs: &str, whitewater: &str) -> sr_eval::Evaluator {
 fn the_memory_of_the_coverage_counts_in_the_surface_budget() {
     // 301 x 301 vertices: the surface alone takes 27.5 MB, the coverage's bins and shares another 7.2 MB, under a budget of 30 MiB
     let made = |attrs: &str, whitewater: &str| {
-        let f = basin(300, attrs, whitewater).evaluate(1.0);
+        let f = basin(600, attrs, whitewater).evaluate(1.0);
         (f.failures.clone(), f.nodes.iter().find(|n| &*n.id == "sea").and_then(|n| n.sim_ocean.clone()).is_some())
     };
-    let (failures, made_particles) = made(r#"surfaceMemoryMiB="30""#, "");
+    let (failures, made_particles) = made(r#"surfaceMemoryMiB="108""#, "");
     assert!(made_particles, "the particles mode fits: {failures:?}");
-    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="30""#, r#"foamMode="albedo""#);
+    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="108""#, r#"foamMode="albedo""#);
     assert!(!made_albedo, "the coverage does not fit");
     assert!(
         failures.iter().any(|m| m.contains("foam coverage") && m.contains("memory")),
         "the failure says what and which budget: {failures:?}"
     );
-    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="64""#, r#"foamMode="albedo""#);
+    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="128""#, r#"foamMode="albedo""#);
     assert!(made_albedo, "with room for it: {failures:?}");
 }

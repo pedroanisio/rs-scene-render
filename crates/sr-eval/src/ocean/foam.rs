@@ -4,15 +4,88 @@
 
 use sr_3d::Vertex;
 use sr_sim::ocean::whitewater::{Kind, Particle};
-use std::collections::HashMap;
-
-/// What the coverage holds for each vertex while it is made, in bytes and as an upper bound: its 4-byte index in a bin, a table
-/// entry of 48 bytes (the worst case, a bin for each vertex), 16 for the bin's vector, the share of the vertex not yet covered (8)
-/// and the coverage itself (4).
-pub(super) const COVERAGE_BYTES_PER_VERTEX: usize = 4 + 48 + 8 + 4 + 16;
 
 /// Share of a tracer's life during which it covers fully; it fades linearly to nothing after.
 const FULL_UNTIL: f64 = 0.6;
+
+/// The vertices of a surface by the squares of a grid they lie in, in two arrays (the first vertex of each square, and the vertices
+/// square by square): what a tracer reaches is looked up in the 3 x 3 squares around its own, and the memory is known to the byte
+/// before anything is allocated.
+struct Bins {
+    x0: f64,
+    z0: f64,
+    side: f64,
+    nx: usize,
+    nz: usize,
+    starts: Vec<u32>,
+    indices: Vec<u32>,
+}
+
+/// The squares of the grid for `vertices` and a coverage of `radius`: of the side of `radius` or more (so that what a tracer reaches is
+/// in the 3 x 3 squares around its own) and large enough that there are not many more squares than vertices, whatever the radius.
+fn layout(vertices: &[Vertex], radius: f64) -> (f64, f64, f64, usize, usize) {
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for v in vertices {
+        for (k, a) in [0, 2].into_iter().enumerate() {
+            lo[k] = lo[k].min(f64::from(v.pos[a]));
+            hi[k] = hi[k].max(f64::from(v.pos[a]));
+        }
+    }
+    if vertices.is_empty() {
+        return (0.0, 0.0, radius, 1, 1);
+    }
+    let (wx, wz) = (hi[0] - lo[0], hi[1] - lo[1]);
+    let n = vertices.len() as f64;
+    // a square holds about one vertex at the most: the side is the one that would give n squares, or the longest side over n
+    let side = radius.max((wx * wz / n).sqrt()).max(wx.max(wz) / n);
+    ((lo[0]), lo[1], side, (wx / side) as usize + 1, (wz / side) as usize + 1)
+}
+
+/// What the coverage holds while it is made, in bytes and exactly: the array of the first vertex of each of `bins` squares and the
+/// vertices square by square (4 bytes each), the share of each vertex not yet covered (8) and the coverage itself (4).
+pub(super) fn coverage_bytes(vertices: usize, bins: usize) -> usize {
+    4 * (bins + 1) + 4 * vertices + 8 * vertices + 4 * vertices
+}
+
+impl Bins {
+    fn of(vertices: &[Vertex], radius: f64, (x0, z0, side, nx, nz): (f64, f64, f64, usize, usize)) -> Self {
+        let mut counts = vec![0u32; nx * nz + 1];
+        let square = |v: &Vertex| {
+            let ix = (((f64::from(v.pos[0]) - x0) / side) as usize).min(nx - 1);
+            let iz = (((f64::from(v.pos[2]) - z0) / side) as usize).min(nz - 1);
+            iz * nx + ix
+        };
+        for v in vertices {
+            counts[square(v) + 1] += 1;
+        }
+        for i in 1..counts.len() {
+            counts[i] += counts[i - 1];
+        }
+        let mut next = counts.clone();
+        let mut indices = vec![0u32; vertices.len()];
+        for (i, v) in vertices.iter().enumerate() {
+            let q = square(v);
+            indices[next[q] as usize] = i as u32;
+            next[q] += 1;
+        }
+        debug_assert!(side >= radius);
+        Self { x0, z0, side, nx, nz, starts: counts, indices }
+    }
+
+    /// The square of a place, which may be outside the grid.
+    fn square_of(&self, x: f64, z: f64) -> (i64, i64) {
+        (((x - self.x0) / self.side).floor() as i64, ((z - self.z0) / self.side).floor() as i64)
+    }
+
+    /// The vertices of the square `(ix, iz)`, none outside the grid.
+    fn square(&self, ix: i64, iz: i64) -> &[u32] {
+        if ix < 0 || iz < 0 || ix >= self.nx as i64 || iz >= self.nz as i64 {
+            return &[];
+        }
+        let q = iz as usize * self.nx + ix as usize;
+        &self.indices[self.starts[q] as usize..self.starts[q + 1] as usize]
+    }
+}
 
 /// The share of the surface under `vertices` that foam covers at `time`, in 0 to 1 for each: one minus the
 /// product over the foam tracers of one minus the tracer's weight there. A tracer weighs
@@ -21,31 +94,36 @@ const FULL_UNTIL: f64 = 0.6;
 /// taken in the order of the tracers, so the same tracers give the same bits.
 ///
 /// The work is the number of distances taken (a tracer takes one for every vertex of the 3 x 3 squares around it): it is counted before
-/// any is taken, and a coverage that needs more than `max_work` is an error that says so, never a frame that took its time.
+/// any is taken, and a coverage that needs more than `max_work` is an error that says so, never a frame that took its time. The memory
+/// it holds ([`coverage_bytes`], exact) is worked out before it is allocated and is an error over `max_bytes`.
 pub(super) fn coverage_within(
     vertices: &[Vertex],
     particles: &[Particle],
     time: f64,
     radius: f64,
     max_work: u64,
+    max_bytes: usize,
 ) -> Result<Vec<f32>, String> {
-    let mut bare = vec![1.0f64; vertices.len()];
     if !(radius > 0.0 && radius.is_finite()) {
         return Ok(vec![0.0; vertices.len()]);
     }
-    // the vertices by the square of side `radius` they lie in: a tracer reaches the 3 x 3 squares around its own
-    let square = |x: f64, z: f64| ((x / radius).floor() as i64, (z / radius).floor() as i64);
-    let mut bins: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
-    for (i, v) in vertices.iter().enumerate() {
-        bins.entry(square(f64::from(v.pos[0]), f64::from(v.pos[2]))).or_default().push(i as u32);
+    let grid = layout(vertices, radius);
+    let needed = coverage_bytes(vertices.len(), grid.3 * grid.4);
+    if needed > max_bytes {
+        return Err(format!(
+            "ocean foam coverage exceeds the surface memory budget (surfaceMemoryMiB): it holds {needed} bytes for {} vertices and the surface has {max_bytes} left",
+            vertices.len()
+        ));
     }
+    let bins = Bins::of(vertices, radius, grid);
+    let mut bare = vec![1.0f64; vertices.len()];
     let living = |p: &&Particle| p.kind == Kind::Foam && (0.0..1.0).contains(&((time - p.birth) / p.lifetime));
     let mut work = 0u64;
     for p in particles.iter().filter(living) {
-        let (bx, bz) = square(p.position[0], p.position[2]);
+        let (bx, bz) = bins.square_of(p.position[0], p.position[2]);
         for dx in -1..=1 {
             for dz in -1..=1 {
-                work += bins.get(&(bx + dx, bz + dz)).map_or(0, |bin| bin.len() as u64);
+                work += bins.square(bx + dx, bz + dz).len() as u64;
             }
         }
         if work > max_work {
@@ -57,11 +135,10 @@ pub(super) fn coverage_within(
     for p in particles.iter().filter(living) {
         let age = (time - p.birth) / p.lifetime;
         let fade = if age <= FULL_UNTIL { 1.0 } else { (1.0 - age) / (1.0 - FULL_UNTIL) };
-        let (bx, bz) = square(p.position[0], p.position[2]);
+        let (bx, bz) = bins.square_of(p.position[0], p.position[2]);
         for dx in -1..=1 {
             for dz in -1..=1 {
-                let Some(bin) = bins.get(&(bx + dx, bz + dz)) else { continue };
-                for &i in bin {
+                for &i in bins.square(bx + dx, bz + dz) {
                     let v = &vertices[i as usize];
                     let d = ((f64::from(v.pos[0]) - p.position[0]).powi(2)
                         + (f64::from(v.pos[2]) - p.position[2]).powi(2))
@@ -80,7 +157,7 @@ pub(super) fn coverage_within(
 /// The coverage with no budget, for the tests of its arithmetic.
 #[cfg(test)]
 pub(super) fn coverage(vertices: &[Vertex], particles: &[Particle], time: f64, radius: f64) -> Vec<f32> {
-    coverage_within(vertices, particles, time, radius, u64::MAX).expect("no budget to exceed")
+    coverage_within(vertices, particles, time, radius, u64::MAX, usize::MAX).expect("no budget to exceed")
 }
 
 #[cfg(test)]
@@ -209,12 +286,39 @@ mod tests {
             .collect();
         // radius 100: one bin holds every vertex, and every tracer reaches that bin: 400 distances each
         let needed = 10 * 400;
-        let made = coverage_within(&vertices, &tracers, 1.0, 100.0, needed).expect("the budget is the work needed");
+        let made = coverage_within(&vertices, &tracers, 1.0, 100.0, needed, usize::MAX)
+            .expect("the budget is the work needed");
         assert_eq!(made.len(), 400);
-        let refused = coverage_within(&vertices, &tracers, 1.0, 100.0, needed - 1).unwrap_err();
+        let refused = coverage_within(&vertices, &tracers, 1.0, 100.0, needed - 1, usize::MAX).unwrap_err();
         assert!(refused.contains("foam coverage") && refused.contains("maxWork"), "{refused}");
         assert!(refused.contains("more than 3999"), "the budget it was over is named: {refused}");
         // a tracer that is not alive weighs nothing and costs nothing
-        assert!(coverage_within(&vertices, &tracers, 11.0, 100.0, 0).is_ok());
+        assert!(coverage_within(&vertices, &tracers, 11.0, 100.0, 0, usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn the_memory_of_the_coverage_is_the_bytes_of_its_arrays_whatever_the_radius_and_a_budget_under_it_refuses() {
+        // a surface of 61 x 41 vertices a cell apart, for radii from far under a cell to far over the surface
+        let vertices: Vec<Vertex> =
+            (0..41).flat_map(|z| (0..61).map(move |x| vertex(x as f32 * 0.5, z as f32 * 0.5))).collect();
+        for radius in [1e-6, 0.05, 0.5, 3.0, 40.0, 1e6] {
+            let grid = layout(&vertices, radius);
+            let bins = Bins::of(&vertices, radius, grid);
+            let held =
+                4 * bins.starts.capacity() + 4 * bins.indices.capacity() + 8 * vertices.len() + 4 * vertices.len();
+            assert_eq!(coverage_bytes(vertices.len(), grid.3 * grid.4), held, "radius {radius}");
+            // never many more squares than vertices, so the memory is a small multiple of the surface's own however small the radius
+            assert!(
+                grid.3 * grid.4 <= 4 * vertices.len() + 16,
+                "radius {radius}: {} squares for {} vertices",
+                grid.3 * grid.4,
+                vertices.len()
+            );
+            assert!(grid.2 >= radius, "a tracer's reach is within the 3 x 3 squares");
+        }
+        let needed = coverage_bytes(vertices.len(), layout(&vertices, 1.0).3 * layout(&vertices, 1.0).4);
+        assert!(coverage_within(&vertices, &[], 1.0, 1.0, u64::MAX, needed).is_ok());
+        let refused = coverage_within(&vertices, &[], 1.0, 1.0, u64::MAX, needed - 1).unwrap_err();
+        assert!(refused.contains("foam coverage") && refused.contains("surfaceMemoryMiB"), "{refused}");
     }
 }
