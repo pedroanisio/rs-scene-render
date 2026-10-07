@@ -73,7 +73,9 @@ void main() { float level = IMG_NORM_PIXEL(signal, vec2(0.5)).r; gl_FragColor = 
             let serial = render(true, 1, mode);
             // Segments and output-owned audio start numbering at zero, unlike the trim.
             // Output dithering therefore differs; compare average red per frame.
-            for (actual, reference) in serial.chunks_exact(32 * 32 * 3).zip(expected.chunks_exact(32 * 32 * 3)) {
+            for (actual, reference) in
+                serial.as_chunks::<{ 32 * 32 * 3 }>().0.iter().zip(expected.as_chunks::<{ 32 * 32 * 3 }>().0.iter())
+            {
                 let mean = |frame: &[u8]| frame.iter().step_by(3).map(|v| *v as f64).sum::<f64>() / 1024.0;
                 assert!(
                     (mean(actual) - mean(reference)).abs() < 1.0,
