@@ -1,5 +1,6 @@
 //! The integration tests of the `pyro` area, one module for each file they came in.
 
+mod blast;
 mod follow;
 mod pyro;
 mod pyro_gas;

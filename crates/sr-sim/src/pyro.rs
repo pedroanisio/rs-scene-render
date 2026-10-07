@@ -384,10 +384,92 @@ pub struct Impulse {
     pub expansion: f64,
 }
 
+/// A blast: the front of a Sedov-Taylor blast (see [`crate::sedov`]) as an incompressible spherical piston in the smoke.
+///
+/// `energy` is released at `center` (scene units) at `time` (seconds from the start of the simulation) into air of density `ambient_density`
+/// (kg/m^3) and pressure `ambient_pressure` (Pa), a gas of `gamma`; a metre is `pixels_per_meter` scene units. The front is at
+/// `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres until it reaches `0.3 (E / p0)^(1/3)` (the end of the strong phase), and stays there. Each step the
+/// air that the front swept in the step is displaced: the cells whose centres are in the sphere of the radius that the front has at the end of
+/// the step are given the divergence `1 - (R0 / R1)^3` over the step (a ratio of volumes, with no unit), so that the air given is exactly
+/// the volume swept and, outside, the projection makes the potential flow `u = Rdot R^2 / r^2`. The shock is not carried (the solver is
+/// incompressible), nothing is heated and no smoke is made. A front smaller than a cell is the sphere of one cell. It needs an open domain.
+#[derive(Clone, Debug)]
+pub struct Blast {
+    pub center: [f64; 3],
+    pub time: f64,
+    pub energy: f64,
+    pub ambient_density: f64,
+    pub ambient_pressure: f64,
+    pub gamma: f64,
+    pub pixels_per_meter: f64,
+    law: crate::sedov::Sedov,
+}
+
+impl Blast {
+    pub fn new(
+        center: [f64; 3],
+        time: f64,
+        energy: f64,
+        ambient_density: f64,
+        ambient_pressure: f64,
+        gamma: f64,
+        pixels_per_meter: f64,
+    ) -> Result<Blast, Error> {
+        if !finite3(center) || !nonnegative(time) {
+            return Err(Error::Invalid("a blast has a finite place and a time from zero"));
+        }
+        if !nonnegative(energy) || !(ambient_density.is_finite() && ambient_density > 0.0) {
+            return Err(Error::Invalid("a blast has an energy that is not negative and an air of positive density"));
+        }
+        if !(ambient_pressure.is_finite() && ambient_pressure > 0.0)
+            || !(pixels_per_meter.is_finite() && pixels_per_meter > 0.0)
+        {
+            return Err(Error::Invalid("a blast has a positive ambient pressure and pixels to the metre"));
+        }
+        let law = crate::sedov::solve(gamma)
+            .map_err(|_| Error::Invalid("a blast needs a ratio of specific heats from 1.05 to 3"))?;
+        Ok(Blast { center, time, energy, ambient_density, ambient_pressure, gamma, pixels_per_meter, law })
+    }
+
+    /// The front `t` seconds after the release, in scene units, before the clamp to a cell.
+    fn front(&self, t: f64) -> f64 {
+        if t <= 0.0 || self.energy == 0.0 {
+            return 0.0;
+        }
+        let strong = self
+            .law
+            .radius(self.energy, self.ambient_density, t)
+            .min(self.law.max_radius(self.energy, self.ambient_pressure));
+        strong * self.pixels_per_meter
+    }
+
+    /// The radius of the front at the start and at the end of the fixed step `step`, in scene units, for cells of `voxel_size`: a front that
+    /// is not zero is at least a cell.
+    pub fn radii(&self, dt: f64, step: u64, voxel_size: f64) -> (f64, f64) {
+        let first = fixed_step_index(self.time / dt);
+        if step < first {
+            return (0.0, 0.0);
+        }
+        let cell = |r: f64| if r > 0.0 { r.max(voxel_size) } else { 0.0 };
+        let end = cell(self.front((step + 1) as f64 * dt - self.time));
+        let start = if step == first { 0.0 } else { cell(self.front(step as f64 * dt - self.time)) };
+        (start, end)
+    }
+
+    /// The pulse of the step: the radius of the sphere that the front ends it in and the divergence that its cells are given over the step
+    /// (the volume swept as a share of the volume of that sphere), if the front moved.
+    pub fn pulse(&self, dt: f64, step: u64, voxel_size: f64) -> Option<(f64, f64)> {
+        let (r0, r1) = self.radii(dt, step, voxel_size);
+        (r1 > r0).then(|| (r1, 1.0 - (r0 / r1).powi(3)))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Inputs {
     pub sources: Vec<Source>,
     pub impulses: Vec<Impulse>,
+    /// Blasts, which need an open domain.
+    pub blasts: Vec<Blast>,
     /// Sources whose expansion follows from their heat rather than being given: smoke heated at
     /// constant pressure, as an ideal gas, expands at `(dT/dt) / T` in every cell it heats, so
     /// `expansion` must be zero. Their `density_rate` is a total: the sum of the volume fractions
@@ -1395,6 +1477,25 @@ impl Simulation {
                         velocity: impulse.velocity,
                         expansion: impulse.expansion / dt,
                         heated,
+                    },
+                );
+            }
+        }
+        for blast in &input.blasts {
+            if self.spec.boundary != Boundary::Open {
+                return Err(Error::Invalid("a blast needs an open domain"));
+            }
+            if let Some((radius, expansion)) = blast.pulse(dt, self.step, self.spec.voxel_size) {
+                inject(
+                    &mut state,
+                    &mut target,
+                    &Shape::Sphere { center: blast.center, radius },
+                    Injection {
+                        density: 0.0,
+                        temperature: 0.0,
+                        velocity: [0.0; 3],
+                        expansion: expansion / dt,
+                        heated: None,
                     },
                 );
             }
