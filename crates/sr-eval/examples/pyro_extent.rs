@@ -63,6 +63,12 @@ fn main() {
             let edge = if top { ylo } else { yhi };
             voxels.iter().filter(|v| (v.0 - edge).abs() < 3.0 * h).map(|v| v.1).sum()
         };
+        // where the window is: the y of the first cell of the grid in the object's axes, and the key of the whole volume
+        let window_y = t.index_to_world([0.0, 0.0, 0.0])[1] - 0.5 * h;
+        println!(
+            "WINDOW t={time}: the first cell of the grid is at y = {window_y}, the key of the volume {:016x}",
+            volume.key
+        );
         println!(
             "EXTENT t={time}: peak {peak:.4} total {total:.2} stored y {ylo:.1}..{yhi:.1}; above 1e-1 of the peak {:?}, 1e-2 {:?}, 1e-3 {:?}, 1e-4 {:?}; in the 3 cells at the top face {:.3e}, bottom face {:.3e} ({:.2} s)",
             extent(1e-1).map(|e| (e.0.round(), e.1.round())),

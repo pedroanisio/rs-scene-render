@@ -1553,11 +1553,17 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &
     Ok(())
 }
 
-/// A number for the cell of space that cell `c` of a window moved by `window` cells is: 21 bits of each of its three
-/// coordinates counted from the domain's own origin.
-fn global_cell(c: [usize; 3], window: [i64; 3]) -> u64 {
-    let part = |a: usize| ((c[a] as i64 + window[a] + (1 << 20)) as u64) & 0x1f_ffff;
-    part(0) | part(1) << 21 | part(2) << 42
+/// A number for the cell of space that cell `c` of a window moved by `window` cells is. A cell inside the box that the domain began
+/// as has the number it has without a follow (its index in that box), so that a window that has not moved, or has moved and
+/// looks at cells of the first box, has the noise that the domain had; a cell outside it has a number of its own, the high bit set
+/// and 21 bits of each of its three coordinates, and no two cells share one.
+fn global_cell(c: [usize; 3], window: [i64; 3], cells: [usize; 3]) -> u64 {
+    let g: [i64; 3] = std::array::from_fn(|a| c[a] as i64 + window[a]);
+    if (0..3).all(|a| (0..cells[a] as i64).contains(&g[a])) {
+        return index(g.map(|v| v as usize), cells) as u64;
+    }
+    let part = |a: usize| ((g[a] + (1 << 20)) as u64) & 0x1f_ffff;
+    1 << 63 | part(0) | part(1) << 21 | part(2) << 42
 }
 
 fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
@@ -1568,7 +1574,7 @@ fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
         let (cells, window, follows) = (s.cells, s.window, spec.follow.is_some());
         force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
             // the noise of a window that moves belongs to the cell of space, not to the cell of the window
-            let key = if follows { global_cell(coords(k, cells), window) } else { k as u64 };
+            let key = if follows { global_cell(coords(k, cells), window, cells) } else { k as u64 };
             for a in 0..3 {
                 f[a] = input.acceleration[a]
                     + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])

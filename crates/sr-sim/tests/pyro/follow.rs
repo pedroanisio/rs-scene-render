@@ -257,7 +257,8 @@ fn a_window_never_leaves_the_slab_of_a_source_that_is_acting_whatever_the_loss()
 }
 
 #[test]
-fn a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following() {
+fn a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following_with_seeded_turbulence_too()
+{
     let make = |follow| Spec {
         cells: [24, 24, 24],
         origin: [-6.0, -6.0, -6.0],
@@ -265,6 +266,8 @@ fn a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not
         dt: 0.05,
         boundary: Boundary::Open,
         buoyancy: 1.0,
+        turbulence: 0.5,
+        seed: 9,
         pressure_iterations: 500,
         pressure_tolerance: 1e-8,
         follow,
