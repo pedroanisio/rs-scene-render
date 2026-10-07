@@ -15,6 +15,7 @@ mod sim;
 mod stress_balance;
 mod stress_math;
 mod stress_plan;
+mod stress_ring;
 mod stress_spike;
 mod stress_world;
 mod surface3;

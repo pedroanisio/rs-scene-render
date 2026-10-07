@@ -81,6 +81,11 @@ pub struct Cantilever {
 /// A cantilever of `n` cubes of `edge` metres, welded to the world at its root, 5 m above nothing, with a block of `load` newtons of weight resting on its tip,
 /// that breaks by stress at `strength` pascals. The bodies are the beam (0), the block (1) and the slots (2 and on, one for each piece after the first).
 pub fn cantilever(n: usize, edge: f64, strength: f64, load: f64) -> Cantilever {
+    cantilever_over(n, edge, strength, load, false)
+}
+
+/// The same, with a floor under it if `floor`: what falls when the root breaks lands on it.
+pub fn cantilever_over(n: usize, edge: f64, strength: f64, load: f64, floor: bool) -> Cantilever {
     let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
     let mass = DENSITY * edge.powi(3);
     let size = [edge; 3];
@@ -117,7 +122,7 @@ pub fn cantilever(n: usize, edge: f64, strength: f64, load: f64) -> Cantilever {
         gravity: [0.0, -G, 0.0],
         pixels_per_meter: 1.0,
         iterations: 8,
-        bounds: Bounds3::None,
+        bounds: if floor { Bounds3::Floor { y: 0.0 } } else { Bounds3::None },
         joints: vec![weld],
         bodies,
     })
@@ -465,4 +470,502 @@ fn a_body_that_breaks_in_flight_keeps_its_momentum_its_angular_momentum_and_its_
         }
     }
     assert!(checked_after > 100, "{checked_after} steps after the break");
+}
+
+fn bits(frame: &Frame3) -> Vec<u64> {
+    frame
+        .bodies
+        .iter()
+        .flat_map(|b| b.pos.iter().chain(&b.rot).map(|v| v.to_bits()).collect::<Vec<_>>())
+        .chain(
+            frame
+                .velocities
+                .iter()
+                .flat_map(|v| v.linear.iter().chain(&v.angular).map(|c| c.to_bits()).collect::<Vec<_>>()),
+        )
+        .collect()
+}
+
+#[test]
+fn a_body_that_breaks_gives_the_same_bits_in_a_fresh_world_stepped_to_it_by_jumps_and_after_a_seek_back() {
+    let (n, edge, strength) = (5, 0.4f64, 8.0e5);
+    let load = 1.005 * breaking_load(0, n, edge, strength);
+    let mut direct = cantilever(n, edge, strength, load);
+    let want = bits(&direct.world.frame_at(2.0, &mut Still));
+    let held: Vec<Option<Vec<u32>>> =
+        (0..2 + n - 1).map(|k| direct.world.stress_pieces(k).map(<[u32]>::to_vec)).collect();
+    assert!(held[2].is_some(), "the beam broke in this run");
+    // the same world asked in jumps, then back to the middle and forward again
+    let mut jumps = cantilever(n, edge, strength, load);
+    for t in [0.3, 0.7, 0.9, 1.4, 2.0] {
+        let _ = jumps.world.frame_at(t, &mut Still);
+    }
+    assert_eq!(bits(&jumps.world.frame_at(2.0, &mut Still)), want);
+    let mut seek = cantilever(n, edge, strength, load);
+    let _ = seek.world.frame_at(2.0, &mut Still);
+    let early = seek.world.frame_at(0.5, &mut Still);
+    assert!(early.errors.is_empty());
+    assert_eq!(bits(&seek.world.frame_at(2.0, &mut Still)), want);
+    // what each body holds is the same too
+    for k in 0..2 + n - 1 {
+        assert_eq!(seek.world.stress_pieces(k).map(<[u32]>::to_vec), held[k], "body {k}");
+        assert_eq!(jumps.world.stress_pieces(k).map(<[u32]>::to_vec), held[k], "body {k}");
+    }
+    // and a fresh world is the same again
+    let mut fresh = cantilever(n, edge, strength, load);
+    assert_eq!(bits(&fresh.world.frame_at(2.0, &mut Still)), want);
+}
+
+#[test]
+fn registering_a_body_that_breaks_by_stress_changes_no_bit_of_a_body_that_does_not_break() {
+    let (n, edge) = (5, 0.4f64);
+    let load = 3000.0;
+    // the same cantilever with and without the registration (the strength is far over any stress): reading the stress is read only
+    let mut with = cantilever(n, edge, 1e15, load);
+    let a = bits(&with.world.frame_at(1.5, &mut Still));
+    // the same bodies and joints with no with_stress: built the same way, by hand
+    let mut plain = unregistered_cantilever(n, edge, load);
+    assert_eq!(a, bits(&plain.frame_at(1.5, &mut Still)));
+    // a body registered as one piece (no joint to break) is the body it was
+    let mut one = column_of_one_piece(true);
+    let mut plain = column_of_one_piece(false);
+    for t in [0.2, 1.0, 1.7] {
+        assert_eq!(bits(&one.frame_at(t, &mut Still)), bits(&plain.frame_at(t, &mut Still)), "at {t}");
+    }
+}
+
+/// The cantilever of [`cantilever`] without the stress: the same world to the bit of its construction.
+fn unregistered_cantilever(n: usize, edge: f64, load: f64) -> World3 {
+    let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
+    let mass = DENSITY * edge.powi(3);
+    let size = [edge; 3];
+    let mut bodies = vec![
+        body(Shape3::Voxels { size, cells }, mass * n as f64, [0.0, -5.0, 0.0]),
+        body(Shape3::Box([edge / 2.0; 3]), load / G, [(n as f64 - 0.5) * edge, -5.0 - edge / 2.0 - 1e-6, edge / 2.0]),
+    ];
+    for _ in 1..n {
+        bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0, -5.0, 0.0]));
+    }
+    let weld = Joint3Spec {
+        kind: Joint3Kind::Weld,
+        a: 0,
+        b: None,
+        anchor: Some([0.0, -5.0 + edge / 2.0, edge / 2.0]),
+        axis: [0.0, 1.0, 0.0],
+        rest_length: None,
+        stiffness: None,
+        damping: None,
+        min: None,
+        max: None,
+        motor_speed: 0.0,
+        max_force: None,
+        break_force: None,
+    };
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![weld],
+        bodies,
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (2..2 + n - 1).collect() }])
+    .unwrap()
+}
+
+/// A body of three cells that tumbles on a floor, registered as one piece (with a joint of nothing to break) or not registered.
+fn column_of_one_piece(registered: bool) -> World3 {
+    let edge = 0.5f64;
+    let cells: Vec<[i32; 3]> = (0..3).map(|i| [i, 0, 0]).collect();
+    let mass = DENSITY * edge.powi(3) * 3.0;
+    let size = [edge; 3];
+    let mut b = body(Shape3::Voxels { size, cells: cells.clone() }, mass, [0.0, -2.0, 0.0]);
+    b.angular_velocity = [30.0, 50.0, 70.0];
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::Floor { y: 0.0 },
+        joints: vec![],
+        bodies: vec![b, body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass / 3.0, [0.0; 3])],
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }])
+    .unwrap();
+    if !registered {
+        return w;
+    }
+    let piece = StressPiece3::from_cells(&cells, size, mass).unwrap();
+    w.with_stress(vec![Stress3 {
+        parent: 0,
+        strength: 1.0,
+        pieces: vec![piece],
+        joints: vec![],
+        min_cells: 1,
+        overflow_to_dust: false,
+    }])
+    .unwrap()
+}
+
+/// A flyer whose joints all break in the first step that reads them (a strength of a pascal): the pieces of the beam all come apart, the largest staying.
+fn all_apart(slots: usize, min_cells: usize, dust: bool) -> World3 {
+    let n = 5;
+    // it spins, so that there is a load to read at once
+    Flyer { n, edge: 0.4, strength: 1.0, omega: 12.0, drift: [0.0; 3], slots, min_cells, dust }.world()
+}
+
+#[test]
+fn every_piece_that_comes_loose_takes_a_slot_in_the_order_of_its_lowest_piece_and_the_one_that_stays_is_the_first_of_the_largest(
+) {
+    let mut w = all_apart(4, 1, false);
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    // five pieces of one cell: the first stays the body, and the others take the four slots in order
+    assert_eq!(w.stress_pieces(0), Some(&[0u32][..]));
+    for slot in 1..=4usize {
+        assert_eq!(w.stress_pieces(slot), Some(&[slot as u32][..]), "slot {slot}");
+    }
+}
+
+#[test]
+fn loose_parts_of_fewer_cells_than_the_minimum_are_dust_and_hold_no_piece() {
+    // a minimum of two cells: no loose part of one cell is a body, so the four others are dust and only the first piece is left
+    let mut w = all_apart(4, 2, false);
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    assert_eq!(w.stress_pieces(0), Some(&[0u32][..]));
+    for slot in 1..=4usize {
+        assert_eq!(w.stress_pieces(slot), None, "slot {slot} holds nothing");
+    }
+}
+
+#[test]
+fn more_loose_parts_than_slots_is_an_error_that_names_both_numbers_or_the_smallest_are_dust() {
+    // four loose parts and two slots
+    let mut w = all_apart(2, 1, false);
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(
+        frame.errors.iter().any(|e| e.contains("4 loose parts") && e.contains("2 slots") && e.contains("maxFragments")),
+        "{:?}",
+        frame.errors
+    );
+    // with the overflow to dust: the largest keep the slots, of equals the first, and the others are dust
+    let mut w = all_apart(2, 1, true);
+    let frame = w.frame_at(0.1, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    assert_eq!(w.stress_pieces(0), Some(&[0u32][..]));
+    assert_eq!(w.stress_pieces(1), Some(&[1u32][..]));
+    assert_eq!(w.stress_pieces(2), Some(&[2u32][..]));
+}
+
+#[test]
+fn the_world_refuses_a_registration_that_is_not_a_body_of_pieces_it_can_read() {
+    let size = [0.4; 3];
+    let mass = DENSITY * 0.4f64.powi(3);
+    let pieces: Vec<StressPiece3> =
+        (0..5).map(|i| StressPiece3::from_cells(&[[i, 0, 0]], size, mass).unwrap()).collect();
+    let joints: Vec<StressJoint3> = (0..4).map(|i| row_joint(i, 0.4)).collect();
+    let good = Stress3 {
+        parent: 0,
+        strength: 1e6,
+        pieces: pieces.clone(),
+        joints: joints.clone(),
+        min_cells: 1,
+        overflow_to_dust: false,
+    };
+    // a world with the split and no stress yet
+    let fresh = || {
+        let mut bodies =
+            vec![body(Shape3::Voxels { size, cells: (0..5).map(|i| [i, 0, 0]).collect() }, mass * 5.0, [0.0; 3])];
+        for _ in 0..4 {
+            bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0; 3]));
+        }
+        World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.0,
+            step: 1.0 / 240.0,
+            gravity: [0.0; 3],
+            pixels_per_meter: 1.0,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies,
+        })
+        .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..=4).collect() }])
+        .unwrap()
+    };
+    assert!(fresh().with_stress(vec![good.clone()]).is_ok());
+    let bad = |what: &str, change: &dyn Fn(&mut Stress3)| {
+        let mut s = good.clone();
+        change(&mut s);
+        let e = fresh().with_stress(vec![s]).err().unwrap_or_else(|| panic!("{what}: accepted"));
+        assert!(e.to_string().contains("invalid stress fracture"), "{what}: {e}");
+    };
+    bad("a strength of zero", &|s| s.strength = 0.0);
+    bad("a strength that is not a number", &|s| s.strength = f64::NAN);
+    bad("no piece", &|s| s.pieces.clear());
+    bad("a piece lost", &|s| {
+        s.pieces.pop();
+        s.joints.pop();
+    });
+    bad("a mass that is not the body's", &|s| s.pieces[2].mass *= 1.5);
+    bad("a joint to itself", &|s| s.joints[1].b = s.joints[1].a);
+    bad("a joint to a piece that is not there", &|s| s.joints[3].b = 9);
+    bad("a joint twice", &|s| s.joints.push(row_joint(0, 0.4)));
+    bad("a section with no area", &|s| s.joints[0].section.area = 0.0);
+    bad("a body that is not a split's parent", &|s| s.parent = 1);
+    // and twice for one body
+    assert!(fresh().with_stress(vec![good.clone(), good]).is_err());
+}
+
+/// The pieces (one cell each) and the joints (one square face each) of a block of `nx` by `ny` by `nz` cubes of `edge` metres, in the lattice of the scene: the cell
+/// `[i, j, k]` is the piece `i + nx (j + ny k)`, and the joints are in the body's frame (physics axes: y and z are the lattice's, negated).
+pub fn grid_block(nx: usize, ny: usize, nz: usize, edge: f64) -> (Vec<StressPiece3>, Vec<StressJoint3>, Vec<[i32; 3]>) {
+    let mass = DENSITY * edge.powi(3);
+    let size = [edge; 3];
+    let index = |i: usize, j: usize, k: usize| (i + nx * (j + ny * k)) as u32;
+    let mut cells = Vec::new();
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                cells.push([i as i32, j as i32, k as i32]);
+            }
+        }
+    }
+    let pieces: Vec<StressPiece3> =
+        cells.iter().map(|c| StressPiece3::from_cells(&[*c], size, mass).unwrap()).collect();
+    let second = edge.powi(4) / 12.0;
+    let mut joints = Vec::new();
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let c = [(i as f64 + 0.5) * edge, -(j as f64 + 0.5) * edge, -(k as f64 + 0.5) * edge];
+                for axis in 0..3 {
+                    let (ni, nj, nk) = match axis {
+                        0 => (i + 1, j, k),
+                        1 => (i, j + 1, k),
+                        _ => (i, j, k + 1),
+                    };
+                    if ni >= nx || nj >= ny || nk >= nz {
+                        continue;
+                    }
+                    let mut centroid = c;
+                    let mut normal = [0.0; 3];
+                    // the face between the cell and its neighbour up the axis: half a cell on, along the axis' physics direction
+                    let sign = if axis == 0 { 1.0 } else { -1.0 };
+                    centroid[axis] += sign * edge / 2.0;
+                    normal[axis] = sign;
+                    let mut sec = [[0.0; 3]; 3];
+                    let mut lo = centroid;
+                    let mut hi = centroid;
+                    for other in (0..3).filter(|o| *o != axis) {
+                        sec[other][other] = second;
+                        lo[other] -= edge / 2.0;
+                        hi[other] += edge / 2.0;
+                    }
+                    joints.push(StressJoint3 {
+                        a: index(i, j, k),
+                        b: index(ni, nj, nk),
+                        section: JointSection { area: edge * edge, centroid, second: sec, normal, lo, hi },
+                    });
+                }
+            }
+        }
+    }
+    (pieces, joints, cells)
+}
+
+/// A block of 8 by 8 by 4 cubes (256 pieces) of 0.25 m on a floor, hit on its top by a box of 50 kg at `speed` m/s, with the pieces registered or not.
+/// The same with the slots and the split but the stress read only if `read`: what the world costs for being ready to cut, and what the reading adds to it.
+pub fn struck_block_with(registered: bool, read: bool, strength: f64, speed: f64) -> World3 {
+    struck_block_from(registered, read, strength, speed, false)
+}
+
+/// The same, struck from the top or, with `side`, from the side.
+pub fn struck_block_from(registered: bool, read: bool, strength: f64, speed: f64, side: bool) -> World3 {
+    let (nx, ny, nz, edge) = (8, 8, 4, 0.25f64);
+    let (pieces, joints, cells) = grid_block(nx, ny, nz, edge);
+    let size = [edge; 3];
+    let mass = DENSITY * edge.powi(3) * cells.len() as f64;
+    // the block's lattice origin is its top corner: y is down, so the block is 8 cubes (2 m) high above the floor of y = 0
+    let mut bodies = vec![body(Shape3::Voxels { size, cells }, mass, [0.0, -(ny as f64) * edge, 0.0])];
+    let striker = if side {
+        // from the side, at the middle of the height: 1 m to the left of the block and moving along +x
+        let mut b = body(Shape3::Box([0.3; 3]), 50.0, [-0.3 - 1.0, -(ny as f64) * edge / 2.0, 0.5]);
+        b.velocity = [speed, 0.0, 0.0];
+        b
+    } else {
+        let mut b = body(Shape3::Box([0.3; 3]), 50.0, [0.5, -(ny as f64) * edge - 0.3 - 1.0, -0.5]);
+        b.velocity = [0.0, speed, 0.0];
+        b
+    };
+    bodies.push(striker);
+    let slots = if registered { 255 } else { 0 };
+    for _ in 0..slots {
+        bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, DENSITY * edge.powi(3), [0.0; 3]));
+    }
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::Floor { y: 0.0 },
+        joints: vec![],
+        bodies,
+    });
+    if !registered {
+        return w;
+    }
+    let w = w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (2..2 + slots).collect() }]).unwrap();
+    if !read {
+        return w;
+    }
+    w.with_stress(vec![Stress3 { parent: 0, strength, pieces, joints, min_cells: 1, overflow_to_dust: false }]).unwrap()
+}
+
+/// The block of `struck_block` with no striker, thrown tumbling at the floor: awake and in contact for the steps that follow.
+pub fn tumbling_block(read: bool) -> World3 {
+    let (nx, ny, nz, edge) = (8, 8, 4, 0.25f64);
+    let (pieces, joints, cells) = grid_block(nx, ny, nz, edge);
+    let size = [edge; 3];
+    let mass = DENSITY * edge.powi(3) * cells.len() as f64;
+    let mut b = body(Shape3::Voxels { size, cells }, mass, [0.0, -3.0, 0.0]);
+    b.angular_velocity = [300.0, 150.0, 90.0];
+    b.velocity = [2.0, 8.0, 0.0];
+    let mut bodies = vec![b];
+    for _ in 0..255 {
+        bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, DENSITY * edge.powi(3), [0.0; 3]));
+    }
+    let w = World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::Floor { y: 0.0 },
+        joints: vec![],
+        bodies,
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..256).collect() }])
+    .unwrap();
+    if !read {
+        return w;
+    }
+    w.with_stress(vec![Stress3 { parent: 0, strength: 1e15, pieces, joints, min_cells: 1, overflow_to_dust: false }])
+        .unwrap()
+}
+
+#[test]
+#[ignore = "a measurement"]
+fn what_a_step_costs_with_256_pieces_when_the_block_tumbles_on_the_floor() {
+    for (read, what) in [(false, "split, 255 slots"), (true, "split and stress read")] {
+        let mut w = tumbling_block(read);
+        let mut times = Vec::new();
+        let mut awake = 0;
+        for step in 1..=240u64 {
+            let began = std::time::Instant::now();
+            let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+            times.push(began.elapsed().as_secs_f64() * 1000.0);
+            assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+            if !w.stress_levels(0).is_empty() {
+                awake += 1;
+            }
+        }
+        let worst = times.iter().copied().fold(0.0, f64::max);
+        println!(
+            "COST tumbling, {what}: worst {worst:.3} ms, mean {:.3} ms over {} steps ({awake} of them read)",
+            times.iter().sum::<f64>() / times.len() as f64,
+            times.len()
+        );
+    }
+}
+
+#[test]
+#[ignore = "a measurement"]
+fn what_a_step_costs_with_256_pieces_when_something_hits_the_block() {
+    for (speed, label) in [(0.0, "the striker falling from 1 m"), (100.0, "struck at 100 m/s")] {
+        for (registered, read, what) in [
+            (false, false, "no split, no stress"),
+            (true, false, "split, 255 slots"),
+            (true, true, "split and stress read"),
+        ] {
+            let mut w = struck_block_with(registered, read, 1e15, speed);
+            let mut times = Vec::new();
+            for step in 1..=120u64 {
+                let began = std::time::Instant::now();
+                let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+                times.push((began.elapsed().as_secs_f64() * 1000.0, frame.errors.len()));
+            }
+            let worst = times.iter().map(|t| t.0).fold(0.0, f64::max);
+            let mean = times.iter().map(|t| t.0).sum::<f64>() / times.len() as f64;
+            println!(
+                "COST {label}, {what}: worst step {worst:.3} ms, mean {mean:.3} ms (errors {})",
+                times.iter().map(|t| t.1).sum::<usize>()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_part_that_breaks_off_is_a_body_that_breaks_again_when_it_lands_and_its_pieces_take_slots_from_the_same_pool() {
+    let (n, edge, strength) = (5, 0.4f64, 8.0e5);
+    let load = 1.005 * breaking_load(0, n, edge, strength);
+    let mut c = cantilever_over(n, edge, strength, load, true);
+    let mut events: Vec<(u64, Vec<Option<Vec<u32>>>)> = Vec::new();
+    for step in 1..=480u64 {
+        let frame = c.world.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let held: Vec<Option<Vec<u32>>> =
+            (0..2 + n - 1).map(|k| c.world.stress_pieces(k).map(<[u32]>::to_vec)).collect();
+        if events.last().is_none_or(|(_, last)| *last != held) {
+            events.push((step, held));
+        }
+    }
+    // the root breaks in the first steps (the load is over the strength at once), and the four pieces that fall are one body in the first slot (the body 2)
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[1].1, vec![Some(vec![0]), None, Some(vec![1, 2, 3, 4]), None, None, None]);
+    // they fall five metres, in about a second, and when they land every joint of the part breaks together: the first piece stays the body that was the slot, and the
+    // three others take the next three slots of the same pool, in order
+    let (landed, held) = &events[2];
+    assert!((200..260).contains(landed), "landed at step {landed}");
+    assert_eq!(held, &vec![Some(vec![0]), None, Some(vec![1]), Some(vec![2]), Some(vec![3]), Some(vec![4])]);
+}
+
+#[test]
+fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accounted_for_with_nothing_that_is_not_a_number(
+) {
+    // a block of 2 m of 256 pieces hit on its side by 50 kg at 100 m/s, with a strength that this is far over: it breaks in the first steps
+    let mut w = struck_block_from(true, true, 4.0e4, 100.0, true);
+    let frame = w.frame_at(1.0, &mut Still);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    assert!(
+        frame.bodies.iter().all(|b| b.pos.iter().chain(&b.rot).all(|v| v.is_finite()))
+            && frame.velocities.iter().all(|v| v.linear.iter().chain(&v.angular).all(|c| c.is_finite())),
+        "something is not a number"
+    );
+    // the bodies that hold pieces (the block and its slots) hold every piece once and none twice, whether the joints that broke left it in one body or in many
+    let mut seen = vec![0u32; 256];
+    let mut bodies = 0;
+    for k in 0..2 + 255 {
+        if k == 1 {
+            continue;
+        }
+        if let Some(held) = w.stress_pieces(k) {
+            bodies += 1;
+            for &i in held {
+                seen[i as usize] += 1;
+            }
+        }
+    }
+    let broken = (0..640).filter(|&j| w.stress_joint_broken(0, j) == Some(true)).count();
+    assert!(broken > 0 && bodies >= 1, "{broken} joints broke, in {bodies} bodies");
+    assert!(seen.iter().all(|c| *c == 1), "every piece is in exactly one body");
 }
