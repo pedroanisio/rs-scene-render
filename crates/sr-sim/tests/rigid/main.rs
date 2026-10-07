@@ -14,6 +14,7 @@ mod mesh_fracture_inertia;
 mod sim;
 mod stress_balance;
 mod stress_math;
+mod stress_plan;
 mod stress_spike;
 mod surface3;
 mod surface_prefetch;

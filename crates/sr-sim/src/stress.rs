@@ -25,6 +25,7 @@
 //! flat one with the mean normal of its faces: its faces' own tilt is in the second moments but not in the direction of the stress.
 
 pub mod balance;
+pub mod plan;
 
 pub(crate) type V3 = [f64; 3];
 
