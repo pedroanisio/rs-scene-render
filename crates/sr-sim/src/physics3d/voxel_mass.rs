@@ -146,8 +146,10 @@ pub(super) fn sum_mass_properties(parts: &[MassProperties]) -> MassProperties {
 /// or all inward) and total `mass`, uniformly dense: the volume integrals of the signed tetrahedra that each triangle makes with the origin, which
 /// are exact for a polyhedron, and the tensor diagonalised as [`voxel_mass_properties`] does. A mesh that is not closed and consistently wound has no
 /// volume to speak of (the integrals depend on where the origin is) and is refused: every edge must be met once in each direction, the corners
-/// that are at one place being one (a mesh cut apart has corners of its own for every triangle), and the shells (parts that share no corner) all wound alike, so
-/// that a solid in several parts is taken and a piece with a cavity (a shell wound inward) is refused. Two solids that touch only along an edge are
+/// that are at one place being one (a mesh cut apart has corners of its own for every triangle), and the shells (parts that share no corner) all wound the same
+/// way, which is a rule about signs and not about containment: a solid in several parts is taken; a shell wound inward is refused, which refuses a cavity
+/// that is apart from the outer shell and not one that touches it at a corner (that is one shell); two nested shells both wound outward are taken, and
+/// the inner volume is counted twice. The caller supplies geometry that is a solid. Two solids that touch only along an edge are
 /// one shell with an edge met four times, and are refused too, though their integrals would be right.
 pub(super) fn mesh_mass_properties(points: &[Vector], triangles: &[[u32; 3]], mass: f64) -> Option<MassProperties> {
     if triangles.is_empty() || !(mass.is_finite() && mass > 0.0) || !closed_and_consistent(points, triangles)? {
