@@ -49,6 +49,13 @@ pub enum Shape3 {
     TriMesh(Vec<[f64; 3]>, Vec<[u32; 3]>),
     /// Convex parts of a closed mesh (V-HACD).
     Decomposition(Vec<[f64; 3]>, Vec<[u32; 3]>),
+    /// A union of cells of a lattice, exactly: `size` is the size of a cell along the body's scene axes, and the cell with the
+    /// integer key `[i, j, k]` fills the box from `[i, j, k] * size` to `[i + 1, j + 1, k + 1] * size` in the body's frame.
+    /// Concave, and with the mass properties (centre of mass, inertia) of the cells.
+    Voxels {
+        size: [f64; 3],
+        cells: Vec<[i32; 3]>,
+    },
 }
 
 /// A rigid body.
@@ -646,6 +653,16 @@ impl World3 {
                 Shape3::Decomposition(ps, idx) => {
                     Some(ColliderBuilder::convex_decomposition(&pts(ps), &flip_winding(idx)))
                 }
+                // the half turn about x that turns scene axes into physics axes maps the lattice onto itself: a cell
+                // [i, j, k] is the cell [i, -j - 1, -k - 1] there, so no cell moves by half a cell
+                Shape3::Voxels { size, cells } if !cells.is_empty() && size.iter().all(|s| *s > 0.0) => {
+                    let keys: Vec<IVector> = cells
+                        .iter()
+                        .map(|c| IVector::new(i64::from(c[0]), -i64::from(c[1]) - 1, -i64::from(c[2]) - 1))
+                        .collect();
+                    Some(ColliderBuilder::voxels(vec3(size.map(|s| s / ppm)), &keys))
+                }
+                Shape3::Voxels { .. } => None,
             }
             .unwrap_or_else(|| ColliderBuilder::ball(0.01));
             let groups = {
@@ -1608,6 +1625,45 @@ impl World3 {
     }
 }
 
+/// The mass properties of a body of one shape and `mass`, as the world gives them to its collider, in the scene's units and axes:
+/// the centre of mass in the body's frame and the inertia tensor about it (kilograms scene units squared), a metre being
+/// `pixels_per_meter` scene units. Only for shapes of cells so far.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeMass {
+    pub mass: f64,
+    pub centre: [f64; 3],
+    pub inertia: [[f64; 3]; 3],
+}
+
+pub fn shape_mass_properties(shape: &Shape3, mass: f64, pixels_per_meter: f64) -> Result<ShapeMass, String> {
+    let Shape3::Voxels { size, cells } = shape else {
+        return Err("mass properties are given only for bodies of cells".into());
+    };
+    if cells.is_empty()
+        || !size.iter().all(|s| *s > 0.0)
+        || mass.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        || pixels_per_meter.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return Err("a body of cells needs cells, a positive size, a positive mass and a positive scale".into());
+    }
+    let keys: Vec<IVector> =
+        cells.iter().map(|c| IVector::new(i64::from(c[0]), -i64::from(c[1]) - 1, -i64::from(c[2]) - 1)).collect();
+    let collider = ColliderBuilder::voxels(vec3(size.map(|s| s / pixels_per_meter)), &keys).mass(mass).build();
+    let props = collider.mass_properties();
+    let inertia = props.reconstruct_inertia_matrix();
+    // physics axes to scene axes: a half turn about x, so a product of inertia with one of y and z (not both) changes sign
+    let sign = [1.0, -1.0, -1.0];
+    let scene: [[f64; 3]; 3] = std::array::from_fn(|a| {
+        std::array::from_fn(|b| inertia.col(b)[a] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
+    });
+    let centre = props.local_com;
+    Ok(ShapeMass {
+        mass: props.mass(),
+        centre: [centre.x * pixels_per_meter, -centre.y * pixels_per_meter, -centre.z * pixels_per_meter],
+        inertia: scene,
+    })
+}
+
 /// The volume a shape encloses, in the cube of the shape's own length unit. A mesh counts as
 /// closed: its volume is the absolute sum of the signed volumes of the tetrahedra its
 /// triangles make with the origin.
@@ -1623,6 +1679,12 @@ pub fn shape_volume(shape: &Shape3) -> Result<f64, String> {
             let points: Vec<_> = points.iter().map(|p| vec3(*p)).collect();
             let hull = SharedShape::convex_hull(&points).ok_or("the points have no convex hull")?;
             hull.mass_properties(1.0).mass()
+        }
+        Shape3::Voxels { size, cells } => {
+            let mut unique = cells.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            unique.len() as f64 * size[0] * size[1] * size[2]
         }
         Shape3::TriMesh(points, triangles) | Shape3::Decomposition(points, triangles) => {
             let at = |i: u32| points.get(i as usize).copied().ok_or("a triangle names a missing vertex");
