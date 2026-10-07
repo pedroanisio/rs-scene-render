@@ -70,6 +70,28 @@ fn the_slots_the_overflow_and_the_anchor_belong_to_a_body_that_has_something_to_
 }
 
 #[test]
+fn a_body_that_a_crater_or_a_fracture_breaks_has_the_cells_for_its_collider() {
+    let crater = r#"<crater id="pit" source="ball" targetMaterial="softRock"/>"#;
+    let fracture = r#"<fracture source="ball" pieces="4"/>"#;
+    // a mesh or a box for the collider of an object of cells that something breaks is not a body of cells, and the cut would mean nothing: that the
+    // scale was not uniform is not even looked at then (VOX13 is about the cells), so this is its own rule
+    for shape in ["trimesh", "box", "sphere", "convex-hull"] {
+        let ground = body(&format!(r#"type="static" shape="{shape}""#), crater, r#"scaleX="2""#);
+        assert!(ground.contains(&"VOX15".into()), "crater, {shape}: {ground:?}");
+        let block = body(&format!(r#"shape="{shape}""#), fracture, r#"scaleX="2""#);
+        assert!(block.contains(&"VOX15".into()), "fracture, {shape}: {block:?}");
+    }
+    // no body at all is no body of cells either
+    let bare = codes(&format!(r#"<object3D id="b" {CELLS} y="2">{crater}</object3D>"#), "");
+    assert!(bare.contains(&"VOX15".into()), "{bare:?}");
+    // the cells, said or by default, are fine, and an object of cells with nothing to break may have any collider
+    for shape in ["", r#"shape="auto""#, r#"shape="voxels""#] {
+        assert!(body(&format!(r#"type="static" density="2400" {shape}"#), crater, "").is_empty(), "{shape}");
+    }
+    assert!(body(r#"shape="box""#, "", "").is_empty());
+}
+
+#[test]
 fn a_crater_in_cells_is_cut_by_an_impact_once_and_has_no_analytic_rim() {
     let ground = |crater: &str| body(r#"type="static" density="2400""#, crater, "");
     assert!(ground(r#"<crater id="pit" source="ball" targetMaterial="softRock" capture="true"/>"#).is_empty());

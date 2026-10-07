@@ -572,6 +572,7 @@
       <sch:assert id="VOX5" test="@primitive='voxels' or not(@voxels|@cellSize|@palette|@surface)">voxels, cellSize, palette and surface belong to primitive="voxels".</sch:assert>
       <sch:assert id="VOX6" test="not(@palette) or normalize-space(@palette)='file' or (count(str:tokenize(normalize-space(@palette),' '))&lt;=255 and count(str:tokenize(normalize-space(@palette),' ')[. = $materials/@id])=count(str:tokenize(normalize-space(@palette),' ')))">palette is the word file or at most 255 material ids.</sch:assert>
       <sch:assert id="VOX7" test="not(@primitive='voxels') or not(@mesh|@volume|@terrain|@map|@text|@path|medium|pyro)">a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child.</sch:assert>
+      <sch:assert id="VOX15" test="not(@primitive='voxels' and (crater or fracture)) or (rigidBody and not(rigidBody[@shape and not(@shape='auto' or @shape='voxels')]))">an object of cells that a crater or a fracture breaks has a rigidBody whose collider is the cells (shape voxels or auto, or no shape).</sch:assert>
     </sch:rule>
     <sch:rule context="object3D/rigidBody">
       <sch:let name="voxels" value="boolean(parent::object3D[@primitive='voxels'])"/>

@@ -1490,6 +1490,14 @@ impl<'a> Eval<'a> {
                     "a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child."
                         .into()
                 });
+                let breaks = kids(n, "crater").next().is_some() || kids(n, "fracture").next().is_some();
+                let of_cells = |b: roxmltree::Node| matches!(b.attribute("shape"), None | Some("auto" | "voxels"));
+                self.check(
+                    !(voxels && breaks) || (kids(n, "rigidBody").next().is_some() && kids(n, "rigidBody").all(of_cells)),
+                    n,
+                    "VOX15",
+                    || "an object of cells that a crater or a fracture breaks has a rigidBody whose collider is the cells (shape voxels or auto, or no shape).".into(),
+                );
                 let thermal = kids(n, "medium").any(|m| matches!(m.attribute("blackbody"), Some("true" | "1")));
                 let temperature = n
                     .document()

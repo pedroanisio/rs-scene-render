@@ -958,6 +958,12 @@
     "vox14-both.scene.xml": [
       "VOX14"
     ],
+    "vox15-fracture-box.scene.xml": [
+      "VOX15"
+    ],
+    "vox15-mesh-collider.scene.xml": [
+      "VOX15"
+    ],
     "vox2-both-sources.scene.xml": [
       "VOX2"
     ],
