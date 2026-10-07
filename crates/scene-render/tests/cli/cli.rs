@@ -374,6 +374,60 @@ fn changed_only_renders_the_frames_an_edit_changed() {
 }
 
 #[test]
+fn changed_only_invalidates_persistent_shader_history() {
+    let (dir, scene) = two_halves("persistent-history", "");
+    std::fs::write(
+        dir.join("history.fs"),
+        r#"/*{"INPUTS":[{"NAME":"inputImage","TYPE":"image"}],"PASSES":[{"TARGET":"acc","PERSISTENT":true},{}]}*/
+void main() {
+    if (PASSINDEX == 0) {
+        vec3 old = IMG_NORM_PIXEL(acc, isf_FragNormCoord).rgb;
+        vec3 now = IMG_NORM_PIXEL(inputImage, isf_FragNormCoord).rgb;
+        gl_FragColor = vec4(max(old, now), 1.0);
+    } else { gl_FragColor = IMG_NORM_PIXEL(acc, isf_FragNormCoord); }
+}"#,
+    )
+    .unwrap();
+    let xml = r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="0.3" background="#000000"/>
+    <composition><shape id="early" shape="rect" width="32" height="32" fill="#FF0000" end="0.1"/><adjustment id="history" effects="feedback"/></composition>
+    <effects><effect id="feedback" type="shader" src="history.fs" space="raw"/></effects></scene>"##;
+    std::fs::write(&scene, xml).unwrap();
+    let out = dir.join("f_%03d.png");
+    let args = [
+        "render",
+        scene.to_str().unwrap(),
+        "--frames",
+        "0..3",
+        "-o",
+        out.to_str().unwrap(),
+        "--changed-only",
+        "--strict",
+    ];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(rendered(&first), (3, 3));
+    assert_eq!(rendered(&run(&args)), (0, 3));
+    std::fs::write(&scene, xml.replace("#FF0000", "#00FF00")).unwrap();
+    let edited = run(&args);
+    assert!(edited.status.success(), "{edited:?}");
+    assert_eq!(rendered(&edited), (3, 3), "all frames depend on the edited first frame");
+    let fresh = dir.join("fresh_%03d.png");
+    let control =
+        run(&["render", scene.to_str().unwrap(), "--frames", "0..3", "-o", fresh.to_str().unwrap(), "--strict"]);
+    assert!(control.status.success(), "{control:?}");
+    for frame in 0..3 {
+        let actual = image::open(dir.join(format!("f_{frame:03}.png"))).unwrap().to_rgba8();
+        let expected = image::open(dir.join(format!("fresh_{frame:03}.png"))).unwrap().to_rgba8();
+        assert_eq!(actual, expected);
+        assert!(actual.get_pixel(16, 16)[1] > 250);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn with_motion_blur_an_edit_renders_every_frame() {
     let (dir, scene) = two_halves("blur", r#"motionBlur="true""#);
     let (scene, out) = (scene.display().to_string(), dir.join("f_%03d.png").display().to_string());

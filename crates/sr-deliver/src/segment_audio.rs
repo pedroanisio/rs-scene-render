@@ -30,6 +30,8 @@ const UNPLAYED: &str = "sr:unplayed";
 pub struct OutputAudio {
     /// Master in the mix layout, the output's duration long.
     pub master: Planar,
+    /// Post-fader tracks and buses in output time, for audio-reactive output shaders.
+    pub nodes: std::collections::HashMap<String, Planar>,
     /// Integrated loudness, LUFS.
     pub loudness: f64,
     /// True peak, dBTP.
@@ -244,7 +246,7 @@ pub fn render(
     master.volume = map_curve(&master.volume, tm, fps);
     let mix = Mix { rate, layout: sa.mix.layout, duration: tm.duration, control_fps: fps, nodes, master };
     let mixed = mix.render()?;
-    Ok(OutputAudio { master: mixed.master, loudness: mixed.loudness, true_peak: mixed.true_peak })
+    Ok(OutputAudio { master: mixed.master, nodes: mixed.nodes, loudness: mixed.loudness, true_peak: mixed.true_peak })
 }
 
 /// The mix nodes of the output's own audio tracks, in output time.
