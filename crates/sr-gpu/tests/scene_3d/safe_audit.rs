@@ -72,3 +72,23 @@ fn enforce_off_reports_nothing() {
     let e = ev(r#"enforce="off""#, r#"mode="burn""#, "");
     assert!(audit(&e, &times(96)).is_empty());
 }
+
+#[test]
+fn physics_motion_is_checked_at_the_rendered_position() {
+    let xml = r##"<scene version="1.3"><project width="400" height="400" fps="30" duration="1" safeArea="sa"/>
+        <safeAreas><safeArea id="sa" preset="youtube-shorts" enforce="error"/></safeAreas>
+        <composition><shape id="logo" shape="rect" x="100" y="100" width="20" height="20" fill="#FF0000" tags="logo">
+        <rigidBody velocityX="500" linearDamping="0"/></shape></composition><physics gravityY="0" bounds="none"/></scene>"##;
+    let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    assert!(audit(&ev, &[0.0]).is_empty());
+    let frame = ev.evaluate(0.5);
+    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+    let expected = sr_eval::safe_area::audit(ev.program(), &frame);
+    assert_eq!(expected.len(), 1, "the simulated logo crosses the right inset");
+    let got = audit(&ev, &[0.5]);
+    assert_eq!(got.len(), 1, "safe-area enforcement must use the rendered position");
+    assert_eq!(got[0].finding, expected[0]);
+    assert_eq!(got[0].level, sr_eval::SafeEnforce::Error);
+    assert!(audit(&ev, &[0.0]).is_empty(), "auditing must also support backward seeks");
+}
