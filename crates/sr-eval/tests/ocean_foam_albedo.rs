@@ -89,3 +89,35 @@ fn the_default_coverage_radius_is_one_cell() {
         sum(&one_cell)
     );
 }
+
+/// A basin of `size` by `size` cells of side 1 whose whitewater is `whitewater`, with the ocean's own attributes `ocean_attrs`.
+fn basin(size: u32, ocean_attrs: &str, whitewater: &str) -> sr_eval::Evaluator {
+    let xml = format!(
+        r#"<scene version="1.3"><project width="64" height="64" fps="10" duration="4"/><composition>
+          <ocean id="sea" width="{size}" depth="{size}" cellSize="1" bottomDepth="2" dt="0.1" {ocean_attrs}>
+            <waterImpulse time="0.1" radius="3" amplitude="0.3"/>
+            <whitewater emissionRate="60" threshold="0.05" lifetime="3" seed="5" {whitewater}/>
+          </ocean></composition></scene>"#
+    );
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap_or_else(|e| panic!("{e:?}"));
+    sr_eval::Evaluator::new(&doc, &Default::default()).unwrap()
+}
+
+#[test]
+fn the_memory_of_the_coverage_counts_in_the_surface_budget() {
+    // 301 x 301 vertices: the surface alone takes 27.5 MB, the coverage's bins and shares another 7.2 MB, under a budget of 30 MiB
+    let made = |attrs: &str, whitewater: &str| {
+        let f = basin(300, attrs, whitewater).evaluate(1.0);
+        (f.failures.clone(), f.nodes.iter().find(|n| &*n.id == "sea").and_then(|n| n.sim_ocean.clone()).is_some())
+    };
+    let (failures, made_particles) = made(r#"surfaceMemoryMiB="30""#, "");
+    assert!(made_particles, "the particles mode fits: {failures:?}");
+    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="30""#, r#"foamMode="albedo""#);
+    assert!(!made_albedo, "the coverage does not fit");
+    assert!(
+        failures.iter().any(|m| m.contains("foam coverage") && m.contains("memory")),
+        "the failure says what and which budget: {failures:?}"
+    );
+    let (failures, made_albedo) = made(r#"surfaceMemoryMiB="64""#, r#"foamMode="albedo""#);
+    assert!(made_albedo, "with room for it: {failures:?}");
+}

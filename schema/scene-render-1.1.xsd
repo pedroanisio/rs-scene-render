@@ -4663,7 +4663,7 @@
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="particles"/><xs:enumeration value="albedo"/></xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="foamRadius" type="positiveDecimal">
-      <xs:annotation><xs:documentation>Radius in scene units of the coverage one foam tracer gives the surface in albedo mode; absent, one cell of the ocean. Ignored in particles mode.</xs:documentation></xs:annotation>
+      <xs:annotation><xs:documentation>Radius in scene units of the coverage one foam tracer gives the surface in albedo mode; absent, one cell of the ocean; at most 64 cells of the ocean (OCN14). Ignored in particles mode.</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="foamAlbedo" type="unitDecimal" default="0.9">
       <xs:annotation><xs:documentation>Diffuse albedo of fully covered water in albedo mode.</xs:documentation></xs:annotation>

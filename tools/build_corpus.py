@@ -187,6 +187,7 @@ CASES = [
     ("ocn7", ["OCN7"], lambda _: OCEAN_COUPLED.replace('<object3D id="rock" primitive="sphere" radius="1" y="-3"/>', '<object3D id="rock" primitive="sphere" radius="1" y="-3"><animate property="radius"><key time="0" value="1"/><key time="1" value="2"/></animate></object3D>')),
     ("whitewater-checkpoint-range", ["S06"], lambda _: VALID["ocean"].replace('<whitewater ', '<whitewater checkpointMemoryMiB="4097" ')),
     ("whitewater-foam-mode", ["S06"], lambda _: VALID["ocean"].replace('<whitewater ', '<whitewater foamMode="mix" ')),
+    ("ocn14-foam-radius", ["OCN14"], lambda _: VALID["ocean"].replace('<whitewater ', '<whitewater foamMode="albedo" foamRadius="40" ')),
     ("whitewater-foam-albedo-range", ["S06"], lambda _: VALID["ocean"].replace('<whitewater ', '<whitewater foamAlbedo="1.5" ')),
     ("ocean-order", ["S06"], lambda _: OCEAN.replace('bottomDepth="2"', 'bottomDepth="2" order="3"')),
     ("p3d1", ["P3D1"], lambda _: PARTICLES3D.replace('version="1.3"', 'version="1.2"')),

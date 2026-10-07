@@ -1055,6 +1055,13 @@ impl<'a> Eval<'a> {
                     "OCN5",
                     || "ocean accepts one whitewater source with end >= start and valid foam/spray materials.".into(),
                 );
+                let cell = a("cellSize").map_or(1.0, xpath_number);
+                self.check(
+                    sources.iter().all(|s| s.attribute("foamRadius").is_none_or(|r| xpath_number(r) <= 64.0 * cell)),
+                    n,
+                    "OCN14",
+                    || "ocean whitewater foamRadius is at most 64 cells of the ocean: a wider coverage takes too many distances to the vertices of the surface.".into(),
+                );
             }
             "particles3D" => {
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "P3D1", || {

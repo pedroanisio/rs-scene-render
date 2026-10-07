@@ -30,9 +30,9 @@ struct Runtime {
     waves: Vec<sim::waves::Wave>,
     whitewater: Option<sim::whitewater::Whitewater>,
     surface_bytes: usize,
-    /// The radius of the coverage that foam tracers give the surface, when whitewater foam is mixed into the water's albedo
-    /// (`foamMode="albedo"`) instead of drawn as triangles.
-    foam_coverage: Option<f64>,
+    /// The radius of the coverage that foam tracers give the surface, and the most distances it may take a frame (the whitewater's
+    /// `maxWork`), when whitewater foam is mixed into the water's albedo (`foamMode="albedo"`) instead of drawn as triangles.
+    foam_coverage: Option<(f64, u64)>,
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
@@ -208,7 +208,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         .transpose()?;
     let foam_coverage = e.children.iter().find_map(|c| match c {
         sr_model::model::OceanChild::Whitewater(w) if text(w, "foamMode").as_deref() == Some("albedo") => {
-            Some(num(w, "foamRadius", spec.cell_size))
+            Some((num(w, "foamRadius", spec.cell_size), num(w, "maxWork", 100_000_000.) as u64))
         }
         _ => None,
     });
@@ -419,9 +419,20 @@ impl Sims {
                             p.kind as u64,
                         ]);
                     }
-                    if let Some(radius) = *foam_coverage {
-                        // the foam is the surface's own: its coverage rides in the alpha of the vertex colour
-                        let coverage = foam::coverage(&mesh.vertices, &foam.particles, foam.time, radius);
+                    if let Some((radius, max_work)) = *foam_coverage {
+                        // the foam is the surface's own: its coverage rides in the alpha of the vertex colour. While it is made
+                        // the surface holds, besides the vertices, a bin of vertices, a share not yet covered and the share itself
+                        // for each (80 bytes, an upper bound), which count in the surface's budget
+                        let transient = mesh.vertices.len().saturating_mul(foam::COVERAGE_BYTES_PER_VERTEX);
+                        if surface::memory_cost(spec)?.saturating_add(transient) > *surface_bytes {
+                            return Err(format!(
+                                "ocean foam coverage exceeds the surface memory budget (surfaceMemoryMiB): {transient} bytes for {} vertices over the {} bytes of the surface",
+                                mesh.vertices.len(),
+                                surface::memory_cost(spec)?
+                            ));
+                        }
+                        let coverage =
+                            foam::coverage_within(&mesh.vertices, &foam.particles, foam.time, radius, max_work)?;
                         for (vertex, share) in mesh.vertices.iter_mut().zip(coverage) {
                             vertex.color[3] = share;
                         }

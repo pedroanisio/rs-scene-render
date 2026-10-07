@@ -173,3 +173,17 @@ fn whitewater_foam_can_be_drawn_as_particles_or_mixed_into_the_water_albedo() {
         assert!(codes(&node, "1.3").contains(&"S06".into()), "{bad}: {:?}", codes(&node, "1.3"));
     }
 }
+
+#[test]
+fn a_foam_coverage_wider_than_64_cells_of_the_ocean_is_refused() {
+    // the cell is the ocean's cellSize (1 when absent): 64 cells are the most, a wider coverage takes too many distances
+    let ok = |attrs: &str, radius: &str| {
+        let node = format!(r#"<ocean id="o" {attrs}><whitewater foamMode="albedo" foamRadius="{radius}"/></ocean>"#);
+        codes(&node, "1.3")
+    };
+    assert!(ok("", "64").is_empty(), "{:?}", ok("", "64"));
+    assert!(ok(r#"cellSize="0.5""#, "32").is_empty());
+    assert!(ok("", "64.5").contains(&"OCN14".into()), "{:?}", ok("", "64.5"));
+    assert!(ok(r#"cellSize="0.5""#, "33").contains(&"OCN14".into()));
+    assert!(ok(r#"cellSize="2""#, "129").contains(&"OCN14".into()));
+}

@@ -6,6 +6,11 @@ use sr_3d::Vertex;
 use sr_sim::ocean::whitewater::{Kind, Particle};
 use std::collections::HashMap;
 
+/// What the coverage holds for each vertex while it is made, in bytes and as an upper bound: its 4-byte index in a bin, a table
+/// entry of 48 bytes (the worst case, a bin for each vertex), 16 for the bin's vector, the share of the vertex not yet covered (8)
+/// and the coverage itself (4).
+pub(super) const COVERAGE_BYTES_PER_VERTEX: usize = 4 + 48 + 8 + 4 + 16;
+
 /// Share of a tracer's life during which it covers fully; it fades linearly to nothing after.
 const FULL_UNTIL: f64 = 0.6;
 
@@ -14,10 +19,19 @@ const FULL_UNTIL: f64 = 0.6;
 /// `(1 - (d / radius)^2)^2` at the horizontal distance `d` from it (nothing from `radius` on), times its
 /// fade: 1 until 60 % of its life, then linear to 0 at its death. Spray covers nothing. The products are
 /// taken in the order of the tracers, so the same tracers give the same bits.
-pub(super) fn coverage(vertices: &[Vertex], particles: &[Particle], time: f64, radius: f64) -> Vec<f32> {
+///
+/// The work is the number of distances taken (a tracer takes one for every vertex of the 3 x 3 squares around it): it is counted before
+/// any is taken, and a coverage that needs more than `max_work` is an error that says so, never a frame that took its time.
+pub(super) fn coverage_within(
+    vertices: &[Vertex],
+    particles: &[Particle],
+    time: f64,
+    radius: f64,
+    max_work: u64,
+) -> Result<Vec<f32>, String> {
     let mut bare = vec![1.0f64; vertices.len()];
     if !(radius > 0.0 && radius.is_finite()) {
-        return vec![0.0; vertices.len()];
+        return Ok(vec![0.0; vertices.len()]);
     }
     // the vertices by the square of side `radius` they lie in: a tracer reaches the 3 x 3 squares around its own
     let square = |x: f64, z: f64| ((x / radius).floor() as i64, (z / radius).floor() as i64);
@@ -25,11 +39,23 @@ pub(super) fn coverage(vertices: &[Vertex], particles: &[Particle], time: f64, r
     for (i, v) in vertices.iter().enumerate() {
         bins.entry(square(f64::from(v.pos[0]), f64::from(v.pos[2]))).or_default().push(i as u32);
     }
-    for p in particles.iter().filter(|p| p.kind == Kind::Foam) {
-        let age = (time - p.birth) / p.lifetime;
-        if !(0.0..1.0).contains(&age) {
-            continue;
+    let living = |p: &&Particle| p.kind == Kind::Foam && (0.0..1.0).contains(&((time - p.birth) / p.lifetime));
+    let mut work = 0u64;
+    for p in particles.iter().filter(living) {
+        let (bx, bz) = square(p.position[0], p.position[2]);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                work += bins.get(&(bx + dx, bz + dz)).map_or(0, |bin| bin.len() as u64);
+            }
         }
+        if work > max_work {
+            return Err(format!(
+                "ocean foam coverage needs more than {max_work} distances (the whitewater's maxWork): a foamRadius of {radius} reaches too many vertices of the surface for the tracers"
+            ));
+        }
+    }
+    for p in particles.iter().filter(living) {
+        let age = (time - p.birth) / p.lifetime;
         let fade = if age <= FULL_UNTIL { 1.0 } else { (1.0 - age) / (1.0 - FULL_UNTIL) };
         let (bx, bz) = square(p.position[0], p.position[2]);
         for dx in -1..=1 {
@@ -48,7 +74,13 @@ pub(super) fn coverage(vertices: &[Vertex], particles: &[Particle], time: f64, r
             }
         }
     }
-    bare.iter().map(|b| (1.0 - b) as f32).collect()
+    Ok(bare.iter().map(|b| (1.0 - b) as f32).collect())
+}
+
+/// The coverage with no budget, for the tests of its arithmetic.
+#[cfg(test)]
+pub(super) fn coverage(vertices: &[Vertex], particles: &[Particle], time: f64, radius: f64) -> Vec<f32> {
+    coverage_within(vertices, particles, time, radius, u64::MAX).expect("no budget to exceed")
 }
 
 #[cfg(test)]
@@ -158,5 +190,31 @@ mod tests {
         assert!(want.iter().any(|c| *c > 0.0) && want.contains(&0.0), "the case covers part of the grid");
         assert_eq!(fast, want);
         assert_eq!(coverage(&v, &particles, time, radius), fast, "the same tracers give the same bits");
+    }
+
+    #[test]
+    fn a_coverage_that_takes_more_distances_than_its_budget_is_refused_and_one_at_the_budget_is_made() {
+        // a grid of 20 x 20 vertices, 10 foam tracers each within reach of all of them (a radius of 100 over a square of 20)
+        let vertices: Vec<Vertex> = (0..400).map(|i| vertex((i % 20) as f32, (i / 20) as f32)).collect();
+        let tracers: Vec<Particle> = (0..10)
+            .map(|i| Particle {
+                id: i,
+                kind: Kind::Foam,
+                birth: 0.0,
+                lifetime: 10.0,
+                position: [i as f64, 0.0, i as f64],
+                velocity: [0.0; 3],
+                radius: 0.05,
+            })
+            .collect();
+        // radius 100: one bin holds every vertex, and every tracer reaches that bin: 400 distances each
+        let needed = 10 * 400;
+        let made = coverage_within(&vertices, &tracers, 1.0, 100.0, needed).expect("the budget is the work needed");
+        assert_eq!(made.len(), 400);
+        let refused = coverage_within(&vertices, &tracers, 1.0, 100.0, needed - 1).unwrap_err();
+        assert!(refused.contains("foam coverage") && refused.contains("maxWork"), "{refused}");
+        assert!(refused.contains("more than 3999"), "the budget it was over is named: {refused}");
+        // a tracer that is not alive weighs nothing and costs nothing
+        assert!(coverage_within(&vertices, &tracers, 11.0, 100.0, 0).is_ok());
     }
 }

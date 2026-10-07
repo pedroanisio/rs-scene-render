@@ -1460,7 +1460,7 @@ name: at most 4096 distinct objects, a plane or mesh with a crater or a closed b
 one), OCN7 (collider geometry is static), OCN8 (`bodyCoupling` needs `colliders`), OCN9
 (`bodyDrag` belongs to an ocean with `colliders`), OCN10 to OCN12 (a `waterImpulse` with
 `source`: no derived attribute given, a dynamic rigid body without a crater listed in
-`colliders`, one impulse per body) and OCN13 (`splash` names emitters of crater ejecta).
+`colliders`, one impulse per body) OCN13 (`splash` names emitters of crater ejecta) and OCN14 (a foam coverage radius of at most 64 cells).
 Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
@@ -1490,6 +1490,10 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth). The tracers keep checkpoints within their own byte budget, one per second of simulated time at first and every second, fourth, eighth... second when the budget fills, so a request that goes back in time replays from the nearest checkpoint at or before it; a cold seek to 6 s on 518,400 cells with a 1/24 s step still costs about 600 million units |
 | `checkpointMemoryMiB` | 64 | Byte ceiling of the retained tracer checkpoints, 0 to 4096 MiB, separate from `maxMemoryMiB`; zero keeps none, so every request that goes back in time replays from zero |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
+| `foamMode` | `particles` | `particles` draws each foam tracer as a triangle batch; `albedo` makes the foam tracers a coverage of the water surface that the path tracer's shading takes toward the foam (below) and draws no foam triangles |
+| `foamRadius` | one cell | In `albedo` mode, radius in scene units of the coverage one tracer gives the surface, at most 64 cells (OCN14); ignored otherwise |
+| `foamAlbedo` | .9 | In `albedo` mode, diffuse albedo of fully covered water, 0 to 1 |
+| `foamRoughness` | .8 | In `albedo` mode, roughness of fully covered water, 0 to 1 |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
 height and horizontal Froude number `speed/sqrt(gravity*depth)`. A dry neighbour
@@ -1534,6 +1538,13 @@ each foam tracer instead gives the vertices of the water surface within
 `(1 - x^2)^2` of its distance `x` to the radius, full until 60 % of the
 tracer's life and fading linearly to zero after it; shares of several tracers
 combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
+The coverage is made on the CPU for every surface vertex, per frame, and is
+budgeted: it counts the distances it will take (every living tracer takes one
+for each vertex of the 3 x 3 squares of side `foamRadius` around it) before
+taking any, and fails with its cause when they pass the whitewater's `maxWork`;
+and the bins, the shares not yet covered and the coverage itself (at most 80
+bytes a vertex while it is made) count in the surface's `surfaceMemoryMiB`.
+Foam that is not drawn as triangles is not charged to the whitewater mesh budget.
 The share rides in the alpha of the vertex colour and is the share of the
 surface's area that the foam covers: a path-traced sample on a covered surface
 is on the foam with that probability, and then the surface is the foam's (a
