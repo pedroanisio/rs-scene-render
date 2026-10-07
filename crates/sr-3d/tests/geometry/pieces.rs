@@ -38,7 +38,7 @@ fn scan(c: &[i32; 3]) -> (i32, i32, i32) {
 }
 
 fn edge(a: u32, b: u32, faces: [u32; 3], face_sum: [[i64; 3]; 3], normal_sum: [i32; 3]) -> Edge {
-    Edge::new(a, b, faces, face_sum, normal_sum)
+    Edge::new(a, b, faces, face_sum, normal_sum).unwrap()
 }
 
 /// What every graph must be, whatever the rule: every cell in one piece, pieces in scan order and face-connected, the moments of each
@@ -354,6 +354,25 @@ fn cells_at_the_last_keys_of_an_occupancy_are_cut_and_joined_without_overflow() 
         let g = partition(&o, Partition::Planes(&planes), 10).unwrap();
         check(&o, &g);
     }
+    // and who wins is decided, not only that nothing overflows: two cells side by side at the low end of the keys and a plane whose normal is
+    // the largest i64 and whose offset is exactly between their two products (the first is on the negative side, the second on the positive)
+    let (x0, x1) = (-KEY_LIMIT, -KEY_LIMIT + 1);
+    let near = occupancy(&[[x0, 0, 0], [x1, 0, 0]]);
+    let offset = i128::from(i64::MAX) * i128::from(2 * i64::from(x0) + 2);
+    let cut = partition(&near, Partition::Planes(&[Plane { normal: [i64::MAX, 0, 0], offset }]), 10).unwrap();
+    check(&near, &cut);
+    assert_eq!(cut.pieces().len(), 2);
+    assert_eq!(cut.pieces()[0].cells(), [[x0, 0, 0]]);
+    assert_eq!(cut.edges().len(), 1);
+    // the three cells of the first body: the two that touch are one piece and the third is another, whatever the seeds, planes and offsets
+    let pieces = |g: &PieceGraph| {
+        (g.piece_of([last - 1, last, -KEY_LIMIT]) == g.piece_of([last, last, -KEY_LIMIT]), g.pieces().len())
+    };
+    assert_eq!(pieces(&g), (true, 2));
+    // an edge is from a piece to a higher one
+    assert!(Edge::new(2, 2, [1, 0, 0], [[0; 3]; 3], [0; 3]).is_err());
+    assert!(Edge::new(3, 2, [1, 0, 0], [[0; 3]; 3], [0; 3]).is_err());
+    assert_eq!(Edge::new(0, 1, [0; 3], [[0; 3]; 3], [0; 3]).unwrap().centroid([1.0; 3]), None);
     // a seed beyond the range is refused by name
     let error = partition(&o, Partition::VoronoiAt(&[[i64::MAX, 0, 0]]), 10).unwrap_err();
     assert!(error.contains("seed") && error.contains(&MAX_SEED_COORD.to_string()), "{error}");
@@ -410,11 +429,13 @@ fn the_faces_of_a_joint_are_counted_by_axis_and_a_wrapped_joint_keeps_its_area_w
     // cells of 2 by 3 by 5 units: the area is 1 face of 3 x 5 and 4 faces of 2 x 5
     assert_eq!(joint.area([2.0, 3.0, 5.0]), 15.0 + 40.0);
     // and the centroid is the mean of the centres of the faces, weighted by their areas, in units
-    let centroid = joint.centroid([2.0, 3.0, 5.0]);
+    let centroid = joint.centroid([2.0, 3.0, 5.0]).unwrap();
     let (x, y) = (centroid[0], centroid[1]);
     // the x face is between (0, 1) and (1, 1): centre (1, 1.5, .5) cells; the y faces: (1, 1, .), (1, 2, .), (2, 1, .), (2, 2, .) at x 1.5 and 2.5
     // and y 1 or 2 (cells 1 up, the one above) -> centres (1.5, 1), (1.5, 2), (2.5, 1), (2.5, 2) cells: the weights are 15 and 4 x 10
     let wx = (15.0 * 1.0 * 2.0 + 10.0 * (1.5 + 1.5 + 2.5 + 2.5) * 2.0) / 55.0;
     let wy = (15.0 * 1.5 * 3.0 + 10.0 * (1.0 + 2.0 + 1.0 + 2.0) * 3.0) / 55.0;
     assert!((x - wx).abs() < 1e-12 && (y - wy).abs() < 1e-12, "{centroid:?} against {wx} {wy}");
+    // every face is half a cell up the z axis (the cells are the layer z = 0), so the centre is at 0.5 cells of 5 units
+    assert!((centroid[2] - 2.5).abs() < 1e-12, "{}", centroid[2]);
 }
