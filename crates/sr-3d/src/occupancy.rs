@@ -109,6 +109,8 @@ pub struct Occupancy {
     palette_revision: u64,
     /// Which grid this is: its own for each grid built and each copy made, for the whole of its life.
     lineage: u64,
+    /// The highest revision given to `compact`: emptied bricks last edited at or before it are no longer told by `changed_bricks_since`.
+    compacted: u64,
 }
 
 /// A copy has the cells, the palette and the revision of the grid it was made from and a lineage of its own: from then on the two are
@@ -124,6 +126,7 @@ impl Clone for Occupancy {
             palette: self.palette.clone(),
             palette_revision: self.palette_revision,
             lineage: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
+            compacted: self.compacted,
         }
     }
 }
@@ -165,6 +168,7 @@ impl Occupancy {
             palette: Palette::default(),
             palette_revision: 0,
             lineage: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
+            compacted: 0,
         }
     }
 
@@ -440,6 +444,12 @@ impl Occupancy {
         self.lineage
     }
 
+    /// The highest revision given to [`Occupancy::compact`]: a reader that has read the grid up to a revision below it cannot be told what
+    /// changed since, because bricks emptied after its revision may be gone, and reads the whole.
+    pub fn compacted_through(&self) -> u64 {
+        self.compacted
+    }
+
     /// The bricks that hold something, in key order, with their 512 palette indices (x runs fastest, then y, then z).
     pub fn bricks(&self) -> impl Iterator<Item = ([i32; 3], &[u8; BRICK_CELLS])> {
         self.bricks.iter().filter(|(_, b)| b.filled > 0).map(|(k, b)| (*k, &*b.cells))
@@ -454,6 +464,7 @@ impl Occupancy {
     /// surface reads `changed_bricks_since` up to the revision it built, so that revision is the one to give here: a brick emptied after
     /// it stays until it has been read.
     pub fn compact(&mut self, revision: u64) {
+        self.compacted = self.compacted.max(revision);
         self.bricks.retain(|_, b| b.filled > 0 || b.changed > revision);
     }
 

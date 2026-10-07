@@ -836,3 +836,32 @@ fn a_surface_over_its_budget_is_refused_at_the_plane_that_takes_it_over_and_not_
         assert!(cache.quads().is_empty());
     }
 }
+
+#[test]
+fn a_grid_compacted_past_the_revision_the_cache_read_is_meshed_again_whole() {
+    let classes = Classes::identity();
+    let mut live = grid(block([0, 0, 0], 48, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&live, &classes, usize::MAX).unwrap();
+    // a brick is emptied and the grid is compacted before the cache has read it: the brick is no longer among the ones that changed
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                live.set([x, y, z], 0).unwrap();
+            }
+        }
+    }
+    live.compact(live.revision());
+    let update = cache.update(&live, &classes, usize::MAX).unwrap();
+    assert!(update.full, "what the cache cannot be told is made again");
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&live), &classes));
+    // a cache that read the revision before compacting it is told what changed
+    live.set([30, 30, 30], 0).unwrap();
+    let read = live.revision();
+    cache.update(&live, &classes, usize::MAX).unwrap();
+    live.compact(read);
+    live.set([31, 31, 31], 0).unwrap();
+    let update = cache.update(&live, &classes, usize::MAX).unwrap();
+    assert!(!update.full);
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&live), &classes));
+}

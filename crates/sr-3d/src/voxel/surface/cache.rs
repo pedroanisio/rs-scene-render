@@ -51,7 +51,7 @@ impl SurfaceCache {
     pub fn update(&mut self, grid: &Occupancy, classes: &Classes, max_bytes: usize) -> Result<Remesh, String> {
         let ident = (grid.lineage(), grid.revision());
         let revision = self.held.as_ref().map_or(0, |h| h.1);
-        let dirty = matches!(&self.held, Some((lineage, held, _)) if *lineage == ident.0 && *held <= ident.1)
+        let dirty = matches!(&self.held, Some((lineage, held, _)) if *lineage == ident.0 && *held <= ident.1 && *held >= grid.compacted_through())
             .then(|| grid.changed_bricks_since(revision));
         self.apply(grid, classes, max_bytes, ident, dirty)
     }
