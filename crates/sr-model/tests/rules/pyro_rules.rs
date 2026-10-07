@@ -202,3 +202,34 @@ fn a_source_near_an_open_face_is_not_warned_about_when_the_window_follows_its_pl
     assert!(codes(&object("")).contains(&"W02".into()), "{:?}", codes(&object("")));
     assert!(!codes(&object(r#"follow="true""#)).contains(&"W02".into()));
 }
+
+#[test]
+fn a_blast_needs_an_open_domain_a_place_in_it_and_a_gas_that_is_one() {
+    let blast = |pyro_attributes: &str, blast_attributes: &str| {
+        codes(&format!(
+            r#"<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" {pyro_attributes}><pyroBlast time="0.3" energy="1000000" {blast_attributes}/></pyro><medium blackbody="true"/></object3D>"#
+        ))
+    };
+    let open = r#"boundary="open""#;
+    assert!(blast(open, "").is_empty(), "{:?}", blast(open, ""));
+    assert!(blast(open, r#"x="4" y="-4" z="0" ambientDensity="0.9" ambientPressure="90000" gamma="1.67""#).is_empty());
+    // a closed pyro (the default) cannot let the divergence of a blast out
+    assert!(blast("", "").contains(&"PYC5".into()));
+    assert!(blast(r#"boundary="closed""#, "").contains(&"PYC5".into()));
+    // the place of the blast is in the domain: half the width, the height and the depth either way
+    for place in [r#"x="4.5""#, r#"y="-4.01""#, r#"z="9""#] {
+        assert!(blast(open, place).contains(&"PYC6".into()), "{place}");
+    }
+    // the types: no energy that is negative, no gas that is not one, no air of nothing
+    for bad in [r#"energy="-1""#, r#"gamma="1""#, r#"gamma="3.5""#, r#"ambientDensity="0""#, r#"ambientPressure="-5""#]
+    {
+        let object = format!(
+            r#"<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" boundary="open"><pyroBlast time="0.3" energy="1000000" {bad}/></pyro><medium blackbody="true"/></object3D>"#
+        )
+        .replace(r#"energy="1000000" energy="-1""#, r#"energy="-1""#);
+        assert!(!codes(&object).is_empty(), "{bad}");
+    }
+    // time and energy are required
+    let missing = r#"<object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="1" dt="0.1" boundary="open"><pyroBlast energy="1"/></pyro><medium blackbody="true"/></object3D>"#;
+    assert!(!codes(missing).is_empty());
+}

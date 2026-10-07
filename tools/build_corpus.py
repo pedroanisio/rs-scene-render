@@ -37,6 +37,8 @@ PYRO_FOLLOW = PYRO.replace('<pyro ', '<pyro boundary="open" follow="true" follow
 VOXELS = '<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/><assets><voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/><mesh id="shape" src="../media/robot.glb"/></assets><materials><material id="stone" baseColor="#808080"/><material id="moss" baseColor="#406040"/></materials><composition><object3D id="build" primitive="voxels" voxels="model" cellSize="2" palette="stone moss" surface="blocks"/></composition></scene>\n'
 VOXELS_FROM_MESH = VOXELS.replace('<voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/>', '<voxelAsset id="model" fromMesh="shape" cellSize="0.5"/>').replace(' palette="stone moss"', ' palette="file"')
 
+PYRO_BLAST = PYRO.replace('<pyro ', '<pyro boundary="open" ').replace('</pyro>', '<pyroBlast time="0.3" energy="1000000" x="1" y="-1"/></pyro>')
+
 PYRO_MESH = PYRO.replace("<composition>", '<assets><mesh id="source-mesh" src="../media/robot.glb"/></assets><composition>').replace('shape="sphere" radius="2"', 'shape="mesh" mesh="source-mesh"')
 
 PYRO_COLLIDERS = PYRO.replace("<composition>", '<composition><object3D id="solid" primitive="box" width="2" height="2" depth="2"/>').replace("<pyro ", '<pyro colliders="solid" ')
@@ -181,6 +183,9 @@ CASES = [
     ("ocn3", ["OCN3"], lambda _: OCEAN.replace('width="8"', 'width="8.1"')),
     ("ocn4", ["OCN4"], lambda _: OCEAN.replace('</ocean>', '<animate property="bottomDepth"><key time="0" value="2"/></animate></ocean>')),
     ("ocn5", ["OCN5"], lambda _: OCEAN.replace('</ocean>', '<whitewater start="1" end="0.5"/></ocean>')),
+    ("pyc5-closed", ["PYC5"], lambda _: PYRO_BLAST.replace('boundary="open" ', '')),
+    ("pyc6-outside", ["PYC6"], lambda _: PYRO_BLAST.replace('x="1"', 'x="5"')),
+    ("pyro-blast-gamma", ["S06"], lambda _: PYRO_BLAST.replace('<pyroBlast ', '<pyroBlast gamma="4" ')),
     ("pyro-advection", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro advection="rk4" ')),
     ("pyro-solver", ["S06"], lambda _: VALID["pyro"].replace('<pyro ', '<pyro solver="cg" ')),
     ("ocn6", ["OCN6"], lambda _: OCEAN_COUPLED.replace('colliders="seabed rock"', 'colliders="seabed rock seabed"')),
@@ -499,6 +504,8 @@ VALID = {
     "pyro-maccormack": PYRO.replace('<pyro ', '<pyro solver="multigrid" advection="maccormack" '),
     "pyro-mesh": PYRO_MESH,
     "pyro-follow": PYRO_FOLLOW,
+    "pyro-blast": PYRO_BLAST,
+    "pyro-blast-gas": PYRO_BLAST.replace('<pyroBlast ', '<pyroBlast ambientDensity="0.9" ambientPressure="90000" gamma="1.67" '),
     "voxels": VOXELS,
     "voxels-from-mesh": VOXELS_FROM_MESH,
     # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it

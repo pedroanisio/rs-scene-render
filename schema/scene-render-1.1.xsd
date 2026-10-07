@@ -4703,8 +4703,29 @@
     <xs:attribute name="velocityZ" type="xs:double" default="0"/>
     <xs:attribute name="expansion" type="xs:double" default="0"/>
   </xs:complexType>
+  <xs:complexType name="pyroBlastType">
+    <xs:annotation><xs:documentation>
+      A blast in the smoke (version 1.3): `energy` joules released at (x, y, z) in the pyro's own axes at `time` seconds, into air of
+      `ambientDensity` kg/m^3 and `ambientPressure` Pa, a gas of `gamma`. The front is the Sedov-Taylor blast, R = xi (E t^2 / rho)^(1/5)
+      metres, with the constant found from the self-similar solution, until it reaches 0.3 (E / p)^(1/3) metres (the end of the strong
+      phase), where it stops; a metre is the scene's `pixelsPerMeter` (the physics element's, 100 if there is none) scene units. The
+      solver is incompressible, so the shock is not carried: each step the air that the front swept in the step is displaced (the cells
+      whose centres are in the sphere of the front's radius at the end of the step are given the divergence that makes their volume the
+      volume swept), and the projection makes the potential flow outside. Nothing is heated and no smoke is made (a fireball is a
+      pyroSource or a pyroImpulse that the author adds). A pyro with a blast needs boundary="open" (PYC5), and the blast's place is in
+      the domain (PYC6). An energy of zero is a blast that does nothing. A pyro with no blast is the pyro it was.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="time" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="energy" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="ambientDensity" type="positiveDecimal" default="1.2"/>
+    <xs:attribute name="ambientPressure" type="positiveDecimal" default="101325"/>
+    <xs:attribute name="gamma" default="1.4"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:minInclusive value="1.05"/><xs:maxInclusive value="3"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
   <xs:complexType name="pyroType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/></xs:choice>
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/><xs:element name="pyroBlast" type="pyroBlastType"/></xs:choice>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
     <xs:attribute name="colliderThickness" type="positiveDecimal"/>
     <xs:attribute name="forceFields" type="xs:IDREFS"/>

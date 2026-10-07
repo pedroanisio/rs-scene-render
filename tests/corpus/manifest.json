@@ -460,7 +460,16 @@
     "pyc4-authored.scene.xml": [
       "PYC4"
     ],
+    "pyc5-closed.scene.xml": [
+      "PYC5"
+    ],
+    "pyc6-outside.scene.xml": [
+      "PYC6"
+    ],
     "pyro-advection.scene.xml": [
+      "S06"
+    ],
+    "pyro-blast-gamma.scene.xml": [
       "S06"
     ],
     "pyro-solver.scene.xml": [
@@ -993,6 +1002,8 @@
     "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
+    "pyro-blast-gas.scene.xml": [],
+    "pyro-blast.scene.xml": [],
     "pyro-colliders.scene.xml": [],
     "pyro-crater-push.scene.xml": [],
     "pyro-crater.scene.xml": [],
