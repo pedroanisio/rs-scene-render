@@ -28,6 +28,12 @@ pub use key::volume_key;
 /// did, and all reductions stay serial and in index order.
 const HEAVY: usize = 256;
 const LIGHT: usize = 8192;
+/// A temperature that differs from ambient by less than this share of it is the rounding of the interpolation, not
+/// heat: the window that follows a plume does not count it as smoke.
+const HEAT_NOISE: f64 = 1e-9;
+/// The share of its speed that the drift of the smoke along an axis must have for the smoke to be going one way along
+/// it: a window that follows asks for room only on the face such smoke is going toward.
+const FOLLOW_DRIFT: f64 = 0.2;
 
 #[cfg(test)]
 mod atomicity;
@@ -43,6 +49,8 @@ mod pockets;
 mod sampling;
 #[cfg(test)]
 mod voxel_memory;
+#[cfg(test)]
+mod window;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -155,6 +163,20 @@ pub struct Spec {
     pub advection: Advection,
     /// Conservative resident state plus step workspace budget, before allocation.
     pub max_bytes: usize,
+    /// A window that follows its plume: absent, the domain is where it began for good.
+    pub follow: Option<Follow>,
+}
+
+/// A domain whose window moves by whole cells to keep the smoke away from its faces, with the same number of cells
+/// whatever it does, so that its memory and the cost of a step do not change. It needs an open domain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Follow {
+    /// Cells the smoke is kept from every face, when the window can move without leaving too much smoke behind.
+    pub margin: usize,
+    /// The share of all the smoke that the window may leave behind, each side of it: zero lets go of no smoke at
+    /// all (only slabs that hold none), and more lets go of the thin tail a plume drags behind it, the loss counted
+    /// in [`State::lost`].
+    pub loss: f64,
 }
 
 impl Default for Spec {
@@ -177,6 +199,7 @@ impl Default for Spec {
             solver: PressureSolver::Jacobi,
             advection: Advection::SemiLagrangian,
             max_bytes: 256 << 20,
+            follow: None,
         }
     }
 }
@@ -385,6 +408,22 @@ pub struct Inputs {
 }
 
 impl Inputs {
+    /// The shapes of the sources and impulses that act in the fixed step `step` from `start` to `end`.
+    fn acting(&self, start: f64, end: f64, step: u64, dt: f64) -> Vec<&Shape> {
+        let acts = |s: &Source| (end.min(s.end.unwrap_or(end)) - start.max(s.start)).max(0.0) > 0.0;
+        let fires = |i: &Impulse| {
+            let ratio = i.time / dt;
+            ratio.is_finite() && fixed_step_index(ratio) == step
+        };
+        self.sources
+            .iter()
+            .chain(&self.heated)
+            .filter(|s| acts(s))
+            .map(|s| &s.shape)
+            .chain(self.impulses.iter().chain(&self.heated_impulses).filter(|i| fires(i)).map(|i| &i.shape))
+            .collect()
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let heated = self.heated.len().saturating_add(self.heated_impulses.len());
         if self.sources.len().saturating_add(self.impulses.len()).saturating_add(heated) > 4096
@@ -466,6 +505,13 @@ fn face_dims(mut dims: [usize; 3], axis: usize) -> [usize; 3] {
 pub struct State {
     cells: [usize; 3],
     origin: [f64; 3],
+    /// The origin the domain began with, and the whole cells it has moved by since (a window that follows its
+    /// plume): `origin` is always `base + window * h`, computed afresh, never accumulated.
+    base: [f64; 3],
+    window: [i64; 3],
+    /// The density the window has let go of by following the plume, summed over cells: none unless it was
+    /// allowed to.
+    lost: f64,
     h: f64,
     ambient: f64,
     boundary: Boundary,
@@ -610,6 +656,222 @@ impl State {
     pub fn cells(&self) -> [usize; 3] {
         self.cells
     }
+    /// The domain minimum in scene units now: where the window is.
+    pub fn origin(&self) -> [f64; 3] {
+        self.origin
+    }
+    /// Whole cells the window has moved by since the domain began.
+    pub fn window(&self) -> [i64; 3] {
+        self.window
+    }
+    /// The density summed over the cells the window has let go of while following its plume.
+    pub fn lost(&self) -> f64 {
+        self.lost
+    }
+    /// The velocity on the faces normal to `axis`, x-fastest, one more face than cells along that axis.
+    pub fn velocity_faces(&self, axis: usize) -> &[f64] {
+        &self.velocity[axis]
+    }
+
+    /// Whether the smoke is somewhere in cell `k`: it holds density, or it is warmer or cooler than ambient by
+    /// more than [`HEAT_NOISE`] of the ambient temperature. The interpolation of the advection leaves rounding
+    /// (299.99999999999994 K for 300 K) in air that nothing has touched, and that is not heat.
+    fn active(&self, k: usize) -> bool {
+        self.density[k] != 0.0 || (self.temperature[k] - self.ambient).abs() > HEAT_NOISE * self.ambient
+    }
+
+    /// Where the window should move so that the smoke is `margin` cells from every face, and on which axes it
+    /// cannot: the whole cells to move by (the sign says toward which side the cells are numbered up to, as in
+    /// [`Simulation::shift_window`]) and, for each axis, whether the smoke is nearer a face than `margin` cells
+    /// (plus the cells the fastest air along the axis goes in a step of `dt`)
+    /// and the window cannot move away from it (or the smoke is near both). The smoke along an axis is the span
+    /// of slabs between the ends that hold at most `loss / 2` of all the density each (none at all, and no heat,
+    /// for a `loss` of zero): integer indices from sums in a fixed order, the same on any number of threads. A
+    /// move is only as long as the slabs it leaves behind allow, and never leaves a slab with a cell in `keep` (the
+    /// shapes of the sources that are acting: a plume begins at its source, and a window that left the source
+    /// would part the plume from it).
+    pub fn follow_decision(&self, margin: usize, loss: f64, dt: f64, keep: &[&Shape]) -> ([i64; 3], [bool; 3]) {
+        let n = self.cells;
+        // the density and the heat of each slab of cells normal to each axis, summed in the order of the cells
+        let mut mass: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
+        let mut heat: [Vec<u64>; 3] = std::array::from_fn(|a| vec![0; n[a]]);
+        // and the density times the velocity of the air along the axis, to tell which way the smoke at each end is going
+        let mut flux: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
+        let mut flux_abs: [Vec<f64>; 3] = std::array::from_fn(|a| vec![0.0; n[a]]);
+        for z in 0..n[2] {
+            for y in 0..n[1] {
+                let row = index([0, y, z], n);
+                for x in 0..n[0] {
+                    let k = row + x;
+                    let d = self.density[k];
+                    let hot = u64::from((self.temperature[k] - self.ambient).abs() > HEAT_NOISE * self.ambient);
+                    for (a, i) in [x, y, z].into_iter().enumerate() {
+                        mass[a][i] += d;
+                        heat[a][i] += hot;
+                        if d != 0.0 {
+                            let dims = face_dims(n, a);
+                            let (low, mut high) = ([x, y, z], [x, y, z]);
+                            high[a] += 1;
+                            let v = 0.5 * (self.velocity[a][index(low, dims)] + self.velocity[a][index(high, dims)]);
+                            flux[a][i] += d * v;
+                            flux_abs[a][i] += d * v.abs();
+                        }
+                    }
+                }
+            }
+        }
+        // a step moves the smoke by as many cells as the fastest air along the axis goes in it, so the margin
+        // is that many cells more than asked for, as far as a cell is left between the faces
+        let reach: [usize; 3] = std::array::from_fn(|a| {
+            let fastest = self.velocity[a].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let cells = (fastest * dt / self.h).ceil();
+            let room = (n[a] - 1) / 2;
+            if cells.is_finite() {
+                (cells as usize).min(room.saturating_sub(margin))
+            } else {
+                0
+            }
+        });
+        let total: f64 = mass[0].iter().sum();
+        let allowed = loss / 2.0 * total;
+        let mut by = [0i64; 3];
+        let mut blocked = [false; 3];
+        for a in 0..3 {
+            // a slab may be trimmed off the end of the smoke while the trimmed density stays within the share
+            let gone = |i: usize, trimmed: f64| {
+                if loss == 0.0 {
+                    mass[a][i] == 0.0 && heat[a][i] == 0
+                } else {
+                    trimmed + mass[a][i] <= allowed
+                }
+            };
+            let (mut lo, mut trimmed) = (0usize, 0.0);
+            while lo < n[a] && gone(lo, trimmed) {
+                trimmed += mass[a][lo];
+                lo += 1;
+            }
+            if lo == n[a] {
+                continue;
+            }
+            let (mut hi, mut trimmed) = (n[a] - 1, 0.0);
+            while hi > lo && gone(hi, trimmed) {
+                trimmed += mass[a][hi];
+                hi -= 1;
+            }
+            let width = margin + reach[a];
+            // Smoke that is going one way along the axis (its density-weighted air has at least a fifth of its speed
+            // as drift) asks for room only on the face it is going toward: a face behind a plume that is rising away
+            // from it is no reason to move the window, which would take the room that the plume rises into. Smoke
+            // that is not going anywhere along the axis, or spreads both ways, asks for room on both.
+            let (drift, speed): (f64, f64) = (flux[a].iter().sum(), flux_abs[a].iter().sum());
+            let directed = speed > 0.0 && drift.abs() >= FOLLOW_DRIFT * speed;
+            let (toward_low, toward_high) = (!directed || drift < 0.0, !directed || drift > 0.0);
+            let (n, lo, hi, margin) = (n[a] as i64, lo as i64, hi as i64, width as i64);
+            // smoke nearer the low face than the margin: the window moves toward lower cells by what is short, at
+            // most as far as the slabs at the high end that may be left behind
+            let near_low = if toward_low { (margin - lo).max(0) } else { 0 };
+            let near_high = if toward_high { (hi + margin + 1 - n).max(0) } else { 0 };
+            if near_low > 0 && near_high > 0 {
+                blocked[a] = true;
+            } else if near_low > 0 {
+                // the slabs left behind are the last ones: n - 1, n - 2, ...
+                let allowed = self.keeping(a, near_low.min(n - 1 - hi), false, keep);
+                by[a] = -allowed;
+                blocked[a] = allowed < near_low;
+            } else if near_high > 0 {
+                let allowed = self.keeping(a, near_high.min(lo), true, keep);
+                by[a] = allowed;
+                blocked[a] = allowed < near_high;
+            }
+        }
+        (by, blocked)
+    }
+
+    /// How many of the first `wanted` slabs normal to `axis`, counting from the low end if `from_low` and else from
+    /// the high end, hold no cell whose centre is in a shape of `keep`: the window can leave that many behind.
+    fn keeping(&self, axis: usize, wanted: i64, from_low: bool, keep: &[&Shape]) -> i64 {
+        if keep.is_empty() {
+            return wanted;
+        }
+        let n = self.cells;
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        for t in 0..wanted {
+            let slab = if from_low { t as usize } else { n[axis] - 1 - t as usize };
+            let held = (0..n[v]).any(|j| {
+                (0..n[u]).any(|i| {
+                    let mut cell = [0; 3];
+                    (cell[axis], cell[u], cell[v]) = (slab, i, j);
+                    let p = self.cell_world(index(cell, n));
+                    keep.iter().any(|shape| shape.contains(p))
+                })
+            });
+            if held {
+                return t;
+            }
+        }
+        wanted
+    }
+
+    /// This state with its window moved by `by` whole cells: the cell that was at `c + by` is at `c`, what
+    /// was kept is bit for bit what it was, and what comes in is the background (no density, ambient
+    /// temperature, air at rest). It is refused, and nothing changes, if a cell that would be left behind holds
+    /// smoke: the window never lets go of any.
+    fn shifted(&self, by: [i64; 3], exact: bool) -> Result<State, Error> {
+        let n = self.cells.map(|n| n as i64);
+        if by.iter().zip(&n).any(|(b, n)| b.abs() >= *n) {
+            return Err(Error::Invalid("a window cannot move by its whole size or more"));
+        }
+        let count = self.density.len();
+        let mut lost = 0.0;
+        for k in 0..count {
+            let c = coords(k, self.cells).map(|v| v as i64);
+            // the cell that is left behind is the one whose new place `c - by` is outside the window
+            let left = (0..3).any(|a| !(0..n[a]).contains(&(c[a] - by[a])));
+            if left {
+                if exact && self.active(k) {
+                    return Err(Error::Invalid("the window cannot move: the cells it would leave behind hold smoke"));
+                }
+                lost += self.density[k];
+            }
+        }
+        let shift = |src: &[f64], dims: [usize; 3], fill: f64| -> Vec<f64> {
+            let size = dims.map(|d| d as i64);
+            let mut out = vec![fill; src.len()];
+            out.par_chunks_mut(dims[0]).enumerate().for_each(|(row, line)| {
+                let (y, z) = ((row % dims[1]) as i64, (row / dims[1]) as i64);
+                let (y, z) = (y + by[1], z + by[2]);
+                if !(0..size[1]).contains(&y) || !(0..size[2]).contains(&z) {
+                    return;
+                }
+                for (x, v) in line.iter_mut().enumerate() {
+                    let x = x as i64 + by[0];
+                    if (0..size[0]).contains(&x) {
+                        *v = src[index([x as usize, y as usize, z as usize], dims)];
+                    }
+                }
+            });
+            out
+        };
+        let window: [i64; 3] = std::array::from_fn(|a| self.window[a] + by[a]);
+        let origin: [f64; 3] = std::array::from_fn(|a| self.base[a] + window[a] as f64 * self.h);
+        if (0..3).any(|a| !origin[a].is_finite() || origin[a] + 0.5 * self.h == origin[a]) {
+            return Err(Error::Invalid("the window has gone so far that the origin cannot represent a voxel centre"));
+        }
+        Ok(State {
+            cells: self.cells,
+            origin,
+            base: self.base,
+            window,
+            lost: self.lost + lost,
+            h: self.h,
+            ambient: self.ambient,
+            boundary: self.boundary,
+            density: shift(&self.density, self.cells, 0.0),
+            temperature: shift(&self.temperature, self.cells, self.ambient),
+            velocity: std::array::from_fn(|a| shift(&self.velocity[a], face_dims(self.cells, a), 0.0)),
+            solid: vec![false; count],
+        })
+    }
 
     /// Domain-space cell centres in the same x-fastest order as scalar fields.
     pub fn cell_centres(&self) -> impl ExactSizeIterator<Item = [f64; 3]> + '_ {
@@ -661,6 +923,9 @@ impl State {
         State {
             cells: self.cells,
             origin: self.origin,
+            base: self.base,
+            window: self.window,
+            lost: self.lost,
             h: self.h,
             ambient: self.ambient,
             boundary: self.boundary,
@@ -966,6 +1231,19 @@ impl Simulation {
         {
             return Err(Error::Invalid("invalid grid dimensions, rates, temperatures or solver settings"));
         }
+        if let Some(Follow { margin, loss }) = s.follow {
+            if !(0.0..=1.0).contains(&loss) {
+                return Err(Error::Invalid("the loss of a following window is a share between 0 and 1"));
+            }
+            if s.boundary != Boundary::Open {
+                return Err(Error::Invalid("a window that follows its plume needs an open domain"));
+            }
+            if margin == 0 || s.cells.iter().any(|&n| 2 * margin >= n) {
+                return Err(Error::Invalid(
+                    "the margin of a following window must be at least one cell and leave a cell between its faces",
+                ));
+            }
+        }
         for a in 0..3 {
             let hi = s.origin[a] + s.voxel_size * s.cells[a] as f64;
             if !hi.is_finite() || hi <= s.origin[a] || s.origin[a] + 0.5 * s.voxel_size == s.origin[a] {
@@ -989,6 +1267,9 @@ impl Simulation {
         let state = State {
             cells: s.cells,
             origin: s.origin,
+            base: s.origin,
+            window: [0; 3],
+            lost: 0.0,
             h: s.voxel_size,
             ambient: s.ambient_temperature,
             boundary: s.boundary,
@@ -1002,6 +1283,28 @@ impl Simulation {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Move the window of the domain by `by` whole cells, toward the side the cells are numbered up to: the cell
+    /// that was at `c + by` is at `c`. What the window keeps is what it had to the bit and what it takes in is
+    /// the background of an open face. A move that would leave smoke behind is an error and changes nothing.
+    pub fn shift_window(&mut self, by: [i64; 3]) -> Result<(), Error> {
+        self.state = self.state.shifted(by, true)?;
+        Ok(())
+    }
+    /// Move the window as far as the smoke of the state asks for, if the spec follows its plume (see
+    /// [`State::follow_decision`]); the whole cells it moved by, none if there is nothing to do. It is a function
+    /// of the state and of the sources that act in the step (`input`, sampled for the window as it is), so a replay
+    /// from a checkpoint moves where the first run did. A caller that samples inputs for the step calls it first
+    /// and samples them again if it moved, so that they are taken for the window the step will have.
+    pub fn follow(&mut self, input: &Inputs) -> Result<[i64; 3], Error> {
+        let Some(Follow { margin, loss }) = self.spec.follow else { return Ok([0; 3]) };
+        let keep = input.acting(self.time(), (self.step + 1) as f64 * self.spec.dt, self.step, self.spec.dt);
+        let (by, _) = self.state.follow_decision(margin, loss, self.spec.dt, &keep);
+        if by != [0; 3] {
+            self.state = self.state.shifted(by, false)?;
+        }
+        Ok(by)
     }
     pub fn time(&self) -> f64 {
         self.step as f64 * self.spec.dt
@@ -1250,16 +1553,26 @@ fn advect(s: &mut State, dt: f64, spec: &Spec, solids: &[SolidFaces], profile: &
     Ok(())
 }
 
+/// A number for the cell of space that cell `c` of a window moved by `window` cells is: 21 bits of each of its three
+/// coordinates counted from the domain's own origin.
+fn global_cell(c: [usize; 3], window: [i64; 3]) -> u64 {
+    let part = |a: usize| ((c[a] as i64 + window[a] + (1 << 20)) as u64) & 0x1f_ffff;
+    part(0) | part(1) << 21 | part(2) << 42
+}
+
 fn forces(s: &mut State, spec: &Spec, input: &Inputs, step: u64) {
     let count = s.density.len();
     let mut force = vec![[0.0; 3]; count];
     {
         let (temperature, ambient) = (&s.temperature, s.ambient);
+        let (cells, window, follows) = (s.cells, s.window, spec.follow.is_some());
         force.par_iter_mut().enumerate().with_min_len(HEAVY).for_each(|(k, f)| {
+            // the noise of a window that moves belongs to the cell of space, not to the cell of the window
+            let key = if follows { global_cell(coords(k, cells), window) } else { k as u64 };
             for a in 0..3 {
                 f[a] = input.acceleration[a]
                     + input.spatial_acceleration.get(k).map_or(0.0, |v| v[a])
-                    + spec.turbulence * crate::rng::signed(spec.seed, k as u64, step * 3 + a as u64);
+                    + spec.turbulence * crate::rng::signed(spec.seed, key, step * 3 + a as u64);
             }
             f[1] -= spec.buoyancy * (temperature[k] - ambient);
         });
@@ -1755,7 +2068,11 @@ impl Timeline {
             }
         }
         while self.simulation.step < target {
-            let value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
+            let mut value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
+            if self.simulation.follow(&value)? != [0; 3] {
+                // the inputs of a step are those of the window it has
+                value = input(self.simulation.step, self.simulation.time(), self.simulation.state())?;
+            }
             self.simulation.step(&value)?;
             self.revision += 1;
             let step = self.simulation.step;

@@ -782,6 +782,81 @@ the message names the face and the distance). The 12 comes from one plume, one f
 source; the side faces were not measured; and a source with a rotation or a scale is bounded by a sphere
 or by its extent along the axis.
 
+#### A window that follows its plume (`pyro@follow`)
+
+An open domain cuts a plume that rises past its top face: the face is a zero-pressure outlet and what crosses it is
+lost. `follow="true"` (PYRO9: only with `boundary="open"`) makes the window of the domain move, in whole cells and in the
+object's own axes, to keep the smoke `followMargin` cells (PYRO10: only with `follow`; the engine's value is 12, the
+distance from which a plume's top face was measured to have no effect on it, see W02; PYRO11: it leaves a cell between the
+faces) from the faces it is going toward, plus the cells the fastest air along the axis goes in one step; the number of
+cells does not change, so the memory and the cost of a step do not either (a move is a copy of the state, and about a state
+clone has been measured at 102 ms at 192 x 156 x 192 under load). Absent or false the domain is where it began for good, and
+with a follow that never moves the state is bit for bit the one without it (tests
+`a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following`, the nine reference hashes of the
+solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
+
+Where the window moves is a function of the state and of the sources that act in the step, never of the history of
+requests. The smoke along an axis is the span of slabs of cells between the ends that hold at most half of `followLoss` of all
+the density each (the lowest and highest cell index, integers, from sums taken in the order of the cells, so the same on any
+number of threads). Smoke that goes one way along an axis (the drift of its density-weighted air is at least a fifth of its
+speed) asks for room only on the face it goes toward, because a face behind a plume that rises away from it is no reason to
+take from the room it rises into (test `a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`; the
+fireball of the hero scene, which expands toward its own bottom face for a moment and then rises, made a window move 22 units
+down without this rule); smoke that goes nowhere or spreads both ways along an axis asks on both. The sources are the
+shapes of the `pyroSource` and `pyroImpulse` that act in the step, and **a window never leaves a slab that holds a cell of such a
+source**, whatever the loss, because a plume begins at its source and a window that left it would part the plume from the
+ground. The inputs of a step are sampled again if the window moved, so that they are those of the window the step has, and
+the seeded turbulence is keyed by the cell of space (the cell of the window and the cells the window has moved by), so that a
+point keeps its noise. The state keeps the cells it has moved by (so its origin is `base + cells * voxelSize` computed afresh)
+and the density it has let go of (`State::lost`); both are in the checkpoints and in the identity of the state, and a seek
+replays the same moves. The volume exported to the renderer places its grids by the origin of the state, so the smoke does
+not move in the world; a frozen bake of a following plume keeps the transform of each frame (test
+`a_baked_sequence_of_a_following_plume_is_the_frames_it_was_baked_from`), and any order of times and a fresh evaluator give the
+same frames.
+
+`followLoss` (0 to 1, the engine's default is 0) is the share of all the smoke that a move may leave behind on each side.
+**With a loss of zero a window lets go only of slabs that hold no density and no heat, and that is almost never**: the
+interpolation of the advection leaves a tail that is never exactly zero, and a plume drags a stem of smoke down to its source.
+Measured (sr-sim `follow`, a blob of smoke rising in air that accelerates upward at 2 units a second squared, 140 steps of
+0.05 s, cells of 0.5 units, a window of 80 rows; deterministic; the reference is a window of 640 rows): the reference holds 164.3
+of smoke with its centre at -38.5 units; a window that stays holds 12.9 (centre -28.5); a loss of zero never moves and holds
+the same 12.9, a loss of 1e-9 holds 42.6, of 1e-6 holds 174.0 (centre -37.9) and has let go of 9e-4 in all, of 1e-4 178.6 and of 1e-3
+181.0. The follow holds up to 10 % more smoke than the reference because the open bottom face is not where the reference's is, a
+difference of the two domains and not of the follow. What a move lets go of is counted in `lost`, never silent, and a move lets go of
+at most the share asked (`what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked`: the smoke before a move
+equals the smoke after it plus what it let go of, to a trillionth, and no move lets go of more than 1.5 times the loss of all the
+smoke, the three axes together). In the evaluator (`crates/sr-eval/tests/volume/pyro_follow.rs`: a blob in a domain of
+8 x 60 x 8 units that a force field accelerates upward at 6 units a second squared) the fixed domain holds nothing at 5 s and the
+following one holds the blob 14 units above the old top face.
+
+On the hero scene (`examples/cinematic-impact/hero.scene.xml`, plume of 192 x 156 x 192 units in cells of 3, open, 24 steps a
+second; tool `crates/sr-eval/examples/pyro_extent.rs`, deterministic; the cut figures are the scene's own solver, Jacobi, the others the
+multigrid one) the plume is cut by the top face from about 5 s: the smoke in the three cells at the top face is 0.30 of 3526 at 5 s
+and 98 of 2972 at 6 s. A domain of 468 units
+(the same cells below, two more windows above) shows what the plume is: at 6 s the smoke above a thousandth of the peak spans y = -83
+to 62 (145 units), above a hundredth -77 to 53, above a tenth -74 to 8, and the whole smoke is 3016. A window of 156 units
+holds that with a margin of 3 cells (9 units) only just: with `follow="true" followMargin="3" followLoss="0.001"` the window moves
+up by about 10 units, the smoke at the top face at 6 s is 0.28, the whole smoke 2977, and the plume reaches the margin; a loss of
+zero lets go of nothing, never makes room and holds 158 at the top face at 6 s, as little help as a fixed window. A plume that the
+hero film follows to its end needs 145 units and its margins, about 240 for a margin of 12 cells, and that is 64 x 80 x 64 cells
+against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with them.
+
+The hero scene sets `follow="true" followMargin="3" followLoss="0.001"` on its `<pyro>`: the default margin of 12 cells (36
+units there) does not fit a window of 52 rows with a plume of 145 units, and a loss above zero is what makes the window follow
+at all. The margin is in cells, so a copy of the scene with cells of 1.5 units (`hero-hires.scene.xml`) needs a margin of 6 for the
+same distance. Whether the frame at 3 s of the 720p probe changes with the window is for the render to say (the window does not
+move before the plume nears a face, so the smoke may be bit for bit the same until then).
+
+Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to its
+source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit between
+its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and `follow` is the
+saving in cells for a plume that has left its source behind, not a free height. A `followLoss` large enough to let go of the stem
+loses visible smoke: the stem is part of the plume (a heated puff keeps 11 % of its smoke in a stem below the rows its head has
+left). The margin and the loss are the engine's values with no published source. The decision reads the density, the velocity and
+the temperature of every cell once a step (one serial pass), and its cost, measured (sr-sim `follow`, ignored test `cost_of_the_decision_against_a_step`, ci profile, one core for the
+decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
+and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -3019,6 +3094,9 @@ Also includes `assetProvenance`, inventoried below.
 | `seed` | xs:unsignedLong | Default `0` |
 | `pressureTolerance` | positiveDecimal | Default `0.000001` |
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
+| `follow` | xs:boolean | Optional; absent is false; true needs `boundary="open"` (PYRO9) |
+| `followMargin` | xs:positiveInteger | Optional; only with `follow` (PYRO10), leaves a cell between the faces (PYRO11); the engine uses 12 |
+| `followLoss` | unitDecimal | Optional; only with `follow` (PYRO10); the engine uses 0 |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
 | `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
 | `advection` | xs:string; enumeration=semilagrangian, enumeration=maccormack | Default `semilagrangian` |
@@ -3576,11 +3654,12 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (at commit 349d371 the Schematron has 228 assertions,
-counted by parsing the file: `grep -c` of `sch:assert` gives 237 because it also counts closing tags; 77 of them are in the
-cinematic families OCN 13, P3D 11, CRT 9, PYRO 8, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are the
-upstream's own: the rules R, C, V, MOV, PEN and TXT. At commit fa63e5d the file had 169, 66 in the cinematic families
-without BH). Inventory
+rule scorecard remain pending implementation reconciliation** (the Schematron has 263 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 83 of them are in the
+cinematic families OCN 13, P3D 11, CRT 12, PYRO 11, VOL 10, BH 8, FRX 7, PYC 4, MSQ 4 and GEO 3, and the rest are
+sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
+families, and the 17 that it does not (BH1 to BH8, FRX5 to FRX7, CRT10 to CRT12, PYRO9 to PYRO11) are this repository's. At commit 349d371,
+before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.

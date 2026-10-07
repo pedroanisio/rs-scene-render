@@ -4653,6 +4653,34 @@
     <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
     <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="follow" type="xs:boolean">
+      <xs:annotation><xs:documentation>
+        A window that follows the plume (PYRO9: only with boundary="open"). The domain keeps the same number of cells and so
+        the same memory and cost of a step, and moves by whole cells to keep the smoke away from its faces, which an open
+        domain would otherwise cut it at; absent or false it stays where it is. Where the window may move is decided from the
+        state alone (the smoke along each axis, kept followMargin cells, plus the cells the fastest air goes in a step, from
+        each face), so the same at any time requested and from a checkpoint; it never leaves a slab that a source acting in
+        the step covers, and it lets go of the density that followLoss allows and no more, counted by the solver. If the
+        smoke does not fit in the window the window cannot follow it and it is cut as before: the remedy is a larger window.
+        The domain is still centred on the object when the document begins; the moving window is in the object's own axes.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="followMargin" type="xs:positiveInteger">
+      <xs:annotation><xs:documentation>
+        Cells the smoke is kept from every face of a window that follows it (PYRO10: only with follow; PYRO11: it leaves a
+        cell between the faces of the window). The engine's default is 12, the distance from which the engine measured the
+        top face of a plume to have no effect on it (W02); it is not an XSD default so that it can be refused without follow.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="followLoss" type="unitDecimal">
+      <xs:annotation><xs:documentation>
+        The share (0 to 1) of all the smoke that the window of a followed plume may let go of each side when it moves
+        (PYRO10: only with follow). The engine's default is 0: only slabs that hold no smoke and no heat, and nothing is let
+        go of; a plume has a thin numerical tail that is never exactly zero, so a window with a loss of zero follows only
+        what leaves nothing behind. Not an XSD default so that it can be refused without follow. What is let go of is the
+        solver's own count (the state's lost density), never silent.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>

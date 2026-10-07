@@ -508,6 +508,7 @@ impl<'a> Eval<'a> {
         let number = |e: Node, k: &str, default: f64| e.attribute(k).map_or(default, xpath_number);
         // a source from a crater has no place in the document, and an animated one moves
         if pyro.attribute("boundary") != Some("open")
+            || matches!(pyro.attribute("follow"), Some("true" | "1"))
             || n.attribute("crater").is_some()
             || n.children().any(|c| c.is_element())
         {
@@ -1133,6 +1134,20 @@ impl<'a> Eval<'a> {
                 });
                 self.check(grid, n, "PYRO1", || {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
+                });
+                let follows = matches!(a("follow"), Some("true" | "1"));
+                self.check(!follows || a("boundary") == Some("open"), n, "PYRO9", || {
+                    "a pyro whose window follows its plume needs boundary=\"open\".".into()
+                });
+                self.check(follows || !(has("followMargin") || has("followLoss")), n, "PYRO10", || {
+                    "followMargin and followLoss belong to a pyro that follows its plume.".into()
+                });
+                let margin = a("followMargin").map_or(f64::NAN, xpath_number);
+                let room = ["width", "height", "depth"]
+                    .iter()
+                    .all(|name| 2.0 * margin * h < a(name).map_or(f64::NAN, xpath_number));
+                self.check(!has("followMargin") || room, n, "PYRO11", || {
+                    "followMargin must leave a cell between the faces of the window on every axis.".into()
                 });
             }
             "burst" if n.parent_element().is_some_and(|p| is(p, "particles3D")) => {

@@ -466,6 +466,12 @@
     "pyro1.scene.xml": [
       "PYRO1"
     ],
+    "pyro10-orphan.scene.xml": [
+      "PYRO10"
+    ],
+    "pyro11-margin.scene.xml": [
+      "PYRO11"
+    ],
     "pyro2.scene.xml": [
       "PYRO2"
     ],
@@ -486,6 +492,9 @@
     ],
     "pyro8.scene.xml": [
       "PYRO8"
+    ],
+    "pyro9-closed.scene.xml": [
+      "PYRO9"
     ],
     "r1.scene.xml": [
       "R1"
@@ -940,6 +949,7 @@
     "pyro-crater-push.scene.xml": [],
     "pyro-crater.scene.xml": [],
     "pyro-fields.scene.xml": [],
+    "pyro-follow.scene.xml": [],
     "pyro-maccormack.scene.xml": [],
     "pyro-mesh.scene.xml": [],
     "pyro-multigrid.scene.xml": [],
