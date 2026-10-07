@@ -441,3 +441,61 @@ fn the_bytes_of_a_model_can_be_bounded_from_its_count_and_its_box_before_anythin
     let (min, max) = o.bounds().unwrap();
     assert!(o.bytes() as u64 <= Occupancy::estimate_bytes(o.count(), min, max));
 }
+
+#[test]
+fn keys_beyond_the_documented_range_are_refused_where_they_would_overflow_and_the_range_ends_are_usable() {
+    // every key is within 2^30 of the origin: what the doubled coordinates of the moments and the neighbours of a cell need
+    let (lo, hi) = (-(1i32 << 30), (1i32 << 30) - 1);
+    let mut o = Occupancy::new();
+    assert!(o.set([hi, hi, hi], 1).is_ok() && o.set([lo, lo, lo], 1).is_ok());
+    assert_eq!((o.get([hi, hi, hi]), o.get([lo, lo, lo])), (1, 1));
+    for bad in [[hi + 1, 0, 0], [0, lo - 1, 0], [0, 0, i32::MAX], [i32::MIN, 0, 0]] {
+        assert!(o.set(bad, 1).is_err(), "{bad:?}");
+        assert_eq!(o.get(bad), 0, "reading a cell out of range is empty, not a panic");
+    }
+    // the cells at the ends can be named, listed, bounded and joined to their neighbours without overflow
+    assert_eq!(o.cells().collect::<Vec<_>>(), vec![[lo, lo, lo], [hi, hi, hi]]);
+    assert_eq!(o.bounds(), Some(([lo, lo, lo], [hi, hi, hi])));
+    assert_eq!(o.components().len(), 2);
+    assert!(o.moments().properties([1.0; 3], 1.0).is_ok());
+    // bulk builders refuse them too, by cell and by brick
+    assert!(Occupancy::from_cells([([hi + 1, 0, 0], 1u8)]).is_err());
+    let brick = |key: [i32; 3]| (key, dense(key, &[[key[0] * 8, key[1] * 8, key[2] * 8]], 1));
+    assert!(Occupancy::from_bricks([brick([1 << 28, 0, 0])]).is_err(), "the brick whose cells are past the range");
+    assert!(Occupancy::from_bricks([brick([(1 << 27) - 1, 0, 0]), brick([-(1 << 27), 0, 0])]).is_ok());
+}
+
+#[test]
+fn the_bytes_bound_of_a_model_saturates_instead_of_overflowing() {
+    // a box as wide as the keys allow: more bricks than a u64 holds when multiplied, so the bound is what a count of cells allows
+    let (lo, hi) = ([-(1i32 << 30); 3], [(1i32 << 30) - 1; 3]);
+    let huge = Occupancy::estimate_bytes(u64::MAX, lo, hi);
+    assert_eq!(huge, u64::MAX, "saturated, not wrapped");
+    assert_eq!(Occupancy::estimate_bytes(10, lo, hi), 10 * Occupancy::BRICK_BYTES as u64);
+    assert_eq!(Occupancy::estimate_bytes(0, lo, hi), 0);
+    // an inverted box has no bricks
+    assert_eq!(Occupancy::estimate_bytes(5, [100, 100, 100], [0, 0, 0]), 0);
+}
+
+#[test]
+fn a_brick_given_twice_is_an_error_even_when_the_second_copy_is_empty_and_index_zero_has_no_colour() {
+    let one = dense([0, 0, 0], &[[1, 1, 1]], 1);
+    assert!(Occupancy::from_bricks([([0, 0, 0], one), ([0, 0, 0], [0u8; 512])]).is_err());
+    assert!(
+        Occupancy::from_bricks([([0, 0, 0], [0u8; 512]), ([0, 0, 0], one)]).is_err(),
+        "a key given twice is an error either way round"
+    );
+    assert!(Occupancy::from_bricks([([0, 0, 0], [0u8; 512]), ([0, 0, 0], [0u8; 512])]).is_err(), "twice is twice");
+    // the colour of the empty index is not a thing a model can set: it changes nothing, so no revision and no fingerprint
+    let mut o = Occupancy::from_cells([([0, 0, 0], 1u8)]).unwrap();
+    let (look, rev) = (o.appearance_fingerprint(), o.palette_revision());
+    assert!(!o.set_color(0, [9, 9, 9, 9]));
+    assert_eq!((o.appearance_fingerprint(), o.palette_revision(), o.palette().color(0)), (look, rev, [0; 4]));
+    let mut colours = *o.palette().colors();
+    colours[0] = [7, 7, 7, 7];
+    assert!(!o.set_palette(colours), "only entry 0 differs");
+    assert_eq!(o.palette().color(0), [0; 4]);
+    colours[1] = [7, 7, 7, 7];
+    assert!(o.set_palette(colours));
+    assert_eq!(o.palette().color(0), [0; 4]);
+}
