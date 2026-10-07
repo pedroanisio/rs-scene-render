@@ -506,12 +506,15 @@ fn flag(e: &dyn Element, n: &str) -> bool {
 pub(crate) fn has_bodies_of_cells(g0: &FrameGraph) -> bool {
     g0.nodes.iter().any(|n| {
         n.kind == "object3D"
-            && text(&*n.elem, "primitive").as_deref() == Some("voxels")
-            && children(&*n.elem).iter().any(|c| {
-                c.element_name() == "rigidBody"
-                    && matches!(text(*c, "shape").as_deref(), None | Some("auto" | "voxels"))
-            })
+            && children(&*n.elem).iter().any(|c| c.element_name() == "rigidBody" && is_body_of_cells(n, *c))
     })
+}
+
+/// Whether object `n` with the rigidBody `rigid` is a body of cells: an object of primitive voxels whose collider is its cells (the one predicate of the
+/// build of the world and of the refusal of a physics cache).
+fn is_body_of_cells(n: &FrameNode, rigid: &dyn Element) -> bool {
+    text(&*n.elem, "primitive").as_deref() == Some("voxels")
+        && matches!(text(rigid, "shape").as_deref(), None | Some("auto" | "voxels"))
 }
 
 /// Why a physics cache cannot hold a world with bodies of cells.
@@ -567,8 +570,7 @@ pub(crate) fn build(
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
         // an object of cells whose collider is the cells: the shape and the mass are the cells'
-        let of_cells = text(&*n.elem, "primitive").as_deref() == Some("voxels")
-            && matches!(text(c, "shape").as_deref(), None | Some("auto" | "voxels"));
+        let of_cells = is_body_of_cells(n, c);
         let mut cells_mass = None;
         let mut cells_of_body = None;
         let shape = if matches!(plan, Plan3::Placeholder) || sequence_budget.is_some() {

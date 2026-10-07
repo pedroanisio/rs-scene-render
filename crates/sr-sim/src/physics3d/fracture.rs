@@ -265,12 +265,12 @@ impl World3 {
                 .fragments
                 .iter()
                 .map(|p| {
-                    let rb = &self.state.bodies[self.state.handles[p.body]];
                     let position = *source.position()
                         * Pose::from_parts(vec3(flip(p.offset).map(|x| x / ppm)), Rotation::IDENTITY);
                     // the centre of mass of the piece as it was registered: the body is out of the world, and a body that is stepped while it is has the
                     // mass properties that the solver makes of colliders that are switched off, which is not a fragment's
-                    let local = self.fracture_props[p.body].unwrap_or_else(|| rb.mass_properties().local_mprops);
+                    let local = self.fracture_props[p.body]
+                        .expect("the fracture registered the mass properties of its fragments");
                     (position, local.world_com(&position))
                 })
                 .collect();

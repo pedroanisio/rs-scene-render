@@ -172,10 +172,17 @@ impl VoxelOwner {
         let rim: std::collections::BTreeMap<[i32; 3], u8> =
             cut.map_or_else(Default::default, |c| c.excavation.rim.iter().copied().collect());
         let asset = &self.model.occupancy;
-        let grid = Arc::new(Occupancy::from_cells(cells.iter().map(|c| {
-            let index = asset.get(*c);
-            (*c, if index != 0 { index } else { rim.get(c).copied().unwrap_or(1) })
-        }))?);
+        let mut painted = Vec::with_capacity(cells.len());
+        for c in cells {
+            let index = match asset.get(*c) {
+                0 => rim.get(c).copied().ok_or_else(|| {
+                    format!("the cell {c:?} is neither the asset's nor the rim's: it has no palette index")
+                })?,
+                index => index,
+            };
+            painted.push((*c, index));
+        }
+        let grid = Arc::new(Occupancy::from_cells(painted)?);
         grids.insert((body, revision), grid.clone());
         Ok(grid)
     }
