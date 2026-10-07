@@ -634,8 +634,9 @@
       <sch:assert id="CRT7" test="(@source and @targetMaterial) or not(@source or @targetMaterial or @targetDensity or @strength or @gravity)">crater source requires targetMaterial, and targetMaterial, targetDensity, strength and gravity belong to a crater with a source.</sch:assert>
       <sch:assert id="CRT8" test="not(@source) or (/scene//object3D[@id=current()/@source and not(@id=current()/../@id)]/rigidBody[not(@type) or @type='dynamic'])">crater source must name another object3D whose rigidBody is dynamic.</sch:assert>
       <sch:assert id="CRT9" test="not(@capture) or @source">crater capture belongs to a crater that grows from a source.</sch:assert>
-      <sch:assert id="CRT10" test="not(@mantle or @bulking) or @source">crater mantle and bulking belong to a crater that grows from a source.</sch:assert>
+      <sch:assert id="CRT10" test="not(@mantle or @bulking or @repose) or @source">crater mantle, bulking and repose belong to a crater that grows from a source.</sch:assert>
       <sch:assert id="CRT11" test="not(@bulking) or @mantle='true'">crater bulking belongs to a crater with a mantle (mantle="true").</sch:assert>
+      <sch:assert id="CRT12" test="not(@repose) or not(@mantle='true')">a crater that gives its settled ejecta a repose angle has no mantle: the ejecta are the ground once, as one or the other.</sch:assert>
       <sch:assert id="CRT5" test="not(../rigidBody[not(@type='static' or @type='kinematic') or (@shape and not(@shape='auto' or @shape='trimesh'))])">crater rigid bodies require static/kinematic type with auto or trimesh collision geometry.</sch:assert>
     </sch:rule>
   </sch:pattern>

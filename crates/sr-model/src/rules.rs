@@ -845,11 +845,14 @@ impl<'a> Eval<'a> {
                 self.check(!has("capture") || has("source"), n, "CRT9", || {
                     "crater capture belongs to a crater that grows from a source.".into()
                 });
-                self.check((!has("mantle") && !has("bulking")) || has("source"), n, "CRT10", || {
-                    "crater mantle and bulking belong to a crater that grows from a source.".into()
+                self.check((!has("mantle") && !has("bulking") && !has("repose")) || has("source"), n, "CRT10", || {
+                    "crater mantle, bulking and repose belong to a crater that grows from a source.".into()
                 });
                 self.check(!has("bulking") || n.attribute("mantle") == Some("true"), n, "CRT11", || {
                     "crater bulking belongs to a crater with a mantle (mantle=\"true\").".into()
+                });
+                self.check(!has("repose") || n.attribute("mantle") != Some("true"), n, "CRT12", || {
+                    "a crater that gives its settled ejecta a repose angle has no mantle: the ejecta are the ground once, as one or the other.".into()
                 });
                 self.check(
                     owner.is_none_or(|o| {
