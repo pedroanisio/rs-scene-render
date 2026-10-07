@@ -358,3 +358,86 @@ fn foam_casts_the_shadow_of_an_opaque_surface_on_the_floor_under_the_water() {
         all(&bare)
     );
 }
+
+#[test]
+fn the_refracted_shadow_ray_scales_the_light_by_one_minus_the_share_and_not_by_a_step_or_a_square() {
+    let Some(mut eng) = engine() else { return };
+    // A camera under the water between the surface (depth 0) and a floor 2 below it, looking down at the floor, which the sun lights
+    // through the water, the foam a uniform share of the surface: the light on the floor is what the refracted shadow ray lets
+    // through, one minus the share of it (there is no dome; the floor sees the foam only from below, lit by nothing)
+    let floor_under = |eng: &mut ThreeEngine, share: f32| {
+        let clear = MaterialParams { base_color: [1.0; 4], ..water(Some(FOAM)) };
+        let sea = plane(eng, 0.0, clear, move |_| share);
+        let floor = plane(
+            eng,
+            2.0,
+            MaterialParams { base_color: [0.7, 0.7, 0.7, 1.0], roughness: 1.0, ..Default::default() },
+            |_| 0.0,
+        );
+        let eye = Vec3::new(0.0, 1.0, -0.2);
+        let mut s = scene(eng, vec![sea, floor], None, true, eye);
+        s.cam = resolve(
+            &CameraParams {
+                fov: 30.0,
+                position: Some(eye),
+                target: Some(Vec3::new(0.0, 2.0, 0.0)),
+                ..Default::default()
+            },
+            W as f32,
+            W as f32,
+        );
+        let px = eng.render_now(&s, None);
+        mean(&px, 16, 48, 16, 48)
+    };
+    let (open, half, covered) = (floor_under(&mut eng, 0.0), floor_under(&mut eng, 0.5), floor_under(&mut eng, 1.0));
+    println!("floor: share 0 {open:.4}, 0.5 {half:.4}, 1 {covered:.4}");
+    assert!(open > 0.2 && covered < 0.35 * open, "from the sun's light to the shade: {open} against {covered}");
+    // one minus the share of what the open water lets through (0.2985 against 0.2697 at a half: the light the floor gives back to the
+    // surface and the surface to the floor adds a tenth); a step at one half would give the whole or nothing, and one minus the share
+    // squared a quarter of the open water's
+    let want = 0.5 * (open + covered);
+    assert!((half - want).abs() <= 0.15 * want, "{half} against the mean {want} of {open} and {covered}");
+    assert!(half > 0.4 * open && half < 0.7 * open, "neither a step nor a square: {half} of {open}");
+}
+
+/// The mean and the standard deviation of the luminance of the middle 16 x 16 pixels of a sea wholly at `share` of foam, rendered at
+/// `samples` a pixel under a uniform dome.
+fn noise_at(eng: &mut ThreeEngine, share: f32, samples: u32, denoise: bool) -> (f32, f32) {
+    let dome = srgb_to_linear(128.0 / 255.0);
+    let draw = plane(eng, 0.0, water(Some(FOAM)), move |_| share);
+    let mut s = scene(eng, vec![draw], Some(dome), false, TOP);
+    s.path = Some(PathOpts { samples, bounces: 4, denoise });
+    let px = eng.render_now(&s, None);
+    let mut v: Vec<f32> = Vec::new();
+    for y in 24..40u32 {
+        for x in 24..40u32 {
+            v.push(lum(px[(y * W + x) as usize]));
+        }
+    }
+    let m = v.iter().sum::<f32>() / v.len() as f32;
+    (m, (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32).sqrt())
+}
+
+#[test]
+#[ignore = "measures the noise of the random coverage; run it on the GPU queue with --ignored"]
+fn the_noise_of_the_foam_mix_at_a_half_share_is_what_the_srep_states() {
+    let Some(mut eng) = engine() else { return };
+    // 8 samples a pixel, a window of 16 x 16 pixels, a uniform grey dome: the numbers of the SREP (NVIDIA), with the room that the
+    // adapters and the random numbers give; a way to draw the lobe that has less variance tightens them
+    let (half, half_sd) = noise_at(&mut eng, 0.5, 8, false);
+    let (denoised, denoised_sd) = noise_at(&mut eng, 0.5, 8, true);
+    let (_, open_sd) = noise_at(&mut eng, 0.0, 8, false);
+    let (covered, covered_sd) = noise_at(&mut eng, 1.0, 8, false);
+    println!(
+        "noise at 8 samples: half {half:.4} sd {half_sd:.4} (cv {:.3}); denoised {denoised:.4} sd {denoised_sd:.4} (cv {:.3}); open sd {open_sd:.4}; covered {covered:.4} sd {covered_sd:.4}",
+        half_sd / half,
+        denoised_sd / denoised
+    );
+    // the coefficient of variation of the mix at a half: 0.345 measured
+    assert!(half_sd / half < 0.45, "cv {}", half_sd / half);
+    // with the denoiser: 0.125 measured, and its mean about 5 % under the true one (0.0996)
+    assert!(denoised_sd / denoised < 0.17, "cv {}", denoised_sd / denoised);
+    assert!((denoised - 0.0996).abs() < 0.0996 * 0.08, "the denoised mean {denoised}");
+    // a share of 0 or of 1 is as noisy as it was before the mix existed: 0.0101 and 0.0091 measured
+    assert!(open_sd < 0.013 && covered_sd < 0.012, "{open_sd} {covered_sd}");
+}
