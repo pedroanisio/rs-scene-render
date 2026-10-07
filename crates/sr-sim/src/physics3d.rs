@@ -318,6 +318,8 @@ struct State {
     voxel_revisions: Vec<Option<u64>>,
     slots_used: Vec<usize>,
     slot_active: Vec<bool>,
+    /// Bodies of cells that a cut left with nothing: out of the world for good.
+    voxel_spent: Vec<bool>,
 }
 
 struct Checkpoint {
@@ -634,6 +636,7 @@ impl World3 {
             voxel_revisions: vec![None; spec.bodies.len()],
             slots_used: Vec::new(),
             slot_active: vec![false; spec.bodies.len()],
+            voxel_spent: vec![false; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);

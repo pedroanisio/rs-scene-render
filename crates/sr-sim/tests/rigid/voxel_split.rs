@@ -1,5 +1,7 @@
 //! A body of cells that breaks at run time: the cells a cut destroys leave it, the pieces that separate take the slots made for them
 //! with the motion they had, and the world replays the same whenever it is asked.
+#![allow(clippy::needless_range_loop)]
+
 use sr_sim::{
     fields::Field,
     physics3d::{shape_mass_properties, *},
@@ -228,17 +230,58 @@ fn before_the_cut_only_the_bar_is_in_the_world_and_after_it_the_piece_has_the_mo
     assert!(driver.asked.contains(&Some(1)));
 }
 
+/// A driver that cuts as a [`Cutter`] does and remembers the pose and the centre of mass that each body had at the start of its last step.
+struct Watch {
+    inner: Cutter,
+    seen: Vec<Option<(Pose3, [f64; 3])>>,
+}
+
+impl Driver3 for Watch {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.inner.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.inner.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.inner.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, _: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body] = Some((state.pose, state.centre));
+        Ok(None)
+    }
+}
+
+/// The centre of mass of a body in its own frame, from its pose and the world position of its centre.
+fn local_centre(pose: &Pose3, centre: [f64; 3]) -> [f64; 3] {
+    let conjugate = [-pose.rot[0], -pose.rot[1], -pose.rot[2], pose.rot[3]];
+    rotate(conjugate, sub(centre, pose.pos))
+}
+
 #[test]
 fn the_pieces_take_the_slots_in_order_and_there_must_be_slots_for_them() {
     let mut w = world(2, None);
-    let mut driver = Cutter { pieces: 2, ..Cutter::new(0.2) };
+    let mut driver = Watch { inner: Cutter { pieces: 2, ..Cutter::new(0.2) }, seen: vec![None; 3] };
     let frame = w.frame_at(0.4, &mut driver);
     assert!(frame.errors.is_empty(), "{:?}", frame.errors);
     assert_eq!(frame.enabled, vec![true, true, true]);
-    // the two pieces are the two ends of the far part, the first nearer the cut
-    let (c1, _) = centre_of(&frame.bodies[1], cells_of(6..9, 0..2, 0..2));
-    let (c2, _) = centre_of(&frame.bodies[2], cells_of(9..12, 0..2, 0..2));
-    assert!(c1[0] < c2[0] + 1.0);
+    // what each slot holds, seen from the world: its centre of mass in its own frame is that of the cells of the piece that the cut gave it, in
+    // order (the first piece, the cells x 6 to 8, in the first slot; the second, x 9 to 11, in the second)
+    for (slot, cells) in [(1usize, cells_of(6..9, 0..2, 0..2)), (2, cells_of(9..12, 0..2, 0..2))] {
+        let (pose, centre) = driver.seen[slot].expect("the slot has taken a step");
+        let local = local_centre(&pose, centre);
+        let wanted =
+            shape_mass_properties(&Shape3::Voxels { size: SIZE, cells }, 12.0 * CELL_MASS, 1.0).unwrap().centre;
+        for k in 0..3 {
+            assert!((local[k] - wanted[k]).abs() < 1e-9, "slot {slot}, axis {k}: {} against {}", local[k], wanted[k]);
+        }
+    }
     // with one slot for two pieces the world says so, and does not take the step
     let mut short = world(1, None);
     let failed = short.frame_at(0.4, &mut Cutter { pieces: 2, ..Cutter::new(0.2) });
@@ -624,5 +667,270 @@ fn the_frame_at_every_step_across_a_cut_is_the_same_fresh_logged_asked_in_any_or
         let got = replay.frame_at(t, &mut d);
         assert!(replay.checkpoint_restores() > restored, "step {s} was not replayed from a checkpoint");
         same(&got, &wanted[i], &format!("replayed, step {s}"));
+    }
+}
+
+/// A driver that cuts as a [`Script`] does and pushes every body from a time on with a force and a torque, which is how a test sees the
+/// mass and the inertia that the world gave a body: a = F / m, alpha = I^-1 tau. `closed` hides a body until a time.
+struct Pusher {
+    script: Script,
+    from: f64,
+    force: [f64; 3],
+    torque: [f64; 3],
+    closed: Vec<(usize, f64)>,
+}
+
+impl Driver3 for Pusher {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.script.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.script.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.script.voxel_cut(t, parent, revision, i)
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        !self.closed.iter().any(|(k, until)| *k == which && t < *until)
+    }
+    fn load(&mut self, _step: u64, t: f64, _body: usize, _state: &BodyState) -> Result<Option<Load3>, String> {
+        Ok((t + 1e-9 >= self.from).then_some(Load3 { force: self.force, torque: self.torque }))
+    }
+}
+
+fn inverse3(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let c = |a: usize, b: usize| {
+        let (r, s) = ([(a + 1) % 3, (a + 2) % 3], [(b + 1) % 3, (b + 2) % 3]);
+        m[r[0]][s[0]] * m[r[1]][s[1]] - m[r[0]][s[1]] * m[r[1]][s[0]]
+    };
+    std::array::from_fn(|i| std::array::from_fn(|j| c(j, i) / det))
+}
+
+/// A world of the bar at rest in space with `slots` slots.
+fn resting(slots: usize) -> World3 {
+    let mut parent = body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+    parent.start = Pose3 { pos: [0.0, 0.0, 0.0], rot: [0., 0., 0., 1.] };
+    let mut bodies = vec![parent];
+    for _ in 0..slots {
+        bodies.push(body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic));
+    }
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies,
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..=slots).collect() }])
+    .unwrap()
+}
+
+/// What the world made of the mass and the inertia of the part of the bar that stays and of the piece: pushed from 0.4 s, a body speeds up
+/// as F / m and spins up as I^-1 tau, with the m and I of its own cells.
+fn push_and_measure(closed: Vec<(usize, f64)>, from: f64, ask: (f64, f64)) {
+    let (force, torque) = ([120.0, -40.0, 75.0], [30.0, 55.0, -45.0]);
+    let mut w = resting(1);
+    let mut d = Pusher { script: Script { cuts: vec![first_cut(0.3)] }, from, force, torque, closed };
+    let (a, b) = (w.frame_at(ask.0, &mut d), w.frame_at(ask.1, &mut d));
+    assert!(a.errors.is_empty() && b.errors.is_empty(), "{:?} {:?}", a.errors, b.errors);
+    let dt = ask.1 - ask.0;
+    for (k, cells, mass) in
+        [(0usize, cells_of(0..5, 0..2, 0..2), 20.0 * CELL_MASS), (1, cells_of(6..12, 0..2, 0..2), 24.0 * CELL_MASS)]
+    {
+        let props = shape_mass_properties(&Shape3::Voxels { size: SIZE, cells }, mass, 1.0).unwrap();
+        for i in 0..3 {
+            let accel = (b.velocities[k].linear[i] - a.velocities[k].linear[i]) / dt;
+            let wanted = force[i] / mass;
+            assert!(
+                (accel - wanted).abs() < 1e-9,
+                "body {k}, axis {i}: acceleration {accel} against {wanted}: the mass is not {mass}"
+            );
+        }
+        let inverse = inverse3(props.inertia);
+        for i in 0..3 {
+            let alpha = (b.velocities[k].angular[i] - a.velocities[k].angular[i]).to_radians() / dt;
+            let wanted: f64 = (0..3).map(|j| inverse[i][j] * torque[j]).sum();
+            assert!(
+                (alpha - wanted).abs() < 2e-3 * wanted.abs().max(1e-3),
+                "body {k}, axis {i}: spin-up {alpha} against {wanted}: the inertia is not that of its cells"
+            );
+        }
+    }
+}
+
+#[test]
+fn what_the_world_gives_the_part_that_stays_and_the_piece_is_the_mass_and_the_inertia_of_their_cells() {
+    // pushed from 0.4 s, a tenth of a second after the cut, with the measurement over four steps
+    push_and_measure(vec![], 0.4, (0.41, 0.45));
+}
+
+#[test]
+fn a_piece_whose_slot_is_hidden_when_it_is_cut_has_the_mass_and_the_inertia_of_its_cells_when_it_shows() {
+    // the slot is hidden by the driver until 0.8 s, the cut is at 0.3 s: it is a body that the world has made and does not yet show
+    push_and_measure(vec![(1, 0.8)], 0.9, (0.91, 0.95));
+}
+
+#[test]
+fn a_body_that_loses_all_its_cells_stays_out_of_the_world_and_its_pieces_are_the_bodies_that_are_left() {
+    // the bar is cut in two and nothing stays: both halves are pieces and the bar is disabled for good
+    let all = (
+        0,
+        0.5,
+        None,
+        VoxelCut3 {
+            revision: 1,
+            destroyed: vec![],
+            parent_mass: 0.0,
+            pieces: vec![
+                VoxelPiece3 { cells: cells_of(0..6, 0..2, 0..2), mass: 24.0 * CELL_MASS },
+                VoxelPiece3 { cells: cells_of(6..12, 0..2, 0..2), mass: 24.0 * CELL_MASS },
+            ],
+        },
+    );
+    let mut w = world(2, None);
+    let mut d = Script { cuts: vec![all] };
+    for t in [0.4, 0.5, 0.51, 0.6, 1.0, 2.5] {
+        let frame = w.frame_at(t, &mut d);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let wanted = if t < 0.5 - 1e-9 { vec![true, false, false] } else { vec![false, true, true] };
+        assert_eq!(frame.enabled, wanted, "t = {t}: a body with nothing left comes back");
+    }
+    // and from a world that replays it
+    let mut replay = world_logging(2, None, Some(0));
+    let frame = replay.frame_at(2.5, &mut d);
+    assert_eq!(frame.enabled, vec![false, true, true]);
+    let back = replay.frame_at(0.7, &mut d);
+    assert_eq!(back.enabled, vec![false, true, true]);
+    assert!(replay.checkpoint_restores() >= 1);
+}
+
+/// Two bars with a split each: body 0 with slot 1 and body 2 with slot 3.
+fn two_bars() -> World3 {
+    let bar_body = || body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+    let slot = || body(Shape3::Voxels { size: SIZE, cells: vec![[0, 0, 0]] }, CELL_MASS, BodyKind::Dynamic);
+    let mut second = bar_body();
+    second.start = Pose3 { pos: [10.0, 0.0, 0.0], rot: [0., 0., 0., 1.] };
+    let mut slot2 = slot();
+    slot2.start = second.start;
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.,
+        step: 0.01,
+        gravity: [0.; 3],
+        pixels_per_meter: 1.,
+        iterations: 8,
+        bounds: Bounds3::None,
+        joints: vec![],
+        bodies: vec![bar_body(), slot(), second, slot2],
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }, VoxelSplit3 { parent: 2, slots: vec![3] }])
+    .unwrap()
+}
+
+#[test]
+fn a_step_whose_second_cut_cannot_be_installed_does_not_install_the_first() {
+    let good = first_cut(0.5);
+    // the second bar is cut by a cell it does not have
+    let bad = (
+        2,
+        0.5,
+        None,
+        VoxelCut3 {
+            revision: 1,
+            destroyed: vec![[40, 0, 0]],
+            parent_mass: 20.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(6..12, 0..2, 0..2), mass: 24.0 * CELL_MASS }],
+        },
+    );
+    let mut w = two_bars();
+    let failed = w.frame_at(0.7, &mut Script { cuts: vec![good.clone(), bad] });
+    assert!(failed.errors.iter().any(|e| e.contains("cell")), "{:?}", failed.errors);
+    // the world is as it was: asked by a driver that cuts nothing, the first bar has not been cut
+    let after = w.frame_at(0.7, &mut Script { cuts: vec![] });
+    assert!(after.errors.is_empty(), "{:?}", after.errors);
+    assert_eq!(after.enabled, vec![true, false, true, false], "the cut that could have been installed was not");
+    // and a driver that gets it right gets what a world that never failed gets, to the bit
+    let right = (
+        2,
+        0.5,
+        None,
+        VoxelCut3 {
+            revision: 1,
+            destroyed: cells_of(5..6, 0..2, 0..2),
+            parent_mass: 20.0 * CELL_MASS,
+            pieces: vec![VoxelPiece3 { cells: cells_of(6..12, 0..2, 0..2), mass: 24.0 * CELL_MASS }],
+        },
+    );
+    let mut clean = two_bars();
+    let want = clean.frame_at(1.0, &mut Script { cuts: vec![good.clone(), right.clone()] });
+    let got = w.frame_at(1.0, &mut Script { cuts: vec![good, right] });
+    same(&got, &want, "after a failed step");
+    assert_eq!(got.enabled, vec![true, true, true, true]);
+}
+
+#[test]
+fn a_split_that_could_never_work_is_refused_when_it_is_registered() {
+    let bar_body = || body(Shape3::Voxels { size: SIZE, cells: bar() }, 48.0 * CELL_MASS, BodyKind::Dynamic);
+    let make = || {
+        World3::new(World3Spec {
+            fix_internal_edges: false,
+            start: 0.,
+            step: 0.01,
+            gravity: [0.; 3],
+            pixels_per_meter: 1.,
+            iterations: 8,
+            bounds: Bounds3::None,
+            joints: vec![],
+            bodies: vec![bar_body(), bar_body(), bar_body(), bar_body()],
+        })
+    };
+    // two splits of one body: which would take the cut?
+    assert!(make()
+        .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }, VoxelSplit3 { parent: 0, slots: vec![2] }])
+        .is_err());
+    // a ring: 0 makes 1, which makes 0 again, and neither could ever be a slot in use first
+    assert!(make()
+        .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![1] }, VoxelSplit3 { parent: 1, slots: vec![0] }])
+        .is_err());
+    // a longer ring
+    assert!(make()
+        .with_voxel_splits(vec![
+            VoxelSplit3 { parent: 0, slots: vec![1] },
+            VoxelSplit3 { parent: 1, slots: vec![2] },
+            VoxelSplit3 { parent: 2, slots: vec![0] },
+        ])
+        .is_err());
+    // a chain is fine, and so is a body that is both a slot and a parent
+    assert!(make()
+        .with_voxel_splits(vec![
+            VoxelSplit3 { parent: 0, slots: vec![1, 2] },
+            VoxelSplit3 { parent: 1, slots: vec![3] },
+        ])
+        .is_ok());
+    // a body that a fracture will replace cannot also be cut
+    let fractured = make().with_fractures(vec![Fracture3 {
+        source: 0,
+        at: 1.0,
+        radial_impulse: 0.0,
+        fragments: vec![Fragment3 { body: 1, offset: [0.0; 3], impulse: [0.0; 3] }],
+        contact: None,
+    }]);
+    if let Ok(w) = fractured {
+        assert!(
+            w.with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: vec![2] }]).is_err(),
+            "a fracture source as the parent"
+        );
     }
 }

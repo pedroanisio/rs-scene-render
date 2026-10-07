@@ -89,6 +89,34 @@ impl World3 {
                 }
             }
         }
+        // a body is the parent of one split, and no body that a fracture replaces is a parent
+        let mut parents = BTreeSet::new();
+        for split in &splits {
+            if !parents.insert(split.parent)
+                || self.fracture_sources[split.parent].is_some()
+                || self.fragment_owners[split.parent].is_some()
+            {
+                return Err(VoxelSplitError(
+                    "a body is the parent of one split at most, and a fracture's source or piece is not one",
+                ));
+            }
+        }
+        // no ring: a body that makes a slot of its own maker could never be the first to be in use
+        for start in 0..splits.len() {
+            let mut seen = BTreeSet::new();
+            let mut frontier: Vec<usize> = splits[start].slots.clone();
+            while let Some(body) = frontier.pop() {
+                if body == splits[start].parent {
+                    return Err(VoxelSplitError("the slots of a split lead back to its parent"));
+                }
+                if !seen.insert(body) {
+                    continue;
+                }
+                for other in splits.iter().filter(|o| o.parent == body) {
+                    frontier.extend(other.slots.iter().copied());
+                }
+            }
+        }
         for (s, split) in splits.iter().enumerate() {
             for &slot in &split.slots {
                 self.slot_owners[slot] = Some(s);
@@ -102,10 +130,23 @@ impl World3 {
         Ok(self)
     }
 
-    /// Installs the cuts that the driver says the bodies of cells have suffered, before the step that starts at `t`. All of a cut is checked
-    /// before any of it is applied: a cut that cannot be installed leaves the world as it was.
+    /// Installs the cuts that the driver says the bodies of cells have suffered, before the step that starts at `t`. Every cut of the call is
+    /// asked for and checked before any of them is applied: if one cannot be installed none is, and the world is as it was. (A body that
+    /// becomes a slot in use in this call is cut from the next step: the splits are independent within a call.)
     pub(super) fn apply_voxel_cuts(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
+        struct Prepared {
+            split: usize,
+            parent: usize,
+            cut: VoxelCut3,
+            shape: SharedShape,
+            parts: Vec<(SharedShape, Vec3, Vec3, f64)>,
+            pose: Pose,
+            v: Vec3,
+            w: Vec3,
+            c_old: Vec3,
+        }
+        let mut prepared: Vec<Prepared> = Vec::new();
         for s in 0..self.voxel_splits.len() {
             let (parent, slots) = (self.voxel_splits[s].parent, self.voxel_splits[s].slots.clone());
             if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
@@ -166,7 +207,13 @@ impl World3 {
             if parts.iter().any(|(_, c, velocity, _)| !c.is_finite() || !velocity.is_finite()) || !w.is_finite() {
                 return Err("a cut of a body of cells exceeds numerical range".into());
             }
-            // install
+            prepared.push(Prepared { split: s, parent, cut, shape, parts, pose, v, w, c_old });
+        }
+        // install: nothing below can fail
+        for Prepared { split, parent, cut, shape, parts, pose, v, w, c_old } in prepared {
+            let slots = self.voxel_splits[split].slots.clone();
+            let h = self.state.handles[parent];
+            let collider = self.state.bodies[h].colliders()[0];
             self.state.colliders[collider].set_shape(shape);
             let body = &mut self.state.bodies[h];
             if cut.parent_mass > 0.0 {
@@ -177,9 +224,11 @@ impl World3 {
                     body.set_linvel(v + w.cross(c_new - c_old), true);
                 }
             } else {
+                // nothing stays: the body is gone for good, which the state has to say or the next step shows it again
                 body.set_enabled(false);
+                self.state.voxel_spent[parent] = true;
             }
-            let used = self.state.slots_used[s];
+            let used = self.state.slots_used[split];
             for (i, (piece, _, velocity, mass)) in parts.into_iter().enumerate() {
                 let slot = slots[used + i];
                 let hs = self.state.handles[slot];
@@ -196,7 +245,7 @@ impl World3 {
                 body.set_enabled(driver.enabled(t, slot));
                 self.state.active[slot] = true;
             }
-            self.state.slots_used[s] = used + cut.pieces.len();
+            self.state.slots_used[split] = used + cut.pieces.len();
             self.state.voxel_revisions[parent] = Some(cut.revision);
             // what lost its support or gained a neighbour has to be looked at again
             for &handle in &self.state.handles {

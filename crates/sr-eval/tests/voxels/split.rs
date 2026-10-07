@@ -150,8 +150,22 @@ fn more_pieces_than_slots_is_an_error_or_the_smallest_become_dust_and_the_choice
     // equal parts: the choice is by position, the same every time
     let tie: Vec<[i32; 3]> = (0..5).flat_map(|k| [[0, 3 * k, 0], [1, 3 * k, 0]]).collect();
     let a = cut(&grid(&tie), &nothing, 1, SIZE, DENSITY, 1.0, &policy(Overflow::Dust, 2), &nobody).unwrap();
-    let b = cut(&grid(&tie), &nothing, 1, SIZE, DENSITY, 1.0, &policy(Overflow::Dust, 2), &nobody).unwrap();
-    assert_eq!(a, b);
+    // equal parts put in in any order give the same cut: the choice is by position and not by the order of arrival
+    for seed in 1..=6u64 {
+        let mut shuffled = tie.clone();
+        let mut state = seed;
+        for i in (1..shuffled.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            shuffled.swap(i, (state >> 33) as usize % (i + 1));
+        }
+        let b = cut(&grid(&shuffled), &nothing, 1, SIZE, DENSITY, 1.0, &policy(Overflow::Dust, 2), &nobody).unwrap();
+        assert_eq!(a, b, "shuffle {seed}");
+    }
+    // the kept pieces are the first two of the equal ones in the scan, the rest dust
+    assert_eq!(a.cut.pieces.len(), 2);
+    assert_eq!(a.cut.pieces[0].cells, vec![[0, 3, 0], [1, 3, 0]]);
+    assert_eq!(a.cut.pieces[1].cells, vec![[0, 6, 0], [1, 6, 0]]);
+    assert_eq!(a.dust.len(), 4);
     assert_eq!(a.stays, vec![[0, 0, 0], [1, 0, 0]], "the first of equals stays");
 }
 
