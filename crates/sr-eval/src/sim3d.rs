@@ -1506,7 +1506,19 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
     for link in &three.links {
         let Some(Some(impact)) = frame.impacts.get(link.watch) else { continue };
         let Some(i) = index_of(g, &three.bodies[link.owner].id) else { continue };
-        match crate::crater::impact_crater(&link.source, impact, g.time - impact.time) {
+        // the crater of an object of cells is made along the axis of the surface of its cells, and from the speed along it
+        let aligned = match &three.bodies[link.owner].voxels {
+            Some(owner) => owner.aligned(&link.source, impact),
+            None => Ok(*impact),
+        };
+        let aligned = match aligned {
+            Ok(impact) => impact,
+            Err(error) => {
+                g.fail(format!("{}: {error}", three.bodies[link.owner].id));
+                continue;
+            }
+        };
+        match crate::crater::impact_crater(&link.source, &aligned, g.time - aligned.time) {
             Ok(grown) => g.nodes[i].crater_impact = Some(Arc::new(grown)),
             Err(error) => g.fail(format!("{}: {error}", three.bodies[link.owner].id)),
         }

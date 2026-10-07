@@ -33,6 +33,7 @@ pub fn crater_cut_of(
     // crater is made at the surface: the plane of the kernel is where the axis through the point meets the cells' surface
     let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
     let mut spec = grown.spec;
+    spec.outward = crater_axis(grown, before, settings);
     spec.center = surface_along(before, spec.center, spec.outward, cell);
     let kernel = sr_3d::crater::Crater::conserving(
         spec,
@@ -66,6 +67,67 @@ pub fn crater_cut_of(
     let base = before.bounds().map_or(i32::MAX, |(_, max)| max[1]);
     let anchored = move |c: &[i32; 3]| c[1] == base;
     crater_cut(before, &kernel, 1.0 / grown.units, &ejection, 1, &rock, &anchored)
+}
+
+/// The axis of the crater of `grown` in the cells of `before`: the outward normal of the surface of the cells around the impact, from where the mass of the cells
+/// within the crater's crest radius lies (the direction from the centroid of the filled cells of that ball to its centre, which is the normal of a plane
+/// and the mean of the normals of a staircase of cells). The contact normal of the world is the normal of the cell face or edge that the body touched
+/// first, which on a slope of cells is off by ten degrees and more; it is what the axis is when the ground round the impact is a ball with no
+/// filled cell or all filled cells (or the estimate points the other way).
+pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, settings: &Settings) -> [f64; 3] {
+    let contact = grown.spec.outward;
+    let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
+    match surface_normal(before, grown.spec.center, grown.spec.radius, cell) {
+        Some(normal) if (0..3).map(|i| normal[i] * contact[i]).sum::<f64>() > 0.0 => snap_to_lattice(normal),
+        _ => contact,
+    }
+}
+
+/// The nearest axis of the lattice if `normal` is within two degrees of it: the estimate of a surface of cells that is flat along a face has the noise of
+/// the cells' rounding (a few tenths of a degree on flat ground, 0.1 in the tests), and a face of cells has the normal of the face. The consequence is a
+/// discontinuity: ground that slopes by less than two degrees is cut along the axis of the lattice as if it were flat, and one that slopes by two or more
+/// is cut along its own normal; the volume cut differs between them by the few cells that a tilt of two degrees moves (the ledger gives the figures).
+fn snap_to_lattice(normal: [f64; 3]) -> [f64; 3] {
+    let (axis, along) = (0..3).map(|i| (i, normal[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).expect("three axes");
+    if along >= 2.0f64.to_radians().cos() {
+        let mut snapped = [0.0; 3];
+        snapped[axis] = normal[axis].signum();
+        snapped
+    } else {
+        normal
+    }
+}
+
+/// The outward normal of the surface of the cells of `before` round `point` (object units): minus the direction of the centroid of the filled cells within
+/// `radius` of it, None if there is none or they are centred on it.
+pub fn surface_normal(before: &Occupancy, point: [f64; 3], radius: f64, cell: f64) -> Option<[f64; 3]> {
+    let reach = (radius / cell).ceil() as i32 + 1;
+    let centre = sr_3d::voxel::object_to_cell(point, cell)?;
+    let (mut sum, mut count) = ([0.0f64; 3], 0u64);
+    for dk in -reach..=reach {
+        for dj in -reach..=reach {
+            for di in -reach..=reach {
+                let key = [centre[0] + di, centre[1] + dj, centre[2] + dk];
+                if before.get(key) == 0 {
+                    continue;
+                }
+                let at = sr_3d::voxel::cell_to_object(key, cell);
+                let offset: [f64; 3] = std::array::from_fn(|i| at[i] - point[i]);
+                if offset.iter().map(|c| c * c).sum::<f64>() <= radius * radius {
+                    for i in 0..3 {
+                        sum[i] += offset[i];
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let length = sum.iter().map(|c| c * c).sum::<f64>().sqrt();
+    // a ball that is all ground or all air is centred on the point to within the cells' rounding: it has no surface to give a normal
+    (length > 0.02 * radius * count as f64).then(|| sum.map(|c| -c / length))
 }
 
 /// Where the line through `point` along `outward` (object units, unit) meets the surface of the cells of `before`, `cell` object units a side: from a point in a
@@ -185,10 +247,27 @@ impl VoxelOwner {
                 return Ok(cut.clone());
             }
         }
-        let grown = crate::crater::impact_crater(source, impact, 0.0)?;
+        let grown = crate::crater::impact_crater(source, &self.aligned(source, impact)?, 0.0)?;
         let cut = Arc::new(crater_cut_of(&grown, &self.model.occupancy, &self.settings, seed_of(id))?);
         *memo = Some((*impact, cut.clone()));
         Ok(cut)
+    }
+
+    /// The impact as the crater of an object of cells takes it: its normal is the axis of the surface of the cells (not the contact's, which is that of the
+    /// first face or edge touched) and the speed that the law is given is the body's along that axis. The law reads the speed along the normal, and the
+    /// contact's, 13 to 15 degrees off on a slope of cells, gave a crater from a speed 3 percent low.
+    pub(crate) fn aligned(
+        &self,
+        source: &crate::crater::CraterSource,
+        impact: &sr_sim::physics3d::Impact3,
+    ) -> Result<sr_sim::physics3d::Impact3, String> {
+        let first = crate::crater::impact_crater(source, impact, 0.0)?;
+        let axis = crater_axis(&first, &self.model.occupancy, &self.settings);
+        let closing = -(0..3).map(|i| impact.owner_velocity[i] * axis[i]).sum::<f64>();
+        if closing.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return Ok(*impact);
+        }
+        Ok(sr_sim::physics3d::Impact3 { normal: axis, closing_speed: closing, ..*impact })
     }
 
     /// The grid of body `body` at `revision`, made of its `cells`: the palette index of a cell is the asset's, or the rim's for a cell that the cut heaped.
