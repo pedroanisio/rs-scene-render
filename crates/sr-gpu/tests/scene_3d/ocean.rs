@@ -139,3 +139,53 @@ fn whitewater_foam_in_the_albedo_mode_is_refused_by_the_raster_renderer_and_by_a
         );
     }
 }
+
+/// The picture of a sea with foam in the albedo mode, seen from `y` over it by a path tracer, whose whitewater has `foam` besides
+/// `foamMode="albedo"`: the sum of the luminance of its pixels.
+fn foamy_sea(gpu: &sr_gpu::Gpu, y: f32, foam: &str) -> Vec<[f32; 4]> {
+    let xml = format!(
+        r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#101020"/><materials><material id="water" baseColor="#102040" roughness="0.3" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="{y}" z="-8" target="sea" renderer="pathtrace" pathSamples="16" maxBounces="2"/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0" foamMode="albedo" {foam}/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/><light id="fill" type="ambient" intensity="1"/></lights></scene>"##
+    );
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let frame = ev.evaluate(0.5);
+    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let out = renderer.render(&frame, ev.program());
+    assert!(out.stats.errors.is_empty() && out.stats.unsupported.is_empty(), "{:?}", out.stats);
+    renderer.read(&out.texture)
+}
+
+fn light(px: &[[f32; 4]]) -> f64 {
+    px.iter().map(|p| f64::from(0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2])).sum()
+}
+
+#[test]
+fn the_documents_foam_albedo_and_roughness_reach_the_water_with_their_values_and_their_defaults() {
+    let Some(gpu) = gpu() else { return };
+    // the magnitude of the albedo: what the foam adds to a sea is in proportion to the albedo (a diffuse surface under the
+    // ambient light and the sun), so half the albedo adds half
+    let (black, half, full) = (
+        light(&foamy_sea(&gpu, -6.0, r#"foamAlbedo="0""#)),
+        light(&foamy_sea(&gpu, -6.0, r#"foamAlbedo="0.45""#)),
+        light(&foamy_sea(&gpu, -6.0, "")),
+    );
+    println!("albedo 0: {black:.2}, 0.45: {half:.2}, default: {full:.2}");
+    assert!(full > black + 5.0, "the foam brightens the sea: {full} against {black}");
+    let ratio = (half - black) / (full - black);
+    assert!((ratio - 0.5).abs() <= 0.08, "half the albedo adds half the light: {ratio}");
+    // the defaults are the documented ones, bit for bit
+    let explicit = foamy_sea(&gpu, -6.0, r#"foamAlbedo="0.9" foamRoughness="0.8""#);
+    assert!(explicit == foamy_sea(&gpu, -6.0, ""), "the defaults are 0.9 and 0.8");
+    // the roughness: from 10 degrees over the water a smooth foam has a brighter lobe than a rough one
+    let (smooth, rough) = (
+        light(&foamy_sea(&gpu, -1.2, r#"foamRoughness="0.1""#)),
+        light(&foamy_sea(&gpu, -1.2, r#"foamRoughness="0.9""#)),
+    );
+    println!("grazing: roughness 0.1: {smooth:.2}, 0.9: {rough:.2}");
+    assert!(smooth > 1.2 * rough, "{smooth} against {rough}");
+    // and the default is the value of 0.8, not another
+    let default = foamy_sea(&gpu, -1.2, "");
+    assert!(default == foamy_sea(&gpu, -1.2, r#"foamRoughness="0.8""#));
+    assert!(default != foamy_sea(&gpu, -1.2, r#"foamRoughness="0.2""#), "the roughness reaches the shading");
+}

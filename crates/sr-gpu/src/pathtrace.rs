@@ -656,6 +656,44 @@ mod tests {
     }
 
     #[test]
+    fn a_variant_pipeline_is_given_water_only_for_water_and_foam_only_for_foam() {
+        let plain = format!(
+            "{}\n{}\n{}",
+            include_str!("sampling.wgsl"),
+            include_str!("pathtrace.wgsl"),
+            include_str!("volume.wgsl")
+        );
+        let names = |c: Vec<(&str, f64)>| c.into_iter().map(|(n, v)| (n.to_string(), v)).collect::<Vec<_>>();
+        // foam alone: the media constants, and neither WATER nor FOAM (the module has no FOAM override to give a value to)
+        assert_eq!(
+            names(variant_constants(false, false, false, true)).iter().map(|c| c.0.as_str()).collect::<Vec<_>>(),
+            ["HAS_MEDIA", "MEDIUM_LIGHTING"]
+        );
+        // water: WATER on and FOAM off; water with foam: FOAM on
+        assert!(variant_constants(true, false, true, false).contains(&("WATER", 1.0)));
+        assert!(variant_constants(true, false, true, false).contains(&("FOAM", 0.0)));
+        assert!(variant_constants(true, true, true, true).contains(&("FOAM", 1.0)));
+        assert!(variant_constants(true, true, true, true).contains(&("MEDIUM_LIGHTING", 1.0)));
+        // the text: nothing added for a scene with neither (the plain pipeline is not a variant), the refracted shadow rays only for
+        // water, the hook only for foam
+        assert_eq!(variant_source(&plain, false, false), plain);
+        let foam_only = variant_source(&plain, false, true);
+        assert!(foam_only.contains("rnd() < foam") && !foam_only.contains("fn light_through("));
+        let water_only = variant_source(&plain, true, false);
+        assert!(water_only.contains("fn light_through(") && !water_only.contains("rnd() < foam"));
+        assert!(
+            water_only.contains("override FOAM: bool = false;"),
+            "the water shader declares the override the constant sets"
+        );
+        let both = variant_source(&plain, true, true);
+        assert!(both.contains("fn light_through(") && both.contains("rnd() < foam"));
+        assert!(
+            !foam_only.contains("override FOAM"),
+            "the foam-only shader has no override: a constant for it would be an error"
+        );
+    }
+
+    #[test]
     fn the_foam_hook_changes_the_surface_at_the_hit_and_brings_in_no_refracted_shadow_ray() {
         let plain = format!(
             "{}\n{}\n{}",
@@ -1056,6 +1094,27 @@ fn variant_slot(media: bool, grid: bool, lighting: bool, water: bool, foam: bool
     }) + 5 * if water { foam as usize } else { 2 }
 }
 
+/// The override constants of a variant pipeline: the media ones always, `WATER` only for a scene with a transmissive material and
+/// `FOAM` only for one that also has foam (the water shader declares it; the foam-only shader has no such override, and a constant
+/// for a name the module lacks is an error of the pipeline).
+fn variant_constants(media: bool, lighting: bool, water: bool, foam: bool) -> Vec<(&'static str, f64)> {
+    let mut constants = vec![("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
+    if water {
+        constants.extend([("WATER", 1.0), ("FOAM", foam as u8 as f64)]);
+    }
+    constants
+}
+
+/// The shader text of a variant: the base with the water additions when `water`, and the foam at the hit when `foam`.
+fn variant_source(base: &str, water: bool, foam: bool) -> String {
+    let source = if water { water_source(base) } else { base.to_string() };
+    if foam {
+        foam_source(&source)
+    } else {
+        source
+    }
+}
+
 /// Pipelines of the path tracer (built on first use).
 pub struct PtGpu {
     bgl0: wgpu::BindGroupLayout,
@@ -1296,11 +1355,8 @@ impl PtGpu {
         let media = !scene.volumes.is_empty();
         let slot = variant_slot(media, grid, lighting, water, foam);
         self.trace_water[slot].get_or_init(|| {
-            let mut constants = vec![("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
-            if water {
-                constants.extend([("WATER", 1.0), ("FOAM", foam as u8 as f64)]);
-            }
-            let source = if media && grid {
+            let constants = variant_constants(media, lighting, water, foam);
+            let base = if media && grid {
                 grid_source()
             } else {
                 format!(
@@ -1310,8 +1366,7 @@ impl PtGpu {
                     include_str!("volume.wgsl")
                 )
             };
-            let source = if water { water_source(&source) } else { source };
-            let source = if foam { foam_source(&source) } else { source };
+            let source = variant_source(&base, water, foam);
             let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pathtrace-variant"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
