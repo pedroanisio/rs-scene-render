@@ -256,6 +256,39 @@ impl Crater {
         self.profile.mantle.map_or(self.spec.radius + self.spec.rim_width, |m| m.reach)
     }
 
+    /// The exponent `p` of the bowl, `(1 - x^2)^p`: 2 for a crater of [`Crater::new`], the one that makes the bowl hold the volume of the
+    /// budget for [`Crater::conserving`].
+    pub fn bowl_exponent(&self) -> f64 {
+        self.profile.bowl_exponent
+    }
+
+    /// The unit vector the crater points along, out of the ground.
+    pub fn axis(&self) -> [f64; 3] {
+        self.axis.to_array()
+    }
+
+    /// How far under the original surface the floor of the grown bowl is at distance `r` from the axis: the depth at the centre, falling to
+    /// nothing at the crest radius and beyond.
+    pub fn bowl_depth_at(&self, r: f64) -> f64 {
+        let x = r / self.spec.radius;
+        if x.abs() >= 1. {
+            0.
+        } else {
+            self.spec.depth * bowl(x, self.profile.bowl_exponent).0
+        }
+    }
+
+    /// How far the grown rim stands over the original surface at distance `r` from the axis: highest at the crest radius, and nothing
+    /// beyond the rim's width either side of it.
+    pub fn rim_height_at(&self, r: f64) -> f64 {
+        let x = (r - self.spec.radius) / self.spec.rim_width;
+        if x.abs() >= 1. {
+            0.
+        } else {
+            self.spec.rim_height * bump(x).0
+        }
+    }
+
     /// The dimensions this crater was made from; the axis is the one given, not normalised.
     pub fn spec(&self) -> Spec {
         self.spec

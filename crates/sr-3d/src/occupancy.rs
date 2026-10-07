@@ -9,6 +9,8 @@
 //!   own axes (the scene's: x right, y down, z away from the camera); an importer from another convention (MagicaVoxel is z up) turns
 //!   its keys into these before it fills the grid. The size of a cell belongs to the object, not to the grid. The palette index
 //!   is a `u8` by design (a `.vox` model has 255 colours): a label above 255 is the importer's error to report.
+//! * Keys are within `[-2^30, 2^30)` ([`KEY_LIMIT`]): a cell outside is refused by every way of filling a grid, so that no neighbour, brick
+//!   corner or sum of moments overflows (the moments hold for up to 2^32 cells).
 //! * Cells are stored in sparse **bricks** of 8 by 8 by 8 cells, keyed by the key divided (flooring) by 8. Keys may
 //!   be negative. A grid may have a limit on its bricks.
 //! * The **scan order** of cells, which every ordering in this module and above it uses, is z, then y, then x (x runs fastest).
@@ -21,7 +23,7 @@
 //!   one, and every brick of it is new to a reader at revision 0.
 //! * The **revision** is a counter of this grid that changes when, and only when, a cell changes; the bricks that changed
 //!   since a revision are told by [`Occupancy::changed_bricks_since`], in key order, a brick that was emptied included until it
-//!   is compacted away. Two grids built differently have different revisions; the **fingerprint** is the hash of the content
+//!   is compacted away. A revision compares states of one grid only (grids built differently may have the same one); the **fingerprint** is the hash of the content
 //!   (cells and palette indices, in the order of the scan) and is equal for equal content, whatever its history.
 //! * What is derived from the cells (mass, centre of mass, inertia, connected components) is computed from integers in a fixed
 //!   order, so equal occupancy gives equal bits ([`Moments`], [`components`]).
@@ -30,6 +32,14 @@ use std::collections::{BTreeMap, HashMap};
 
 /// Cells to a side of a brick.
 pub const BRICK: i32 = 8;
+
+/// Every key of a cell is in `[-KEY_LIMIT, KEY_LIMIT)`: what the neighbours of a cell, the doubled coordinates of the moments and the key
+/// of a brick times 8 need so as never to overflow. A cell outside it is an error to fill (and is empty to read).
+pub const KEY_LIMIT: i32 = 1 << 30;
+
+fn in_range(key: [i32; 3]) -> bool {
+    key.iter().all(|k| (-KEY_LIMIT..KEY_LIMIT).contains(k))
+}
 const BRICK_CELLS: usize = 512;
 
 #[derive(Clone, Debug)]
@@ -155,10 +165,11 @@ impl Occupancy {
     /// An upper bound on the bytes of a grid of `cells` filled cells whose box is `min` to `max` (inclusive keys), worked out before
     /// anything is allocated: no more bricks than cells, and no more than the box has.
     pub fn estimate_bytes(cells: u64, min: [i32; 3], max: [i32; 3]) -> u64 {
-        let bricks: u64 = (0..3)
-            .map(|a| (i64::from(max[a].div_euclid(BRICK)) - i64::from(min[a].div_euclid(BRICK)) + 1).max(0) as u64)
+        let bricks: u128 = (0..3)
+            .map(|a| (i64::from(max[a].div_euclid(BRICK)) - i64::from(min[a].div_euclid(BRICK)) + 1).max(0) as u128)
             .product();
-        cells.min(bricks).saturating_mul(Self::BRICK_BYTES as u64)
+        let bound = u128::from(cells).min(bricks) * Self::BRICK_BYTES as u128;
+        u64::try_from(bound).unwrap_or(u64::MAX)
     }
 
     /// The smallest and largest keys of the filled cells (inclusive), exact for what is there now; none for an empty grid.
@@ -220,13 +231,17 @@ impl Occupancy {
         bricks: impl IntoIterator<Item = ([i32; 3], [u8; BRICK_CELLS])>,
     ) -> Result<Self, String> {
         let mut o = Self::with_limits(limits);
+        let mut given = std::collections::BTreeSet::new();
         for (key, cells) in bricks {
+            if !given.insert(key) {
+                return Err(format!("the brick {key:?} is given twice"));
+            }
+            if key.iter().any(|k| !(-KEY_LIMIT / BRICK..KEY_LIMIT / BRICK).contains(k)) {
+                return Err(format!("the brick {key:?} is outside the keys of an occupancy"));
+            }
             let filled = cells.iter().filter(|c| **c != 0).count() as u16;
             if filled == 0 {
                 continue;
-            }
-            if o.bricks.contains_key(&key) {
-                return Err(format!("the brick {key:?} is given twice"));
             }
             // the cells of the brick come in at once: the brick's cost, then its cells against the limit on cells
             o.room(true)?;
@@ -264,6 +279,9 @@ impl Occupancy {
             if palette == 0 {
                 return Err(format!("the cell {key:?} is listed with the empty palette index"));
             }
+            if !in_range(key) {
+                return Err(format!("the cell {key:?} is outside the keys of an occupancy"));
+            }
             let (brick_key, index) = split(key);
             let new_brick = o.bricks.get(&brick_key).is_none_or(|b| b.filled == 0);
             o.room(new_brick)?;
@@ -296,7 +314,7 @@ impl Occupancy {
 
     /// Sets one colour of the palette; true if that changed it. The cells and their revision are not touched.
     pub fn set_color(&mut self, index: u8, rgba: [u8; 4]) -> bool {
-        if self.palette.colors[usize::from(index)] == rgba {
+        if index == 0 || self.palette.colors[usize::from(index)] == rgba {
             return false;
         }
         self.palette.colors[usize::from(index)] = rgba;
@@ -305,7 +323,9 @@ impl Occupancy {
     }
 
     /// Sets the whole palette (an importer's); true if that changed it.
-    pub fn set_palette(&mut self, colors: [[u8; 4]; 256]) -> bool {
+    pub fn set_palette(&mut self, mut colors: [[u8; 4]; 256]) -> bool {
+        // the empty index has no colour to set
+        colors[0] = self.palette.colors[0];
         if self.palette.colors == colors {
             return false;
         }
@@ -336,6 +356,13 @@ impl Occupancy {
 
     /// Sets a cell; true if that changed it. A brick that holds nothing yet is made, and a cell filled, only within the limits.
     pub fn set(&mut self, key: [i32; 3], palette: u8) -> Result<bool, String> {
+        if !in_range(key) {
+            return if palette == 0 {
+                Ok(false)
+            } else {
+                Err(format!("the cell {key:?} is outside the keys of an occupancy"))
+            };
+        }
         let (brick_key, index) = split(key);
         let present = self.bricks.get(&brick_key).map(|b| b.cells[index]);
         if present.unwrap_or(0) == palette {
@@ -440,8 +467,8 @@ impl Occupancy {
 
 /// The moments of a set of cells, in integers: the count and the sums of the doubled coordinates `u = 2 key + 1` (twice the
 /// centre of a cell in cells) and of their products, so that the centre of mass and the inertia are worked out from exact numbers
-/// and a single division each, and are the same bits for any order of the cells. Keys within 2^20 of the origin and at most
-/// 2^32 cells keep every sum, and the products of two sums, inside an `i128`.
+/// and a single division each, and are the same bits for any order of the cells. Keys within [`KEY_LIMIT`] (2^30) of the origin and at most
+/// 2^32 cells keep every sum, and the products of two sums, inside an `i128` (the products reach 2^126).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Moments {
     n: u64,

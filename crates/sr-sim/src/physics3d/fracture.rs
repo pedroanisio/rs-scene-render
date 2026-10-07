@@ -155,6 +155,7 @@ impl World3 {
         self.fracture_sources[k].is_none_or(|i| !self.state.fractured[i])
             && self.fragment_owners[k].is_none_or(|i| self.state.fractured[i])
             && self.slot_owners[k].is_none_or(|_| self.state.slot_active[k])
+            && !self.state.voxel_spent[k]
     }
 
     pub(super) fn apply_fractures(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {

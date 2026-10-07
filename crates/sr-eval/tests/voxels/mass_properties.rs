@@ -65,12 +65,16 @@ fn the_collider_of_a_body_of_cells_has_the_mass_properties_of_the_cells_in_the_s
     for k in 0..3 {
         assert!((rapier.centre[k] - exact.centre[k]).abs() < 1e-9 * exact.centre[k].abs().max(1.0));
     }
-    // the inertia is in kilograms scene units squared
-    let scale = exact.inertia[0][0];
-    assert!(
-        (rapier.inertia[0][0] - exact.inertia[0][0]).abs() < 1e-12 * scale,
-        "{} against {}",
-        rapier.inertia[0][0],
-        exact.inertia[0][0]
-    );
+    // the inertia is in kilograms scene units squared: every entry of the tensor, at this scale too
+    for k in 0..3 {
+        for l in 0..3 {
+            let scale = exact.inertia[k][k].max(exact.inertia[l][l]);
+            assert!(
+                (rapier.inertia[k][l] - exact.inertia[k][l]).abs() < 1e-12 * scale,
+                "at 100 a metre, inertia [{k}][{l}]: {} against {}",
+                rapier.inertia[k][l],
+                exact.inertia[k][l]
+            );
+        }
+    }
 }
