@@ -519,7 +519,11 @@ fn a_wide_crater_whose_axis_is_slanted_reaches_along_the_lattice_as_far_as_the_h
         .collect();
     let far = expected.iter().filter(|c| (f64::from(c[0]) + 0.5 - spec.center[0]).abs() > 16.0 + 2.0 * H).count();
     assert!(far > 0, "the case has cells beyond the old reach of 16 m");
-    assert_eq!(x.removed.iter().copied().collect::<BTreeSet<_>>(), expected, "the box that is scanned missed {far} cells beyond the old reach");
+    assert_eq!(
+        x.removed.iter().copied().collect::<BTreeSet<_>>(),
+        expected,
+        "the box that is scanned missed {far} cells beyond the old reach"
+    );
 }
 
 #[test]

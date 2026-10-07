@@ -1321,7 +1321,13 @@ impl Driver3 for Counting {
     fn fields(&mut self, _: f64) -> Vec<Field> {
         vec![]
     }
-    fn voxel_cut(&mut self, _: f64, parent: usize, revision: Option<u64>, _: Option<&Impact3>) -> Result<Option<VoxelCut3>, String> {
+    fn voxel_cut(
+        &mut self,
+        _: f64,
+        parent: usize,
+        revision: Option<u64>,
+        _: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
         if parent != 0 {
             return Ok(None);
         }
