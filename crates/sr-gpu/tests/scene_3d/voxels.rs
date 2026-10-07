@@ -386,3 +386,53 @@ fn a_material_that_starts_to_let_light_through_changes_which_faces_are_made() {
     let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
     assert_eq!(shot_at(&mut fresh, &ev, 1.0).triangles, 22);
 }
+
+// ------------------------------------------------------------------------------------------------------------- one budget for an object
+
+/// A checkerboard of `n` cells a side whose cells are `at` cells from the origin: every cell shows its six faces, none of which merge.
+fn checker(n: i32, at: [i32; 3]) -> std::sync::Arc<sr_3d::Occupancy> {
+    let cells: Vec<([i32; 3], u8)> = (0..n)
+        .flat_map(|z| (0..n).flat_map(move |y| (0..n).map(move |x| ([x, y, z], 1u8))))
+        .filter(|(c, _)| (c[0] + c[1] + c[2]) % 2 == 0)
+        .map(|(c, i)| ([c[0] + at[0], c[1] + at[1], c[2] + at[2]], i))
+        .collect();
+    std::sync::Arc::new(sr_3d::Occupancy::from_cells(cells).unwrap())
+}
+
+#[test]
+fn the_surface_memory_of_a_voxels_object_is_one_budget_for_the_object_and_the_pieces_that_came_away_from_it() {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("budget.vox", &block(2, 1), &[RED]);
+    for camera in ["", r#"renderer="pathtrace" pathSamples="2" maxBounces="1""#] {
+        let xml = document(&file, r#"surfaceMemoryMiB="2""#, camera, "");
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let mut frame = ev.evaluate(0.5);
+        // what a simulation says of the object at a frame: its cells, and a piece that came away from it with cells of its own; each is
+        // 1,536 quads, which 2 MiB (2,361 quads) holds one of and not both
+        let node = frame.nodes.iter_mut().find(|n| &*n.id == "obj").unwrap();
+        node.voxels = Some(std::sync::Arc::new(sr_eval::voxel_cut::SimVoxels {
+            enabled: true,
+            revision: 1,
+            grid: checker(8, [0, 0, 0]),
+            changed_bricks: Vec::new(),
+            steps: Vec::new(),
+            thrown: None,
+            pieces: vec![sr_eval::voxel_cut::SimVoxelPiece {
+                body: 5,
+                enabled: true,
+                revision: 1,
+                grid: checker(8, [0, 0, 0]),
+                pose3: glam::Mat4::from_translation(glam::Vec3::new(12.0, 0.0, 0.0)).to_cols_array().map(f64::from),
+            }],
+        }));
+        let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let out = renderer.render(&frame, ev.program());
+        let stats = &out.stats;
+        assert_eq!(stats.voxel_surfaces.len(), 1, "{camera}: only the object is drawn: {:?}", stats.voxel_surfaces);
+        assert_eq!(stats.voxel_surfaces[0].body, None);
+        let errors: Vec<_> = stats.errors.iter().filter(|e| e.contains("surfaceMemoryMiB")).collect();
+        assert_eq!(errors.len(), 1, "{camera}: the piece is refused, once, with the cause: {:?}", stats.errors);
+        assert!(errors[0].contains("admits 825 quads"), "{camera}: the budget that was left: {}", errors[0]);
+    }
+}

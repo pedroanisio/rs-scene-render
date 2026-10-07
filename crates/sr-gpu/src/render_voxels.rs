@@ -304,6 +304,8 @@ impl Renderer {
         let group_of_class: BTreeMap<u8, &GroupKey> = label.iter().map(|(l, i)| (*i, &l.group)).collect();
         let colour_of_class: BTreeMap<u8, Option<[u8; 4]>> = label.iter().map(|(l, i)| (*i, l.colour)).collect();
         let mut drawn_groups = 0;
+        // the budget is the object's: each body takes what the ones before it left, in the order of the frame (the object, then its pieces)
+        let mut used_quads = 0usize;
         for body in &bodies {
             let tag = body.id.map_or(0, |b| b as u64 + 1);
             // what the meshes depend on: the cells, the colours, the materials and how the object reads them
@@ -317,17 +319,18 @@ impl Renderer {
             ]);
             let state_key = (n.id.clone(), body.id);
             let mut remeshed = (0, false);
+            let left = budget.saturating_sub(used_quads * sr_3d::voxel::surface::BYTES_PER_QUAD);
             if self.voxel_surfaces.get(&state_key).and_then(|s| s.signature) != Some(signature) {
                 let state = self.voxel_surfaces.entry(state_key.clone()).or_default();
                 // the meshes that this rebuild replaces are released before the new ones are made (the budget counts one set of them)
                 state.groups.clear();
                 state.signature = None;
                 let update = match body.steps {
-                    None => state.cache.update(body.grid, &classes, budget),
+                    None => state.cache.update(body.grid, &classes, left),
                     Some(steps) => state.cache.update_steps(
                         body.grid,
                         &classes,
-                        budget,
+                        left,
                         h(&[model.occupancy.lineage(), tag]),
                         body.revision,
                         steps,
@@ -380,6 +383,22 @@ impl Renderer {
                 state.groups = out;
                 // a surface that could not be drawn is made again at the next frame, and says why again
                 state.signature = (!failed).then_some(signature);
+            }
+            // a surface made at an earlier frame, when the bodies before it held fewer quads, must fit what is left as well
+            let state = self.voxel_surfaces.get_mut(&state_key).expect("the state of this body");
+            if state.quads * sr_3d::voxel::surface::BYTES_PER_QUAD > left && !state.groups.is_empty() {
+                state.groups.clear();
+                state.signature = None;
+                plan.stats.errors.push(format!(
+                    "{}: voxel surface exceeds memory budget (surfaceMemoryMiB): the quads of the object and of its pieces cost {} bytes each at the peak and the budget of {budget} bytes admits {} quads in all",
+                    n.id,
+                    sr_3d::voxel::surface::BYTES_PER_QUAD,
+                    budget / sr_3d::voxel::surface::BYTES_PER_QUAD
+                ));
+                continue;
+            }
+            if !state.groups.is_empty() {
+                used_quads += state.quads;
             }
             let state = &self.voxel_surfaces[&state_key];
             let model_matrix = body.world * Mat4::from_scale(Vec3::splat(cell_size));
