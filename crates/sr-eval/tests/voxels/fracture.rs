@@ -414,5 +414,9 @@ fn what_the_dust_took_is_in_the_units_of_the_scene_whatever_its_scale() {
             1e4 * metres.angular_momentum[i]
         );
     }
-    assert!(metres.momentum.iter().any(|c| c.abs() > 1.0));
+    assert!(metres.momentum.iter().any(|c| c.abs() > 1.0), "{metres:?}");
+    assert!(
+        metres.angular_momentum.iter().any(|c| c.abs() > 1.0),
+        "the angular momentum is not nothing either: {metres:?}"
+    );
 }

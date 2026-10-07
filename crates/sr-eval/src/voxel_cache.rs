@@ -9,8 +9,9 @@
 //! equal one is a hit. A fingerprint that is the same for two different contents (which a 64-bit hash cannot rule out) costs a second entry and not a
 //! wrong answer; [`DerivedCache::with_fingerprint`] lets a test force that. The comparison is a memory compare of the bricks, which is cheaper than
 //! any of the products. What is kept is charged to the budget, the content included, and the least recently asked entry goes first when the budget is
-//! passed: by a counter of the requests and not by a clock, so that the same requests give the same cache. An entry that alone is over the budget is
-//! not kept (a budget of 0 keeps nothing and every answer is still right). What cannot be derived (an error) is not kept.
+//! passed: by a counter of the requests and not by a clock, so that the same requests give the same cache (every request has its own number: there
+//! are no ties). An entry that alone is over the budget is not kept and its content is not even copied (a budget of 0 keeps nothing and every answer
+//! is still right). Products are charged by the room their vectors have, after the slack is taken off. What cannot be derived (an error) is not kept.
 use crate::voxels::{body, Body};
 use sr_3d::occupancy::{Occupancy, Properties, BRICK};
 use std::collections::BTreeMap;
@@ -25,8 +26,15 @@ type Brick = ([i32; 3], Box<[u8; BRICK_CELLS]>);
 struct Snapshot(Vec<Brick>);
 
 impl Snapshot {
-    fn of(o: &Occupancy) -> Self {
-        Snapshot(o.bricks().map(|(k, c)| (k, Box::new(*c))).collect())
+    /// What a snapshot of `bricks` bricks takes: the cells of each, and the key, the pointer and the slot of the vector.
+    fn bytes_of(bricks: usize) -> usize {
+        bricks * (BRICK_CELLS + std::mem::size_of::<Brick>())
+    }
+
+    fn of(o: &Occupancy, bricks: usize) -> Self {
+        let mut all = Vec::with_capacity(bricks);
+        all.extend(o.bricks().map(|(k, c)| (k, Box::new(*c))));
+        Snapshot(all)
     }
 
     fn matches(&self, o: &Occupancy) -> bool {
@@ -38,10 +46,6 @@ impl Snapshot {
             }
         }
         bricks.next().is_none()
-    }
-
-    fn bytes(&self) -> usize {
-        self.0.len() * (BRICK_CELLS + 16)
     }
 }
 
@@ -140,9 +144,10 @@ impl DerivedCache {
         }
         let (product, size) = make()?;
         self.computed += 1;
-        let snapshot = Snapshot::of(o);
-        let bytes = size + snapshot.bytes();
+        // the size is known before the content is copied: an entry that cannot be kept costs no copy
+        let bytes = size + Snapshot::bytes_of(key.bricks);
         if bytes <= self.budget {
+            let snapshot = Snapshot::of(o, key.bricks);
             while self.bytes + bytes > self.budget {
                 self.evict_one();
             }
@@ -191,8 +196,11 @@ impl DerivedCache {
     pub fn components(&mut self, o: &Occupancy) -> Arc<Vec<Vec<[i32; 3]>>> {
         let product = self
             .get(1, o, [0.0; 5], || {
-                let parts = o.components();
-                let bytes = parts.iter().map(|p| p.len() * 12 + 24).sum::<usize>() + 64;
+                let mut parts = o.components();
+                // charged by the room the vectors have, after the slack is taken off
+                parts.iter_mut().for_each(Vec::shrink_to_fit);
+                parts.shrink_to_fit();
+                let bytes = parts.iter().map(|p| p.capacity() * 12 + 24).sum::<usize>() + parts.capacity() * 24 + 64;
                 Ok((Product::Components(Arc::new(parts)), bytes))
             })
             .expect("the components of a grid are not an error");
@@ -212,8 +220,13 @@ impl DerivedCache {
     ) -> Result<Arc<Body>, String> {
         let params = [size[0], size[1], size[2], density, pixels_per_meter];
         let product = self.get(2, o, params, || {
-            let b = body(o, size, density, pixels_per_meter)?;
-            let bytes = o.count() as usize * 12 + 128;
+            let mut b = body(o, size, density, pixels_per_meter)?;
+            let mut room = 0;
+            if let sr_sim::physics3d::Shape3::Voxels { cells, .. } = &mut b.shape {
+                cells.shrink_to_fit();
+                room = cells.capacity();
+            }
+            let bytes = room * 12 + 128;
             Ok((Product::Body(Arc::new(b)), bytes))
         })?;
         match product {
