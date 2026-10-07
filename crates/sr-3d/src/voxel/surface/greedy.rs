@@ -64,7 +64,7 @@ pub fn mesh_quads_within(grid: &Occupancy, classes: &Classes, max_bytes: usize) 
     Ok(quads)
 }
 
-fn merge(axis: u8, positive: bool, plane: i32, faces: &[(i32, i32, u8)], out: &mut Vec<Quad>) {
+pub(super) fn merge(axis: u8, positive: bool, plane: i32, faces: &[(i32, i32, u8)], out: &mut Vec<Quad>) {
     // the faces not yet taken, by place; a taken face is removed
     let mut open: HashMap<(i32, i32), u8> = faces.iter().map(|&(u, v, class)| ((u, v), class)).collect();
     let mut scan: Vec<(i32, i32)> = open.keys().copied().collect();

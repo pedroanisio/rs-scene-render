@@ -552,3 +552,158 @@ fn a_surface_over_its_budget_is_refused_with_an_error_that_does_not_depend_on_ho
     // nothing to draw is nothing to pay
     assert!(mesh_quads_within(&Occupancy::new(), &Classes::identity(), 0).unwrap().is_empty());
 }
+
+// ------------------------------------------------------------------------------------------------------------ the cache
+
+use sr_3d::voxel::surface::SurfaceCache;
+
+/// The planes (axis, plane) that an edit of the bricks `keys` can change: the nine planes of the slab of each brick along each axis.
+fn dirty_planes(keys: &[[i32; 3]]) -> BTreeSet<(usize, i32)> {
+    keys.iter().flat_map(|k| (0..3).flat_map(move |a| (0..=8).map(move |i| (a, 8 * k[a] + i)))).collect()
+}
+
+/// A grid built afresh from the cells of `g`, the history of its edits forgotten.
+fn fresh(g: &Occupancy) -> Occupancy {
+    Occupancy::from_cells(g.cells().map(|c| (c, g.get(c)))).unwrap()
+}
+
+#[test]
+fn a_cache_that_is_brought_up_to_date_gives_the_quads_of_a_fresh_mesh_and_remeshes_nothing_if_nothing_changed() {
+    let classes = Classes::identity();
+    let mut g = grid(block([-3, 2, -5], 20, 1));
+    let mut cache = SurfaceCache::new();
+    let first = cache.update(&g, &classes, usize::MAX).unwrap();
+    assert!(first.full, "the first time is the whole of it");
+    assert_eq!(cache.quads(), mesh_quads(&g, &classes));
+    let again = cache.update(&g, &classes, usize::MAX).unwrap();
+    assert_eq!((again.remeshed, again.full), (0, false), "the same revision of the same grid: nothing to do");
+    // a recolouring changes no cell, no revision, no quad
+    g.set_color(1, [9, 9, 9, 255]);
+    assert_eq!(cache.update(&g, &classes, usize::MAX).unwrap().remeshed, 0);
+    assert_eq!(cache.quads(), mesh_quads(&g, &classes));
+}
+
+#[test]
+fn a_cut_of_k_bricks_remeshes_the_planes_of_those_bricks_and_no_others_and_gives_the_fresh_mesh() {
+    let classes = Classes::identity();
+    // a block of 64 (8 bricks a side), a sphere of cells cut out of one corner: it touches a few bricks
+    let mut g = grid(block([0, 0, 0], 64, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&g, &classes, usize::MAX).unwrap();
+    let before = g.revision();
+    // 65 planes along each axis have a layer of the 8 bricks of a side on one of their sides
+    let total_planes = 3 * 65;
+    for z in 0..12i32 {
+        for y in 0..12i32 {
+            for x in 0..12i32 {
+                if (x - 5) * (x - 5) + (y - 5) * (y - 5) + (z - 5) * (z - 5) <= 36 {
+                    g.set([x, y, z], 0).unwrap();
+                }
+            }
+        }
+    }
+    let changed = g.changed_bricks_since(before);
+    assert!(changed.len() > 1 && changed.len() <= 8, "the cut spans a few bricks: {}", changed.len());
+    let update = cache.update(&g, &classes, usize::MAX).unwrap();
+    assert!(!update.full);
+    assert_eq!(
+        update.remeshed,
+        dirty_planes(&changed).len(),
+        "the nine planes of each changed brick on each axis, shared ones once"
+    );
+    assert!(update.remeshed * 3 < total_planes, "{} of {total_planes} planes", update.remeshed);
+    assert_eq!(cache.quads(), mesh_quads(&fresh(&g), &classes), "the same quads as a mesh of the cut grid made afresh");
+}
+
+#[test]
+fn after_any_sequence_of_edits_the_cache_is_the_mesh_of_a_fresh_grid_even_across_emptied_bricks_and_compaction() {
+    let classes = Classes::identity().with_see_through(&[3]);
+    let mut seed = 0x1234_5678_9abc_def1u64;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut g = Occupancy::new();
+    let mut cache = SurfaceCache::new();
+    for step in 0..60 {
+        // a few edits near brick borders, clustered so that bricks fill and empty: a box of 3 or a single cell, set or cleared
+        for _ in 0..1 + next(4) {
+            let at = [next(40) as i32 - 20, next(24) as i32 - 12, next(40) as i32 - 20];
+            let value = if next(3) == 0 { 0 } else { 1 + next(3) as u8 };
+            let size = if next(4) == 0 { 4 } else { 1 };
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
+                        g.set([at[0] + x, at[1] + y, at[2] + z], value).unwrap();
+                    }
+                }
+            }
+        }
+        let update = cache.update(&g, &classes, usize::MAX).unwrap();
+        assert_eq!(
+            cache.quads(),
+            mesh_quads(&fresh(&g), &classes),
+            "step {step} ({} planes remeshed, full: {})",
+            update.remeshed,
+            update.full
+        );
+        // the cache has read up to this revision: the grid may forget the bricks it emptied
+        if step % 7 == 6 {
+            g.compact(g.revision());
+        }
+    }
+}
+
+#[test]
+fn another_grid_an_older_state_or_other_classes_are_a_full_remesh() {
+    let classes = Classes::identity();
+    let mut g = grid(block([0, 0, 0], 12, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&g, &classes, usize::MAX).unwrap();
+    // a copy edited has a lineage of its own: its revision is not a revision of the grid the cache holds
+    let mut copy = g.clone();
+    copy.set([3, 3, 3], 0).unwrap();
+    let update = cache.update(&copy, &classes, usize::MAX).unwrap();
+    assert!(update.full, "another lineage");
+    assert_eq!(cache.quads(), mesh_quads(&copy, &classes));
+    // the grid the cache held, edited past the copy's revision, is another grid again
+    g.set([1, 1, 1], 0).unwrap();
+    g.set([2, 2, 2], 0).unwrap();
+    assert!(cache.update(&g, &classes, usize::MAX).unwrap().full);
+    // and a revision behind the cached one, of the same grid, cannot be told from what is cached
+    let mut older = g.clone();
+    older.set([5, 5, 5], 0).unwrap();
+    cache.update(&older, &classes, usize::MAX).unwrap();
+    let behind = {
+        let mut b = g.clone();
+        b.set([6, 6, 6], 0).unwrap();
+        b
+    };
+    assert!(cache.update(&behind, &classes, usize::MAX).unwrap().full, "another copy");
+    // other classes mean other quads, not the cached ones
+    let glass = Classes::identity().with_see_through(&[1]);
+    let update = cache.update(&behind, &glass, usize::MAX).unwrap();
+    assert!(update.full, "the classes changed");
+    assert_eq!(cache.quads(), mesh_quads(&behind, &glass));
+}
+
+#[test]
+fn a_cache_over_its_budget_is_refused_and_forgets_what_it_had() {
+    let classes = Classes::identity();
+    let mut g = grid(block([0, 0, 0], 16, 1));
+    let mut cache = SurfaceCache::new();
+    cache.update(&g, &classes, usize::MAX).unwrap();
+    // cells that touch only by their edges: 6 faces each, 16 of them, 96 quads over a budget of 12 quads
+    for x in 0..8 {
+        g.set([2 * x, 0, 20], 1).unwrap();
+        g.set([2 * x + 1, 0, 21], 1).unwrap();
+    }
+    let refused = cache.update(&g, &classes, 12 * BYTES_PER_QUAD).unwrap_err();
+    assert!(refused.contains("voxel surface exceeds memory budget"), "{refused}");
+    assert!(cache.quads().is_empty(), "a refused surface leaves nothing to draw");
+    let update = cache.update(&g, &classes, usize::MAX).unwrap();
+    assert!(update.full, "what was forgotten is made again");
+    assert_eq!(cache.quads(), mesh_quads(&g, &classes));
+}
