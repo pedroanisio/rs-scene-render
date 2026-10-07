@@ -1181,3 +1181,59 @@ fn the_part_that_stays_after_a_cut_has_all_its_cells_when_they_end_at_the_edge_o
         );
     }
 }
+
+/// A driver that cuts as a [`Cutter`] does and remembers, for each body, the state it was asked to load at each step.
+struct History {
+    inner: Cutter,
+    seen: Vec<Vec<(u64, BodyState)>>,
+}
+
+impl Driver3 for History {
+    fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
+        self.inner.kinematic(t, which)
+    }
+    fn fields(&mut self, t: f64) -> Vec<Field> {
+        self.inner.fields(t)
+    }
+    fn voxel_cut(
+        &mut self,
+        t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        i: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        self.inner.voxel_cut(t, parent, revision, i)
+    }
+    fn load(&mut self, step: u64, _: f64, body: usize, state: &BodyState) -> Result<Option<Load3>, String> {
+        self.seen[body].push((step, *state));
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_piece_is_a_body_with_its_own_mass_and_centre_at_the_first_step_it_is_asked_about() {
+    // a slot that has been stepped as a disabled body has its collider disabled by its parent until the pipeline runs again: the mass properties that
+    // the cut gives it have to be those that the very next question about the body finds (its centre of mass), not the ones of an empty body
+    let mut w = world(2, None);
+    let mut d = History { inner: Cutter::new(0.2), seen: vec![vec![]; 3] };
+    let frame = w.frame_at(0.3, &mut d);
+    assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    let first =
+        d.seen[1].iter().find(|(step, state)| *step >= 20 && state.enabled).expect("the piece was asked about").1;
+    let wanted = shape_mass_properties(
+        &Shape3::Voxels { size: SIZE, cells: cells_of(6..12, 0..2, 0..2) },
+        24.0 * CELL_MASS,
+        1.0,
+    )
+    .unwrap()
+    .centre;
+    let local = local_centre(&first.pose, first.centre);
+    for k in 0..3 {
+        assert!(
+            (local[k] - wanted[k]).abs() < 1e-9,
+            "axis {k}: the centre of mass of the piece at its first step is {} and its cells' is {}",
+            local[k],
+            wanted[k]
+        );
+    }
+}

@@ -288,7 +288,16 @@ impl World3 {
                 let cs = self.state.bodies[hs].colliders()[0];
                 self.state.colliders[cs].set_shape(piece);
                 self.state.colliders[cs].set_mass_properties(props);
+                let shows = driver.enabled(t, slot);
+                if shows {
+                    // a slot that has been stepped as a disabled body has its collider disabled by its parent until the next step of the pipeline, and a
+                    // collider that is not enabled is left out of the mass properties of the body: switched off and on it is enabled at once, so that the
+                    // very next question about the body (its centre of mass, its mass for a field) finds the piece and not an empty body
+                    self.state.colliders[cs].set_enabled(false);
+                    self.state.colliders[cs].set_enabled(true);
+                }
                 let body = &mut self.state.bodies[hs];
+                body.set_enabled(shows);
                 body.set_body_type(RigidBodyType::Dynamic, true);
                 body.set_position(pose, true);
                 body.recompute_mass_properties_from_colliders(&self.state.colliders);
@@ -297,7 +306,6 @@ impl World3 {
                 self.state.slot_active[slot] = true;
                 self.state.slot_since[slot] = Some(step);
                 self.state.voxel_cells[slot] = Some(std::sync::Arc::new(sorted_unique(&cut.pieces[i].cells)));
-                body.set_enabled(driver.enabled(t, slot));
                 self.state.active[slot] = true;
             }
             self.state.slots_used[split] = used + cut.pieces.len();
