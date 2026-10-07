@@ -45,7 +45,8 @@ pub struct PtMat {
     pub texture_params: [f32; 4],
     pub borders: [[f32; 4]; 6],
     /// Absorption of the medium a refracting surface encloses: Beer-Lambert coefficient per scene
-    /// unit for each colour channel (from the attenuation colour and distance), then unused.
+    /// unit for each colour channel (from the attenuation colour and distance), then the albedo of the foam
+    /// mixed into the surface (0 when none).
     pub attenuation: [f32; 4],
 }
 
@@ -298,7 +299,8 @@ pub fn build(scene: &Scene3) -> PtScene {
                 m.specular * srgb_luma(m.specular_color).max(0.0),
                 dr.cast_shadow as u32 as f32,
                 dr.receive_shadow as u32 as f32,
-                0.0,
+                // foam mixed into the surface (the water shader's hook): 1 + the foam's roughness, or 0
+                m.foam_mix.map_or(0.0, |f| 1.0 + f.roughness.clamp(0.0, 1.0)),
             ],
             maps,
             borders: std::array::from_fn(|i| {
@@ -314,7 +316,12 @@ pub fn build(scene: &Scene3) -> PtScene {
                 m.normal_scale,
                 m.occlusion_strength,
             ],
-            attenuation: absorption(&m.attenuation_color, m.attenuation_distance),
+            attenuation: {
+                // the fourth value is the albedo of foam mixed into the surface, when it is
+                let mut a = absorption(&m.attenuation_color, m.attenuation_distance);
+                a[3] = m.foam_mix.map_or(0.0, |f| f.albedo.clamp(0.0, 1.0));
+                a
+            },
         });
         if let Some(key) = instances::key(dr).filter(|k| repetitions[k] > 1) {
             let prototype = *prototype_ids.entry(key).or_insert_with(|| {
@@ -620,6 +627,22 @@ fn bvh(tris: &[[Vec3; 3]], nodes: &mut Vec<PtNode>) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_foam_hook_changes_the_surface_at_the_hit_and_brings_in_no_refracted_shadow_ray() {
+        let plain = format!(
+            "{}\n{}\n{}",
+            include_str!("sampling.wgsl"),
+            include_str!("pathtrace.wgsl"),
+            include_str!("volume.wgsl")
+        );
+        assert!(!plain.contains("s.trans = s.trans * (1.0 - foam);"), "scenes without foam keep their shader text");
+        for base in [plain.clone(), grid_source(), water_source(&plain)] {
+            let foamy = foam_source(&base);
+            assert!(foamy.contains("var s = surf_of(m);") && foamy.contains("s.trans = s.trans * (1.0 - foam);"));
+            assert_eq!(foamy.contains("fn light_through("), base.contains("fn light_through("));
+        }
+    }
 
     #[test]
     fn the_water_shader_adds_the_refracted_shadow_ray_and_the_plain_one_does_not_have_it() {
@@ -952,6 +975,24 @@ fn water_source(base: &str) -> String {
     format!("{hooked}\n{}", include_str!("pathtrace_water.wgsl"))
 }
 
+/// The shader for scenes where some surface has foam mixed into its material: the shader it is given plus the mix at the
+/// hit. A surface's share of foam, the alpha of its vertex colour, takes its albedo, its transmission and its roughness
+/// toward the foam's. Scenes without such a surface keep the text, and so the compiled code, they had.
+fn foam_source(base: &str) -> String {
+    const SURFACE: &str = "        let s = surf_of(m);\n";
+    assert_eq!(base.matches(SURFACE).count(), 1, "one place hooks in the foam: {SURFACE}");
+    base.replace(
+        SURFACE,
+        "        var s = surf_of(m);\n\
+         \x20       if (m.extra.w > 0.5) {\n\
+         \x20           let foam = clamp(color.a, 0.0, 1.0);\n\
+         \x20           s.albedo = mix(s.albedo, vec3(m.attenuation.w), foam);\n\
+         \x20           s.trans = s.trans * (1.0 - foam);\n\
+         \x20           s.a = mix(s.a, max((m.extra.w - 1.0) * (m.extra.w - 1.0), 1e-3), foam);\n\
+         \x20       }\n",
+    )
+}
+
 /// Pipelines of the path tracer (built on first use).
 pub struct PtGpu {
     bgl0: wgpu::BindGroupLayout,
@@ -961,7 +1002,7 @@ pub struct PtGpu {
     trace_volume: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
     /// The same with the `WATER` constant for scenes with transmissive materials: no volumes, volumes
     /// (by whether their lighting needs albedo), and grid-lit volumes (the same).
-    trace_water: [std::sync::OnceLock<wgpu::ComputePipeline>; 5],
+    trace_water: [std::sync::OnceLock<wgpu::ComputePipeline>; 15],
     module: wgpu::ShaderModule,
     /// The variant of the shader with light grids, its group-1 layout and pipelines (built on first use).
     bgl_grid: wgpu::BindGroupLayout,
@@ -1129,8 +1170,10 @@ impl PtGpu {
     }
 
     fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
-        if scene.draws.iter().any(|dr| dr.material.transmission > 0.0) {
-            return self.water_pipeline(d, scene, grid);
+        let water = scene.draws.iter().any(|dr| dr.material.transmission > 0.0);
+        let foam = scene.draws.iter().any(|dr| dr.material.foam_mix.is_some());
+        if water || foam {
+            return self.variant_pipeline(d, scene, grid, water, foam);
         }
         if scene.volumes.is_empty() {
             return &self.trace;
@@ -1176,19 +1219,29 @@ impl PtGpu {
         })
     }
 
-    /// The trace pipeline of a scene with transmissive materials: the shader with `WATER` set, so
-    /// scenes without them keep the pipeline, and the speed, they had.
-    fn water_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
+    /// The trace pipeline of a scene with transmissive materials (`water`: the shader with `WATER` set), with foam mixed into
+    /// some surface's material (`foam`), or both. Scenes with neither keep the pipeline, and the speed, they had; foam alone does
+    /// not bring in the refracted shadow rays, which cost several times the plain shader.
+    fn variant_pipeline(
+        &self,
+        d: &wgpu::Device,
+        scene: &Scene3,
+        grid: bool,
+        water: bool,
+        foam: bool,
+    ) -> &wgpu::ComputePipeline {
         let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
         let media = !scene.volumes.is_empty();
         let slot = match (media, grid) {
             (false, _) => 0,
             (true, false) => 1 + lighting as usize,
             (true, true) => 3 + lighting as usize,
-        };
+        } + 5 * if water { foam as usize } else { 2 };
         self.trace_water[slot].get_or_init(|| {
-            let constants =
-                [("WATER", 1.0), ("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
+            let mut constants = vec![("HAS_MEDIA", media as u8 as f64), ("MEDIUM_LIGHTING", lighting as u8 as f64)];
+            if water {
+                constants.extend([("WATER", 1.0), ("FOAM", foam as u8 as f64)]);
+            }
             let source = if media && grid {
                 grid_source()
             } else {
@@ -1199,16 +1252,18 @@ impl PtGpu {
                     include_str!("volume.wgsl")
                 )
             };
+            let source = if water { water_source(&source) } else { source };
+            let source = if foam { foam_source(&source) } else { source };
             let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("pathtrace-water"),
-                source: wgpu::ShaderSource::Wgsl(water_source(&source).into()),
+                label: Some("pathtrace-variant"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
             let plain_layout;
             let layout = if media && grid {
                 &self.grid_pipelines(d).layout
             } else {
                 plain_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("pathtrace-water"),
+                    label: Some("pathtrace-variant"),
                     bind_group_layouts: &[Some(&self.bgl0)],
                     immediate_size: 0,
                 });
@@ -1216,7 +1271,7 @@ impl PtGpu {
             };
             let _creation = crate::gpu::creation_lock();
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("pathtrace-water"),
+                label: Some("pathtrace-variant"),
                 layout: Some(layout),
                 module: &module,
                 entry_point: Some("cs_trace"),

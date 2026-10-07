@@ -1,7 +1,9 @@
-//! The path tracer: light through water and glass, the specular lobe, the horizon, instances and tiles, and the geodesic pass.
+//! The path tracer: light through water and glass, foam mixed into the water, the specular lobe, the horizon, instances and tiles, and the geodesic pass.
 
 mod common;
 
+#[path = "path_tracer/foam_albedo.rs"]
+mod foam_albedo;
 #[path = "path_tracer/geodesic.rs"]
 mod geodesic;
 #[path = "path_tracer/geodesic_scene.rs"]

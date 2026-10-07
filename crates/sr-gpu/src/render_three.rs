@@ -1430,7 +1430,28 @@ impl Renderer {
         }
         if primitive_kind(n) != "mesh" {
             if let Some(mesh) = self.primitive_mesh(plan, ctx, n) {
-                let (material, maps) = doc_mat.unwrap_or_else(default_mat);
+                let (mut material, maps) = doc_mat.unwrap_or_else(default_mat);
+                if n.kind == "ocean" {
+                    // whitewater foam in the albedo mode is the coverage the surface's vertices carry: the water mixes toward it
+                    let config =
+                        sr_model::element::children(&*n.elem).into_iter().find(|e| e.element_name() == "whitewater");
+                    if let Some(c) =
+                        config.filter(|c| c.get_attr("foamMode").is_some_and(|v| v.to_string() == "albedo"))
+                    {
+                        if material.alpha_mode == sr_3d::AlphaMode::Opaque {
+                            let a = Attrs { e: c, props: None };
+                            material.foam_mix = Some(sr_3d::FoamMix {
+                                albedo: a.num("foamAlbedo", 0.9) as f32,
+                                roughness: a.num("foamRoughness", 0.8) as f32,
+                            });
+                        } else {
+                            plan.stats.errors.push(format!(
+                                "{}: whitewater foamMode=\"albedo\" needs a water material with an opaque alpha mode",
+                                n.id
+                            ));
+                        }
+                    }
+                }
                 draws.push(Draw3 {
                     mesh: MeshSrc::Cached(mesh),
                     model: world,

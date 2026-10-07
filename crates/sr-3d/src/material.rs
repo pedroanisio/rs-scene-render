@@ -10,6 +10,14 @@ pub enum AlphaMode {
     Blend,
 }
 
+/// Foam mixed into the surface's material: where the share of foam in the alpha of the vertex colour is 1 the surface is a
+/// diffuse white of `albedo` and `roughness` that lets no light through; where it is 0 the material is its own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoamMix {
+    pub albedo: f32,
+    pub roughness: f32,
+}
+
 /// Every scalar and colour input of the shading model. Colours are linear.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialParams {
@@ -52,6 +60,8 @@ pub struct MaterialParams {
     pub unevenness: f32,
     pub unevenness_scale: f32,
     pub unevenness_seed: u32,
+    /// The share of foam of each vertex (in its colour's alpha) mixes the material toward the foam's; none leaves the material as it is.
+    pub foam_mix: Option<FoamMix>,
 }
 
 impl Default for MaterialParams {
@@ -92,6 +102,7 @@ impl Default for MaterialParams {
             unevenness: 0.0,
             unevenness_scale: 8.0,
             unevenness_seed: 0,
+            foam_mix: None,
         }
     }
 }
