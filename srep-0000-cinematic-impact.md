@@ -801,9 +801,12 @@ the density each (the lowest and highest cell index, integers, from sums taken i
 number of threads). A face is asked for room only if the air in the smoke nearest it is going toward it (the density-weighted
 velocity along the axis, summed over the slabs of the smoke within the margin of that end, points to the face): a face behind a plume
 that rises away from it is no reason to take from the room it rises into (test
-`a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`; the fireball of the hero scene, which expands toward
-its own bottom face for a moment and then rises, made a window of the first policy, that asked for room on every face, move 22
-units down), and smoke at rest is going toward none. On the hero scene with `followMargin="3"` the window still moves down 6
+`a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`, the oracle of the policy: a puff at rest or rising
+away from a face must not move the window toward it), and smoke at rest is going toward none. The hero scene is not what justifies
+the policy: the window of the hero is the same under the first policy (d87fc65, every face asked for room) and under this one (80f70d5),
+the first cell of the grid at y = -78, -72, -72, -72, -75, -90 over the six times measured with the first and -78, -72, -72, -75, -90 at
+1, 1.25, 3, 5 and 5.96 s with this one (6 units down at about 1.1 s in both). A figure of 22 units that an earlier version of this section
+gave for the first policy on the hero is withdrawn: it is not a measurement of either commit. On the hero scene with `followMargin="3"` the window still moves down 6
 units (two cells) at 1.1 s, when the expanding fireball comes within the margin of the bottom face, and stays there to 4 s; a
 smaller margin keeps it where it began for longer, at the price of smoke nearer the face. The sources are the
 shapes of the `pyroSource` and `pyroImpulse` that act in the step, and **a window never leaves a slab that holds a cell of such a
@@ -850,10 +853,12 @@ units there) does not fit a window of 52 rows with a plume of 145 units, and a l
 at all. The margin is in cells, so a copy of the scene with cells of 1.5 units (`hero-hires.scene.xml`) needs a margin of 6 for the
 same distance. The frame at 3 s of the 720p probe does change, and was expected to: the window has moved at 1.125 s, before 3 s, so the frame cannot be
 the one of the scene without follow. Its sha256 has three values, each with its reason: `24c6ab56...` (963b614, the scene without the
-follow attributes), `eeb71e14...` (d87fc65, follow merged: the window moved by the first policy and the noise keyed by the cell of the
-window) and `c8a66483...` (from 80f70d5, and the same on 28887eb and later: the noise keyed by the cell of the box the state began in, and a face
-asked for room only if the air in the smoke nearest it goes toward it). The two corrections between the last two (8c30823, 80f70d5)
-change 185,284 pixels of 921,600 (20.1 %, largest difference 157 levels, mean 0.153); the frames without follow are bit for bit the same
+follow attributes), `eeb71e14...` (d87fc65, follow merged, the noise keyed by the cell of the
+window) and `c8a66483...` (from 80f70d5, and the same on 28887eb and later: the noise keyed by the cell of the box the state began in). The
+two commits between the last two (8c30823, the noise key, and 80f70d5, the policy of the faces) change 185,284 pixels of 921,600 (20.1 %,
+largest difference 157 levels, mean 0.153). The window of the hero is the same under both, so these pixels are attributed to the noise
+key (8c30823: the hero has turbulence, and the noise of a cell depended on where the window was) unless a measurement says otherwise (a probe at
+3.0 s with only 8c30823 would decide; it has not been made); the frames without follow are bit for bit the same
 in both (frames 120 and 143, sha256 `a9d92b13...` and `ea8a614c...`), so the path without follow did not change. A frame is a function of
 the policy, and a change of policy changes the hero's frames after the first move of the window: the hash is not a fixed reference of
 the scene but of the scene at a commit.
