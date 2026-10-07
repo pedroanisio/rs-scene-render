@@ -245,6 +245,28 @@ fn prim_triangles(prim: &sr_3d::Primitive) -> Triangles {
     (pts, tris)
 }
 
+/// The shape and the mass of an object of cells (primitive voxels) whose `rigidBody` `b` has the cells as its collider: the asset's cells, each
+/// `cellSize` of the object (or of the asset, or 1) times the node's scale on a side, and the mass that its density gives them. The origin of
+/// the body is the minimum corner of the box of cells, as the origin of the object is.
+fn cells_body(
+    p: &Program,
+    n: &FrameNode,
+    b: &dyn Element,
+    s: [f64; 3],
+    pixels_per_meter: f64,
+) -> Result<(Shape3, f64), String> {
+    let key = n.asset.as_deref().ok_or("the object names no voxel asset")?;
+    let model = crate::voxel_asset::load(p, key)?;
+    if s.iter().any(|c| !(c.is_finite() && *c > 0.0)) {
+        return Err("a body of cells cannot be mirrored or have a scale that is not positive".into());
+    }
+    let cell = crate::voxel_asset::cell_size(opt(&*n.elem, "cellSize"), &model);
+    let size = s.map(|c| c * cell);
+    let density = num(b, "density", 0.0);
+    let body = crate::voxels::body(&model.occupancy, size, density, pixels_per_meter)?;
+    Ok((body.shape, body.mass))
+}
+
 /// The collision shape of object `n` for `rigidBody` `b`, in the object's axes scaled by `s`.
 fn shape_for(
     p: &Program,
@@ -521,8 +543,24 @@ pub(crate) fn build(
                 })
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
+        // an object of cells whose collider is the cells: the shape and the mass are the cells'
+        let of_cells = text(&*n.elem, "primitive").as_deref() == Some("voxels")
+            && matches!(text(c, "shape").as_deref(), None | Some("auto" | "voxels"));
+        let mut cells_mass = None;
         let shape = if matches!(plan, Plan3::Placeholder) || sequence_budget.is_some() {
             Shape3::Sphere(1.0)
+        } else if of_cells {
+            let ppm = ph.map_or(100.0, |p| p.pixels_per_meter.get());
+            match cells_body(p, n, c, scale, ppm) {
+                Ok((shape, mass)) => {
+                    cells_mass = Some(mass);
+                    shape
+                }
+                Err(error) => {
+                    failures.push(format!("{}: rigidBody: {error}", n.id));
+                    Shape3::Sphere(1.0)
+                }
+            }
         } else {
             shape_for(p, n, c, scale, problems, failures)
         };
@@ -539,7 +577,7 @@ pub(crate) fn build(
         specs.push(Body3Spec {
             kind,
             shape,
-            mass: num(c, "mass", 1.0),
+            mass: cells_mass.unwrap_or_else(|| num(c, "mass", 1.0)),
             friction: num(c, "friction", 0.5),
             restitution: num(c, "restitution", 0.0),
             linear_damping: num(c, "linearDamping", 0.01),
