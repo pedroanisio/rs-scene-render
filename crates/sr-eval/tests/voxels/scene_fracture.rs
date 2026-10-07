@@ -187,3 +187,35 @@ fn the_pieces_of_a_block_that_breaks_carry_the_momentum_it_had_end_to_end() {
         assert!((momentum[i] - total * v).abs() < 1e-6 * total, "axis {i}: {} against {}", momentum[i], total * v);
     }
 }
+
+#[test]
+fn a_fracture_of_cells_before_a_fracture_of_a_mesh_does_not_fire_the_mesh_at_its_own_time() {
+    // the events of the world are in the order of the document: the cells' is the first and the mesh's the second, and each frame shows a mesh broken when
+    // the event of that mesh has fired, whatever fractures come before it in the document
+    let dir = Dir::new("mixed");
+    std::fs::write(dir.0.join("block.srvol"), srvol::write(&block(), 0.25).unwrap()).unwrap();
+    let xml = r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="1.5"/>
+        <assets><voxelAsset id="model" src="block.srvol"/></assets>
+        <materials><material id="stone" baseColor="#808080"/><material id="inside" baseColor="#ff0000"/></materials>
+        <composition>
+          <object3D id="block" primitive="voxels" voxels="model" material="stone">
+            <rigidBody density="2400" linearDamping="0" angularDamping="0" collidesWith="none"/>
+            <fracture at="0.2" pieces="4" seed="3"/>
+          </object3D>
+          <object3D id="slab" primitive="box" width="2" height="2" depth="2" x="20" visible="false">
+            <rigidBody type="static" mass="4" linearDamping="0" angularDamping="0" collidesWith="none"/>
+            <fracture at="1" pieces="4" seed="42" interiorMaterial="inside"/>
+          </object3D>
+        </composition>
+        <physics gravityY="0" pixelsPerMeter="1" fixedStep="0.01" bounds="none"/></scene>"##;
+    let ev = evaluator(&dir, xml);
+    let slab = |t: f64| {
+        let frame = ev.evaluate(t);
+        assert!(frame.failures.is_empty() && frame.problems.is_empty(), "{:?} {:?}", frame.failures, frame.problems);
+        frame.nodes.iter().find(|n| &*n.id == "slab").unwrap().fracture.is_some()
+    };
+    assert!(!slab(0.1), "before both");
+    assert!(!slab(0.5), "the block's fracture has fired, the slab's has not");
+    assert!(slab(1.2), "the slab's own time");
+    assert!(block_node(&ev, 0.5).voxels.unwrap().pieces.len() > 1, "and the block's pieces are there");
+}

@@ -873,7 +873,7 @@ pub(crate) fn build(
             }),
             dust: None,
         });
-        fractures.push(FractureNode { source, indices, geometry });
+        fractures.push(FractureNode { event: events.len() - 1, source, indices, geometry });
     }
     // the slots that take the pieces of an object of cells that a crater cuts: bodies of one cell, dynamic and out of the world until a cut gives them a
     // piece, as many as the object says (`maxFragments`), after every other body of the world
@@ -1412,6 +1412,8 @@ impl Phys3 {
 }
 
 pub(crate) struct FractureNode {
+    /// The place of the fracture among the world's events (a fracture of cells has one too, and no node here).
+    event: usize,
     source: usize,
     indices: Vec<usize>,
     geometry: Arc<crate::fracture::Geometry>,
@@ -1536,8 +1538,8 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
             }
         }
     }
-    for (k, fracture) in three.fractures.iter().enumerate() {
-        if !frame.fractured.get(k).copied().unwrap_or(false) {
+    for fracture in &three.fractures {
+        if !frame.fractured.get(fracture.event).copied().unwrap_or(false) {
             continue;
         }
         let Some(i) = index_of(g, &three.bodies[fracture.source].id) else { continue };
