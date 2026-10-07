@@ -61,3 +61,30 @@ fn whitewater_batches_render_typed_materials_in_raster_and_pathtrace() {
         assert!(pixels.iter().any(|p| p[1] > 0.3 && p[1] > p[0] * 3.), "green foam absent in {mode}");
     }
 }
+
+#[test]
+fn whitewater_foam_in_the_albedo_mode_draws_no_foam_triangles_and_renders_in_the_path_tracer() {
+    let Some(gpu) = gpu() else { return };
+    let mut shots = Vec::new();
+    for mode in ["", r#"foamMode="albedo""#] {
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="10" duration="2" background="#101020"/><materials><material id="water" baseColor="#102040" roughness="0.3" doubleSided="true"/><material id="foam" baseColor="#10FF10" unlit="true" doubleSided="true"/><material id="spray" baseColor="#FF1010" unlit="true" doubleSided="true"/></materials><composition><camera id="cam" x="0" y="-6" z="-8" target="sea" renderer="pathtrace" pathSamples="4" maxBounces="2"/><ocean id="sea" width="8" depth="4" bottomDepth="2" initialVelocityX="2" boundary="periodic" dt="0.1" material="water"><whitewater emissionRate="30" threshold="0.1" radius="0.2" sprayFraction="0.5" foamMaterial="foam" sprayMaterial="spray" {mode}/></ocean></composition><lights><light id="sun" type="directional" intensity="3" yaw="45"/><light id="fill" type="ambient" intensity="1"/></lights></scene>"##
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let frame = ev.evaluate(0.5);
+        assert!(frame.problems.is_empty(), "{:?}", frame.problems);
+        let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let out = renderer.render(&frame, ev.program());
+        assert!(out.stats.errors.is_empty() && out.stats.unsupported.is_empty(), "{:?}", out.stats);
+        shots.push((out.stats.triangles, renderer.read(&out.texture)));
+    }
+    let (particles, albedo) = (&shots[0], &shots[1]);
+    assert!(albedo.0 < particles.0, "the foam is still drawn as triangles: {} against {}", albedo.0, particles.0);
+    assert!(
+        !albedo.1.iter().any(|p| p[1] > 0.3 && p[1] > p[0] * 3.),
+        "the foam material is drawn although the foam is the water's own"
+    );
+    assert!(albedo.1.iter().any(|p| p[2] > 0.02), "the water is absent");
+    assert_ne!(particles.1, albedo.1);
+}
