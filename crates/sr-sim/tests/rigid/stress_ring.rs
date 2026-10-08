@@ -78,7 +78,8 @@ fn a_pull_across_a_ring_is_shared_by_the_areas_of_the_joints_that_the_plane_cros
         load(pieces[1].centre, 0.25 * f, 1),
         load(pieces[3].centre, 0.75 * f, 3),
     ];
-    let step = Step { whole, before: rest, after: rest, dt, accel: [0.0; 3], contacts: &contacts, anchor: None };
+    let step =
+        Step { whole, before: rest, after: rest, dt, accel: [0.0; 3], contacts: &contacts, couples: &[], anchor: None };
     let side = &across.side;
     let in_part = |i: usize| side.contains(i as u32, pieces[i].centre);
     let q = [0.5, 0.75, 0.0];

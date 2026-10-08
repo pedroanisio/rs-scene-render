@@ -3,7 +3,7 @@
 //! on a part and what the part puts on the rest are equal and opposite, and what is not a load on the body's points (damping) is no stress.
 #![allow(clippy::needless_range_loop)]
 
-use sr_sim::stress::balance::{momentum, spin_momentum, Located, MassSum, Rigid, Step};
+use sr_sim::stress::balance::{momentum, spin_momentum, Couple, Located, MassSum, Rigid, Step};
 use sr_sim::stress::{cut_stresses, JointSection};
 
 const G: f64 = 9.80665;
@@ -53,7 +53,7 @@ fn a_body_that_falls_freely_puts_no_load_on_any_part_of_itself() {
     let mut after = before;
     after.linear[1] -= G * dt;
     after.position = std::array::from_fn(|a| before.position[a] + dt * (before.linear[a] + after.linear[a]) / 2.0);
-    let step = Step { whole, before, after, dt, accel: [0.0, -G, 0.0], contacts: &[], anchor: None };
+    let step = Step { whole, before, after, dt, accel: [0.0, -G, 0.0], contacts: &[], couples: &[], anchor: None };
     for cut in 1..4 {
         let part = sum(&parts[cut..]);
         let w = step.on_part(&part, &|i| i >= cut, [0.5 * cut as f64, 0.0, 0.0]);
@@ -72,13 +72,48 @@ fn a_spinning_body_pulls_each_part_toward_its_axis_by_the_centripetal_force() {
     let turn = |angle: f64| [[angle.cos(), 0.0, angle.sin()], [0.0, 1.0, 0.0], [-angle.sin(), 0.0, angle.cos()]];
     let before = Rigid { rotation: turn(0.0), angular: [0.0, w, 0.0], ..at_rest(&whole, [0.0; 3]) };
     let after = Rigid { rotation: turn(w * dt), ..before };
-    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &[], anchor: None };
+    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &[], couples: &[], anchor: None };
     let right = &parts[1];
     let load = step.on_part(right, &|i| i == 1, [0.0; 3]);
     let want = right.mass * w * w * 1.0;
     // along -x (toward the axis), to the first order of the angle turned in the step (the load is that of the middle of the step)
     assert!(close(load.force[0].abs(), want, 2e-3), "{:?} against {want}", load.force);
     assert!(load.force[0] < 0.0 && load.force[1].abs() < 1e-6 * want, "{:?}", load.force);
+}
+
+#[test]
+fn a_couple_on_a_piece_is_a_moment_on_the_parts_that_have_it_and_on_none_of_the_others_whatever_the_cut() {
+    // a beam of four cubes at rest, held at the first, and a twist of 5 N m s about y on the tip (a contact's friction about its normal): the rest of the body has to hold the part that has
+    // the tip against it, with the same moment wherever the cut is (a couple has no arm), and the part that has not the tip is held by nothing
+    let parts = beam(4);
+    let whole = sum(&parts);
+    let dt = 1.0 / 240.0;
+    let rest = at_rest(&whole, [0.0; 3]);
+    let twist = Couple { moment: [0.0, 5.0, 0.0], piece: 3 };
+    let step = Step {
+        whole,
+        before: rest,
+        after: rest,
+        dt,
+        accel: [0.0; 3],
+        contacts: &[],
+        couples: &[twist],
+        anchor: Some(0),
+    };
+    for cut in 1..4 {
+        let part = sum(&parts[cut..]);
+        for q in [[0.5 * cut as f64, 0.0, 0.0], [3.0, 1.0, -2.0]] {
+            let load = step.on_part(&part, &|i| i >= cut, q);
+            assert!(close(load.moment[1], -5.0 / dt, 1e-9), "cut {cut}: {:?}", load.moment);
+            assert!(load.force.iter().all(|f| f.abs() < 1e-9), "{:?}", load.force);
+        }
+    }
+    let middle = sum(&parts[1..3]);
+    let load = step.on_part(&middle, &|i| (1..3).contains(&i), [0.5, 0.0, 0.0]);
+    assert!(load.moment.iter().all(|m| m.abs() < 1e-9), "a part without the tip: {:?}", load.moment);
+    // the whole body, at rest, leaves exactly the twist reversed: it is what the joint to the world holds
+    let (force, moment) = step.unbalanced();
+    assert!(force.iter().all(|f| f.abs() < 1e-9) && close(moment[1], -5.0, 1e-9), "{force:?} {moment:?}");
 }
 
 #[test]
@@ -89,7 +124,16 @@ fn a_beam_held_at_one_end_with_a_weight_on_the_other_has_the_bending_stress_of_t
     let dt = 1.0 / 240.0;
     let rest = at_rest(&whole, [0.0; 3]);
     let tip = Located { at: [2.0, 0.0, 0.0], impulse: [0.0, -300.0 * dt, 0.0], piece: 3 };
-    let step = Step { whole, before: rest, after: rest, dt, accel: [0.0, -G, 0.0], contacts: &[tip], anchor: Some(0) };
+    let step = Step {
+        whole,
+        before: rest,
+        after: rest,
+        dt,
+        accel: [0.0, -G, 0.0],
+        contacts: &[tip],
+        couples: &[],
+        anchor: Some(0),
+    };
     // the side that is the tip's (pieces 1 to 3), the rest of the beam being the root: the cut at x = 0.5
     let cut = 0.5;
     let part = sum(&parts[1..]);
@@ -155,7 +199,7 @@ fn what_the_rest_puts_on_a_part_and_what_the_part_puts_on_the_rest_are_equal_and
     ];
     let q = [3.0, 1.2, -1.5];
     for anchor in [None, Some(0usize)] {
-        let step = Step { whole, before, after, dt, accel: [0.0, -G, 0.0], contacts: &contacts, anchor };
+        let step = Step { whole, before, after, dt, accel: [0.0, -G, 0.0], contacts: &contacts, couples: &[], anchor };
         for cut in 1..5 {
             let (low, high) = (sum(&parts[..cut]), sum(&parts[cut..]));
             let a = step.on_part(&low, &|i| i < cut, q);
@@ -197,7 +241,7 @@ fn damping_is_a_rigid_acceleration_that_stresses_nothing_and_the_centripetal_loa
     let before = frame(0.2, w0, 10.0);
     let mut after = frame(0.2 + mean * dt, w1, 9.9);
     after.position[0] += 0.5 * (10.0 + 9.9) * dt;
-    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &[], anchor: None };
+    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &[], couples: &[], anchor: None };
     let part = sum(&parts[2..]);
     let load = step.on_part(&part, &|i| i >= 2, after.world(whole.centre()));
     // the centre of the part is 0.5 m from the centre of mass along the body's x axis; the impulse of a step of a turn is along the inward direction of
@@ -256,7 +300,16 @@ fn the_load_on_a_part_is_the_same_in_a_frame_that_moves_at_three_hundred_metres_
     };
     let result = |boost: [f64; 3]| {
         let (b, a, contacts, q) = make(boost);
-        let step = Step { whole, before: b, after: a, dt, accel: [0.0, -G, 0.0], contacts: &contacts, anchor: None };
+        let step = Step {
+            whole,
+            before: b,
+            after: a,
+            dt,
+            accel: [0.0, -G, 0.0],
+            contacts: &contacts,
+            couples: &[],
+            anchor: None,
+        };
         let part = sum(&parts[2..]);
         step.on_part(&part, &|i| i >= 2, q)
     };
@@ -315,7 +368,7 @@ fn a_spinning_beam_pulled_apart_along_its_axis_has_no_bending_whatever_it_turns_
         Located { at: after.world([0.0, 0.0, 0.0]), impulse: direction.map(|d| -d * force), piece: 0 },
         Located { at: after.world([2.0, 0.0, 0.0]), impulse: direction.map(|d| d * force), piece: 3 },
     ];
-    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &contacts, anchor: None };
+    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &contacts, couples: &[], anchor: None };
     let part = sum(&parts[2..]);
     let q = [1.0, 0.0, 0.0];
     let load = step.on_part_local(&part, &|i| i >= 2, q);

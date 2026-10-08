@@ -1385,38 +1385,56 @@ fn a_block_that_lands_on_a_beam_that_tilts_under_it_slides_by_a_centimetre_a_sec
 }
 
 #[test]
-fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_not_read_and_the_balance_says_so() {
-    // a bar turning at 5 rad/s about the vertical on its floor: the friction under it is a twist of the manifold (the simplified friction solves it apart from the tangent vector), which
-    // the world does not read: the frictions that are read add up to nothing along the floor, and the balance leaves the moment that slows the bar. Not a defect of the moment: the
-    // stress of a bar that is slowed this way is not known, and the balance says it (the whole residual is the twist)
+fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_read_and_the_balance_leaves_nothing() {
+    twist_is_read(spinning_bar(5.0), 0);
+}
+
+#[test]
+fn the_twist_is_read_on_either_body_of_the_pair_a_bar_on_a_box_listed_before_it_or_after_it() {
+    // the moment of the solver is on the first body of the pair about the direction of the force on it and on the second the other way: the box that the bar spins on is before it in the
+    // list of bodies, or after
+    twist_is_read(spinning_bar_on_box(5.0, false), 0);
+    twist_is_read(spinning_bar_on_box(5.0, true), 1);
+}
+
+fn twist_is_read(mut w: World3, parent: usize) {
+    // a bar turning at 5 rad/s about the vertical on its floor: what slows it is the twist of the manifold (the simplified friction solves a torque about the normal apart from the tangent
+    // vector), which is read once for each manifold like the friction and taken to the step's total by the same ratio. The frictions that are read add up to nothing along the floor (the
+    // bar's centre does not move), the twist is the moment that the bar loses, I d(omega) (m (L^2 + w^2) / 12 about the vertical), and the balance leaves nothing of it
     let (n, edge) = (4usize, 0.25f64);
     let mass = DENSITY * edge.powi(3) * n as f64;
-    let mut w = spinning_bar(5.0);
+    let inertia = mass * (1.0f64 + 0.25 * 0.25) / 12.0;
     let mut before = 5.0;
     let mut checked = 0;
     for step in 1..=30u64 {
         let frame = w.frame_at(step as f64 / 240.0, &mut Still);
-        let b = w.stress_balance(0).expect("read");
+        let b = w.stress_balance(parent).expect("read");
         // angular velocity about the physics' y is the scene's -y
-        let spin = frame.velocities[0].angular[1].to_radians().abs();
+        let spin = frame.velocities[parent].angular[1].to_radians().abs();
         let lost = before - spin;
         before = spin;
         if lost <= 0.0 {
             continue;
         }
         checked += 1;
-        // the horizontal friction that was read is nothing: the bar's centre does not move
         assert!(
             b.friction[0].abs() < 1e-3 * mass * G / 240.0 && b.friction[2].abs() < 1e-3 * mass * G / 240.0,
             "step {step}: {:?}",
             b.friction
         );
-        // and the moment about the vertical that the balance leaves is the spin that it lost times the moment of inertia (m (L^2 + w^2) / 12 about the vertical axis)
-        let inertia = mass * (1.0f64 + 0.25 * 0.25) / 12.0;
+        // the moment that the balance leaves is a fiftieth of what the bar lost at most (the ratio of the manifold's normals is the steady one's here, and what is left is the solver's
+        // own: the twist of the last sub-step times the ratio is 1% of the step's)
         assert!(
-            (b.moment[1].abs() - inertia * lost).abs() < 0.02 * inertia * lost,
-            "step {step}: moment {:?} against {}",
+            b.moment[1].abs() < 0.02 * inertia * lost,
+            "step {step}: moment {:?} against what the bar lost, {}",
             b.moment,
+            inertia * lost
+        );
+        // and the twist that was read is that moment, about the vertical, against the spin
+        assert!(
+            (b.twist[1].abs() - inertia * lost).abs() < 0.02 * inertia * lost,
+            "step {step}: twist {:?} against {}",
+            b.twist,
             inertia * lost
         );
     }
@@ -1425,6 +1443,16 @@ fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_not_read_and_the_
 
 /// The bar of `sliding_bar`, at rest, turning about the vertical at `omega` rad/s.
 pub fn spinning_bar(omega: f64) -> World3 {
+    spinning_bar_on(omega, None)
+}
+
+/// The same on a static box of 4 m by 1 m by 4 m instead of the floor, listed before the bar if `box_first` and after it if not (the order of the two bodies of a pair decides which of
+/// them the solver's moments are on).
+pub fn spinning_bar_on_box(omega: f64, box_first: bool) -> World3 {
+    spinning_bar_on(omega, Some(box_first))
+}
+
+fn spinning_bar_on(omega: f64, support: Option<bool>) -> World3 {
     let (n, edge) = (4usize, 0.25f64);
     let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
     let mass = DENSITY * edge.powi(3);
@@ -1432,7 +1460,19 @@ pub fn spinning_bar(omega: f64) -> World3 {
     let mut bar = body(Shape3::Voxels { size, cells }, mass * n as f64, [0.0, -edge, 0.0]);
     bar.angular_velocity = [0.0, omega.to_degrees(), 0.0];
     bar.friction = 0.5;
-    let mut bodies = vec![bar];
+    // the box's top is at y = 0, as the floor is (the scene's y is down)
+    let mut support_box = body(Shape3::Box([2.0, 0.5, 2.0]), 1.0, [0.0, 0.5, 0.0]);
+    support_box.kind = BodyKind::Static;
+    let first = usize::from(support == Some(true));
+    let mut bodies = Vec::new();
+    if support == Some(true) {
+        bodies.push(support_box.clone());
+    }
+    bodies.push(bar);
+    if support == Some(false) {
+        bodies.push(support_box);
+    }
+    let slots: Vec<usize> = (bodies.len()..bodies.len() + n - 1).collect();
     for _ in 1..n {
         bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0; 3]));
     }
@@ -1446,12 +1486,12 @@ pub fn spinning_bar(omega: f64) -> World3 {
         gravity: [0.0, -G, 0.0],
         pixels_per_meter: 1.0,
         iterations: 8,
-        bounds: Bounds3::Floor { y: 0.0 },
+        bounds: if support.is_some() { Bounds3::None } else { Bounds3::Floor { y: 0.0 } },
         joints: vec![],
         bodies,
     })
-    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..n).collect() }])
+    .with_voxel_splits(vec![VoxelSplit3 { parent: first, slots }])
     .unwrap()
-    .with_stress(vec![Stress3 { parent: 0, strength: 1e15, pieces, joints, min_cells: 1, overflow_to_dust: false }])
+    .with_stress(vec![Stress3 { parent: first, strength: 1e15, pieces, joints, min_cells: 1, overflow_to_dust: false }])
     .unwrap()
 }
