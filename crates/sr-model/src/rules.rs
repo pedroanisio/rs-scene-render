@@ -1511,8 +1511,10 @@ impl<'a> Eval<'a> {
                             .find(|d| d.is_element() && is(*d, "voxelAsset") && d.attribute("id") == Some(id))
                             .and_then(|d| d.attribute("cellSize"))
                     });
-                    let scale = ["scaleX", "scaleY", "scaleZ"].map(|k| a(k).map_or(1.0, xpath_number).abs());
-                    let size = a("cellSize").or(asset_size).map(xpath_number);
+                    // the numbers are read as the schema reads an xs:double (a sign and spaces around it are valid there, and not in an XPath number)
+                    let double = |v: &str| v.trim().parse::<f64>().ok();
+                    let scale = ["scaleX", "scaleY", "scaleZ"].map(|k| a(k).and_then(double).map_or(1.0, f64::abs));
+                    let size = a("cellSize").or(asset_size).and_then(double);
                     if size.is_some_and(|c| c * scale.into_iter().fold(f64::INFINITY, f64::min) < 0.5) {
                         self.warn(
                             n,

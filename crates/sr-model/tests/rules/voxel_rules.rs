@@ -143,3 +143,21 @@ fn the_warning_says_the_size_is_in_the_scene_and_does_not_advise_what_would_only
     assert!(text.contains("in the scene"), "{text}");
     assert!(!text.contains("scale the object"), "{text}");
 }
+
+#[test]
+fn the_numbers_of_the_size_are_read_as_the_schema_reads_a_double_and_the_limit_is_exact() {
+    // xs:double takes a sign and spaces around the number: the cells are of 0.25 in all of these
+    for object in [
+        r#"primitive="voxels" voxels="model" cellSize="+0.25""#,
+        r#"primitive="voxels" voxels="model" cellSize=" 0.25 ""#,
+        r#"primitive="voxels" voxels="model" cellSize="1" scaleX="+0.25" scaleY="+0.25" scaleZ=" 0.25""#,
+        r#"primitive="voxels" voxels="model" cellSize="0.49999""#,
+    ] {
+        assert!(warned(FILE, object), "{object}");
+    }
+    assert!(!warned(
+        FILE,
+        r#"primitive="voxels" voxels="model" cellSize="0.25" scaleX="+3" scaleY="3" scaleZ=" 3.0 ""#
+    ));
+    assert!(!warned(FILE, r#"primitive="voxels" voxels="model" cellSize="0.5""#), "0.5 is the limit and does not warn");
+}
