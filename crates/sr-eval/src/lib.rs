@@ -22,6 +22,7 @@ pub mod codes;
 pub mod crater;
 pub mod curve;
 pub mod data;
+mod debris;
 pub mod eval;
 pub mod expr;
 pub mod fracture;
@@ -48,6 +49,12 @@ pub mod splash;
 pub mod stroke_font;
 pub mod terrain;
 pub mod value;
+pub mod voxel;
+pub mod voxel_asset;
+pub mod voxel_cache;
+pub mod voxel_crater;
+pub mod voxel_cut;
+pub mod voxels;
 
 /// Closest candidate within a small edit distance ("did you mean").
 pub(crate) fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {

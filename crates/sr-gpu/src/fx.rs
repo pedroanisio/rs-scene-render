@@ -2897,7 +2897,7 @@ mod tests {
 
     #[test]
     fn moved_samples_fuse_without_changing_half_float_accumulation() {
-        let gpu = match crate::Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
@@ -2985,7 +2985,7 @@ mod tests {
 
     #[test]
     fn specialized_effects_match_general_shading_with_animated_parameters() {
-        let gpu = match crate::Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");

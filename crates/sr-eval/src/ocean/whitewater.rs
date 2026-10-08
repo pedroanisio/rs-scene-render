@@ -1,21 +1,25 @@
 use sr_3d::{Primitive, Vertex};
 use sr_sim::ocean::whitewater::{Frame, Kind};
 
-/// Two batches rather than a separate draw and prototype for every tracer.
-pub(super) fn meshes(frame: &Frame, available: usize) -> Result<[Primitive; 2], String> {
+/// Two batches rather than a separate draw and prototype for every tracer. The foam batch is empty when `foam` is false:
+/// the foam is then the coverage of the surface, not triangles.
+pub(super) fn meshes(frame: &Frame, available: usize, foam: bool) -> Result<[Primitive; 2], String> {
     // Eight-sided foam disc: 9 vertices, 24 indices. Spray octahedron:
     // 6 vertices, 24 indices. Include normal/tangent workspace and upload copy.
-    let bytes = frame.particles.len().checked_mul(9 * 256 + 24 * 8).ok_or("whitewater surface memory overflow")?;
-    if bytes > available || frame.particles.len() > u32::MAX as usize / 9 {
+    // only the tracers that are drawn are charged and given room
+    let drawn = |p: &&sr_sim::ocean::whitewater::Particle| foam || p.kind == Kind::Spray;
+    let total = frame.particles.iter().filter(drawn).count();
+    let bytes = total.checked_mul(9 * 256 + 24 * 8).ok_or("whitewater surface memory overflow")?;
+    if bytes > available || total > u32::MAX as usize / 9 {
         return Err("whitewater surface exceeds ocean surface memory budget".into());
     }
     let mut meshes = [Primitive::default(), Primitive::default()];
     for (i, mesh) in meshes.iter_mut().enumerate() {
-        let count = frame.particles.iter().filter(|p| usize::from(p.kind == Kind::Spray) == i).count();
+        let count = frame.particles.iter().filter(drawn).filter(|p| usize::from(p.kind == Kind::Spray) == i).count();
         mesh.vertices.reserve_exact(count * if i == 0 { 9 } else { 6 });
         mesh.indices.reserve_exact(count * 24);
     }
-    for p in &frame.particles {
+    for p in frame.particles.iter().filter(drawn) {
         let mesh = &mut meshes[usize::from(p.kind == Kind::Spray)];
         let radius = p.radius * (1. - (frame.time - p.birth) / p.lifetime).clamp(0., 1.);
         let base = mesh.vertices.len() as u32;
@@ -50,4 +54,39 @@ pub(super) fn meshes(frame: &Frame, available: usize) -> Result<[Primitive; 2], 
         sr_3d::compute_tangents(&mut mesh.vertices, &mesh.indices);
     }
     Ok(meshes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sr_sim::ocean::whitewater::Particle;
+
+    fn foam(n: usize) -> Frame {
+        let particles = (0..n)
+            .map(|i| Particle {
+                id: i as u64,
+                kind: Kind::Foam,
+                birth: 0.0,
+                lifetime: 2.0,
+                position: [i as f64 * 0.01, 0.0, 0.0],
+                velocity: [0.0; 3],
+                radius: 0.05,
+            })
+            .collect();
+        Frame { time: 0.5, particles }
+    }
+
+    #[test]
+    fn foam_that_is_not_drawn_takes_no_share_of_the_memory_budget() {
+        let frame = foam(1000);
+        // room for a hundred tracers: the thousand discs do not fit, and in the albedo mode there are none to fit
+        let available = 100 * (9 * 256 + 24 * 8);
+        assert!(meshes(&frame, available, true).is_err(), "the foam discs exceed the budget");
+        let [foam_batch, spray_batch] = meshes(&frame, available, false).expect("no disc is built, so none is charged");
+        assert!(
+            foam_batch.vertices.capacity() == 0 && foam_batch.indices.capacity() == 0,
+            "nothing is reserved for it"
+        );
+        assert!(spray_batch.vertices.is_empty());
+    }
 }

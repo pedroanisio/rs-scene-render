@@ -6,6 +6,9 @@ on:
   workflow_call:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && github.event_name != 'workflow_dispatch' }}
 env:
   SR_GPU_BACKEND: vulkan
   CARGO_BUILD_JOBS: 2
@@ -24,7 +27,7 @@ jobs:
       - run: python3 tools/check_release_hygiene.py --all
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+      - run: cargo test --workspace --exclude sr-eval --exclude sr-sim --exclude sr-gpu --locked --no-fail-fast -- --test-threads=1
       - run: python3 -m unittest discover -s tools/tests -v
         if: always()
       - uses: actions/upload-artifact@v6
@@ -34,6 +37,36 @@ jobs:
           path: |
             target/environment/
             target/golden-output/
+          if-no-files-found: warn
+  gpu-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - run: python3 tools/gpu_shards.py ${{ matrix.shard }} 6
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: gpu-test-diagnostics-${{ matrix.shard }}
+          path: |
+            target/environment/
+            target/golden-output/
+          if-no-files-found: warn
+  cpu-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - run: cargo test --locked -p sr-eval -p sr-sim --no-fail-fast -- --test-threads=2
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: cpu-test-diagnostics
+          path: target/environment/
           if-no-files-found: warn
   evidence:
     runs-on: ubuntu-24.04
@@ -78,8 +111,10 @@ jobs:
       - id: base
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if [ "${{ github.ref_type }}" = tag ] && git rev-parse HEAD^ >/dev/null 2>&1; then
-            base="$(git rev-parse HEAD^)"
+          if [ "${{ github.ref_type }}" = tag ] || [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              base="$(git rev-parse HEAD^)"
+            fi
           fi
           if [ -n "$base" ] && [ "$base" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "sha=$base" >> "$GITHUB_OUTPUT"
@@ -116,7 +151,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/runtime
       - uses: actions/download-artifact@v7
         with:
           name: validated-linux-tools

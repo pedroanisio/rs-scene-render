@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn solid_fill_specialization_matches_general_rasterization_exactly() {
-        let gpu = match crate::Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");

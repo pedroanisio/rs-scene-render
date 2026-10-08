@@ -17,7 +17,8 @@
 //! is displaced is what is lifted, after the window is cut off, the domain ends or a column is dry.
 use super::Error;
 
-/// The widest window, in cells, one transform is made over.
+/// The widest window, in cells, one transform is made over. A window of this size holds 1024 x 1024 complex
+/// numbers, 16 MiB, besides the grid-sized vectors of the part being filtered: callers charge it to their budget.
 pub const MAX_WINDOW: usize = 1024;
 /// Cells of margin beyond a footprint, in depths: the filter's kernel falls as
 /// `exp(-pi r / (2 h))`, 0.2% at four depths.
@@ -167,6 +168,14 @@ fn filter_sparse(
     (placed, true)
 }
 
+/// A depth of more cells than the widest window holds has no window that holds a depth of its kernel.
+fn too_deep(depth: f64, cell: f64) -> Result<(), Error> {
+    if depth / cell > MAX_WINDOW as f64 {
+        return Err(Error::Invalid("depth response depth is more than a window of cells"));
+    }
+    Ok(())
+}
+
 /// As [`depth_response`] for a non-negative `field`, giving the columns and amounts instead of
 /// adding them to a vector the size of the grid, in order of column.
 pub fn depth_response_sparse(
@@ -183,6 +192,7 @@ pub fn depth_response_sparse(
     {
         return Err(Error::Invalid("depth response depth, cell size, grid or displacement"));
     }
+    too_deep(depth, cell)?;
     Ok(filter_sparse(cells, cell, depth, height.clamp(0.0, depth), field, wet))
 }
 
@@ -223,6 +233,7 @@ pub fn depth_response(
     {
         return Err(Error::Invalid("depth response depth, cell size or grid"));
     }
+    too_deep(depth, cell)?;
     let height = height.clamp(0.0, depth);
     let positive: Vec<f64> = field.iter().map(|v| v.max(0.0)).collect();
     let mut all = filter_part(cells, cell, depth, height, &positive, out, wet);

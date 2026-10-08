@@ -76,6 +76,98 @@ fn segments_play_spans_in_order_at_their_speed() {
     assert!(near(&frames[9], 32, 18, [0, 0, 255]), "{:?}", rgb(&frames[9], 32, 18));
 }
 
+fn safe_area_delivery(
+    name: &str,
+    segments: &str,
+    visible: &str,
+) -> Result<sr_deliver::Report, sr_deliver::DeliverError> {
+    let d = dir(name);
+    let xml = format!(
+        r##"<scene version="1.3"><project width="64" height="36" fps="10" duration="3" safeArea="sa"/>
+        <output path="{}/f_%03d.png" codec="png-sequence">{segments}</output>
+        <safeAreas><safeArea id="sa" top="0" right="0.25" bottom="0" left="0" enforce="error"/></safeAreas>
+        <composition><shape id="logo" shape="rect" x="50" y="10" width="10" height="10" tags="logo" fill="#FFFFFF" {visible}/></composition></scene>"##,
+        d.display()
+    );
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu().unwrap()), &Default::default(), &mut |_, _| {})
+}
+
+fn assert_safe_area_error(result: Result<sr_deliver::Report, sr_deliver::DeliverError>) {
+    match result {
+        Err(sr_deliver::DeliverError::Document(report)) => {
+            assert!(report.diagnostics.iter().any(|d| d.code == "SA01" && d.is_error()), "{report:?}");
+        }
+        other => panic!("expected safe-area rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn safe_area_checks_use_exported_times_at_output_fps_and_trim_origin() {
+    let Some(gpu) = gpu() else { return };
+    for (name, fps, start, visible, rejects) in [
+        ("faster", 20, 0.0, "start=\"0.04\" end=\"0.09\"", true),
+        ("trim", 10, 0.05, "start=\"0.04\" end=\"0.09\"", true),
+        ("slower", 5, 0.0, "start=\"0.09\" end=\"0.15\"", false),
+    ] {
+        let d = dir(name);
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="36" fps="10" duration="0.2" safeArea="sa"/>
+        <output path="{}/f_%03d.png" codec="png-sequence" fps="{fps}" start="{start}"/>
+        <safeAreas><safeArea id="sa" top="0" right="0.25" bottom="0" left="0" enforce="error"/></safeAreas>
+        <composition><shape id="logo" shape="rect" x="50" y="10" width="10" height="10" tags="logo" fill="#FFFFFF" {visible}/></composition></scene>"##,
+            d.display()
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let result = sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu), &Default::default(), &mut |_, _| {});
+        if rejects {
+            assert_safe_area_error(result);
+            assert!(!d.join("f_000.png").exists());
+        } else {
+            assert_eq!(result.unwrap().frames, 1, "unrendered project frames must not reject delivery");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[test]
+fn reordered_segments_still_enforce_safe_areas() {
+    if gpu().is_none() {
+        return;
+    }
+    assert_safe_area_error(safe_area_delivery(
+        "safe-reordered",
+        r#"<segment from="2" to="2.2"/><segment from="0" to="0.2"/>"#,
+        "",
+    ));
+}
+
+#[test]
+fn safe_area_checks_exclude_composition_times_cut_from_the_output() {
+    if gpu().is_none() {
+        return;
+    }
+    let report = safe_area_delivery(
+        "safe-gap",
+        r#"<segment from="0" to="0.2"/><segment from="2" to="2.2"/>"#,
+        r#"start="1" end="1.5""#,
+    )
+    .expect("the violating logo appears only in the cut footage");
+    assert_eq!(report.frames, 4);
+}
+
+#[test]
+fn safe_area_checks_include_the_other_side_of_segment_transitions() {
+    if gpu().is_none() {
+        return;
+    }
+    assert_safe_area_error(safe_area_delivery(
+        "safe-transition",
+        r#"<segment from="0" to="0.2"><transition type="crossfade" duration="0.2" alignment="start"/></segment><segment from="2" to="2.2"/>"#,
+        r#"start="0.2" end="0.4""#,
+    ));
+}
+
 /// Left half red, right half blue, in a 64 × 36 frame.
 const HALVES: &str = r##"<shape id="l" shape="rect" width="32" height="36" x="0" y="0" fill="#FF0000"/>
     <shape id="r" shape="rect" width="32" height="36" x="32" y="0" fill="#0000FF"/>"##;

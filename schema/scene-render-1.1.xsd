@@ -1482,6 +1482,7 @@
       <xs:element name="pdf" type="pdfAssetType"/>
       <xs:element name="meshSequence" type="meshSequenceAssetType"/>
       <xs:element name="volume" type="volumeAssetType"/>
+      <xs:element name="voxelAsset" type="voxelAssetType"/>
     </xs:choice>
   </xs:complexType>
 
@@ -1770,10 +1771,44 @@
         <xs:enumeration value="sphere"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="cylinder"/><xs:enumeration value="cone"/>
         <xs:enumeration value="convex-hull"/><xs:enumeration value="trimesh"/>
-        <xs:enumeration value="decomposition"/>
+        <xs:enumeration value="decomposition"/><xs:enumeration value="voxels"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="mass" type="positiveDecimal" default="1"/>
+    <xs:attribute name="density" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        Kilograms per cubic metre, for a body of cells (VOX9, VOX10): its mass is the number of cells times the volume of one (cellSize times the object's
+        scale, over the scene's pixelsPerMeter, cubed) times this. Required with cells as the collider, and `mass` is then not given.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="maxFragments">
+      <xs:annotation><xs:documentation>
+        A body of cells that a crater or a fracture can break gets this many slots (bodies that wait, one cell each, until a cut frees a part of it): 1 to 4096; the
+        engine's value is 64, and it is not an XSD default so that it can be refused where there is nothing to cut (VOX11). The world refuses more fragments
+        than slots (see fragmentOverflow).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="fragmentMinCells" type="xs:positiveInteger">
+      <xs:annotation><xs:documentation>
+        Loose parts of a cut with fewer cells than this are dust: they leave the body and become particles (VOX11). The engine's value is 1.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="fragmentOverflow">
+      <xs:annotation><xs:documentation>
+        What a cut does when it frees more parts than there are slots (VOX11): `error` names both numbers, `dust` makes the smallest parts dust. The engine's value is error.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="dust"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="anchor">
+      <xs:annotation><xs:documentation>
+        Which part of what a crater's cut leaves stays the body (VOX12): `base`, every part that touches the base layer (the cells of the greatest y key, the lowest
+        layer in the scene's axes, y down), the way ground is held by what is under it, or `largest`, the largest connected part. Only an owner with a crater has it, and
+        that owner is static or kinematic (CRT5), so the engine's value when it is not given is `base`: a dynamic body, whose cut would leave its largest part, has no
+        anchor to give.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="largest"/><xs:enumeration value="base"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="friction" type="unitDecimal" default="0.5"/>
     <xs:attribute name="restitution" type="unitDecimal" default="0"/>
     <xs:attribute name="linearDamping" type="unitDecimal" default="0.01"/>
@@ -2245,6 +2280,55 @@
     <xs:attribute name="effects" type="xs:IDREFS"/>
   </xs:complexType>
 
+  <xs:complexType name="blackHoleType">
+    <xs:annotation><xs:documentation>
+      Version 1.3. A non-rotating, uncharged black hole in vacuum: the Schwarzschild solution, in units with G = c = 1,
+      so that the mass is a length of scene units and the horizon is at r_s = 2 `mass` (BH1). One per scene (BH2). It is
+      drawn by a camera with `geodesics="true"`; without it nothing is drawn (W03). Its place is the origin of the
+      Schwarzschild coordinates; nothing else about it is authored.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="mass" type="positiveDecimal" use="required"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+  </xs:complexType>
+  <xs:complexType name="accretionDiskType">
+    <xs:annotation><xs:documentation>
+      Version 1.3. A geometrically thin, optically thick disk of gas on circular orbits in the equatorial plane of the
+      `blackHole` it names (BH3), from `innerRadius` to `outerRadius` in the Schwarzschild radial coordinate, scene
+      units. `innerRadius` is at least the innermost stable circular orbit, 6 `mass` (BH4), and is that when absent;
+      `outerRadius` is beyond it (BH4). Its temperature is the thin-disk profile with a zero-torque inner edge,
+      T(r) = `temperatureScale` f(r) / f(49/36 r_in), f(r) = (r_in / r)^(3/4) (1 - (r_in / r)^(1/2))^(1/4): `temperatureScale`,
+      in kelvin, is the local temperature at the peak, r = 49/36 r_in, before the shift of light. The gas orbits with
+      the angular velocity sqrt(`mass` / r^3) times `timeScale`, in radians per scene second, about the axis of the disk,
+      which is the scene's up, (0, -1, 0), turned by `rotationX`, `rotationY` and `rotation` (about z) degrees composed as
+      an object3D composes them, Rz Ry Rx; seen from above it turns counter-clockwise. The disk is centred on its
+      `blackHole` and has no place of its own. `angularPattern` is the azimuthal structure the gas carries and `seed` fixes it: `none` is a smooth
+      disk, `clumps` (the default) seeded azimuthal noise that rotates differentially, `spiral` seeded logarithmic spiral
+      arms; `contrast` is its amplitude, 0 to 1, and `intensity` scales the brightness. The disk is analytic,
+      a surface the rays meet, and is not made of particles.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="blackHole" type="xs:IDREF" use="required"/>
+    <xs:attribute name="innerRadius" type="positiveDecimal"/>
+    <xs:attribute name="outerRadius" type="positiveDecimal" use="required"/>
+    <xs:attribute name="temperatureScale" type="positiveDecimal" use="required"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="angularPattern" default="clumps">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="none"/><xs:enumeration value="clumps"/><xs:enumeration value="spiral"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="contrast" type="unitDecimal" default="0.5"/>
+    <xs:attribute name="intensity" type="nonNegativeDecimal" default="1"/>
+    <xs:attribute name="timeScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="rotationX" type="xs:double" default="0"/>
+    <xs:attribute name="rotationY" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+  </xs:complexType>
   <xs:complexType name="morphType">
     <xs:annotation><xs:documentation>With an object3D of primitive="mesh" and an imported model: the weight of one morph
     target of the model, by the target's name. It replaces that target's weight from the clip or the rest pose, and wins
@@ -2299,7 +2383,7 @@
         <xs:enumeration value="torus"/><xs:enumeration value="capsule"/>
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
         <xs:enumeration value="clay"/><xs:enumeration value="map"/><xs:enumeration value="globe"/>
-        <xs:enumeration value="volume"/>
+        <xs:enumeration value="volume"/><xs:enumeration value="voxels"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>
@@ -2417,6 +2501,33 @@
     <xs:attribute name="terrainZoom"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="22"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="terrainMissing" default="error"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="error"/><xs:enumeration value="zero"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="terrainMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="voxels" type="xs:IDREF">
+      <xs:annotation><xs:documentation>
+        Version 1.3. With primitive="voxels" (VOX4): the voxelAsset whose cells this object is made of. Position, scale and the other
+        transform attributes are those of every object3D; the origin of the cells is the corner of the bounding box of the occupied cells.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="cellSize" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): scene units a cell. Absent, the voxelAsset's own cellSize if it has one, else the cell size that
+        an srvol asset's grid says, else 1.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="palette" type="xs:string">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): the token `file` (the colours of the file, which needs a file that has them) or the materials,
+        as IDs separated by spaces, of the palette indices 1, 2, ... in order, at most 255 (VOX6). The material of a cell is the one of its
+        index, else the object's own `material`, else the colour of the file; an index with none of the three is an error that names it.
+        Absent, `file` if the file has colours and otherwise the object's `material`.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="surface">
+      <xs:annotation><xs:documentation>
+        Only with primitive="voxels" (VOX5): `blocks`, the only value so far, draws every exposed face of a cell as a quad. The engine's default
+        is `blocks`; it is not an XSD default so that it can be refused on any other primitive.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="blocks"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="volume" type="xs:IDREF"/>
   </xs:complexType>
 
@@ -2488,6 +2599,20 @@
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="raster"/><xs:enumeration value="pathtrace"/>
       </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="geodesics" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        Version 1.3. true renders the scene by tracing each camera ray along a null geodesic of the Schwarzschild
+        spacetime of the scene's `blackHole` (BH5): the shadow, the lensed image of the background and of the
+        `accretionDisk`. This version renders only the black hole, its disk and the 2D background: any `object3D`,
+        `particles3D`, `particleEmitter`, `ocean`, `fluid`, `flock`, `slime`, `erosion`, `pyro` or `medium` in the scene is an
+        error (BH6), the camera is farther than 3 `mass` from the hole (BH7) and is the only one with geodesics (BH8); 2D
+        layers, text, shapes, effects and adjustments are allowed, and the image goes through the 2D chain. The camera's
+        distance to the hole is the radius of the static observer. `fov`, `roll`, `target`, `yaw` and `pitch` are those of any
+        camera and `pathSamples` is the number of antialiasing samples of a pixel; `denoise="true"` and lights are not
+        used (W04, W05). false (the default) is the camera there always was, and a `blackHole` or an `accretionDisk` with
+        it is not rendered (W03).
+      </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="pathSamples" default="64">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="65536"/></xs:restriction></xs:simpleType>
@@ -2972,6 +3097,8 @@
       <xs:element name="particleEmitter" type="particleEmitterType"/>
       <xs:element name="particles3D" type="particles3DType"/>
       <xs:element name="ocean" type="oceanType"/>
+      <xs:element name="blackHole" type="blackHoleType"/>
+      <xs:element name="accretionDisk" type="accretionDiskType"/>
       <xs:element name="flock" type="flockType"/>
       <xs:element name="fluid" type="fluidType"/>
       <xs:element name="slime" type="slimeType"/>
@@ -4165,7 +4292,9 @@
       expansion follows from the heating as an ideal gas at constant pressure. The literature gives no value for the
       share of the energy that goes into a plume: the defaults are the engine's, with no published value. A body
       that arrives slowly, in physical units, heats its dust very little. All quantities are in SI through
-      `physics/@pixelsPerMeter`.
+      `physics/@pixelsPerMeter`. `velocityX`, `velocityY` and `velocityZ` of an impulse and `velocityRateX`, `velocityRateY`
+      and `velocityRateZ` of a source stay authorable with `crater`: the push is added to the cloud of the impact (in the
+      volume's axes) and is not derived from it.
     </xs:documentation></xs:annotation>
     <xs:attribute name="crater" type="xs:IDREF"/>
     <xs:attribute name="heatFraction"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType></xs:attribute>
@@ -4194,6 +4323,35 @@
     <xs:attribute name="boundsMaxX" type="xs:double"/>
     <xs:attribute name="boundsMaxY" type="xs:double"/>
     <xs:attribute name="boundsMaxZ" type="xs:double"/>
+  </xs:complexType>
+  <xs:complexType name="voxelAssetType">
+    <xs:annotation><xs:documentation>
+      Version 1.3 (VOX1). A model of cells, each with a palette index 1 to 255: either a file (`src`, `format` vox, MagicaVoxel, or srvol, the
+      engine's volume cache with the indices as exact values of the grid `voxelGrid`) or a closed mesh asset cut into cells (`fromMesh` and
+      `cellSize`, the cells whose centres are inside the mesh, on a lattice of multiples of the cell size, by the test that the smoke's colliders use,
+      with the mesh in the frame it is drawn in: scene units, an imported asset in metres being 100 to the metre, and scene axes, so `cellSize`
+      is in scene units), exactly one of the two (VOX2, VOX3). A `vox` file with a scene graph is the whole scene, the models
+      placed as the graph says, unless `model` names one (its number from 0), which is then unplaced. MagicaVoxel's axes (z up) are turned into the
+      scene's (y down, z forward) by a proper rotation. `maxCells` and `maxMemoryMiB` bound what is built, before it is allocated, and over
+      either is an error that names the number, never a model cut short. The engine's defaults are 4194304 cells, 128 MiB and the grid
+      `voxels`; they are not XSD defaults so that the attributes that belong to one source can be refused on the other (VOX2).
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="src" type="xs:anyURI"/>
+    <xs:attribute name="format">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="vox"/><xs:enumeration value="srvol"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="model" type="xs:nonNegativeInteger"/>
+    <xs:attribute name="fromMesh" type="xs:IDREF"/>
+    <xs:attribute name="cellSize" type="positiveDecimal"/>
+    <xs:attribute name="voxelGrid" type="volumeChannelType"/>
+    <xs:attribute name="maxCells">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="67108864"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="maxMemoryMiB">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
   <xs:complexType name="meshSequenceAssetType">
     <xs:attribute name="id" type="xs:ID" use="required"/>
@@ -4324,8 +4482,8 @@
         one cell outside the domain, so there is no jump at its boundary); a `drag` of zero gives no coupling. The place
         is taken to the volume's axes by the inverse of its world matrix at that time and the velocity back by its
         linear part. In time the gas is the linear interpolation of the two smoke steps around the instant; the
-        smoke is simulated as far as the particles need, before them in the frame, and a smoke that fails fails the
-        particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
+        particles run before the smoke in the frame and ask it, in order, for the steps they need, so that it is simulated
+        once for each of its steps, and a smoke that fails fails the particles with its message. The velocity fields of the steps in use are charged to the volume's `maxMemoryMiB`
         and exceeding it is an error. The particles do not push the gas, and the coupling is linear in the relative
         velocity: for 0.34 m rocks of 2100 kg/m3 in air at 50 m/s the quadratic drag is a rate of about 0.03 per second,
         so it moves dust-sized particles and not ejecta. The volume must be on the composition clock.
@@ -4340,11 +4498,13 @@
     <xs:attribute name="sizeCurve" type="curveType" default="linear"/>
     <xs:attribute name="colorCurve" type="curveType" default="linear"/>
   </xs:complexType>
+
   <xs:complexType name="burst3DType">
     <xs:annotation><xs:documentation>
       A burst of a 3D emitter at an instant (`time`, `count`, `repeat`, `interval`), or what the impact of a crater
       throws out of it: `crater` names a crater that grows from an impact (`crater@source`), `count` is then the
-      number of particles that stand for the ejecta, and when, where, how fast and how heavy each one is are derived
+      number of particles that stand for the ejecta (for the crater of an object of cells, whose particles are the cells that the cut throws with the cut's own
+      velocities, there is no count, no `angle` and no `angleSpread`: CRT16 and CRT17), and when, where, how fast and how heavy each one is are derived
       (the instant, `repeat` and `interval` are not given). Each particle is born at the instant it is launched, at its
       launch distance from the impact point, with its own velocity and mass; the mass is kept in the particle (the
       render size still comes from `size`) and the particles together hold 80% of the crater's mass. Launch speed
@@ -4357,12 +4517,12 @@
       pose is that of its owner at the impact. More particles than `maxParticles` is an error, not a truncation.
     </xs:documentation></xs:annotation>
     <xs:attribute name="time" type="xs:double"/>
-    <xs:attribute name="count" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="count" type="xs:positiveInteger"/>
     <xs:attribute name="repeat" type="xs:nonNegativeInteger" default="0"/>
     <xs:attribute name="interval" type="positiveDecimal" default="1"/>
     <xs:attribute name="crater" type="xs:IDREF"/>
-    <xs:attribute name="angle"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
-    <xs:attribute name="angleSpread"><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angle"><xs:annotation><xs:documentation>The launch angle above the tangent plane, degrees; the engine's default is 45. It is not an XSD default, so that it can be refused on a burst that is not from a crater (P3D9).</xs:documentation></xs:annotation><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="angleSpread"><xs:annotation><xs:documentation>The half-width of the uniform spread of the launch angle, degrees; the engine's default is 15, with the same reason as `angle`. The angle and its spread stay between 0 and 90 together (P3D10).</xs:documentation></xs:annotation><xs:simpleType><xs:restriction base="nonNegativeDecimal"><xs:maxInclusive value="90"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
   <xs:complexType name="oceanType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="waterImpulse" type="waterImpulseType"/><xs:element name="wave" type="oceanWaveType"/><xs:element name="whitewater" type="whitewaterType"/></xs:choice>
@@ -4465,12 +4625,21 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="depthFiltered"/><xs:enumeration value="hydrostatic"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="density" type="positiveDecimal" default="1000">
+      <xs:annotation><xs:documentation>
+        Density of the water, kilograms per cubic metre (default 1000, fresh water; sea water is about 1025). It is the density of the
+        weight of the water a body displaces (`bodyCoupling`), of the force the water gives back to it (the momentum the solver
+        exchanges is per unit density), of what the ejecta that fall into the ocean bring (`splash`: their momentum is divided by it),
+        and of the target of the cavity of a body that enters (`waterImpulse`). Without the attribute the water is 1000 kg/m3, as it was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="bodyDrag" type="nonNegativeDecimal">
       <xs:annotation><xs:documentation>
         Coefficient of form drag of a body in the water. With `bodyCoupling` it is the coefficient of the vertical motion:
         the force is -(1/2) rho C_d A |v| v with A the area the submerged part presents from above, limited to what
         stops the body within a step. With `bedResponse="depthFiltered"` it is also that of the horizontal exchange
-        with the water, the same law along the motion of the body relative to the water. Default 1.0. It is an engine parameter, not a value from the impact literature; 0 gives
+        with the water, the same law along the motion of the body relative to the water. Default 1.0, the engine's: not an XSD default, so that
+        the attribute can be refused on an ocean without `colliders` (OCN9). It is an engine parameter, not a value from the impact literature; 0 gives
         undamped bobbing.
       </xs:documentation></xs:annotation>
     </xs:attribute>
@@ -4524,6 +4693,19 @@
     <xs:attribute name="checkpointMemoryMiB" default="64"><xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="foamMaterial" type="xs:IDREF"/>
     <xs:attribute name="sprayMaterial" type="xs:IDREF"/>
+    <xs:attribute name="foamMode" default="particles">
+      <xs:annotation><xs:documentation>particles draws each foam tracer as a triangle batch (foamMaterial). albedo draws no foam triangles: the foam tracers become a per-vertex coverage of the ocean surface (a kernel of foamRadius, fading with age) that is the share of the surface's area the foam covers: where it covers, the surface is a diffuse white of albedo foamAlbedo and roughness foamRoughness that lets no light through, and the light that gets through the rest keeps the water's tint; foamMaterial is then unused. Spray is drawn in both modes. The mix is the path tracer's: with the raster renderer the frame reports an error instead of drawing no foam, and the water's material must have the opaque alpha mode.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="particles"/><xs:enumeration value="albedo"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="foamRadius" type="positiveDecimal">
+      <xs:annotation><xs:documentation>Radius in scene units of the coverage one foam tracer gives the surface in albedo mode; absent, one cell of the ocean; at most 64 cells of the ocean (OCN14). Ignored in particles mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="foamAlbedo" type="unitDecimal" default="0.9">
+      <xs:annotation><xs:documentation>Diffuse albedo of fully covered water in albedo mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="foamRoughness" type="unitDecimal" default="0.8">
+      <xs:annotation><xs:documentation>Roughness of fully covered water in albedo mode.</xs:documentation></xs:annotation>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="oceanWaveType">
     <xs:attribute name="wavelength" type="positiveDecimal" default="16"/>
@@ -4556,8 +4738,29 @@
     <xs:attribute name="velocityZ" type="xs:double" default="0"/>
     <xs:attribute name="expansion" type="xs:double" default="0"/>
   </xs:complexType>
+  <xs:complexType name="pyroBlastType">
+    <xs:annotation><xs:documentation>
+      A blast in the smoke (version 1.3): `energy` joules released at (x, y, z) in the pyro's own axes at `time` seconds, into air of
+      `ambientDensity` kg/m^3 and `ambientPressure` Pa, a gas of `gamma`. The front is the Sedov-Taylor blast, R = xi (E t^2 / rho)^(1/5)
+      metres, with the constant found from the self-similar solution, until it reaches 0.3 (E / p)^(1/3) metres (the end of the strong
+      phase), where it stops; a metre is the scene's `pixelsPerMeter` (the physics element's, 100 if there is none) scene units. The
+      solver is incompressible, so the shock is not carried: each step the air that the front swept in the step is displaced (the cells
+      whose centres are in the sphere of the front's radius at the end of the step are given the divergence that makes their volume the
+      volume swept), and the projection makes the potential flow outside. Nothing is heated and no smoke is made (a fireball is a
+      pyroSource or a pyroImpulse that the author adds). A pyro with a blast needs boundary="open" (PYC5), and the blast's place is in
+      the domain (PYC6). An energy of zero is a blast that does nothing. A pyro with no blast is the pyro it was.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="time" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="energy" type="nonNegativeDecimal" use="required"/>
+    <xs:attribute name="x" type="xs:double" default="0"/>
+    <xs:attribute name="y" type="xs:double" default="0"/>
+    <xs:attribute name="z" type="xs:double" default="0"/>
+    <xs:attribute name="ambientDensity" type="positiveDecimal" default="1.2"/>
+    <xs:attribute name="ambientPressure" type="positiveDecimal" default="101325"/>
+    <xs:attribute name="gamma" default="1.4"><xs:simpleType><xs:restriction base="positiveDecimal"><xs:minInclusive value="1.1"/><xs:maxInclusive value="3"/></xs:restriction></xs:simpleType></xs:attribute>
+  </xs:complexType>
   <xs:complexType name="pyroType">
-    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/></xs:choice>
+    <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:element name="pyroSource" type="pyroSourceType"/><xs:element name="pyroImpulse" type="pyroImpulseType"/><xs:element name="pyroBlast" type="pyroBlastType"/></xs:choice>
     <xs:attribute name="colliders" type="xs:IDREFS"/>
     <xs:attribute name="colliderThickness" type="positiveDecimal"/>
     <xs:attribute name="forceFields" type="xs:IDREFS"/>
@@ -4576,6 +4779,34 @@
     <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
     <xs:attribute name="pressureTolerance" type="positiveDecimal" default="0.000001"/>
     <xs:attribute name="boundary" default="closed"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="open"/><xs:enumeration value="closed"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="follow" type="xs:boolean">
+      <xs:annotation><xs:documentation>
+        A window that follows the plume (PYRO9: only with boundary="open"). The domain keeps the same number of cells and so
+        the same memory and cost of a step, and moves by whole cells to keep the smoke away from its faces, which an open
+        domain would otherwise cut it at; absent or false it stays where it is. Where the window may move is decided from the
+        state alone (the smoke along each axis, kept followMargin cells, plus the cells the fastest air goes in a step, from
+        each face), so the same at any time requested and from a checkpoint; it never leaves a slab that a source acting in
+        the step covers, and it lets go of the density that followLoss allows and no more, counted by the solver. If the
+        smoke does not fit in the window the window cannot follow it and it is cut as before: the remedy is a larger window.
+        The domain is still centred on the object when the document begins; the moving window is in the object's own axes.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="followMargin" type="xs:positiveInteger">
+      <xs:annotation><xs:documentation>
+        Cells the smoke is kept from every face of a window that follows it (PYRO10: only with follow; PYRO11: it leaves a
+        cell between the faces of the window). The engine's default is 12, the distance from which the engine measured the
+        top face of a plume to have no effect on it (W02); it is not an XSD default so that it can be refused without follow.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="followLoss" type="unitDecimal">
+      <xs:annotation><xs:documentation>
+        The share (0 to 1) of all the smoke that the window of a followed plume may let go of each side when it moves
+        (PYRO10: only with follow). The engine's default is 0: only slabs that hold no smoke and no heat, and nothing is let
+        go of; a plume has a thin numerical tail that is never exactly zero, so a window with a loss of zero follows only
+        what leaves nothing behind. Not an XSD default so that it can be refused without follow. What is let go of is the
+        solver's own count (the state's lost density), never silent.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="pressureIterations" default="200"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="solver" default="jacobi"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="jacobi"/><xs:enumeration value="multigrid"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="advection" default="semilagrangian"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="semilagrangian"/><xs:enumeration value="maccormack"/></xs:restriction></xs:simpleType></xs:attribute>
@@ -4595,18 +4826,54 @@
       impulse, distributed by piece mass along the source-centroid-to-piece directions.
       maxMemoryMiB bounds component geometry/reconstruction admission, not whole-process RSS.
       Fracture is cinematic partitioning, not a material stress/failure calculation.
+      `source` names the dynamic rigid body that breaks it (FRX5): the fracture fires on the step after the first impact of
+      that body on this one is noticed, above `minImpulse`, the total normal impulse of the pair in one step in
+      kg*scene-unit/second (absent: twice the weight of the source in one step, as for a crater from an impact). Its
+      time and its push are then derived, so `at`, `radialImpulse` and `impulseX`/`Y`/`Z` are not given (FRX6), and
+      `minImpulse` and `energyFraction` belong to a fracture with `source` (FRX7). The pieces keep the velocity the
+      body had after the contact, and a part of the kinetic energy of the impact relative to the pair, 1/2 mu v_n^2 (mu
+      the reduced mass of the two bodies, v_n the closing speed), `energyFraction` of it (0 to 1; the engine's default
+      is 0.3, with no published value, and not an XSD default so that it can be refused without `source`), becomes the
+      pieces' push on each other, with no momentum added. The partition is the seeded one of the document and does not
+      depend on where the impact was.
     </xs:documentation></xs:annotation>
+    <xs:attribute name="source" type="xs:IDREF"/>
+    <xs:attribute name="minImpulse" type="positiveDecimal"/>
+    <xs:attribute name="energyFraction" type="unitDecimal"/>
     <xs:attribute name="at" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="pieces" default="8"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
-    <xs:attribute name="interiorMaterial" type="xs:IDREF" use="required"/>
+    <xs:attribute name="interiorMaterial" type="xs:IDREF"/>
     <xs:attribute name="interiorUvScale" type="positiveDecimal" default="1"/>
+    <xs:attribute name="partition">
+      <xs:annotation><xs:documentation>
+        On an object of cells (FRX9): how the body is cut into pieces, `voronoi` (the engine's value: `pieces` seeds drawn from `seed` in the box of the cells, each cell
+        to the nearest), `planes` (the cells are the pieces' sides of the planes in `planes`) or `labels` (the cells that have one palette index are one part). A part that is not
+        connected by faces is split into its components, so every piece is connected. `pieces` and `seed` belong to voronoi (FRX10). The pieces have the material of
+        their cells, and a face that a cut exposes is drawn with the palette like any other: there is no interior material (FRX8).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="voronoi"/><xs:enumeration value="planes"/><xs:enumeration value="labels"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="planes" type="xs:string">
+      <xs:annotation><xs:documentation>
+        With partition="planes" (FRX11): up to 63 planes, each four numbers `nx ny nz offset`, in object units (the object's own axes, before its scale, the
+        origin at the corner of the cells): a cell is on the positive side of a plane if the dot product of the normal with the centre of the cell, `(key + 1/2) * cellSize`,
+        is at least the offset. The normal is not unit and need not be, but it is not all zeros (a plane with no direction cuts nothing), and all the numbers are finite; it is taken to 2^-32 of its largest component.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="labels">
+      <xs:annotation><xs:documentation>
+        With partition="labels" (FRX12): `material`, the palette index of a cell is its label, so that a model breaks along its materials.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="material"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="impulseX" type="xs:double" default="0"/>
     <xs:attribute name="impulseY" type="xs:double" default="0"/>
     <xs:attribute name="impulseZ" type="xs:double" default="0"/>
     <xs:attribute name="radialImpulse" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="maxMemoryMiB" default="256"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
+
   <xs:complexType name="craterType">
     <xs:annotation><xs:documentation>
       Owned cinematic deformation in object-space scene units, after imported basis/node transforms.
@@ -4615,7 +4882,8 @@
       for abs(x)&lt;1 (zero otherwise), displace along n by
       p*(-depth*B(r/(radius*p))+rimHeight*B((r-radius*p)/(rimWidth*p)))*B(h/influenceDepth).
       At p=0 the map is identity. Normals use the inverse-transpose differential; tangents use the differential.
-      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight).
+      influenceDepth defaults to twice max(radius,depth,rimHeight); it must be at least twice max(depth,rimHeight) (CRT4, for a crater
+      without a `source`; the size of a crater from an impact is not in the document, so its envelope is checked when the crater is made).
       This compact axial envelope preserves orientation and leaves distant back surfaces unchanged.
       maxMemoryMiB bounds additional deformation vertex buffers and admits each rigid collision replacement
       by a conservative geometry-storage estimate; it does not bound source decoding, checkpoint retention or the entire scene.
@@ -4674,6 +4942,34 @@
         <xs:enumeration value="regolith"/><xs:enumeration value="ice"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="mantle" type="xs:boolean" default="false">
+      <xs:annotation><xs:documentation>
+        Only with `source` (CRT10). The ejecta that the law throws out (0.8 of the crater's volume) come down outside the rim as a mantle
+        `t0 (R / r)^3` thick, `R` the rim crest's radius, which is part of the ground (the same deformation as the bowl and the rim) and
+        is cut at twenty crest radii and scaled to hold exactly the ejecta's volume; the bowl is made to excavate exactly the law's volume.
+        The ejecta particles that come to rest on it are removed (they have become the ground). Off, the ground is as it was.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="bulking">
+      <xs:annotation><xs:documentation>
+        Only with `mantle="true"` (CRT10, CRT11). What is put back, the rim and the mantle together, is this many times the volume that the bowl
+        excavates: broken rock takes more room than the rock did (1 to 1.3). Without it the rim keeps the height of the law and the bulking is what
+        that asks for: the law's rim (0.326 of the volume for the authored rock in soft rock) and its 0.8 of ejecta, 1.126 there, a value
+        derived from the law and inside the physical range. With 1 the rim holds 0.2 of the volume.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="1"/><xs:maxInclusive value="1.3"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="repose">
+      <xs:annotation><xs:documentation>
+        Only with `source` (CRT10), and not with `mantle="true"` (CRT12): the angle of repose of the debris, in degrees (10 to 60). The ejecta
+        particles that come to rest on the ground are removed and their volume (mass over the target's density) is poured onto a
+        height field of deposit over the final crater, which relaxes at this angle in a fixed order over sixteen neighbours, without making or losing
+        volume; the deposit is added to the height of the ground in the crater's deformation. Absent (the default), the settled particles
+        are not removed and nothing is added to the ground. The deposit is as faithful as the grid is fine: a pile of fewer than ten cells'
+        radius is not within two degrees of the angle. The particles do not see the deposit, and nor does the rigid world or the ocean.
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:double"><xs:minInclusive value="10"/><xs:maxInclusive value="60"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
     <xs:attribute name="targetDensity" type="positiveDecimal"/>
     <xs:attribute name="strength" type="nonNegativeDecimal"/>
     <xs:attribute name="gravity" type="positiveDecimal"/>
@@ -4695,5 +4991,4 @@
     </xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
-
 </xs:schema>

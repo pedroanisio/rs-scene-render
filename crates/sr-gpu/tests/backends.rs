@@ -117,17 +117,21 @@ fn render_doc_on(gpu: &Gpu, d: &sr_model::Document, t: f64) -> Option<Shot> {
     Some(Shot { px: r.read(&f.texture), size: f.texture.size, stats: f.stats })
 }
 
+fn valid_corpus() -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
+    files.sort();
+    files
+}
+
 #[test]
 fn gl_matches_the_native_backend_on_the_conformance_corpus() {
     // every valid corpus document that loads here (remote assets may not), at its start and
     // its middle
     let (Some(g), Some(n)) = (gl(), native()) else { return };
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
-    files.retain(|p| p.to_string_lossy().ends_with(".scene.xml"));
-    files.sort();
     let (mut compared, mut failures, mut declared) = (0, Vec::new(), Vec::new());
-    for path in files {
+    for path in valid_corpus() {
         let doc = match sr_model::load_file(&path, &sr_model::LoadOptions::default()) {
             Ok(d) => d,
             Err(e) => {

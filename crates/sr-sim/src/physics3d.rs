@@ -14,7 +14,14 @@ use rapier3d_f64::prelude::*;
 use crate::fields::{self, Field};
 
 mod fracture;
-pub use fracture::{Fracture3, FractureError, Fragment3};
+mod voxel_mass;
+mod voxel_split;
+pub use fracture::{Dust3, Fracture3, FractureContact, FractureError, FractureLost3, Fragment3};
+use voxel_mass::{
+    hull_mass_properties, mesh_mass_properties, sum_mass_properties, tensor_mass_properties, voxel_mass_properties,
+};
+use voxel_split::voxel_key;
+pub use voxel_split::{VoxelCut3, VoxelPiece3, VoxelSplit3, VoxelSplitError};
 
 /// A pose in scene space: position (px) and rotation (unit quaternion x, y, z, w, scene axes).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +56,13 @@ pub enum Shape3 {
     TriMesh(Vec<[f64; 3]>, Vec<[u32; 3]>),
     /// Convex parts of a closed mesh (V-HACD).
     Decomposition(Vec<[f64; 3]>, Vec<[u32; 3]>),
+    /// A union of cells of a lattice, exactly: `size` is the size of a cell along the body's scene axes, and the cell with the
+    /// integer key `[i, j, k]` fills the box from `[i, j, k] * size` to `[i + 1, j + 1, k + 1] * size` in the body's frame.
+    /// Concave, and with the mass properties (centre of mass, inertia) of the cells.
+    Voxels {
+        size: [f64; 3],
+        cells: Vec<[i32; 3]>,
+    },
 }
 
 /// A rigid body.
@@ -195,6 +209,25 @@ pub trait Driver3 {
     ) -> Result<Option<f64>, String> {
         Ok(None)
     }
+    /// What the body of cells `parent` (see [`World3::with_voxel_splits`]) has lost by time `t`, relative to the state the world has installed
+    /// (`revision`, none before the first cut), or `None` if nothing is new: cells that are gone and parts that separate into the slots
+    /// reserved for them. `impact` is the first impact the world has noticed on it. It must depend only on its arguments and on records
+    /// that no longer change, so that a world restored to a checkpoint finds the same cut at the same step. The default cuts nothing.
+    ///
+    /// The revision of a cut is a function of the time: the driver gives one revision at one instant, so that asking again finds it installed
+    /// and returns `None` (or the same revision, which the world skips). A driver that gives a new revision for cells it has already destroyed is
+    /// refused with an error that names the cell, the same one however the frame is asked. The world asks twice inside every step (at its start and
+    /// again after the loads) and once more in the tail of a frame asked for an instant, and clones the slots of each split every time, so the cost of
+    /// a step grows with the slots reserved.
+    fn voxel_cut(
+        &mut self,
+        _t: f64,
+        _parent: usize,
+        _revision: Option<u64>,
+        _impact: Option<&Impact3>,
+    ) -> Result<Option<VoxelCut3>, String> {
+        Ok(None)
+    }
     /// Whether the body participates at composition time `t`. Invisible future bodies must
     /// not collide with bodies already in the world. The default keeps standalone worlds unchanged.
     fn enabled(&mut self, _t: f64, _which: usize) -> bool {
@@ -269,6 +302,10 @@ pub struct Frame3 {
     /// The first impact of each watched pair, once a step has resolved it (see
     /// [`World3::with_impact_watches`]); in the order of the watches.
     pub impacts: Vec<Option<Impact3>>,
+    /// For each body of cells that can be cut (a parent of a split, or a slot with a piece in it): how many cuts have been installed in it as of this
+    /// frame, 0 for the cells it started with. A cut that removes, heaps up and separates is one edit. None for any other body, and for a slot that has
+    /// no piece yet. [`World3::voxel_cells_at`] gives the cells of a body at an edit.
+    pub voxel_revision: Vec<Option<u64>>,
     /// Failed frames contain no poses; consumers must report these diagnostics.
     pub errors: Vec<String>,
 }
@@ -290,7 +327,21 @@ struct State {
     active: Vec<bool>,
     collider_revisions: Vec<Option<u64>>,
     fractured: Vec<bool>,
+    /// What the dust of each fracture took away when it fired (none before, and none for a fracture without dust).
+    fracture_lost: Vec<Option<FractureLost3>>,
     impacts: Vec<Option<Impact3>>,
+    /// The revision of the cut installed in each body of cells (none before its first), the slots used by each split, and which slots are in use.
+    voxel_revisions: Vec<Option<u64>>,
+    /// How many cuts have been installed in each body of cells (0 for the cells it started with; a slot has 1 when it is given its piece).
+    voxel_edits: Vec<u64>,
+    slots_used: Vec<usize>,
+    slot_active: Vec<bool>,
+    /// Bodies of cells that a cut left with nothing: out of the world for good.
+    voxel_spent: Vec<bool>,
+    /// The step at which each slot was taken into use: a body that is a slot is cut from the step after, however often the step is asked for.
+    slot_since: Vec<Option<u64>>,
+    /// The cells (in the body's own keys, sorted, each once) of each body that can be cut: shared with the checkpoints, replaced by a cut.
+    voxel_cells: Vec<Option<std::sync::Arc<Vec<[i32; 3]>>>>,
 }
 
 struct Checkpoint {
@@ -463,7 +514,8 @@ struct ContactLog {
     bytes: usize,
 }
 
-/// Contact points one step may produce while a watched pair is still to be noticed.
+/// Contact points of the watched pairs one step may produce while a pair is still to be noticed, unless the world is
+/// told another limit ([`World3::with_watch_contacts_per_step`]).
 const WATCH_CONTACTS_PER_STEP: usize = 4096;
 
 /// Bookkeeping charged per retained step, on top of its contacts.
@@ -477,6 +529,21 @@ const FRAME_LOG_BYTES: usize = 32 << 20;
 
 /// Bookkeeping charged per retained frame, on top of its poses and flags.
 const FRAME_ENTRY_BYTES: usize = 64;
+
+/// The side of a brick in cells, as `sr_3d::occupancy::BRICK` has it (this crate does not depend on that one: a test of `sr-eval` asserts that they are equal).
+pub const VOXEL_BRICK: i32 = 8;
+
+/// What a revision of the history is charged beyond its cells: the Arc and the vector's header and the entries of the map and the order (about).
+const VOXEL_HISTORY_ENTRY_BYTES: usize = 96;
+
+/// What a revision of the history is charged: its cells by the room of their vector, and the entry. The cells of the revision a body is in are shared
+/// with the state and so with the checkpoints, which charge them to their own budget too: they are counted in both.
+fn voxel_history_charge(cells: &std::sync::Arc<Vec<[i32; 3]>>) -> usize {
+    cells.capacity() * std::mem::size_of::<[i32; 3]>() + VOXEL_HISTORY_ENTRY_BYTES
+}
+
+/// Bytes that the history of the cells of the bodies that can be cut may use unless a caller says another limit.
+const VOXEL_HISTORY_BYTES: usize = 256 << 20;
 
 /// The frames already simulated, by step: a request for one of them needs no checkpoint
 /// restore and no replay.
@@ -509,9 +576,60 @@ pub struct World3 {
     fractures: Vec<Fracture3>,
     fracture_sources: Vec<Option<usize>>,
     fragment_owners: Vec<Option<usize>>,
+    /// The mass properties that a fracture gave each body that it takes part in (a fragment's, a source's), as registered: a fragment is out of the world until
+    /// its fracture, and what the solver holds of a body that is out of the world is not to be asked for its centre of mass.
+    fracture_props: Vec<Option<MassProperties>>,
+    voxel_splits: Vec<VoxelSplit3>,
+    /// For each body, the split whose slot it is, if it is one.
+    slot_owners: Vec<Option<usize>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
+    watch_contacts_per_step: usize,
+    /// Whether the shapes of a frame's deforming surfaces are built ahead, in parallel.
+    prefetch: bool,
+    /// Shapes built ahead and not yet taken by their step, by body and revision.
+    prefetched: Vec<(usize, ColliderUpdate3, SharedShape)>,
+    /// How many steps took a shape that had been built ahead.
+    prefetch_hits: u64,
+    /// How many times the state was taken back to a checkpoint, to replay from it.
+    checkpoint_restores: u64,
+    /// The cells of every body of cells at every edit that a frame has told of, under a budget ([`World3::voxel_cells_at`]), and the order they came in.
+    voxel_history: BTreeMap<(usize, u64), std::sync::Arc<Vec<[i32; 3]>>>,
+    voxel_history_order: std::collections::VecDeque<(usize, u64)>,
+    voxel_history_bytes: usize,
+    voxel_history_budget: usize,
+    /// The step of the checkpoint that the world was last taken back to.
+    last_restored: Option<u64>,
+}
+
+/// Whether a replacement surface can be built: within its memory budget, finite and with triangles that name its vertices.
+fn validate_update(update: &ColliderUpdate3, ppm: f64) -> Result<(), String> {
+    let bytes = ColliderUpdate3::required_bytes(update.vertices.len(), update.triangles.len())
+        .ok_or("deforming collider memory overflow")?;
+    if bytes > update.max_bytes {
+        return Err("deforming collider memory budget exceeded".into());
+    }
+    if update.vertices.len() < 3
+        || update.triangles.is_empty()
+        || update.vertices.iter().flatten().any(|v| !v.is_finite() || !(v / ppm).is_finite())
+        || update.triangles.iter().flatten().any(|&i| i as usize >= update.vertices.len())
+    {
+        return Err("invalid deforming collider vertices or triangles".into());
+    }
+    Ok(())
+}
+
+/// The shape of a deforming surface, in physics axes: the same one whichever thread builds it and whenever.
+fn build_shape(
+    vertices: &[[f64; 3]],
+    triangles: Vec<[u32; 3]>,
+    ppm: f64,
+    fix_internal_edges: bool,
+) -> Result<SharedShape, String> {
+    let vertices = vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
+    let flags = if fix_internal_edges { TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED } else { TriMeshFlags::empty() };
+    SharedShape::trimesh_with_flags(vertices, triangles, flags).map_err(|e| format!("invalid deforming collider: {e}"))
 }
 
 /// Scene axes ↔ physics axes: (x, y, z) ↔ (x, −y, −z), a half turn about x.
@@ -561,7 +679,15 @@ impl World3 {
             active: Vec::new(),
             collider_revisions: vec![None; spec.bodies.len()],
             fractured: Vec::new(),
+            fracture_lost: Vec::new(),
             impacts: Vec::new(),
+            voxel_revisions: vec![None; spec.bodies.len()],
+            voxel_edits: vec![0; spec.bodies.len()],
+            slots_used: Vec::new(),
+            slot_active: vec![false; spec.bodies.len()],
+            voxel_spent: vec![false; spec.bodies.len()],
+            slot_since: vec![None; spec.bodies.len()],
+            voxel_cells: vec![None; spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -609,6 +735,13 @@ impl World3 {
                 Shape3::Decomposition(ps, idx) => {
                     Some(ColliderBuilder::convex_decomposition(&pts(ps), &flip_winding(idx)))
                 }
+                // the half turn about x that turns scene axes into physics axes maps the lattice onto itself: a cell
+                // [i, j, k] is the cell [i, -j - 1, -k - 1] there, so no cell moves by half a cell
+                Shape3::Voxels { size, cells } if !cells.is_empty() && size.iter().all(|s| *s > 0.0) => {
+                    let keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
+                    Some(ColliderBuilder::voxels(vec3(size.map(|s| s / ppm)), &keys))
+                }
+                Shape3::Voxels { .. } => None,
             }
             .unwrap_or_else(|| ColliderBuilder::ball(0.01));
             let groups = {
@@ -621,13 +754,19 @@ impl World3 {
                 };
                 InteractionGroups::new(member, filter, InteractionTestMode::And)
             };
-            let c = collider
-                .friction(b.friction)
-                .restitution(b.restitution)
-                .sensor(b.sensor)
-                .collision_groups(groups)
-                .mass(b.mass.max(1e-6))
-                .build();
+            let collider =
+                collider.friction(b.friction).restitution(b.restitution).sensor(b.sensor).collision_groups(groups);
+            // a body of cells has the mass properties of its cells, worked out exactly (see voxel_mass), not the ones Parry diagonalises
+            let collider = match &b.shape {
+                Shape3::Voxels { size, cells } if !cells.is_empty() && size.iter().all(|s| *s > 0.0) => {
+                    match voxel_mass_properties(&unique_keys(cells), size.map(|s| s / ppm), b.mass.max(1e-6)) {
+                        Some(props) => collider.mass_properties(props),
+                        None => collider.mass(b.mass.max(1e-6)),
+                    }
+                }
+                _ => collider.mass(b.mass.max(1e-6)),
+            };
+            let c = collider.build();
             st.colliders.insert_with_parent(c, h, &mut st.bodies);
             st.handles.push(h);
             st.active.push(!follows);
@@ -749,9 +888,22 @@ impl World3 {
         let mut w = World3 {
             fracture_sources: vec![None; spec.bodies.len()],
             fragment_owners: vec![None; spec.bodies.len()],
+            fracture_props: vec![None; spec.bodies.len()],
+            voxel_splits: Vec::new(),
+            slot_owners: vec![None; spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
+            watch_contacts_per_step: WATCH_CONTACTS_PER_STEP,
+            prefetch: true,
+            prefetched: Vec::new(),
+            prefetch_hits: 0,
+            checkpoint_restores: 0,
+            voxel_history: BTreeMap::new(),
+            voxel_history_order: std::collections::VecDeque::new(),
+            voxel_history_bytes: 0,
+            voxel_history_budget: VOXEL_HISTORY_BYTES,
+            last_restored: None,
             fractures: Vec::new(),
             spec,
             params,
@@ -788,6 +940,147 @@ impl World3 {
     pub fn with_frame_log_budget(mut self, bytes: usize) -> Self {
         self.frame_log = FrameLog { budget: bytes, frames: BTreeMap::new(), bytes: 0 };
         self
+    }
+
+    /// Whether the shapes of the deforming surfaces of the steps of a frame are built ahead, in parallel, once an impact has
+    /// been noticed (the default), or each in its own step. The simulation is the same bit for bit either way.
+    pub fn with_surface_prefetch(mut self, on: bool) -> Self {
+        self.prefetch = on;
+        self.prefetched.clear();
+        self
+    }
+
+    /// The cells the state keeps of the body `body` of a split, and the room the vector that holds them has: what a checkpoint is charged for them
+    /// is the room, so a test of the accounting looks at both.
+    pub fn voxel_cells_held(&self, body: usize) -> Option<(usize, usize)> {
+        self.state.voxel_cells.get(body)?.as_ref().map(|c| (c.len(), c.capacity()))
+    }
+
+    /// Bytes the history of the cells of the bodies that can be cut ([`World3::voxel_cells_at`]) may use: the oldest revisions go first, never the one the
+    /// world is in. A revision is charged for its cells at twelve bytes each, by the room of the vector that holds them.
+    pub fn with_voxel_history_budget(mut self, bytes: usize) -> Self {
+        self.voxel_history_budget = bytes;
+        self.trim_voxel_history();
+        self
+    }
+
+    /// Bytes the history holds now.
+    pub fn voxel_history_bytes(&self) -> usize {
+        self.voxel_history_bytes
+    }
+
+    /// The cells (keys of the body's own lattice, sorted by key: x first, then y, then z, which is not the order of an `Occupancy`'s cells, z first) that body `body` had when `revision` cuts had been installed in it, for a
+    /// revision that a frame ([`Frame3::voxel_revision`]) has told of and that the world has kept: the history is held under a budget of bytes
+    /// ([`World3::with_voxel_history_budget`]) and the oldest go first, so a revision that is gone is None and the frame has to be made again. A cut
+    /// that was replayed has the same cells, so the same revision is always the same cells.
+    pub fn voxel_cells_at(&self, body: usize, revision: u64) -> Option<std::sync::Arc<Vec<[i32; 3]>>> {
+        self.voxel_history.get(&(body, revision)).cloned()
+    }
+
+    /// The keys of the bricks of 8 by 8 by 8 cells that have a cell that is not at both revisions of body `body` (a cell removed, added or moved to a
+    /// piece), in key order, the bricks that were emptied included: what a mesher has to look at again to go from one revision to the other. None if
+    /// the world does not have both.
+    pub fn voxel_bricks_changed(&self, body: usize, from: u64, to: u64) -> Option<Vec<[i32; 3]>> {
+        let (a, b) = (self.voxel_cells_at(body, from)?, self.voxel_cells_at(body, to)?);
+        let (mut i, mut j) = (0, 0);
+        let mut bricks = std::collections::BTreeSet::new();
+        let mut note = |c: &[i32; 3]| {
+            bricks.insert(c.map(|k| k.div_euclid(VOXEL_BRICK)));
+        };
+        while i < a.len() || j < b.len() {
+            match (a.get(i), b.get(j)) {
+                (Some(x), Some(y)) if x == y => {
+                    i += 1;
+                    j += 1;
+                }
+                (Some(x), Some(y)) if x < y => {
+                    note(x);
+                    i += 1;
+                }
+                (Some(_), Some(y)) => {
+                    note(y);
+                    j += 1;
+                }
+                (Some(x), None) => {
+                    note(x);
+                    i += 1;
+                }
+                (None, Some(y)) => {
+                    note(y);
+                    j += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        Some(bricks.into_iter().collect())
+    }
+
+    /// Keeps the cells of body `body` at edit `edit` in the history, and drops the oldest that are over the budget.
+    pub(super) fn record_voxel_cells(&mut self, body: usize, edit: u64, cells: &std::sync::Arc<Vec<[i32; 3]>>) {
+        let bytes = voxel_history_charge(cells);
+        if let Some(old) = self.voxel_history.insert((body, edit), cells.clone()) {
+            self.voxel_history_bytes -= voxel_history_charge(&old);
+            // a revision that is made again is the newest
+            self.voxel_history_order.retain(|k| *k != (body, edit));
+        }
+        self.voxel_history_order.push_back((body, edit));
+        self.voxel_history_bytes += bytes;
+        self.trim_voxel_history();
+    }
+
+    /// Puts the cells that every body is in now in the history (a frame made again from a checkpoint is in them, and nothing else recorded them).
+    fn record_current_voxel_cells(&mut self) {
+        for k in 0..self.state.voxel_cells.len() {
+            if let Some(cells) = self.state.voxel_cells[k].clone() {
+                let edit = self.state.voxel_edits[k];
+                if self.voxel_history.get(&(k, edit)).is_none_or(|have| !std::sync::Arc::ptr_eq(have, &cells)) {
+                    self.record_voxel_cells(k, edit, &cells);
+                }
+            }
+        }
+    }
+
+    fn trim_voxel_history(&mut self) {
+        // what the world is in is never dropped: the next frame will tell of it
+        let current =
+            |w: &Self, key: &(usize, u64)| w.state.voxel_cells[key.0].is_some() && w.state.voxel_edits[key.0] == key.1;
+        let mut kept = std::collections::VecDeque::new();
+        while self.voxel_history_bytes > self.voxel_history_budget {
+            let Some(key) = self.voxel_history_order.pop_front() else { break };
+            if current(self, &key) {
+                kept.push_back(key);
+                continue;
+            }
+            if let Some(gone) = self.voxel_history.remove(&key) {
+                self.voxel_history_bytes -= voxel_history_charge(&gone);
+            }
+        }
+        while let Some(key) = kept.pop_back() {
+            self.voxel_history_order.push_front(key);
+        }
+    }
+
+    /// The momentum that the dust of the fracture `event` took away when it fired, if it has fired and has dust: the counter that says what the world
+    /// did not keep: part of the world's state, as of the last step it took, restored with a checkpoint (so a frame served from the log says nothing of it).
+    pub fn fracture_lost(&self, event: usize) -> Option<FractureLost3> {
+        self.state.fracture_lost.get(event).copied().flatten()
+    }
+
+    /// How many times the world has been taken back to a checkpoint to replay from it (a frame asked for that is not in the log, or a step
+    /// that failed after the solver ran): what a test of a replay counts to know that it replayed.
+    pub fn checkpoint_restores(&self) -> u64 {
+        self.checkpoint_restores
+    }
+
+    /// The step of the checkpoint that the world was last taken back to (none if it never was): a replay that started from a later checkpoint
+    /// than the first shows it.
+    pub fn last_restored_checkpoint(&self) -> Option<u64> {
+        self.last_restored
+    }
+
+    /// How many steps have taken a surface built ahead.
+    pub fn prefetch_hits(&self) -> u64 {
+        self.prefetch_hits
     }
 
     /// Bytes charged for the frames held.
@@ -845,7 +1138,8 @@ impl World3 {
     /// state, so it is the same after any seek and in any fresh world; frames report it
     /// from the step after the one that resolved it (`Frame3::impacts`), and the owner's
     /// surface is asked about it (`Driver3::surface`). Watching changes nothing about the
-    /// simulation. Must be set before the first step.
+    /// simulation. An owner watched against several sources is told the earliest of the impacts they have
+    /// noticed. Must be set before the first step.
     pub fn with_impact_watches(mut self, watches: Vec<ImpactWatch>) -> Result<Self, String> {
         if self.state.step != 0 {
             return Err("impact watches must be set before the first step".into());
@@ -862,6 +1156,14 @@ impl World3 {
                 return Err("impact watch threshold must be finite".into());
             }
         }
+        // a fracture by contact reads the impact of a watch against its own source
+        for e in &self.fractures {
+            if let Some(c) = e.contact {
+                if watches.get(c.watch).is_none_or(|w| w.owner != e.source) {
+                    return Err(format!("the fracture of body {} names no impact watch against it", e.source));
+                }
+            }
+        }
         self.state.impacts = vec![None; watches.len()];
         for cp in self.checkpoints.values_mut() {
             cp.state.impacts = vec![None; watches.len()];
@@ -869,6 +1171,17 @@ impl World3 {
         self.watches = watches;
         let budget = self.frame_log.budget;
         Ok(self.with_frame_log_budget(budget))
+    }
+
+    /// The most contact points of the watched pairs that one step may produce while one of them is still to be
+    /// noticed (default 4096); more is an error. Only the pairs that are watched count. Must be set before the
+    /// first step.
+    pub fn with_watch_contacts_per_step(mut self, limit: usize) -> Result<Self, String> {
+        if self.state.step != 0 {
+            return Err("the contact limit of the watches must be set before the first step".into());
+        }
+        self.watch_contacts_per_step = limit;
+        Ok(self)
     }
 
     /// The contacts resolved by step `step`, in a stable order: by body pair, then
@@ -924,6 +1237,7 @@ impl World3 {
         motion: &[Option<Motion>],
         min_impulse: f64,
         max_per_step: usize,
+        only: Option<&[[usize; 2]]>,
     ) -> Result<Vec<Contact3>, String> {
         let st = &self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -953,6 +1267,16 @@ impl World3 {
             let (a1, a2) = (index_of.get(slot1).copied().flatten(), index_of.get(slot2).copied().flatten());
             // Order the pair by body index, boundary slabs last; flip the normal with it.
             let swap = a1.unwrap_or(usize::MAX) > a2.unwrap_or(usize::MAX);
+            // the pairs that are looked for, when it is those only that matter: the others are not even read
+            if let Some(only) = only {
+                let key = [
+                    a1.unwrap_or(usize::MAX).min(a2.unwrap_or(usize::MAX)),
+                    a1.unwrap_or(usize::MAX).max(a2.unwrap_or(usize::MAX)),
+                ];
+                if !only.contains(&key) {
+                    continue;
+                }
+            }
             let (first, second) = if swap { ((a2, m2), (a1, m1)) } else { ((a1, m1), (a2, m2)) };
             let lever = |c: &Collider| c.position_wrt_parent().copied().unwrap_or(Pose::IDENTITY);
             let (pose1, pose2) = (m1.pose * lever(c1), m2.pose * lever(c2));
@@ -965,7 +1289,11 @@ impl World3 {
                     if impulse.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                         continue;
                     }
-                    let point = (pose1 * contact.local_p1 + pose2 * contact.local_p2) * 0.5;
+                    // a point on a composite shape that has the pose of a subshape (the cells of a body of cells) is in the frame of that subshape: its pose takes it to
+                    // the collider's, and a shape that has none (a mesh, a compound) is where it was
+                    let local1 = manifold.subshape_pos1().map_or(contact.local_p1, |p| *p * contact.local_p1);
+                    let local2 = manifold.subshape_pos2().map_or(contact.local_p2, |p| *p * contact.local_p2);
+                    let point = (pose1 * local1 + pose2 * local2) * 0.5;
                     let speed = |m: &Motion| m.linvel + m.angvel.cross(point - m.centre);
                     let relative = speed(second.1) - speed(first.1);
                     let normal = if swap { -manifold.data.normal } else { manifold.data.normal };
@@ -1020,7 +1348,15 @@ impl World3 {
             .filter(|(_, found)| found.is_none())
             .map(|(w, _)| w.min_impulse)
             .fold(f64::INFINITY, f64::min);
-        let contacts = self.collect_contacts(step, motion, threshold, WATCH_CONTACTS_PER_STEP)?;
+        // only the pairs that are watched and not yet noticed can be an impact
+        let pairs: Vec<[usize; 2]> = self
+            .watches
+            .iter()
+            .zip(&self.state.impacts)
+            .filter(|(_, found)| found.is_none())
+            .map(|(w, _)| [w.source.min(w.owner), w.source.max(w.owner)])
+            .collect();
+        let contacts = self.collect_contacts(step, motion, threshold, self.watch_contacts_per_step, Some(&pairs))?;
         if contacts.is_empty() {
             return Ok(());
         }
@@ -1063,6 +1399,8 @@ impl World3 {
     fn restore_nearest_checkpoint(&mut self) {
         if let Some((_, cp)) = self.checkpoints.range(..=self.state.step).next_back() {
             self.state = cp.state.clone();
+            self.checkpoint_restores += 1;
+            self.last_restored = Some(cp.state.step);
         }
     }
 
@@ -1072,6 +1410,10 @@ impl World3 {
         let mut bytes = items.saturating_mul(8192).saturating_add(4096);
         for (_, collider) in st.colliders.iter() {
             bytes = bytes.saturating_add(shape_charge(collider.shape()));
+        }
+        // the cells the state keeps of every body that can be cut: twelve bytes a cell, and every cut makes a copy of its own
+        for cells in st.voxel_cells.iter().flatten() {
+            bytes = bytes.saturating_add(cells.capacity().saturating_mul(std::mem::size_of::<[i32; 3]>()));
         }
         for pair in st.narrow.contact_pairs() {
             bytes = bytes.saturating_add(4096);
@@ -1128,7 +1470,14 @@ impl World3 {
                 born = true;
                 // A fragment keeps its inherited motion when a visibility
                 // window reopens; its authored placeholder pose is never used.
-                if self.fragment_owners[k].is_some() {
+                if self.fragment_owners[k].is_some() || self.slot_owners[k].is_some() {
+                    // its collider was left disabled by the body that was: switched off and on it counts again in the body's mass at once, so
+                    // the first step the piece is shown has its mass and its centre of mass and not an empty body at the origin
+                    for &c in body.colliders() {
+                        self.state.colliders[c].set_enabled(false);
+                        self.state.colliders[c].set_enabled(true);
+                    }
+                    body.recompute_mass_properties_from_colliders(&self.state.colliders);
                     body.wake_up(true);
                     continue;
                 }
@@ -1154,6 +1503,17 @@ impl World3 {
         }
     }
 
+    /// The earliest impact any watch against body `k` has noticed (the first watch on a tie), which the owner is told.
+    fn impact_of(&self, k: usize) -> Option<Impact3> {
+        self.watches
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.owner == k)
+            .filter_map(|(w, _)| self.state.impacts[w].map(|i| (i.step, w, i)))
+            .min_by_key(|(step, w, _)| (*step, *w))
+            .map(|(_, _, i)| i)
+    }
+
     fn sync_colliders(&mut self, t: f64, driver: &mut dyn Driver3) -> Result<(), String> {
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         // Validate every replacement before changing the world. Failure leaves
@@ -1163,33 +1523,30 @@ impl World3 {
             if !self.fracture_enabled(k) || !driver.enabled(t, k) {
                 continue;
             }
-            let impact = self.watches.iter().position(|w| w.owner == k).and_then(|w| self.state.impacts[w]);
+            let impact = self.impact_of(k);
             let Some(update) = driver.surface(t, k, self.state.collider_revisions[k], impact.as_ref())? else {
                 continue;
             };
             if self.spec.bodies[k].kind == BodyKind::Dynamic {
                 return Err("deforming colliders require static or kinematic bodies".into());
             }
-            let bytes = ColliderUpdate3::required_bytes(update.vertices.len(), update.triangles.len())
-                .ok_or("deforming collider memory overflow")?;
-            if bytes > update.max_bytes {
-                return Err("deforming collider memory budget exceeded".into());
-            }
-            if update.vertices.len() < 3
-                || update.triangles.is_empty()
-                || update.vertices.iter().flatten().any(|v| !v.is_finite() || !(v / ppm).is_finite())
-                || update.triangles.iter().flatten().any(|&i| i as usize >= update.vertices.len())
-            {
-                return Err("invalid deforming collider vertices or triangles".into());
-            }
-            let vertices = update.vertices.iter().map(|p| vec3(flip(*p).map(|c| c / ppm))).collect();
-            let flags = if self.spec.fix_internal_edges {
-                TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED
-            } else {
-                TriMeshFlags::empty()
+            validate_update(&update, ppm)?;
+            // a shape built ahead for this very surface is taken, and any other is built now
+            let ahead = self
+                .prefetched
+                .iter()
+                .position(|(body, built, _)| *body == k && built.revision == update.revision)
+                .filter(|&at| {
+                    self.prefetched[at].1.vertices == update.vertices
+                        && self.prefetched[at].1.triangles == update.triangles
+                });
+            let shape = match ahead {
+                Some(at) => {
+                    self.prefetch_hits += 1;
+                    self.prefetched.remove(at).2
+                }
+                None => build_shape(&update.vertices, update.triangles, ppm, self.spec.fix_internal_edges)?,
             };
-            let shape = SharedShape::trimesh_with_flags(vertices, update.triangles, flags)
-                .map_err(|e| format!("invalid deforming collider: {e}"))?;
             replacements.push((k, update.revision, shape));
         }
         let changed = !replacements.is_empty();
@@ -1211,9 +1568,66 @@ impl World3 {
         Ok(())
     }
 
+    /// Builds ahead, on several threads, the shapes of the deforming surfaces that the steps up to `target` will install.
+    /// A surface is a function of its time once the impact that makes it is known, so what is built is what each step
+    /// would build for itself; a step takes the shape whose surface it finds equal. Only the impacts noticed already are
+    /// used (a frame in which one is noticed builds its shapes step by step), and any failure is left to the steps, which
+    /// meet it in their own order.
+    fn prefetch_surfaces(&mut self, target: u64, driver: &mut dyn Driver3) {
+        use rayon::prelude::*;
+        self.prefetched.clear();
+        if !self.prefetch || self.watches.is_empty() || target < self.state.step + 2 {
+            return;
+        }
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let mut revisions = self.state.collider_revisions.clone();
+        let mut updates: Vec<(usize, ColliderUpdate3)> = Vec::new();
+        for step in self.state.step + 1..=target {
+            // the surface of the step that ends at `t` is asked for at `t`
+            let t = self.spec.start + step as f64 * self.spec.step;
+            for (k, revision) in revisions.iter_mut().enumerate() {
+                let Some(impact) = self.impact_of(k) else { continue };
+                if !self.fracture_enabled(k) || !driver.enabled(t, k) || self.spec.bodies[k].kind == BodyKind::Dynamic {
+                    continue;
+                }
+                match driver.surface(t, k, *revision, Some(&impact)) {
+                    Ok(Some(update)) if validate_update(&update, ppm).is_ok() => {
+                        *revision = Some(update.revision);
+                        updates.push((k, update));
+                    }
+                    Ok(None) => {}
+                    _ => return,
+                }
+            }
+        }
+        if updates.len() < 2 {
+            return;
+        }
+        let fix = self.spec.fix_internal_edges;
+        let built: Result<Vec<_>, String> = updates
+            .into_par_iter()
+            .map(|(k, update)| {
+                let shape = build_shape(&update.vertices, update.triangles.clone(), ppm, fix)?;
+                Ok((k, update, shape))
+            })
+            .collect();
+        if let Ok(built) = built {
+            self.prefetched = built;
+        }
+    }
+
     fn step_once(&mut self, driver: &mut dyn Driver3) -> Result<(), String> {
-        // the loads first: a step that cannot get one is not taken, and nothing has changed
+        // a step that cannot get a load is not taken (its number does not advance), but what its start applied (the visibility, the fractures, the cuts)
+        // stays applied: asked again at this instant the world finds it installed and does the same, so the retry is deterministic
         let t = self.spec.start + self.state.step as f64 * self.spec.step;
+        // what a frame asked for at this instant has (its tail: the visibility, the fractures and the cuts, in that order) comes before the loads, so that a
+        // driver that reads a body to load it finds the same body however the step is reached: after the world has been asked for the frame at this
+        // instant, or by stepping straight through to it. They are applied again below, as they always were (each is idempotent: what is installed,
+        // shown or fired is not again), for what the loads or the others have changed. The colliders of the static and kinematic bodies are not
+        // among them: they are asked at the end of the step (the contract of `Driver3::surface`), and a load reads dynamic bodies only.
+        self.sync_visibility(t, driver);
+        self.apply_fractures(t, driver)?;
+        self.apply_voxel_cuts(self.state.step, t, driver)?;
         let mut loads = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {
             if b.kind == BodyKind::Dynamic {
@@ -1242,6 +1656,7 @@ impl World3 {
         self.sync_colliders(t + self.spec.step, driver)?;
         self.sync_visibility(t, driver);
         self.apply_fractures(t, driver)?;
+        self.apply_voxel_cuts(self.state.step, t, driver)?;
         self.record_frame();
         let st = &mut self.state;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
@@ -1278,7 +1693,15 @@ impl World3 {
             if !body.is_enabled() || !body.is_dynamic() || fields.is_empty() {
                 continue;
             }
-            let p = flip(body.translation().to_array()).map(|c| c * ppm);
+            // the field is read where the body's mass is: for the bodies that have always been in the world the origin of the frame, which is what they
+            // have always had (a mesh's centre of mass is usually near it); for a body of cells the origin is that of the lattice and may be far from the
+            // cells, and the velocity that goes with the position is that of the centre of mass
+            let at = if matches!(self.spec.bodies[k].shape, Shape3::Voxels { .. }) {
+                body.center_of_mass()
+            } else {
+                body.translation()
+            };
+            let p = flip(at.to_array()).map(|c| c * ppm);
             let lv = flip(body.linvel().to_array()).map(|c| c * ppm);
             let a = fields::total3(&fields, p, lv, t);
             let mass = body.mass();
@@ -1344,7 +1767,7 @@ impl World3 {
             if let Some(log) = &self.contact_log {
                 let config = log.config;
                 noticed = self
-                    .collect_contacts(step, &motion, config.min_impulse, config.max_per_step)
+                    .collect_contacts(step, &motion, config.min_impulse, config.max_per_step, None)
                     .and_then(|c| self.store_contacts(step, c));
             }
             if noticed.is_ok() && pending {
@@ -1374,21 +1797,43 @@ impl World3 {
     /// and kept, otherwise replayed from the nearest checkpoint at or before it.
     pub fn frame_at(&mut self, t: f64, driver: &mut dyn Driver3) -> Frame3 {
         let target = self.step_index(t);
-        if let Some(frame) = self.frame_log.frames.get(&target) {
-            return frame.clone();
+        // the log and the history of cells have budgets of their own: a frame whose revisions the history has dropped is made again (which puts
+        // them back), so that what it says can be asked for
+        let logged = self.frame_log.frames.get(&target).map(|frame| {
+            let kept = frame
+                .voxel_revision
+                .iter()
+                .enumerate()
+                .all(|(k, r)| r.is_none_or(|n| self.voxel_history.contains_key(&(k, n))));
+            (kept, frame.clone())
+        });
+        match logged {
+            Some((true, frame)) => return frame,
+            Some((false, _)) => {
+                if let Some(old) = self.frame_log.frames.remove(&target) {
+                    self.frame_log.bytes -= frame_bytes(&old);
+                }
+            }
+            None => {}
         }
+        self.prefetched.clear();
         if self.state.step > target || target - self.state.step > self.steps_per_checkpoint {
             if let Some((_, cp)) = self.checkpoints.range(..=target).next_back() {
                 if cp.state.step > self.state.step || self.state.step > target {
                     self.state = cp.state.clone();
+                    self.checkpoint_restores += 1;
+                    self.last_restored = Some(cp.state.step);
                 }
             }
         }
+        self.prefetch_surfaces(target, driver);
         while self.state.step < target {
             if let Err(error) = self.step_once(driver) {
+                self.prefetched.clear();
                 return Frame3 { errors: vec![error], ..Default::default() };
             }
         }
+        self.prefetched.clear();
         if let Err(error) = self.sync_colliders(self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
@@ -1396,6 +1841,12 @@ impl World3 {
         if let Err(error) = self.apply_fractures(self.spec.start + target as f64 * self.spec.step, driver) {
             return Frame3 { errors: vec![error], ..Default::default() };
         }
+        // the cuts of the step that has not been taken yet are in the frame as the step would put them (it is idempotent: a cut
+        // that is installed is not installed again), so that a frame is the same whether the world has been asked past it or not
+        if let Err(error) = self.apply_voxel_cuts(target, self.spec.start + target as f64 * self.spec.step, driver) {
+            return Frame3 { errors: vec![error], ..Default::default() };
+        }
+        self.record_current_voxel_cells();
         self.snapshot()
     }
 
@@ -1445,6 +1896,9 @@ impl World3 {
             fractured: st.fractured.clone(),
             impacts: st.impacts.clone(),
             broken: st.joint_handles.iter().map(|h| h.is_none()).collect(),
+            voxel_revision: (0..st.handles.len())
+                .map(|k| st.voxel_cells[k].as_ref().map(|_| st.voxel_edits[k]))
+                .collect(),
             errors: Vec::new(),
         }
     }
@@ -1453,6 +1907,54 @@ impl World3 {
     pub fn progress(&self) -> (u64, usize) {
         (self.state.step, self.checkpoints.len())
     }
+}
+
+/// The mass properties of a body of one shape and `mass`, as the world gives them to its collider, in the scene's units and axes:
+/// the centre of mass in the body's frame and the inertia tensor about it (kilograms scene units squared), a metre being
+/// `pixels_per_meter` scene units. Only for shapes of cells so far.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeMass {
+    pub mass: f64,
+    pub centre: [f64; 3],
+    pub inertia: [[f64; 3]; 3],
+}
+
+pub fn shape_mass_properties(shape: &Shape3, mass: f64, pixels_per_meter: f64) -> Result<ShapeMass, String> {
+    let Shape3::Voxels { size, cells } = shape else {
+        return Err("mass properties are given only for bodies of cells".into());
+    };
+    if cells.is_empty()
+        || !size.iter().all(|s| *s > 0.0)
+        || mass.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        || pixels_per_meter.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return Err("a body of cells needs cells, a positive size, a positive mass and a positive scale".into());
+    }
+    // the properties as the world gives them to Rapier (principal moments and frame), read back as a tensor: so that what is compared with the
+    // cells is what the world simulates, the diagonalisation and the frame included, and not the tensor before them
+    let keys = unique_keys(cells);
+    let props = voxel_mass_properties(&keys, size.map(|s| s / pixels_per_meter), mass)
+        .ok_or("a body of cells needs cells, a positive size, a positive mass and a positive scale")?;
+    let inertia = props.reconstruct_inertia_matrix();
+    // physics axes to scene axes: a half turn about x, so a product of inertia with one of y and z (not both) changes sign
+    let sign = [1.0, -1.0, -1.0];
+    let scene: [[f64; 3]; 3] = std::array::from_fn(|a| {
+        std::array::from_fn(|b| inertia.col(b)[a] * sign[a] * sign[b] * pixels_per_meter * pixels_per_meter)
+    });
+    let c = [props.local_com.x, props.local_com.y, props.local_com.z];
+    Ok(ShapeMass {
+        mass: props.mass(),
+        centre: std::array::from_fn(|a| c[a] * sign[a] * pixels_per_meter),
+        inertia: scene,
+    })
+}
+
+/// The keys of the cells in the physics lattice, each once, in order.
+fn unique_keys(cells: &[[i32; 3]]) -> Vec<IVector> {
+    let mut keys: Vec<IVector> = cells.iter().map(voxel_key).collect();
+    keys.sort_by_key(|k| (k.z, k.y, k.x));
+    keys.dedup();
+    keys
 }
 
 /// The volume a shape encloses, in the cube of the shape's own length unit. A mesh counts as
@@ -1470,6 +1972,12 @@ pub fn shape_volume(shape: &Shape3) -> Result<f64, String> {
             let points: Vec<_> = points.iter().map(|p| vec3(*p)).collect();
             let hull = SharedShape::convex_hull(&points).ok_or("the points have no convex hull")?;
             hull.mass_properties(1.0).mass()
+        }
+        Shape3::Voxels { size, cells } => {
+            let mut unique = cells.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            unique.len() as f64 * size[0] * size[1] * size[2]
         }
         Shape3::TriMesh(points, triangles) | Shape3::Decomposition(points, triangles) => {
             let at = |i: u32| points.get(i as usize).copied().ok_or("a triangle names a missing vertex");
@@ -1494,6 +2002,7 @@ fn frame_bytes(frame: &Frame3) -> usize {
     std::mem::size_of::<Frame3>()
         + frame.bodies.len() * per_body
         + frame.impacts.len() * std::mem::size_of::<Option<Impact3>>()
+        + frame.voxel_revision.len() * std::mem::size_of::<Option<u64>>()
         + FRAME_ENTRY_BYTES
 }
 
@@ -1509,6 +2018,10 @@ fn shape_charge(shape: &dyn rapier3d_f64::parry::shape::Shape) -> usize {
             .shapes()
             .iter()
             .fold(4096usize, |sum, (_, part)| sum.saturating_add(512).saturating_add(shape_charge(part.as_ref())))
+    } else if let Some(voxels) = shape.as_voxels() {
+        // about two bytes a cell, which is what a private copy of the shape holds (an edited body of cells keeps its old copy in the
+        // checkpoints taken before the edit); counted as the meshes are, in full for every checkpoint
+        voxels.voxels().count().saturating_mul(2).saturating_add(4096)
     } else if let Some(poly) = shape.as_convex_polyhedron() {
         poly.points()
             .len()
