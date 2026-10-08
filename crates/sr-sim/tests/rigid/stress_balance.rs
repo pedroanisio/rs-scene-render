@@ -285,3 +285,48 @@ fn the_momentum_of_a_body_is_its_mass_by_the_velocity_of_its_centre_and_its_spin
     // the centre of mass is at x = 1: the part is 1 m from it along x, so it goes at 3 m/s along y
     assert!(far[0].abs() < 1e-9 && close(far[1], 125.0 * 3.0, 1e-12), "{far:?}");
 }
+
+#[test]
+fn a_spinning_beam_pulled_apart_along_its_axis_has_no_bending_whatever_it_turns_in_a_step() {
+    // four cubes of 0.5 m along x spinning at 12 rad/s about their centre of mass (x = 1, held at the origin of the world), in a step of 1/60 s (0.2 rad), with two contacts on
+    // its axis, at its two ends, pulling it apart with 5000 N along the axis (the direction that the axis has in the middle of the step). The part of two cubes beyond the middle is held
+    // by the pull and the centripetal m w^2 r = 250 * 144 * 0.5 = 18000 N, all along the axis: no shear and no moment. The arms of the contacts are those of the body at the
+    // middle of the step, like the force: a load whose arm is of the end of the step while the force is of the middle makes a moment of half the turn times the arm times the force
+    let parts = beam(4);
+    let whole = sum(&parts);
+    let (omega, dt) = (12.0f64, 1.0 / 60.0);
+    let turn = |angle: f64| [[angle.cos(), -angle.sin(), 0.0], [angle.sin(), angle.cos(), 0.0], [0.0, 0.0, 1.0]];
+    let at = |angle: f64| {
+        let r = turn(angle);
+        let c = whole.centre();
+        // the centre of mass stays at the origin of the world
+        Rigid {
+            position: [-r[0][0] * c[0], -r[1][0] * c[0], 0.0],
+            rotation: r,
+            linear: [0.0; 3],
+            angular: [0.0, 0.0, omega],
+            centre: c,
+        }
+    };
+    let (before, after) = (at(0.0), at(omega * dt));
+    let direction = [(omega * dt / 2.0).cos(), (omega * dt / 2.0).sin(), 0.0];
+    let force = 5000.0 * dt;
+    let contacts = [
+        Located { at: after.world([0.0, 0.0, 0.0]), impulse: direction.map(|d| -d * force), piece: 0 },
+        Located { at: after.world([2.0, 0.0, 0.0]), impulse: direction.map(|d| d * force), piece: 3 },
+    ];
+    let step = Step { whole, before, after, dt, accel: [0.0; 3], contacts: &contacts, anchor: None };
+    let part = sum(&parts[2..]);
+    let q = [1.0, 0.0, 0.0];
+    let load = step.on_part_local(&part, &|i| i >= 2, q);
+    let want = 5000.0 + 250.0 * omega * omega * 0.5;
+    // the rest pulls the part toward the centre of mass: along -x
+    assert!(close(-load.force[0], want, 2e-3), "{:?} against {want} along the axis", load.force);
+    assert!(load.force[1].abs() < 2e-3 * want && load.force[2].abs() < 1e-9 * want, "across: {:?}", load.force);
+    // no moment about the cut: the old arms, of the end of the step, left 5000 * 0.1 * 1 = 500 N m
+    assert!(
+        load.moment.iter().all(|m| m.abs() < 2e-3 * want),
+        "{:?} of a pull of {want} at a lever of 1 m",
+        load.moment
+    );
+}

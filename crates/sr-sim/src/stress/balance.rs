@@ -110,7 +110,6 @@ impl Rigid {
 /// The rotation halfway between two (rows: world = R l): the increment `D = A B^T` turned by half its angle about its axis, then `B`.
 fn mid_rotation(before: &[V3; 3], after: &[V3; 3]) -> [V3; 3] {
     let d: [V3; 3] = std::array::from_fn(|i| std::array::from_fn(|j| dot(after[i], before[j])));
-    let cos = ((d[0][0] + d[1][1] + d[2][2] - 1.0) / 2.0).clamp(-1.0, 1.0);
     let axis = [d[2][1] - d[1][2], d[0][2] - d[2][0], d[1][0] - d[0][1]];
     let sin2 = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
     if sin2 < 1e-12 {
@@ -118,7 +117,8 @@ fn mid_rotation(before: &[V3; 3], after: &[V3; 3]) -> [V3; 3] {
         return *before;
     }
     let k = axis.map(|v| v / sin2);
-    let angle = cos.acos();
+    // the angle from its sine and cosine (the arc cosine of the trace is blunt for a small turn)
+    let angle = (sin2 / 2.0).atan2((d[0][0] + d[1][1] + d[2][2] - 1.0) / 2.0);
     let (c, s) = ((angle / 2.0).cos(), (angle / 2.0).sin());
     let skew = [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]];
     let half: [V3; 3] = std::array::from_fn(|i| {
@@ -186,17 +186,29 @@ fn solve3(m: &[V3; 3], b: V3) -> Option<V3> {
 }
 
 impl Step<'_> {
+    /// The vector from the centre of mass of the body to a point of the body that is given in the world at the end of the step, as it is in the world at the middle of the step: the
+    /// loads are those of the middle of the step, and so must be the arms that their moments are made with (an arm of the end of the step turned half the angle that the body
+    /// turns in a step against a force of the middle makes a moment of half that angle times the arm times the force).
+    fn arm_to(&self, world_point: V3) -> V3 {
+        let local = sub(self.after.local(world_point), self.after.centre);
+        rotate(&mid_rotation(&self.before.rotation, &self.after.rotation), local)
+    }
+
+    /// The vector from the centre of mass of the body to the centre of mass of the part, in the world at the middle of the step.
+    fn part_arm(&self, part: &MassSum) -> V3 {
+        rotate(&mid_rotation(&self.before.rotation, &self.after.rotation), sub(part.centre(), self.after.centre))
+    }
+
     /// What the balance of the whole body leaves after the loads that are known (the weight and the fields, the contacts): an impulse and its moment about the centre of
     /// mass. With one joint of the world that is its load; with none, what is not a load on the points of the body (damping, a velocity that was set) and, when a load is not
     /// known (the friction at a contact, whose total the solver does not give), what it is.
     pub fn unbalanced(&self) -> (V3, V3) {
-        let com = self.after.com();
         let dv = sub(self.after.linear, self.before.linear);
         let mut known = self.accel.map(|a| a * self.whole.mass * self.dt);
         let mut known_moment = [0.0; 3];
         for c in self.contacts {
             known = add(known, c.impulse);
-            known_moment = add(known_moment, cross(sub(c.at, com), c.impulse));
+            known_moment = add(known_moment, cross(self.arm_to(c.at), c.impulse));
         }
         let left = sub(dv.map(|v| v * self.whole.mass), known);
         let left_moment =
@@ -230,19 +242,17 @@ impl Step<'_> {
     /// The force and the moment about the centre of mass, in the world, that the rest of the body puts on the part.
     fn part_load(&self, part: &MassSum, in_part: &dyn Fn(usize) -> bool) -> (V3, V3) {
         let dt = self.dt;
-        let com = self.after.com();
         let whole_mass = self.whole.mass;
         let dv = sub(self.after.linear, self.before.linear);
         // the whole body: what the balance leaves after the loads that are known (the weight and the fields, the contacts)
         let (left, left_moment) = self.unbalanced();
         // the part's own loads that are known
-        let centre = self.after.world(part.centre());
-        let arm = sub(centre, com);
+        let arm = self.part_arm(part);
         let mut on_force = self.accel.map(|a| a * part.mass * dt);
         let mut on_moment = cross(arm, on_force);
         for c in self.contacts.iter().filter(|c| in_part(c.piece)) {
             on_force = add(on_force, c.impulse);
-            on_moment = add(on_moment, cross(sub(c.at, com), c.impulse));
+            on_moment = add(on_moment, cross(self.arm_to(c.at), c.impulse));
         }
         match self.anchor {
             Some(piece) => {
