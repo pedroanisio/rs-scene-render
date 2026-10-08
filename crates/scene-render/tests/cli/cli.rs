@@ -1673,3 +1673,66 @@ fn validate_checks_every_layout_the_document_declares() {
     assert_eq!(v.status.code(), Some(1), "{out}");
     assert!(out.contains("SA01") && out.contains("layout tall"), "{out}");
 }
+
+/// A `.vox` file (version 150) of a block of 4 cells a side of the palette index 1.
+fn small_vox() -> Vec<u8> {
+    fn chunk(id: &[u8; 4], content: &[u8], children: &[u8]) -> Vec<u8> {
+        let mut v = id.to_vec();
+        v.extend((content.len() as u32).to_le_bytes());
+        v.extend((children.len() as u32).to_le_bytes());
+        v.extend(content);
+        v.extend(children);
+        v
+    }
+    let mut children = chunk(b"SIZE", &[4u32, 4, 4].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(), &[]);
+    let mut xyzi = 64u32.to_le_bytes().to_vec();
+    for z in 0..4u8 {
+        for y in 0..4u8 {
+            for x in 0..4u8 {
+                xyzi.extend([x, y, z, 1]);
+            }
+        }
+    }
+    children.extend(chunk(b"XYZI", &xyzi, &[]));
+    let rgba: Vec<u8> = (0..256).flat_map(|_| [200u8, 40, 40, 255]).collect();
+    children.extend(chunk(b"RGBA", &rgba, &[]));
+    let mut file = b"VOX ".to_vec();
+    file.extend(150u32.to_le_bytes());
+    file.extend(chunk(b"MAIN", &[], &children));
+    file
+}
+
+#[test]
+fn a_voxels_scene_with_small_cells_is_rendered_as_authored_under_strict_and_enters_the_incremental_record() {
+    // the size of the cells in the scene is for the validator to say (W09, a warning); a renderer that drew the object has nothing "not rendered"
+    // to report, so --strict passes and the sidecar of --changed-only keeps the frames
+    let dir = std::env::temp_dir().join(format!("sr-cli-voxel-cells-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("block.vox"), small_vox()).unwrap();
+    let scene = dir.join("scene.scene.xml");
+    std::fs::write(
+        &scene,
+        r##"<scene version="1.3"><project width="32" height="32" fps="10" duration="1" background="#202020"/><assets><voxelAsset id="model" src="block.vox"/></assets><composition><camera id="cam" x="0" y="-1" z="-4" target="obj" fov="40"/><object3D id="obj" primitive="voxels" voxels="model" cellSize="0.25"/></composition><lights><light id="sun" type="directional" intensity="3" yaw="-30" pitch="-35"/></lights></scene>"##,
+    )
+    .unwrap();
+    let out = dir.join("f_%03d.png");
+    let args = [
+        "render",
+        scene.to_str().unwrap(),
+        "--frames",
+        "0..3",
+        "-o",
+        out.to_str().unwrap(),
+        "--changed-only",
+        "--strict",
+    ];
+    let first = run(&args);
+    if no_gpu(&first) {
+        return;
+    }
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(rendered(&first), (3, 3));
+    assert_eq!(rendered(&run(&args)), (0, 3), "the frames are in the record");
+    std::fs::remove_dir_all(dir).unwrap();
+}

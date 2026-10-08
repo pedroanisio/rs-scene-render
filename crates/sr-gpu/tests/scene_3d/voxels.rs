@@ -359,7 +359,7 @@ fn an_animated_material_of_a_voxels_object_changes_the_picture_and_does_not_depe
 ) {
     let Some(gpu) = gpu() else { return };
     let file = vox_file("animated.vox", &block(8, 1), &[RED]);
-    // the object's own material turns from red to blue and its roughness and transmission animate too: what a frame draws is that frame's
+    // the object's own material turns from red to blue: what a frame draws is that frame's
     let materials = r##"<material id="paint" unlit="true" baseColor="#FF0000"><animate property="baseColor"><key time="0" value="#FF0000"/><key time="1" value="#0000FF"/></animate></material>"##;
     for camera in ["", r#"renderer="pathtrace" pathSamples="8" maxBounces="2""#] {
         let xml = document(&file, r#"material="paint""#, camera, materials);

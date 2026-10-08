@@ -831,8 +831,9 @@ fn a_surface_over_its_budget_is_refused_at_the_plane_that_takes_it_over_and_not_
         }
         .unwrap_err();
         assert!(refused.contains("voxel surface exceeds memory budget"), "{refused}");
-        // the budget admits the first plane (5 000 quads at the edge) and the second (10 000): the third takes it over, and no plane is made after
-        assert!(cache.planes_meshed() <= 3, "production {production}: {} planes meshed", cache.planes_meshed());
+        // the budget admits the first plane (5 000 quads at the edge) and the second (10 000): the third takes it over, the check is after each
+        // plane is made, so exactly three are, and none after
+        assert_eq!(cache.planes_meshed(), 3, "production {production}");
         assert!(cache.quads().is_empty());
     }
 }

@@ -35,6 +35,7 @@ pub struct SurfaceCache {
     held: Option<(u64, u64, Classes)>,
     slices: BTreeMap<(u8, bool, i32), Slice>,
     meshed: usize,
+    planes: Vec<(u8, i32)>,
 }
 
 impl SurfaceCache {
@@ -45,6 +46,11 @@ impl SurfaceCache {
     /// How many quads the surface has.
     pub fn quad_count(&self) -> usize {
         self.slices.values().map(|s| s.len()).sum()
+    }
+
+    /// The planes (axis, plane) that the last update meshed again when it was an incremental one, in order; empty for a whole remesh.
+    pub fn planes_remeshed(&self) -> &[(u8, i32)] {
+        &self.planes
     }
 
     /// How many planes the last update meshed, whether it came to an end or was refused for the budget.
@@ -120,6 +126,8 @@ impl SurfaceCache {
         let same_classes = matches!(&self.held, Some((_, _, held)) if held == classes);
         let incremental = dirty.is_some() && same_classes;
         if incremental && matches!(&self.held, Some((_, held, _)) if *held == ident.1) {
+            self.meshed = 0;
+            self.planes.clear();
             return Ok(Remesh { remeshed: 0, full: false });
         }
         let index = Index::of(grid);
@@ -170,6 +178,10 @@ impl SurfaceCache {
             return Err(super::budget_error(max_bytes));
         }
         self.meshed = meshed;
+        self.planes = match &dirty {
+            Some(dirty) => dirty.iter().map(|(axis, plane)| (*axis as u8, *plane)).collect(),
+            None => Vec::new(),
+        };
         self.held = Some((ident.0, ident.1, classes.clone()));
         Ok(Remesh { remeshed: meshed, full })
     }

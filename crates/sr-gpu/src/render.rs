@@ -64,6 +64,8 @@ pub struct VoxelSurfaceStat {
     pub hash: u64,
     pub remeshed: usize,
     pub full: bool,
+    /// The planes (axis, plane) that an incremental update meshed again; empty for a whole remesh and for a frame that made nothing.
+    pub planes: Vec<(u8, i32)>,
 }
 
 /// Counters for one rendered frame.

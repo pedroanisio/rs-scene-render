@@ -188,19 +188,6 @@ impl Renderer {
             }
         };
         let cell_size = sr_eval::voxel_asset::cell_size(a.opt("cellSize"), &model) as f32;
-        // measured (see the SREP): the raster shadow of cells smaller than 0.5 in the scene is displaced or lost. The size comes from the file
-        // as well as from the document, so the renderer says it where the validator cannot
-        let scale = (0..3).map(|c| world.col(c).truncate().length()).fold(f32::INFINITY, f32::min);
-        let in_scene = (cell_size * scale * 1e4).round() / 1e4;
-        if in_scene < 0.5 {
-            let note = format!(
-                "{}: cells of {in_scene} in the scene (the cell size times the scale of the object), below 0.5: the shadow that the raster renderer casts from them is displaced or lost, and the path tracer's holds down to 0.05",
-                n.id
-            );
-            if !plan.stats.unsupported.contains(&note) {
-                plan.stats.unsupported.push(note);
-            }
-        }
         let budget = (a.num("surfaceMemoryMiB", 128.0) as usize) << 20;
         // the bodies: what the simulation says when it cuts this object, else the asset's cells
         let mut bodies: Vec<Body> = Vec::new();
@@ -349,6 +336,7 @@ impl Renderer {
             ]);
             let state_key = (n.id.clone(), body.id);
             let mut remeshed = (0, false);
+            let mut rebuilt = false;
             let left = budget.saturating_sub(used_quads * sr_3d::voxel::surface::BYTES_PER_QUAD);
             if self.voxel_surfaces.get(&state_key).and_then(|s| s.signature) != Some(signature) {
                 let state = self.voxel_surfaces.entry(state_key.clone()).or_default();
@@ -365,7 +353,10 @@ impl Renderer {
                     ),
                 };
                 match update {
-                    Ok(u) => remeshed = (u.remeshed, u.full),
+                    Ok(u) => {
+                        remeshed = (u.remeshed, u.full);
+                        rebuilt = true;
+                    }
                     Err(e) => {
                         state.groups.clear();
                         plan.stats.errors.push(format!("{}: {e}", n.id));
@@ -468,6 +459,7 @@ impl Renderer {
                 hash: state.hash,
                 remeshed: remeshed.0,
                 full: remeshed.1,
+                planes: if rebuilt { state.cache.planes_remeshed().to_vec() } else { Vec::new() },
             });
         }
         plan.stats.voxel_groups += drawn_groups;

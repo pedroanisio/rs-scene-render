@@ -460,7 +460,9 @@ impl Occupancy {
         self.bricks.iter().filter(|(_, b)| b.changed > revision).map(|(k, _)| *k).collect()
     }
 
-    /// Forgets the emptied bricks last edited at or before `revision`: whoever read the grid up to then has been told. The mesher of the
+    /// Forgets the emptied bricks last edited at or before `revision`: whoever read the grid up to then has been told. (Nothing in the
+    /// engine calls this yet: the grids a simulation hands over are not compacted. It is the contract of whoever will, and
+    /// [`Occupancy::compacted_through`] is what makes a cache that read less than that read the whole.) The mesher of the
     /// surface reads `changed_bricks_since` up to the revision it built, so that revision is the one to give here: a brick emptied after
     /// it stays until it has been read.
     pub fn compact(&mut self, revision: u64) {

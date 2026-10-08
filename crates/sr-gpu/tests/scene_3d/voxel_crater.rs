@@ -114,13 +114,9 @@ fn the_surface_of_the_ground_after_the_cut_is_the_surface_of_a_full_remesh_of_it
         let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
         let (before, frame) = draw(&mut renderer, &ev, 0.05);
         assert!(before.errors.is_empty(), "{:?}", before.errors);
-        // the cells of the file are a quarter of a unit in the scene, below the size the raster shadow is measured down to: the renderer says so
-        // (the document does not, for the size is in the file) and a size at or above it says nothing
-        assert!(
-            before.notes.iter().any(|n| n.contains("ground") && n.contains("cells of 0.25 in the scene")),
-            "{camera}: {:?}",
-            before.notes
-        );
+        // the cells of the file are a quarter of a unit in the scene, below the size the raster shadow is measured down to; the ground is drawn as
+        // authored, so nothing is reported as not rendered (the validator says what the document says of the size, W09)
+        assert!(before.notes.is_empty(), "{camera}: {:?}", before.notes);
         let ground = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap().voxels.clone().unwrap();
         assert_eq!(before.surfaces.len(), 1, "the ground, whole");
         assert_eq!((before.surfaces[0].revision, before.surfaces[0].full), (0, true));
@@ -145,13 +141,36 @@ fn the_surface_of_the_ground_after_the_cut_is_the_surface_of_a_full_remesh_of_it
             (quads, hash),
             "{camera}: the surface after the cut is that of the cells made again"
         );
-        // the planes made again are those of the bricks the cut touched (nine along each axis for a brick), the bricks the frame says
+        // the planes made again, from the cells that differ between the ground before and after the cut (read from the two grids, not from the
+        // bricks the frame names): a cell has its faces on the planes at its key and the one after it on each axis, and the cache makes again the
+        // nine planes of the slab of every brick that holds a cell that changed
+        let changed: std::collections::BTreeSet<[i32; 3]> =
+            ground.grid.cells().chain(cut.grid.cells()).filter(|c| ground.grid.get(*c) != cut.grid.get(*c)).collect();
+        let touched: std::collections::BTreeSet<[i32; 3]> =
+            changed.iter().map(|c| c.map(|k| k.div_euclid(8))).collect();
         assert_eq!(cut.steps.len(), 1, "one cut, one step");
-        let bricks = &cut.steps[0].1;
-        assert_eq!(bricks.len(), 83, "{camera}: the bricks the cut touched");
-        let planes: std::collections::BTreeSet<(usize, i32)> =
-            bricks.iter().flat_map(|k| (0..3).flat_map(move |a| (0..=8).map(move |i| (a, 8 * k[a] + i)))).collect();
-        assert_eq!(owner.remeshed, planes.len(), "{camera}: the planes of the bricks of the cut and no others");
+        assert_eq!(
+            touched.iter().copied().collect::<Vec<_>>(),
+            cut.steps[0].1,
+            "{camera}: the bricks of the cells that changed are the ones the step names"
+        );
+        assert_eq!(touched.len(), 83, "{camera}: the bricks the cut touched");
+        let must: std::collections::BTreeSet<(u8, i32)> = changed
+            .iter()
+            .flat_map(|c| (0..3u8).flat_map(move |a| [(a, c[usize::from(a)]), (a, c[usize::from(a)] + 1)]))
+            .collect();
+        let slabs: std::collections::BTreeSet<(u8, i32)> = touched
+            .iter()
+            .flat_map(|k| (0..3u8).flat_map(move |a| (0..=8).map(move |i| (a, 8 * k[usize::from(a)] + i))))
+            .collect();
+        let made: std::collections::BTreeSet<(u8, i32)> = owner.planes.iter().copied().collect();
+        assert_eq!(made.len(), owner.planes.len(), "no plane twice");
+        assert_eq!(owner.remeshed, made.len());
+        assert!(must.is_subset(&made), "{camera}: every plane a changed cell has a face on is made again");
+        assert_eq!(
+            made, slabs,
+            "{camera}: and the planes are those of the slabs of the bricks that hold them, no others"
+        );
         // the cells are checked against a naive extractor, not only against the mesher's own plane code: the area of the quads of the surface
         // is the number of faces of cells that have an empty neighbour, and so is it for each piece
         for grid in std::iter::once(&cut.grid).chain(cut.pieces.iter().map(|p| &p.grid)) {
