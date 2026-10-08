@@ -117,6 +117,11 @@ pub struct RenderStats {
     pub voxel_mesh_seconds: f64,
     /// The surface of each body of cells drawn this frame (an object of cells and the pieces that came away from it).
     pub voxel_surfaces: Vec<VoxelSurfaceStat>,
+    /// Surfaces of voxel bodies the renderer keeps after this frame, the cells it read to see which palette indices are in use, and the
+    /// meshes it made and uploaded (a group whose quads did not change keeps its mesh).
+    pub voxel_states: usize,
+    pub voxel_cells_scanned: u64,
+    pub voxel_groups_uploaded: usize,
     /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
     /// rigid-body stepping its colliders trigger.
     pub sim_smoke_seconds: f64,
@@ -3237,6 +3242,11 @@ impl Renderer {
         plan.stats.sim_smoke_seconds = g.sim_seconds.smoke;
         plan.stats.sim_particles_seconds = g.sim_seconds.particles;
         self.used.clear();
+        // what is kept of a voxels object that the frame no longer has goes with it
+        {
+            let ids: std::collections::HashSet<&str> = g.nodes.iter().map(|n| &*n.id).collect();
+            self.voxel_surfaces.retain(|(id, _), _| ids.contains(&**id));
+        }
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];
         let mut roots = Vec::new();
         for (i, n) in g.nodes.iter().enumerate() {
@@ -3398,6 +3408,7 @@ impl Renderer {
         self.pool.trim();
         stats.textures_created = self.pool.created - created_before;
         stats.textures_released = self.pool.released - released_before;
+        stats.voxel_states = self.voxel_surfaces.len();
         Frame { texture: frame, stats }
     }
 

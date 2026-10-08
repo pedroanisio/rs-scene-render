@@ -493,3 +493,61 @@ fn a_cut_of_a_voxels_object_inside_an_isolated_group_redraws_the_group() {
     let again = renderer.render(&plain, ev.program());
     assert_eq!(renderer.read(&again.texture), before, "the whole object again is the first picture");
 }
+
+// ------------------------------------------------------------------------------------------------------------------- what is kept
+
+/// The frame of a document with one voxels object (palette `a b`) where a simulation says the object has `grid` at `revision`.
+fn sim_frame(
+    ev: &sr_eval::Evaluator,
+    grid: sr_3d::Occupancy,
+    revision: u64,
+    steps: Vec<(u64, Vec<[i32; 3]>)>,
+) -> sr_eval::FrameGraph {
+    let mut frame = ev.evaluate(0.5);
+    let node = frame.nodes.iter_mut().find(|n| &*n.id == "obj").unwrap();
+    node.voxels = Some(std::sync::Arc::new(sr_eval::voxel_cut::SimVoxels {
+        enabled: true,
+        revision,
+        grid: std::sync::Arc::new(grid),
+        changed_bricks: Vec::new(),
+        steps,
+        thrown: None,
+        pieces: Vec::new(),
+    }));
+    frame
+}
+
+fn two_blocks(skip: Option<[i32; 3]>) -> sr_3d::Occupancy {
+    // a block of the first index and, apart from it, a block of the second
+    let cells = (0..4).flat_map(|z| (0..4).flat_map(move |y| (0..4).map(move |x| ([x, y, z], 1u8))));
+    let others = (0..4).flat_map(|z| (0..4).flat_map(move |y| (0..4).map(move |x| ([x + 12, y, z], 2u8))));
+    sr_3d::Occupancy::from_cells(cells.filter(|(c, _)| Some(*c) != skip).chain(others)).unwrap()
+}
+
+#[test]
+fn what_the_renderer_keeps_of_a_voxels_object_is_only_what_the_frames_still_have_and_only_what_changed_is_made_again() {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("kept.vox", &block(2, 1), &[RED, BLUE]);
+    let materials = r##"<material id="a" baseColor="#FF0000"/><material id="b" baseColor="#0000FF"/>"##;
+    let xml = document(&file, r#"palette="a b""#, "", materials);
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let first = renderer.render(&sim_frame(&ev, two_blocks(None), 1, Vec::new()), ev.program());
+    assert_eq!((first.stats.voxel_groups_uploaded, first.stats.voxel_states), (2, 1), "two materials, two meshes");
+    assert_eq!(first.stats.voxel_cells_scanned, 128, "the cells read to see which indices are in use");
+    // the same frame again: nothing is read, nothing is made
+    let again = renderer.render(&sim_frame(&ev, two_blocks(None), 1, Vec::new()), ev.program());
+    assert_eq!((again.stats.voxel_cells_scanned, again.stats.voxel_groups_uploaded), (0, 0));
+    // a cut that takes one cell of the first block: its mesh is made again and the second block's is the one it was
+    let cut =
+        renderer.render(&sim_frame(&ev, two_blocks(Some([1, 1, 1])), 2, vec![(2, vec![[0, 0, 0]])]), ev.program());
+    assert!(cut.stats.errors.is_empty(), "{:?}", cut.stats.errors);
+    assert_eq!(cut.stats.voxel_groups_uploaded, 1, "only the group whose quads changed");
+    assert_eq!(cut.stats.voxel_cells_scanned, 127, "the cells of the new revision");
+    // the object leaves the frame: what the renderer kept of it goes
+    let mut gone = ev.evaluate(0.5);
+    gone.nodes.retain(|n| &*n.id != "obj");
+    let out = renderer.render(&gone, ev.program());
+    assert_eq!(out.stats.voxel_states, 0);
+}

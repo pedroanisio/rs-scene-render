@@ -54,12 +54,19 @@ pub(in crate::render) struct VoxelState {
     /// The quads of the surface held and their fingerprint, for the frame's statistics.
     quads: usize,
     hash: u64,
+    /// The palette indices in use among the cells of the body at a revision (keyed by the grid, the body and the revision), so that the cells
+    /// are read once and not at every frame.
+    used: Option<(u64, [bool; 256])>,
+    /// What the looks of the indices were when the groups were made: another look is another colour or material for every one of them.
+    looks: u64,
 }
 
 /// A mesh of the quads of one group. What it is drawn with is read from the group at each frame, so that a material that animates is
 /// the frame's and not that of the frame that made the mesh.
 struct GroupDraw {
     group: GroupKey,
+    /// The fingerprint of the quads the mesh was made from: a group whose quads are those of the new surface keeps its mesh.
+    hash: u64,
     mesh: Arc<crate::three::MeshGpu>,
 }
 
@@ -236,10 +243,20 @@ impl Renderer {
         let object_material = a.str("material");
         let mut used = [false; 256];
         for body in &bodies {
-            for (_, cells) in body.grid.bricks() {
-                for c in cells.iter() {
-                    used[usize::from(*c)] = true;
+            let key = h(&[model.occupancy.lineage(), body.id.map_or(0, |b| b as u64 + 1), body.revision]);
+            let state = self.voxel_surfaces.entry((n.id.clone(), body.id)).or_default();
+            if state.used.as_ref().map(|u| u.0) != Some(key) {
+                let mut seen = [false; 256];
+                for (_, cells) in body.grid.bricks() {
+                    for c in cells.iter() {
+                        seen[usize::from(*c)] = true;
+                    }
                 }
+                plan.stats.voxel_cells_scanned += body.grid.count() as u64;
+                state.used = Some((key, seen));
+            }
+            for (all, seen) in used.iter_mut().zip(state.used.iter().flat_map(|u| u.1)) {
+                *all |= seen;
             }
         }
         let mut looks: BTreeMap<u8, Look> = BTreeMap::new();
@@ -335,8 +352,6 @@ impl Renderer {
             let left = budget.saturating_sub(used_quads * sr_3d::voxel::surface::BYTES_PER_QUAD);
             if self.voxel_surfaces.get(&state_key).and_then(|s| s.signature) != Some(signature) {
                 let state = self.voxel_surfaces.entry(state_key.clone()).or_default();
-                // the meshes that this rebuild replaces are released before the new ones are made (the budget counts one set of them)
-                state.groups.clear();
                 state.signature = None;
                 let update = match body.steps {
                     None => state.cache.update(body.grid, &classes, left),
@@ -352,7 +367,6 @@ impl Renderer {
                 match update {
                     Ok(u) => remeshed = (u.remeshed, u.full),
                     Err(e) => {
-                        state.signature = None;
                         state.groups.clear();
                         plan.stats.errors.push(format!("{}: {e}", n.id));
                         continue;
@@ -367,10 +381,24 @@ impl Renderer {
                         by_group.entry(g).or_default().push(q);
                     }
                 }
-                let mut out = Vec::new();
+                // what a group is drawn with other than its quads is the looks of the indices: another look makes every group again
+                if state.looks != looks_hash {
+                    state.groups.clear();
+                    state.looks = looks_hash;
+                }
+                // the meshes this rebuild replaces are released before the new ones are made (the budget counts one set of them); a group
+                // whose quads did not change keeps its mesh
+                let hashes: BTreeMap<&GroupKey, u64> =
+                    by_group.iter().map(|(g, q)| (*g, sr_3d::voxel::surface::quads_hash(q))).collect();
+                state.groups.retain(|g| hashes.get(&g.group) == Some(&g.hash));
+                let kept: Vec<GroupKey> = state.groups.iter().map(|g| g.group.clone()).collect();
+                let mut out: Vec<GroupDraw> = std::mem::take(&mut state.groups);
                 let mut failed = false;
                 let limit = self.gpu.device.limits().max_buffer_size;
                 for (group, quads) in by_group {
+                    if kept.contains(group) {
+                        continue;
+                    }
                     let colour = |class: u8| -> [f32; 4] {
                         match colour_of_class.get(&class).copied().flatten() {
                             Some(c) => {
@@ -390,7 +418,8 @@ impl Renderer {
                         break;
                     }
                     let mesh = self.three_engine().upload_mesh_owned(primitive.vertices, primitive.indices);
-                    out.push(GroupDraw { group: group.clone(), mesh });
+                    plan.stats.voxel_groups_uploaded += 1;
+                    out.push(GroupDraw { group: group.clone(), hash: hashes[group], mesh });
                 }
                 let state = self.voxel_surfaces.get_mut(&state_key).expect("the state of this body");
                 state.groups = out;
