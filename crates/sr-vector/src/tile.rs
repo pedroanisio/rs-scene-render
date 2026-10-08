@@ -969,6 +969,9 @@ pub fn render_cpu_rows(
     let y_first = rows.start * TILE;
     let y_end = (rows.end * TILE).min(h);
     let mut out = vec![[0.0f32; 4]; (w * y_end.saturating_sub(y_first)) as usize];
+    // Each row worker owns its scratch. Retain capacity across pixels, including
+    // nested masks/mattes, instead of allocating on every layer push.
+    let mut stack: Vec<([f32; 4], f32)> = Vec::new();
     for ty in rows {
         for tx in 0..e.tiles[0] {
             let [off, n] = e.ranges[(ty * e.tiles[0] + tx) as usize];
@@ -983,7 +986,7 @@ pub fn render_cpu_rows(
                     }
                     let mut acc = [0.0f32; 4];
                     let mut m = 1.0f32;
-                    let mut stack: Vec<([f32; 4], f32)> = Vec::new();
+                    stack.clear();
                     for c in &e.cmds[off as usize..(off + n) as usize] {
                         match c.kind {
                             kind::FILL => {

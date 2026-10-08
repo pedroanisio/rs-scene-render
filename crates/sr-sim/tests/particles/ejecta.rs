@@ -199,10 +199,7 @@ fn results_do_not_depend_on_the_thread_count_and_the_seed_selects_them() {
     let other = ejecta(&Spec { seed: s.seed + 1, ..s.clone() }).unwrap();
     assert_ne!(other, reference);
     // The stratified launch radii and masses do not depend on the seed; angles and azimuths do.
-    assert!(other
-        .iter()
-        .zip(&reference)
-        .all(|(a, b)| a.mass == b.mass && radius_of(a) - radius_of(b) < 1e-9 || a.mass == b.mass));
+    assert!(other.iter().zip(&reference).all(|(a, b)| a.mass == b.mass && (radius_of(a) - radius_of(b)).abs() < 1e-9));
 }
 
 #[test]

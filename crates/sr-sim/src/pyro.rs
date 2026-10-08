@@ -427,11 +427,13 @@ impl Blast {
         if !finite3(center) || !nonnegative(time) {
             return Err(Error::Invalid("a blast has a finite place and a time from zero"));
         }
-        if !nonnegative(energy) || !(ambient_density.is_finite() && ambient_density > 0.0) {
+        if !(nonnegative(energy) && ambient_density.is_finite() && ambient_density > 0.0) {
             return Err(Error::Invalid("a blast has an energy that is not negative and an air of positive density"));
         }
-        if !(ambient_pressure.is_finite() && ambient_pressure > 0.0)
-            || !(pixels_per_meter.is_finite() && pixels_per_meter > 0.0)
+        if !(ambient_pressure.is_finite()
+            && ambient_pressure > 0.0
+            && pixels_per_meter.is_finite()
+            && pixels_per_meter > 0.0)
         {
             return Err(Error::Invalid("a blast has a positive ambient pressure and pixels to the metre"));
         }

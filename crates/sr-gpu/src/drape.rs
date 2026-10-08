@@ -14,7 +14,12 @@ use rayon::prelude::*;
 use sr_text::Drawing;
 use sr_vector::scene::Paint;
 
+#[cfg(test)]
+static COLOR_DECODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn lin(v: f64) -> f32 {
+    #[cfg(test)]
+    COLOR_DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sr_model_decode(v) as f32
 }
 
@@ -97,24 +102,29 @@ pub fn rasterize(d: &Drawing, size: [u32; 2]) -> Vec<u8> {
     }
     // vectors over them, one band of tiles at a time
     let e = sr_vector::tile::encode(&d.scene, size);
-    let paint = |i: u32, _x: f32, _y: f32| -> [f32; 4] {
-        match e.paints.get(i as usize) {
-            Some(Paint::Solid { rgba, .. }) => [lin(rgba[0]), lin(rgba[1]), lin(rgba[2]), rgba[3] as f32],
+    // Solid paint is independent of position. Decode each color once, before
+    // the fine rasterizer visits every covered pixel (and each overlapping fill).
+    let colors: Vec<[f32; 4]> = e
+        .paints
+        .iter()
+        .map(|paint| match paint {
+            Paint::Solid { rgba, .. } => [lin(rgba[0]), lin(rgba[1]), lin(rgba[2]), rgba[3] as f32],
             _ => [0.2, 0.2, 0.2, 1.0],
-        }
-    };
+        })
+        .collect();
+    let paint = |i: u32, _x: f32, _y: f32| colors.get(i as usize).copied().unwrap_or([0.2, 0.2, 0.2, 1.0]);
     let over = render_parallel(&e, &paint);
     base.par_iter_mut().zip(over.par_iter()).for_each(|(b, v)| {
         for k in 0..4 {
             b[k] = v[k] + b[k] * (1.0 - v[3]);
         }
     });
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for p in base {
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    out.par_chunks_mut(4).zip(base.par_iter()).for_each(|(dst, p)| {
         let a = p[3];
         let un = |c: f32| if a > 0.0 { c / a } else { 0.0 };
-        out.extend([enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (a.clamp(0.0, 1.0) * 255.0).round() as u8]);
-    }
+        dst.copy_from_slice(&[enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (a.clamp(0.0, 1.0) * 255.0).round() as u8]);
+    });
     out
 }
 
@@ -124,4 +134,65 @@ fn render_parallel(e: &sr_vector::tile::Encoded, paint: &(dyn Fn(u32, f32, f32) 
     let bands: Vec<Vec<[f32; 4]>> =
         (0..rows).into_par_iter().map(|ty| sr_vector::tile::render_cpu_rows(e, ty..ty + 1, paint)).collect();
     bands.concat()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sr_vector::{shapes, Cmd, FillRule, MaskOp, MatteMode, Scene};
+
+    #[test]
+    fn solid_paints_decode_once_and_masked_matted_pixels_match_reference() {
+        let fill = || Cmd::Fill {
+            polys: shapes::rect(0., 0., 65., 33., [0.; 4]).flatten(0.1),
+            rule: FillRule::NonZero,
+            paint: Paint::Solid { rgba: [0.2, 0.4, 0.6, 0.5], srgb: true },
+            opacity: 0.8,
+        };
+        let d = Drawing {
+            scene: Scene {
+                cmds: vec![
+                    Cmd::Push { mask_init: 0. },
+                    fill(),
+                    fill(),
+                    Cmd::Mask {
+                        polys: shapes::rect(3.25, 2.5, 50., 20., [0.; 4]).flatten(0.1),
+                        rule: FillRule::NonZero,
+                        op: MaskOp::Add,
+                        opacity: 0.6,
+                        invert: false,
+                    },
+                    Cmd::PushMatte,
+                    fill(),
+                    Cmd::PopMatte { mode: MatteMode::Luma, opacity: 0.7 },
+                ],
+            },
+            ..Default::default()
+        };
+        let e = sr_vector::tile::encode(&d.scene, [65, 33]);
+        let reference = sr_vector::tile::render_cpu(&e, &|i, _, _| match &e.paints[i as usize] {
+            Paint::Solid { rgba, .. } => [
+                sr_model_decode(rgba[0]) as f32,
+                sr_model_decode(rgba[1]) as f32,
+                sr_model_decode(rgba[2]) as f32,
+                rgba[3] as f32,
+            ],
+            _ => [0.2, 0.2, 0.2, 1.],
+        });
+        let expected: Vec<u8> = reference
+            .iter()
+            .flat_map(|p| {
+                let un = |c: f32| if p[3] > 0. { c / p[3] } else { 0. };
+                [enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (p[3].clamp(0., 1.) * 255.).round() as u8]
+            })
+            .collect();
+        COLOR_DECODES.store(0, std::sync::atomic::Ordering::Relaxed);
+        let actual = rasterize(&d, [65, 33]);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            COLOR_DECODES.load(std::sync::atomic::Ordering::Relaxed),
+            3 * e.paints.len(),
+            "decode solid colors once per paint, not per pixel"
+        );
+    }
 }

@@ -105,3 +105,23 @@ fn cs_scatter(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_in
     keys_out[dst] = key;
     vals_out[dst] = vals_in[i];
 }
+
+// Software adapters execute each block on CPU lanes. A serial counting scatter
+// performs one rank lookup per item, rather than comparing all earlier lanes.
+// Keep cs_keys/hist/scan unchanged so even rounded depth ties retain their order.
+@compute @workgroup_size(1)
+fn cs_scatter_cpu(@builtin(workgroup_id) wg: vec3<u32>) {
+    let block = wg.x + wg.y * 65535u;
+    if (block >= sp.blocks) { return; }
+    var ranks: array<u32, 256>;
+    let start = block * BLOCK;
+    let end = min(start + BLOCK, sp.n);
+    for (var i = start; i < end; i++) {
+        let key = keys_in[i];
+        let digit = (key >> sp.shift) & 255u;
+        let dst = hist[digit * sp.blocks + block] + ranks[digit];
+        ranks[digit] += 1u;
+        keys_out[dst] = key;
+        vals_out[dst] = vals_in[i];
+    }
+}

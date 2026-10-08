@@ -17,7 +17,9 @@
 use glam::{Mat4, Vec3};
 
 use crate::three::{Draw3, LightKind, MeshSrc, Scene3};
+mod cache;
 mod instances;
+pub use cache::BuildCache;
 
 /// Path-tracing options of a pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +117,11 @@ pub struct PtScene {
 /// CPU seconds `build` spent, split so BVH construction shows apart from the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BuildTiming {
+    /// The complete rigid geometry and its BVHs came from the previous build.
+    pub geometry_reused: bool,
+    /// Object-space prototype BVHs built or reused in this call.
+    pub prototype_builds: usize,
+    pub prototype_hits: usize,
     /// Everything but the BVHs: materials, textures, triangle expansion, prototypes, lights.
     pub assemble_seconds: f64,
     /// Construction of the top-level and prototype BVHs (`bvh`).
@@ -246,9 +253,16 @@ fn triangle(dr: &Draw3, t: &[u32; 3], model: Mat4, nmat: Mat4) -> Triangle {
 
 /// Builds world-space and shared prototype geometry, materials, lights and both BVH levels.
 pub fn build(scene: &Scene3) -> PtScene {
+    BuildCache::new(0).build(scene)
+}
+
+fn build_inner(scene: &Scene3, cache: &mut BuildCache) -> PtScene {
     let started = std::time::Instant::now();
     let mut bvh_seconds = 0.0;
     let mut s = PtScene::default();
+    let key = cache::SceneKey::of(scene);
+    let reused = cache.reuse(key.as_ref());
+    s.timing.geometry_reused = reused.is_some();
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
     let mut norms: Vec<[Vec3; 3]> = Vec::new();
     let mut tmat: Vec<u32> = Vec::new();
@@ -257,7 +271,7 @@ pub fn build(scene: &Scene3) -> PtScene {
     let mut texture_offsets = std::collections::HashMap::new();
     let repetitions = instances::repetitions(scene);
     let mut prototype_ids = std::collections::HashMap::new();
-    let mut prototypes: Vec<Vec<Triangle>> = Vec::new();
+    let mut prototypes: Vec<std::sync::Arc<cache::Prototype>> = Vec::new();
     let mut instance_records = std::collections::HashMap::new();
     // a shadow catcher has no colour of its own and the tracer cannot evaluate its darkening: it is left out (see `notes`)
     for dr in scene.draws.iter().filter(|d| !d.shadow_catcher) {
@@ -323,17 +337,12 @@ pub fn build(scene: &Scene3) -> PtScene {
                 a
             },
         });
+        if reused.is_some() {
+            continue;
+        }
         if let Some(key) = instances::key(dr).filter(|k| repetitions[k] > 1) {
             let prototype = *prototype_ids.entry(key).or_insert_with(|| {
-                let (_, indices) = dr.mesh.cpu();
-                prototypes.push(
-                    indices
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .map(|t| triangle(dr, t, Mat4::IDENTITY, Mat4::IDENTITY))
-                        .collect(),
-                );
+                prototypes.push(cache.prototype(dr, &mut s.timing));
                 prototypes.len() - 1
             });
             let MeshSrc::Cached(mesh) = &dr.mesh else { unreachable!() };
@@ -356,98 +365,99 @@ pub fn build(scene: &Scene3) -> PtScene {
         }
     }
 
-    s.notes = notes(scene);
-    let mut splat_records = std::collections::HashMap::new();
-    for cloud in &scene.splats {
-        let linear = glam::Mat3::from_mat4(cloud.model);
-        let local = glam::Mat3::from_mat4(cloud.model.inverse());
-        for (index, data) in cloud.gpu.cpu.iter().take(cloud.gpu.n as usize).enumerate() {
-            let center = cloud.model.transform_point3(Vec3::new(data[0], data[1], data[2]));
-            let covariance = glam::Mat3::from_cols_array(&[
-                data[4], data[5], data[6], data[5], data[7], data[8], data[6], data[8], data[9],
-            ]);
-            let covariance = linear * covariance * linear.transpose();
-            let inverse = covariance.inverse();
-            if !inverse.is_finite() {
-                continue;
-            }
-            let extent = Vec3::from_array(
-                [covariance.x_axis.x, covariance.y_axis.y, covariance.z_axis.z].map(|v| v.max(0.0).sqrt()),
-            ) * 3.0;
-            let mut record = [[0.0; 4]; 24];
-            record[0] = [center.x, center.y, center.z, f32::from_bits(u32::MAX)];
-            for (row, axis) in inverse.to_cols_array_2d().into_iter().enumerate() {
-                record[row + 1] = [axis[0], axis[1], axis[2], 0.0];
-            }
-            record[4] = [data[12], data[13], data[14], data[3] * cloud.opacity];
-            for (row, axis) in local.to_cols_array_2d().into_iter().enumerate() {
-                record[row + 5] = [axis[0], axis[1], axis[2], 0.0];
-            }
-            if let Some(sh) = cloud.gpu.cpu_sh.get(index) {
-                for (row, values) in sh.as_chunks::<4>().0.iter().enumerate() {
-                    record[row + 8].copy_from_slice(values);
-                }
-                record[20][0] = cloud.gpu.sh_degree as f32;
-            }
-            splat_records.insert(tris.len(), record);
-            tris.push([center - extent, center + extent, center]);
-            norms.push([Vec3::ZERO; 3]);
-            texcoords.push([[[0.0; 2]; 6]; 3]);
-            colors.push([[1.0; 4]; 3]);
-            tmat.push(u32::MAX);
-        }
-    }
     if s.pixels.is_empty() {
         s.pixels.push(u32::MAX);
     }
-    // Top-level BVH, then world triangles / splats / instance records in leaf order
-    let clock = std::time::Instant::now();
-    let order = bvh(&tris, &mut s.nodes);
-    bvh_seconds += clock.elapsed().as_secs_f64();
-    for (new_index, &t) in order.iter().enumerate() {
-        if let Some(record) = instance_records.remove(&t) {
-            s.instances.insert(new_index, record);
-        }
-        if let Some(record) = splat_records.remove(&t) {
-            s.splats.insert(new_index, record);
-        }
-        for c in 0..3 {
-            let p = tris[t][c];
-            let q = norms[t][c];
-            s.pos.push([p.x, p.y, p.z, 0.0]);
-            s.nrm.push([q.x, q.y, q.z, 0.0]);
-            s.uv.push(texcoords[t][c]);
-            s.colors.push(colors[t][c]);
-        }
-        s.tri_mat.push(tmat[t]);
-    }
-    let mut roots = Vec::new();
-    for prototype in &prototypes {
-        let positions: Vec<_> = prototype.iter().map(|t| t.p).collect();
-        let mut nodes = Vec::new();
-        let clock = std::time::Instant::now();
-        let order = bvh(&positions, &mut nodes);
-        bvh_seconds += clock.elapsed().as_secs_f64();
-        let root = s.nodes.len() as u32;
-        let first = s.tri_mat.len() as u32;
-        for node in &mut nodes {
-            node.a += if node.b == 0 { root } else { first };
-        }
-        roots.push(root);
-        s.nodes.extend(nodes);
-        for &index in &order {
-            let t = &prototype[index];
-            for c in 0..3 {
-                s.pos.push(t.p[c].extend(0.).to_array());
-                s.nrm.push(t.n[c].extend(0.).to_array());
-                s.uv.push(t.uv[c]);
-                s.colors.push(t.colors[c]);
+    s.notes = notes(scene);
+    if let Some(geometry) = reused {
+        geometry.apply(&mut s);
+    } else {
+        let mut splat_records = std::collections::HashMap::new();
+        for cloud in &scene.splats {
+            let linear = glam::Mat3::from_mat4(cloud.model);
+            let local = glam::Mat3::from_mat4(cloud.model.inverse());
+            for (index, data) in cloud.gpu.cpu.iter().take(cloud.gpu.n as usize).enumerate() {
+                let center = cloud.model.transform_point3(Vec3::new(data[0], data[1], data[2]));
+                let covariance = glam::Mat3::from_cols_array(&[
+                    data[4], data[5], data[6], data[5], data[7], data[8], data[6], data[8], data[9],
+                ]);
+                let covariance = linear * covariance * linear.transpose();
+                let inverse = covariance.inverse();
+                if !inverse.is_finite() {
+                    continue;
+                }
+                let extent = Vec3::from_array(
+                    [covariance.x_axis.x, covariance.y_axis.y, covariance.z_axis.z].map(|v| v.max(0.0).sqrt()),
+                ) * 3.0;
+                let mut record = [[0.0; 4]; 24];
+                record[0] = [center.x, center.y, center.z, f32::from_bits(u32::MAX)];
+                for (row, axis) in inverse.to_cols_array_2d().into_iter().enumerate() {
+                    record[row + 1] = [axis[0], axis[1], axis[2], 0.0];
+                }
+                record[4] = [data[12], data[13], data[14], data[3] * cloud.opacity];
+                for (row, axis) in local.to_cols_array_2d().into_iter().enumerate() {
+                    record[row + 5] = [axis[0], axis[1], axis[2], 0.0];
+                }
+                if let Some(sh) = cloud.gpu.cpu_sh.get(index) {
+                    for (row, values) in sh.as_chunks::<4>().0.iter().enumerate() {
+                        record[row + 8].copy_from_slice(values);
+                    }
+                    record[20][0] = cloud.gpu.sh_degree as f32;
+                }
+                splat_records.insert(tris.len(), record);
+                tris.push([center - extent, center + extent, center]);
+                norms.push([Vec3::ZERO; 3]);
+                texcoords.push([[[0.0; 2]; 6]; 3]);
+                colors.push([[1.0; 4]; 3]);
+                tmat.push(u32::MAX);
             }
-            s.tri_mat.push(0);
         }
-    }
-    for record in s.instances.values_mut() {
-        record[13][0] = f32::from_bits(roots[record[13][0].to_bits() as usize]);
+        // Top-level BVH, then world triangles / splats / instance records in leaf order
+        let clock = std::time::Instant::now();
+        let order = bvh(&tris, &mut s.nodes);
+        bvh_seconds += clock.elapsed().as_secs_f64();
+        for (new_index, &t) in order.iter().enumerate() {
+            if let Some(record) = instance_records.remove(&t) {
+                s.instances.insert(new_index, record);
+            }
+            if let Some(record) = splat_records.remove(&t) {
+                s.splats.insert(new_index, record);
+            }
+            for c in 0..3 {
+                let p = tris[t][c];
+                let q = norms[t][c];
+                s.pos.push([p.x, p.y, p.z, 0.0]);
+                s.nrm.push([q.x, q.y, q.z, 0.0]);
+                s.uv.push(texcoords[t][c]);
+                s.colors.push(colors[t][c]);
+            }
+            s.tri_mat.push(tmat[t]);
+        }
+        let mut roots = Vec::new();
+        for prototype in &prototypes {
+            let mut nodes = prototype.nodes.clone();
+            let order = &prototype.order;
+            let root = s.nodes.len() as u32;
+            let first = s.tri_mat.len() as u32;
+            for node in &mut nodes {
+                node.a += if node.b == 0 { root } else { first };
+            }
+            roots.push(root);
+            s.nodes.extend(nodes);
+            for &index in order {
+                let t = &prototype.triangles[index];
+                for c in 0..3 {
+                    s.pos.push(t.p[c].extend(0.).to_array());
+                    s.nrm.push(t.n[c].extend(0.).to_array());
+                    s.uv.push(t.uv[c]);
+                    s.colors.push(t.colors[c]);
+                }
+                s.tri_mat.push(0);
+            }
+        }
+        for record in s.instances.values_mut() {
+            record[13][0] = f32::from_bits(roots[record[13][0].to_bits() as usize]);
+        }
     }
     for l in &scene.lights {
         let kind = match l.kind {
@@ -510,7 +520,12 @@ pub fn build(scene: &Scene3) -> PtScene {
         s.nrm.extend([[0.0; 4]; 3]);
         s.tri_mat.push(0);
     }
-    s.timing = BuildTiming { assemble_seconds: (started.elapsed().as_secs_f64() - bvh_seconds).max(0.0), bvh_seconds };
+    if !s.timing.geometry_reused {
+        cache.remember(key, &s);
+    }
+    bvh_seconds += s.timing.bvh_seconds;
+    s.timing.bvh_seconds = bvh_seconds;
+    s.timing.assemble_seconds = (started.elapsed().as_secs_f64() - bvh_seconds).max(0.0);
     s
 }
 
