@@ -135,27 +135,50 @@ fn one_over_the_load_that_breaks_it_breaks_the_root_joint_and_only_it_and_the_pa
     let state = broken.voxels.as_ref().expect("cells");
     // the root piece stays the body (the weld holds it); the four beyond the joint are the one piece that fell
     assert_eq!(cells_of(&state.grid), BTreeSet::from([[0, 0, 0]]), "the part that the weld holds is the body");
-    assert!(state.revision > 0, "the body was cut");
+    // one break is one edit of the body, as one cut is: revision 1, the bricks that it changed (those of the four cells that left) and one step that names them
+    assert_eq!(state.revision, 1, "one break is one edit");
+    assert!(!state.changed_bricks.is_empty(), "the bricks that the break changed");
+    assert_eq!(state.steps.len(), 1, "the edit steps from the first revision to this one: {:?}", state.steps);
+    assert_eq!(state.steps[0].0, 1);
+    assert_eq!(state.steps[0].1, state.changed_bricks, "the one step is what changed since revision 0");
     assert_eq!(state.pieces.len(), 1, "the four pieces beyond the root joint come away together, being joined");
     let piece = &state.pieces[0];
     assert!(piece.enabled);
     assert_eq!(cells_of(&piece.grid), (1..N as i32).map(|i| [i, 0, 0]).collect::<BTreeSet<_>>());
     // fragments and dust are the source, each cell once: nothing is dust here (fragmentMinCells is 1)
     assert_eq!(state.grid.count() + piece.grid.count(), N as u64);
-    // and the piece fell: it is well below where it was (y is down in the scene), and the root did not move
+    // and the piece fell: it is well below where it was (y is down in the scene). The root's weld holds it whether the joint breaks or not, so that it did not move cannot
+    // tell a break from none: what discriminates in this test is the revision, the pieces and the grids above
     let (root0, root) = (position(&ev, "beam", 0.0), position(&ev, "beam", 2.0));
     assert!((root[1] - root0[1]).abs() < 5e-3, "the root piece stayed in the weld: {root0:?} to {root:?}");
     assert!(piece.pose3[13] > root[1] + 5.0, "the part beyond the joint fell: {:?} against {root:?}", piece.pose3);
 }
 
 #[test]
-fn the_part_that_fell_falls_with_the_acceleration_of_gravity() {
-    // momentum is the mass of the piece times a velocity that gains G a second: the second difference of its height in free fall is G, to the pose's rounding
+fn the_part_that_fell_falls_with_the_acceleration_of_gravity_in_every_frame_after_the_break() {
+    // the piece leaves with the velocity of its centre on the body that held it (0: the beam is at rest in its weld), and after that gravity is all there is: its height is
+    // a quadratic of the steps, and the world's integrator (semi-implicit Euler at 1/240 s) makes the second difference over ten steps exactly g (1/24)^2, so the check is
+    // tight (1e-4 of g) in every triplet of frames from the first frame that has the piece to the last
     let (_dir, ev) = setup("stress-fall", &document(1.005 * breaking_load(0), "", ""));
-    let y = |t: f64| node(&ev, "beam", t).voxels.as_ref().expect("cells").pieces[0].pose3[13];
-    let (a, b, c) = (y(1.5), y(1.5 + 1.0 / 24.0), y(1.5 + 2.0 / 24.0));
-    let g = (a - 2.0 * b + c) * 24.0 * 24.0;
-    assert!((g - G).abs() < 0.03 * G, "the second difference gives {g} against {G}");
+    assert_every_frame_is_clean(&ev, "the cantilever over its breaking load, to its last frame");
+    let ys: Vec<Option<f64>> = (0..ev.frame_count())
+        .map(|n| {
+            let frame = ev.evaluate_frame(n);
+            let beam = frame.nodes.iter().find(|x| &*x.id == "beam").unwrap();
+            beam.voxels.as_ref().and_then(|v| v.pieces.first().map(|p| p.pose3[13]))
+        })
+        .collect();
+    let first = ys.iter().position(Option::is_some).expect("the piece comes away");
+    assert!(first > 0, "the beam holds in the first frame");
+    assert!(ys[first..].iter().all(Option::is_some), "a piece that has come away stays away");
+    let mut triplets = 0;
+    for n in first + 1..ys.len() - 1 {
+        let (a, b, c) = (ys[n - 1].unwrap(), ys[n].unwrap(), ys[n + 1].unwrap());
+        let g = (a - 2.0 * b + c) * 24.0 * 24.0;
+        assert!((g - G).abs() < 1e-4 * G, "frames {}..{}: the second difference gives {g} against {G}", n - 1, n + 1);
+        triplets += 1;
+    }
+    assert!(triplets >= 20, "{triplets} triplets: the break is early enough to see the fall for a second at least");
 }
 
 #[test]

@@ -715,39 +715,19 @@ pub(crate) fn build(
         };
         // a fracture by stress is the load on the body and nothing else: one rigid body until a joint of its pieces gives, and the world breaks it
         if text(config, "mode").as_deref() == Some("stress") {
-            let made = match bodies[source].cells.clone() {
-                None => Err("fracture mode stress breaks an object of cells whose rigidBody is its cells".to_string()),
-                Some(_) if specs[source].kind != BodyKind::Dynamic => {
-                    Err("fracture mode stress needs a dynamic rigidBody: a static body has nothing to hold it up"
-                        .to_string())
+            // what the schema keeps out (a mesh, a static body, a crater on the same object: FRX14, VOX14, VOX15) is not looked for again, and an object whose cells could not
+            // be made has said why already
+            if let Some(info) = bodies[source].cells.clone() {
+                match stress_of(config, &info, bodies[source].scale[0], source) {
+                    Ok(stress) => stresses.push(stress),
+                    Err(error) => failures.push(format!("{}: {error}", n.id)),
                 }
-                Some(_) if children(&*n.elem).into_iter().any(|c| c.element_name() == "crater") => {
-                    Err("an object of cells is cut by a crater or breaks by stress, not both".to_string())
-                }
-                Some(info) => stress_of(config, &info, bodies[source].scale[0], source),
-            };
-            match made {
-                Ok(stress) => stresses.push(stress),
-                Err(error) => failures.push(format!("{}: {error}", n.id)),
             }
             continue;
         }
         // an object of cells breaks into the pieces of its partition, which are bodies of cells, and what is too small is dust
         if let Some(info) = bodies[source].cells.clone() {
-            let cell = info.size[0] / bodies[source].scale[0];
-            let made = (|| -> Result<_, String> {
-                let planes;
-                let label = |c: [i32; 3]| u32::from(info.model.occupancy.get(c));
-                let rule = match text(config, "partition").as_deref() {
-                    Some("planes") => {
-                        planes = crate::voxel_cut::planes_of(&text(config, "planes").unwrap_or_default(), cell)?;
-                        sr_3d::pieces::Partition::Planes(&planes)
-                    }
-                    Some("labels") => sr_3d::pieces::Partition::Labels(&label),
-                    _ => {
-                        sr_3d::pieces::Partition::Voronoi { seeds: num(config, "pieces", 8.) as u32, seed: config.seed }
-                    }
-                };
+            let made = with_partition(config, &info, bodies[source].scale[0], |rule| {
                 crate::voxels::fracture(
                     &info.model.occupancy,
                     rule,
@@ -760,7 +740,7 @@ pub(crate) fn build(
                     info.density,
                     info.pixels_per_meter,
                 )
-            })();
+            });
             let broken = match made {
                 Ok(broken) => broken,
                 Err(error) => {
@@ -1116,30 +1096,42 @@ fn stress_of(
     scale: f64,
     parent: usize,
 ) -> Result<sr_sim::physics3d::Stress3, String> {
+    with_partition(config, info, scale, |rule| {
+        crate::voxels::stress(
+            &info.model.occupancy,
+            rule,
+            &crate::voxels::StressConfig {
+                strength: num(config, "strength", 0.),
+                min_cells: info.min_cells,
+                overflow_to_dust: info.overflow == crate::voxels::Overflow::Dust,
+            },
+            parent,
+            info.size,
+            info.density,
+            info.pixels_per_meter,
+        )
+    })
+}
+
+/// Runs `make` with the partition rule of the fracture `config` for the cells `info` (`voronoi` by `pieces` and `seed`, `planes`, or `labels` by the palette index): the rule
+/// borrows the planes that are made here, so it is lent and not returned. `scale` is the object's scale along x, which turns the cell size of the object into its own units for
+/// the planes.
+fn with_partition<T>(
+    config: &sr_model::model::Fracture,
+    info: &crate::voxel_cut::CellsInfo,
+    scale: f64,
+    make: impl FnOnce(sr_3d::pieces::Partition<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let cell = info.size[0] / scale;
-    let planes;
     let label = |c: [i32; 3]| u32::from(info.model.occupancy.get(c));
-    let rule = match text(config, "partition").as_deref() {
+    match text(config, "partition").as_deref() {
         Some("planes") => {
-            planes = crate::voxel_cut::planes_of(&text(config, "planes").unwrap_or_default(), cell)?;
-            sr_3d::pieces::Partition::Planes(&planes)
+            let planes = crate::voxel_cut::planes_of(&text(config, "planes").unwrap_or_default(), cell)?;
+            make(sr_3d::pieces::Partition::Planes(&planes))
         }
-        Some("labels") => sr_3d::pieces::Partition::Labels(&label),
-        _ => sr_3d::pieces::Partition::Voronoi { seeds: num(config, "pieces", 8.) as u32, seed: config.seed },
-    };
-    crate::voxels::stress(
-        &info.model.occupancy,
-        rule,
-        &crate::voxels::StressConfig {
-            strength: num(config, "strength", 0.),
-            min_cells: info.min_cells,
-            overflow_to_dust: info.overflow == crate::voxels::Overflow::Dust,
-        },
-        parent,
-        info.size,
-        info.density,
-        info.pixels_per_meter,
-    )
+        Some("labels") => make(sr_3d::pieces::Partition::Labels(&label)),
+        _ => make(sr_3d::pieces::Partition::Voronoi { seeds: num(config, "pieces", 8.) as u32, seed: config.seed }),
+    }
 }
 
 /// The craters that grow from impacts: for each `crater` element with a `source`, the watch
