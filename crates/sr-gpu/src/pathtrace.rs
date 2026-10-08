@@ -656,6 +656,37 @@ mod tests {
     }
 
     #[test]
+    fn scatter_bounces_other_than_one_is_a_variant_of_its_own_and_one_leaves_every_text_as_it_was() {
+        // one is the single scattering that the shader has: no pipeline of its own, the text it had
+        assert!(!needs_scatter([1u32, 1].into_iter()));
+        assert!(!needs_scatter(std::iter::empty()));
+        assert!(needs_scatter([1u32, 4].into_iter()) && needs_scatter([0u32].into_iter()));
+        // the slots: the fifteen there were keep their numbers, a scene with more scattering and no water or foam has its own, and every
+        // shape of scene with scattering is another set of twenty
+        let shapes = [(false, false, false), (true, false, false), (true, false, true), (true, true, false), (true, true, true)];
+        let mut before = std::collections::BTreeSet::new();
+        let mut all = std::collections::BTreeSet::new();
+        for (media, grid, lighting) in shapes {
+            for (water, foam) in [(true, false), (true, true), (false, true), (false, false)] {
+                for scatter in [false, true] {
+                    let slot = variant_slot(media, grid, lighting, water, foam, scatter);
+                    assert!(all.insert(slot), "slot {slot} is taken twice");
+                    if !scatter && (water || foam) {
+                        before.insert(slot);
+                    }
+                }
+            }
+        }
+        assert_eq!(before.len(), 15);
+        assert_eq!((before.first(), before.last()), (Some(&0), Some(&14)), "the slots of the variants that were are those they had");
+        assert_eq!((all.first(), all.last(), all.len()), (Some(&0), Some(&39), 40));
+        // the text: without scattering the base is not touched, by any of the additions
+        let base = format!("{}\n{}", include_str!("pathtrace.wgsl"), include_str!("volume.wgsl"));
+        assert_eq!(variant_source(&base, false, false, false), base);
+        assert_eq!(variant_source(&base, true, false, false), variant_source_without_scatter(&base, true, false));
+    }
+
+    #[test]
     fn a_variant_pipeline_is_given_water_only_for_water_and_foam_only_for_foam() {
         let plain = format!(
             "{}\n{}\n{}",

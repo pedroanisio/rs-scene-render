@@ -733,6 +733,27 @@ mod tests {
     }
 
     #[test]
+    fn the_scatter_bounces_of_a_medium_are_packed_in_the_spare_lane_of_its_record() {
+        let with = |bounces: u32| {
+            let medium = Medium::new(
+                Arc::new(ball(1.0)),
+                Some(sr_volume::medium::Bounds::new([0.0; 3], [8.0; 3]).unwrap()),
+                Transform::identity(),
+                sr_volume::medium::Optical { scatter_bounces: bounces, ..Default::default() },
+            )
+            .unwrap();
+            VolumeDraw::new(Arc::new(medium), March { step_size: 0.5, max_steps: 65536 }).unwrap()
+        };
+        let lane = |draw: &VolumeDraw| {
+            let mut rows = Vec::new();
+            pack(&mut rows, std::slice::from_ref(draw));
+            rows[13][3]
+        };
+        assert_eq!(lane(&draw(1.0, 0.0, None)), 1.0, "a medium that says nothing has one");
+        assert_eq!((lane(&with(0)), lane(&with(1)), lane(&with(4)), lane(&with(32))), (0.0, 1.0, 4.0, 32.0));
+    }
+
+    #[test]
     fn light_grid_plan_covers_the_asking_media_with_one_slot_per_light_and_direction() {
         // no medium asks: no grid
         assert_eq!(plan_light_grid(&[draw(1.0, 0.0, None)], 2, true).unwrap(), None);
