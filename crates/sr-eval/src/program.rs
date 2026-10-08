@@ -1134,8 +1134,6 @@ fn template(
             }
         }
     });
-    // a fracture by stress is valid and not evaluated yet: refused by name, and not made as a fracture by impact
-    walk(&scene, &mut |e| crate::pending::refuse_stress_fracture(e, &mut *diags));
     Templated { scene, params, size, reframe }
 }
 
@@ -1918,9 +1916,6 @@ impl Builder {
         let mut sub_d = Vec::new();
         let mut sub_w = Vec::new();
         let t = template(&doc, &EvalOptions::default(), &mut sub_d, &mut sub_w);
-        // what the include's own templating found is not the main document's, but a feature that is refused by name is refused wherever it is: the nodes that the include makes would be
-        // built as the other fracture
-        self.diags.extend(sub_d.into_iter().filter(|d| d.code == "E24"));
         let ns = self.nodes[idx as usize].id.clone();
         let (mut kids, dur, size) = match &inc.symbol {
             Some(s) => match t.scene.symbols.as_ref().and_then(|x| x.symbols.iter().find(|y| &y.id == s)) {

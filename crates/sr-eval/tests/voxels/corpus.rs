@@ -20,6 +20,7 @@ fn the_valid_documents_of_the_corpus_that_make_bodies_of_cells_are_evaluated_as_
         ("voxel-fracture", "block", true),
         ("voxel-fracture-planes", "block", true),
         ("voxel-fracture-labels", "block", true),
+        ("voxel-fracture-stress", "block", true),
     ] {
         let doc = sr_model::load_file(corpus(name), &sr_model::LoadOptions::default())
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
@@ -53,23 +54,11 @@ fn every_valid_document_of_the_corpus_with_cells_evaluates_clean() {
         .collect();
     files.sort();
     assert!(files.len() >= 10, "the documents of cells of the corpus: {files:?}");
-    let mut refused = 0;
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let doc =
             sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        // the one document that is refused is the fracture by stress, by its own code (E24), until the wiring of the mode
-        let ev = match Evaluator::new(&doc, &EvalOptions::default()) {
-            Ok(ev) => ev,
-            Err(report) => {
-                assert!(
-                    name == "voxel-fracture-stress.scene.xml" && report.diagnostics.iter().all(|d| d.code == "E24"),
-                    "{name} is refused by something other than the fracture by stress: {report}"
-                );
-                refused += 1;
-                continue;
-            }
-        };
+        let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
         for t in [0.0, doc.duration() / 2.0, doc.fps().frame_time(doc.frame_count() - 1)] {
             let g = ev.evaluate(t);
             assert!(
@@ -80,5 +69,4 @@ fn every_valid_document_of_the_corpus_with_cells_evaluates_clean() {
             );
         }
     }
-    assert_eq!(refused, 1, "only the fracture by stress is refused");
 }
