@@ -38,6 +38,8 @@ VOXELS = '<scene version="1.3"><project width="32" height="32" fps="30" duration
 VOXELS_FROM_MESH = VOXELS.replace('<voxelAsset id="model" src="../media/voxels.vox" maxCells="100000"/>', '<voxelAsset id="model" fromMesh="shape" cellSize="0.5"/>').replace(' palette="stone moss"', ' palette="file"')
 
 PYRO_BLAST = PYRO.replace('<pyro ', '<pyro boundary="open" ').replace('</pyro>', '<pyroBlast time="0.3" energy="1000000" x="1" y="-1"/></pyro>')
+# The block of cells is block.vox (16 x 4 x 16 cells of 0.25 m: 4 m by 1 m by 4 m, its origin at its minimum corner) and the ball falls at x = 2, z = 2: the middle of that block. The one
+# document that scales the ground by 3 has a block of 12 m, and the ball is a third of the way across it, which is fine for what it checks (a scale written with a plus sign).
 VOXEL_HEAD = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><assets><voxelAsset id="model" src="../media/block.vox" maxCells="100000"/></assets><materials><material id="stone" baseColor="#808080"/></materials><composition><object3D id="ball" primitive="sphere" radius="0.2" x="2" y="-8" z="2"><rigidBody mass="500" velocityY="120"/></object3D>'
 VOXEL_TAIL = '</composition><physics pixelsPerMeter="1"/></scene>\n'
 VOXEL_BODY = VOXEL_HEAD + '<object3D id="block" primitive="voxels" voxels="model" cellSize="0.25" material="stone"><rigidBody density="2400"/></object3D>' + VOXEL_TAIL

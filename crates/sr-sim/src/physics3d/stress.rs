@@ -376,6 +376,12 @@ impl World3 {
         self.stress_levels.get(body).map_or(&[], Vec::as_slice)
     }
 
+    /// The stresses (normal, shear, bending, twist and principal) at the worst fibre of each intact joint of the body `body` as of the last step that read it, by joint.
+    #[doc(hidden)]
+    pub fn stress_readings(&self, body: usize) -> &[(u32, crate::stress::CutStress)] {
+        self.stress_readings.get(body).map_or(&[], Vec::as_slice)
+    }
+
     /// What the last step left unexplained in the body `body`, if the stress was read on it ([`StressBalance`]).
     #[doc(hidden)]
     pub fn stress_balance(&self, body: usize) -> Option<StressBalance> {
@@ -626,6 +632,7 @@ impl World3 {
             });
             let mut pending: Vec<u32> = Vec::new();
             let mut levels: Vec<(u32, f64)> = Vec::new();
+            let mut readings: Vec<(u32, crate::stress::CutStress)> = Vec::new();
             for cut in plans.iter() {
                 let sections: Vec<&JointSection> = cut.members.iter().map(|&j| &family.joints[j].section).collect();
                 let q_local = sections[0].centroid;
@@ -635,6 +642,7 @@ impl World3 {
                 for &target in &cut.targets {
                     let at = cut.members.iter().position(|&m| m == target).expect("a target is a member of its cut");
                     levels.push((target as u32, stresses[at].principal));
+                    readings.push((target as u32, stresses[at]));
                     if stresses[at].principal >= family.strength {
                         pending.push(target as u32);
                     }
@@ -643,7 +651,9 @@ impl World3 {
             pending.sort_unstable();
             pending.dedup();
             levels.sort_unstable_by_key(|(j, _)| *j);
+            readings.sort_unstable_by_key(|(j, _)| *j);
             self.stress_levels[k] = levels;
+            self.stress_readings[k] = readings;
             self.state.stress_pending[k] = pending;
         }
     }

@@ -10,7 +10,8 @@ fn corpus(name: &str) -> std::path::PathBuf {
 #[test]
 fn the_valid_documents_of_the_corpus_that_make_bodies_of_cells_are_evaluated_as_what_they_say() {
     // (document, the object, whether its frames say what it is: a body that a crater or a fracture can break does)
-    // The asset of the corpus has five cells, and the fractures of the corpus say fragmentMinCells="1": every piece is a body, and the document breaks into them.
+    // The asset of the corpus (tests/corpus/media/block.vox) has 1024 cells in 16 x 4 x 16, and the fractures of the corpus say fragmentMinCells="1": every piece is a body, and the
+    // document breaks into them (with the old asset of five cells, and a least of two, every piece was dust).
     for (name, object, says) in [
         ("voxel-body", "block", false),
         ("voxel-crater", "ground", true),

@@ -597,6 +597,7 @@ pub struct World3 {
     /// What the last step read on each body of a family: the principal tension of each of its intact joints.
     stress_levels: Vec<Vec<(u32, f64)>>,
     stress_balance: Vec<Option<stress::StressBalance>>,
+    stress_readings: Vec<Vec<(u32, crate::stress::CutStress)>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
@@ -914,6 +915,7 @@ impl World3 {
             stress_plans: std::collections::HashMap::new(),
             stress_levels: vec![Vec::new(); spec.bodies.len()],
             stress_balance: vec![None; spec.bodies.len()],
+            stress_readings: vec![Vec::new(); spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),

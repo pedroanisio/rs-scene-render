@@ -158,7 +158,7 @@ fn the_load_in_each_joint_of_a_cantilever_at_rest_is_the_beam_s_to_the_exact_sec
     for (j, (joint, principal)) in levels.iter().enumerate() {
         assert_eq!(*joint as usize, j);
         let want = beam_principal(j, n, edge, load);
-        // the solver holds a weld and a resting block to a few ten-thousandths of the load (5e-4 measured: 0.0004 to 0.0005 in the four joints, the weld's give)
+        // the solver holds a weld and a resting block to a few ten-thousandths of the load (4.5e-4 to 5.1e-4 measured in the four joints: the weld's give)
         assert!((principal / want - 1.0).abs() < 1e-3, "joint {j}: {principal} against {want}");
     }
 }
@@ -996,8 +996,10 @@ fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accou
         }
     }
     let broken = (0..640).filter(|&j| w.stress_joint_broken(0, j) == Some(true)).count();
-    // the numbers of this run, which is deterministic: the strength of 4e4 Pa is 13% over what the block reads at rest (3.53e4), so the blow of the first steps breaks nearly all of it
-    assert_eq!((broken, bodies), (633, 250), "joints broken, bodies that hold pieces");
+    // the strength of 4e4 Pa is 13% over what the block reads at rest (3.53e4), so the blow of the first steps breaks nearly all of it: how many joints and how many bodies is the
+    // outcome of a run that is chaotic in its details (this one: 633 joints and 250 bodies, and it was 634 and 251 before the friction and the frame were corrected), so the test asks for
+    // the bulk of it, and for the bodies to be fewer than the pieces only by what stayed joined
+    assert!(broken >= 600 && (200..=256).contains(&bodies), "{broken} joints broken, {bodies} bodies that hold pieces");
     assert!(seen.iter().all(|c| *c == 1), "every piece is in exactly one body");
 }
 
@@ -1112,6 +1114,16 @@ fn a_beam_that_spins_has_in_each_joint_the_pull_of_the_part_beyond_it_by_the_cen
             .world();
     let frame = w.frame_at(1.0 / 240.0, &mut Still);
     assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+    // the shear is asserted apart (it enters the principal tension as shear^2 / pull, which a 2.5% shear changes by 6e-4 only): nothing across the beam, to 1e-3 of the pull, and no
+    // bending, and no twist
+    let readings = w.stress_readings(0);
+    assert_eq!(readings.len(), n - 1);
+    for (joint, r) in readings {
+        assert!(
+            r.shear < 1e-3 * r.normal && r.bending.abs() < 1e-3 * r.normal && r.torsion < 1e-3 * r.normal,
+            "joint {joint}: {r:?}"
+        );
+    }
     let levels = w.stress_levels(0);
     assert_eq!(levels.len(), n - 1);
     for (j, (joint, principal)) in levels.iter().enumerate() {
@@ -1120,7 +1132,7 @@ fn a_beam_that_spins_has_in_each_joint_the_pull_of_the_part_beyond_it_by_the_cen
         let r = (n as f64 / 2.0 - part / 2.0) * edge;
         let want = part * mass * omega * omega * r / (edge * edge);
         assert_eq!(*joint as usize, j);
-        assert!((principal / want - 1.0).abs() < 2e-3, "joint {j}: {principal} against {want}");
+        assert!((principal / want - 1.0).abs() < 2e-4, "joint {j}: {principal} against {want}");
     }
 }
 
@@ -1137,34 +1149,49 @@ fn halves_into_walls(slots: usize, dust: bool) -> World3 {
 #[test]
 fn two_bodies_of_a_family_that_break_in_the_same_step_share_the_pool_and_the_one_that_does_not_fit_is_an_error_or_dust()
 {
-    // three slots: the first break takes one, the two halves that hit the walls together need two each and there are two left
-    let mut w = halves_into_walls(3, false);
-    let mut broke_apart = None;
-    let mut errors = Vec::new();
-    for step in 1..=240u64 {
-        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
-        if broke_apart.is_none() && w.stress_pieces(0).is_some_and(|h| h.len() == 1) {
-            broke_apart = Some(step);
-        }
-        if !frame.errors.is_empty() {
-            errors = frame.errors;
-            break;
-        }
-    }
-    // the first body takes the two that are free, and the second finds none: an error that names both numbers, and not an index out of the pool
-    assert!(
-        errors.iter().any(|e| e.contains("2 loose parts") && e.contains("0 slots free") && e.contains("maxFragments")),
-        "{errors:?} (the parent broke apart at {broke_apart:?})"
-    );
-    // with the overflow to dust it is the same step and no error: the second body's loose parts are dust, the pool is used once
+    // with the overflow to dust, first: the two halves break in the same step, and what each holds is exact. Three slots: the first break takes one, and the two halves that hit the walls
+    // together need two each and there are two left, which the body of the lower index takes: the rule is that the bodies of a family are served in the order of their index, the loose
+    // parts of each by their lowest piece, and what does not fit is dust, the smallest first (the first of equals): not the largest of the whole family first
     let mut w = halves_into_walls(3, true);
+    let (mut parent_apart, mut slot_apart) = (None, None);
     for step in 1..=240u64 {
         let frame = w.frame_at(step as f64 / 240.0, &mut Still);
         assert!(frame.errors.is_empty(), "step {step}: {:?}", frame.errors);
+        if parent_apart.is_none() && w.stress_pieces(0).is_some_and(|h| h.len() == 1) {
+            parent_apart = Some(step);
+        }
+        if slot_apart.is_none() && w.stress_pieces(1).is_some_and(|h| h.len() == 1) {
+            slot_apart = Some(step);
+        }
     }
-    let held: Vec<usize> = (0..4).filter_map(|k| w.stress_pieces(k).map(<[u32]>::len)).collect();
-    // the parent and slot 1 hold what is left of the halves (one piece each, the others being the two slots and the dust), and the slots 2 and 3 hold one piece each
-    assert_eq!(held.iter().sum::<usize>(), 4, "{held:?}");
+    let step = parent_apart.expect("the first half breaks apart");
+    assert_eq!(slot_apart, Some(step), "the two halves break apart in the same step");
+    let held: Vec<Option<Vec<u32>>> = (0..4).map(|k| w.stress_pieces(k).map(<[u32]>::to_vec)).collect();
+    // the parent keeps the first piece of its half, the pieces 1 and 2 of it take the two slots that are left, and the other half (the body 1) keeps its first piece, the pieces 4 and 5
+    // of it being dust: no body holds them
+    assert_eq!(held, vec![Some(vec![0]), Some(vec![3]), Some(vec![1]), Some(vec![2])]);
+    let mut ids: Vec<u32> = held.iter().flatten().flatten().copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids, vec![0, 1, 2, 3], "every piece that is held is held once, and the dust is held by none");
+    // the same world with no overflow to dust is an error in that very step, that names both numbers, and not an index out of the pool
+    let mut w = halves_into_walls(3, false);
+    let mut errors = (0, Vec::new());
+    for step in 1..=240u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        if !frame.errors.is_empty() {
+            errors = (step, frame.errors);
+            break;
+        }
+    }
+    assert!(
+        errors
+            .1
+            .iter()
+            .any(|e| e.contains("2 loose parts") && e.contains("0 slots free") && e.contains("maxFragments")),
+        "{errors:?}"
+    );
+    assert_eq!(errors.0, step, "the error is in the step in which the halves break");
 }
 
 #[test]

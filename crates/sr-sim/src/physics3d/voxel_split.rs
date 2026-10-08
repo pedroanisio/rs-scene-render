@@ -171,32 +171,32 @@ impl World3 {
         }
         let mut prepared: Vec<Prepared> = Vec::new();
         let mut claimed = vec![0usize; self.voxel_splits.len()];
-        // the cuts to look at: every split's parent, which the driver cuts from an impact, and every body of a family that breaks by stress that has joints put aside
-        // at the end of the last step, which cuts itself (the joints that are over strength, all together)
-        let mut jobs: Vec<(usize, usize, Option<StressInstall>)> =
-            (0..self.voxel_splits.len()).map(|s| (s, self.voxel_splits[s].parent, None)).collect();
+        // the cuts to look at: every split's parent, which the driver cuts from an impact, and every body of a family that breaks by stress that has joints put aside at the end of the
+        // last step, which cuts itself (the joints that are over strength, all together). The cut of a body of a family is made in its turn, in the loop, after the ones before it:
+        // what they claimed of the pool (a cut of the driver, or of another body of the family) is out of it, and a job that is skipped claims nothing
+        let mut jobs: Vec<(usize, usize, bool)> =
+            (0..self.voxel_splits.len()).map(|s| (s, self.voxel_splits[s].parent, false)).collect();
         // the joints that break and leave the body in one piece are recorded when the cuts are installed, with the rest
         let mut only_broken: Vec<(usize, StressInstall)> = Vec::new();
-        // the slots of each split that the cuts of this call have claimed, in the order of the bodies: the pool of a family is one, and what each cut takes is not out of it until all
-        // are installed, so a cut is asked how many are free after the ones before it
-        let mut reserved = vec![0usize; self.voxel_splits.len()];
         for k in 0..self.spec.bodies.len() {
             if self.state.stress_pending[k].is_empty() {
                 continue;
             }
             let family = self.stress_of[k].expect("a body with joints put aside is in a family");
-            let split = self.stress_split(family);
-            if let Some(install) = self.stress_install_for(k, step, reserved[split])? {
-                if install.cut.is_some() {
-                    reserved[split] += install.loose.len();
-                    jobs.push((split, k, Some(install)));
-                } else {
-                    only_broken.push((k, install));
-                }
-            }
+            jobs.push((self.stress_split(family), k, true));
         }
-        for (s, parent, stress) in jobs {
+        for (s, parent, by_stress) in jobs {
             let slots = self.voxel_splits[s].slots.clone();
+            let stress = if by_stress {
+                let Some(install) = self.stress_install_for(parent, step, claimed[s])? else { continue };
+                if install.cut.is_none() {
+                    only_broken.push((parent, install));
+                    continue;
+                }
+                Some(install)
+            } else {
+                None
+            };
             if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
                 continue;
             }

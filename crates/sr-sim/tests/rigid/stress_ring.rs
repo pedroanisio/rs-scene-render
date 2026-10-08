@@ -103,10 +103,11 @@ fn a_pull_across_a_ring_is_shared_by_the_areas_of_the_joints_that_the_plane_cros
     let step = Step { contacts: &off, ..step };
     let wrench = step.on_part(&across.mass, &in_part, q);
     let stresses = cut_stresses(&members, &across.side_has_a, &wrench);
-    // by hand: the pull f / 0.04 over the two joints; the moment about the centre of the section (y = 0.75) is 0.75 f; the second moment about it is the areas at their distances,
-    // 0.01 * 0.75^2 + 0.03 * 0.25^2 = 0.0075, and the joints' own (0.1^3 * 0.1 / 12 and 0.1^3 * 0.3 / 12); the bending stress is 0.75 f r / J at the corner that is farthest on the
-    // tension side of each joint: r = 0.8 below the centre for the joint 0-1 (its corner at y = -0.05) and 0.2 for the joint 2-3 (its nearest corner, at y = 0.7 + 0.1 - 0.05... that is
-    // 0.25 - 0.05 above the centre, where the bending is least compressive): the figures are exact, and the second is not zero (the box of a joint, not its centre, is read)
+    // By hand. The pull f over the two joints is f / 0.04 (areas 0.01 and 0.03). The pull acts on the row y = 0, and the centre of the section is at y = 0.75, so its moment about
+    // the centre is 0.75 f. The second moment of the section about the centre is the areas at their distances, 0.01 * 0.75^2 + 0.03 * 0.25^2 = 0.0075, and the joints' own
+    // (0.1^3 * 0.1 / 12 and 0.1^3 * 0.3 / 12). The bending stress at a point is 0.75 f * (its distance below the centre) / J, and a joint is read at the corner of its box that is
+    // farthest on the tension side: joint 0-1 spans y = -0.05 to 0.05, so its corner is 0.8 below the centre; joint 2-3 spans y = 0.95 to 1.05, so its corner on the tension side is
+    // the nearest to the centre, 0.2 above it, and the bending there is a compression of 0.75 f * 0.2 / J. (At the centre of the joint, 0.25 above, it would be 4e2 Pa: the box is read.)
     let j = 0.0075 + 0.1f64.powi(3) * 0.1 / 12.0 + 0.1f64.powi(3) * 0.3 / 12.0;
     let first = f / 0.04 + 0.75 * f * 0.8 / j;
     let second = f / 0.04 - 0.75 * f * 0.2 / j;
