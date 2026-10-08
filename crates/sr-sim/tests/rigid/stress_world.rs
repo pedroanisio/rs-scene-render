@@ -402,7 +402,7 @@ impl Flyer {
 }
 
 /// The mass sum of the pieces of a flyer that body `k` holds.
-fn held_mass(w: &World3, k: usize, n: usize, edge: f64) -> Option<MassSum> {
+fn held_mass(w: &World3, k: usize, edge: f64) -> Option<MassSum> {
     let held = w.stress_pieces(k)?;
     let mass = DENSITY * edge.powi(3);
     let size = [edge; 3];
@@ -411,15 +411,14 @@ fn held_mass(w: &World3, k: usize, n: usize, edge: f64) -> Option<MassSum> {
         let p = StressPiece3::from_cells(&[[i as i32, 0, 0]], size, mass).unwrap();
         sum.add(&MassSum { mass: p.mass, first: p.centre.map(|c| c * p.mass), second: p.second });
     }
-    let _ = n;
     Some(sum)
 }
 
 /// The linear momentum, the angular momentum about the origin of the world and the kinetic energy of all the parts of a flyer in a frame.
-fn invariants(w: &World3, frame: &Frame3, n: usize, edge: f64) -> ([f64; 3], [f64; 3], f64) {
+fn invariants(w: &World3, frame: &Frame3, edge: f64) -> ([f64; 3], [f64; 3], f64) {
     let (mut p, mut l, mut energy) = ([0.0; 3], [0.0; 3], 0.0);
     for k in 0..frame.bodies.len() {
-        let Some(sum) = held_mass(w, k, n, edge) else { continue };
+        let Some(sum) = held_mass(w, k, edge) else { continue };
         if !frame.enabled[k] {
             continue;
         }
@@ -479,7 +478,7 @@ fn a_body_that_breaks_in_flight_keeps_its_momentum_its_angular_momentum_and_its_
     for step in 1..=240u64 {
         let frame = w.frame_at(step as f64 / 240.0, &mut Still);
         assert!(frame.errors.is_empty(), "{:?}", frame.errors);
-        readings.push((step, invariants(&w, &frame, n, edge)));
+        readings.push((step, invariants(&w, &frame, edge)));
         if broke_at.is_none() && w.stress_pieces(0).is_some_and(|h| h.len() < n) {
             broke_at = Some(step);
         }
@@ -997,7 +996,9 @@ fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accou
         "something is not a number"
     );
     // the bodies that hold pieces (the block and its slots) hold every piece once and none twice, whether the joints that broke left it in one body or in many
+    let (_, joints, _) = grid_block(8, 8, 4, 0.25);
     let mut seen = vec![0u32; 256];
+    let mut body_of = vec![usize::MAX; 256];
     let mut bodies = 0;
     for k in 0..2 + 255 {
         if k == 1 {
@@ -1007,14 +1008,29 @@ fn a_block_of_256_pieces_struck_at_100_m_s_breaks_into_pieces_that_are_all_accou
             bodies += 1;
             for &i in held {
                 seen[i as usize] += 1;
+                body_of[i as usize] = k;
             }
         }
     }
     let broken = (0..640).filter(|&j| w.stress_joint_broken(0, j) == Some(true)).count();
-    // the strength of 4e4 Pa is 13% over what the block reads at rest (3.53e4), so the blow of the first steps breaks nearly all of it: how many joints and how many bodies is the
-    // outcome of a run that is chaotic in its details (this one: 633 joints and 250 bodies, and it was 634 and 251 before the friction and the frame were corrected), so the test asks for
-    // the bulk of it, and for the bodies to be fewer than the pieces only by what stayed joined
-    assert!(broken >= 600 && (200..=256).contains(&bodies), "{broken} joints broken, {bodies} bodies that hold pieces");
+    // the bodies are fewer than the pieces by exactly what stayed joined: every joint that is intact has both its pieces in one body (a joint that holds two bodies apart is not intact), and
+    // every body of more than one piece is held by intact joints, which are at least the pieces it has beyond the first
+    let intact: Vec<&StressJoint3> = joints
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| w.stress_joint_broken(0, *j) == Some(false))
+        .map(|(_, j)| j)
+        .collect();
+    assert_eq!(intact.len(), 640 - broken);
+    for joint in &intact {
+        assert_eq!(body_of[joint.a as usize], body_of[joint.b as usize], "an intact joint between two bodies");
+    }
+    assert!(
+        256 - bodies <= intact.len(),
+        "{} pieces share a body and only {} joints are intact",
+        256 - bodies,
+        intact.len()
+    );
     assert!(seen.iter().all(|c| *c == 1), "every piece is in exactly one body");
 }
 
@@ -1166,7 +1182,7 @@ fn two_bodies_of_a_family_that_break_in_the_same_step_share_the_pool_and_the_one
 {
     // with the overflow to dust, first: the two halves break in the same step, and what each holds is exact. Three slots: the first break takes one, and the two halves that hit the walls
     // together need two each and there are two left, which the body of the lower index takes: the rule is that the bodies of a family are served in the order of their index, the loose
-    // parts of each by their lowest piece, and what does not fit is dust, the smallest first (the first of equals): not the largest of the whole family first
+    // parts of each by their lowest piece, and what does not fit is dust, the smallest first (of equals the later, the first keeps its slot): not the largest of the whole family first
     let mut w = halves_into_walls(3, true);
     let (mut parent_apart, mut slot_apart) = (None, None);
     for step in 1..=240u64 {
@@ -1261,7 +1277,7 @@ fn the_friction_that_a_block_landing_and_sliding_puts_on_a_welded_beam_is_what_t
     let mut c = cantilever_with(5, 0.4, 1e15, load, false, (1.0, 0.02));
     let mass = load / G;
     let mut before = 1.0;
-    let (mut read, mut missed) = (0, 0);
+    let (mut read, mut missed) = (0, Vec::new());
     for step in 1..=60u64 {
         let frame = c.world.frame_at(step as f64 / 240.0, &mut Still);
         assert!(frame.errors.is_empty(), "{:?}", frame.errors);
@@ -1282,15 +1298,27 @@ fn the_friction_that_a_block_landing_and_sliding_puts_on_a_welded_beam_is_what_t
                 (friction - lost).abs() <= 0.3 * lost.abs().max(0.5),
                 "step {step}: the friction read is {friction} and the block lost {lost}"
             );
+            // the steps in which the normal impulse of the last sub-step is not the step's eighth (the first of the sliding, then the ones in which the normal changes: the ratios are 1, 4101,
+            // 11, 15 and 19): a fixed scale of the sub-steps would read them anything from an eighth to 4000 times too small or large, and the ratio of the normals reads them to 10%
+            if [26, 29, 30, 32, 45].contains(&step) {
+                assert!((b.friction_scale - 8.0).abs() > 1.5, "step {step}: a ratio of {}", b.friction_scale);
+                assert!(
+                    (friction - lost).abs() <= 0.1 * lost.abs(),
+                    "step {step} (a ratio of {}): the friction read is {friction} and the block lost {lost}",
+                    b.friction_scale
+                );
+            }
         } else if lost.abs() > 0.5 {
             // the step in which the last sub-step has no friction vector (the block has bounced off, or is held): what the earlier sub-steps did is not given
-            missed += 1;
+            missed.push(step);
         }
     }
     // it reads where it can (twenty steps of the block's sliding, 4% to 6% over what the block lost while it slides steadily, 23% under it in the step in which it stops), and
     // the steps it cannot read are the landing and a bounce
     assert!(read >= 15, "{read} steps read the friction");
-    assert!(missed <= 4, "{missed} steps in which the block lost more than the world read");
+    // and they are exactly the landing (step 16, the block loses a horizontal momentum of 138 N s that was not read) and the bounce after it (step 27): nowhere else does the block lose
+    // more than the world reads
+    assert_eq!(missed, vec![16, 27], "the steps in which the block lost more than the world read");
 }
 
 #[test]
@@ -1361,8 +1389,6 @@ fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_not_read_and_the_
     // a bar turning at 5 rad/s about the vertical on its floor: the friction under it is a twist of the manifold (the simplified friction solves it apart from the tangent vector), which
     // the world does not read: the frictions that are read add up to nothing along the floor, and the balance leaves the moment that slows the bar. Not a defect of the moment: the
     // stress of a bar that is slowed this way is not known, and the balance says it (the whole residual is the twist)
-    let mut bar = sliding_bar(0.0, 0.5);
-    let _ = &mut bar;
     let (n, edge) = (4usize, 0.25f64);
     let mass = DENSITY * edge.powi(3) * n as f64;
     let mut w = spinning_bar(5.0);
