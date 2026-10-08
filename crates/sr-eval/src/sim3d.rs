@@ -275,6 +275,53 @@ fn cells_body(
     Ok((body.shape, body.mass, model, size))
 }
 
+/// The largest distance from the origin, in metres, that a body's collider (in its own frame) or its start position may
+/// reach: 2^47 m. Below it the spacing of f64 is at most 2^-6 m, under the 0.02 m within which Rapier predicts contacts
+/// (`IntegrationParameters::prediction_distance`, `normalized_prediction_distance` 0.02 times a `length_unit` of 1, the
+/// default this engine keeps); beyond it a contact cannot be placed to the solver's own tolerance, and a size that
+/// overflows (a radius of 1e308, found by sr-fuzz) gave contacts whose products are infinite, on which Rapier's manifold
+/// reduction indexed past the manifold's points.
+const SOLVER_REACH_M: f64 = 140_737_488_355_328.0;
+
+/// The largest magnitude of `values`, or infinity if one is not finite (`f64::max` would pass over a NaN).
+fn largest(values: impl IntoIterator<Item = f64>) -> f64 {
+    values.into_iter().fold(0.0, |m: f64, v| if v.is_finite() { m.max(v.abs()) } else { f64::INFINITY })
+}
+
+/// Why the solver cannot take a body with `shape` (in scene units) starting at `pos`, or `None` when it can.
+fn beyond_the_solver(shape: &Shape3, pos: [f64; 3], pixels_per_meter: f64) -> Option<String> {
+    let extent = match shape {
+        Shape3::Box(h) => largest(*h),
+        Shape3::Sphere(r) => largest([*r]),
+        // the straight part and the cap together, or the half height and the radius: at most twice the larger
+        Shape3::Capsule(hh, r) | Shape3::Cylinder(hh, r) | Shape3::Cone(hh, r) => 2.0 * largest([*hh, *r]),
+        Shape3::Convex(ps) | Shape3::TriMesh(ps, _) | Shape3::Decomposition(ps, _) => {
+            largest(ps.iter().flatten().copied())
+        }
+        Shape3::Voxels { size, cells } => {
+            largest(cells.iter().flat_map(|c| (0..3).map(move |i| (c[i].unsigned_abs() as f64 + 1.0) * size[i])))
+        }
+    } / pixels_per_meter;
+    let at = largest(pos) / pixels_per_meter;
+    let reach = |what: &str, m: f64| {
+        if m.is_finite() {
+            format!("{what} reaches {m:.3e} m, beyond the 2^47 m (1.4e14 m) within which the solver can place contacts")
+        } else {
+            format!(
+                "{what} is not a finite number of metres, and the solver can place no contact for it (2^47 m at most)"
+            )
+        }
+    };
+    let beyond = |m: f64| !m.is_finite() || m >= SOLVER_REACH_M;
+    if beyond(extent) {
+        Some(reach("its collider", extent))
+    } else if beyond(at) {
+        Some(reach("its start position", at))
+    } else {
+        None
+    }
+}
+
 /// The collision shape of object `n` for `rigidBody` `b`, in the object's axes scaled by `s`.
 fn shape_for(
     p: &Program,
@@ -540,6 +587,8 @@ pub(crate) fn build(
     let ph = p.scene.physics.as_ref();
     let mut bodies = Vec::new();
     let mut specs = Vec::new();
+    // a body was refused because the solver cannot place contacts for it: the world is not built
+    let mut refused = false;
     for (i, n) in g0.nodes.iter().enumerate() {
         if n.kind != "object3D" {
             continue;
@@ -590,6 +639,15 @@ pub(crate) fn build(
             }
         } else {
             shape_for(p, n, c, scale, problems, failures)
+        };
+        // a world that will be stepped never takes a body the solver cannot place contacts for
+        let shape = match beyond_the_solver(&shape, start.pos, ph.map_or(100.0, |p| p.pixels_per_meter.get())) {
+            Some(error) if matches!(plan, Plan3::Simulate { .. }) => {
+                failures.push(format!("{}: rigidBody: {error}", n.id));
+                refused = true;
+                Shape3::Sphere(1.0)
+            }
+            _ => shape,
         };
         let crater_surface = if children(&*n.elem).into_iter().any(|c| c.element_name() == "crater") {
             match &shape {
@@ -1053,6 +1111,9 @@ pub(crate) fn build(
     let Plan3::Simulate { record, .. } = plan else {
         return Some(Phys3 { world: None, bodies, fractures, spec_digest, hulls, watches, links, follow });
     };
+    if refused {
+        return Some(Phys3 { world: None, bodies, fractures, spec_digest, hulls, watches, links, follow });
+    }
     let log = record.then(|| crate::physcache::contact_config(&spec, &watches));
     let world = World3::new(spec)
         .with_fractures(events)
