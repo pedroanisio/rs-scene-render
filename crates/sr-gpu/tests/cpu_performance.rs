@@ -231,8 +231,10 @@ fn software_splat_sort_preserves_rendered_pixels_and_depth_ties() {
     let mut s = scene(Vec::new());
     s.splats.push(sr_gpu::three::SplatDraw { gpu: engine.upload_splats(&points), model: Mat4::IDENTITY, opacity: 1. });
     let reference = engine.render_now(&s, None);
-    engine.software_adapter = true;
-    assert_eq!(engine.render_now(&s, None), reference);
+    let mut software = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    software.software_adapter = true;
+    assert_eq!(software.render_now(&s, None), reference);
+    assert_eq!(software.stats.splat_sorts, 1);
     assert!(reference.iter().any(|p| p[3] > 0.));
 }
 
@@ -325,4 +327,154 @@ fn benchmark_cached_pathtrace_geometry() {
         times.sort_by(f64::total_cmp);
         println!("{name}: median {:.3} ms; {times:?}", (times[2] + times[3]) * 0.5);
     }
+}
+
+#[test]
+fn alternating_rigid_passes_reuse_geometry_within_the_budget() {
+    let Some(gpu) = common::gpu() else { return };
+    let engine = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    let a = scene(vec![draw(&engine, Vec3::new(32., 32., 0.))]);
+    let b = scene(vec![draw(&engine, Vec3::new(30., 32., 0.))]);
+    let mut cache = sr_gpu::pathtrace::BuildCache::new(1 << 20);
+    cache.build(&a);
+    cache.build(&b);
+    for s in [&a, &b, &a, &b] {
+        let data = cache.build(s);
+        same_payload(&data, &sr_gpu::pathtrace::build(s));
+        assert!(data.timing.geometry_reused, "a different pass must not evict geometry that fits the budget");
+    }
+}
+
+#[test]
+fn culled_noncasters_do_not_prepare_objects_or_materials() {
+    let Some(gpu) = common::gpu() else { return };
+    let mut engine = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    let mut s = scene(vec![draw(&engine, Vec3::new(32., 32., 0.))]);
+    let reference = engine.render_now(&s, None);
+    for i in 0..1000 {
+        let mut d = draw(&engine, Vec3::new(10000. + i as f32, 32., 0.));
+        d.cast_shadow = false;
+        s.draws.push(d);
+    }
+    assert_eq!(engine.render_now(&s, None), reference);
+    assert_eq!(engine.stats.prepared_objects, 1);
+}
+
+#[test]
+fn warm_pathtrace_passes_do_not_upload_unchanged_geometry() {
+    let Some(gpu) = common::gpu() else { return };
+    let mut engine = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    let mut s = scene(vec![draw(&engine, Vec3::new(32., 32., 0.))]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 1, bounces: 1, denoise: false });
+    engine.render_now(&s, None);
+    assert_eq!(engine.stats.pt_geometry_uploads, 1);
+    s.draws[0].material.base_color = [0.2, 0.8, 0.4, 1.];
+    let warm = engine.render_now(&s, None);
+    assert_eq!(engine.stats.pt_geometry_uploads, 0);
+    let mut fresh = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    assert_eq!(warm, fresh.render_now(&s, None));
+    s.draws[0].model.w_axis.x += 3.;
+    let moved = engine.render_now(&s, None);
+    assert_eq!(engine.stats.pt_geometry_uploads, 1);
+    assert_eq!(moved, fresh.render_now(&s, None));
+}
+
+#[test]
+fn opacity_changes_reuse_splat_order_but_view_changes_invalidate_it() {
+    let Some(gpu) = common::gpu() else { return };
+    let mut engine = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    engine.software_adapter = true;
+    let points = sr_3d::Splats {
+        basis: Mat4::IDENTITY,
+        pos: vec![[28., 32., 0.], [32., 32., 1.], [32., 32., 1.]],
+        scale: vec![[4.; 3]; 3],
+        rot: vec![[0., 0., 0., 1.]; 3],
+        color: vec![[1., 0., 0., 0.5], [0., 1., 0., 0.5], [0., 0., 1., 0.5]],
+        ..Default::default()
+    };
+    let mut s = scene(Vec::new());
+    s.splats.push(sr_gpu::three::SplatDraw { gpu: engine.upload_splats(&points), model: Mat4::IDENTITY, opacity: 1. });
+    engine.render_now(&s, None);
+    assert_eq!(engine.stats.splat_sorts, 1);
+    s.splats[0].opacity = 0.7;
+    let warm = engine.render_now(&s, None);
+    assert_eq!(engine.stats.splat_sorts, 0);
+    let mut fresh = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    assert_eq!(warm, fresh.render_now(&s, None));
+    s.splats[0].model = Mat4::from_rotation_y(0.5);
+    let moved = engine.render_now(&s, None);
+    assert_eq!(engine.stats.splat_sorts, 1);
+    assert_eq!(moved, fresh.render_now(&s, None));
+}
+
+#[test]
+fn packed_geometry_is_immutable_across_reversed_submissions_and_texture_changes() {
+    let Some(gpu) = common::gpu() else { return };
+    let mut e = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    let mut s = scene(vec![draw(&e, Vec3::new(32., 32., 0.))]);
+    s.path = Some(sr_gpu::pathtrace::PathOpts { samples: 1, bounces: 1, denoise: false });
+    let a = e.target(s.size);
+    let b = e.target(s.size);
+    let mut first = gpu.device.create_command_encoder(&Default::default());
+    let mut second = gpu.device.create_command_encoder(&Default::default());
+    e.render(&mut first, &s, None, &a.create_view(&Default::default())).unwrap();
+    s.draws[0].material.base_color = [0.2, 0.7, 0.4, 1.];
+    e.render(&mut second, &s, None, &b.create_view(&Default::default())).unwrap();
+    assert_eq!(e.stats.pt_geometry_uploads, 0);
+    gpu.queue.submit([second.finish(), first.finish()]);
+    let mut fresh = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    assert_eq!(e.read(&b), fresh.render_now(&s, None));
+    s.draws[0].material.base_color = [1.; 4];
+    assert_eq!(e.read(&a), fresh.render_now(&s, None));
+    let white = e.upload_rgba8(1, 1, &[255, 255, 255, 255], true);
+    let blue = e.upload_rgba8(1, 1, &[32, 64, 255, 255], true);
+    s.draws[0].maps[0] = Some(white);
+    e.render_now(&s, None);
+    // Different metadata with identical packed pixels is safe to reuse.
+    assert_eq!(e.stats.pt_geometry_uploads, 0);
+    s.draws[0].maps[0] = Some(blue);
+    let changed = e.render_now(&s, None);
+    assert_eq!(e.stats.pt_geometry_uploads, 1);
+    assert_eq!(changed, fresh.render_now(&s, None));
+    assert_eq!(e.render_now(&s, None), changed);
+    assert_eq!(e.stats.pt_geometry_uploads, 0);
+}
+
+#[test]
+fn splat_cache_ignores_unsubmitted_encoders_and_replaced_clouds() {
+    let Some(gpu) = common::gpu() else { return };
+    let mut e = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    e.software_adapter = true;
+    let mut points = sr_3d::Splats {
+        basis: Mat4::IDENTITY,
+        pos: vec![[28., 32., 0.], [32., 32., 1.]],
+        scale: vec![[4.; 3]; 2],
+        rot: vec![[0., 0., 0., 1.]; 2],
+        color: vec![[1., 0., 0., 0.5], [0., 1., 0., 0.5]],
+        ..Default::default()
+    };
+    let mut s = scene(Vec::new());
+    s.splats.push(sr_gpu::three::SplatDraw { gpu: e.upload_splats(&points), model: Mat4::IDENTITY, opacity: 1. });
+    let a = e.target(s.size);
+    let b = e.target(s.size);
+    let mut abandoned = gpu.device.create_command_encoder(&Default::default());
+    e.render(&mut abandoned, &s, None, &a.create_view(&Default::default())).unwrap();
+    s.splats[0].opacity = 0.7;
+    let mut submitted = gpu.device.create_command_encoder(&Default::default());
+    e.render(&mut submitted, &s, None, &b.create_view(&Default::default())).unwrap();
+    assert_eq!(e.stats.splat_sorts, 1, "unsubmitted data is not reusable");
+    gpu.queue.submit([submitted.finish()]);
+    let mut fresh = ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+    assert_eq!(e.read(&b), fresh.render_now(&s, None));
+    drop(abandoned);
+    s.splats[0].opacity = 0.8;
+    assert_eq!(e.render_now(&s, None), fresh.render_now(&s, None));
+    assert_eq!(e.stats.splat_sorts, 0, "the later completed encoder can be reused");
+    points.pos[0][2] = 5.;
+    s.splats[0].gpu = e.upload_splats(&points);
+    assert_eq!(e.render_now(&s, None), fresh.render_now(&s, None));
+    assert_eq!(e.stats.splat_sorts, 1);
+    s.cam = resolve(&CameraParams { offset: Vec3::new(2., 0., 0.), ..Default::default() }, 64., 64.);
+    assert_eq!(e.render_now(&s, None), fresh.render_now(&s, None));
+    assert_eq!(e.stats.splat_sorts, 1);
 }

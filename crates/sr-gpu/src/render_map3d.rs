@@ -33,6 +33,25 @@ fn map_state(g: &FrameGraph, mp: &sr_model::model::MapAsset) -> u64 {
     sr_eval::rng::hash_str(&s)
 }
 
+// Retain resolution/state variants under a global LRU budget. Three times the
+// base level covers retained RGBA and the GPU mip chain.
+fn remember_drape(engine: &mut crate::three::ThreeEngine, key: String, t: Arc<crate::three::TexGpu>, budget: usize) {
+    if t.rgba.len().saturating_mul(3) > budget {
+        return;
+    }
+    engine.drape_order.retain(|k| k != &key);
+    engine.textures.insert(key.clone(), t);
+    engine.drape_order.push_back(key);
+    let mut bytes: usize =
+        engine.drape_order.iter().filter_map(|k| engine.textures.get(k)).map(|t| t.rgba.len().saturating_mul(3)).sum();
+    while engine.drape_order.len() > 32 || bytes > budget {
+        let Some(old) = engine.drape_order.pop_front() else { break };
+        if let Some(t) = engine.textures.remove(&old) {
+            bytes = bytes.saturating_sub(t.rgba.len().saturating_mul(3));
+        }
+    }
+}
+
 impl Renderer {
     /// The draws of a `map` or `globe` object.
     #[allow(clippy::too_many_arguments)]
@@ -197,8 +216,11 @@ impl Renderer {
         let scale = if globe { size.min(4096.0) / h } else { size / w.max(h) };
         let (tw, th) = ((w * scale).round().max(1.0) as u32, (h * scale).round().max(1.0) as u32);
         let key = format!("drape|{}|{globe}|{tw}x{th}|{}", mp.id, map_state(ctx.g, mp));
-        if let Some(t) = self.three_engine().textures.get(&key) {
-            return Ok(t.clone());
+        if let Some(t) = self.three_engine().textures.get(&key).cloned() {
+            let order = &mut self.three_engine().drape_order;
+            order.retain(|k| k != &key);
+            order.push_back(key);
+            return Ok(t);
         }
         let n = &ctx.g.nodes[j];
         let frame = globe.then(|| {
@@ -234,18 +256,7 @@ impl Renderer {
         let d = if scale != 1.0 { d.transformed(&sr_vector::geom::Xf::scale(scale, scale)) } else { d };
         let rgba = crate::drape::rasterize(&d, [tw, th]);
         let t = self.three_engine().upload_rgba8(tw, th, &rgba, true);
-        // keep the drapes of recent states only
-        let stale: Vec<String> = self
-            .three_engine()
-            .textures
-            .keys()
-            .filter(|k| k.starts_with(&format!("drape|{}|{globe}|", mp.id)))
-            .cloned()
-            .collect();
-        for k in stale {
-            self.three_engine().textures.remove(&k);
-        }
-        self.three_engine().textures.insert(key, t.clone());
+        remember_drape(self.three_engine(), key, t.clone(), 256 << 20);
         Ok(t)
     }
 
@@ -420,5 +431,63 @@ impl Renderer {
         }
         self.three_engine().meshes.insert(key, surface.clone());
         Ok((surface, building_mesh))
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    #[test]
+    fn drape_resolutions_coexist_and_reuse_their_uploaded_textures() {
+        let gpu = crate::gpu::test_gpu().unwrap();
+        let xml = r##"<scene version="1.2"><project width="64" height="64" fps="10" duration="2"/>
+        <assets><map id="m" width="100" height="100" background="#326599"/></assets>
+        <composition><object3D id="a" primitive="globe" map="m" radius="12" textureSize="128" x="18" y="32">
+        <animate property="rotationY"><key time="0" value="0"/><key time="2" value="40"/></animate></object3D>
+        <object3D id="b" primitive="globe" map="m" radius="12" textureSize="64" x="46" y="32"/></composition>
+        <lights><light id="l" type="ambient" intensity="1"/></lights></scene>"##;
+        let doc = sr_model::load_str(xml, &Default::default()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        let mut r = crate::Renderer::new(gpu.clone(), ev.program());
+        r.render(&ev.evaluate(0.), ev.program());
+        gpu.wait();
+        let first: Vec<_> = r
+            .three_engine()
+            .textures
+            .iter()
+            .filter(|(k, _)| k.starts_with("drape|"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(first.len(), 2, "both resolution variants must remain cached");
+        let frame = r.render(&ev.evaluate(0.1), ev.program());
+        for (key, texture) in first {
+            assert!(std::sync::Arc::ptr_eq(&texture, &r.three_engine().textures[&key]));
+        }
+        let mut fresh = crate::Renderer::new(gpu, ev.program());
+        let reference = fresh.render(&ev.evaluate(0.1), ev.program());
+        assert_eq!(r.read(&frame.texture), fresh.read(&reference.texture));
+    }
+    #[test]
+    fn drape_cache_is_bounded_and_oversized_images_do_not_flush_reusable_variants() {
+        let gpu = crate::gpu::test_gpu().unwrap();
+        let mut e = crate::three::ThreeEngine::new(gpu.device.clone(), gpu.queue.clone());
+        let small = e.upload_rgba8(1, 1, &[255; 4], true);
+        let big = e.upload_rgba8(2, 2, &[255; 16], true);
+        let put =
+            |e: &mut crate::three::ThreeEngine, key: &str| super::remember_drape(e, key.into(), small.clone(), 24);
+        put(&mut e, "a");
+        put(&mut e, "b");
+        put(&mut e, "a");
+        put(&mut e, "c");
+        assert!(e.textures.contains_key("a") && e.textures.contains_key("c"));
+        assert!(!e.textures.contains_key("b"));
+        assert_eq!(e.drape_order.len(), 2);
+        super::remember_drape(&mut e, "large".into(), big, 24);
+        assert!(e.textures.contains_key("a") && e.textures.contains_key("c"));
+        assert!(!e.textures.contains_key("large"));
+        for i in 0..40 {
+            super::remember_drape(&mut e, format!("state{i}"), small.clone(), 4096);
+        }
+        assert_eq!(e.drape_order.len(), 32);
+        assert_eq!(e.textures.len(), 32);
     }
 }

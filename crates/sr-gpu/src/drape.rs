@@ -15,11 +15,11 @@ use sr_text::Drawing;
 use sr_vector::scene::Paint;
 
 #[cfg(test)]
-static COLOR_DECODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! { static COLOR_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 fn lin(v: f64) -> f32 {
     #[cfg(test)]
-    COLOR_DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    COLOR_DECODES.with(|n| n.set(n.get() + 1));
     sr_model_decode(v) as f32
 }
 
@@ -69,6 +69,9 @@ impl Image {
 /// Rasterises `d` at `size` pixels (drawing units are pixels).
 pub fn rasterize(d: &Drawing, size: [u32; 2]) -> Vec<u8> {
     let [w, h] = size;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
     let mut base = vec![[0.0f32; 4]; (w * h) as usize];
     // raster tiles beneath
     let mut images: HashMap<u64, Option<Image>> = HashMap::new();
@@ -113,27 +116,25 @@ pub fn rasterize(d: &Drawing, size: [u32; 2]) -> Vec<u8> {
         })
         .collect();
     let paint = |i: u32, _x: f32, _y: f32| colors.get(i as usize).copied().unwrap_or([0.2, 0.2, 0.2, 1.0]);
-    let over = render_parallel(&e, &paint);
-    base.par_iter_mut().zip(over.par_iter()).for_each(|(b, v)| {
-        for k in 0..4 {
-            b[k] = v[k] + b[k] * (1.0 - v[3]);
+    // Each worker owns just one band. Composite and encode straight into the
+    // final disjoint byte slices, without collecting another full float frame.
+    let mut out = vec![0u8; w as usize * h as usize * 4];
+    let band_pixels = w as usize * sr_vector::tile::TILE as usize;
+    out.par_chunks_mut(band_pixels * 4).zip(base.par_chunks(band_pixels)).enumerate().for_each(|(ty, (dst, below))| {
+        let over = sr_vector::tile::render_cpu_rows(&e, ty as u32..ty as u32 + 1, &paint);
+        for ((dst, b), v) in dst.chunks_mut(4).zip(below).zip(over) {
+            let p: [f32; 4] = std::array::from_fn(|k| v[k] + b[k] * (1.0 - v[3]));
+            let a = p[3];
+            let un = |c: f32| if a > 0.0 { c / a } else { 0.0 };
+            dst.copy_from_slice(&[
+                enc(un(p[0])),
+                enc(un(p[1])),
+                enc(un(p[2])),
+                (a.clamp(0.0, 1.0) * 255.0).round() as u8,
+            ]);
         }
     });
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    out.par_chunks_mut(4).zip(base.par_iter()).for_each(|(dst, p)| {
-        let a = p[3];
-        let un = |c: f32| if a > 0.0 { c / a } else { 0.0 };
-        dst.copy_from_slice(&[enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (a.clamp(0.0, 1.0) * 255.0).round() as u8]);
-    });
     out
-}
-
-/// [`sr_vector::tile::render_cpu`] in bands of tile rows rendered in parallel.
-fn render_parallel(e: &sr_vector::tile::Encoded, paint: &(dyn Fn(u32, f32, f32) -> [f32; 4] + Sync)) -> Vec<[f32; 4]> {
-    let rows = e.tiles[1];
-    let bands: Vec<Vec<[f32; 4]>> =
-        (0..rows).into_par_iter().map(|ty| sr_vector::tile::render_cpu_rows(e, ty..ty + 1, paint)).collect();
-    bands.concat()
 }
 
 #[cfg(test)]
@@ -186,13 +187,76 @@ mod tests {
                 [enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (p[3].clamp(0., 1.) * 255.).round() as u8]
             })
             .collect();
-        COLOR_DECODES.store(0, std::sync::atomic::Ordering::Relaxed);
+        COLOR_DECODES.with(|n| n.set(0));
         let actual = rasterize(&d, [65, 33]);
         assert_eq!(actual, expected);
         assert_eq!(
-            COLOR_DECODES.load(std::sync::atomic::Ordering::Relaxed),
+            COLOR_DECODES.with(|n| n.get()),
             3 * e.paints.len(),
             "decode solid colors once per paint, not per pixel"
         );
+    }
+    #[test]
+    fn fused_bands_preserve_overlapping_bitmap_and_vector_compositing() {
+        let mut d = Drawing::default();
+        for (key, rgba, rect, xf) in [
+            (1, [40, 100, 220, 160], [0., 0., 65., 33.], sr_vector::geom::Xf::IDENTITY),
+            (2, [220, 80, 40, 190], [7.25, 3.5, 30.5, 20.75], sr_vector::geom::Xf([0.9, 0.1, -0.15, 1., 4., -2.])),
+        ] {
+            let img = image::RgbaImage::from_pixel(2, 2, image::Rgba(rgba));
+            let mut png = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+            d.bitmaps.push(sr_text::Bitmap {
+                png: std::sync::Arc::new(png.into_inner()),
+                key,
+                rect,
+                xf,
+                opacity: 0.7,
+                uv: [0., 0., 1., 1.],
+                below: true,
+            });
+        }
+        d.scene.cmds.push(Cmd::Fill {
+            polys: shapes::rect(3.25, 2.5, 50., 20., [0.; 4]).flatten(0.1),
+            rule: FillRule::NonZero,
+            paint: Paint::Solid { rgba: [0.2, 0.5, 0.7, 0.6], srgb: true },
+            opacity: 0.8,
+        });
+        let e = sr_vector::tile::encode(&d.scene, [65, 33]);
+        let over = sr_vector::tile::render_cpu(&e, &|_, _, _| [lin(0.2), lin(0.5), lin(0.7), 0.6]);
+        let mut base = vec![[0.0f32; 4]; 65 * 33];
+        // Original separate bitmap, composition and encoding passes.
+        for b in &d.bitmaps {
+            let img = Image::decode(&b.png).unwrap();
+            let [x, y, w, h] = b.rect;
+            let inv = b.xf.mul(&sr_vector::geom::Xf([w, 0., 0., h, x, y])).inverse().unwrap();
+            for y in 0..33 {
+                for x in 0..65 {
+                    let q = inv.apply(sr_vector::geom::p(x as f64 + 0.5, y as f64 + 0.5));
+                    if !(0.0..=1.0).contains(&q.x) || !(0.0..=1.0).contains(&q.y) {
+                        continue;
+                    }
+                    let s = img.sample(q.x, q.y);
+                    let o = b.opacity as f32;
+                    let px = &mut base[y * 65 + x];
+                    for k in 0..4 {
+                        px[k] = s[k] * o + px[k] * (1. - s[3] * o);
+                    }
+                }
+            }
+        }
+        for (b, v) in base.iter_mut().zip(over) {
+            for k in 0..4 {
+                b[k] = v[k] + b[k] * (1. - v[3]);
+            }
+        }
+        let expected: Vec<u8> = base
+            .iter()
+            .flat_map(|p| {
+                let un = |c: f32| if p[3] > 0. { c / p[3] } else { 0. };
+                [enc(un(p[0])), enc(un(p[1])), enc(un(p[2])), (p[3].clamp(0., 1.) * 255.).round() as u8]
+            })
+            .collect();
+        assert_eq!(rasterize(&d, [65, 33]), expected);
     }
 }

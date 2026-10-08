@@ -19,6 +19,7 @@ use glam::{Mat4, Vec3};
 use crate::three::{Draw3, LightKind, MeshSrc, Scene3};
 mod cache;
 mod instances;
+mod packed;
 pub use cache::BuildCache;
 
 /// Path-tracing options of a pass.
@@ -117,7 +118,7 @@ pub struct PtScene {
 /// CPU seconds `build` spent, split so BVH construction shows apart from the rest.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BuildTiming {
-    /// The complete rigid geometry and its BVHs came from the previous build.
+    /// The complete rigid geometry and its BVHs came from a retained build.
     pub geometry_reused: bool,
     /// Object-space prototype BVHs built or reused in this call.
     pub prototype_builds: usize,
@@ -131,6 +132,8 @@ pub struct BuildTiming {
 /// What recording the tracer's passes cost beyond the scene build.
 #[derive(Default)]
 pub struct RenderTiming {
+    /// Packed geometry storage uploads recorded this pass.
+    pub geometry_uploads: usize,
     /// CPU seconds packing and uploading the scene buffers before the first tile.
     pub pack_seconds: f64,
     /// Timestamps of the trace and denoise passes, when requested and supported.
@@ -256,12 +259,13 @@ pub fn build(scene: &Scene3) -> PtScene {
     BuildCache::new(0).build(scene)
 }
 
-fn build_inner(scene: &Scene3, cache: &mut BuildCache) -> PtScene {
+fn build_inner(scene: &Scene3, cache: &mut BuildCache, take: bool) -> (PtScene, Option<cache::Ticket>) {
     let started = std::time::Instant::now();
     let mut bvh_seconds = 0.0;
     let mut s = PtScene::default();
     let key = cache::SceneKey::of(scene);
-    let reused = cache.reuse(key.as_ref());
+    let reused = cache.reuse(key.as_ref(), take);
+    let id = reused.as_ref().map_or_else(cache::next_id, |g| g.id);
     s.timing.geometry_reused = reused.is_some();
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
     let mut norms: Vec<[Vec3; 3]> = Vec::new();
@@ -520,13 +524,18 @@ fn build_inner(scene: &Scene3, cache: &mut BuildCache) -> PtScene {
         s.nrm.extend([[0.0; 4]; 3]);
         s.tri_mat.push(0);
     }
-    if !s.timing.geometry_reused {
-        cache.remember(key, &s);
-    }
+    let ticket = if take {
+        key.map(|key| cache::Ticket { key, id })
+    } else {
+        if !s.timing.geometry_reused {
+            cache.remember(key, &s, id);
+        }
+        None
+    };
     bvh_seconds += s.timing.bvh_seconds;
     s.timing.bvh_seconds = bvh_seconds;
     s.timing.assemble_seconds = (started.elapsed().as_secs_f64() - bvh_seconds).max(0.0);
-    s
+    (s, ticket)
 }
 
 /// Binned SAH BVH. Returns the triangle order its leaves index.
@@ -1165,6 +1174,7 @@ pub struct PtGpu {
     atrous: wgpu::ComputePipeline,
     output: wgpu::RenderPipeline,
     tile_bytes: u64,
+    packed: std::sync::Mutex<packed::Cache>,
 }
 
 impl PtGpu {
@@ -1291,6 +1301,7 @@ impl PtGpu {
             atrous,
             output,
             tile_bytes: DEFAULT_TILE_BYTES,
+            packed: Default::default(),
         }
     }
 
@@ -1568,6 +1579,23 @@ pub fn render_timed(
     out: &wgpu::TextureView,
     time_gpu: bool,
 ) -> RenderTiming {
+    render_cached(pt, d, enc, scene, data, opts, inputs, out, time_gpu, None)
+}
+
+/// Only engine-owned geometry tickets may select immutable packed storage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_cached(
+    pt: &PtGpu,
+    d: &wgpu::Device,
+    enc: &mut wgpu::CommandEncoder,
+    scene: &Scene3,
+    data: &PtScene,
+    opts: PathOpts,
+    inputs: &PtInputs,
+    out: &wgpu::TextureView,
+    time_gpu: bool,
+    identity: Option<u64>,
+) -> RenderTiming {
     let started = std::time::Instant::now();
     let size = [scene.size[0].max(1), scene.size[1].max(1)];
     let limits = d.limits();
@@ -1590,38 +1618,32 @@ pub fn render_timed(
             mapped_at_creation: false,
         })
     };
-    // interleaved corners, the material index's bits in the first corner's position w
-    let mut verts: Vec<[f32; 4]> = Vec::with_capacity(data.pos.len() * 8);
-    for (c, (p, n)) in data.pos.iter().zip(&data.nrm).enumerate() {
-        let w = if c % 3 == 0 { f32::from_bits(data.tri_mat[c / 3]) } else { 0.0 };
-        verts.push([p[0], p[1], p[2], w]);
-        verts.push(*n);
-        verts.push(data.colors.get(c).copied().unwrap_or([1.0; 4]));
-        let uv = data.uv.get(c).copied().unwrap_or([[0.0; 2]; 6]);
-        for pair in uv.as_chunks::<2>().0 {
-            verts.push([pair[0][0], pair[0][1], pair[1][0], pair[1][1]]);
+    let identity = identity.filter(|_| scene.volumes.is_empty());
+    let cached = identity.and_then(|id| pt.packed.lock().unwrap_or_else(|e| e.into_inner()).get(id, &data.pixels));
+    let geometry_uploads = usize::from(cached.is_none());
+    let (geometry, media) = if let Some(buffers) = cached {
+        let media = [(buffers.verts.size() / 16) as u32, 0, 0, 0];
+        (buffers, media)
+    } else {
+        let (mut verts, offset) = packed::vertices(data);
+        let media = crate::volume::pack(&mut verts, &scene.volumes);
+        let buffers = packed::Buffers {
+            verts: storage("pt-verts", bytemuck::cast_slice(&verts)),
+            nodes: storage("pt-nodes", bytemuck::cast_slice(&data.nodes)),
+            offset,
+        };
+        if let Some(id) = identity {
+            pt.packed.lock().unwrap_or_else(|e| e.into_inner()).insert(id, &data.pixels, buffers.clone());
         }
-        if c % 3 == 2 {
-            verts.extend([[0.0; 4]; 6]);
-        }
-    }
-    for (&index, record) in &data.splats {
-        verts[index * 24..(index + 1) * 24].copy_from_slice(record);
-    }
-    for (&index, record) in &data.instances {
-        verts[index * 24..(index + 1) * 24].copy_from_slice(record);
-    }
-    let offset = (verts.len() * 4) as u32;
+        (buffers, media)
+    };
+    let packed::Buffers { verts: tverts, nodes, offset } = geometry;
     let mut materials = data.mats.clone();
     for material in &mut materials {
         for map in &mut material.maps {
             map[0] += offset;
         }
     }
-    for pixels in data.pixels.chunks(4) {
-        verts.push(std::array::from_fn(|i| f32::from_bits(pixels.get(i).copied().unwrap_or(0))));
-    }
-    let media = crate::volume::pack(&mut verts, &scene.volumes);
     // Light grids: callers check `limit_note` first, which reports the grid sizing errors.
     let grid_plan = crate::volume::plan_light_grid(&scene.volumes, data.lights.len() as u32, scene.env.is_some())
         .unwrap_or_else(|e| panic!("{e}; check pathtrace::limit_note before rendering"));
@@ -1647,9 +1669,7 @@ pub fn render_timed(
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         })
     });
-    let tverts = storage("pt-verts", bytemuck::cast_slice(&verts));
     let mats = storage("pt-mats", bytemuck::cast_slice(&materials));
-    let nodes = storage("pt-nodes", bytemuck::cast_slice(&data.nodes));
     let mut lights = data.lights.clone();
     for light in &mut lights {
         if light.size[3] > 0.0 {
@@ -1853,5 +1873,5 @@ pub fn render_timed(
     if let Some(t) = &timer {
         t.resolve(enc);
     }
-    RenderTiming { pack_seconds, gpu: timer }
+    RenderTiming { pack_seconds, gpu: timer, geometry_uploads }
 }

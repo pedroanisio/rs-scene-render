@@ -9,6 +9,8 @@
 //! compositor's backdrop; splats are radix-sorted on the GPU and drawn back
 //! to front; blended surfaces follow, sorted back to front.
 
+mod sort_cache;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -301,6 +303,12 @@ pub struct Scene3 {
 /// Counters for statistics and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats3 {
+    /// Objects prepared for at least one raster camera or shadow pass.
+    pub prepared_objects: usize,
+    /// Splat clouds whose depth order was computed this pass.
+    pub splat_sorts: usize,
+    /// Packed vertex/BVH buffer sets uploaded by the path tracer this pass.
+    pub pt_geometry_uploads: usize,
     pub draws: usize,
     pub triangles: u64,
     pub shadow_views: usize,
@@ -494,6 +502,7 @@ pub struct ThreeEngine {
     depth_pipe: wgpu::RenderPipeline,
     sort_pipes: [wgpu::ComputePipeline; 4],
     software_scatter: Option<wgpu::ComputePipeline>,
+    sorted_splats: sort_cache::Cache,
     /// Enables linear-work splat scattering on software adapters. Renderer sets
     /// this from the selected adapter; direct engine users can select it too.
     pub software_adapter: bool,
@@ -508,6 +517,7 @@ pub struct ThreeEngine {
     pub meshes: HashMap<String, Arc<MeshGpu>>,
     /// Textures keyed by the caller.
     pub textures: HashMap<String, Arc<TexGpu>>,
+    pub(crate) drape_order: std::collections::VecDeque<String>,
     /// Environments keyed by the caller.
     pub envs: HashMap<String, Arc<EnvGpu>>,
     /// Splats keyed by the caller.
@@ -1060,6 +1070,7 @@ impl ThreeEngine {
             depth_pipe,
             sort_pipes,
             software_scatter: None,
+            sorted_splats: Default::default(),
             software_adapter: false,
             repeat_smp,
             clamp_smp,
@@ -1067,6 +1078,7 @@ impl ThreeEngine {
             mat_binds: HashMap::new(),
             meshes: HashMap::new(),
             textures: HashMap::new(),
+            drape_order: Default::default(),
             envs: HashMap::new(),
             splat_cache: HashMap::new(),
             next_key: 1,
@@ -1496,7 +1508,7 @@ impl ThreeEngine {
         }
         // a scene too large for the tracer's buffers is rasterised (the caller reports `limit_note`)
         if let Some(opts) = path.filter(|_| note.is_none()) {
-            let data = self.pt_geometry.build(scene);
+            let (data, ticket) = self.pt_geometry.build_for_render(scene);
             if self.pt.is_none() {
                 self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
             }
@@ -1507,7 +1519,7 @@ impl ThreeEngine {
                 black: &self.black_env,
                 sampler: &self.repeat_smp,
             };
-            let timing = crate::pathtrace::render_timed(
+            let timing = crate::pathtrace::render_cached(
                 self.pt.as_ref().expect("built"),
                 &self.device,
                 enc,
@@ -1517,6 +1529,7 @@ impl ThreeEngine {
                 &inputs,
                 out,
                 self.time_gpu,
+                ticket.as_ref().map(|t| t.id),
             );
             self.pt_timers.extend(timing.gpu);
             self.stats = Stats3 {
@@ -1526,8 +1539,10 @@ impl ThreeEngine {
                 pt_assemble_seconds: data.timing.assemble_seconds,
                 pt_bvh_seconds: data.timing.bvh_seconds,
                 pt_pack_seconds: timing.pack_seconds,
+                pt_geometry_uploads: timing.geometry_uploads,
                 ..Default::default()
             };
+            self.pt_geometry.recycle(data, ticket);
             return Ok(());
         }
         let d = self.device.clone();
@@ -1802,10 +1817,38 @@ impl ThreeEngine {
             depth: f32,
             pipe: PipeKey,
             visible: bool,
+            active: bool,
         }
         let mut preps: Vec<Prep> = Vec::new();
         for (dr, &(lo, hi)) in scene.draws.iter().zip(&draw_bounds) {
             let m = dr.mesh.mesh();
+            stats.triangles += m.count as u64 / 3;
+            let outside = |matrix| {
+                matches!(&dr.mesh, MeshSrc::Cached(mesh)
+                if dr.maps[5].is_none() && bounds_outside_clip(mesh.lo, mesh.hi, dr.model, matrix))
+            };
+            let visible = !outside(vp);
+            let casts = dr.cast_shadow
+                && !dr.shadow_catcher
+                && dr.opacity > 0.0
+                && shadow_mats.iter().any(|&matrix| !outside(matrix));
+            if !visible && !casts {
+                // Keep scene indices stable for batching; no uniforms, materials,
+                // pipeline or bindings are prepared for this placeholder.
+                preps.push(Prep {
+                    kind: Kind::Opaque,
+                    obj: 0,
+                    mat: 0,
+                    key: [0; 6],
+                    vbuf: None,
+                    depth: 0.0,
+                    pipe: PipeKey { cull: false, blend: false },
+                    visible: false,
+                    active: false,
+                });
+                continue;
+            }
+            stats.prepared_objects += 1;
             let o = ObjectU {
                 model: dr.model.to_cols_array_2d(),
                 normal: dr.model.inverse().transpose().to_cols_array_2d(),
@@ -1842,19 +1885,24 @@ impl ThreeEngine {
                 MeshSrc::Deformed(vs, _) => Some(buf(bytemuck::cast_slice(vs), wgpu::BufferUsages::VERTEX, "deformed")),
                 MeshSrc::Cached(_) => None,
             };
-            stats.triangles += m.count as u64 / 3;
-            // Shadow lists remain independent: an offscreen object can still cast
-            // a visible shadow. Deformation/displacement retain the conservative path.
-            let visible = !matches!(&dr.mesh, MeshSrc::Cached(mesh)
-                if dr.maps[5].is_none() && bounds_outside_clip(mesh.lo, mesh.hi, dr.model, vp));
-            preps.push(Prep { kind, obj, mat, key: [0; 6], vbuf, depth: scene.cam.depth_of(center), pipe, visible });
+            preps.push(Prep {
+                kind,
+                obj,
+                mat,
+                key: [0; 6],
+                vbuf,
+                depth: scene.cam.depth_of(center),
+                pipe,
+                visible,
+                active: true,
+            });
         }
         stats.draws = preps.len();
         // shadow-pass object uniforms: one per (caster, view)
         let mut shadow_objs: Vec<(usize, u32, u32)> = Vec::new();
         for (v, &shadow_mat) in shadow_mats.iter().enumerate() {
             for (i, dr) in scene.draws.iter().enumerate() {
-                if dr.cast_shadow && !dr.shadow_catcher && dr.opacity > 0.0 {
+                if preps[i].active && dr.cast_shadow && !dr.shadow_catcher && dr.opacity > 0.0 {
                     // Cached undeformed bounds are authoritative only without
                     // shader displacement. Other casters keep the full path.
                     if let MeshSrc::Cached(mesh) = &dr.mesh {
@@ -1894,9 +1942,11 @@ impl ThreeEngine {
         let mat_buf = buf(&mat_bytes, wgpu::BufferUsages::UNIFORM, "three-materials");
         self.mat_binds.clear();
         for (i, dr) in scene.draws.iter().enumerate() {
-            preps[i].key = self.mat_bind(&dr.maps, &mat_buf);
+            if preps[i].active {
+                preps[i].key = self.mat_bind(&dr.maps, &mat_buf);
+            }
         }
-        if preps.is_empty() {
+        if preps.iter().all(|p| !p.active) {
             let none: Maps = Default::default();
             self.mat_bind(&none, &mat_buf);
         }
@@ -2250,79 +2300,83 @@ impl ThreeEngine {
         for sp in &scene.splats {
             let n = sp.gpu.n.max(1);
             stats.splats += sp.gpu.n as u64;
-            let blocks = n.div_ceil(256);
-            let mut ubytes = Vec::new();
-            for pass in 0..4u32 {
-                let u = SortU {
-                    n: sp.gpu.n,
-                    blocks,
-                    shift: pass * 8,
-                    pad: 0,
-                    view: (scene.cam.view * sp.model).to_cols_array_2d(),
-                };
-                pad(&mut ubytes, bytemuck::bytes_of(&u));
-            }
-            let ubuf = buf(&ubytes, wgpu::BufferUsages::UNIFORM, "sort-params");
-            let mk = |label: &str, len: u64| {
-                d.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: len * 4,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                })
-            };
-            let (ka, va, kb, vb) =
-                (mk("keys-a", n as u64), mk("vals-a", n as u64), mk("keys-b", n as u64), mk("vals-b", n as u64));
-            let hist = mk("hist", 256 * blocks as u64);
-            let bind = |ki: &wgpu::Buffer, vi: &wgpu::Buffer, ko: &wgpu::Buffer, vo: &wgpu::Buffer| {
-                d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sort"),
-                    layout: &self.bgl_sort,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(std::mem::size_of::<SortU>() as u64),
-                            }),
-                        },
-                        wgpu::BindGroupEntry { binding: 1, resource: sp.gpu.buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: ki.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: vi.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: ko.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: vo.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: hist.as_entire_binding() },
-                    ],
-                })
-            };
-            let ab = bind(&ka, &va, &kb, &vb);
-            let ba = bind(&kb, &vb, &ka, &va);
-            let groups = [blocks.min(65535), blocks.div_ceil(65535)];
-            {
-                let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("splat-sort"),
-                    timestamp_writes: None,
-                });
-                cp.set_pipeline(&self.sort_pipes[0]);
-                cp.set_bind_group(0, &ab, &[0]);
-                cp.dispatch_workgroups(groups[0], groups[1], 1);
+            let transform = scene.cam.view * sp.model;
+            let view = transform.to_cols_array_2d();
+            let key = transform.to_cols_array().map(f32::to_bits);
+            let va = if let Some(indices) = self.sorted_splats.get(&sp.gpu, key) {
+                indices
+            } else {
+                stats.splat_sorts += 1;
+                let blocks = n.div_ceil(256);
+                let mut ubytes = Vec::new();
                 for pass in 0..4u32 {
-                    let bg = if pass % 2 == 0 { &ab } else { &ba };
-                    let off = pass * UNIFORM_ALIGN as u32;
-                    cp.set_bind_group(0, bg, &[off]);
-                    cp.set_pipeline(&self.sort_pipes[1]);
-                    cp.dispatch_workgroups(groups[0], groups[1], 1);
-                    cp.set_pipeline(&self.sort_pipes[2]);
-                    cp.dispatch_workgroups(1, 1, 1);
-                    cp.set_pipeline(if self.software_adapter {
-                        self.software_scatter.as_ref().expect("software scatter compiled")
-                    } else {
-                        &self.sort_pipes[3]
-                    });
-                    cp.dispatch_workgroups(groups[0], groups[1], 1);
+                    let u = SortU { n: sp.gpu.n, blocks, shift: pass * 8, pad: 0, view };
+                    pad(&mut ubytes, bytemuck::bytes_of(&u));
                 }
-            }
+                let ubuf = buf(&ubytes, wgpu::BufferUsages::UNIFORM, "sort-params");
+                let mk = |label: &str, len: u64| {
+                    d.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size: len * 4,
+                        usage: wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    })
+                };
+                let (ka, va, kb, vb) =
+                    (mk("keys-a", n as u64), mk("vals-a", n as u64), mk("keys-b", n as u64), mk("vals-b", n as u64));
+                let hist = mk("hist", 256 * blocks as u64);
+                let bind = |ki: &wgpu::Buffer, vi: &wgpu::Buffer, ko: &wgpu::Buffer, vo: &wgpu::Buffer| {
+                    d.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("sort"),
+                        layout: &self.bgl_sort,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &ubuf,
+                                    offset: 0,
+                                    size: std::num::NonZeroU64::new(std::mem::size_of::<SortU>() as u64),
+                                }),
+                            },
+                            wgpu::BindGroupEntry { binding: 1, resource: sp.gpu.buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: ki.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 3, resource: vi.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: ko.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 5, resource: vo.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 6, resource: hist.as_entire_binding() },
+                        ],
+                    })
+                };
+                let ab = bind(&ka, &va, &kb, &vb);
+                let ba = bind(&kb, &vb, &ka, &va);
+                let groups = [blocks.min(65535), blocks.div_ceil(65535)];
+                {
+                    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("splat-sort"),
+                        timestamp_writes: None,
+                    });
+                    cp.set_pipeline(&self.sort_pipes[0]);
+                    cp.set_bind_group(0, &ab, &[0]);
+                    cp.dispatch_workgroups(groups[0], groups[1], 1);
+                    for pass in 0..4u32 {
+                        let bg = if pass % 2 == 0 { &ab } else { &ba };
+                        let off = pass * UNIFORM_ALIGN as u32;
+                        cp.set_bind_group(0, bg, &[off]);
+                        cp.set_pipeline(&self.sort_pipes[1]);
+                        cp.dispatch_workgroups(groups[0], groups[1], 1);
+                        cp.set_pipeline(&self.sort_pipes[2]);
+                        cp.dispatch_workgroups(1, 1, 1);
+                        cp.set_pipeline(if self.software_adapter {
+                            self.software_scatter.as_ref().expect("software scatter compiled")
+                        } else {
+                            &self.sort_pipes[3]
+                        });
+                        cp.dispatch_workgroups(groups[0], groups[1], 1);
+                    }
+                }
+                self.sorted_splats.insert(&sp.gpu, key, va.clone(), enc);
+                va
+            };
             // four passes end back in the "a" buffers
             let so = SplatObjU {
                 model: sp.model.to_cols_array_2d(),
