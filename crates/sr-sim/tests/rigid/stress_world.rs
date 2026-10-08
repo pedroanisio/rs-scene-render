@@ -92,6 +92,19 @@ pub fn cantilever_over(n: usize, edge: f64, strength: f64, load: f64, floor: boo
 /// The same, with the block moving along x at `block.0` m/s and `block.1` metres over the top of the tip piece when it starts: a block that lands sliding drags the tip
 /// with its friction.
 pub fn cantilever_with(n: usize, edge: f64, strength: f64, load: f64, floor: bool, block: (f64, f64)) -> Cantilever {
+    cantilever_mu(n, edge, strength, load, floor, block, (0.5, 0.5))
+}
+
+/// The same with the friction coefficients of the beam and of the block, which the world combines by the rule of Rapier's default for two colliders (their average).
+pub fn cantilever_mu(
+    n: usize,
+    edge: f64,
+    strength: f64,
+    load: f64,
+    floor: bool,
+    block: (f64, f64),
+    mu: (f64, f64),
+) -> Cantilever {
     let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
     let mass = DENSITY * edge.powi(3);
     let size = [edge; 3];
@@ -105,9 +118,11 @@ pub fn cantilever_with(n: usize, edge: f64, strength: f64, load: f64, floor: boo
                 [(n as f64 - 0.5) * edge, -5.0 - edge / 2.0 - block.1, edge / 2.0],
             );
             b.velocity = [block.0, 0.0, 0.0];
+            b.friction = mu.1;
             b
         },
     ];
+    bodies[0].friction = mu.0;
     for _ in 1..n {
         bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0, -5.0, 0.0]));
     }
@@ -1276,6 +1291,29 @@ fn the_friction_that_a_block_landing_and_sliding_puts_on_a_welded_beam_is_what_t
     // the steps it cannot read are the landing and a bounce
     assert!(read >= 15, "{read} steps read the friction");
     assert!(missed <= 4, "{missed} steps in which the block lost more than the world read");
+}
+
+#[test]
+fn a_block_of_friction_0_8_on_a_beam_of_0_2_is_read_with_the_0_5_that_they_combine_to_in_every_step() {
+    // the world combines two colliders by the average (Rapier's default rule; the Max rule is the boundary slabs'), so the friction between them is 0.5, and nothing that is read of a step is over
+    // that times the normal impulse (the rule itself is checked on colliders, in the unit test of the module of the world's stress, because the bound only engages when the ratio of a step is not
+    // to be trusted, and a landing of this block does not give one that is over it)
+    let load = 3000.0;
+    let mut c = cantilever_mu(5, 0.4, 1e15, load, false, (1.0, 0.02), (0.2, 0.8));
+    let mut read = 0;
+    for step in 1..=60u64 {
+        let frame = c.world.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let b = c.world.stress_balance(0).expect("read");
+        assert!(
+            b.friction[0].abs() <= 0.5 * b.normal * (1.0 + 1e-9),
+            "step {step}: friction {} over the 0.5 of the normal impulse {}",
+            b.friction[0],
+            b.normal
+        );
+        read += usize::from(b.friction[0] != 0.0);
+    }
+    assert!(read >= 3, "{read} steps with a friction read");
 }
 
 #[test]

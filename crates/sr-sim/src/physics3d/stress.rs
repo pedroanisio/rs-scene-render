@@ -160,6 +160,17 @@ pub(super) struct CachedPlan {
     plans: Arc<Vec<CutPlan>>,
 }
 
+/// The friction coefficient that the solver uses for a contact of two colliders: each has a coefficient and a rule to combine it with the other's, and when the rules differ the one with
+/// the higher discriminant wins (the boundary slabs have the Max rule, which a body that rests on one is combined with by; every other collider has Rapier's default, the average).
+fn combined_friction(c1: &Collider, c2: &Collider) -> f64 {
+    CoefficientCombineRule::combine(
+        c1.friction(),
+        c2.friction(),
+        c1.friction_combine_rule(),
+        c2.friction_combine_rule(),
+    )
+}
+
 fn vector_norm_of(v: Vector) -> f64 {
     (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
 }
@@ -507,7 +518,7 @@ impl World3 {
                 let ratio = if last > 1e-12 * total.abs() && last > 0.0 { total / last } else { substeps };
                 // a friction is not more than the coefficient times the normal impulse, whatever the ratio: when the normal of the last sub-step is the small end of a large one the ratio is
                 // large and a vector that is nearly zero times it is not the friction of the step
-                let bound = c1.friction().max(c2.friction()) * total.abs();
+                let bound = combined_friction(c1, c2) * total.abs();
                 let raw = (vector_norm_of(first.data.warmstart_tangent_world), ratio);
                 weighted = (weighted.0 + raw.0 * raw.1, weighted.1 + raw.0);
                 // the friction vector is the impulse on the first body (the normal's sign above is the other way: it is along the normal, and the first body is pushed against it)
@@ -759,5 +770,29 @@ impl World3 {
                 self.state.stress_held[slots[slots_before + i]] = part.clone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collider(friction: f64, rule: CoefficientCombineRule) -> Collider {
+        ColliderBuilder::cuboid(1.0, 1.0, 1.0).friction(friction).friction_combine_rule(rule).build()
+    }
+
+    #[test]
+    fn two_colliders_of_different_friction_combine_by_the_average_unless_one_of_them_says_otherwise() {
+        let (block, beam) =
+            (collider(0.8, CoefficientCombineRule::Average), collider(0.2, CoefficientCombineRule::Average));
+        assert!(
+            (combined_friction(&block, &beam) - 0.5).abs() < 1e-12,
+            "the larger one is not the friction between them"
+        );
+        assert!((combined_friction(&beam, &block) - 0.5).abs() < 1e-12);
+        // a boundary slab: friction 0 with the Max rule, which takes the body's own
+        let slab = collider(0.0, CoefficientCombineRule::Max);
+        assert!((combined_friction(&block, &slab) - 0.8).abs() < 1e-12);
+        assert!((combined_friction(&slab, &beam) - 0.2).abs() < 1e-12);
     }
 }
