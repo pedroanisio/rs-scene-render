@@ -252,7 +252,7 @@ impl Renderer {
                         seen[usize::from(*c)] = true;
                     }
                 }
-                plan.stats.voxel_cells_scanned += body.grid.count() as u64;
+                plan.stats.voxel_cells_scanned += body.grid.count();
                 state.used = Some((key, seen));
             }
             for (all, seen) in used.iter_mut().zip(state.used.iter().flat_map(|u| u.1)) {
