@@ -25,6 +25,10 @@ use crate::stress::{cut_stresses, JointSection};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+/// The speed, in metres per second, across the middle of a manifold above which two bodies slide on each other: under it a friction that the solver reports is noise (the speed of a body
+/// that lands straight is a few parts in a billion).
+const SLIDING_SPEED: f64 = 1e-3;
+
 /// The most pieces of a body that can break by stress: the cuts of the body are worked out for every joint, and cost the pieces times the joints.
 pub const MAX_STRESS_PIECES: usize = 1024;
 
@@ -158,6 +162,21 @@ pub(super) struct CachedPlan {
     held: Vec<u32>,
     broken: Vec<bool>,
     plans: Arc<Vec<CutPlan>>,
+}
+
+/// The friction impulse of a step from the vector of the last sub-step, the ratio that takes it to the step's and the bound (the coefficient times the normal impulse): the vector times the
+/// ratio, if that is within the bound. Over it the ratio is not to be trusted, and what is known is whether the contact slides: if it does the friction is the bound, along the vector, and if it
+/// does not (a body that lands straight, whose vector is the noise of the last sub-step times a ratio of thousands) it is not read, and stays in the balance of the body.
+fn friction_of_step(vector: [f64; 3], ratio: f64, bound: f64, sliding: bool) -> Option<[f64; 3]> {
+    let scaled = vector.map(|v| v * ratio);
+    let size = scaled.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if size <= bound {
+        Some(scaled)
+    } else if sliding {
+        Some(scaled.map(|v| v * bound / size))
+    } else {
+        None
+    }
 }
 
 /// The friction coefficient that the solver uses for a contact of two colliders: each has a coefficient and a rule to combine it with the other's, and when the rules differ the one with
@@ -526,20 +545,21 @@ impl World3 {
                 if vector.x == 0.0 && vector.y == 0.0 && vector.z == 0.0 {
                     continue;
                 }
+                // where the ratio is over the bound the friction of the step is not known from the vector, and what is known is whether the manifold slides: if it does (the two bodies move
+                // across each other at its middle by more than the noise of the solver) the friction is the most that the contact can give, along the vector, and if it does not (a block that
+                // lands straight, whose vector is the noise of the last sub-step) the friction is not read and stays in the balance of the body, like a landing's
+                let relative = {
+                    let (v1, v2) = (b1.velocity_at_point(vec3(middle)), b2.velocity_at_point(vec3(middle)));
+                    let v = v2 - v1;
+                    v - normal * v.dot(normal)
+                };
+                let Some(impulse) =
+                    friction_of_step([vector.x, vector.y, vector.z], ratio, bound, relative.length() > SLIDING_SPEED)
+                else {
+                    continue;
+                };
                 if let Some(piece) = family.piece_at(after.local(middle), inward, held) {
-                    friction_loads.push(Located {
-                        at: middle,
-                        impulse: {
-                            let scaled = [vector.x * ratio, vector.y * ratio, vector.z * ratio];
-                            let size = scaled.iter().map(|v| v * v).sum::<f64>().sqrt();
-                            if size > bound && size > 0.0 {
-                                scaled.map(|v| v * bound / size)
-                            } else {
-                                scaled
-                            }
-                        },
-                        piece: piece as usize,
-                    });
+                    friction_loads.push(Located { at: middle, impulse, piece: piece as usize });
                 }
             }
         }
@@ -779,6 +799,20 @@ mod tests {
 
     fn collider(friction: f64, rule: CoefficientCombineRule) -> Collider {
         ColliderBuilder::cuboid(1.0, 1.0, 1.0).friction(friction).friction_combine_rule(rule).build()
+    }
+
+    #[test]
+    fn a_friction_over_the_bound_is_the_bound_if_the_contact_slides_and_is_not_read_if_it_does_not() {
+        // a vector of 1e-3 that is the noise of a sub-step, a ratio of 4101 (the normal of the last sub-step is a quarter of a thousandth of the step's) and a bound of 2
+        let noise = [1e-3, 0.0, 0.0];
+        assert_eq!(friction_of_step(noise, 4101.0, 2.0, false), None, "a body that lands straight reads no friction");
+        let slid = friction_of_step(noise, 4101.0, 2.0, true).expect("a slide is read");
+        assert!((slid[0] - 2.0).abs() < 1e-12 && slid[1] == 0.0, "the bound, along the vector: {slid:?}");
+        // within the bound the ratio is the steady one's and the contact's motion does not matter
+        for sliding in [false, true] {
+            let steady = friction_of_step([0.1, 0.0, 0.0], 8.0, 2.0, sliding).expect("read");
+            assert!((steady[0] - 0.8).abs() < 1e-12);
+        }
     }
 
     #[test]

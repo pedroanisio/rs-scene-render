@@ -1317,6 +1317,46 @@ fn a_block_of_friction_0_8_on_a_beam_of_0_2_is_read_with_the_0_5_that_they_combi
 }
 
 #[test]
+fn a_bar_that_lands_flat_on_a_floor_with_no_speed_along_it_puts_no_friction_on_itself() {
+    // a bar with nothing to slide: the vector of the last sub-step is the solver's noise, and the ratio of the step's normal impulse to that of the last sub-step (large in the step in which
+    // the contact closes) is not to be trusted with it: a friction at the bound, along a direction that nothing chose, would be read as a shear in the step that the criterion looks at most
+    let mut w = sliding_bar(0.0, 0.5);
+    let weight = DENSITY * 0.25f64.powi(3) * 4.0 * G / 240.0;
+    let mut landed = 0;
+    for step in 1..=90u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let Some(b) = w.stress_balance(0) else { continue };
+        landed += usize::from(b.normal != 0.0);
+        let across = b.friction.iter().map(|f| f * f).sum::<f64>().sqrt();
+        assert!(
+            across <= 1e-3 * weight,
+            "step {step}: friction {:?} against a normal impulse of {}",
+            b.friction,
+            b.normal
+        );
+    }
+    assert!(landed >= 1, "the bar lands");
+}
+
+#[test]
+fn a_block_that_lands_on_a_beam_that_tilts_under_it_slides_by_a_centimetre_a_second_and_is_read_at_the_bound() {
+    // the weld of the beam to the world is not rigid: under the impact of a block that falls straight the tip goes down and turns, and the surface moves across the block's by a centimetre
+    // a second (the vector of the solver is at the cone, half of the last sub-step's normal): that is a slide, and its friction is the bound and not noise
+    let mut c = cantilever_with(5, 0.4, 1e15, 3000.0, false, (0.0, 0.02));
+    let mut at_bound = 0;
+    for step in 1..=90u64 {
+        let frame = c.world.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let b = c.world.stress_balance(0).expect("read");
+        let across = b.friction.iter().map(|f| f * f).sum::<f64>().sqrt();
+        assert!(across <= 0.5 * b.normal.abs() * (1.0 + 1e-9), "step {step}");
+        at_bound += usize::from(across > 0.0 && (across - 0.5 * b.normal.abs()).abs() <= 1e-9 * b.normal.abs());
+    }
+    assert!(at_bound >= 1, "the landing step reads the bound");
+}
+
+#[test]
 fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_not_read_and_the_balance_says_so() {
     // a bar turning at 5 rad/s about the vertical on its floor: the friction under it is a twist of the manifold (the simplified friction solves it apart from the tangent vector), which
     // the world does not read: the frictions that are read add up to nothing along the floor, and the balance leaves the moment that slows the bar. Not a defect of the moment: the
