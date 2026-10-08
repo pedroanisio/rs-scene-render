@@ -403,6 +403,31 @@ errors. The cache decoder and renderer both bound file bytes, brick counts and
 cached storage; schema validation alone cannot establish these data-dependent
 limits.
 
+**Cells of negligible density are skipped, and bricks are found through a
+directory** (the skip: commits 574d621 and 2afdecd; the directory: 73f9535 and
+eb45dd7; 2026-10-04; each pair is one change on two branches). The in-volume shadow
+march does not sample cells that cannot matter. A per-volume map of 4-voxel cells,
+built on the CPU, marks the cells whose readable voxels could add more than 1e-10 to
+the optical depth along any ray (the largest density times density scale times
+extinction times the longest path in the domain; about 300 times under half an ulp of
+an f32 near 1), and the march jumps over the others. It is a bound, not zero, so the
+transmittance is unchanged at its resolution. Media with a second frame or advection
+and grids with a non-negligible background are marched as before, and the primary
+march is untouched. A voxel read finds its brick through a table with one row index
+for each possible brick position, packed beside the record, when the grid's bricks
+span at most 2^20 positions (at most 4 MiB, counted in the volume's memory); a larger
+extent keeps the binary search, and the velocity and second-frame grids have no
+directory. Only the lookup changes: the trilinear arithmetic is untouched. Frozen
+plume, 1280 x 720, trace seconds (original, cell skip alone, both changes): sun only
+5.76, 2.68, 1.14; step 3 6.94, 4.14, 1.40; dome only 19.56, 12.39, 3.75; full 26.82,
+15.32, 4.66; the frame's PNG hash is identical in all four, in each stage. The commit
+messages do not record the adapter or the load of these timings. Tests (unit tests of
+`crates/sr-gpu/src/volume.rs`): `skip_map_clears_only_cells_whose_readable_voxels_are_negligible`,
+`the_skipped_density_shrinks_with_extinction_density_scale_and_domain` (a thin, very
+dense medium has no negligible density at 1e-6; no extinction makes every cell
+negligible), `media_with_a_second_frame_or_a_nonzero_background_are_not_skipped` and
+`brick_directory_covers_the_bricks_and_gives_way_to_the_search_when_too_large`.
+
 #### Light grids
 
 `lighting="exact"` (the default) marches a shadow ray from every in-scattering
@@ -757,6 +782,182 @@ the message names the face and the distance). The 12 comes from one plume, one f
 source; the side faces were not measured; and a source with a rotation or a scale is bounded by a sphere
 or by its extent along the axis.
 
+#### A window that follows its plume (`pyro@follow`)
+
+An open domain cuts a plume that rises past its top face: the face is a zero-pressure outlet and what crosses it is
+lost. `follow="true"` (PYRO9: only with `boundary="open"`) makes the window of the domain move, in whole cells and in the
+object's own axes, to keep the smoke `followMargin` cells (PYRO10: only with `follow`; the engine's value is 12, the
+distance from which a plume's top face was measured to have no effect on it, see W02; PYRO11: it leaves a cell between the
+faces) from the faces it is going toward, plus the cells the fastest air along the axis goes in one step; the number of
+cells does not change, so the memory and the cost of a step do not either (a move is a copy of the state, and about a state
+clone has been measured at 102 ms at 192 x 156 x 192 under load). Absent or false the domain is where it began for good, and
+with a follow that never moves the state is bit for bit the one without it (tests
+`a_following_window_that_the_smoke_never_nears_the_faces_of_is_bit_for_bit_not_following`, the nine reference hashes of the
+solver, and `a_follow_that_is_false_or_absent_is_the_domain_it_always_was`).
+
+Where the window moves is a function of the state and of the sources that act in the step, never of the history of
+requests. The smoke along an axis is the span of slabs of cells between the ends that hold at most half of `followLoss` of all
+the density each (the lowest and highest cell index, integers, from sums taken in the order of the cells, so the same on any
+number of threads). A face is asked for room only if the air in the smoke nearest it is going toward it (the density-weighted
+velocity along the axis, summed over the slabs of the smoke within the margin of that end, points to the face): a face behind a plume
+that rises away from it is no reason to take from the room it rises into (test
+`a_window_does_not_move_against_the_drift_of_its_smoke_to_make_room_behind_it`, the oracle of the policy: a puff at rest or rising
+away from a face must not move the window toward it), and smoke at rest is going toward none. The hero scene is not what justifies
+the policy: the window of the hero is the same under the first policy (d87fc65, every face asked for room) and under this one (80f70d5),
+the first cell of the grid at y = -78, -72, -72, -72, -75, -90 over the six times measured with the first and -78, -72, -72, -75, -90 at
+1, 1.25, 3, 5 and 5.96 s with this one (6 units down at about 1.1 s in both). A figure of 22 units that an earlier version of this section
+gave for the first policy on the hero is withdrawn: it is not a measurement of either commit. On the hero scene with `followMargin="3"` the window still moves down 6
+units (two cells) at 1.1 s, when the expanding fireball comes within the margin of the bottom face, and stays there to 4 s; a
+smaller margin keeps it where it began for longer, at the price of smoke nearer the face. The sources are the
+shapes of the `pyroSource` and `pyroImpulse` that act in the step, and **a window never leaves a slab that holds a cell of such a
+source**, whatever the loss, because a plume begins at its source and a window that left it would part the plume from the
+ground. The inputs of a step are sampled again if the window moved, so that they are those of the window the step has, and
+the seeded turbulence is keyed by the cell of space (the cell of the window and the cells the window has moved by), so that a
+point keeps its noise. The state keeps the cells it has moved by (so its origin is `base + cells * voxelSize` computed afresh)
+and the density it has let go of (`State::lost`); both are in the checkpoints and in the identity of the state, and a seek
+replays the same moves. The volume exported to the renderer places its grids by the origin of the state, so the smoke does
+not move in the world; a frozen bake of a following plume keeps the transform of each frame (test
+`a_baked_sequence_of_a_following_plume_is_the_frames_it_was_baked_from`), and any order of times and a fresh evaluator give the
+same frames.
+
+`followLoss` (0 to 1, the engine's default is 0) is the share of all the smoke that a move may leave behind on each side.
+**With a loss of zero a window lets go only of slabs that hold no density and no heat, and that is almost never**: the
+interpolation of the advection leaves a tail that is never exactly zero, and a plume drags a stem of smoke down to its source.
+Measured (sr-sim `follow`, a blob of smoke rising in air that accelerates upward at 2 units a second squared, 140 steps of
+0.05 s, cells of 0.5 units, a window of 80 rows; deterministic; the reference is a window of 640 rows): the reference holds 164.3
+of smoke with its centre at -38.5 units; a window that stays holds 12.9 (centre -28.5); a loss of zero never moves and holds
+the same 12.9, a loss of 1e-9 holds 42.6, of 1e-6 holds 174.0 (centre -37.9) and has let go of 9e-4 in all, of 1e-4 178.6 and of 1e-3
+181.0. The follow holds up to 10 % more smoke than the reference because the open bottom face is not where the reference's is, a
+difference of the two domains and not of the follow. What a move lets go of is counted in `lost`, never silent, and a move lets go of
+at most the share asked (`what_a_move_lets_go_of_is_counted_and_is_never_more_than_the_share_asked`: the smoke before a move
+equals the smoke after it plus what it let go of, to a trillionth, and no move lets go of more than 1.5 times the loss of all the
+smoke, the three axes together). In the evaluator (`crates/sr-eval/tests/volume/pyro_follow.rs`: a blob in a domain of
+8 x 60 x 8 units that a force field accelerates upward at 6 units a second squared) the fixed domain holds nothing at 5 s and the
+following one holds the blob 14 units above the old top face.
+
+On the hero scene (`examples/cinematic-impact/hero.scene.xml`, plume of 192 x 156 x 192 units in cells of 3, open, 24 steps a
+second; tool `crates/sr-eval/examples/pyro_extent.rs`, deterministic; the cut figures are the scene's own solver, Jacobi, the others the
+multigrid one) the plume is cut by the top face from about 5 s: the smoke in the three cells at the top face is 0.30 of 3526 at 5 s
+and 98 of 2972 at 6 s. A domain of 468 units
+(the same cells below, two more windows above) shows what the plume is: at 6 s the smoke above a thousandth of the peak spans y = -83
+to 62 (145 units), above a hundredth -77 to 53, above a tenth -74 to 8, and the whole smoke is 3016. A window of 156 units
+holds that with a margin of 3 cells (9 units) only just: with `follow="true" followMargin="3" followLoss="0.001"` the window moves
+down 6 units at 1.1 s (the fireball) and then up, to 12 units above where it began at 5.96 s, the smoke in the three cells at the top
+face at 5.96 s is 0.17 of 2999 (88.5 of 2996 without follow, a plume cut by the face) and the plume reaches the margin; a loss of
+zero lets go of nothing, never makes room and holds 158 at the top face at 6 s, as little help as a fixed window. A plume that the
+hero film follows to its end needs 145 units and its margins, about 240 for a margin of 12 cells, and that is 64 x 80 x 64 cells
+against 64 x 52 x 64, 54 % more cells and the memory and cost of a step with them.
+
+The hero scene sets `follow="true" followMargin="3" followLoss="0.001"` on its `<pyro>`: the default margin of 12 cells (36
+units there) does not fit a window of 52 rows with a plume of 145 units, and a loss above zero is what makes the window follow
+at all. The margin is in cells, so a copy of the scene with cells of 1.5 units (`hero-hires.scene.xml`) needs a margin of 6 for the
+same distance. The frame at 3 s of the 720p probe does change, and was expected to: the window has moved at 1.125 s, before 3 s, so the frame cannot be
+the one of the scene without follow. Its sha256 has three values, each with its reason: `24c6ab56...` (963b614, the scene without the
+follow attributes), `eeb71e14...` (d87fc65, follow merged, the noise keyed by the cell of the
+window) and `c8a66483...` (from 80f70d5, and the same on 28887eb and later: the noise keyed by the cell of the box the state began in). The
+two commits between the last two (8c30823, the noise key, and 80f70d5, the policy of the faces) change 185,284 pixels of 921,600 (20.1 %,
+largest difference 157 levels, mean 0.153). The window of the hero is the same under both, so these pixels are attributed to the noise
+key (8c30823: the hero has turbulence, and the noise of a cell depended on where the window was) unless a measurement says otherwise (a probe at
+3.0 s with only 8c30823 would decide; it has not been made); the frames without follow are bit for bit the same
+in both (frames 120 and 143, sha256 `a9d92b13...` and `ea8a614c...`), so the path without follow did not change. A frame is a function of
+the policy, and a change of policy changes the hero's frames after the first move of the window: the hash is not a fixed reference of
+the scene but of the scene at a commit.
+
+Limits. A plume has to fit in its window: the window follows the head of the plume only while the stem that joins it to its
+source, and the smoke that numerical diffusion spreads about it (the blob above spreads over 68 rows at 140 steps), fit between
+its faces with the margin, and a plume that does not fit is cut as it was; the remedy is a larger window, and `follow` is the
+saving in cells for a plume that has left its source behind, not a free height. A `followLoss` large enough to let go of the stem
+loses visible smoke: the stem is part of the plume (a heated puff keeps 11 % of its smoke in a stem below the rows its head has
+left). The margin and the loss are the engine's values with no published source. The decision reads the density, the velocity and
+the temperature of every cell once a step (one serial pass), and its cost, measured (sr-sim `follow`, ignored test `cost_of_the_decision_against_a_step`, ci profile, one core for the
+decision and the solver's threads for the step, best of five), is 0.0093 s against a step of 0.423 s at 128 x 104 x 128 (2.2 %)
+and 0.0334 s against 1.407 s at 192 x 156 x 192 (2.4 %).
+
+#### A blast in the smoke (`pyroBlast`)
+
+`<pyroBlast time energy x y z ambientDensity ambientPressure gamma/>` is a child of `<pyro>` (version 1.3 with it): at `time` seconds `energy`
+joules are released at (x, y, z) in the pyro's own axes into air of `ambientDensity` kg/m^3 (1.2) and `ambientPressure` Pa (101325), a gas of
+`gamma` (1.4, from 1.1 to 3). A pyro with a blast needs `boundary="open"` (PYC5: a blast is a source of divergence, which a closed domain cannot let
+out; the evaluator and the solver refuse it too) and the blast's place is in the domain (PYC6). An energy of zero is a blast that does nothing, and a
+pyro with no blast is bit for bit the pyro it was (the reference hashes of the solver, and a test of a puff with turbulence).
+
+**What is solved.** The front is the Sedov-Taylor blast: `R(t) = xi0 (E t^2 / rho0)^(1/5)` metres, where the constant is not quoted but found
+(`sr_sim::sedov`): with `xi = r / R`, `u = Rdot U`, `rho = rho0 G` and `p = rho0 Rdot^2 P` the equations of an ideal gas reduce to three ordinary
+differential equations that are integrated from the shock (`U = P = 2 / (gamma + 1)`, `G = (gamma + 1) / (gamma - 1)`) to the centre, and the
+energy inside the front, `E = (16 pi / 25) J rho0 R^5 / t^2` with `J` the integral of `G U^2 / 2 + P / (gamma - 1)` over `xi^2 dxi`, gives
+`xi0 = (25 / (16 pi J))^(1/5)`: 1.0328 for gamma 1.4 (Landau and Lifshitz print alpha = 0.851) and 1.1517 for 5/3 (published 1.15), the mass inside the
+front is that of the sphere of ambient gas to 1e-6 (it is not given), the pressure at the centre of the monatomic blast is 0.3062 of the one behind
+the shock (published 0.306), and an independent integration in Python agrees to 2e-6. The front stops at `0.3 (E / p0)^(1/3)`, the end of the strong
+phase: the radius at which the pressure behind the strong shock, `2 rho0 D^2 / (gamma + 1)` with `D = 2 R / (5 t)`, has fallen to `11.85 xi0^5 / (gamma + 1)`
+times `p0` (5.8 for air, 9.0 for the monatomic gas): a few times the ambient pressure, where the blast stops being strong. It is a choice of the radius
+and not a result: the engine's, with no published value (the constant 0.3 is not the 0.3 to 0.6 m per cube root of a kilogram of the fireballs of explosives:
+`0.3 (E / p0)^(1/3)` is 1.04 m per cube root of a kilogram of TNT).
+The smoke solver is incompressible, so the shock is not carried. What is carried is the displacement of the air by the front, as an incompressible
+spherical piston. In each step the volume that the front swept, `4 pi (R1^3 - R0^3) / 3` between the sphere it began the step in and the one it ends it in,
+is given to the sphere's cells (the cells whose centres are in the sphere of the end of the step; at least a cell: a front smaller than that is the sphere of one cell,
+and the volume given is still the volume swept), spread evenly over them: each is given the divergence `volume / (cells h^3 dt)`, so that the air the domain lets out is
+exactly the volume swept whatever the cells make of the sphere, an energy of 1 J included (1.1e-6 cubic metres, not the volume of a cell). The cells that share the volume are the
+sphere's WHOLE (a window that the sphere cuts holds only some of them, and the others take their share), so that the divergence in the window is the one that the sphere
+makes in free space and agrees with the flow outside. The analytic flow of the piston (inside the sphere `u = d (x - c) / 3`, outside `u = Q / (4 pi r^2)` away from the centre `c` of
+the blast, `Q` the volume over the step) is put in a velocity of its own and projected ALONE (the projection is linear, so this is the share of the step's flow
+that the blast makes), with the faces open at zero pressure and the solids and obstacles of the step; that flow carries the smoke (the density and the temperature) once, over
+the step, and it is NOT kept in the velocity of the smoke. Kept, it would stay for ever: a potential flow with open faces is not removed by a projection with
+no divergence (the first design of the blast kept it and left 50 to 200 percent of the pulse a step after the front had stopped), so the velocity of the smoke is what it
+would have been with no blast, to the bit, at every step (`Simulation::blast_flow` gives the flow of the last step to whoever wants it). A window that the sphere cuts, or that is
+not centred on the blast, is pushed from the blast and not from its own middle. Nothing is heated and no smoke is made (a fireball is a `pyroSource` or
+`pyroImpulse` that the author adds). The order of a step with a blast is the smoke's own (advection, sources, forces, projection) and then the blast's: its flow is projected alone, with
+the solids of the step at rest for it (what a moving collider does to the air is the smoke's own flow, made first, and the two add up to the whole), and it carries the density and the
+temperature once, by the same advection with no decay and no cooling (the step has made those: a decay of 1 a second would otherwise be made twice in a step with a blast). The cost of a step with
+a blast is a second projection and one more state while the first is held (about 41 bytes a cell, which carries the smoke by exchange of its density and temperature and not by copy, and a copy of the
+three faces of its flow, which the advection replaces): the live bytes at the peak of a step are counted by an allocator (`tests/pyro_blast_memory.rs`, 48^3 cells) at 206 bytes a cell with a blast and 141
+without, inside the 288 of the budget (a first version of this, which copied the whole state and kept the last step's flow through this one, was 248; 1.1 GB more than a step with no blast at 256^3),
+the simulation holds 66.6 bytes a cell after a step with a blast (its state, 42, and the flow of that step, 24, which is dropped when the next begins or the window moves), and the time is in the profile as `blast`.
+
+**Units.** `x`, `y`, `z` are in the pyro's own axes, as those of a source; `energy` is in joules, the air in SI; a metre is the physics element's
+`pixelsPerMeter` scene units (100 if there is none) and the volume's axes turn that into its own units (a volume that is not scaled the same on every
+axis has no sphere, and is an error: the images of the three axes must have one length and be at right angles, so a shear is refused as well as a stretch). The radius is worked out in metres and then multiplied by that; the divergence is a ratio of volumes per second and
+needs no conversion. Tested at 1, 100 and 37 pixels to the metre: the same radius in metres, the same displacement of a puff of smoke in metres
+(to 1e-3, the density being a single float), and the same kinetic energy in joules to 1e-6.
+
+**The time step.** With `dt` of the pyro (1/24 s) the strong phase of a plausible blast is over within the first step: the energy above which it is not is
+`E* = [xi0 (dt^2 / rho0)^(1/5) p0^(1/3) / 0.3]^(15/2)`, which goes as `dt^3`: 1.91e12 J at 1/24 s and 2.64e10 J at 1/100 s, and below it the blast is ONE PULSE of the volume
+of `R_max`, in the step that contains `time`. Sub-steps would not change what the projection gives (the potential flow depends on the volume swept, not on its
+history within the step), so there are none. The front, for three energies in air at 1/24 s:
+
+| energy (J) | R(dt) (m) | R(2 dt) (m) | R_max (m) | R_max reached at | steps of the strong phase |
+|---|---|---|---|---|---|
+| 1e6 | 4.43 | 5.84 | 0.64 | 0.3 ms | one pulse of R_max |
+| 1e9 | 17.6 | 23.3 | 6.44 | 3.4 ms | one pulse of R_max |
+| 1e15 | 279 | 369 | 643 | 0.336 s (8.06 steps) | 9 (the ninth is the last to sweep) |
+
+The sphere of the front, which stops at `R_max`, reaches the centres of the faces of a window of side `L` if `R_max` is `L / 2`, `E = p0 (L / 0.6)^3`: 9.0e7 J for the
+hero's domain of 5.76 m (at 100 pixels to the metre) and 9.0e13 J for one of 576 m; it covers the whole window, corners included, at `R_max = sqrt(3) L / 2`, 4.66e8 J for
+5.76 m. A window that the sphere does not cover whole holds the cells it has of the sphere, each given the divergence that the whole sphere gives in free space (the window's
+flow is the free-space flow of the sphere, to 5 percent in the test), and the flow of the piston from the centre of the blast.
+
+**What it does.** Measured on a domain of 64 cells with the blast of 3.75e9 J (the strong phase ends at 10 m; `crates/sr-sim/tests/pyro/blast.rs`): the air that
+the blast's flow lets out of the domain is the volume swept over `dt` to 1e-6, over one step and over all the steps of the strong phase (the sum is the volume of the sphere of `R_max`), with
+a solid in the sphere, and the smoke's own flow in the same step lets out the source's (the two are made apart); the cells of the sphere are its volume to 5 percent; the speed outside the sphere is `Q / (4 pi r^2)` to 15
+percent at 1.25 and 1.5 radii (the open faces of the box change it farther out); a window cut by the sphere, with the blast 1 m from its face, has the air go away from the blast, the flow inside linear in the distance from it (0.6 to 3 percent) with the divergence
+of the whole sphere (10 percent), and the flow at the middle the one that free space gives (5 percent); the kinetic energy in a ball of 1.5 radii is `rho Q^2 / (8 pi R) (1/5 + 1 - R / a)` to 0.9 percent at half a metre and 0.85 at a
+quarter (the piston's own energy is `2 pi rho Rdot^2 R^3` outside and a fifth of that inside: for the strong phase the energy that the solver's flow has is that of the displacement,
+which is part of the blast's `E`, not all); a puff of smoke at 6 m is displaced as the volume swept says (`r1^3 = r0^3 + R^3`, 0.51 m) to 0.984 and 0.990 of it at half a metre
+and a quarter. With a pulse of many cells in one step (1e11 J, the puff at 9 m, the displacement 1.5 m, a Courant number of 3 at half a metre and 6 at a quarter) the semi-Lagrangian
+trace neither leaves the domain nor crosses the sphere, and the displacement is 0.990 and 0.981 of the exact one. **The advection does not conserve the smoke**: it changes by
+3.6 percent at half a metre and 0.70 at a quarter (1.8 and 1.4 percent for the pulse of many cells), which is the interpolation of the semi-Lagrangian scheme and falls with the cell;
+it is not the 1e-6 of a conservative scheme. This is a limit of the smoke solver as a whole and not of the blast: any large velocity (a pulse, a gust, a fast plume) gains or loses
+smoke by the same interpolation, and a conservative advection or a correction of the mass in each step (with the puff of this test as its oracle) is work for the solver. The same
+document through the evaluator, after the puff and the first two pulses (the front at 5.14 m; the volume swept says 1.06 m for the puff as a whole), moves the centre of the smoke on the line
+through the puff by 1.19 m (the centre of the line, not of the whole puff: 12 percent over) at every scene unit; the test fixes that number to 0.05 m.
+
+**Limits.** (1) The solver is incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law and not found by the
+flow, and the smoke is moved by the displacement and not by a shock. (2) The interior flow is that of a uniform divergence (linear in `r`), not Sedov's
+profile, and only the displacement of the front is the blast's: the energy of the flow is the energy of the displacement. (3) The strong phase is shorter
+than a step of the pyro for any `E` below `E*`; a blast faithful in time needs a `dt` of the pyro smaller than a tenth of the time of the strong phase (`dt` of 3e-5 s
+for 1e6 J), at the cost of that many steps. (4) After `R_max` nothing is modelled: no negative phase, no reflection, and the walls are the solver's. (5) No heat and
+no smoke are injected. (6) Because the blast's flow is not kept in the velocity, the smoke's own velocity gets no impulse from it: an updraft or a vortex stays where it was while the density and the temperature move, a plume made after the blast is not deflected by its wind, and the two advections in a step (the smoke's, then the blast's) are a first-order splitting with the numerical diffusion of both. A blast has no compressible after-flow and no negative phase. In a potential incompressible flow no velocity is left when the source stops, which is right. Not done: the coupling to bodies (the front's pressure `2 rho0 D^2 / (gamma + 1)` and the time it takes to pass a body's size give an impulse that the
+world's own conservation test can check) and to the ocean (the same pressure as a `waterImpulse`): each its own step with its own oracle.
+
 ### Three-dimensional particles
 
 The `sr-sim::particles3d` CPU core and `<particles3D>` scene binding are
@@ -864,7 +1065,7 @@ render cache keys and whole-pass motion blur recognize this node.
 | `start`, `end`, `visible`, `opacity`, `motionBlur` | Node timeline and rendering; defaults 0, absent, true, 1, inherit; hiding its rendering does not move existing particles |
 | `emissionStart`, `emissionEnd`, `dt` | Local seconds since node start, independent of its visibility interval; defaults 0, absent, 1/60; group clocks scale the simulation timeline |
 | `rate`, `lifetime`, `lifetimeVariance` | Defaults 10 births/s, 2 s, 0 s; rate is sampled at interval start, pose at each birth |
-| `emitterShape`, `emitterWidth`, `emitterHeight`, `emitterDepth`, `emitterRadius`, `emitterMesh` | point/box/sphere/mesh, default point; dimensions/radius default 1; mesh requires a mesh asset and is a surface source |
+| `emitterShape`, `emitterWidth`, `emitterHeight`, `emitterDepth`, `emitterRadius`, `emitterMesh` | point/box/sphere/mesh, default point; dimensions/radius default 1; mesh requires a mesh asset and is a surface source, area-weighted; its vertices are the imported ones, as for every mesh asset (a file in metres, y up, is turned half a turn about x and is 100 scene units to the metre), placed by the emitter's own transform, so a ring that a file measures in scene units is 100 times larger than measured unless the emitter is scaled by 0.01 |
 | `seed`, `maxParticles`, `maxEvents`, `maxWork` | Defaults 0, 10000, 16384, 100000000; upper bounds 2^64−1, 1000000, 1000000, 1000000000 |
 | `velocityX/Y/Z`, `directionX/Y/Z`, `speed`, `speedVariance`, `spread` | Local launch velocity; defaults zero velocity, direction (0,−1,0), zero speed/variance and zero full-cone degrees; spread is at most 360 |
 | `inheritedVelocityX/Y/Z`, `gravityX/Y/Z`, `drag` | Explicit world velocity added at birth, world acceleration and nonnegative linear drag; all default 0 |
@@ -959,10 +1160,11 @@ boundary, for an open volume and for a closed one), and not at all with `drag` z
 the volume's axes by the inverse of its world matrix at that instant and the velocity back by its linear part. In
 time the gas is the linear interpolation of the two smoke steps around the instant (a frame between two canonical steps takes the particle on by a partial segment of its step, which asks a handful of times per
 particle (two to five, counted in test `particles_gas`, commit 0c9df98, 2026-10-04) from the step's own context: no smoke step is simulated and no field fetched, so
-motion-blur samples add queries and no simulation). The smoke is simulated as far as the
-particles need, and first in the frame when a document names a gas (the others keep their order), so that the
-particles find the smoke at the step they ask for and the volume of the frame is not asked for one it has gone
-past; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
+motion-blur samples add queries and no simulation). The particles run before the smoke in the
+frame and ask it, in order, for the steps they need, so that the smoke is simulated once for each of its steps (30 steps
+in 3 s for an impact scene whose ejecta are dragged by a smoke and fall into an ocean, where 69 were simulated when
+the smoke ran first, test `gas_and_splash`, commit 8c3ed9b, 2026-10-06) and the frame's own volume finds the step
+it is at among the states the particles kept; going back restores the smoke's own checkpoint as any seek of it does, and any order of frames, a fresh
 evaluator and a smoke that kept no checkpoint but the first give the same bits. The velocity fields of the steps in use
 (the window of a particle step, `ceil(dt_particles / dt_smoke) + 3` of them) and the two states the smoke keeps for them (the frame's own volume needs the step the readers started at, and the
 timeline is a step past it: 1.2 MB each at 32 cells, about 110 MB each for 128 x 104 x 128) are charged to the
@@ -980,15 +1182,15 @@ drag is a rate of about 0.03 per second (computed from the drag law, not measure
 dust-sized particles (or an authored `drag`) and not the ejecta of the impact scenes.
 
 Ejecta falling into an ocean (`ocean@splash`). An ocean lists the emitters whose particles fall into it
-(OCN13: each throws out the ejecta of a crater, so its particles have a mass; an emitter belongs to one
-ocean). The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
+(OCN13: each throws out the ejecta of a crater, so its particles have a mass). An emitter belongs to one ocean,
+which the evaluator checks when the scene is evaluated, not the rule. The particle solver takes a plane of water (a point, the normal out of the water, the rectangle it
 covers): a particle whose centre crosses it downward inside the rectangle, before any contact it would make later
 in the segment, is removed there, and the driver is told which (instant, place, velocity, mass), for every fixed
 step, an empty list too, and again the same when a seek replays the step. The evaluator takes the plane from
 the ocean at its pose when the emitter starts (a function of the document; the ocean must have no scale and both
 must be on the composition clock), sums what fell by cell and by canonical step of the ocean (the volume is the
 mass over the density of the target of the crater that threw them, the momentum is the mass times the horizontal
-velocity in the ocean's axes over the density of the water, in scene units) in the order of the particles' ids,
+velocity in the ocean's axes over the density of the water, `ocean@density`, in scene units) in the order of the particles' ids,
 and writes it once per (emitter, fixed step) in a log of at most 16 MiB: a replay of a step must reproduce its
 entries to the bit or it is an error. The ocean reads a canonical step by the entries of the fixed steps that
 overlap it, and a step the particles have not reached is an error that names it, never an empty splash. At the
@@ -1066,6 +1268,7 @@ replays from local time zero.
 | `colliders` | absent | Up to 4096 distinct `object3D` ids that move the bed or occupy the water (OCN6, OCN7); see the numerical contract. Absent leaves the bed fixed |
 | `bedResponse` | `depthFiltered` | `depthFiltered` or `hydrostatic`: how the surface answers what `colliders` do to the water; no effect without `colliders` |
 | `bodyCoupling` | `none` | `none`, `buoyancy` or `full`: what the water does to the rigid bodies in `colliders` (OCN8) |
+| `density` | 1000 | Density of the water in kg/m3: the weight of what a body displaces, the force the water gives back, the momentum the ejecta of `splash` bring (divided by it) and the target of the cavity of `waterImpulse` |
 | `bodyDrag` | 1.0 | Form-drag coefficient of a body in the water, vertical (with `bodyCoupling`) and horizontal (`depthFiltered`) (OCN9) |
 | `splash` | absent | Emitters of crater ejecta whose particles fall into this ocean (OCN13) |
 | `maxMemoryMiB`, `checkpointMemoryMiB` | 256, 64 | Solver workspace and separate checkpoint ceiling; zero checkpoints disables retention |
@@ -1261,6 +1464,33 @@ in first order and 0.7 and 2.3% in second on the mound, commit fdfb0b0) and is r
 and with owners and lifts the ratio new over old is 0.922, 0.962 and 0.956 (first order) and 0.995, 0.988 and 1.006
 (second order), within the noise of a machine with load1 between 5.6 and 11.5 and under 2% where it is not.
 
+Against an exact solution (test `ocean_reference` of `sr-sim`). The only reference the wave of the ocean has outside the code is the
+linear shallow-water wave of a Gaussian hump on still water, which has a closed form: with `g = 10`, depth 10 m, `sigma = 8` m and an
+amplitude `A` of 1e-3 of the depth, the surface at 4 s is `A` times the integral of `s exp(-s^2/2) J0(s r/sigma) cos(c s t/sigma)` over `s`,
+`c = sqrt(g h)`, evaluated in the test by quadrature. In a closed basin of 160 m the largest error of the surface over the cells is, as a
+fraction of `A`, 6.9e-2, 4.4e-2 and 2.6e-2 in first order and 1.0e-2, 3.1e-3 and 9.3e-4 in second for 4, 8 and 16 cells to `sigma`, which is
+the observed order 0.70 in first order and 1.71 in second over the two halvings, and the basin keeps its water to 3.3e-14 (commit 166a7b3,
+2026-10-06; the results are deterministic; the test takes 15.8 s in release at a load of about 15). At 32 cells to `sigma` the second-order error
+is 3.9e-4 (order 1.27 from the step before), near the floor of a linear reference for a hump of 1e-3 of the depth, and was measured in a
+disposable program and not in the test. This checks the scheme's dissipation and order against an answer from outside the code; it does
+not check the wave of an impact, whose cavity, depth response and dispersion are not in it.
+
+Where the shallow-water wave stops being the wave of water (a declared limit). The solver propagates what it is given without
+dispersion, and real water at the depth `h` has `omega^2 = g k tanh(k h)`; a bed that rises is, in the linear theory of the surface at
+rest, attenuated by `1 / cosh(k h)` (Kajiura 1963; Hammack 1973; the problem of an initial surface hump is that of Cauchy and Poisson, solved for
+an axisymmetric hump by Kranzer and Keller 1959: all cited from memory and not read). The exact linear answer for the hump of the paragraph
+above with `g = 10`, `h = 10` m is the same integral with `cos(omega(k) t)` in place of `cos(c k t)`, and it was evaluated by a disposable program
+(2026-10-06, not in the repository; deterministic): for a hump of `sigma = 40` m (`sigma / h = 4`) at 20 s the leading crest is `0.1516 A` at
+`r = 214.5` m against `0.1568 A` at `220.5` m for the shallow-water wave, 3 % lower; for `sigma = 16` m (`sigma / h = 1.6`) at 8 s the largest
+excursion is a trough of `-0.1714 A` at `41.5` m where the shallow-water wave has a crest of `0.1568 A` at `88` m; for `sigma = 8` m
+(`sigma / h = 0.8`) it is a trough of `-0.2374 A` at `14` m at 4 s (against the crest at `44` m) and of `-0.1366 A` at `42.5` m at 8 s (against `0.1148 A` at
+`84` m). The same comparison for the surface response of a bed uplift (`1 / cosh(k h)`): the shallow-water peak `0.1467 A` at `91` m against a dispersive
+trough of `-0.1535 A` at `34` m for `sigma = 20` m. A hump whose width is a depth or less is therefore not a wave that the solver
+gets slightly wrong but one it does not have: its exact linear form is a dispersed train. The cavity of the 90 478 kg rock in 20 m of water has
+a radius of the order of the depth (an estimate, not measured here), so the far-wave heights of the sea sweeps below are properties of this
+model and are not predictions of what water would do; no figure of this section has been compared with any measurement of a real impact,
+and none is claimed to be.
+
 What a sphere crossing deep water makes. A sphere of 2 m radius at 10 m below the surface of 20 m of water,
 crossing at 20 and 50 m/s, raises the highest surface by 8.69 and 5.52 m in the hydrostatic mode and by 0.177 and
 0.198 m in the filtered one (commit 4308a71, 2026-10-04, test ocean_depth_filter). On the authored impact-ocean
@@ -1315,7 +1545,7 @@ name: at most 4096 distinct objects, a plane or mesh with a crater or a closed b
 one), OCN7 (collider geometry is static), OCN8 (`bodyCoupling` needs `colliders`), OCN9
 (`bodyDrag` belongs to an ocean with `colliders`), OCN10 to OCN12 (a `waterImpulse` with
 `source`: no derived attribute given, a dynamic rigid body without a crater listed in
-`colliders`, one impulse per body) and OCN13 (`splash` names emitters of crater ejecta).
+`colliders`, one impulse per body) OCN13 (`splash` names emitters of crater ejecta) and OCN14 (a foam coverage radius of at most 64 cells; it is checked in the particles mode too, where the radius is ignored, so that a document does not become invalid by changing the mode).
 Only pose and opacity are animatable; the ocean corpus fixtures are checked
 against the independent XSD/Schematron oracle.
 
@@ -1345,6 +1575,10 @@ of Houdini's FLIP-based emission model or a validated impact-water model.
 | `maxWork` | 100000000 | Per-request whitewater work ceiling, at most 1,000,000,000,000. A request charges 8 units per cell per step it replays (plus 8 per tracer and per birth). The tracers keep checkpoints within their own byte budget, one per second of simulated time at first and every second, fourth, eighth... second when the budget fills, so a request that goes back in time replays from the nearest checkpoint at or before it; a cold seek to 6 s on 518,400 cells with a 1/24 s step still costs about 600 million units |
 | `checkpointMemoryMiB` | 64 | Byte ceiling of the retained tracer checkpoints, 0 to 4096 MiB, separate from `maxMemoryMiB`; zero keeps none, so every request that goes back in time replays from zero |
 | `foamMaterial`, `sprayMaterial` | absent | Optional scoped material references |
+| `foamMode` | `particles` | `particles` draws each foam tracer as a triangle batch; `albedo` makes the foam tracers a coverage of the water surface that the path tracer's shading takes toward the foam (below) and draws no foam triangles |
+| `foamRadius` | one cell | In `albedo` mode, radius in scene units of the coverage one tracer gives the surface, at most 64 cells (OCN14); ignored otherwise |
+| `foamAlbedo` | .9 | In `albedo` mode, diffuse albedo of fully covered water, 0 to 1 |
+| `foamRoughness` | .8 | In `albedo` mode, roughness of fully covered water, 0 to 1 |
 
 At each canonical ocean `dt` endpoint, compute central differences of surface
 height and horizontal Froude number `speed/sqrt(gravity*depth)`. A dry neighbour
@@ -1382,6 +1616,76 @@ pose, opacity, depth and shadow settings. Material references override these
 defaults. This bounded geometry is tested in raster and path-traced passes;
 it is not volumetric mist or a liquid-sheet reconstruction. OCN5 enforces the
 single source, ordered window and material-reference constraints.
+
+With `foamMode="albedo"` foam is the water's own: no foam mesh is built, and
+each foam tracer instead gives the vertices of the water surface within
+`foamRadius` (default one cell, so the coverage is at mesh resolution) a share
+`(1 - x^2)^2` of its distance `x` to the radius, full until 60 % of the
+tracer's life and fading linearly to zero after it; shares of several tracers
+combine as `1 - prod(1 - c)`, in particle order, so the result is deterministic.
+The coverage is made on the CPU for every surface vertex, per frame, and is
+budgeted (the distances against a budget of their own, equal to the whitewater's
+`maxWork` for each frame, that is not shared with the solver's): it counts the distances it will take (every living tracer takes one
+for each vertex of the 3 x 3 squares around the one it is in, of a grid of squares that are at least
+`foamRadius` a side and at most about as many as there are vertices) before
+taking any, and fails with its cause when they pass the whitewater's `maxWork`;
+and the arrays of the coverage (16 bytes a vertex and 4 for each square of its
+grid, exactly) count in the surface's `surfaceMemoryMiB`.
+Foam that is not drawn as triangles is not charged to the whitewater mesh budget.
+The share rides in the alpha of the vertex colour and is the share of the
+surface's area that the foam covers: a path-traced sample on a covered surface
+is on the foam with that probability, and then the surface is the foam's (a
+diffuse white of albedo `foamAlbedo`, .9, and roughness `foamRoughness`, .8,
+that lets no light through), and on the water otherwise, so that the picture is
+the mean of the two weighted by the share and the light that gets through the
+uncovered part keeps the water's tint. The refracted shadow ray scales its
+transmittance by one minus the same share, so opaque foam stops the sun that
+clear water lets through (in expectation: the sun's ray is not drawn at random but
+scaled, which is the mean of what the randomly drawn samples of a camera path see, and so the
+same approximation as the mix itself), and the albedo guide of the denoiser takes the mean
+albedo. The lobe of the first hit of a sample is not drawn at random but from a
+sequence with a random offset in each pixel (the offset a hash of the pixel, so that
+neighbours are not correlated, and the sequence the golden-ratio one, so that the
+samples of a pixel are spread over the share): at 8 samples a pixel, a window of
+16 x 16 pixels and a share of one half, the standard deviation of the luminance is
+0.0155 (0.156 of the mean) where the random draw gave 0.0354 (0.345) and the
+continuous mix before it 0.0061 (0.111); with the denoiser 0.0003 (0.003) against
+0.0118 (0.125) and a mean of 0.0984 against 0.0996 of many samples (it was about
+5 % under). The correlation of the residuals of neighbouring pixels is 0.014 to the
+right, -0.002 below and 0.011 on the diagonal, and a share of 0 or of 1 is as noisy
+as before the mix (0.0101 and 0.0087). The variance that remains under a dome is
+that of the draws at the later hits of the path, which are random, and of the
+sampling of the lobes themselves; a light of the scene is evaluated at every hit
+with the lobe of the sample, so a direct light adds the draw of that lobe to the
+noise (evaluating both lobes for it is a possible further step). The mix is the path tracer's: the raster renderer reports an error for
+a scene with `foamMode="albedo"` instead of drawing no foam, and the water
+needs an opaque alpha mode (also an error otherwise). Three warnings say it before
+a renderer runs: W08 (a water that is not opaque, is unlit or shines, by the criterion the renderer applies,
+read from the document's attributes at the start: a material attribute that animates is read by the renderer at each frame and not seen by it), W06 (a `foamMaterial` with `foamMode="albedo"`, which is not
+used) and W07 (`foamMode="albedo"` in a scene where no camera has
+`renderer="pathtrace"`); the corpus has a document for each, and the valid
+albedo document has the path-traced camera. A metallic water is covered by foam like any other (the foam sample is a
+non-metal surface, so a wholly covered metallic sea is the same white as a
+dielectric one: 0.1926 against 0.1928 of the quadrature); an unlit water, which
+draws its own colour, and an emissive one, whose emission the foam samples would add
+to their own, are refused with an error that names the cause and the ocean is not
+drawn (W08 says so in the document). Scenes without the mix keep the text of the
+plain shaders and their pipelines; the water shader gains the declaration
+`override FOAM` and one branch that is off without foam, so that its identity is
+a measurement (the same picture, bit for bit, on an NVIDIA adapter) and not a
+structural fact. Foam on a surface that lets no light through uses a variant
+with only this hook, because forcing the water variant (the refracted shadow
+rays) cost 6.7 times the plain shader: 21.25 s against 3.2 s of the GPU pass
+`pathtrace trace` on `examples/cinematic-impact/hero.scene.xml` with its
+whitewater at threshold 1000 (no tracer) and `foamMode="albedo"`, t = 3.0,
+640 x 360, the scene's own samples, an NVIDIA RTX 6000 Ada through `sr-gpu`,
+`tools/probe_render.py --size 640x360 --short`, on the first form of the
+renderer change (the one that selected the water variant for a foam mix). On
+an NVIDIA adapter: water wholly covered by foam equals the quadrature of a
+diffuse .9 surface (0.1926 against 0.1928), the picture at shares of .25, .5
+and .75 is the weighted mean of the bare and the covered picture to 5 %, a
+share of 0 is the unmixed picture bit for bit for opaque and for transmissive
+water, and the seven comparison frames and the hero frame keep their hashes.
 
 #### Implemented numerical contract
 
@@ -1785,7 +2089,7 @@ and production validation are finished.
 Rust and Schematron share **CRT1** (version), **CRT2** (single surface owner),
 **CRT3** (ordered timing), **CRT4** (finite direction/profile/envelope) and
 **CRT5** (rigid-body compatibility), with **CRT6** to **CRT8** for a crater from an
-impact and **CRT9** for `capture`. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
+impact, **CRT9** for `capture` and **CRT10** and **CRT11** for `mantle` and `bulking`. `tests/corpus/valid/crater.scene.xml`, `crater-impact.scene.xml` and
 `tests/corpus/invalid/crt1.scene.xml` through `crt9-capture-without-source.scene.xml` independently
 exercise the XSD/Schematron and Rust validators.
 
@@ -1834,6 +2138,45 @@ one), so the rock reaches the bed slowed. At 6 s, with and without `capture`, it
 crater's centre in the hydrostatic response (the highest wave after 4 s 2.136 and 2.132 m) and 0.1 and 8.5 m in the
 filtered one (2.097 and 2.083 m): with the depth filter the free rock rolls out of its crater and `capture` keeps it
 in (test `impact_scenes` on 3 m cells, commit e22458b on fa63e5d, 2026-10-05, deterministic).
+
+`crater@mantle` (boolean, default false, only with `source`: **CRT10**) and `crater@bulking` (1 to 1.3, only with `mantle="true"`:
+**CRT10**, **CRT11**). The ground of a crater that grows from an impact takes out less than the law excavates and gives back none of what
+the law throws out: for the authored rock in soft rock the kernel's bowl, whose bump reaches the rim crest, excavates 129.7 m3, 1.285 of the law's
+volume of 100.9 m3, and the rim puts back 32.9 m3, 0.326 of it, so the ground loses 0.959 of the volume and the 0.8 of it that the law says was thrown
+out (80.7 m3) is nowhere in the ground (`sr_sim::cratering::crater`, `sr_3d::crater`; measured by a disposable program on 2026-10-06). With `mantle` the
+volumes are a contract. The bowl excavates exactly the law's volume `V` with the depth and the radius of the law: its bump is `(1 - x^2)^p` with
+`p = pi R^2 d / V - 1` (`R` the rim crest's radius, `d` the law's depth; `p` is 2 for the crater as it was, and the bowl is made deeper if `p` would
+be under 2). The ejecta come down outside the rim as a mantle `t0 (R / r)^3` thick (McGetchin et al. 1973, Collins et al. 2005, from the law's own
+text: the inverse cube), brought to zero over the rim's width by a smooth ramp, cut at twenty crest radii and scaled to hold exactly the law's ejecta
+volume, `0.8 V`; it is part of the ground, the same deformation as the bowl and the rim, and grows with the crater as they do (every part of the
+map, its crest and its height, is scaled by the progress). The rim and the mantle together put back `bulking` times `V` (broken rock takes more room than the
+rock did): with `bulking` the rim has the volume `bulking V - 0.8 V` (0.2 V at 1), and without it the rim keeps the height of the law, which is
+a measured relation of the law and not cut, and the bulking is what that asks for, 1.126 for the authored rock in soft rock (0.326 V of rim and
+0.8 V of mantle), inside the physical range of the debris and derived from the law and not chosen. The integral of the change of height over the
+ground is then `(bulking - 1) V`, to 1e-6 of `V` (test `crater` of `sr-3d`). The transient stage of the crater, its collapse into the final one, is not
+modelled: the law's radius is the final, apparent radius, and multiplying it by 1.2 to 1.3 would count the collapse twice. Off, which is the default,
+the ground is as it was, to the bit.
+
+The ejecta particles that come to rest on the ground are taken out where they lie (`particles3D` runs `Spec::settle`, 0.5 m a second relative to the surface, a choice and not a measurement) so
+that what they are made of is not counted twice, once as particles and once in the mantle; they are told to the ocean's coupling as ground, and only the water's take from it. For the authored
+rock 379 of 1000 ejecta have been taken out by 5.5 s, and 88 are in the air at 1.6 s in both runs. The mantle that the law's own volume gives, and not the footprint of the particles' landing
+points, is what the ground gets; the comparison is a measurement and not a part of the model: for the authored rock, on level ground, with no drag and 20 000 particles, 84 to 86 % of the mass of the ejecta
+the engine launches (Housen and Holsapple) comes down inside the crest radius, back in the crater, and the rest lies between one and about three and a half crest radii, steeper than the inverse cube
+(log-log slope of the thickness -4.1 to -7.0 against -3, for launch angles 30, 45 and 60 degrees, `the_ballistic_landing_points_of_the_ejecta_make_a_mantle_that_is_measured_against_the_inverse_cube`
+in `sr-sim`); the analytic mantle, with all of its 0.8 V outside the rim and out to twenty crest radii, is therefore the law's statement of where the ejecta are in the final crater and not what these
+particles do, which is not corrected here.
+
+Granular debris is a height field of deposit over the ground (`sr_sim::granular::Bed`) that relaxes to an angle of repose in a fixed order over sixteen neighbours, without making or losing
+volume. `crater@repose` (10 to 60 degrees, only with `source`, never with `mantle="true"`: **CRT10**, **CRT12**) connects it to the scene: the emitter of the crater's ejecta takes out each
+particle that comes to rest on the ground (0.5 m a second relative to it, as with the mantle), tells where it lay in the plane of the crater and how much of the target it stood for (its mass over the
+target's density), and the volumes are poured, step by step, onto a bed of 144 by 144 cells (twelve to the crest radius, six crest radii to each side) over the grown crater, which relaxes after each step.
+The bed after the steps that a frame's particles have computed lies on the ground in that frame, as a height added in the crater's deformation to what the bowl and the rim give. The bed is a fold of
+a log of what settled, so it is the same whatever order the frames are asked in (tested to the bit), and is kept at checkpoints like the particles'. For the authored rock thrown as 1000 ejecta, 73 621 kg of the 169 634 kg
+have settled by 5.5 s and the deposit is 35.0577 m3 of the 35.0577 that their mass stands for. Limits: the particles and the rigid world land on the ground without the deposit; what reads the crater
+after the particles in a frame (the render, and any simulation that runs after them) sees it; material that settles beyond six crest radii is put on the edge of the bed; an emitter deposits on one crater; and
+the ground the deposit relaxes on is the final crater, also for what settles during its growth. A volume poured at one point of level
+ground piles into a cone whose flank, in each sector of 15 degrees, is within 2 degrees of the declared angle when the pile is ten cells of radius or more (34.1 to 35.6 degrees for 35, and 29.2 to 30.5, 23.7 to 25.5,
+38.3 to 40.6 and 34.5 to 35.6 for 30, 25, 40 and 35 at 10, 12, 12 and 20 cells), and up to about 5 degrees off for piles of 5 to 8 cells (26.2 to 30.0 degrees for 30 at 5 cells and 26.9 to 30.8 at 8). Under water the mantle changes the sea sweeps, whose tests assert order and not numbers.
 
 The size is Holsapple's pi-group scaling law (Annu. Rev. Earth Planet. Sci. 21:333-373,
 1993, doi 10.1146/annurev.ea.21.050193.002001, Eq. 18). With `pi_V = rho V / m`,
@@ -1919,7 +2262,8 @@ crater uses the normal component. It warms the dust by `heat / (dust mass x spec
 (dust mass: its volume times the target density), at most `maxTemperature` kelvin: a declared
 physical cap (vaporisation), not a fallback, below the solver's limit of 50000 K. The solver
 derives the expansion from the heating, as an ideal gas at constant pressure, `(dT/dt)/T` in
-every cell heated, so there is no authored `expansion`; a sealed domain cannot sustain it, as
+every cell heated, so there is no authored `expansion`; a push (`velocityX` to `velocityZ` of an impulse,
+`velocityRateX` to `velocityRateZ` of a source) may be authored and is added to the cloud, in the volume's axes; a sealed domain cannot sustain it, as
 for any expansion. The literature gives ranges, not values, for the share of an impact's
 energy that goes into a plume (internal energy of target and body 0.70 to 0.91 of it at 5 to
 45 km/s in strong rock, O'Keefe and Ahrens 1977; ejecta kinetic energy 0.07 to 0.5 of it), and
@@ -2010,9 +2354,23 @@ instant asked for (in the cases tried, smoke with a `dt` of 0.2 s read the rigid
 dynamic body per step through `Driver3::load`, which defaults to none: a world that is never
 loaded is unchanged, and a group whose coupling gives no load is bit-identical to no group.
 
-Every member of a group runs on the composition clock (the ocean's local time is the
-composition time less its start, with no remapping), because the exchange is indexed by it. The
-rigid world's frame memory, checkpoints and the log together
+Every member of a group runs on one clock, and it may be any clock that stretches time the same
+way everywhere: a `group`'s `timeScale` and `timeOffset`, nested or not (a clock the engine finds as
+`scale * t + offset` of the composition's), or the composition's own. The ocean, every body of the 3D
+world (the world is one, so a body the ocean does not carry counts too) and every smoke volume and
+particle system that collides with a body of the world must run on that same clock, and one that does not
+is an error that names it and the ocean whose clock it differs from; a remap, a loop, a freeze or a clip's
+rate on the way is not a uniform clock and is refused. The ocean's local time is the
+group's time less its `start`, because the exchange is indexed by it, and the rigid world runs on the group's time
+(`physics@start`, the steps of `fixedStep`, the force fields' windows and the ocean's `dt` are in it): a scene in a
+group of `timeScale` 0.5 at composition time `T` is, bit for bit, the scene without the group at `T / 2`
+(and at `2 T` for a scale of 2; the tests compare the ball, the water cells and the particles, for scales of
+0.3, 0.5, 0.8, 1.5 and 2, for nested groups and for a late-starting group, in any order of requests and
+from a fresh evaluator). The world starts at the composition time at which the group's clock reads its
+start; a clock that puts that before the composition begins (a negative `timeOffset` against a world that
+starts at zero) is an error, since the scene cannot be asked about before it. Not covered: smoke from a crater
+and particles that fall into an ocean keep requiring the composition clock, as does a 2D rigid world, which
+stays on the composition's time whatever the group does. The rigid world's frame memory, checkpoints and the log together
 make a backward request cheap: it is answered from the frame memory, or by restoring a
 checkpoint and replaying with the logged loads, and the two agree bit for bit.
 
@@ -2036,7 +2394,7 @@ and date).
 
 Buoyancy and the full coupling (`ocean@bodyCoupling="buoyancy"` and `"full"`). The group above gets its
 first physical coupling. Each rigid body in the ocean's `colliders` is loaded, every rigid step, with the
-weight of the water it displaces (density 1000 kg/m3 and the ocean's gravity) upward through the centroid of
+weight of the water it displaces (the density of the ocean, `ocean@density`, 1000 kg/m3 when it gives none, and the ocean's gravity) upward through the centroid of
 the submerged volume, which turns a tilted body, and with a quadratic form drag on its vertical motion,
 `-(1/2) rho C_d A |v| v`, `C_d` = `bodyDrag` (default 1.0, an engine parameter and not from the impact
 literature) and `A` the area the submerged part presents from above, limited to what stops the body within a
@@ -2131,7 +2489,8 @@ zero radial contribution. These authored impulses may change total momentum.
 The source's one `<rigidBody>` provides total mass and collision parameters.
 **FRX1** gates version 1.3; **FRX2** requires one fracture and one rigid body on
 an object3D other than a plane, map or volume; **FRX3** resolves the interior
-material; **FRX4** rejects nonfinite numeric values. Runtime solid validation is
+material; **FRX4** rejects nonfinite numeric values; **FRX5** to **FRX7** belong to a
+fracture from an impact (below). Runtime solid validation is
 still required for the allowed primitive kinds and imported geometry. The five
 `fracture`/`frx1`–`frx4` corpus fixtures agree with the independent schema oracle.
 The NaN fixture additionally expects the existing Rust-only `W01` warning.
@@ -2323,6 +2682,64 @@ source-window search and nonuniform parent-transform adversarial coverage. Final
 native UHD impact sequence appearance, throughput and whole-process memory remain
 unverified.
 
+#### Fracture from an impact (`fracture@source`)
+
+A fracture whose time and push are the consequence of an impact rather than authored. `source` names the
+dynamic rigid-body object that breaks it; the owner is the body that breaks. Nothing in the document says when:
+the body breaks at the first impact of the source on it, found by the rigid world as for a crater from an impact
+(the same `ImpactWatch`, recorded in the world's state and in an SRPHYS04 cache, so a seek, a fresh world and a
+baked cache give the same bits). The fracture fires on the step after the impact is noticed: the pieces
+replace the body at the boundary that ends the step of the impact, with the velocity the body had after the
+contact, never before it. `at`, `radialImpulse` and `impulseX`, `impulseY`, `impulseZ` are derived, so giving any of them
+is **FRX6**; the source must be another object3D with a dynamic rigidBody (**FRX5**); `minImpulse` and
+`energyFraction` belong only to a fracture with a source (**FRX7**). The rest of the declaration (`pieces`, `seed`,
+`interiorMaterial`, `interiorUvScale`, `maxMemoryMiB`) keeps its meaning, and the pieces are the seeded partition of the
+document.
+
+| Attribute | Type; default | Contract |
+|---|---|---|
+| `source` | object3D ID; absent | The dynamic rigid body whose impact breaks the owner (FRX5) |
+| `minImpulse` | positive decimal; twice the source's weight in one step | Total normal impulse of the pair in one step, kg·scene-unit/second, below which nothing breaks (FRX7) |
+| `energyFraction` | decimal 0–1; engine value `0.3` | Part of the impact's relative kinetic energy that pushes the pieces apart (FRX7); no XSD default, so that a document that gives it without `source` is refused |
+
+The default threshold is the crater's: a body resting on its target pushes with its weight, so it breaks nothing,
+and an impact has to push with more than twice that in one step. A pair that rests, touches
+gently or never meets breaks nothing and the owner stays whole for the whole composition.
+
+The push is a modelled quantity, not a measured one. The relative kinetic energy of the impact is
+`E_rel = 1/2 mu v_n^2`, with `mu = m_s m_o / (m_s + m_o)` the reduced mass of source and owner and `v_n` the closing
+speed along the contact normal as the world noticed it. The fraction `f = energyFraction` of it, `E = f E_rel`, becomes
+the kinetic energy the pieces gain relative to the owner's centre of mass. Each piece gets a speed along the unit line from the
+owner's mass centre to its own, the same `s` for every piece; the mass-weighted mean of those velocities is removed so that the
+push adds no linear momentum, and the angular momentum about the centre of mass is not changed by it. With `d_i`
+the unit line of piece `i` and `dbar` the mass-weighted mean of the lines, `s = sqrt(2 E / sum_i m_i |d_i - dbar|^2)`.
+The value `0.3` has no published source: it is the engine's, declared here so that a document without
+it is defined, and a document that wants another says it. A piece whose centre is on the centre of mass has a zero line and
+is given only the mean's removal like the others. The pieces keep the velocity of the body after the contact at their
+own centres, so the momentum the contact solver left the owner passes through the fracture, and a spinning owner's pieces
+go on turning with it.
+
+Oracles, in the tests of `sr-sim` and `sr-eval` (`fracture_contact`, `impact_block`): the mass of the pieces is the mass of the owner;
+total linear and angular momentum of the pieces equal those of the intact owner in the same world, at the instant
+of the impact, to 1e-9; the kinetic energy gained is `E` (90.000000 against 90.000000 in the reference world, to a millionth
+of it); nothing breaks below the threshold or without an impact; the pieces are the same in any order of
+requests, from a fresh world, and from a baked cache. In the block scene
+(`examples/cinematic-impact/impact-block.scene.xml`, the 90 478 kg rock at 100 m/s and 60 degrees against a
+583 200 kg granite block on a slab, 12 pieces) the block lies still until the rock reaches it, 1.49 s in, and the
+mean distance of its pieces from where the block stood, at 3 s (1.5 s after the contact), is 6.3, 10.5 and 14.5 m for rocks arriving at
+60, 100 and 150 m/s, and 7.4, 10.5 and 11.4 m for rocks of 30, 90 and 270 tonnes (test `impact_block`, commit 2cf1fa2,
+2026-10-06, deterministic). These are orders of magnitude and directions, not predictions of a real impact.
+
+Limits, stated so that they are not mistaken for physics. The partition does not depend on where the impact was: the same
+seeded cuts come out wherever the rock lands, and only the push (which depends on the speed and the masses, not on the point)
+and the spin of the owner tell them apart. A piece does not break again (no second generation: the world rejects chained ownership, and the pieces are not
+objects of the document). The source is not part of the partition and goes on
+with the velocity the contact gave it; at the boundary the pieces appear where the owner was and a source that has penetrated
+the owner by more than a step's travel may overlap pieces and be pushed out by the solver. The push adds `E` to the kinetic energy
+that the contact has already treated: the total energy after the fracture is not more than before the impact only if `f` is at
+most the share the contact dissipated (`1 - e^2` for a restitution `e` of the pair), which the engine does not check. The fracture
+is the cinematic cut of this section, not a stress or toughness model.
+
 #### Mesh sequences (implemented; importer hardening pending)
 
 Version 1.3 adds `<meshSequence>` under `<assets>`. An `object3D` with
@@ -2409,6 +2826,25 @@ projection. Filter halos cover every denoising pass; tile edges must not become
 image edges. Peak image working-buffer allocation is bounded independently of
 frame area. Geometry/texture limits remain separately validated and reported.
 
+**Render statistics and the probe.** The statistics of a render say where a
+frame's time goes (commit 7e6fcb3, 2026-10-04): `sim_rigid_seconds`,
+`sim_ocean_seconds`, `sim_smoke_seconds` and `sim_particles_seconds`,
+`draw_prep_seconds`, `volume_prep_seconds` and, for the path tracer,
+`pt_assemble_seconds`, `pt_bvh_seconds` and `pt_pack_seconds`. With `--stats` the
+passes are timed by GPU timestamp queries, the path tracer's under `pathtrace trace`
+and `pathtrace denoise` in `gpu.passes` (absent on an adapter without them, and the
+timing costs a little itself). All of it is additive and changes no pixel (test
+`crates/sr-gpu/tests/stage_times.rs`). `tools/probe_render.py` (commit ca85e5e,
+2026-10-04) renders single frames of a scene, optionally at another size (a copy of
+the scene is rendered; the scene's own file is never edited), through the shared GPU
+queue, and writes a JSON report: the stage seconds, the GPU milliseconds by pass,
+the wall seconds of the render process alone (queue wait excluded), its peak resident
+memory and the sha256 of the frame, which tells two builds' pixels apart. A failed
+render or a missing statistics line is an error, never a partial result; the report
+logic has unit tests (`tools/tests/test_probe_render.py`). What the probe reports is
+a measurement on one machine at one load, not a promise (ledger: "Render stage
+timings, render probe and reflected-volume tests").
+
 ### Light through water and glass (path tracer)
 
 Materials with `transmission` above 0 refract in the path tracer. Three
@@ -2438,9 +2874,52 @@ behaviours apply to them, none needing a schema attribute:
   surfaces in air are black. The dome reaches submerged surfaces by sampled paths
   and needs no such term.
 
-Scenes without a transmissive material render the same bytes at the same speed.
-The ocean's default spray (transmission .6) is such a material, so frames with
-whitewater are lit by this path.
+At commit c6195de scenes without a transmissive material rendered the same bytes
+at the same speed; the specular sampling below (commit 06d6596) changes every
+path-traced frame by noise, not by a bias. The ocean's default spray
+(transmission .6) is a transmissive material, so frames with whitewater are lit by
+this path.
+
+#### Specular sampling at grazing views
+
+The specular lobe of a surface draws its half vector among the GGX normals visible
+from the view (Heitz 2018), with the density `G1(v) D(h) / (4 n.v)` of the light
+direction, and the share of samples that go to the specular lobe is capped at
+0.999 (it was 0.95, with half vectors drawn from `D(h) cos`). Visible normals
+because a grazing view sent many drawn normals' reflections below the surface,
+where the path ends, and a dark glossy surface at the horizon (the `farSea` plane
+of the ocean scenes) showed dark specks at 8 samples per pixel; the cap because a
+dark dielectric's diffuse lobe is a thousandth of its reflectance there and was
+given one sample in twenty. Sampling visible normals and the cap together: in the
+ocean acceptance scene, in a band of 160 x 50 pixels along the horizon, the pixels
+more than 40 levels under the median were 517 at 8 samples without a denoiser and
+217 with the scene's, against 15 at 64 samples; they are 5 and 1 (0 at 64 samples),
+and the band's mean at 8 samples, 228.39, agrees with 228.87 at 64. The lobe stays
+unbiased: a quadrature of the BRDF times the cosine over the hemisphere, with no
+sampling, agrees with the picture of a plane under a uniform dome within 0.4 % for
+roughness 0.06, 0.25 and 0.5 at seven view angles from the horizon down, and
+dropping the masking term from the density fails it (test
+`crates/sr-gpu/tests/horizon_specks.rs`; ledger: "Specular sampling of the visible
+normals").
+
+Measured against the build before it (commit c7dba89), NVIDIA adapter, 2026-10-06,
+the seven frames of the path-traced identity set and the hero frame at 1280 x 720,
+t = 3.0:
+
+| frame | pixels differing of 921600 | largest difference (levels) | mean difference (levels) | image mean before, after | trace seconds before, after | sha256 after (first 16 digits) |
+|---|---|---|---|---|---|---|
+| plume, both lights | 430552 | 201 | 0.88 | 168.47, 168.41 | 4.62, 4.52 | c5756924eb0fe609 |
+| plume, dome only | 442240 | 203 | 1.01 | 164.57, 164.49 | 3.76, 3.69 | 0acc6a3d7b7dc71d |
+| plume, sun only | 172555 | 1 | 0.19 | 71.222, 71.223 | 1.00, 0.96 | 524f6d0950558c71 |
+| dry floor, both lights | 732979 | 22 | 1.05 | 182.550, 182.554 | 0.12, 0.12 | be3f8c9a1617811c |
+| dry floor, sun only | 77875 | 23 | 0.16 | 144.672, 144.674 | 0.12, 0.12 | 3e3d13ac3bfedb59 |
+| dry floor, dome only | 839336 | 22 | 1.58 | 116.779, 116.787 | 0.09, 0.09 | 36c2fec7b1634588 |
+| glass ball in air | 101364 | 53 | 0.31 | 138.230, 138.233 | 0.34, 0.33 | 1235e3373a4501e4 |
+| hero | 447584 | 201 | 1.03 | 166.23, 166.17 | 10.22, 10.14 | 24c6ab56703017611dd410948af73798116f35dfbdc0a232639cecd5e5a9b72e |
+
+Every mean moves by at most 0.04 %. The sha256 of the hero frame at 1280 x 720,
+t = 3.0 is, from commit 06d6596 (2026-10-06), `24c6ab56703017611dd410948af73798116f35dfbdc0a232639cecd5e5a9b72e`;
+it was `953a7b382df31fd6c2bf49e646c9abb9dec4978807ff95e6df4b92328e5eaea1`.
 
 Agreement with brute force (the light replaced by an emissive copy that paths
 find, 1024 samples, flat water 4 units over a diffuse floor, 320×180; commit
@@ -2461,7 +2940,8 @@ under water agrees with 24 bounces within 3 % (test
 `dome_light_through_water_does_not_depend_on_the_bounce_limit`, commit c6195de,
 2026-10-05, NVIDIA).
 
-On a software adapter the three brute-force comparisons render half-size frames
+On a software adapter the brute-force comparisons run only when asked (`SR_BRUTE_FORCE=1`; commit 487cf35, 2026-10-06,
+llvmpipe: the two comparisons take 191 s and 428 s, the whole test file 913 s); when asked they render half-size frames
 (the same view, the patch scaled with them) at 1024 samples, with the tolerance the
 test states or four times the noise of the references' means when that is larger
 (commit d9aeb32, 2026-10-05, llvmpipe at a load average of 15: the three tests take
@@ -2471,9 +2951,15 @@ half-size frame that the 15 % margin absorbs: the measured errors are 2.1 % (sun
 and 10.0 % and 10.1 % (point and sphere); `SR_BRUTE_FORCE=full` forces the full size
 on any adapter and nothing reduces them on a GPU.
 
-Known limits. A camera that starts under the water, or a surface reached
-without a refraction into its medium, is not "inside": the sun does not reach
-it (a test pins this). The shadow ray follows the first transmissive interface;
+Known limits. A camera that starts under the water is placed inside the medium
+by a probe ray straight up (the scene's up is -y): the first transmissive surface
+it meets, seen from the inside, sets the medium, and a floor or wall the camera
+sees is lit by the sun through that surface (test
+`a_camera_under_the_water_sees_a_wall_lit_as_the_oracle_says`, `water_oracle.rs`).
+Where the probe finds no surface, or one that is not the boundary of the water the
+camera is in (a sloped bank, a lid, an overturning wave), the camera is treated as
+in air and the sun does not reach what it sees, as it does not reach a surface
+that a path reached without refracting into its medium. The shadow ray follows the first transmissive interface;
 a second interface along it (an overturning wave, layered media) is not
 followed, and where the refinement finds no way out toward the light (a steep
 wave, grazing light) the light contributes nothing there: those samples are
@@ -2481,7 +2967,15 @@ dark, never bright. A textured transmissive surface uses its uniform base
 colour for the tint in the shadow ray. A smoke medium and refracting surfaces
 in one pass are lit independently: the shadow ray does not cross the medium.
 Caustics (light focused by the water surface) are not produced; flat water is
-the exact single-refraction case, a wavy sea an approximation. A transmissive
+the exact single-refraction case, a wavy sea an approximation. The sun that
+crosses a wavy surface is resolved by one refracted shadow ray per sample; the
+focusing of the waves is not modelled. Under steep waves a floor under water
+receives 0.581 of the light of the same floor dry by the analytic shadow ray,
+against 0.631 by brute force with an emissive sphere of 1024 samples (a gap of
+0.05, 8 %), and a point reached by two facets takes one facet per sample. Closing
+the gap needs the Jacobian of the refraction from the surface to the floor, or
+light tracing, and waits for an acceptance shot that shows the lit floor under
+waves. A transmissive
 plane that covers the whole sea (the `farSea` plane of `impact-ocean.scene.xml`, when its
 water material is transmissive)
 tints and hides everything below it as well.
@@ -2496,6 +2990,378 @@ of 15 with one llvmpipe thread (`LP_NUM_THREADS=1`); `composite`
 the default threads and 0 of 80 with one llvmpipe thread. The tests measure image quality and pixel
 values, not time; the difference between the two commits is not significant, and the
 conclusion holds for these two commits only.
+
+### Schwarzschild black hole (`blackHole`, `accretionDisk`, `camera@geodesics`)
+
+A scene with a non-rotating black hole in vacuum, a thin disk of gas around it and a camera that follows the paths of
+light through its spacetime. Version 1.3. This version draws the hole, the disk and the sky and nothing else.
+
+**Units.** G = c = 1 and lengths are scene units, so the mass `M` (`blackHole@mass`) is a length and the horizon is the
+sphere `r_s = 2M` in the Schwarzschild radial coordinate `r`, centred on the hole's `x y z`. Times are lengths: a
+second of the scene is `timeScale` units of that time for the disk (`accretionDisk@timeScale`, default 1).
+
+**Elements.** `blackHole` has `mass` and a place. `accretionDisk` names its hole (`blackHole`), has `innerRadius` (6M when
+absent), `outerRadius`, `temperatureScale` (kelvin), a `seed`, an `angularPattern` (`none`, `clumps`, `spiral`), its
+`contrast`, `intensity` and `timeScale`, and the tilt of its axis by `rotationX`, `rotationY` and `rotation` (about z)
+in degrees, composed as an object3D composes them, Rz Ry Rx. It has no place of its own: it is centred on the hole.
+`camera@geodesics` (default false) makes the camera trace null geodesics; its position is the position of a static
+observer at the radius `d` = its distance to the hole, which is outside the photon sphere. `fov`, `roll`, `target`, `yaw`
+and `pitch` are those of any camera, and `pathSamples` is the number of antialiasing samples of a pixel.
+
+**Rules.** BH1: the version is 1.3. BH2: one `blackHole` per scene. BH3: an `accretionDisk` names a `blackHole`. BH4: the
+inner radius is at least 6M, the radius of the innermost stable circular orbit, and the outer one is beyond the inner.
+BH5: a camera with `geodesics="true"` needs a hole. BH6: with it the scene has no `object3D`, `particles3D`,
+`particleEmitter`, `ocean`, `fluid`, `flock`, `slime`, `erosion`, `pyro` or `medium`: it is an error and not a silence
+(2D layers, text, shapes, effects and adjustments are allowed: the image goes through the 2D chain). BH7: the camera is
+farther than 3M from the hole (only its authored `x y z` is checked). BH8: one such camera per scene. W03: a hole or a disk
+and no geodesic camera: they are not drawn. W04: `denoise="true"` on a geodesic camera, which does not denoise. W05:
+lights in the scene, which are not used. The corpus holds one document for each rule and warning (tests/corpus,
+`bh1-version` to `bh8-two-cameras`, `w03-no-lens` to `w05-lights`).
+
+**Null geodesics.** The metric is `ds^2 = -(1 - 2M/r) dt^2 + dr^2 / (1 - 2M/r) + r^2 dOmega^2`. A light ray moves in a
+plane through the hole. With `u = 1/r`, `phi` the angle in that plane and `b = L/E` the impact parameter of the ray (its
+angular momentum over its energy), Binet's equation for light is `u'' + u = 3 M u^2` and its first integral is
+`(du/dphi)^2 = 1/b^2 - u^2 + 2 M u^3`. The photon sphere is `r = 3M` (`u = 1/(3M)`), and the critical impact parameter
+`b_c = sqrt(27) M = 3 sqrt(3) M`: a ray with `b < b_c` falls into the hole, one with `b > b_c` is deflected and escapes.
+The ray of a static observer at radius `d` that makes the angle `psi` with the direction to the hole has
+`b = d sin(psi) / sqrt(1 - 2M/d)`, so the shadow of the hole has the angular radius `psi_sh = asin(b_c sqrt(1 - 2M/d) / d)`
+(for `d` far from the hole, `b_c / d`). The total deflection of a ray that escapes is
+`alpha(b) = 2 integral from 0 to u_0 of du / sqrt(1/b^2 - u^2 + 2 M u^3) - pi`, `u_0` the smallest positive root of the
+radicand: `4M/b + (15 pi/4)(M/b)^2 + (128/3)(M/b)^3 + ...` for large `b`, and
+`-ln(b/b_c - 1) + ln(216 (7 - 4 sqrt(3))) - pi` as `b` approaches `b_c`.
+
+**The disk.** The gas is on circular geodesics in the plane through the hole perpendicular to the axis of the disk, which is
+(0, -1, 0), the scene's up, turned by the disk's rotations. A circular orbit of radius `r` is stable for `r >= 6M`, its
+angular velocity is `Omega = sqrt(M / r^3)` (about the axis, anticlockwise seen from the tip of the axis, times `timeScale`
+for the scene's time) and the time dilation of the gas relative to a static observer at infinity is
+`u^t = 1 / sqrt(1 - 3M/r)`. A photon that reaches the camera from a point of the disk carries `lambda = L_z / E`, its angular
+momentum about the axis over its energy, and the ratio of the energy the camera receives to the one the gas emits is
+`g = sqrt(1 - 3M/r) / (1 - Omega lambda)`, with `lambda = b (n . z)`, `n` the unit normal of the plane of the photon's orbit
+oriented by its motion from the gas to the camera and `z` the axis. For weak fields `g = 1 / (1 + v . d)` with `d` the
+direction of the camera ray going out from the camera and `v = Omega r (z x r^)`: the side that moves toward the camera has
+`g > 1` and is bluer and brighter. The renderer traces from the camera and so reverses the orientation of the path; the
+formula in terms of `lambda` is the one that holds. In Luminet's form (Luminet 1979, Astron. Astrophys. 75, 228, not read in preparing
+this text) `1 + z = (1 - 3M/r)^(-1/2) (1 + Omega b sin(theta_0) sin(alpha))` with `theta_0` the inclination of the
+observer against the axis and `alpha` the angle of the pixel, whose sign is that of `-lambda` there. The observed bolometric
+intensity is `g^4` times the emitted one, and the colour is a black body at `g T`, which already carries the `g^3` of
+the spectral intensity.
+
+The temperature of the gas is the profile of a thin disk with no torque at its inner edge,
+`T(r) = temperatureScale * f(r) / f(49/36 r_in)`, `f(r) = (r_in/r)^(3/4) (1 - (r_in/r)^(1/2))^(1/4)` (Shakura and Sunyaev 1973,
+Astron. Astrophys. 24, 337, not read either, in its Newtonian form with the inner edge at `r_in`, `f(49/36 r_in) = 0.48787`): `temperatureScale` is the
+temperature at the maximum, `r = 49/36 r_in`, before the shift of light. The relativistic factors of Novikov and Thorne are not
+applied. The disk is opaque: a ray ends at the first point of the disk it meets, after at most the number of crossings the
+renderer follows. The azimuthal pattern is a seeded function of the angle and of `Omega(r) * time`, so that it turns
+differentially; `none` gives a smooth disk. The sky at infinity is what the rays that escape see.
+
+**Acceptance.** A renderer of this scene is accepted by the physical quantities below, not by a reference image. The numbers
+were computed on 2026-10-06 with a Gauss-Legendre quadrature of 400 points of the integral above, with `M = 1`; they were not
+measured on the renderer.
+- The shadow has the radius `b_c = 5.19615 M` for a distant observer: `psi_sh` is 0.48336 rad at `d = 10 M`, 0.10200 rad
+  at `50 M` and 0.0051910 rad at `1000 M`.
+- The deflection of a ray is `0.590396` rad at `b = 10 M`, `0.236136` at `20 M`, `0.0850835` at `50 M`, `0.0412225` at
+  `100 M` and `0.00401182` at `1000 M`; the weak-field series with the three terms above agrees to 4.4e-5 at `b = 100 M` and
+  to 4.3e-8 at `1000 M`, and the strong-deflection form to 4e-6 at `b = b_c (1 + 1e-6)`, where it is 13.4153 rad.
+- The ratio of energies is `g = sqrt(1 - 3M/r)`, `0.70711` at `r = 6M`, for a ray with `lambda = 0` (a disk seen face on) and
+  `g -> 1` for large `r`; a disk seen at an angle is brighter and bluer on the side that approaches, where `lambda` has
+  the sign that makes `1 - Omega lambda` smaller than 1.
+- The photon ring, the light that goes round the hole before it reaches the camera, is a family of images whose size
+  approaches `b_c` and whose width falls by the factor `e^pi` between one and the next.
+A renderer that does not meet them for the cases it can reach, within the error of its integration, is wrong; the
+integrator step and the number of steps are the renderer's and are written in its own section.
+
+**Reference implementation (`sr_sim::gr`).** The engine carries this physics as a CPU reference in double precision,
+`crates/sr-sim/src/gr.rs`, that the renderer is compared with and that no render calls. Lengths are the scene's and `G = c = 1`.
+
+*The integration.* Binet's equation is integrated in the angle `phi` with the classical fourth-order Runge-Kutta method on
+`(u, w = du/dphi)`, `w' = -u + 3 M u^2`, with a fixed step of 0.02 rad (`STEP`) and at most 4096 steps (`MAX_STEPS`), after which
+a ray that has neither been captured nor escaped is taken to be captured (it is circling the photon sphere). The ray starts at
+the observer's radius `r_o` with `u = 1/r_o` and `w = +-sqrt(max(1/b^2 - u^2 + 2 M u^3, 0))`, positive for a ray that goes in. It
+is captured when `u >= 1/(2M)` and has escaped when `u <= 0`, at the angle `phi_inf = phi + h u / (u - u_new)` of a linear
+interpolation across the last step. The planes of the disk are crossed at `phi0 + k pi`, `k < 4`, and the step that would pass one
+is shortened to land on it. The arithmetic is written in one order, so that a shader can do the same sums: the acceleration is
+`-u + 3 * M * u * u` taken left to right, the stages come in the order `k1` to `k4`, the half step `0.5 * h` is taken once and the
+result is `x + (h / 6) * (k1 + 2 k2 + 2 k3 + k4)`. The same code runs in single precision (`gr::f32`).
+
+*The camera and the ray of a pixel* (`gr::image`, the convention that the shader copies). The camera has the unit vectors `fwd`,
+`right` and `down` (`right x down = fwd`), a focal length `f` in pixels and the size `w x h`; the ray of pixel `(x, y)` is
+`d = normalize(fwd f + right (x + 0.5 - w/2) + down (y + 0.5 - h/2))`. With `n` the unit vector from the hole to the observer, `cos a
+= -d . n`, `perp = d + n cos a` and `sin a = |perp|`, the plane of the ray has the basis `e1 = n` and `e2 = perp / sin a` (any unit
+vector orthogonal to `n` when `sin a < 1e-6`), `phi` grows from `e1` toward `e2` along the path traced from the camera outward, the
+impact parameter is `b = max(r_o sin a / sqrt(1 - 2M/r_o), 1e-5)` and the ray goes in when `cos a > 0`. The plane of the disk, with the
+unit axes `dx`, `dy` (`dx x dy = dz`) and `dz` the axis of spin, is first met by the plane of the ray at `phi0` in `(0, pi]`:
+`phi0 = atan2(-e1 . dz, e2 . dz)`, plus `pi` if it is negative and plus `pi` again if it is below 1e-6; when `(e1 . dz)^2 + (e2 . dz)^2 <
+1e-12` the planes coincide and there is none. A pixel takes the first of the four crossings whose radius is within the disk, and then
+the azimuth `psi = atan2(p . dy, p . dx)` of `p = cos(phi_k) e1 + sin(phi_k) e2`, and the redshift
+`g = sqrt(1 - 3M/r) / (1 + Omega b h)` with `Omega = sqrt(M / r^3)` and `h = (e1 x e2) . dz`: it is the `g` of the paragraph on the disk, for
+`lambda = -b h`, because `e1 x e2` is the normal of the plane of the orbit oriented against the photon's motion. A ray that escapes ends
+in the direction `cos(phi_inf) e1 + sin(phi_inf) e2`. A difference of convention between a renderer and this reference shows as a
+difference of image and not as physics, which is why it is written here.
+
+*The closed forms* (`gr::oracle`), none run per pixel: the shadow `b_c = sqrt(27) M`, the horizon `2M`, the photon sphere `3M`, the
+last stable orbit `6M`, `Omega = sqrt(M/r^3)`, the smallest positive root `u_0` of `1/b^2 - u^2 + 2 M u^3` by bisection on `(0, 1/(3M))`, the
+exact deflection `2 integral_0^{u_0} du / sqrt(1/b^2 - u^2 + 2 M u^3) - pi` evaluated by Romberg quadrature of the form with `u = u_0 (1 - s^2)`, in
+which the radicand is `(u_0 - u) Q(u)`, `Q(u) = (1 - 2 M u_0)(u + u_0) - 2 M u^2`, and the integrand `2 sqrt(u_0) / sqrt(Q)` is smooth on `[0, 1]`,
+the weak-field series `4x + (15 pi/4) x^2 + (128/3) x^3 + (3465 pi/64) x^4`, `x = M/b`, Luminet's redshift
+`g = sqrt(1 - 3M/r) / (1 + Omega b sin(i) sin(alpha))` and the temperature of Shakura and Sunyaev `r^(-3/4) (1 - sqrt(r_in/r))^(1/4)` times a scale, zero
+at and inside `r_in`, with its maximum at `49/36 r_in`. The references are Luminet 1979 (Astron. Astrophys. 75, 228), Shakura and Sunyaev 1973
+(Astron. Astrophys. 24, 337), Darwin 1959 for the exact deflection as an elliptic integral and Chandrasekhar 1983 (The Mathematical Theory of Black
+Holes) for the same; the series coefficients are those of Keeton and Petters 2005 (Phys. Rev. D 72, 104006). None of them was read in preparing this text:
+they are cited from memory, the closed forms that need them are derived above, and what is checked is the quadrature of the integral and the
+integration against each other, which do not share code.
+
+*What was measured* (tests `gr` and `gr_image` of `sr-sim`, commits 5e33e9d, bc4e7d1 and c7fcc13, 2026-10-06; the results are deterministic and do not
+depend on the load). The impact parameter that separates capture from escape, found by bisection for a ray from `1e9 M`, is within a relative
+`9.7e-8`, `5.7e-9`, `3.5e-10` and `2.1e-11` of `sqrt(27) M` at the steps 0.08, 0.04, 0.02 and 0.01. The integrated deflection for a ray from `1e9 M` with
+the step `2e-4` is `0.590395778`, `0.236135975` and `0.041222440` at `b = 10`, `20` and `100 M` against `0.590395788`, `0.236135995` and `0.041222540` by quadrature (the
+`1e-7` at `100 M` is the part of the ray before `1e9 M`). At the step of the shader the angle at infinity is within `1.3e-7` of the quadrature for the impact
+parameters 5.3, 5.5, 6, 8, 10, 20 and 100 M (`7.2e-8` at 10 M), and the error at 10 M falls from `9.1e-7` to `7.2e-8` to `6.1e-9` as the step goes 0.04, 0.02, 0.01.
+The weak-field series leaves a residual of about `700 (M/b)^5`. Single against double precision, for four rays: at most `9.4e-7` relative in the angle at
+infinity and `1.4e-5` in the radius of a crossing (test `single_precision_follows_double_precision`). The image: on 256 x 160 pixels, with an equatorial camera at
+`40 M` and a focal length of 100 pixels, the shadow has the radius `12.915` px by area against `12.764` px from `b_c` (limit 0.5 px); the two sides of an
+inclined image have the same classes and radii, and `1/g + 1/g'` averages to `1/sqrt(1 - 3M/r)` to `1e-9`; in the column of the plane through the axis `g =
+sqrt(1 - 3M/r)` to `1e-12`; a 1280 x 720 image takes about 2.6 s of one core. The comparison of the shader with this reference, pixel by pixel, is the
+test of the renderer (`sr-gpu`, commits e4b1f85 for the tests and 99f4d2e for the shader, on the NVIDIA adapter, 2026-10-06, as its author reported it and not
+rerun in preparing this text). On 96 x 60 pixels the shader in single precision and this image agree on the class of 5760 of 5760 pixels (106 captured, 5084 of
+background, 570 of disk); the worst relative differences are 1.2e-5 in the angle of escape, 8.1e-6 in the radius of a point of the disk, 3.1e-6 in `g` and 1.3e-6 rad in
+the azimuth. Against `gr::f32::trace`, for the rays more than 5% from the critical curve, 2528 of 3186 radii of crossings agree to 1e-6 or better and the worst is 1.2e-5
+up to `56 M` (6.8e-5 beyond it, near the escape) and 1.4e-6 in the angle of escape: the GPU compiler contracts operations, so the same order of operations does not
+give the same single-precision bits. The shadow of an observer at `1e4 M` is 39.99 px for the 40 expected.
+
+**Limits.** The hole is Schwarzschild: no rotation, no charge, no frame dragging. The disk is analytic, geometrically thin,
+opaque and in steady circular motion: it has no vertical structure, no self-irradiation, no radial flow and no
+relativistic emissivity profile beyond the one above, and it is not made of particles. The scene has no other 3D object
+and no medium (BH6), so there is no light from or through anything but the disk. One hole and one geodesic camera. The
+observer is static at a finite radius `d`; a camera that moves or an observer in free fall is not modelled. The reference integrates a
+ray in its own plane with a fixed step of 0.02 rad, so a ray that circles the photon sphere for more than 82 rad is taken to be captured, the exact
+deflection loses accuracy for `b` within a few per cent of `b_c` (the integral diverges there), `g` exists for `r > 3M` only, and the time of an
+image turns the pattern of the disk and nothing else: `r`, `psi` and `g` do not depend on it. None of the
+formulas of this section was checked against the papers it cites: they are derived in the text, the Schwarzschild
+quantities (Binet's equation, `b_c`, the weak-field deflection `4M/b`, `g`) are standard, and the numerical figures above
+are the check of the integrals. The inner edge `r_in = 6M` and the temperature of the disk are the engine's choices and not a
+fit to any observation.
+
+### Voxel assets and objects (`voxelAsset`, `primitive="voxels"`)
+
+A model of cells, each with a palette index 1 to 255, is declared once as an asset and used by any number of objects. It is the
+body of cells of `sr_3d::occupancy` (sparse bricks of side eight, exact moments, connected components) that the rigid world already
+reads, so what an object looks like and what it collides as are the same cells.
+
+```xml
+<assets>
+  <voxelAsset id="castle" src="castle.vox" sha256="DIGEST" license="MIT" maxCells="2000000"/>
+  <mesh id="rock" src="rock.glb"/>
+  <voxelAsset id="rock-cells" fromMesh="rock" cellSize="5"/>
+</assets>
+<composition>
+  <object3D id="keep" primitive="voxels" voxels="castle" cellSize="2" palette="file" surface="blocks"/>
+</composition>
+```
+
+In the example the mesh `rock` is a glb of a rock a metre across, 100 scene units, so cells of 5 units are 20 to a side and about
+8,000 cells (cells of a quarter of a unit would be 400 to a side, 64 million, far over the default `maxCells`).
+
+`voxelAsset` is version 1.3 (VOX1). It has exactly one source (VOX2): a file (`src`, with `format` `vox` or `srvol`, by extension if
+absent; `model` is the number from 0 of one model of a `vox` file; `voxelGrid` names the grid of an `srvol`) or a closed mesh asset
+(`fromMesh`, a mesh asset by VOX3, with `cellSize`). The attributes of the other source are an error, not ignored. `maxCells`
+(at most 67,108,864) and `maxMemoryMiB` (at most 4,096) are types of the schema; the engine's defaults are 4,194,304 cells,
+128 MiB and the grid `voxels`, and over either is an error that names the number, never a model cut short. The provenance
+attributes are those of the other assets.
+
+An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette` and `surface` belong to that primitive (VOX5).
+`palette` is the word `file` or at most 255 material IDs, in the order of the palette indices 1, 2, ... (VOX6); the material of a
+cell is the one of its index, else the object's `material`, else the colour of the file, and an index with none of the three is an
+error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. The object has no `mesh`,
+`volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
+every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
+
+**Axes.** The lattice is the scene's: the cell `[i, j, k]` is `[i, i+1) x [j, j+1) x [k, k+1)` of the object's space in cells, x
+right, y down, z away from the camera. MagicaVoxel is x right, y forward, z up, also right-handed, and its cell `[x, y, z]` becomes
+`[x, -z-1, y]`: a half turn about x composed with a swap of y and z, determinant 1, so no face is mirrored and every cell stays
+exactly on the lattice.
+
+**A mesh cut into cells (`fromMesh`).** The mesh is taken in the frame it is drawn in: the vertices as the renderer places them (the
+basis of the import times the node's transform), in scene units (an asset in metres is 100 to the metre) and scene axes (y and z turned
+about x), and `cellSize` is in scene units; a cube of one metre in a glb, cut at 10, is 1000 cells, x 0 to 9, y -10 to -1 and z -10 to -1
+(`sr_eval::voxel::from_model`, test `a_mesh_asset_is_cut_in_the_frame_it_is_drawn_in...`). The lattice is aligned to multiples of `cellSize` in those coordinates, and a
+cell is filled, with the palette index 1, when its centre is inside the mesh by the test that the colliders of the smoke use
+(`sr_sim::pyro::mesh::Mesh`: a closed, validated surface, the nearest oriented surface decides), so a mesh that is not closed is the
+collider's error. The box of the lattice and the limits are checked before any cell is looked at, and the rows are cut in parallel
+and put together in the order of the scan, so the result is the same on any number of threads.
+
+**SRVOL as a voxel cache.** One grid, `voxels` by default, whose value at the index `[i, j, k]` is the palette index of the cell
+(exact in a float, 0 for none) and whose transform is a uniform scale, the cell size. The bytes are canonical: the same cells give the
+same file, and a model written and read comes back with the same fingerprint. A cache has no palette; a value that is not an integer
+from 0 to 255 is an error that names the cell and the value. The reader's bounds are the ones of the SRVOL section above.
+
+**What the `.vox` reader takes from the format, and from where.** The reader accepts the header `VOX ` with version 150 or 200,
+and the chunks `MAIN`, `PACK`, `SIZE`, `XYZI`, `RGBA`, `MATL`, `nTRN`, `nGRP` and `nSHP`; every other chunk is skipped by its length.
+Layers, hidden nodes, animation after the first frame and cameras are not read. Four facts of the format are not obvious and each
+has its source:
+
+1. *The palette is offset by one.* The colour of the cell index `c` is the entry `c - 1` of the `RGBA` chunk: "color [0-254] are
+   mapped to palette index [1-255]" (`MagicaVoxel-file-format-vox.txt` of `ephtracy/voxel-model`, section 7). Proved by the knight
+   of the same repository: its cells' colours are the file's entries one place down.
+2. *A file with no `RGBA` chunk has the default palette* of the same description (section 8), 256 entries embedded in
+   `sr_3d::voxel::default_palette` by `tools/make_default_palette.py` (the description is MIT licensed; the table is that of the
+   description and nothing else). Proved by the cat and the soldier of the same repository, which have no `RGBA` chunk.
+3. *A `MATL` id is the palette index.* The description does not say it; `ogt_vox.h` of opengametools (MIT) keeps
+   `materials.matl[color_index]` beside `palette.color[color_index]`, and the real files agree: in `metal-material` the cells have
+   the colour index 85 and the one material that is not the default is the `MATL` with id 85, and in
+   `single-voxel-with-material` the cell is 249 and the odd material is the `MATL` 249.
+4. *Placement under a scene graph.* A model's cells are placed about its centre, `floor(size / 2)` ("the centre pivot for that model
+   is located at floor(size.xyz / 2)", `ogt_vox.h`, line 125), by `p = R q + t`, where `R` comes from the rotation byte of the `nTRN` and a voxel is a unit box (the pivot is a corner of the
+   grid, every face is on an integer coordinate, the pivot is subtracted from the geometry and the transform then applied to it:
+   `ogt_vox.h`, "EXPLANATION OF MODEL PIVOTS", lines 123 to 170), so that a negated axis sends the cell `q` to `-q - 1`, not
+   `-q` (a model of 3 x 3 x 3, the cell (0, 0, 0), the byte 105 and the translation (5, 6, 7) give the cell (4, 6, 7), worked
+   out by hand in the test and not by the script that writes the fixtures):
+   bits 0 and 1 are the column of the nonzero entry of the first row, bits 2 and 3 those of the second (the third is the column that
+   is left), bits 4, 5 and 6 the signs of the three rows (section (c) of the extension file of the same repository, whose example
+   `R = [[0, 1, 0], [0, 0, -1], [-1, 0, 0]]` is the byte 105 and is the fixture `spec-rotation`). Where the cells of two models fall
+   on one place the later one in the graph wins.
+
+*What is evidence and what is proof.* Fact 4 is proved by the description, by `ogt_vox.h` and by the fixtures that `tools/make_vox.py`
+writes (an independent script that shares no code with the reader and works with the centres of the boxes as exact fractions: 24 rotations,
+nesting, several models), and by cells worked out by hand in a test, not by a real file: none of the real files has a rotation (`axes.vox`
+has translations only), so the convention of the negated axis is the reference's and is not checked against a file that MagicaVoxel wrote. The layout of `axes.vox` of the `dot_vox` crate, with its cube on the plane z = 0 and about x = y = 0, fits
+the centre `floor(size / 2)` and is the evidence of it, not a proof. The real files are in `crates/sr-3d/tests/fixtures/vox/real`, with
+the licence texts and the sources (`SOURCES.md`); the test that reads all thirteen sample files is run with `VOX_SAMPLES` set and
+reads nothing, rather than failing, when the files are not there.
+
+**The loader (`sr_eval::voxel_asset::load`).** The asset key resolves as a mesh asset's does (a local file; a remote scheme is an error that
+says so), and a program knows the voxel assets that its objects of primitive `voxels` name (and the mesh asset of a `fromMesh`). The bytes
+are read bounded by `maxMemoryMiB` (default 128), hashed, and the declared `sha256` is checked on the bytes that were read before
+anything is parsed, so a file that is not the one the document names is refused as that and not as a malformed `.vox` (a `voxelAsset`
+with `fromMesh` has no digest of its own: the digest that the mesh asset declares is checked against its file). `maxCells` (default 4,194,304) is the limit of the grid; over either
+limit is an error that names the number. The cells are moved so that the minimum corner of the box of the occupied cells is the origin
+(the object's origin, as the XSD says), and `VoxelModel::origin_cells` is the minimum key before the move, in the lattice of the scene
+after the scene graph: the cells of the file are the cells of the model plus it, and the pivot of a model of the file, `floor(size / 2)`,
+can be worked out again from it. A model has the materials of the file as numbers by palette index (`sr_3d::voxel::material`: `_type`
+and the properties `ogt_vox.h` reads, dimensionless, the values of MagicaVoxel's sliders, and the keys it does not read as spelt), a
+fingerprint of them for a cache of surfaces, the fingerprint of the cells, the colours' origin (the file's or the default palette; none
+for a cache or a mesh), the size of a cell that the asset says, and where the bytes came from (digest, length, modification time). An
+asset is read once for a program and key ("parse once"): a later call finds the file as it was, the same length and modification time (for
+every file the model was made from), and returns the model without reading it; if either changed the bytes are read and hashed and the
+model is reused only if the hash is the same (a rewrite of the same bytes is not a change, a change of one voxel with the same length is),
+and a file changed with the same length AND the same time is taken for the same, the price of not hashing up to `maxMemoryMiB` on each
+call. The source of a `fromMesh` is the mesh and every file the importer reads for it (a `.bin` beside a `.gltf`, the materials and
+textures of an `.obj`), its digest covers all of them, and it is taken again after the mesh is cut: a file that changed in between is an
+error and not a model that its digest does not describe. The mesh asset is the one of the document that has the voxel asset (an asset of
+an included document is named by its namespace and its id, and so is its mesh). A box of cells wider than 2^30 along an axis is an error that
+names its span (an occupancy has 2^30 keys on an axis once its corner is at the origin). The peak memory of a load is up to about three
+times `maxMemoryMiB` (the bytes, the grid, and the copy that is moved when the corner is not already at the origin). `_ri` wins over
+`_ior` where a material has both (`refractive_index`), and a negative zero and a zero are one number in the fingerprint of the materials,
+which `tools/vox_materials_hash.py` works out again from the description of the hash. Tests (`crates/sr-eval/tests/voxels/loader.rs`): a cube of two cells
+a side from a file, through the loader and the world's collider, has the mass `8 rho s^3` and the inertia `m L^2 / 6` (L = 2 s) about
+each axis through its centre, with no products, to 1e-12; one model under two scene graphs that translate it differently has the same
+cells and fingerprint and origins that differ by the translations in the scene's axes, the origin worked out by hand; a wrong digest, a
+file that is not a model with a wrong digest, the limits, a remote source and a missing file are errors that say what they are; the
+cache; the materials; a glb cube of a metre cut at 10 (the frame it is drawn in); a cache with the scale of its grid.
+
+**Limitation: an SRVOL file has no checksum of its own.** The `sha256` of a `voxelAsset` is the evaluator's to check on the bytes it
+reads (the loader of the next step); SRVOL version 1 has no field for the provenance of the file a cache was made from, and gets one,
+as a version 2 or an optional chunk, when something needs to say where the cells came from.
+
+**Bounds before allocation.** The reader checks, before it builds anything: the size of the file (default 1 GiB), the models
+(65,536), the nodes of the scene graph (1,048,576), its depth (64) with a cycle check, and the count of cells that a graph places
+(one model as many times as it is used, capped before it is built), then the limits of the grid. A translation or a placed cell
+more than 2^24 cells from the origin is an error (so that the translations of a graph at its deepest cannot wrap), and every way of
+filling the grid, from a file, a cache or a mesh, refuses a cell outside the keys of an occupancy, `[-2^30, 2^30)`, by name. A model with a side over 256 (the
+coordinates of a cell are bytes, and MagicaVoxel's own models are at most 256 on a side) is refused, and every number is named in the
+message. The scene graph is checked whole before anything is placed: exactly one root that reaches every node (a cycle, a second root
+or a node off the tree is an error that names it), and the places that it makes and the cells in them are counted node by node, once,
+so that a node under two parents cannot ask for billions of places from a file of a few hundred bytes (`max_placements`, default 2^20,
+the cost of the walk whatever the models hold, a model with no voxel included; the places are then made one at a time and none is kept).
+The cells that the places hold are bounded as well, by the caller's limit and by the importer's own, 2^26 (the most that `maxCells` allows,
+because a default `Limits` has no bound), the bytes of the grid by the caller's and by 2^30, and the grid is built in place under them.
+The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut is a chunk and not the box.
+
+| Rule | Says |
+|---|---|
+| VOX1 | `voxelAsset` and primitive `voxels` need `version="1.3"` |
+| VOX2 | exactly one of `src` and `fromMesh`; `format`, `model`, `voxelGrid` only with a file of that format; `fromMesh` and `cellSize` together |
+| VOX3 | `fromMesh` names a mesh asset |
+| VOX4 | an object of primitive `voxels` names a `voxelAsset` in `voxels` |
+| VOX5 | `voxels`, `cellSize`, `palette`, `surface` belong to primitive `voxels` |
+| VOX6 | `palette` is `file` or at most 255 material IDs |
+| VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
+| VOX8 | `rigidBody@shape="voxels"` belongs to an object of primitive `voxels` |
+| VOX9 | `density`, `maxFragments`, `fragmentMinCells`, `fragmentOverflow` and `anchor` belong to a rigid body whose collider is the cells |
+| VOX10 | a body of cells has a `density` and no `mass` |
+| VOX11 | `maxFragments`, `fragmentMinCells` and `fragmentOverflow` belong to a body that a crater or a fracture can break |
+| VOX12 | `anchor` belongs to a body that has a crater |
+| VOX13 | a body of cells that a crater or a fracture breaks is scaled the same on every axis |
+| VOX14 | a body of cells has a crater or a fracture, not both |
+| VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
+
+The Schematron and `sr-model`'s `rules.rs` agree on all 418 documents of the corpus (and the independent `lxml` oracle of
+`tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
+
+**Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
+an object of cells can be asked for; the rules say what is refused. (This is the schema and the rules; the evaluator that makes bodies, cuts and fractures of them from
+a document is the next step, and the physics it will call is already in the engine.)
+
+*The frame.* The object's origin is the minimum corner of the box of its occupied cells, the axes are the scene's with y down, and the cell `[i, j, k]` fills
+`[i, i + 1) x [j, j + 1) x [k, k + 1)` cells of `cellSize` object units; `sr_3d::voxel::cell_to_object(key, cellSize)` is the centre `(key + 1/2) * cellSize`,
+`object_to_cell(p, cellSize)` the cell that holds a point (the floor of `p / cellSize`, where a point within 4 units in the last place of a face is on it and so in the cell above, since 0.3 / 0.1 is 2.9999999999999996 and 0.3 is a face of cells of 0.1; none outside the keys of an occupancy), and `file_key(key, origin_cells)` the key in the
+file's own lattice. The body's centre of mass is not the origin; the world works it out from the cells. Metres are scene units over `pixelsPerMeter`.
+
+*The body (VOX8 to VOX15).* `rigidBody@shape="voxels"` (or `auto`, which is the cells for an object of primitive voxels) makes the cells the collider: the mass is the number of
+cells times the volume of one (`cellSize` times the object's scale, over `pixelsPerMeter`, cubed) times `density` (kg/m^3, required: the materials of an asset carry none; `mass` is
+refused). `maxFragments` (1 to 4096, 64 in the engine), `fragmentMinCells` (loose parts of fewer cells are dust, 1) and `fragmentOverflow` (`error`, which names both numbers, or
+`dust`, which makes the smallest parts dust) are the slots that the pieces of a cut take, and cost bodies of the world, so they are refused where there is nothing to cut
+(no crater and no fracture on the owner, VOX11). `anchor` says which part a crater's cut leaves as the body: `base`, every part that touches the base layer (the
+cells of the greatest y key: the lowest layer, the way ground is held by what is under it), which is the value when it is not given, or `largest`; with a crater only (VOX12), and the owner of a
+crater is static or kinematic (CRT5), so a dynamic body has no anchor to give. A body that a crater or a fracture breaks is scaled the same on
+every axis (VOX13: the cells are cubes for the cut; the rule reads the scale of the object itself, so the scale of an ancestor group, and an animated scale, are not seen by it and the evaluator has to check the world scale of the owner at run time), has the one or the other (VOX14), and has the cells for its collider (VOX15: with a box or a mesh for the collider there is no
+body of cells to cut, and a document that said so would mean nothing; this does not depend on the scale, which is why it is a rule of its own and not VOX13's).
+
+*The crater (CRT5, CRT13 to CRT17).* A crater in an object of cells is cut at the impact, once, by the law's crater with the conserving kernel (bulking 1: four fifths thrown, a
+fifth heaped as the rim, in cells): so `mantle`, `bulking` and `repose`, which are ideas of an analytic surface, are refused (CRT13), and so are `start`, `end` and `curve`, which
+describe a growth that a cut does not have (an attribute with no effect is a falsehood in a document): `curve` by CRT14, and `start` and `end` by CRT6, which refuses them for a crater that grows
+from a source, and CRT15 gives the crater of cells one. It grows from a source (CRT15), and its rigid body may be the cells
+(CRT5 gains `voxels`). `capture` is the world's and stays. The ejecta are a `particles3D` whose `burst@crater` names the crater, and for a crater of cells its particles are the
+cells that the cut throws, each with its place, velocity and palette colour: the burst has no `count` (CRT16: the number is the cut's) and no `angle` or `angleSpread` (CRT17: the cells leave with the velocities the cut gives them, and a launch angle would be an
+attribute with no effect), and a burst that is not of such a crater has a `count`, and may have the angles, as before.
+
+*The fracture (FRX3, FRX8 to FRX12).* The partition is `voronoi` (the engine's: `pieces` seeds drawn from `seed`, at most 4096), `planes` (up to 63 planes of `nx ny nz offset`
+in object units: a cell is on the positive side if the normal dotted with its centre `(key + 1/2) * cellSize` is at least the offset; the normal is rounded to 2^-32 of its largest component, is not all zeros and every number is finite: FRX11)
+or `labels="material"` (the palette index of a cell is its label, so a model breaks along its materials); a part that is not connected is split into its components. `pieces` and `seed`
+belong to voronoi (FRX10). The pieces have the material of their cells: there is no cut surface to paint, so `interiorMaterial` and `interiorUvScale` are refused for cells (FRX8; the
+exposed face of a piece is drawn from the palette like any other, and a surface that is to look different is a palette index, or a later `surface` value) and `interiorMaterial` stays
+required for a mesh (FRX3). The slots are those of the owner's `rigidBody`.
+
+**The pieces of a body of cells (`sr_3d::pieces`).** `partition(occupancy, rule, max_pieces)` cuts a body into pieces and finds the joints
+between them: by seeds (`Voronoi`, drawn from `(seed, index)` by splitmix64, or `VoronoiAt`, given; at most 4096 and within 2^40 of the origin in
+doubled coordinates, an error that names the number or the seed otherwise), by up to 63 planes, or by labels the caller gives. This module has
+two users that were written apart and share it, the fracture of a body of cells into rigid pieces and the fracture by stress that breaks the joints
+by their area, so its fields are private and what it returns cannot be edited into something that breaks its rules. The cells of a piece are keys
+of the occupancy that was cut (its own lattice, cells and not metres); a body with no cell has no pieces and is an error. Every cell is in exactly
+one piece; a part of the rule that is not connected by faces is split into its components; pieces are numbered by their first cell in the scan (z, y,
+x) and list their cells in it, so the result does not depend on the order of the input or on threads, and nothing depends on the order of a hash.
+A piece has the exact moments of its cells (`Piece::moments`), `PieceGraph::piece_of(cell)` says which piece a cell is in, and Voronoi is exact
+integers: squared distance in `i128` over the doubled coordinates `u = 2 key + 1`, a tie to the seed of the lowest index; a plane puts a cell on its
+positive side if `normal . u >= offset`, compared and not subtracted, so that no offset overflows. A joint (`Edge`, `a < b`, sorted by `(a, b)`) has
+the faces two pieces share BY AXIS (`faces: [u32; 3]`, so that the area is right where the cells are not cubes: `Edge::area(size)` is the faces of
+each axis times the product of the two other sizes, and `Edge::centroid(size)` the mean of the centres of the faces weighted by their areas), the
+sum of the doubled coordinates of their centres by axis and the sum of their unit normals from `a` to `b` (which is not an area: the faces on the
+two sides of a piece wrapped round another cancel in it), all in integers. More pieces than `max_pieces` is an error that names the number, never
+a truncation. What it does not do: merge or cut pieces again, give the centre of the pieces of a joint (it is in their moments), or know a material.
+Tests (`crates/sr-3d/tests/geometry/pieces.rs`): a bar cut by a plane has one joint whose four faces, face sum and normal are worked out by hand;
+the tie of two seeds; a U of cells whose Voronoi part is two arm tops (split into components), a constant label, alternating labels, two cells that
+touch only by an edge or a corner (no joint); a ring wrapped round two cells, whose normals cancel along y and whose area and centre are worked out
+by hand; the cells of a ball with a bite go to the nearest seed by a brute-force argmin over the seeds and no two pieces of one part touch, and the
+joints equal a brute force over all the pairs of cells, for 1, 3, 7 and 20 seeds; a single cell; cells at the last keys of an occupancy, seeds, offsets
+and normals at the extremes; the seeds are the reference sequence of splitmix64.
+
+**Rigid bodies of cells, what a crater or a fracture does to them, and what a frame says of them (`sr_3d::occupancy`, `sr_sim::physics3d`, `sr_eval::voxels`).**
+The acceptance ledger entry "Voxel physics: the track so far, what is proven and what is stated as untested" holds the figures, and the entries before it each step's.
+Occupancy and mass: a body of cells is an `Occupancy` whose mass, centre of mass and inertia are worked out from exact integer moments, the same bits for the same cells in any order, and the world gives them to the solver with their principal frame (the eigen solver of the physics library swaps the axes of a diagonal tensor with a repeated smaller moment, and the exact path is also used for the pieces of every fracture).
+Cuts and slots: a body that breaks gives its pieces to slots that the world holds for them, with the motion of the point of the body each was, and a frame is the same to the bit however it is asked (fresh, after a later one, again, replayed from a checkpoint).
+Crater in cells: the law's crater in soft rock takes 6 460 cells out of a slab with a pillar (6 352 on flat ground, 98.34 percent of the law's volume), throws 80 percent of them in counts and heaps 20 percent on a rim that is the law's level set, as one cut of the body.
+Fracture: a body of cells divided by `partition` into bodies of cells with the cut's rules for pieces that are too small or too many; the source weighs all its cells until it breaks, the fragments and the dust sum to it, and the momentum and the angular momentum that the dust takes away are recorded as lost (the fragments and the lost equal the source's to 1e-9).
+Cache and frames: the mass properties, components and body of a grid are kept by its content under a budget of bytes (a hit compares the bricks, so a fingerprint collision is never a wrong answer), and a frame says how many cuts each body has had, with the cells of each revision and the bricks that differ between two.
+A document reaches all of it (`rigidBody shape="voxels"` with `density`, a `crater` or a `fracture` on the object, a `burst` of the cells a cut throws, `maxFragments`, `fragmentMinCells`, `fragmentOverflow` and `anchor`); a physics cache is refused for a world with bodies of cells, and the renderer does not read what a frame says of them yet, so an object that is cut is still drawn from its asset. The axis of a crater in cells is the normal of the surface of the cells round the impact, and ground that slopes at 10, 20 and 30 degrees is cut with the ball along its normal to the law's volume to 6 percent; oblique impacts on a slope, curved ground and steeper slopes are untested, and so is an axis tilted out of the plane that the ground falls in; the limits are in that ledger entry.
 
 ## SRVOL cache version 1
 
@@ -2535,7 +3401,9 @@ document asset access policy.
 ## Exact XSD attribute inventory
 
 This inventory records the executable XSD spelling, lexical type, requiredness
-and default for each cinematic element. “Optional; absent” means that XSD
+and default for each cinematic element, and, for the types that existed before this
+proposal (`object3DType`, `cameraType`), only the attributes it adds or whose values it
+extends; it does not claim to list every attribute of those types. “Optional; absent” means that XSD
 supplies no value; the behavioral sections above specify contextual defaults
 and semantic requirements. Named types refer to the shipped XSD definitions.
 Inline restrictions list their base and facets. Runtime and Schematron checks
@@ -2582,6 +3450,21 @@ Also includes `assetProvenance`, inventoried below.
 | `missingFrame` | volumeMissingFrameType | Default `error` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
 
+### `voxelAssetType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `src` | xs:anyURI | Optional; exactly one of `src` and `fromMesh` (VOX2) |
+| `format` | xs:string; enumeration=vox, enumeration=srvol | Optional; absent: from the extension; only with `src` |
+| `model` | xs:nonNegativeInteger | Optional; absent: the whole scene of a `vox` file; only with format `vox` |
+| `fromMesh` | xs:IDREF | Optional; a mesh asset (VOX3) |
+| `cellSize` | positiveDecimal | Optional; required with `fromMesh`, refused with `src` (VOX2) |
+| `voxelGrid` | volumeChannelType | Optional, no XSD default; only with format `srvol`; the engine uses `voxels` |
+| `maxCells` | xs:positiveInteger; maxInclusive=67108864 | Optional, no XSD default; the engine uses `4194304` |
+| `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; the engine uses `128` |
+| `sha256`, `license`, `credit`, `proxy` | assetProvenance | As in `assetProvenance` |
+
 ### `mediumType`
 
 | Attribute | XSD type or inline restriction | Presence/default |
@@ -2623,6 +3506,9 @@ Also includes `assetProvenance`, inventoried below.
 | `seed` | xs:unsignedLong | Default `0` |
 | `pressureTolerance` | positiveDecimal | Default `0.000001` |
 | `boundary` | xs:string; enumeration=open, enumeration=closed | Default `closed` |
+| `follow` | xs:boolean | Optional; absent is false; true needs `boundary="open"` (PYRO9) |
+| `followMargin` | xs:positiveInteger | Optional; only with `follow` (PYRO10), leaves a cell between the faces (PYRO11); the engine uses 12 |
+| `followLoss` | unitDecimal | Optional; only with `follow` (PYRO10); the engine uses 0 |
 | `pressureIterations` | xs:positiveInteger; maxInclusive=10000 | Default `200` |
 | `solver` | xs:string; enumeration=jacobi, enumeration=multigrid | Default `jacobi` |
 | `advection` | xs:string; enumeration=semilagrangian, enumeration=maccormack | Default `semilagrangian` |
@@ -2668,6 +3554,19 @@ Also includes `pyroShape`, inventoried below.
 | `dustFraction` | positiveDecimal; maxInclusive=1 | Optional, with `crater`; engine default `0.01` |
 | `specificHeat` | positiveDecimal | Optional, with `crater`; default `1000` J/(kg K) |
 | `maxTemperature` | positiveDecimal; maxInclusive=50000 | Optional, with `crater`; default `5000` K |
+
+### `pyroBlastType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `time` | nonNegativeDecimal | Required |
+| `energy` | nonNegativeDecimal | Required; joules |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+| `ambientDensity` | positiveDecimal | Default `1.2`; kg/m^3 |
+| `ambientPressure` | positiveDecimal | Default `101325`; Pa |
+| `gamma` | positiveDecimal; minInclusive=1.1, maxInclusive=3 | Default `1.4` |
 
 ### `particles3DType`
 
@@ -2768,7 +3667,7 @@ Also includes `pyroShape`, inventoried below.
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
 | `time` | xs:double | Required unless `crater` is given (P3D7) |
-| `count` | xs:positiveInteger | Required |
+| `count` | xs:positiveInteger | Required, except on a burst of the crater of an object of cells, where it is refused (CRT16); `angle` and `angleSpread` are refused there too (CRT17) |
 | `repeat` | xs:nonNegativeInteger | Default `0` |
 | `interval` | positiveDecimal | Default `1` |
 | `crater` | xs:IDREF | Optional; a crater that grows from an impact (P3D7 to P3D10) |
@@ -2825,6 +3724,7 @@ Also includes `pyroShape`, inventoried below.
 | `bathymetry` | xs:IDREF | Optional; absent |
 | `colliders` | xs:IDREFS | Optional; absent |
 | `bodyCoupling` | xs:string; enumeration=none, enumeration=buoyancy, enumeration=full | Default `none` (the water does nothing to the bodies); `buoyancy` and `full` need `colliders` (OCN8) |
+| `density` | positiveDecimal | Default `1000`; density of the water, kilograms per cubic metre |
 | `bodyDrag` | nonNegativeDecimal | Optional, with `colliders` (OCN9); form-drag coefficient of the vertical motion of a body in the water (with `bodyCoupling`) and of its horizontal exchange with it (`bedResponse="depthFiltered"`), default `1.0` |
 | `bedResponse` | xs:string; enumeration=depthFiltered, enumeration=hydrostatic | Default `depthFiltered`; no effect without `colliders` |
 | `splash` | xs:IDREFS | Optional; absent; the particles3D emitters whose particles fall into this ocean, each throwing out the ejecta of a crater (OCN13) |
@@ -2873,6 +3773,10 @@ Also includes `pyroShape`, inventoried below.
 | `checkpointMemoryMiB` | xs:nonNegativeInteger; maxInclusive=4096 | Default `64` |
 | `foamMaterial` | xs:IDREF | Optional; absent |
 | `sprayMaterial` | xs:IDREF | Optional; absent |
+| `foamMode` | enumeration `particles`, `albedo` | Default `particles` |
+| `foamRadius` | positiveDecimal | Optional; absent (one cell) |
+| `foamAlbedo` | unitDecimal | Default `0.9` |
+| `foamRoughness` | unitDecimal | Default `0.8` |
 
 ### `craterType`
 
@@ -2881,6 +3785,9 @@ Also includes `pyroShape`, inventoried below.
 | `id` | xs:ID | Optional; names the crater so that what its impact causes can refer to it |
 | `source` | xs:IDREF | Optional; the dynamic rigid body that makes the crater (CRT6 to CRT8) |
 | `capture` | xs:boolean | Default `false`; only with `source` (CRT9): the body that makes the crater is arrested by it |
+| `mantle` | xs:boolean | Default `false`; only with `source` (CRT10): the ejecta come down as a mantle that is part of the ground, and the volumes add up |
+| `bulking` | xs:double; 1 to 1.3 | Optional, only with `mantle="true"` (CRT10, CRT11); what the rim and the mantle put back, in volumes of the bowl; without it, what the law's own rim height asks for |
+| `repose` | xs:double; 10 to 60 | Optional, only with `source` and not with `mantle="true"` (CRT10, CRT12); the angle of repose in degrees of the debris: the ejecta particles that come to rest are removed and their volume is poured onto a deposit that relaxes at this angle and lies on the ground |
 | `targetMaterial` | xs:string; enumeration=water, drySand, drySoil, wetSoil, softRock, hardRock, regolith, ice | Required with `source`; absent otherwise (CRT7) |
 | `targetDensity` | positiveDecimal | Optional with `source`: kg/m3 |
 | `strength` | nonNegativeDecimal | Optional with `source`: Pa |
@@ -2908,13 +3815,30 @@ Also includes `pyroShape`, inventoried below.
 | `at` | nonNegativeDecimal | Default `0` |
 | `pieces` | xs:positiveInteger; maxInclusive=4096 | Default `8` |
 | `seed` | xs:unsignedLong | Default `0` |
-| `interiorMaterial` | xs:IDREF | Required |
+| `interiorMaterial` | xs:IDREF | Required of a fracture of a mesh (FRX3); refused on a fracture of cells (FRX8) |
 | `interiorUvScale` | positiveDecimal | Default `1` |
 | `impulseX` | xs:double | Default `0` |
 | `impulseY` | xs:double | Default `0` |
 | `impulseZ` | xs:double | Default `0` |
 | `radialImpulse` | nonNegativeDecimal | Default `0` |
 | `maxMemoryMiB` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
+| `source` | xs:IDREF | Optional; the dynamic rigid body whose impact breaks the owner (FRX5 to FRX7) |
+| `minImpulse` | positiveDecimal | Optional; only with `source` (FRX7); absent: twice the source's weight in one step |
+| `energyFraction` | unitDecimal | Optional, no XSD default; only with `source` (FRX7); the engine uses `0.3` |
+| `partition` | xs:string; enumeration=voronoi, enumeration=planes, enumeration=labels | Optional; only on the fracture of an object of cells (FRX9); engine default `voronoi` |
+| `planes` | xs:string | Optional; with `partition="planes"` (FRX11): up to 63 planes of four numbers `nx ny nz offset` in object units |
+| `labels` | xs:string; enumeration=material | Optional; with `partition="labels"` (FRX12) |
+
+### `rigidBody3DType` bindings of a body of cells
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `shape` | adds enumeration=voxels | `auto` is the cells for an object of primitive voxels (VOX8) |
+| `density` | positiveDecimal | Required when the collider is the cells, and `mass` is then not given (VOX9, VOX10); kg/m^3 |
+| `maxFragments` | xs:positiveInteger; maxInclusive=4096 | Optional, no XSD default; only with a crater or a fracture on the owner (VOX11); the engine uses `64` |
+| `fragmentMinCells` | xs:positiveInteger | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `1` |
+| `fragmentOverflow` | xs:string; enumeration=error, enumeration=dust | Optional, no XSD default; as `maxFragments` (VOX11); the engine uses `error` |
+| `anchor` | xs:string; enumeration=largest, enumeration=base | Optional; only with a crater on the owner (VOX12), which is static or kinematic (CRT5), so the engine's value when it is not given is `base` |
 
 ### `assetProvenance`
 
@@ -2954,10 +3878,14 @@ existing definitions.
 
 | Attribute | XSD type or inline restriction | Presence/default |
 |---|---|---|
-| `primitive` | xs:string; enumeration=sphere, enumeration=box, enumeration=plane, enumeration=mesh, enumeration=cylinder, enumeration=cone, enumeration=torus, enumeration=capsule, enumeration=text, enumeration=extrude, enumeration=clay, enumeration=map, enumeration=globe, enumeration=volume | Required |
+| `primitive` | xs:string; enumeration=sphere, enumeration=box, enumeration=plane, enumeration=mesh, enumeration=cylinder, enumeration=cone, enumeration=torus, enumeration=capsule, enumeration=text, enumeration=extrude, enumeration=clay, enumeration=map, enumeration=globe, enumeration=volume, enumeration=voxels | Required |
 | `material` | xs:IDREF | Optional; absent |
 | `mesh` | xs:IDREF | Optional; absent |
 | `volume` | xs:IDREF | Optional; absent |
+| `voxels` | xs:IDREF | Optional; a `voxelAsset`, required with primitive `voxels` (VOX4, VOX5) |
+| `cellSize` | positiveDecimal | Optional, no XSD default; only with primitive `voxels` (VOX5); absent: the asset's, else the cache's, else `1` |
+| `palette` | xs:string | Optional; `file` or at most 255 material IDs (VOX5, VOX6); absent: `file` if the file has colours, else the object's `material` |
+| `surface` | xs:string; enumeration=blocks | Optional, no XSD default; only with primitive `voxels` (VOX5); the engine uses `blocks` |
 | `terrain` | xs:IDREF | Optional; absent |
 | `planetRadius` | positiveDecimal | Default `6378137` |
 | `terrainTileSize` | xs:positiveInteger; maxInclusive=4096 | Default `256` |
@@ -2968,6 +3896,42 @@ existing definitions.
 | `exaggeration` | nonNegativeDecimal | Default `1` |
 | `textureSize` | xs:positiveInteger; minInclusive=64, maxInclusive=8192 | Default `2048` |
 | `resolution` | xs:positiveInteger; minInclusive=8, maxInclusive=256 | Default `64` |
+
+This table is not the whole of `object3DType`, and the inventory above makes no claim to be. The type also
+carries attributes that other changes added and that this proposal neither defines nor depends on: `shadowCatcher`
+(commit c737214), `node` and `materialOverride` (43d03ad), `tracking` (54dd99b), `map` and `buildings` (0f63bdc), and on
+`materialType` `unevenness` and `unevennessScale` (096f530). They are upstream's and are specified where they were
+added; reconciling the XSD with this document means checking the attributes listed here, not those.
+
+### `blackHoleType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional |
+| `mass` | positiveDecimal | Required; scene units with G = c = 1 |
+| `x` | xs:double | Default `0` |
+| `y` | xs:double | Default `0` |
+| `z` | xs:double | Default `0` |
+
+### `accretionDiskType`
+
+| Attribute | XSD type or inline restriction | Presence/default |
+|---|---|---|
+| `id` | xs:ID | Required |
+| `name` | xs:string | Optional |
+| `blackHole` | xs:IDREF | Required (BH3) |
+| `innerRadius` | positiveDecimal | Optional; absent is 6 `mass` (BH4) |
+| `outerRadius` | positiveDecimal | Required (BH4) |
+| `temperatureScale` | positiveDecimal | Required; kelvin, at the peak of the profile |
+| `seed` | xs:unsignedLong | Default `0` |
+| `angularPattern` | xs:string; enumeration=none, enumeration=clumps, enumeration=spiral | Default `clumps` |
+| `contrast` | unitDecimal | Default `0.5` |
+| `intensity` | nonNegativeDecimal | Default `1` |
+| `timeScale` | positiveDecimal | Default `1` |
+| `rotationX` | xs:double | Default `0` |
+| `rotationY` | xs:double | Default `0` |
+| `rotation` | xs:double | Default `0`; about z |
 
 ### `cameraType` cinematic bindings
 
@@ -2981,6 +3945,7 @@ existing definitions.
 | `pathSamples` | xs:positiveInteger; maxInclusive=65536 | Default `64` |
 | `maxBounces` | xs:positiveInteger; maxInclusive=64 | Default `4` |
 | `denoise` | xs:boolean | Default `true` |
+| `geodesics` | xs:boolean | Default `false`; true traces null geodesics of the scene's `blackHole` (BH5 to BH8) |
 
 
 ## Conformance and acceptance
@@ -2993,7 +3958,7 @@ timings are artistic, explicitly identified in scene metadata. It is a workload
 and integration example, not a validated scientific Chicxulub reconstruction or
 an accepted cinematic-quality film. The evaluator integration test exercises
 pre-impact, impact, late settling and reverse replay; production-size execution
-is practical with `cargo test --release -p sr-eval --test cinematic_impact`.
+is practical with `cargo test --release -p sr-eval --test crater cinematic_impact::`.
 The full encoded-sequence gate below remains independently required.
 
 Two further examples are written in physical units (`physics/@pixelsPerMeter="1"`, metres and
@@ -3003,7 +3968,7 @@ kg/m3 arrives at 100 m/s and 60 degrees on soft rock; the crater, its smoke and 
 that hold 80 % of the crater's mass, are consequences of the contact) and
 [`impact-ocean.scene.xml`](examples/cinematic-impact/impact-ocean.scene.xml) (the same rock arrives at a
 second-order ocean 20 m deep that carries it with `bodyCoupling="full"` and makes a crater in the
-seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test impact_scenes` checks, with no GPU, that
+seabed; its `waterImpulse` names the rock and says nothing else: the cavity its entry makes). `cargo test -p sr-eval --test crater impact_scenes::` checks, with no GPU, that
 no effect has a time attribute, that nothing happens before the contact, that the crater, the dust, the
 heat in the dust and the ejecta (their mass, which is 0.8 of the crater's, and their reach) grow with speed,
 mass and angle, that an oblique impact carries the ejecta downrange, that the ocean's water volume is conserved to the last
@@ -3066,6 +4031,22 @@ from the first checkpoint give the same bits. Limits that the scenes show and th
   and with mass (test `impact_scenes`, commit e22458b, 2026-10-05, deterministic). A slow impact in physical
   units is a cold cloud.
 
+A simulation that is authored but cannot run (a resource limit, a solver error) is an
+error of the frame, never a note that lets the render succeed without what was asked
+for (commit 91e9013, 2026-10-04). The evaluator's frame graph carries `failures`, the
+part of its problems that are such simulations (smoke, ocean, 3D particles, fracture,
+and the crater and collider limits of a rigid body); the renderer reports each as an
+error with its cause, drops the derived messages for a node whose simulation failed
+(the old "volume primitive requires @volume" and "ocean evaluation produced no
+surface"), and keeps authorised fallbacks as notes. The command line prints every
+error and the notes when it exits on one, and delivery reports all of them. `render`
+(with and without `--strict`), `render --bench` and `encode` exit 1 with the cause and
+write no image for these scenes, and a failure found when the world is built is
+reported at every time, also before the simulation's own start. Test:
+`crates/scene-render/tests/solver_failures.rs`, seven cases (smoke, the ocean's solver
+and its surface, 3D particles, a crater's draw vertices, a rigid crater's collider,
+fracture), four commands each.
+
 The accompanying conformance suite must cover all of the following:
 
 - Valid minimal examples for each new element, every enum branch, default
@@ -3087,6 +4068,12 @@ The accompanying conformance suite must cover all of the following:
   anisotropic), cameras inside the volume, surfaces inside the domain, overlapping
   media, advected and multi-frame media, tiled against whole frames, determinism,
   memory and node-count errors, and the measured limits above (VOL10 included).
+- Render statistics that add no pixel, the probe's report logic, the skip of
+  negligible cells (which cells, how the bound moves with extinction, density scale
+  and domain, which media are marched in full), the brick directory and its fallback to
+  the search, and the unchanged frame of a frozen plume with both.
+- A simulation that cannot run failing every render command with its cause and no
+  partial image, at every time.
 - Pyro divergence reduction, source timing, cooling/dissipation, obstacles,
   forward/backward seeking and cache/live equivalence.
 - 3D particles' z motion, distribution, lifetime/cap behavior, delayed birth,
@@ -3114,8 +4101,18 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 169 assertions at
-commit fa63e5d, 66 of them in the cinematic families OCN, P3D, CRT, PYC, PYRO, VOL, FRX, MSQ and GEO). Inventory
+rule scorecard remain pending implementation reconciliation** (the Schematron has 291 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 111 of them are in the
+cinematic families OCN 14, P3D 11, CRT 17, PYRO 11, VOL 10, BH 8, FRX 12, VOX 15, PYC 6, MSQ 4 and GEO 3, and the rest are
+sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
+families, and the 44 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT17, PYRO9 to PYRO11, VOX1 to VOX15, PYC5 and PYC6) are this repository's. At commit 349d371,
+before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names
 are machine identifiers and are not localized. No prior fields are deprecated.
+
+The integration tests of `sr-sim`, `sr-eval`, `sr-model`, `sr-3d` and `scene-render` are built as a few binaries, one for
+each area, and a test file that this document names (for example `crater_capture` or `impact_scenes`) is a module of the
+binary of its area: `crates/<crate>/tests/<area>/<file>.rs`, run with `cargo test -p <crate> --test <area> <file>::`. The
+tests that observe allocations (`crater_memory`, `terrain_memory`, `pyro_export_memory`, each with its own global
+allocator), the timing tests (`perf`) and the long ignored `hero_hires` keep binaries of their own.

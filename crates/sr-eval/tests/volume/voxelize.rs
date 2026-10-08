@@ -1,0 +1,309 @@
+//! A closed mesh cut into cells: the cells whose centres are inside it, on a lattice of multiples of the cell size, found with the
+//! test that the colliders use. The oracles are counts and volumes worked out here with no code of the voxelizer: the cells of a box
+//! by arithmetic, the cells of a sphere by a ray cast of this file's own, and the volume of the mesh by the divergence theorem.
+
+use sr_3d::occupancy::Limits;
+use sr_eval::voxel::{from_triangles, Bounds};
+
+type Mesh = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+
+/// A box with its corner at `min` and sides `size`, twelve triangles, wound outward.
+fn cuboid(min: [f64; 3], size: [f64; 3]) -> Mesh {
+    let p = |x: usize, y: usize, z: usize| {
+        [min[0] + size[0] * x as f64, min[1] + size[1] * y as f64, min[2] + size[2] * z as f64]
+    };
+    let vertices: Vec<[f64; 3]> = (0..8).map(|i| p(i & 1, i >> 1 & 1, i >> 2 & 1)).collect();
+    let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let mut triangles = Vec::new();
+    for q in quads {
+        triangles.push([q[0], q[1], q[2]]);
+        triangles.push([q[0], q[2], q[3]]);
+    }
+    (vertices, triangles)
+}
+
+/// A sphere of `rings` rings and `segments` segments about `centre`, as a closed polyhedron.
+fn sphere(centre: [f64; 3], radius: f64, rings: usize, segments: usize) -> Mesh {
+    let mut vertices = vec![[centre[0], centre[1] - radius, centre[2]]];
+    for r in 1..rings {
+        let theta = std::f64::consts::PI * r as f64 / rings as f64;
+        for s in 0..segments {
+            let phi = std::f64::consts::TAU * s as f64 / segments as f64;
+            vertices.push([
+                centre[0] + radius * theta.sin() * phi.cos(),
+                centre[1] - radius * theta.cos(),
+                centre[2] + radius * theta.sin() * phi.sin(),
+            ]);
+        }
+    }
+    vertices.push([centre[0], centre[1] + radius, centre[2]]);
+    let ring = |r: usize, s: usize| (1 + (r - 1) * segments + s % segments) as u32;
+    let (top, bottom) = (0u32, (vertices.len() - 1) as u32);
+    let mut triangles = Vec::new();
+    for s in 0..segments {
+        triangles.push([top, ring(1, s + 1), ring(1, s)]);
+        triangles.push([bottom, ring(rings - 1, s), ring(rings - 1, s + 1)]);
+    }
+    for r in 1..rings - 1 {
+        for s in 0..segments {
+            triangles.push([ring(r, s), ring(r, s + 1), ring(r + 1, s + 1)]);
+            triangles.push([ring(r, s), ring(r + 1, s + 1), ring(r + 1, s)]);
+        }
+    }
+    (vertices, triangles)
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Whether `p` is inside the closed mesh: the parity of the crossings of a ray in an unlikely direction (Moller-Trumbore).
+fn inside(mesh: &Mesh, p: [f64; 3]) -> bool {
+    let d = [0.5773502691896258, 0.3090169943749474, 0.754709580222772];
+    let mut crossings = 0;
+    for t in &mesh.1 {
+        let (a, b, c) = (mesh.0[t[0] as usize], mesh.0[t[1] as usize], mesh.0[t[2] as usize]);
+        let (e1, e2) = (sub(b, a), sub(c, a));
+        let h = cross(d, e2);
+        let det = dot(e1, h);
+        if det.abs() < 1e-14 {
+            continue;
+        }
+        let f = 1.0 / det;
+        let s = sub(p, a);
+        let u = f * dot(s, h);
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        let q = cross(s, e1);
+        let v = f * dot(d, q);
+        if v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        if f * dot(e2, q) > 0.0 {
+            crossings += 1;
+        }
+    }
+    crossings % 2 == 1
+}
+
+/// The volume and the area of a closed mesh.
+fn volume_and_area(mesh: &Mesh) -> (f64, f64) {
+    let (mut volume, mut area) = (0.0, 0.0);
+    for t in &mesh.1 {
+        let (a, b, c) = (mesh.0[t[0] as usize], mesh.0[t[1] as usize], mesh.0[t[2] as usize]);
+        volume += dot(a, cross(b, c)) / 6.0;
+        let n = cross(sub(b, a), sub(c, a));
+        area += 0.5 * dot(n, n).sqrt();
+    }
+    (volume.abs(), area)
+}
+
+fn voxelize(mesh: &Mesh, cell: f64) -> Result<sr_3d::occupancy::Occupancy, String> {
+    from_triangles(&mesh.0, &mesh.1, cell, Limits::default(), &Bounds::default())
+}
+
+#[test]
+fn a_box_gives_exactly_the_cells_whose_centres_are_inside_it() {
+    // 4 x 6 x 8 on a lattice of 1: every cell of the box
+    let cells = voxelize(&cuboid([0.0; 3], [4.0, 6.0, 8.0]), 1.0).unwrap();
+    assert_eq!(cells.count(), 4 * 6 * 8);
+    assert_eq!(cells.bounds(), Some(([0, 0, 0], [3, 5, 7])));
+    // a lattice of 0.75 that cuts it across: the count is, along each axis, the integers i with 0 < (i + 1/2) 0.75 < side
+    let along = |side: f64, offset: f64| {
+        (-20..40).filter(|&i| (i as f64 + 0.5) * 0.75 > offset && (i as f64 + 0.5) * 0.75 < offset + side).count()
+    };
+    let (min, size) = ([0.31, -1.07, 2.5], [4.0, 6.0, 8.0]);
+    let cells = voxelize(&cuboid(min, size), 0.75).unwrap();
+    assert_eq!(cells.count() as usize, along(size[0], min[0]) * along(size[1], min[1]) * along(size[2], min[2]));
+    // every cell is index 1
+    assert!(cells.cells().all(|c| cells.get(c) == 1));
+}
+
+#[test]
+fn a_sphere_gives_the_lattice_points_inside_it_by_a_ray_cast_and_the_volume_to_half_a_surface_layer() {
+    let mesh = sphere([0.37, -0.21, 0.52], 5.0, 24, 36);
+    let cell = 0.5;
+    let cells = voxelize(&mesh, cell).unwrap();
+    let mut brute = 0u64;
+    for k in -14..14 {
+        for j in -14..14 {
+            for i in -14..14 {
+                let centre = [(i as f64 + 0.5) * cell, (j as f64 + 0.5) * cell, (k as f64 + 0.5) * cell];
+                let want = inside(&mesh, centre);
+                assert_eq!(cells.get([i, j, k]) != 0, want, "the cell {:?}", [i, j, k]);
+                brute += u64::from(want);
+            }
+        }
+    }
+    assert_eq!(cells.count(), brute);
+    let (volume, area) = volume_and_area(&mesh);
+    let from_cells = cells.count() as f64 * cell.powi(3);
+    assert!((from_cells - volume).abs() <= 0.5 * area * cell, "{from_cells} against {volume} (area {area})");
+}
+
+#[test]
+fn every_cell_centre_agrees_with_the_test_of_the_colliders() {
+    let mesh = sphere([0.1, 0.2, 0.3], 3.0, 16, 24);
+    let region = sr_sim::pyro::mesh::Mesh::new(&mesh.0, &mesh.1, usize::MAX).unwrap();
+    let cell = 0.4;
+    let cells = voxelize(&mesh, cell).unwrap();
+    for k in -10..10 {
+        for j in -10..10 {
+            for i in -10..10 {
+                let centre = [(i as f64 + 0.5) * cell, (j as f64 + 0.5) * cell, (k as f64 + 0.5) * cell];
+                assert_eq!(cells.get([i, j, k]) != 0, region.contains(centre), "the cell {:?}", [i, j, k]);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_mesh_that_is_not_closed_is_the_error_of_the_colliders() {
+    let (vertices, mut triangles) = cuboid([0.0; 3], [2.0; 3]);
+    triangles.truncate(10);
+    let error = from_triangles(&vertices, &triangles, 0.5, Limits::default(), &Bounds::default()).unwrap_err();
+    assert!(error.contains("closed") || error.contains("edge"), "{error}");
+}
+
+#[test]
+fn the_box_of_the_lattice_and_the_limits_are_checked_before_any_cell_is_looked_at() {
+    let mesh = cuboid([0.0; 3], [4.0, 6.0, 8.0]);
+    let bounds = |max_box_cells: u64| Bounds { max_box_cells, ..Bounds::default() };
+    let error = from_triangles(&mesh.0, &mesh.1, 1.0, Limits::default(), &bounds(100)).unwrap_err();
+    assert!(error.contains("192") && error.contains("100"), "{error}");
+    assert!(from_triangles(&mesh.0, &mesh.1, 1.0, Limits::default(), &bounds(192)).is_ok());
+    // more cells than the grid may hold
+    let limits = Limits { max_cells: 191, ..Limits::default() };
+    assert!(from_triangles(&mesh.0, &mesh.1, 1.0, limits, &Bounds::default()).unwrap_err().contains("cells"));
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(from_triangles(&mesh.0, &mesh.1, bad, Limits::default(), &Bounds::default()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_cells_are_the_same_on_any_number_of_threads_and_every_time() {
+    let mesh = sphere([0.37, -0.21, 0.52], 5.0, 24, 36);
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| voxelize(&mesh, 0.5).unwrap())
+    };
+    let first = run(1);
+    for threads in [2, 8] {
+        let other = run(threads);
+        assert_eq!(first.fingerprint(), other.fingerprint(), "{threads} threads");
+        assert_eq!(first.revision(), other.revision());
+    }
+    assert_eq!(first.fingerprint(), voxelize(&mesh, 0.5).unwrap().fingerprint());
+}
+
+#[test]
+fn a_mesh_is_cut_up_to_the_last_key_of_an_occupancy_and_no_further() {
+    let edge = f64::from(sr_3d::occupancy::KEY_LIMIT);
+    // the cells 2^30 - 2 and 2^30 - 1 of x are the last two
+    let last = cuboid([edge - 2.0, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let cut = voxelize(&last, 1.0).unwrap();
+    assert_eq!(cut.cells().collect::<Vec<_>>(), vec![[(edge as i32) - 2, 0, 0], [(edge as i32) - 1, 0, 0]]);
+    // one cell further is far from the origin, and so is the other side
+    for min in [[edge - 1.0, 0.0, 0.0], [-edge - 1.0, 0.0, 0.0], [0.0, f64::from(i32::MAX), 0.0]] {
+        let error = voxelize(&cuboid(min, [2.0, 1.0, 1.0]), 1.0).unwrap_err();
+        assert!(error.contains("far"), "{min:?}: {error}");
+    }
+}
+
+#[test]
+fn the_cells_do_not_depend_on_how_many_rows_are_cut_at_a_time() {
+    // the rows of a box are cut a chunk at a time, so that the memory of a cut is a chunk and not the whole box: the chunk is no
+    // part of the answer
+    let mesh = sphere([0.37, -0.21, 0.52], 5.0, 24, 36);
+    let reference = voxelize(&mesh, 0.5).unwrap();
+    assert!(reference.count() > 1000);
+    // a row of this box is 21 cells (x from -10 to 10) and there are 441 rows (y -11 to 9, z -9 to 11): a chunk of 1 or 7 or 20 cells is one
+    // row (never less), 21 is exactly one row, 126 is six rows (73 chunks and a last one of three), 987 is 47 rows (nine chunks and a last one
+    // of eighteen), 9261 and 2^20 are the whole box in one chunk
+    for chunk_cells in [1, 7, 20, 21, 126, 987, 9261, 1 << 20] {
+        let bounds = Bounds { chunk_cells, ..Bounds::default() };
+        let cut = from_triangles(&mesh.0, &mesh.1, 0.5, Limits::default(), &bounds).unwrap();
+        assert_eq!(cut.fingerprint(), reference.fingerprint(), "{chunk_cells}");
+        assert_eq!(cut.cells().collect::<Vec<_>>(), reference.cells().collect::<Vec<_>>(), "{chunk_cells}");
+    }
+    // and a chunk is never nothing
+    let bounds = Bounds { chunk_cells: 0, ..Bounds::default() };
+    assert!(from_triangles(&mesh.0, &mesh.1, 0.5, Limits::default(), &bounds).is_ok());
+}
+
+/// A glb of a cube of one metre, [0, 1] in each axis, as the importer reads it: eight vertices and twelve triangles.
+fn glb_cube() -> Vec<u8> {
+    let corners: Vec<[f32; 3]> = (0..8).map(|i| [(i & 1) as f32, (i >> 1 & 1) as f32, (i >> 2 & 1) as f32]).collect();
+    let quads: [[u16; 4]; 6] = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let indices: Vec<u16> = quads.iter().flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]]).collect();
+    let mut bin: Vec<u8> = corners.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+    let positions = bin.len();
+    bin.extend(indices.iter().flat_map(|i| i.to_le_bytes()));
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3","min":[0,0,0],"max":[1,1,1]}},{{"bufferView":1,"componentType":5123,"count":36,"type":"SCALAR"}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{positions}}},{{"buffer":0,"byteOffset":{positions},"byteLength":72}}],"buffers":[{{"byteLength":{}}}]}}"#,
+        bin.len()
+    );
+    let mut json = json.into_bytes();
+    json.resize(json.len().div_ceil(4) * 4, b' ');
+    bin.resize(bin.len().div_ceil(4) * 4, 0);
+    let total = 12 + 8 + json.len() + 8 + bin.len();
+    let mut out = b"glTF".to_vec();
+    out.extend(2u32.to_le_bytes());
+    out.extend((total as u32).to_le_bytes());
+    out.extend((json.len() as u32).to_le_bytes());
+    out.extend(b"JSON");
+    out.extend(json);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(b"BIN\0");
+    out.extend(bin);
+    out
+}
+
+#[test]
+fn a_mesh_asset_is_cut_in_the_frame_it_is_drawn_in_so_a_unit_cube_covers_the_same_box_as_the_rendered_one() {
+    // An imported mesh is in scene units, 100 to the metre, with y and z turned (a half turn about x): a cube of one metre at the origin
+    // fills x 0 to 100, y -100 to 0, z -100 to 0, and cells of 10 scene units are 10 along each axis: x 0..9, y -10..-1, z -10..-1.
+    let dir = std::env::temp_dir().join(format!("voxelize-glb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cube.glb");
+    std::fs::write(&path, glb_cube()).unwrap();
+    let model = match sr_3d::import::load(&path, None).unwrap() {
+        sr_3d::Asset::Model(m) => m,
+        sr_3d::Asset::Splats(_) => panic!("a cube is not splats"),
+    };
+    std::fs::remove_dir_all(&dir).unwrap();
+    let cut = sr_eval::voxel::from_model(&model, 10.0, Limits::default(), &Bounds::default()).unwrap();
+    let cells: Vec<[i32; 3]> = cut.cells().collect();
+    assert_eq!(cells.len(), 1000);
+    let (min, max) = cells.iter().fold(([i32::MAX; 3], [i32::MIN; 3]), |(lo, hi), c| {
+        (std::array::from_fn(|k| lo[k].min(c[k])), std::array::from_fn(|k| hi[k].max(c[k])))
+    });
+    assert_eq!((min, max), ([0, -10, -10], [9, -1, -1]));
+    // the box that the rendered mesh fills, from the vertices as the renderer places them (basis times node transform), is the cells'
+    let locals: Vec<_> = model.nodes.iter().map(|n| n.local).collect();
+    let worlds = model.world_matrices(&locals);
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for (k, node) in model.nodes.iter().enumerate() {
+        for &p in &node.primitives {
+            for v in &model.primitives[p].vertices {
+                let at = (model.basis * worlds[k]).transform_point3(glam::Vec3::from(v.pos));
+                for a in 0..3 {
+                    lo[a] = lo[a].min(at[a]);
+                    hi[a] = hi[a].max(at[a]);
+                }
+            }
+        }
+    }
+    for a in 0..3 {
+        assert_eq!(f64::from(lo[a]), f64::from(min[a]) * 10.0, "min {a}");
+        assert_eq!(f64::from(hi[a]), f64::from(max[a] + 1) * 10.0, "max {a}");
+    }
+}

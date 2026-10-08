@@ -2,6 +2,72 @@
 //! Kept in a separate binary so its worker devices do not race other GPU tests.
 
 mod common;
+
+#[test]
+fn output_overlays_enforce_safe_areas_on_their_own_clock() {
+    let Some(gpu) = common::gpu() else { return };
+    for (name, level, force, rejects) in
+        [("error", "error", "", true), ("warn", "warn", "", false), ("force", "error", "safeAreaForce=\"true\"", false)]
+    {
+        let d = std::env::temp_dir().join(format!("sr-overlay-safe-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let xml = format!(
+            r##"<scene version="1.3"><project width="64" height="36" fps="10" duration="2" safeArea="sa"/>
+        <output path="{}/f_%03d.png" codec="png-sequence" start="1" end="1.2" overlay="tag"/>
+        <safeAreas><safeArea id="sa" top="0" right="0.25" bottom="0" left="0" enforce="{level}"/></safeAreas>
+        <symbols><symbol id="tag" {force}><shape id="logo" shape="rect" x="50" y="10" width="10" height="10" end="0.2" tags="logo" fill="#FFFFFF"/></symbol></symbols>
+        <composition/></scene>"##,
+            d.display()
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let result = sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu), &Default::default(), &mut |_, _| {});
+        if rejects {
+            match result {
+                Err(sr_deliver::DeliverError::Document(r)) => {
+                    assert!(r.diagnostics.iter().any(|d| d.code == "SA01" && d.is_error()))
+                }
+                other => panic!("expected overlay safe-area rejection, got {other:?}"),
+            }
+            assert!(std::fs::read_dir(&d).unwrap().next().is_none(), "reject before writing frames");
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.warnings.iter().any(|w| w.contains("SA01")), level == "warn");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[test]
+fn safe_area_audit_checks_only_selected_output_captions() {
+    let Some(gpu) = common::gpu() else { return };
+    for (selected, mode, rejects) in [("good", "burn", false), ("bad", "sidecar", true), ("bad", "burn", true)] {
+        let d = std::env::temp_dir().join(format!("sr-overlay-captions-{}-{selected}-{mode}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let xml = format!(
+            r##"<scene version="1.3"><project width="96" height="64" fps="10" duration="0.2" safeArea="sa"/>
+        <styles><textStyle id="words" font="DejaVu Sans" size="12" color="#FFFFFF"/></styles>
+        <output path="{}/f_%03d.png" codec="png-sequence" burnCaptions="{selected}">
+          <captionTrack id="good" language="en" style="words" y="20%"><cue start="0" end="0.2" text="Good"/></captionTrack>
+          <captionTrack id="bad" language="en" style="words" y="80%" mode="{mode}"><cue start="0" end="0.2" text="Bad"/></captionTrack>
+        </output><safeAreas><safeArea id="sa" top="0" right="0" bottom="0.5" left="0" enforce="error"/></safeAreas><composition/></scene>"##,
+            d.display()
+        );
+        let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let result = sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&gpu), &Default::default(), &mut |_, _| {});
+        if rejects {
+            match result {
+                Err(sr_deliver::DeliverError::Document(r)) => {
+                    assert!(r.diagnostics.iter().any(|d| d.code == "SA01" && d.is_error()))
+                }
+                other => panic!("expected caption safe-area rejection, got {other:?}"),
+            }
+        } else {
+            assert!(result.is_ok(), "unselected captions aren't visible: {result:?}");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
 #[test]
 fn overlays_use_caller_parameters_and_data_rows() {
     let Some(gpu) = common::gpu() else { return };
