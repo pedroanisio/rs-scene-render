@@ -5,4 +5,5 @@ mod fracture;
 mod fracture_surface;
 mod occupancy;
 mod pieces;
+mod pieces_sections;
 mod terrain;

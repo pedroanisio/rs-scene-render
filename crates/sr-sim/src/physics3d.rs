@@ -14,9 +14,11 @@ use rapier3d_f64::prelude::*;
 use crate::fields::{self, Field};
 
 mod fracture;
+mod stress;
 mod voxel_mass;
 mod voxel_split;
 pub use fracture::{Dust3, Fracture3, FractureContact, FractureError, FractureLost3, Fragment3};
+pub use stress::{Stress3, StressBalance, StressError, StressJoint3, StressPiece3, MAX_STRESS_PIECES};
 use voxel_mass::{
     hull_mass_properties, mesh_mass_properties, sum_mass_properties, tensor_mass_properties, voxel_mass_properties,
 };
@@ -342,6 +344,11 @@ struct State {
     slot_since: Vec<Option<u64>>,
     /// The cells (in the body's own keys, sorted, each once) of each body that can be cut: shared with the checkpoints, replaced by a cut.
     voxel_cells: Vec<Option<std::sync::Arc<Vec<[i32; 3]>>>>,
+    /// The pieces that each body of a family that breaks by stress holds (sorted; empty for any other body), the joints of each family that have broken, and
+    /// the joints that a body has put aside to break at the start of the next step.
+    stress_held: Vec<Vec<u32>>,
+    stress_broken: Vec<Vec<bool>>,
+    stress_pending: Vec<Vec<u32>>,
 }
 
 struct Checkpoint {
@@ -582,6 +589,15 @@ pub struct World3 {
     voxel_splits: Vec<VoxelSplit3>,
     /// For each body, the split whose slot it is, if it is one.
     slot_owners: Vec<Option<usize>>,
+    /// The bodies that break by stress, and for each body the family it is in (the parent and its slots).
+    stresses: Vec<stress::StressFamily>,
+    stress_of: Vec<Option<usize>>,
+    /// The cuts of a body for the pieces it holds and the joints that are gone, by body and the fingerprint of both.
+    stress_plans: std::collections::HashMap<(usize, u64), stress::CachedPlan>,
+    /// What the last step read on each body of a family: the principal tension of each of its intact joints.
+    stress_levels: Vec<Vec<(u32, f64)>>,
+    stress_balance: Vec<Option<stress::StressBalance>>,
+    stress_readings: Vec<Vec<(u32, crate::stress::CutStress)>>,
     contact_log: Option<ContactLog>,
     frame_log: FrameLog,
     watches: Vec<ImpactWatch>,
@@ -688,6 +704,9 @@ impl World3 {
             voxel_spent: vec![false; spec.bodies.len()],
             slot_since: vec![None; spec.bodies.len()],
             voxel_cells: vec![None; spec.bodies.len()],
+            stress_held: vec![Vec::new(); spec.bodies.len()],
+            stress_broken: Vec::new(),
+            stress_pending: vec![Vec::new(); spec.bodies.len()],
         };
         for b in &spec.bodies {
             let follows = b.kind == BodyKind::Kinematic || (b.kind == BodyKind::Dynamic && b.activate_at > spec.start);
@@ -891,6 +910,12 @@ impl World3 {
             fracture_props: vec![None; spec.bodies.len()],
             voxel_splits: Vec::new(),
             slot_owners: vec![None; spec.bodies.len()],
+            stresses: Vec::new(),
+            stress_of: vec![None; spec.bodies.len()],
+            stress_plans: std::collections::HashMap::new(),
+            stress_levels: vec![Vec::new(); spec.bodies.len()],
+            stress_balance: vec![None; spec.bodies.len()],
+            stress_readings: vec![Vec::new(); spec.bodies.len()],
             contact_log: None,
             frame_log: FrameLog { budget: FRAME_LOG_BYTES, frames: BTreeMap::new(), bytes: 0 },
             watches: Vec::new(),
@@ -967,6 +992,21 @@ impl World3 {
     /// Bytes the history holds now.
     pub fn voxel_history_bytes(&self) -> usize {
         self.voxel_history_bytes
+    }
+
+    /// The reaction of every joint at the end of the last step that was made: `[fx, fy, fz, mx, my, mz]`, the force in newtons and the torque in newton
+    /// metres of the constraint on its second body, in the solver's frame (y up) and from the impulses of the last solver substep (the step over the number of
+    /// iterations) that the world already reads to break a joint by `breakForce`; none for a joint that has been removed or that was never made.
+    pub fn joint_reactions(&self) -> Vec<Option<[f64; 6]>> {
+        let substep = self.spec.step / self.params.num_solver_iterations.max(1) as f64;
+        self.state
+            .joint_handles
+            .iter()
+            .map(|h| {
+                let joint = self.state.joints.get((*h)?)?;
+                Some(std::array::from_fn(|k| joint.impulses[k] / substep))
+            })
+            .collect()
     }
 
     /// The cells (keys of the body's own lattice, sorted by key: x first, then y, then z, which is not the order of an `Occupancy`'s cells, z first) that body `body` had when `revision` cuts had been installed in it, for a
@@ -1415,6 +1455,13 @@ impl World3 {
         for cells in st.voxel_cells.iter().flatten() {
             bytes = bytes.saturating_add(cells.capacity().saturating_mul(std::mem::size_of::<[i32; 3]>()));
         }
+        // the pieces that the bodies of a family hold and the joints that are gone
+        for held in &st.stress_held {
+            bytes = bytes.saturating_add(held.capacity().saturating_mul(4));
+        }
+        for broken in &st.stress_broken {
+            bytes = bytes.saturating_add(broken.capacity());
+        }
         for pair in st.narrow.contact_pairs() {
             bytes = bytes.saturating_add(4096);
             for manifold in pair.manifolds() {
@@ -1686,7 +1733,10 @@ impl World3 {
         }
         // force fields (pixels, scene axes) on dynamic bodies
         let fields = driver.fields(t);
-        for k in 0..self.spec.bodies.len() {
+        // the acceleration that the fields and the driver's forces give every point of a body, in metres a second squared in the physics axes (what the load of a
+        // body that breaks by stress is read with)
+        let mut field_accel = vec![[0.0f64; 3]; self.spec.bodies.len()];
+        for (k, accel) in field_accel.iter_mut().enumerate() {
             let body = &mut st.bodies[st.handles[k]];
             body.reset_forces(false);
             body.reset_torques(false);
@@ -1706,6 +1756,7 @@ impl World3 {
             let a = fields::total3(&fields, p, lv, t);
             let mass = body.mass();
             body.add_force(vec3(flip(a).map(|c| c / ppm * mass)), true);
+            *accel = flip(a).map(|c| c / ppm);
         }
         for (k, load) in loads {
             let body = &mut st.bodies[st.handles[k]];
@@ -1715,6 +1766,12 @@ impl World3 {
             }
             body.add_force(vec3(flip(load.force).map(|c| c / ppm)), true);
             body.add_torque(vec3(flip(load.torque).map(|c| c / (ppm * ppm))), true);
+            if body.mass() > 0.0 {
+                let force = flip(load.force).map(|c| c / ppm);
+                for c in 0..3 {
+                    field_accel[k][c] += force[c] / body.mass();
+                }
+            }
         }
         for (source, owner, deceleration) in arrests {
             let (v, w, v_owner) = {
@@ -1732,6 +1789,9 @@ impl World3 {
         }
         let pending = self.state.impacts.iter().any(Option::is_none);
         let motion = (self.contact_log.is_some() || pending).then(|| self.capture_motion());
+        // the bodies that break by stress: their motion before the step (after what was set on them), and what is read on them after it
+        let stress_before: Vec<(usize, crate::stress::balance::Rigid, [f64; 3])> =
+            self.stress_bodies().into_iter().map(|k| (k, self.stress_rigid(k), field_accel[k])).collect();
         let st = &mut self.state;
         let g = self.spec.gravity;
         self.pipeline.step(
@@ -1760,6 +1820,9 @@ impl World3 {
                 st.joints.remove(h, true);
                 st.joint_handles[k] = None;
             }
+        }
+        if !stress_before.is_empty() {
+            self.stress_evaluate(stress_before);
         }
         if let Some(motion) = motion {
             let step = self.state.step;

@@ -4867,6 +4867,24 @@
       </xs:documentation></xs:annotation>
       <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="material"/></xs:restriction></xs:simpleType>
     </xs:attribute>
+    <xs:attribute name="mode">
+      <xs:annotation><xs:documentation>
+        What breaks the body: `impact` (the engine's value, and the one of every fracture before this attribute: at a time, or by the impact of `source`) or `stress`
+        (FRX13 to FRX15): the body of cells is one rigid body until the load on it makes more stress in a joint between two of its pieces than `strength`, and the
+        joints that are over it break together, at the start of the next step. The loads are all of them (the weight, the fields, the contacts, and the one joint of
+        the world that may hold the body), so there is no `source`, no time and no push (FRX15); the body is a dynamic body of cells (FRX14). Not an XSD default, so that
+        `strength` can be refused without it. The model is a rigid one: no stress wave, no energy kept in the joints, a joint that is in a cycle takes the share of its plane's cut by
+        its area and its distance from the centre of the cut, and the stress of a body at rest on its contacts is the one of the way the solver spread the pressure over them
+        (a block on a floor is held at the corners of its foot, and reads the bending of a beam on two supports).
+      </xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="impact"/><xs:enumeration value="stress"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="strength" type="positiveDecimal">
+      <xs:annotation><xs:documentation>
+        With mode="stress" (FRX13), required: the principal tension, in pascals, at which a joint between two pieces breaks, from the normal and the bending stress of the
+        load on the section of the joint added and the shear and the twist added (Rankine: a brittle joint). A push does not break a joint by itself.
+      </xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="impulseX" type="xs:double" default="0"/>
     <xs:attribute name="impulseY" type="xs:double" default="0"/>
     <xs:attribute name="impulseZ" type="xs:double" default="0"/>

@@ -10,7 +10,8 @@ fn corpus(name: &str) -> std::path::PathBuf {
 #[test]
 fn the_valid_documents_of_the_corpus_that_make_bodies_of_cells_are_evaluated_as_what_they_say() {
     // (document, the object, whether its frames say what it is: a body that a crater or a fracture can break does)
-    // The asset of the corpus has five cells, and the fractures of the corpus say fragmentMinCells="1": every piece is a body, and the document breaks into them.
+    // The asset of the corpus (tests/corpus/media/block.vox) has 1024 cells in 16 x 4 x 16, and the fractures of the corpus say fragmentMinCells="1": every piece is a body, and the
+    // document breaks into them (with the old asset of five cells, and a least of two, every piece was dust).
     for (name, object, says) in [
         ("voxel-body", "block", false),
         ("voxel-crater", "ground", true),
@@ -52,12 +53,23 @@ fn every_valid_document_of_the_corpus_with_cells_evaluates_clean() {
         .collect();
     files.sort();
     assert!(files.len() >= 10, "the documents of cells of the corpus: {files:?}");
+    let mut refused = 0;
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let doc =
             sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
-        // the first frame, the middle and the last (a frame is at its own instant: the end of the duration is not one)
+        // the one document that is refused is the fracture by stress, by its own code (E24), until the wiring of the mode
+        let ev = match Evaluator::new(&doc, &EvalOptions::default()) {
+            Ok(ev) => ev,
+            Err(report) => {
+                assert!(
+                    name == "voxel-fracture-stress.scene.xml" && report.diagnostics.iter().all(|d| d.code == "E24"),
+                    "{name} is refused by something other than the fracture by stress: {report}"
+                );
+                refused += 1;
+                continue;
+            }
+        };
         for t in [0.0, doc.duration() / 2.0, doc.fps().frame_time(doc.frame_count() - 1)] {
             let g = ev.evaluate(t);
             assert!(
@@ -68,4 +80,5 @@ fn every_valid_document_of_the_corpus_with_cells_evaluates_clean() {
             );
         }
     }
+    assert_eq!(refused, 1, "only the fracture by stress is refused");
 }

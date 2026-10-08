@@ -20,6 +20,8 @@
 //! * A joint ([`Edge`]) is the faces that two pieces share, `a < b`, sorted by `(a, b)`: how many of them are normal to each axis (so that the
 //!   area is right on a lattice whose cells are not cubes), and in exact integers the sum of the doubled coordinates of their centres, by
 //!   axis, and of their normals. [`Edge::area`] and [`Edge::centroid`] are the area and the centre of the joint, worked out from them.
+//! * [`sections`] gives a joint what a load needs of it: the [`Section`] of its faces (area, centre, exact second moments about the centre, the box that holds
+//!   them, the mean normal), as exact integer sums taken from the first face and converted once.
 //! * [`PieceGraph::piece_of`] says which piece a cell is in.
 //! * Voronoi in exact integers: the seeds and the cells are in doubled coordinates `u = 2 * key + 1` (twice the centre of a cell, in cells),
 //!   a cell goes to the nearest seed by the squared distance in `i128`, and a tie goes to the seed of the lowest index. Seeds that are
@@ -158,6 +160,136 @@ impl PieceGraph {
     pub fn piece_of(&self, cell: [i32; 3]) -> Option<u32> {
         self.owner.binary_search_by_key(&scan_key(&cell), |(c, _)| scan_key(c)).ok().map(|i| self.owner[i].1)
     }
+}
+
+/// The section of a joint: the faces that two pieces share, as an area that carries a load: its area, its centre, the second moments of its faces about
+/// the centre (what a bending stress needs of it) and the box that holds the faces. Lengths are in the units of the `size` that [`sections`] was given.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Section {
+    /// The sum of the areas of the faces ([`Edge::area`]).
+    pub area: f64,
+    /// The mean of the centres of the faces, weighted by their areas ([`Edge::centroid`]), from the corner of the lattice.
+    pub centroid: [f64; 3],
+    /// The integral of `r r^T` over the faces, `r` the position from the centroid: for a flat joint normal to an axis, the two second moments of its plane
+    /// and their product, and zero for the axis across. The faces of a joint that is not flat add up as they are, each with the second moment of its own
+    /// rectangle (its size squared over twelve along the two axes that it spans).
+    pub second: [[f64; 3]; 3],
+    /// The unit normal from the piece `a` to the piece `b`: the mean of the normals of the faces weighted by their areas, none if they cancel.
+    pub normal: Option<[f64; 3]>,
+    /// The corners of the box that holds all the faces, lowest and highest on each axis.
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+struct SectionSums {
+    /// The doubled centre of the first face, which the sums are taken from (so that their size is that of the joint and not of its distance from the origin).
+    anchor: Option<[i64; 3]>,
+    n: [u64; 3],
+    /// By the axis that the face is normal to: the sum of the offsets from the anchor, and of their products, in doubled coordinates.
+    s1: [[i128; 3]; 3],
+    s2: [[[i128; 3]; 3]; 3],
+    lo: [i64; 3],
+    hi: [i64; 3],
+}
+
+/// The [`Section`] of every joint of `graph`, in the order of [`PieceGraph::edges`], for cells of `size` along the axes of the lattice. The sums are exact
+/// integers (the products of the doubled centres of the faces, taken from the first face of the joint) that are converted to floats once, so a joint far from
+/// the origin has the moments of one near it. `occupancy` is the body that `graph` cuts: an error if it is not, or if `size` is not positive and finite.
+pub fn sections(graph: &PieceGraph, occupancy: &Occupancy, size: [f64; 3]) -> Result<Vec<Section>, String> {
+    if !size.iter().all(|c| c.is_finite() && *c > 0.0) {
+        return Err(format!("a section needs a positive finite cell size, and {size:?} is not"));
+    }
+    if graph.owner.len() as u64 != occupancy.count() {
+        return Err("the graph does not cut this body: it has another number of cells".into());
+    }
+    let empty = SectionSums {
+        anchor: None,
+        n: [0; 3],
+        s1: [[0; 3]; 3],
+        s2: [[[0; 3]; 3]; 3],
+        lo: [i64::MAX; 3],
+        hi: [i64::MIN; 3],
+    };
+    let mut sums = vec![empty; graph.edges.len()];
+    for c in occupancy.cells() {
+        let Some(mine) = graph.piece_of(c) else {
+            return Err(format!("the cell {c:?} of the body is in no piece of the graph"));
+        };
+        for axis in 0..3 {
+            let mut next = c;
+            next[axis] += 1;
+            let Some(theirs) = graph.piece_of(next) else { continue };
+            if theirs == mine {
+                continue;
+            }
+            let key = (mine.min(theirs), mine.max(theirs));
+            let Ok(at) = graph.edges.binary_search_by_key(&key, |e| (e.a, e.b)) else {
+                return Err(format!("the faces of {c:?} make a joint {key:?} that the graph does not have"));
+            };
+            let acc = &mut sums[at];
+            let mut u = doubled(c);
+            u[axis] += 1;
+            let anchor = *acc.anchor.get_or_insert(u);
+            let d: [i128; 3] = std::array::from_fn(|j| i128::from(u[j]) - i128::from(anchor[j]));
+            acc.n[axis] += 1;
+            for j in 0..3 {
+                acc.s1[axis][j] += d[j];
+                for l in 0..3 {
+                    acc.s2[axis][j][l] += d[j] * d[l];
+                }
+                // the corners of a face: its plane on the axis it is normal to, and a unit either side of its centre on the two others
+                let reach = i64::from(j != axis);
+                acc.lo[j] = acc.lo[j].min(u[j] - reach);
+                acc.hi[j] = acc.hi[j].max(u[j] + reach);
+            }
+        }
+    }
+    let area_of = |k: usize| size[(k + 1) % 3] * size[(k + 2) % 3];
+    let mut out = Vec::with_capacity(sums.len());
+    for (edge, acc) in graph.edges.iter().zip(&sums) {
+        for k in 0..3 {
+            if u64::from(edge.faces[k]) != acc.n[k] {
+                return Err(format!(
+                    "the joint {}-{} has {} faces normal to axis {k} and the cells have {}",
+                    edge.a, edge.b, edge.faces[k], acc.n[k]
+                ));
+            }
+        }
+        let Some(anchor) = acc.anchor else { return Err(format!("the joint {}-{} has no face", edge.a, edge.b)) };
+        let area: f64 = (0..3).map(|k| acc.n[k] as f64 * area_of(k)).sum();
+        // from the anchor, in length: a doubled coordinate is half a cell
+        let half = size.map(|c| c * 0.5);
+        let first: [f64; 3] =
+            std::array::from_fn(|j| (0..3).map(|k| area_of(k) * acc.s1[k][j] as f64).sum::<f64>() * half[j]);
+        let centre: [f64; 3] = first.map(|v| v / area);
+        let mut second = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut sum = 0.0;
+                for k in 0..3 {
+                    sum += area_of(k) * (acc.s2[k][i][j] as f64 * half[i] * half[j]);
+                    if i == j && i != k {
+                        // the faces' own spread: a rectangle of this size along the axis has size^2 / 12 about its centre
+                        sum += area_of(k) * acc.n[k] as f64 * size[i] * size[i] / 12.0;
+                    }
+                }
+                second[i][j] = sum - area * centre[i] * centre[j];
+            }
+        }
+        let weighted: [f64; 3] = std::array::from_fn(|k| f64::from(edge.normal_sum[k]) * area_of(k));
+        let norm = weighted.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let normal = (norm > 0.0).then(|| weighted.map(|v| v / norm));
+        out.push(Section {
+            area,
+            centroid: std::array::from_fn(|j| anchor[j] as f64 * half[j] + centre[j]),
+            second,
+            normal,
+            lo: std::array::from_fn(|j| acc.lo[j] as f64 * half[j]),
+            hi: std::array::from_fn(|j| acc.hi[j] as f64 * half[j]),
+        });
+    }
+    Ok(out)
 }
 
 /// A plane over the doubled coordinates `u`: a cell is on its positive side if `normal . u >= offset`.

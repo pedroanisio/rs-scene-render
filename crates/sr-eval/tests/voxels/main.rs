@@ -13,4 +13,6 @@ mod scene_cut;
 mod scene_fracture;
 mod scene_slope;
 mod split;
+mod stress;
+mod stress_refused;
 mod world_inertia;

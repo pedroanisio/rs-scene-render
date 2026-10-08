@@ -203,3 +203,49 @@ fn a_fracture_of_cells_is_cut_by_seeds_planes_or_materials_and_has_no_interior()
     assert!(mesh(r#"<fracture source="ball" interiorMaterial="stone" partition="voronoi"/>"#).contains(&"FRX9".into()));
     assert!(mesh(r#"<fracture source="ball" interiorMaterial="stone" planes="1 0 0 4"/>"#).contains(&"FRX9".into()));
 }
+
+#[test]
+fn a_fracture_by_stress_has_a_strength_a_dynamic_body_of_cells_and_no_time_or_impact() {
+    let stress =
+        |extra: &str| body(r#"density="2400""#, &format!(r#"<fracture mode="stress" strength="2e6" {extra}/>"#), "");
+    // the fracture of cells by stress: no source (the loads are every load), a strength in pascals, the cuts of the partition as before
+    assert!(stress("").is_empty());
+    assert!(stress(r#"partition="planes" planes="1 0 0 4""#).is_empty());
+    assert!(stress(r#"partition="voronoi" pieces="40" seed="3""#).is_empty());
+    assert!(body(r#"density="2400""#, r#"<fracture mode="impact" source="ball"/>"#, "").is_empty());
+    // the strength is required with the stress, and belongs to it
+    for (fracture, what) in [
+        (r#"<fracture mode="stress"/>"#, "no strength"),
+        (r#"<fracture source="ball" strength="2e6"/>"#, "a strength with no mode"),
+        (r#"<fracture mode="impact" source="ball" strength="2e6"/>"#, "a strength with the impact"),
+    ] {
+        let c = body(r#"density="2400""#, fracture, "");
+        assert!(c.contains(&"FRX13".into()), "{what}: {c:?}");
+    }
+    // what fires the other fracture is not what fires this one
+    for extra in [
+        r#"source="ball""#,
+        r#"at="1""#,
+        r#"radialImpulse="5""#,
+        r#"impulseX="1""#,
+        r#"minImpulse="2" source="ball""#,
+        r#"energyFraction="0.3" source="ball""#,
+    ] {
+        let c = stress(extra);
+        assert!(c.contains(&"FRX15".into()), "{extra}: {c:?}");
+    }
+    // a body of cells and a dynamic one: a mesh, and a static body of cells, have nothing for it to break by
+    let mesh = codes(
+        r#"<object3D id="m" primitive="box"><rigidBody mass="2"/><fracture mode="stress" strength="2e6" interiorMaterial="stone"/></object3D>"#,
+        "",
+    );
+    assert!(mesh.contains(&"FRX14".into()), "{mesh:?}");
+    let fixed = body(r#"type="static" density="2400""#, r#"<fracture mode="stress" strength="2e6"/>"#, "");
+    assert!(fixed.contains(&"FRX14".into()), "{fixed:?}");
+    let moving = body(r#"type="kinematic" density="2400""#, r#"<fracture mode="stress" strength="2e6"/>"#, "");
+    assert!(moving.contains(&"FRX14".into()), "{moving:?}");
+    // the values the schema takes
+    assert!(body(r#"density="2400""#, r#"<fracture mode="plastic" strength="2e6"/>"#, "").contains(&"S06".into()));
+    assert!(!body(r#"density="2400""#, r#"<fracture mode="stress" strength="0"/>"#, "").is_empty());
+    assert!(!body(r#"density="2400""#, r#"<fracture mode="stress" strength="-3"/>"#, "").is_empty());
+}

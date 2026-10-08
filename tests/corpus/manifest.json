@@ -334,6 +334,18 @@
     "frx12-labels.scene.xml": [
       "FRX12"
     ],
+    "frx13-no-strength.scene.xml": [
+      "FRX13"
+    ],
+    "frx13-strength-alone.scene.xml": [
+      "FRX13"
+    ],
+    "frx14-static.scene.xml": [
+      "FRX14"
+    ],
+    "frx15-source.scene.xml": [
+      "FRX15"
+    ],
     "frx2.scene.xml": [
       "FRX2"
     ],
@@ -1099,6 +1111,7 @@
     "voxel-ejecta.scene.xml": [],
     "voxel-fracture-labels.scene.xml": [],
     "voxel-fracture-planes.scene.xml": [],
+    "voxel-fracture-stress.scene.xml": [],
     "voxel-fracture.scene.xml": [],
     "voxels-from-mesh.scene.xml": [],
     "voxels-srvol-format.scene.xml": [],

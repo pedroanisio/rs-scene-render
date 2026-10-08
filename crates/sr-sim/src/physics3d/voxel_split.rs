@@ -10,6 +10,7 @@
 //! the velocity `v + w x (c - c0)` of that point of the body, `c0` the centre of mass of the body before the cut, and it has the same spin.
 //! What stays of the body gets the same rule for its new centre of mass (the centre of mass of a body is where its velocity is kept).
 //! Mass, centre of mass and inertia of every part are those of its cells, worked out exactly (`voxel_mass`; Parry's own are wrong for some shapes).
+use super::stress::StressInstall;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -165,10 +166,27 @@ impl World3 {
             v: Vec3,
             w: Vec3,
             c_old: Vec3,
+            /// What a break by stress did to the pieces that the body holds, to record when it is installed.
+            stress: Option<StressInstall>,
         }
         let mut prepared: Vec<Prepared> = Vec::new();
-        for s in 0..self.voxel_splits.len() {
-            let (parent, slots) = (self.voxel_splits[s].parent, self.voxel_splits[s].slots.clone());
+        let mut claimed = vec![0usize; self.voxel_splits.len()];
+        // the cuts to look at: every split's parent, which the driver cuts from an impact, and every body of a family that breaks by stress that has joints put aside at the end of the
+        // last step, which cuts itself (the joints that are over strength, all together). The cut of a body of a family is made in its turn, in the loop, after the ones before it:
+        // what they claimed of the pool (a cut of the driver, or of another body of the family) is out of it, and a job that is skipped claims nothing
+        let mut jobs: Vec<(usize, usize, bool)> =
+            (0..self.voxel_splits.len()).map(|s| (s, self.voxel_splits[s].parent, false)).collect();
+        // the joints that break and leave the body in one piece are recorded when the cuts are installed, with the rest
+        let mut only_broken: Vec<(usize, StressInstall)> = Vec::new();
+        for k in 0..self.spec.bodies.len() {
+            if self.state.stress_pending[k].is_empty() {
+                continue;
+            }
+            let family = self.stress_of[k].expect("a body with joints put aside is in a family");
+            jobs.push((self.stress_split(family), k, true));
+        }
+        for (s, parent, by_stress) in jobs {
+            let slots = self.voxel_splits[s].slots.clone();
             if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
                 continue;
             }
@@ -177,14 +195,33 @@ impl World3 {
             if self.state.slot_since[parent].is_some_and(|since| since >= step) {
                 continue;
             }
-            let impact = self.impact_of(parent);
-            let Some(cut) = driver.voxel_cut(t, parent, self.state.voxel_revisions[parent], impact.as_ref())? else {
-                continue;
+            // a body that is skipped asks for nothing: what a break by stress would ask of the pool (and an overflow would make an error of) is worked out only for the bodies that are cut
+            let stress = if by_stress {
+                let Some(install) = self.stress_install_for(parent, step, claimed[s])? else { continue };
+                if install.cut.is_none() {
+                    only_broken.push((parent, install));
+                    continue;
+                }
+                Some(install)
+            } else {
+                None
             };
-            if Some(cut.revision) == self.state.voxel_revisions[parent] {
-                continue;
-            }
-            let free = slots.len() - self.state.slots_used[s];
+            let cut = match &stress {
+                Some(install) => install.cut.clone().expect("a stress job has a cut"),
+                None => {
+                    let impact = self.impact_of(parent);
+                    let Some(cut) = driver.voxel_cut(t, parent, self.state.voxel_revisions[parent], impact.as_ref())?
+                    else {
+                        continue;
+                    };
+                    if Some(cut.revision) == self.state.voxel_revisions[parent] {
+                        continue;
+                    }
+                    cut
+                }
+            };
+            // the slots that the cuts before this one in the call will take are not out of the pool yet: a second cut of the same split asked with the whole pool would find them free
+            let free = slots.len().saturating_sub(self.state.slots_used[s] + claimed[s]);
             if cut.pieces.len() > free {
                 return Err(format!(
                     "a cut of body {parent} separates {} pieces and only {free} of its {} slots are free (maxFragments)",
@@ -192,6 +229,7 @@ impl World3 {
                     slots.len()
                 ));
             }
+            claimed[s] += cut.pieces.len();
             if !cut.parent_mass.is_finite()
                 || cut.parent_mass < 0.0
                 || cut.pieces.iter().any(|p| !(p.mass.is_finite() && p.mass > 0.0) || p.cells.is_empty())
@@ -293,10 +331,16 @@ impl World3 {
                 v,
                 w,
                 c_old,
+                stress,
             });
         }
         // install: nothing below can fail
-        for Prepared { split, parent, cut, shape, parts, parent_props, remaining, pose, v, w, c_old } in prepared {
+        for (body, install) in only_broken {
+            self.stress_installed(body, 0, &install);
+        }
+        for Prepared { split, parent, cut, shape, parts, parent_props, remaining, pose, v, w, c_old, stress } in
+            prepared
+        {
             let slots = self.voxel_splits[split].slots.clone();
             let h = self.state.handles[parent];
             let collider = self.state.bodies[h].colliders()[0];
@@ -349,6 +393,9 @@ impl World3 {
                 self.state.active[slot] = true;
             }
             self.state.slots_used[split] = used + cut.pieces.len();
+            if let Some(install) = &stress {
+                self.stress_installed(parent, used, install);
+            }
             self.state.voxel_revisions[parent] = Some(cut.revision);
             // what lost its support or gained a neighbour has to be looked at again
             for &handle in &self.state.handles {

@@ -3294,7 +3294,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX14 | a body of cells has a crater or a fracture, not both |
 | VOX15 | an object of cells that a crater or a fracture breaks has a `rigidBody` whose collider is the cells (`shape` `voxels` or `auto`, or none) |
 
-The Schematron and `sr-model`'s `rules.rs` agree on all 418 documents of the corpus (and the independent `lxml` oracle of
+The Schematron and `sr-model`'s `rules.rs` agree on all 428 documents of the corpus (and the independent `lxml` oracle of
 `tools/build_corpus.py` with them): a valid document of each source and an invalid one for each rule.
 
 **Bodies of cells in the scene (`rigidBody`, `crater`, `fracture`, `burst` on an object of primitive `voxels`).** The schema says what the physics and the render of
@@ -3330,6 +3330,55 @@ or `labels="material"` (the palette index of a cell is its label, so a model bre
 belong to voronoi (FRX10). The pieces have the material of their cells: there is no cut surface to paint, so `interiorMaterial` and `interiorUvScale` are refused for cells (FRX8; the
 exposed face of a piece is drawn from the palette like any other, and a surface that is to look different is a palette index, or a later `surface` value) and `interiorMaterial` stays
 required for a mesh (FRX3). The slots are those of the owner's `rigidBody`.
+
+*The fracture by stress (`fracture@mode="stress"`, FRX13 to FRX15).* `mode` is `impact` (the engine's value and that of every fracture that has no `mode`: at a time, or by the impact
+of `source`) or `stress`, which has a required `strength` in pascals (FRX13: `strength` belongs to the stress and the stress needs it), belongs to a dynamic body of cells (FRX14: a
+mesh has no joints to break, a static body has nothing to hold it up and a kinematic one nothing that loads it) and is fired by the load on the body and by nothing else, so it has no
+`source`, `at`, `minImpulse`, `energyFraction`, `radialImpulse` or `impulse` (FRX15). The partition is the fracture's own (`voronoi`, `planes`, `labels`): its pieces are the parts that
+break off, and the joints between them are what has the strength. The evaluator does not make it yet: it refuses it by name (E24, "fracture mode stress is not evaluated yet by this build"), also in a document that an include brings (one E24 for each include of the file that has it, as each is a template that is walked), as a fracture by impact with no source would come apart at the first frame; `sr_eval::voxels::stress`
+makes the body that the world takes, and the physics is in the engine:
+
+* *One rigid body until a joint breaks* (`World3::with_stress`, `sr_sim::stress`). A weld in the solver between pieces that are bodies was the first thing tried, and it is refused: at
+  240 steps a second a block of 2 m of 64 welded boxes hit at 100 m/s keeps 2.1 times the kinetic energy that it had (8 pieces 0.90, 256 pieces 0.87 of it), and a block of 256 costs 6.1 ms a step
+  (`tests/rigid/stress_spike.rs`, the record); at 960 steps a second they lose energy, and cost four times as much. So the pieces are not bodies and the joints are not constraints: there is
+  no elastic energy, no stress wave and no creep, and what is read in a step is what the body did in it.
+* *The load on a side of a cut* (`sr_sim::stress::balance`). The motion of a rigid body gives the momentum of any set of its pieces exactly from the mass sums of the set, so the force and the
+  moment that the rest of the body puts on a side are the change over the step of the momentum and the spin of the side, less the impulses of the loads on it: the weight and the fields (a uniform
+  acceleration), the contacts of the step (the normal and friction impulses at the points the solver gave, taken through the pose of the cell's subshape, on the piece they are on) and the one
+  joint of the world that may hold the body (what the balance of the whole body leaves, force and moment). The balance is about the centre of mass of the body and in the motion relative to it,
+  so a step in which the body moves its own length gives what it gives at rest (a balance about a point fixed in the world left 16 N and 65 N m on a body in free fall at 4 m/s, and the error
+  grows with the speed). What is left over with no joint (damping, a velocity that was set, a torque of the driver) is a rigid acceleration, which makes no stress.
+* *The cut of a joint* (`sr_sim::stress::plan`). A joint that is the only way between two parts of the body (a bridge: a tree has nothing else) is cut by itself, and the load on it is exact.
+  A joint in a cycle is statically indeterminate, and the rule is the beam's: the plane of the joint (through its centre, normal to its normal), the side the pieces whose centres are on its
+  `a` side, the cut the joints across that plane, and the load of the side shared over them as over one rigid section, by area for a pull and by distance from the centre of the section for a
+  bending moment (a ring of four pieces with joints of 1 and 3 units of area, pulled apart, has the same stress in both joints, the pull over the sum of the areas, where a tree would put it
+  all on one). The cut of least area was the other candidate, and it isolates the weakest piece of a block (its load is its own weight, and says nothing of what the block carries across).
+* *The stress* (`sr_sim::stress::cut_stresses`): `N / A` for the pull (tension positive), the mean shear of the force across the section over the area, the bending stress `g . r` with `g = J^-1 (n x M)`
+  from the exact second moments of the faces of the cut (`sr_3d::pieces::sections`: the sums are exact integers taken from the first face and converted once) and the greatest value over the corners of
+  the joint's box, and the twist as a shear by the polar moment (the formula of a round section, which a square exceeds by about an eighth). A joint breaks when the principal tension of them,
+  `s / 2 + sqrt(s^2 / 4 + t^2)` with `s` the normal and bending stress added and `t` the shear and the twist added (their directions are not worked out, so this is a bound), reaches the strength
+  (Rankine, a brittle joint); a push alone gives zero.
+* *The order.* Every joint is read on the state at the end of a step, and those at or over the strength break together at the start of the next one, whatever order they were looked at in. The pieces that
+  the broken joints leave apart are cut from the body by the machinery of the voxel split: the part that the joint of the world holds stays the body, or the largest (the first of equals); the others take
+  the slots of the pool, in the order of their lowest piece, with the mass properties of their cells and the velocity of their own centres on the body they came out of, so that momentum, angular
+  momentum and energy are those the body had (a beam that spins in flight breaks at its two middle joints together and keeps all three to 1e-9 over 240 steps). A part of fewer cells than `fragmentMinCells`
+  is dust, and more parts than `maxFragments` is an error or the smallest are dust, as in a cut. A part that is itself pieces joined together is a body that can break again, from the same pool: the
+  four pieces that fall off a cantilever land and break at every joint at once.
+* *What was measured.* A cantilever of five cubes welded to the world with a weight on its tip has in every joint the principal tension of the beam to 5e-4, with the exact section modulus; the load that
+  makes the root joint's principal tension the strength, found from the quadratic that includes the shear (it is the strength W / L to the second order of the depth over the length), breaks nothing in two
+  seconds at 0.995 of it and breaks the root and no other joint at 1.005; a column that hangs breaks at its root at 0.99 of the weight under it over its area and not at 1.01, and a column that stands
+  breaks nothing; the same bits in a fresh world, by jumps and after a seek back; a body registered as one piece, or a body that does not break, is the body it was to the bit; 640 joints of 256 pieces read
+  add about 0.05 ms to a step when the block is awake (the first reading, which makes the cuts, 1.5 ms), against the 5 ms asked.
+* *The friction and the frame.* The normal impulse of a contact is the step's total, point by point; the friction is not: the world's friction model (the simplified one of Rapier 0.36) solves one friction constraint for each manifold and keeps only the vector of the last sub-step. It is read once for each manifold, at the middle of its loaded points, and taken to the step's total by the manifold's own normal impulses, the sum of the step's over the sum of the last sub-step's (both are kept), and bounded by the coefficient times the normal impulse: exact when the friction is steady (a bar that slides at 3 m/s with a friction of 0.5 has the friction of the step 8.00 times the last sub-step's, and the friction read equals the momentum it loses, m dv, to 2e-3), and good at an impact where the normal rises or falls and the friction follows it. What it cannot read is a step whose last sub-step has no friction vector (the landing of a block, a bounce): Rapier does not keep the earlier sub-steps, so the friction of that step is read as none and left in the balance of the body (as a rigid acceleration for a body with no joint, as a load on the joint for one with a joint to the world). Measured on a block of 3000 N that lands on the tip of a welded cantilever from 2 cm and slides at 1 m/s: against what the block loses, which is the only force on it along the beam, the friction read is 4% to 8% over while it slides, 23% under in one step (the normal impulse of the step falls by 6% and the ratio reads 9.6), 0 in the landing and in a bounce, and never over the bound, which is the coefficient that the two colliders combine to (the average, for a block of 0.8 on a beam of 0.2: 0.5; the larger is the rule of the boundary slabs only). Where the ratio takes the vector over the bound (4101 in one step of that landing, whose vector was at the cone) the friction is the bound if the two bodies move across each other at the manifold by more than a millimetre a second, and is not read if they do not (a body that lands straight has a vector that is noise, and a ratio of thousands would make a shear of it). The `friction_scale` that the balance reports is the ratio before the bound, a diagnostic. So a weld may not see the friction of the landing step, and sees that of the next. The twist of a manifold (a torque about its normal, solved apart) is not read: a bar that spins flat on its floor is slowed by it alone, and what the balance leaves is exactly the moment of inertia times the spin that it lost (to 2%). A load acts at the point of the body that the contact is on, not at the middle of the two surfaces (they come apart by what the contact slides: a fifth of the friction's moment), and a point of a patch that lies on the edge of two pieces belongs to the pieces under the patch. The load of a step is that of its middle, and so are its arms: both are in the body's frame at the rotation halfway between the start and the end of the step (a frame of the end turned a spinning beam's force half a step against it, a pull of 2.5 read as 3.25, and arms of the end against a force of the middle make a moment of half the turn times the arm times the force). Bodies of a family that break in the same step claim the slots of the pool in turn, in the order of their index, the loose parts of each by their lowest piece, and what does not fit is dust (the smallest first, and of equal ones the later: the first keeps its slot), not the largest of the whole family. A body that the driver skips in a step asks the pool for nothing and cannot make an overflow of the others' cuts.
+* *Limits.* The body is rigid until it breaks: no stress wave (a load is carried by the whole body at once), no energy kept in the joints (a piece that is bent springs back for nothing), and an impact is
+  one step of load. The stress of a body at rest on its contacts is that of the way the solver spread the pressure over them: the solver holds a block of 2 m by 2 m by 1 m on a floor at the four
+  corners of its foot, a quarter of its weight at each (98.1 N s a step against 392.3), so the block is a deep beam of span 2 m on two supports, whose bending moment at the middle is W L / 8 = 23.5 kN m and whose
+  principal tension there is 6 M / (b h^2) = 3.53e4 Pa (read: within 3%, a test). The true tension of a block that lies on its whole face is zero (it is in compression only): what is read is an artefact of the way the solver supports it, which grows with rho g L (a block twice as long reads twice as much) and is not the stress of its weight. The compression at its base, rho g h = 4.7e4 Pa, is another stress, and the 3.5e4 is not the weight over a section: a
+  strength under 3.5e4 Pa breaks the block where it lies, a real material has megapascals. A joint in a cycle is the plane's cut, not the true load path. At most one
+  joint of the world holds the body (the load of two is not determined by the balance of the body) and at most 1024 pieces (the cuts are worked out for every joint: 12.8 ms at the worst for 256 pieces under
+  load, once and after every break). A joint of the world stays on the body that was the parent even when the piece it was anchored in is not the one that stays (the part that the joint holds stays). The dust's
+  momentum leaves with it and is not recorded. A twist is read by the polar moment, which understates the largest shear of a square by 13.3% and of a thin rectangle of width b and thickness t by about b / 2t; the stress of a joint is read at the corners of the box that holds its faces, which are its corners for a rectangle and a bound for a joint that is not (an L, a staircase), and the second moments of such a joint are those of its faces added up. The contact points of a body of cells are taken through the pose of the cell's subshape,
+  which the log of contacts did not do before the correction `fix/contact-points-of-cells`.
 
 **The pieces of a body of cells (`sr_3d::pieces`).** `partition(occupancy, rule, max_pieces)` cuts a body into pieces and finds the joints
 between them: by seeds (`Voronoi`, drawn from `(seed, index)` by splitmix64, or `VoronoiAt`, given; at most 4096 and within 2^40 of the origin in
@@ -3828,6 +3877,8 @@ Also includes `pyroShape`, inventoried below.
 | `partition` | xs:string; enumeration=voronoi, enumeration=planes, enumeration=labels | Optional; only on the fracture of an object of cells (FRX9); engine default `voronoi` |
 | `planes` | xs:string | Optional; with `partition="planes"` (FRX11): up to 63 planes of four numbers `nx ny nz offset` in object units |
 | `labels` | xs:string; enumeration=material | Optional; with `partition="labels"` (FRX12) |
+| `mode` | xs:string; enumeration=impact, enumeration=stress | Optional, no XSD default; `impact` is the engine's; `stress` needs `strength` (FRX13), a dynamic body of cells (FRX14) and none of `source`, `at`, `minImpulse`, `energyFraction`, `radialImpulse`, `impulseX`, `impulseY`, `impulseZ` (FRX15) |
+| `strength` | positiveDecimal | Required with `mode="stress"` and only with it (FRX13): the principal tension, in pascals, that breaks a joint |
 
 ### `rigidBody3DType` bindings of a body of cells
 
@@ -4101,11 +4152,11 @@ identities/ownership, time and spatial units, finite values, resource limits,
 cache format and UHD behavior. The exact attribute inventory above reconciles
 the cinematic element fields/defaults and relevant object/camera bindings with
 the executable XSD. **Complete semantic-validator coverage and the final
-rule scorecard remain pending implementation reconciliation** (the Schematron has 291 assertions with the rules of this section,
-counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 111 of them are in the
-cinematic families OCN 14, P3D 11, CRT 17, PYRO 11, VOL 10, BH 8, FRX 12, VOX 15, PYC 6, MSQ 4 and GEO 3, and the rest are
+rule scorecard remain pending implementation reconciliation** (the Schematron has 294 assertions with the rules of this section,
+counted by parsing the file: `grep -c` of `sch:assert` counts closing tags too; 114 of them are in the
+cinematic families OCN 14, P3D 11, CRT 17, PYRO 11, VOL 10, BH 8, FRX 15, VOX 15, PYC 6, MSQ 4 and GEO 3, and the rest are
 sr-core's own: the rules R, C, V, MOV, PEN and TXT; sr-core 1.3.0 as vendored has 246 and carries the other cinematic
-families, and the 44 that it does not (BH1 to BH8, FRX5 to FRX12, CRT10 to CRT17, PYRO9 to PYRO11, VOX1 to VOX15, PYC5 and PYC6) are this repository's. At commit 349d371,
+families, and the 47 that it does not (BH1 to BH8, FRX5 to FRX15, CRT10 to CRT17, PYRO9 to PYRO11, VOX1 to VOX15, PYC5 and PYC6) are this repository's. At commit 349d371,
 before sr-core 1.3.0 was vendored, the file had 228, and at fa63e5d 169, 66 in the cinematic families without BH). Inventory
 agreement alone does not establish behavior or full acceptance. Existing metadata supplies scene provenance;
 the new numerical data carries no new personal-information fields. Channel names

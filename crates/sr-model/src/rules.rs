@@ -755,7 +755,9 @@ impl<'a> Eval<'a> {
                 });
                 let finite = n
                     .attributes()
-                    .filter(|a| !matches!(a.name(), "interiorMaterial" | "source" | "partition" | "planes" | "labels"))
+                    .filter(|a| {
+                        !matches!(a.name(), "interiorMaterial" | "source" | "partition" | "planes" | "labels" | "mode")
+                    })
                     .all(|a| {
                         let s = a.value().trim();
                         xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
@@ -816,6 +818,35 @@ impl<'a> Eval<'a> {
                     "FRX11",
                     || "partition planes takes planes, from one to 63 planes of four finite numbers (nx ny nz offset, the normal not all zeros), and planes belongs to that partition.".into(),
                 );
+                self.check((a("mode") == Some("stress")) == has("strength"), n, "FRX13", || {
+                    "fracture mode=\"stress\" requires strength (pascals), and strength belongs to mode=\"stress\"."
+                        .into()
+                });
+                self.check(
+                    a("mode") != Some("stress")
+                        || (cells_owner
+                            && n.parent_element().is_some_and(|o| {
+                                kids(o, "rigidBody").any(|b| b.attribute("type").is_none_or(|t| t == "dynamic"))
+                            })),
+                    n,
+                    "FRX14",
+                    || "fracture mode=\"stress\" belongs to a dynamic body of cells (an object of primitive voxels with a dynamic rigidBody).".into(),
+                );
+                let fired_by_other = [
+                    "source",
+                    "at",
+                    "minImpulse",
+                    "energyFraction",
+                    "radialImpulse",
+                    "impulseX",
+                    "impulseY",
+                    "impulseZ",
+                ]
+                .iter()
+                .any(|k| has(k));
+                self.check(a("mode") != Some("stress") || !fired_by_other, n, "FRX15", || {
+                    "a fracture by stress is fired by the load on the body and by nothing else, so source, at, minImpulse, energyFraction, radialImpulse and impulseX, impulseY and impulseZ may not be given.".into()
+                });
                 self.check(
                     (a("partition") == Some("labels") || !has("labels"))
                         && (a("partition") != Some("labels") || a("labels") == Some("material")),
