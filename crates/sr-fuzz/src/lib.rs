@@ -395,16 +395,34 @@ pub struct Crash {
     pub message: String,
 }
 
-/// Runs `f(input)`, turning a panic into a [`Crash`].
+thread_local! {
+    /// Where the last panic on this thread happened, as `file:line:column`, while [`quiet_panics`] is the hook.
+    static PANIC_AT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Keeps panic messages off the terminal and records where each panic happened, which [`guard`]
+/// adds to the message of its crash (`... at file:line:column`).
+pub fn quiet_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        let at = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+        PANIC_AT.with(|p| *p.borrow_mut() = at);
+    }));
+}
+
+/// Runs `f(input)`, turning a panic into a [`Crash`]; under [`quiet_panics`] its message ends with
+/// the place that panicked.
 pub fn guard(target: &'static str, input: &str, f: fn(&str)) -> Option<Crash> {
-    catch_unwind(AssertUnwindSafe(|| f(input))).err().map(|e| Crash {
-        target,
-        input: input.to_string(),
-        message: e
+    PANIC_AT.with(|p| *p.borrow_mut() = None);
+    catch_unwind(AssertUnwindSafe(|| f(input))).err().map(|e| {
+        let mut message = e
             .downcast_ref::<String>()
             .cloned()
             .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default(),
+            .unwrap_or_default();
+        if let Some(at) = PANIC_AT.with(|p| p.borrow_mut().take()) {
+            message = format!("{message} at {at}");
+        }
+        Crash { target, input: input.to_string(), message }
     })
 }
 
