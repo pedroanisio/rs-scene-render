@@ -32,8 +32,9 @@
 use sr_3d::crater::Crater;
 use sr_3d::occupancy::Occupancy;
 use sr_sim::cratering::ejecta::Ejecta;
+use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 /// The law's distribution of mass over speed, read by quantile.
 #[derive(Clone, Debug, PartialEq)]
@@ -351,17 +352,66 @@ fn heap_rim(
     let below = |c: [i32; 3]| [c[0] + down[0], c[1] + down[1], c[2] + down[2]];
     let above = |c: [i32; 3]| [c[0] - down[0], c[1] - down[1], c[2] - down[2]];
     let ground = |c: [i32; 3]| before.get(c) != 0 && !gone.contains(&scan(&c));
-    // the level of a cell that the rim could hold: empty, not taken out, over the floor of the bowl, under the highest level looked for
+    // where the ground was before the crater, along the axis, over the point that a cell is over: the heap stands on the ground that is there and not on the plane
+    // of the crater (ground that falls away from the plane, a hill, has no cell at the height of the plane to hold the rim up). Looked up by the position over the
+    // plane to half a cell, from the top of the reach down to the first cell of the ground; the ground that the plane meets is where the plane is, and is 0 there
+    let (across_u, across_v) = prof.crater.plane_basis();
+    let (half, reach) = (0.5 * frame.h, prof.crest() + prof.rim_height());
+    let surfaces: RefCell<BTreeMap<(i64, i64), Option<f64>>> = RefCell::new(BTreeMap::new());
+    let surface_over = |p: [f64; 3], a: f64| -> Option<f64> {
+        let base: [f64; 3] = std::array::from_fn(|i| p[i] - a * frame.axis[i] - frame.centre[i]);
+        let dot = |w: [f64; 3]| (0..3).map(|i| base[i] * w[i]).sum::<f64>();
+        let key = ((dot(across_u) / half).round() as i64, (dot(across_v) / half).round() as i64);
+        *surfaces.borrow_mut().entry(key).or_insert_with(|| {
+            let at = |height: f64| -> [i32; 3] {
+                std::array::from_fn(|i| {
+                    let x = frame.centre[i]
+                        + key.0 as f64 * half * across_u[i]
+                        + key.1 as f64 * half * across_v[i]
+                        + height * frame.axis[i];
+                    (x / frame.h).floor() as i32
+                })
+            };
+            let steps = (2.0 * reach / (0.25 * frame.h)).ceil() as i64;
+            let mut above = reach;
+            if before.get(at(above)) != 0 {
+                return None;
+            }
+            for k in 1..=steps {
+                let height = reach - k as f64 * 0.25 * frame.h;
+                if before.get(at(height)) != 0 {
+                    let (mut empty, mut filled) = (above, height);
+                    for _ in 0..24 {
+                        let mid = 0.5 * (empty + filled);
+                        if before.get(at(mid)) != 0 {
+                            filled = mid;
+                        } else {
+                            empty = mid;
+                        }
+                    }
+                    // to a thousandth of a cell: ground that is flat at the plane is at 0 and not at a rounding of it
+                    let top = 0.5 * (empty + filled);
+                    return Some((top / (frame.h * 1e-3)).round() * frame.h * 1e-3);
+                }
+                above = height;
+            }
+            None
+        })
+    };
+    // the level of a cell that the rim could hold: empty, not taken out, over the floor of the bowl (the original ground less the bowl's depth), under the highest
+    // level looked for
     let level = |c: [i32; 3]| -> Option<f64> {
         if before.get(c) != 0 || gone.contains(&scan(&c)) {
             return None;
         }
-        let (a, r) = frame.polar(frame.point(c));
+        let p = frame.point(c);
+        let (a, r) = frame.polar(p);
         let rim = prof.rim(r);
         if r >= crest + width || rim <= 0.0 {
             return None;
         }
-        let g = (a + prof.bowl(r)) / rim;
+        let floor = surface_over(p, a)? - prof.bowl(r);
+        let g = (a - floor) / rim;
         (g > 0.0 && g < MAX_LEVEL).then_some(g)
     };
     let mut heap: BinaryHeap<Reverse<(Rank, [i32; 3])>> = BinaryHeap::new();
