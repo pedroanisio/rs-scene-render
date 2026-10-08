@@ -1,0 +1,30 @@
+{
+ "plume_base": [
+  "6d6b8c7a4675475e",
+  5.25
+ ],
+ "plume_dome": [
+  "985c4a19385932fc",
+  4.08
+ ],
+ "plume_sun": [
+  "70cad6a1e6c3716f",
+  1.03
+ ],
+ "dry_total": [
+  "96b283b277a104dd",
+  0.13
+ ],
+ "dry_sun": [
+  "43219182c35b4ef9",
+  0.12
+ ],
+ "dry_dome": [
+  "522f177ae35ddd22",
+  0.1
+ ],
+ "ball_dry": [
+  "02aafdd7a5befa47",
+  0.07
+ ]
+}

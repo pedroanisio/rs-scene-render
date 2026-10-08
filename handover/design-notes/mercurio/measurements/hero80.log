@@ -1,0 +1,8 @@
+80f70d5 fix(sim): a face is asked for room only if the air in the smoke nearest it goes toward it
+    Finished `release` profile [optimized] target(s) in 1m 35s
+rel80 hero_t3.0 c8a664838a1d2e6845d6e392c33912dbd3c6859888bb3f3a655c942e3ae58c8b wall 38.85 trace_s 10.33 rss 837.6
+rel80 f120_follow 1ad8be6d7435cb37f73b9eff3740c1dc5fab7b941bacb96945d00563320e4531 wall 38.744 trace_s 9.99 rss 636.6
+rel80 f120_nofollow a9d92b13ef79b3650202fe795461b542bd8036ccc0d1f160ab2be7bfc4e7c02c wall 36.577 trace_s 9.68 rss 629.9
+rel80 f143_follow 90b9a0f36e4bc55f4c07857231a23fe5ff9fbfe957e7b4f6a71cf879c70d3ee3 wall 48.827 trace_s 9.25 rss 624.6
+rel80 f143_nofollow ea8a614ca89624cf53879fcc7cf68c4fb51b535ff65b1d4723bbce3a9ba4ed71 wall 53.329 trace_s 9.05 rss 631.7
+HERO80 DONE

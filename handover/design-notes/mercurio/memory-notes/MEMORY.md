@@ -1,0 +1,15 @@
+- [Engine, not staging](engine-not-staging.md) — realism work means solvers/coupling/renderer, not restaging scenes
+- [Plan execution decisions are mine](plan-execution-decisions-are-mine.md) — user won't decide execution details of the impact simulation plan; decide, record, proceed
+- [Shared machine and agents](shared-machine-agents.md) — sr-gpu queue for GPU jobs, worktrees, peer session naming (names change on restart: ListAgents), tight disk, GitHub reachable but crates.io blocked, .vox samples in /home/pals/assets/vox-samples
+- [Render verification notes](render-verification-notes.md) — llvmpipe known failures, hygiene check, shader exactness pitfalls
+- [Impact plan status](impact-plan-status.md) — origin/main = b08cb2b; all merged branches and worktrees retired 2026-10-08 12:15 (primary checkout detached at origin/main; only realism=main, mercurio-scatter, wt-density remain). Agents PAUSED by the user (visibility complaint); action plan step 2 = demo render awaiting approval; W6 WIP, hill, 4.1 commit 3 parked.
+- [Black hole GR notes](blackhole-gr-render-notes.md) — geodesic pass layout, measured numbers, findings handed to Saturno
+- [Shell pitfalls](feedback-shell-pkill-and-queue-timeouts.md) — pkill -f kills own shell; timeout inside sr-gpu
+- [No merge during vrun](feedback-no-merge-during-vrun.md) — the verification script only checks HEAD at start; moving the worktree mid-run invalidates the log
+- [Merge then verify separately](feedback-merge-then-verify-separately.md) — never chain merges and the vrun launch; check for conflicts first
+- [Ledger conflicts: strict parse](feedback-ledger-conflicts-strict-parse.md) — json.load accepted a corrupted ledger after a hand-spliced conflict; use a duplicate-key-rejecting parser and check every milestone
+- [Saturno work queue](saturno-work-queue.md) — my delivered branches, pending ledger/design items and build rules as of 2026-10-07
+- [Mercurio work queue](mercurio-work-queue.md) — my branches (foam-albedo, gl-skip, voxel-surface next), approved V.3 decisions, hero-follow reference hash
+- [Assertions behind a skip](feedback-assertion-behind-a-skip.md) — no GL adapter here: sr-gpu GL tests return early; use adapter-free tests and run both directions
+- [No git stash](feedback-no-git-stash.md) — shared stash stack: park work as a WIP commit on wip/<topic>
+- [Netuno W6 and crater status](netuno-w6-and-crater-status.md) — W6 delivered 4202829; crater group 3 parked on wip/crater-hill

@@ -1,0 +1,53 @@
+{
+  "commit": "872ff3f",
+  "binary": "/tmp/claude-1000/-home-pals-src-rs-scene-render/8e0c69e6-b97d-44af-abdc-223a64772d14/scratchpad/fin_base",
+  "scene": "/tmp/claude-1000/-home-pals-src-rs-scene-render/8e0c69e6-b97d-44af-abdc-223a64772d14/scratchpad/m7/v7_sunonly.scene.xml",
+  "size": null,
+  "frames": [
+    {
+      "time": 3.0,
+      "wall_seconds": 2.585,
+      "peak_rss_mib": 448.6,
+      "stats": {
+        "backdrop_copies": 0,
+        "cache_hits": 0,
+        "contrast": [],
+        "contrast_unprobed": [],
+        "decode_wait": 0.0,
+        "draw_prep_seconds": 0.022072227,
+        "draws": 2,
+        "effect_pixels": 0,
+        "errors": [],
+        "fx_passes": 0,
+        "objects3d": 4,
+        "prefix_restored": 0,
+        "pt_assemble_seconds": 0.041620671,
+        "pt_bvh_seconds": 0.05589832,
+        "pt_pack_seconds": 0.04164274,
+        "sim_ocean_seconds": 0.734588061,
+        "sim_particles_seconds": 3.812e-06,
+        "sim_rigid_seconds": 2.1078e-05,
+        "sim_smoke_seconds": 4.148e-06,
+        "splats": 0,
+        "subframe_seconds": 0.0,
+        "subframes": 0,
+        "targets": 1,
+        "textures_created": 2,
+        "textures_released": 0,
+        "triangles": 135712,
+        "unsupported": [],
+        "vector_seconds": 0.0,
+        "video_frames": 0,
+        "volume_prep_seconds": 0.022124593
+      },
+      "gpu": {
+        "frame_ms": 948.704192,
+        "passes_ms": {
+          "pathtrace trace": 947.959456,
+          "pathtrace denoise": 0.657312
+        }
+      },
+      "frame_png_sha256": "524f6d0950558c71e97aa2e6185ab31359342f0a12e172b24c60ddfe3479384a"
+    }
+  ]
+}

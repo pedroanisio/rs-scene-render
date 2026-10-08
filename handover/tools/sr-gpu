@@ -1,0 +1,92 @@
+#!/bin/sh
+# sr-gpu — run one GPU job at a time across all agent sessions on this machine, first come first served.
+#
+# A scene-render process that starts while another process holds the GPU can come up in a slow state
+# and stay 6-40x slower for its whole run (seen 2026-10-01 on v015, v016, v018 and v019). So every
+# command that touches the GPU (scene-render encode/render/simulate, nvenc ffmpeg, Whisper, Kokoro or
+# other CUDA jobs) is started through this wrapper. It does three things:
+#   1. takes a numbered ticket, so jobs run in the order they asked (flock alone is not first-come);
+#   2. waits for the job ahead of it to exit (a lock);
+#   3. then waits until no other process is using the GPU at all, so a job started OUTSIDE the wrapper
+#      cannot put this one in the slow state. After SR_GPU_WAIT_MAX seconds (default 1800) it gives up
+#      waiting, warns, and starts anyway.
+#
+#   sr-gpu <command...>     run the command when its turn comes and the GPU is free
+#   sr-gpu --status         show the holder, the queue in order, and what is on the GPU
+#
+# Short jobs go first: set SR_GPU_SHORT=1 for a job that needs under about two minutes of GPU (stills,
+# narration synthesis, a test window, a Short's encode). It is served before waiting long jobs, in
+# arrival order among short jobs; it never interrupts the job that is running. Sessions with a
+# 10-minute command limit were losing their place behind nine-minute final encodes (2026-10-01).
+# Do not set it for a full-film encode.
+# Fairness: after SR_GPU_SHORT_RUN short jobs in a row (default 2) the oldest waiting long job goes
+# next, so a stream of short jobs cannot keep the encodes waiting (they waited 30 minutes on 2026-10-01).
+#
+# Set SR_AGENT to your session name (e.g. SR_AGENT=pals-b4) so --status can say who is who.
+LOCK="${SR_GPU_LOCK:-$HOME/.local/share/scene-render/gpu.lock}"
+INFO="$LOCK.holder"
+QDIR="$LOCK.queue"
+mkdir -p "$QDIR"
+sweep() {  # drop tickets whose process has gone
+  for t in "$QDIR"/*; do
+    [ -e "$t" ] || continue
+    p="${t##*-}"
+    kill -0 "$p" 2>/dev/null || rm -f "$t"
+  done
+}
+if [ "$1" = "--status" ]; then
+  sweep
+  if flock -n "$LOCK" true 2>/dev/null; then echo "lock: free"; else echo "lock: held by $(cat "$INFO" 2>/dev/null)"; fi
+  n=0
+  for t in $(ls "$QDIR" 2>/dev/null | sort); do n=$((n+1)); echo "queue $n: $(cat "$QDIR/$t" 2>/dev/null)"; done
+  [ "$n" -eq 0 ] && echo "queue: empty"
+  a="$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null)"
+  if [ -n "$a" ]; then echo "on the GPU now:"; echo "$a" | sed 's/^ */  /'; else echo "on the GPU now: nothing"; fi
+  exit 0
+fi
+[ $# -gt 0 ] || { echo "usage: sr-gpu <command...> | sr-gpu --status" >&2; exit 2; }
+export SR_GPU_WAIT_MAX="${SR_GPU_WAIT_MAX:-1800}"
+lane=""; mark=""
+[ "${SR_GPU_SHORT:-0}" = "1" ] && { lane="0-"; mark=" (short)"; }
+SR_GPU_TICKET="$QDIR/$lane$(date +%s%N)-$$"
+export SR_GPU_TICKET
+export SR_GPU_LOCKBASE="$LOCK"
+printf "%s%s, waiting since %s, in %s: %s\n" "${SR_AGENT:-unknown agent}" "$mark" "$(date -u +%H:%M:%SZ)" "$PWD" "$*" > "$SR_GPU_TICKET"
+# A waiter that is told to stop must stop. Before 2026-10-01 19:55 this trap only removed the ticket and
+# the wrapper went on to wait for the lock and run the job later, out of order, as an orphan.
+trap 'rm -f "$SR_GPU_TICKET"; exit 143' INT TERM HUP
+while :; do
+  sweep
+  first="$(ls "$QDIR" 2>/dev/null | sort | head -n 1)"
+  # the short lane sorts first; give the turn to the oldest long job once enough short ones have run
+  case "$first" in 0-*)
+    long="$(ls "$QDIR" 2>/dev/null | grep -v '^0-' | sort | head -n 1)"
+    run="$(cat "$LOCK.shorts" 2>/dev/null || echo 0)"
+    [ -n "$long" ] && [ "${run:-0}" -ge "${SR_GPU_SHORT_RUN:-2}" ] && first="$long" ;;
+  esac
+  # first in line, and the lock is free: only then leave the queue, so a short job that arrives
+  # while a long one runs can still pass the long jobs that are waiting
+  [ "$first" = "${SR_GPU_TICKET##*/}" ] && flock -n "$LOCK" true 2>/dev/null && break
+  [ -e "$SR_GPU_TICKET" ] || break   # our ticket was swept by mistake: do not wait forever
+  sleep 1
+done
+exec flock "$LOCK" sh -c '
+  info="$0"
+  printf "%s, pid %s, since %s, in %s: %s\n" "${SR_AGENT:-unknown agent}" "$$" "$(date -u +%H:%M:%SZ)" "$PWD" "$*" > "$info"
+  case "${SR_GPU_TICKET##*/}" in
+    0-*) n="$(cat "$SR_GPU_LOCKBASE.shorts" 2>/dev/null || echo 0)"; echo $(( ${n:-0} + 1 )) > "$SR_GPU_LOCKBASE.shorts" ;;
+    *) echo 0 > "$SR_GPU_LOCKBASE.shorts" ;;
+  esac
+  rm -f "$SR_GPU_TICKET"
+  waited=0
+  while a="$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null)"; [ -n "$a" ]; do
+    if [ "$waited" -ge "$SR_GPU_WAIT_MAX" ]; then
+      echo "sr-gpu: WARNING: the GPU is still in use by a process outside the queue after ${waited}s; starting anyway. Check the frame rate in the first minute." >&2
+      echo "$a" | sed "s/^/sr-gpu:   /" >&2
+      break
+    fi
+    [ $((waited % 60)) -eq 0 ] && { echo "sr-gpu: waiting for a GPU process outside the queue to finish (${waited}s):" >&2; echo "$a" | sed "s/^/sr-gpu:   /" >&2; }
+    sleep 5; waited=$((waited+5))
+  done
+  sleep 3
+  exec "$@"' "$INFO" "$@"

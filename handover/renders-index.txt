@@ -1,0 +1,17 @@
+cinematic-impact/blackhole-gr/APPROVAL.txt
+cinematic-impact/blackhole-gr/MANIFEST.txt
+cinematic-impact/blackhole-gr/blackhole-gr-30s.mp4
+cinematic-impact/blackhole-gr/blackhole-gr-pixelart-30s.mp4
+cinematic-impact/phase2-close/APPROVAL.txt
+cinematic-impact/phase2-close/MANIFEST.txt
+cinematic-impact/phase2-close/REPORT.md
+cinematic-impact/phase2-close/hero-720p.mp4
+cinematic-impact/phase2-close/impact-land-720p.mp4
+cinematic-impact/phase2-close/impact-ocean-720p.mp4
+cinematic-impact/phase3/hero-follow/MANIFEST.txt
+cinematic-impact/pixelart-blackhole/APPROVAL.txt
+cinematic-impact/pixelart-blackhole/MANIFEST.txt
+cinematic-impact/pixelart-blackhole/blackhole-pixelart-30s.mp4
+cinematic-impact/pixelart/APPROVAL.txt
+cinematic-impact/pixelart/MANIFEST.txt
+cinematic-impact/pixelart/impact-pixelart-30s.mp4

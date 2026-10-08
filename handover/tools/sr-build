@@ -1,0 +1,54 @@
+#!/bin/sh
+# sr-build — run one full build or verification at a time across the agent sessions on this machine.
+#
+# Four sessions each building a 200-binary test suite with 4 jobs on an 8-core host put the load at 13-19
+# and made every build three times slower than alone (seen 2026-10-06). A full build or test run goes
+# through this wrapper: it waits for the one ahead of it (first come, first served) and then runs with
+# all the cores (CARGO_BUILD_JOBS defaults to 8 inside the queue). Small incremental builds and single
+# tests stay outside the wrapper, with CARGO_BUILD_JOBS=2.
+#
+#   sr-build <command...>    run the command when its turn comes
+#   sr-build --status        show the holder and the queue
+#
+# Set SR_AGENT to your session name so --status can say who is who.
+LOCK="${SR_BUILD_LOCK:-$HOME/.local/share/scene-render/build.lock}"
+INFO="$LOCK.holder"
+QDIR="$LOCK.queue"
+mkdir -p "$QDIR"
+sweep() {
+  for t in "$QDIR"/*; do
+    [ -e "$t" ] || continue
+    p="${t##*-}"
+    kill -0 "$p" 2>/dev/null || rm -f "$t"
+  done
+}
+if [ "$1" = "--status" ]; then
+  sweep
+  if flock -n "$LOCK" true 2>/dev/null; then echo "lock: free"; else echo "lock: held by $(cat "$INFO" 2>/dev/null)"; fi
+  n=0
+  for t in $(ls "$QDIR" 2>/dev/null | sort); do n=$((n+1)); echo "queue $n: $(cat "$QDIR/$t" 2>/dev/null)"; done
+  [ "$n" -eq 0 ] && echo "queue: empty"
+  exit 0
+fi
+[ $# -gt 0 ] || { echo "usage: sr-build <command...> | sr-build --status" >&2; exit 2; }
+TICKET="$QDIR/$(date +%s%N)-$$"
+printf "%s, waiting since %s, in %s: %s\n" "${SR_AGENT:-unknown agent}" "$(date -u +%H:%M:%SZ)" "$PWD" "$*" > "$TICKET"
+trap 'rm -f "$TICKET"; exit 143' INT TERM HUP
+while :; do
+  sweep
+  first="$(ls "$QDIR" 2>/dev/null | sort | head -n 1)"
+  [ "$QDIR/$first" = "$TICKET" ] && break
+  sleep 2
+done
+exec 9>"$LOCK"
+flock 9
+printf "%s since %s, in %s: %s\n" "${SR_AGENT:-unknown agent}" "$(date -u +%H:%M:%SZ)" "$PWD" "$*" > "$INFO"
+rm -f "$TICKET"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS_QUEUED:-8}"
+# A shared target directory was tried on 2026-10-06 and withdrawn the same night: cargo keyed the
+# workspace crates of two worktrees to the same artifacts (a build in one worktree linked the sr-sim of
+# another), so queued builds keep the worktree's own target directory.
+"$@"
+rc=$?
+: > "$INFO"
+exit $rc

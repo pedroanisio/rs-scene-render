@@ -1,0 +1,25 @@
+Written for: Urano (decides), with Netuno (bodies) and Mercurio (water, render) as readers of the couplings.
+
+# Design note 3.2: `pyroBlast`, a blast in the smoke
+
+Facts. The smoke solver (sr-sim `pyro`) is incompressible: a MAC grid, a pressure projection, no pressure or density in physical units (density is a volume fraction of smoke). `pyroImpulse` is a one-shot push and an `expansion`: an integrated divergence that the projection turns into an outflow (`inject` with a shape, `Injection.expansion / dt` as the target divergence of the cells it covers). There is no shock, and the code says so ("does not model a physical shock front").
+
+## What a blast is
+`<pyroBlast time x y z energy ...>` as a child of `<pyro>` (like `pyroImpulse`): at `time`, energy E (joules) is released at a point in air of ambient density rho0 and pressure p0, and the strong-shock phase is the Sedov-Taylor self-similar blast: front R(t) = xi(gamma) (E t^2 / rho0)^(1/5), with xi computed, not quoted (see the oracles). The strong-shock phase ends where the front pressure is no longer much above p0: R_max = 0.3 (E / p0)^(1/3) (a length of the order of the blast radius of the acoustic phase; I give it as the end of validity, not an exact result). After R_max the piston stops (R is held): what is left is the flow that the projection has set up.
+
+## What the incompressible solver can carry of it
+The shock is not carried. What is carried is the displacement of air by the front, as an incompressible spherical piston: in each step the sphere of radius R(t_{n+1}) (cells whose centres are inside it) gets the divergence (V(R_{n+1}) - V(R_n)) / (V(R_{n+1}) dt), so that the air displaced is exactly the volume that the front has swept (4 pi R^2 dR); outside the sphere the projection gives the potential flow u = Rdot R^2 / r^2. With R ~ t^(2/5) that is a divergence 6 / (5 t) inside: large in the first steps (Rdot -> infinity as t -> 0), so the first step is the volume of the first R(dt) and no more (the sphere cannot be smaller than a cell: R is clamped below at one cell and the volume swept is then the volume of that sphere; the clamp is named in the limits).
+Smoke (density) inside the sphere is not changed and not heated (the burnt gas of a real blast is hot: not modelled). Units: E in joules, rho0 in kg/m^3 (default 1.2) and p0 in Pa (101325), gamma 1.4, with the scene's metres per scene unit from the existing `pixelsPerMeter`.
+
+## Limits that go in the proposal (five)
+1. Incompressible: no shock, no sound, no overpressure field; the front is prescribed by Sedov's law, not found. 2. The interior flow is that of a uniform divergence (linear in r), not Sedov's profile: the kinetic energy of the piston, 2 pi rho0 Rdot^2 R^3 for R ~ t^(2/5), is reported and compared with the energy that the self-similar solution has as kinetic (a fraction, computed), and the difference is the model's error. 3. The solver's time step bounds the early steps: the first steps are not resolved (R(dt) is a few cells at best); the blast is faithful from t where R >= 3 cells. 4. After R_max the blast stops; nothing models the negative phase or reflections (the domain boundary is the solver's). 5. No heat and no smoke are injected; a fireball is a `pyroSource` or `pyroImpulse` that the author adds.
+
+## Oracles
+1. xi(gamma) by quadrature of the similarity solution's energy integral (no quoted constant): xi(1.4) = 1.033 and xi(5/3) = 1.15 within 2 percent as the published values, and the energy of the self-similar solution is E to 1e-6 for any gamma (that is what fixes xi).
+2. Conservation of the air given: the sum over cells of the divergence times the cell volume equals 4 pi (R_{n+1}^3 - R_n^3) / 3 to the volume of the cells that the sphere covers (the cell-count error is measured and bounded), and the projected exterior flow carries the same flux through every shell outside the sphere (flux = 4 pi R^2 Rdot to a tolerance of the discretization).
+3. The piston's kinetic energy against 2 pi rho0 Rdot^2 R^3 (a solver test at two resolutions, convergent).
+4. Sedov overpressure at the front: p_s = 2 rho0 Rdot^2 / (gamma + 1) (Rankine-Hugoniot, strong shock) at a distance, an order of magnitude check against a published value (E = 4.2 MJ at 10 m: p_s near 0.1 to 0.3 MPa for gamma 1.4: not an exact check).
+5. A scene without a blast is bit for bit the one without the attribute (the nine reference hashes of the solver; a blast with energy 0 or a time after the film is the same).
+
+## Couplings (later steps, each its own commit with its own oracle)
+Bodies: the front is a function p_s(t, r) and a duration; a rigid body in reach gets an impulse A_eff p_s tau (cross-section times front pressure times the time the front takes to pass its size), momentum checked against the impulse by the world's own conservation test. Ocean: the same pressure over the surface as a `waterImpulse` with the integral of p over the front's passage. Not in the first step: the first step is the blast in the smoke, with the sedov module (the oracle) and the derived element, schema rules PYC5 to PYC7, corpus, evaluator, proposal.
