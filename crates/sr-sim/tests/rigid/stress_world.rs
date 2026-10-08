@@ -86,13 +86,27 @@ pub fn cantilever(n: usize, edge: f64, strength: f64, load: f64) -> Cantilever {
 
 /// The same, with a floor under it if `floor`: what falls when the root breaks lands on it.
 pub fn cantilever_over(n: usize, edge: f64, strength: f64, load: f64, floor: bool) -> Cantilever {
+    cantilever_with(n, edge, strength, load, floor, (0.0, 1e-6))
+}
+
+/// The same, with the block moving along x at `block.0` m/s and `block.1` metres over the top of the tip piece when it starts: a block that lands sliding drags the tip
+/// with its friction.
+pub fn cantilever_with(n: usize, edge: f64, strength: f64, load: f64, floor: bool, block: (f64, f64)) -> Cantilever {
     let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
     let mass = DENSITY * edge.powi(3);
     let size = [edge; 3];
     let mut bodies = vec![
         body(Shape3::Voxels { size, cells: cells.clone() }, mass * n as f64, [0.0, -5.0, 0.0]),
         // the block rests on the top of the tip piece (the top is at y = -5 in the scene's axes, y down)
-        body(Shape3::Box([edge / 2.0; 3]), load / G, [(n as f64 - 0.5) * edge, -5.0 - edge / 2.0 - 1e-6, edge / 2.0]),
+        {
+            let mut b = body(
+                Shape3::Box([edge / 2.0; 3]),
+                load / G,
+                [(n as f64 - 0.5) * edge, -5.0 - edge / 2.0 - block.1, edge / 2.0],
+            );
+            b.velocity = [block.0, 0.0, 0.0];
+            b
+        },
     ];
     for _ in 1..n {
         bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0, -5.0, 0.0]));
@@ -1040,11 +1054,20 @@ fn a_bar_that_slides_on_a_floor_has_contact_impulses_that_sum_to_the_momentum_it
     let mass = DENSITY * 0.25f64.powi(3) * 4.0;
     let mut w = sliding_bar(3.0, 0.5);
     let mut slid = 0;
+    let mut before = 3.0;
     for step in 1..=60u64 {
         let frame = w.frame_at(step as f64 / 240.0, &mut Still);
         assert!(frame.errors.is_empty(), "{:?}", frame.errors);
         let Some(balance) = w.stress_balance(0) else { continue };
         let speed = frame.velocities[0].linear[0];
+        // the friction that the world read is what the bar lost in the step: m dv, which no part of the reading is fitted to (nothing else acts along the floor)
+        let lost = mass * (speed - before);
+        before = speed;
+        assert!(
+            (balance.friction[0] - lost).abs() < 2e-3 * mass * G / 240.0,
+            "step {step}: friction {} against what the bar lost {lost}",
+            balance.friction[0]
+        );
         if speed < 1.0 {
             continue;
         }
@@ -1142,4 +1165,120 @@ fn two_bodies_of_a_family_that_break_in_the_same_step_share_the_pool_and_the_one
     let held: Vec<usize> = (0..4).filter_map(|k| w.stress_pieces(k).map(<[u32]>::len)).collect();
     // the parent and slot 1 hold what is left of the halves (one piece each, the others being the two slots and the dust), and the slots 2 and 3 hold one piece each
     assert_eq!(held.iter().sum::<usize>(), 4, "{held:?}");
+}
+
+#[test]
+fn the_friction_that_a_block_landing_and_sliding_puts_on_a_welded_beam_is_what_the_block_loses_where_it_is_read_and_never_over_the_bound(
+) {
+    // a block of 3000 N lands on the tip of the welded cantilever from 2 cm with 1 m/s along the beam and slides: the beam is held by a joint of the world, so what the friction is
+    // is not left to the balance of the body, and the only things that say what it is are the manifold's last sub-step vector and its normal impulses (the step's and the last
+    // sub-step's). The block's horizontal momentum is lost to the beam's friction alone, so m dv of the block is the oracle, step by step
+    let load = 3000.0;
+    let mut c = cantilever_with(5, 0.4, 1e15, load, false, (1.0, 0.02));
+    let mass = load / G;
+    let mut before = 1.0;
+    let (mut read, mut missed) = (0, 0);
+    for step in 1..=60u64 {
+        let frame = c.world.frame_at(step as f64 / 240.0, &mut Still);
+        assert!(frame.errors.is_empty(), "{:?}", frame.errors);
+        let v = frame.velocities[1].linear[0];
+        let lost = -mass * (v - before);
+        before = v;
+        let b = c.world.stress_balance(0).expect("read");
+        let friction = b.friction[0];
+        // never more than the coefficient times the normal impulses (0.5 for these two bodies)
+        assert!(
+            friction.abs() <= 0.5 * b.normal * (1.0 + 1e-9),
+            "step {step}: friction {friction} over 0.5 of the normal impulse {}",
+            b.normal
+        );
+        if friction != 0.0 {
+            read += 1;
+            assert!(
+                (friction - lost).abs() <= 0.3 * lost.abs().max(0.5),
+                "step {step}: the friction read is {friction} and the block lost {lost}"
+            );
+        } else if lost.abs() > 0.5 {
+            // the step in which the last sub-step has no friction vector (the block has bounced off, or is held): what the earlier sub-steps did is not given
+            missed += 1;
+        }
+    }
+    // it reads where it can (twenty steps of the block's sliding, 4% to 6% over what the block lost while it slides steadily, 23% under it in the step in which it stops), and
+    // the steps it cannot read are the landing and a bounce
+    assert!(read >= 15, "{read} steps read the friction");
+    assert!(missed <= 4, "{missed} steps in which the block lost more than the world read");
+}
+
+#[test]
+fn a_bar_spinning_flat_on_a_floor_is_slowed_by_a_twist_that_is_not_read_and_the_balance_says_so() {
+    // a bar turning at 5 rad/s about the vertical on its floor: the friction under it is a twist of the manifold (the simplified friction solves it apart from the tangent vector), which
+    // the world does not read: the frictions that are read add up to nothing along the floor, and the balance leaves the moment that slows the bar. Not a defect of the moment: the
+    // stress of a bar that is slowed this way is not known, and the balance says it (the whole residual is the twist)
+    let mut bar = sliding_bar(0.0, 0.5);
+    let _ = &mut bar;
+    let (n, edge) = (4usize, 0.25f64);
+    let mass = DENSITY * edge.powi(3) * n as f64;
+    let mut w = spinning_bar(5.0);
+    let mut before = 5.0;
+    let mut checked = 0;
+    for step in 1..=30u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        let b = w.stress_balance(0).expect("read");
+        // angular velocity about the physics' y is the scene's -y
+        let spin = frame.velocities[0].angular[1].to_radians().abs();
+        let lost = before - spin;
+        before = spin;
+        if lost <= 0.0 {
+            continue;
+        }
+        checked += 1;
+        // the horizontal friction that was read is nothing: the bar's centre does not move
+        assert!(
+            b.friction[0].abs() < 1e-3 * mass * G / 240.0 && b.friction[2].abs() < 1e-3 * mass * G / 240.0,
+            "step {step}: {:?}",
+            b.friction
+        );
+        // and the moment about the vertical that the balance leaves is the spin that it lost times the moment of inertia (m (L^2 + w^2) / 12 about the vertical axis)
+        let inertia = mass * (1.0f64 + 0.25 * 0.25) / 12.0;
+        assert!(
+            (b.moment[1].abs() - inertia * lost).abs() < 0.02 * inertia * lost,
+            "step {step}: moment {:?} against {}",
+            b.moment,
+            inertia * lost
+        );
+    }
+    assert!(checked > 10, "{checked} steps of a bar that slows");
+}
+
+/// The bar of `sliding_bar`, at rest, turning about the vertical at `omega` rad/s.
+pub fn spinning_bar(omega: f64) -> World3 {
+    let (n, edge) = (4usize, 0.25f64);
+    let cells: Vec<[i32; 3]> = (0..n as i32).map(|i| [i, 0, 0]).collect();
+    let mass = DENSITY * edge.powi(3);
+    let size = [edge; 3];
+    let mut bar = body(Shape3::Voxels { size, cells }, mass * n as f64, [0.0, -edge, 0.0]);
+    bar.angular_velocity = [0.0, omega.to_degrees(), 0.0];
+    bar.friction = 0.5;
+    let mut bodies = vec![bar];
+    for _ in 1..n {
+        bodies.push(body(Shape3::Voxels { size, cells: vec![[0, 0, 0]] }, mass, [0.0; 3]));
+    }
+    let pieces: Vec<StressPiece3> =
+        (0..n as i32).map(|i| StressPiece3::from_cells(&[[i, 0, 0]], size, mass).unwrap()).collect();
+    let joints: Vec<StressJoint3> = (0..n as u32 - 1).map(|i| row_joint(i, edge)).collect();
+    World3::new(World3Spec {
+        fix_internal_edges: false,
+        start: 0.0,
+        step: 1.0 / 240.0,
+        gravity: [0.0, -G, 0.0],
+        pixels_per_meter: 1.0,
+        iterations: 8,
+        bounds: Bounds3::Floor { y: 0.0 },
+        joints: vec![],
+        bodies,
+    })
+    .with_voxel_splits(vec![VoxelSplit3 { parent: 0, slots: (1..n).collect() }])
+    .unwrap()
+    .with_stress(vec![Stress3 { parent: 0, strength: 1e15, pieces, joints, min_cells: 1, overflow_to_dust: false }])
+    .unwrap()
 }

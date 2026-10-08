@@ -160,6 +160,10 @@ pub(super) struct CachedPlan {
     plans: Arc<Vec<CutPlan>>,
 }
 
+fn vector_norm_of(v: Vector) -> f64 {
+    (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
+}
+
 fn fingerprint(held: &[u32], broken: &[bool]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &i in held {
@@ -181,6 +185,10 @@ pub struct StressBalance {
     pub force: [f64; 3],
     pub moment: [f64; 3],
     pub friction_scale: f64,
+    /// The sum of the friction impulses that were put on the body in the step (the vectors of the manifolds taken to the step's totals), in the world.
+    pub friction: [f64; 3],
+    /// The sum of the normal impulses of the contacts on the body in the step (newton seconds): what the friction is bounded by.
+    pub normal: f64,
 }
 
 /// What a break of joints does to the body that has them, ready to install.
@@ -430,7 +438,9 @@ impl World3 {
         after: &Rigid,
         family: &StressFamily,
         held: &[u32],
-    ) -> (Vec<Located>, Vec<Located>) {
+    ) -> (Vec<Located>, Vec<Located>, f64) {
+        let mut weighted = (0.0, 0.0);
+        let substeps = self.params.num_solver_iterations.max(1) as f64;
         let st = &self.state;
         let handle = st.handles[k];
         let (mut normal_loads, mut friction_loads) = (Vec::new(), Vec::new());
@@ -482,6 +492,18 @@ impl World3 {
                 }
                 // the friction of the manifold, once, at the middle of its loaded points
                 let Some(first) = manifold.points.first() else { continue };
+                // taken to the step's total by the ratio of the manifold's normal impulse over the step to its normal impulse in the last sub-step (both are kept): exact when the friction
+                // is steady, and right at an impact, where the normal rises or falls and the friction follows it (a friction that is not steady is not known better than that)
+                let (total, last): (f64, f64) = manifold
+                    .points
+                    .iter()
+                    .fold((0.0, 0.0), |(t, l), p| (t + p.data.impulse, l + p.data.warmstart_impulse));
+                let ratio = if last > 1e-12 * total.abs() && last > 0.0 { total / last } else { substeps };
+                // a friction is not more than the coefficient times the normal impulse, whatever the ratio: when the normal of the last sub-step is the small end of a large one the ratio is
+                // large and a vector that is nearly zero times it is not the friction of the step
+                let bound = c1.friction().max(c2.friction()) * total.abs();
+                let raw = (vector_norm_of(first.data.warmstart_tangent_world), ratio);
+                weighted = (weighted.0 + raw.0 * raw.1, weighted.1 + raw.0);
                 // the friction vector is the impulse on the first body (the normal's sign above is the other way: it is along the normal, and the first body is pushed against it)
                 let vector = first.data.warmstart_tangent_world * -side;
                 if vector.x == 0.0 && vector.y == 0.0 && vector.z == 0.0 {
@@ -490,7 +512,15 @@ impl World3 {
                 if let Some(piece) = family.piece_at(after.local(middle), inward, held) {
                     friction_loads.push(Located {
                         at: middle,
-                        impulse: [vector.x, vector.y, vector.z],
+                        impulse: {
+                            let scaled = [vector.x * ratio, vector.y * ratio, vector.z * ratio];
+                            let size = scaled.iter().map(|v| v * v).sum::<f64>().sqrt();
+                            if size > bound && size > 0.0 {
+                                scaled.map(|v| v * bound / size)
+                            } else {
+                                scaled
+                            }
+                        },
                         piece: piece as usize,
                     });
                 }
@@ -508,7 +538,9 @@ impl World3 {
         };
         normal_loads.sort_by(order);
         friction_loads.sort_by(order);
-        (normal_loads, friction_loads)
+        // the ratio of the friction of the step to that of the last sub-step, by the size of each manifold's, or the sub-steps if there is none
+        let scale = if weighted.1 > 0.0 { weighted.0 / weighted.1 } else { substeps };
+        (normal_loads, friction_loads, scale)
     }
 
     /// The cuts of the body `k`, worked out once for the pieces it holds and the joints that are gone. The cache is keyed by a hash of both, and an entry is taken only if what it was
@@ -548,7 +580,7 @@ impl World3 {
             let held = self.state.stress_held[k].clone();
             let plans = self.stress_plan(k);
             let family = &self.stresses[fam];
-            let (mut contacts, friction) = self.stress_contacts(k, &after, family, &held);
+            let (mut contacts, friction, friction_scale) = self.stress_contacts(k, &after, family, &held);
             let anchor = if k == family.parent
                 && self.spec.joints.iter().enumerate().any(|(i, j)| {
                     (j.a == family.parent || j.b == Some(family.parent)) && self.state.joint_handles[i].is_some()
@@ -579,25 +611,19 @@ impl World3 {
             };
             let whole = family.mass_of(&held);
             let accel = [g[0] + field[0], g[1] + field[1], g[2] + field[2]];
-            // the friction: the solver gives, for each manifold, the vector of the last sub-step. The total of the step is that, times the sub-steps, when the friction is steady
-            // (a body that slides or holds still), and in a body with no joint the balance of the whole body says what it is: the part of what it leaves along the friction
-            let substeps = self.params.num_solver_iterations.max(1) as f64;
-            let mut friction_scale = substeps;
-            if !friction.is_empty() {
-                let along: [f64; 3] = std::array::from_fn(|c| friction.iter().map(|f| f.impulse[c]).sum::<f64>());
-                if anchor.is_none() && crate::stress::dot(along, along) > 0.0 {
-                    let probe = Step { whole, before: start, after, dt, accel, contacts: &contacts, anchor };
-                    let (left, _) = probe.unbalanced();
-                    friction_scale =
-                        (crate::stress::dot(left, along) / crate::stress::dot(along, along)).clamp(0.0, 4.0 * substeps);
-                }
-                for f in &friction {
-                    contacts.push(Located { impulse: f.impulse.map(|v| v * friction_scale), ..*f });
-                }
-            }
+            // the friction, already taken to the step's total by the contact's own ratio (see stress_contacts)
+            let friction_total: [f64; 3] = std::array::from_fn(|c| friction.iter().map(|f| f.impulse[c]).sum::<f64>());
+            let normal_total: f64 = contacts.iter().map(|c| c.impulse.iter().map(|v| v * v).sum::<f64>().sqrt()).sum();
+            contacts.extend(friction.iter().copied());
             let step = Step { whole, before: start, after, dt, accel, contacts: &contacts, anchor };
             let (left, left_moment) = step.unbalanced();
-            self.stress_balance[k] = Some(StressBalance { force: left, moment: left_moment, friction_scale });
+            self.stress_balance[k] = Some(StressBalance {
+                force: left,
+                moment: left_moment,
+                friction_scale,
+                friction: friction_total,
+                normal: normal_total,
+            });
             let mut pending: Vec<u32> = Vec::new();
             let mut levels: Vec<(u32, f64)> = Vec::new();
             for cut in plans.iter() {
