@@ -154,6 +154,14 @@ pub struct Located {
     pub piece: usize,
 }
 
+/// A load on the body that is a pure moment: the torque impulse over the step, in newton metre seconds, in the world, on the piece `piece` (the twist of a contact's friction about its
+/// normal). A couple has no arm: it is the same moment about any point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Couple {
+    pub moment: V3,
+    pub piece: usize,
+}
+
 /// What happened to a body in a step.
 pub struct Step<'a> {
     /// All of the body, its pieces together.
@@ -165,6 +173,8 @@ pub struct Step<'a> {
     pub accel: V3,
     /// The contacts, with the impulse that each put on the body over the step.
     pub contacts: &'a [Located],
+    /// The twists of the contacts' friction: moments with no force.
+    pub couples: &'a [Couple],
     /// The piece that the one joint that holds the body to something else is anchored in. Its load is what the balance of the whole body leaves (a force and
     /// the moment of it about the centre of mass, wherever the anchor is: the load on a part is the same as long as the part has the anchor or not).
     pub anchor: Option<usize>,
@@ -210,6 +220,9 @@ impl Step<'_> {
             known = add(known, c.impulse);
             known_moment = add(known_moment, cross(self.arm_to(c.at), c.impulse));
         }
+        for c in self.couples {
+            known_moment = add(known_moment, c.moment);
+        }
         let left = sub(dv.map(|v| v * self.whole.mass), known);
         let left_moment =
             sub(sub(spin_momentum(&self.whole, &self.after), spin_momentum(&self.whole, &self.before)), known_moment);
@@ -253,6 +266,9 @@ impl Step<'_> {
         for c in self.contacts.iter().filter(|c| in_part(c.piece)) {
             on_force = add(on_force, c.impulse);
             on_moment = add(on_moment, cross(self.arm_to(c.at), c.impulse));
+        }
+        for c in self.couples.iter().filter(|c| in_part(c.piece)) {
+            on_moment = add(on_moment, c.moment);
         }
         match self.anchor {
             Some(piece) => {

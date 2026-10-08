@@ -19,7 +19,7 @@
 //! piece that is bent springs back for nothing), the load of a joint in a cycle is that of its plane's cut shared as over one rigid section, the dust's momentum
 //! leaves with it and is not recorded, and a joint of the world that holds the body stays on the parent when the piece it holds is not.
 use super::*;
-use crate::stress::balance::{Located, MassSum, Rigid, Step};
+use crate::stress::balance::{Couple, Located, MassSum, Rigid, Step};
 use crate::stress::plan::{self, CutPlan, JointGeom, PieceGeom};
 use crate::stress::{cut_stresses, JointSection};
 use std::collections::BTreeSet;
@@ -221,6 +221,8 @@ pub struct StressBalance {
     pub friction: [f64; 3],
     /// The sum of the normal impulses of the contacts on the body in the step (newton seconds): what the friction is bounded by.
     pub normal: f64,
+    /// The sum of the twists of the manifolds on the body (moments about their normals, newton metre seconds), in the world.
+    pub twist: [f64; 3],
 }
 
 /// What a break of joints does to the body that has them, ready to install.
@@ -469,19 +471,19 @@ impl World3 {
     /// The contacts on the body `k` in the step that was just solved. The normal impulses are the step's totals, point by point, on the piece that each is on. The friction is
     /// one tangent impulse for each manifold (the world's friction model, the solver's simplified one, solves a single friction constraint for the whole manifold, at its middle)
     /// and the solver gives only the vector of its last sub-step, so it is returned as that, at the middle of the manifold's loaded points, for the caller to scale to the step's
-    /// total. The twist of the manifold (a torque about its normal) is not given and is not read.
+    /// total. The twist of the manifold (a torque about its normal, for a manifold of more than one point) is a couple on the piece at the middle of its patch, read with the same ratio and bound.
     fn stress_contacts(
         &self,
         k: usize,
         after: &Rigid,
         family: &StressFamily,
         held: &[u32],
-    ) -> (Vec<Located>, Vec<Located>, f64) {
+    ) -> (Vec<Located>, Vec<Located>, Vec<Couple>, f64) {
         let mut weighted = (0.0, 0.0);
         let substeps = self.params.num_solver_iterations.max(1) as f64;
         let st = &self.state;
         let handle = st.handles[k];
-        let (mut normal_loads, mut friction_loads) = (Vec::new(), Vec::new());
+        let (mut normal_loads, mut friction_loads, mut couples) = (Vec::new(), Vec::new(), Vec::new());
         for pair in st.narrow.contact_pairs() {
             let (c1, c2) = (&st.colliders[pair.collider1], &st.colliders[pair.collider2]);
             if c1.is_sensor() || c2.is_sensor() {
@@ -540,6 +542,30 @@ impl World3 {
                 // a friction is not more than the coefficient times the normal impulse, whatever the ratio: when the normal of the last sub-step is the small end of a large one the ratio is
                 // large and a vector that is nearly zero times it is not the friction of the step
                 let bound = combined_friction(c1, c2) * total.abs();
+                // the twist of the manifold, a torque about its normal that the solver keeps apart from the tangent vector (one value for the manifold, of the last sub-step, and none for a manifold of
+                // one point): taken to the step's total by the same ratio, bounded by the coefficient times the normal impulses at their distances from the middle of the patch, and over the
+                // bound it is the bound if the bodies turn on each other about the normal and is not read if they do not. The torque is on the first body about the direction of the force on it, which
+                // is against the normal, and on the second the other way: `side` times the value along the normal, as the normal impulses are
+                let twist = first.data.warmstart_twist_impulse;
+                if loaded.len() > 1 && twist != 0.0 {
+                    let reach: f64 = loaded
+                        .iter()
+                        .map(|(p, f)| {
+                            let (d, size) =
+                                (std::array::from_fn::<f64, 3, _>(|c| p[c] - middle[c]), vector_norm_of(vec3(*f)));
+                            size * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                        })
+                        .sum();
+                    let turning = (b2.angvel() - b1.angvel()).dot(normal).abs() > SLIDING_SPEED;
+                    if let Some([lambda, _, _]) =
+                        friction_of_step([twist, 0.0, 0.0], ratio, combined_friction(c1, c2) * reach, turning)
+                    {
+                        if let Some(piece) = family.piece_at(after.local(middle), inward, held) {
+                            let moment = [normal.x, normal.y, normal.z].map(|n| n * lambda * side);
+                            couples.push(Couple { moment, piece: piece as usize });
+                        }
+                    }
+                }
                 let raw = (vector_norm_of(first.data.warmstart_tangent_world), ratio);
                 weighted = (weighted.0 + raw.0 * raw.1, weighted.1 + raw.0);
                 // the friction vector is the impulse on the first body (the normal's sign above is the other way: it is along the normal, and the first body is pushed against it)
@@ -579,7 +605,7 @@ impl World3 {
         friction_loads.sort_by(order);
         // the ratio of the friction of the step to that of the last sub-step, by the size of each manifold's, or the sub-steps if there is none
         let scale = if weighted.1 > 0.0 { weighted.0 / weighted.1 } else { substeps };
-        (normal_loads, friction_loads, scale)
+        (normal_loads, friction_loads, couples, scale)
     }
 
     /// The cuts of the body `k`, worked out once for the pieces it holds and the joints that are gone. The cache is keyed by a hash of both, and an entry is taken only if what it was
@@ -619,7 +645,7 @@ impl World3 {
             let held = self.state.stress_held[k].clone();
             let plans = self.stress_plan(k);
             let family = &self.stresses[fam];
-            let (mut contacts, friction, friction_scale) = self.stress_contacts(k, &after, family, &held);
+            let (mut contacts, friction, couples, friction_scale) = self.stress_contacts(k, &after, family, &held);
             let anchor = if k == family.parent
                 && self.spec.joints.iter().enumerate().any(|(i, j)| {
                     (j.a == family.parent || j.b == Some(family.parent)) && self.state.joint_handles[i].is_some()
@@ -654,7 +680,8 @@ impl World3 {
             let friction_total: [f64; 3] = std::array::from_fn(|c| friction.iter().map(|f| f.impulse[c]).sum::<f64>());
             let normal_total: f64 = contacts.iter().map(|c| c.impulse.iter().map(|v| v * v).sum::<f64>().sqrt()).sum();
             contacts.extend(friction.iter().copied());
-            let step = Step { whole, before: start, after, dt, accel, contacts: &contacts, anchor };
+            let twist_total: [f64; 3] = std::array::from_fn(|c| couples.iter().map(|q| q.moment[c]).sum::<f64>());
+            let step = Step { whole, before: start, after, dt, accel, contacts: &contacts, couples: &couples, anchor };
             let (left, left_moment) = step.unbalanced();
             self.stress_balance[k] = Some(StressBalance {
                 force: left,
@@ -662,6 +689,7 @@ impl World3 {
                 friction_scale,
                 friction: friction_total,
                 normal: normal_total,
+                twist: twist_total,
             });
             let mut pending: Vec<u32> = Vec::new();
             let mut levels: Vec<(u32, f64)> = Vec::new();
