@@ -2,11 +2,13 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::scene_body::{assert_every_frame_is_clean, evaluator, Dir};
+use sr_3d::crater::Crater;
 use sr_3d::occupancy::Occupancy;
 use sr_3d::voxel::srvol;
 use sr_eval::voxel_crater::Rock;
-use sr_eval::voxel_cut::{crater_axis, Anchor, Settings};
+use sr_eval::voxel_cut::{crater_axis, crater_cut_of, crater_kernel, crater_spec, seed_of, Anchor, Settings};
 use sr_eval::voxels::{Overflow, Policy, Stay};
+use std::collections::BTreeSet;
 
 /// The ground: a slab 30 m by 30 m whose surface is level at y = 12 m (y down) and has a cap of a sphere of radius of curvature `radius` and height `height`
 /// (a hill, up) at x = z = 15 m, or the same cap down (a basin), over a thickness of 12 m. The cells are a quarter of a metre.
@@ -72,6 +74,10 @@ impl Ground {
     }
 }
 
+/// The cells of the ground start at the cell that holds the analytic surface, so their tops stand over it by half a cell on average (the quadrature below reads the
+/// ground as the cells' tops, which is what the plane is fitted to).
+const SHIFT: f64 = 0.125;
+
 fn settings() -> Settings {
     Settings {
         rock: Rock {
@@ -115,7 +121,6 @@ fn document(ground: Ground, d: f64) -> String {
 }
 
 /// What a cut of the ground at `d` is: the frame's node, the cells, and the message if the evaluator said the cut could not be made.
-#[allow(dead_code)]
 struct Hit {
     node: sr_eval::FrameNode,
     cells: Occupancy,
@@ -138,6 +143,24 @@ fn hit(test: &str, ground: Ground, d: f64) -> Hit {
 
 fn degrees_between(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum::<f64>().clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// The cells that the kernel takes out of `cells` about the spec the wiring chose, by a brute force over every cell of the ground: those inside the crest radius
+/// plus the width of the rim, over the surface of the kernel and under the ceiling.
+fn brute_force(kernel: &Crater, cells: &Occupancy) -> std::collections::BTreeSet<[i32; 3]> {
+    let spec = kernel.spec();
+    let axis = spec.outward;
+    cells
+        .cells()
+        .filter(|c| {
+            let p: [f64; 3] = std::array::from_fn(|i| (f64::from(c[i]) + 0.5) * 0.25 - spec.center[i]);
+            let a: f64 = (0..3).map(|i| p[i] * axis[i]).sum();
+            let r = (0..3).map(|i| (p[i] - a * axis[i]).powi(2)).sum::<f64>().sqrt();
+            r < spec.radius + spec.rim_width
+                && a >= kernel.rim_height_at(r) - kernel.bowl_depth_at(r)
+                && a <= spec.radius
+        })
+        .collect()
 }
 
 #[test]
@@ -176,5 +199,106 @@ fn the_normal_that_the_cells_give_is_measured_against_the_analytic_one_at_each_r
                 "curvature {radius} m, {d} m off: the axis is {error:.1} degrees off the analytic normal (limit 5)"
             );
         }
+    }
+}
+
+#[test]
+fn a_hill_is_cut_about_its_normal_and_what_the_kernel_takes_is_what_a_brute_force_says() {
+    // the law of the flat ground: the same ball and speed whatever the ground
+    let flat = hit("hill-flat", Ground { radius: 20.0, height: 0.0, basin: false }, 0.0)
+        .node
+        .crater_impact
+        .as_ref()
+        .expect("the impact")
+        .law()
+        .volume;
+    for (name, ground, d) in [
+        ("top-20", Ground { radius: 20.0, height: 4.0, basin: false }, 0.0),
+        ("off-20", Ground { radius: 20.0, height: 4.0, basin: false }, 5.0),
+        ("top-10", Ground { radius: 10.0, height: 3.0, basin: false }, 0.0),
+        ("off-10", Ground { radius: 10.0, height: 3.0, basin: false }, 5.0),
+    ] {
+        let shot = hit(name, ground, d);
+        // the cut is made: the rim has room on ground that falls away from the plane of the crater (it had none: "room for 0 of 1059 cells")
+        assert!(shot.said.is_empty(), "{name}: the evaluator says {:?}", shot.said);
+        let grown = shot.node.crater_impact.as_ref().expect("the impact");
+        let state = shot.node.voxels.as_ref().expect("cells");
+        assert_eq!(state.revision, 1, "{name}: one cut");
+        let law = grown.law().volume;
+        assert!((law - flat).abs() < 0.005 * flat, "{name}: the law's volume is {law} m3 and the flat ground's {flat}");
+        let spec = crater_spec(grown, &shot.cells, &settings());
+        let angle = degrees_between(spec.outward, ground.normal(d));
+        assert!(angle < 5.0, "{name}: the axis is {angle} degrees off the analytic normal");
+        let kernel = crater_kernel(grown, spec).unwrap();
+        let cut = crater_cut_of(grown, &shot.cells, &settings(), seed_of("ground")).unwrap();
+        // what the kernel takes is what a brute force over every cell of the ground says, about the axis and the centre that the wiring chose
+        let region = brute_force(&kernel, &shot.cells);
+        let removed: BTreeSet<[i32; 3]> = cut.excavation.removed.iter().copied().collect();
+        assert_eq!(removed, region, "{name}: the cells taken are not the kernel's region");
+        let destroyed: BTreeSet<[i32; 3]> = cut.cut.cut.destroyed.iter().copied().collect();
+        assert!(region.is_subset(&destroyed), "{name}: a cell of the kernel's region is not destroyed");
+        let volume = destroyed.len() as f64 * 0.015625;
+        println!(
+            "HILL {name}: axis {angle:.1} degrees off the normal, destroyed {} cells {volume:.2} m3 (law {law:.2}), heaped {}, rim level {:.2}, pieces {}",
+            destroyed.len(),
+            cut.cut.cut.added.len(),
+            cut.excavation.rim_scale,
+            cut.cut.cut.pieces.len()
+        );
+        // the volume that a hill gives is not the law's: the crater is cut from the plane through the mean height of the ground over its reach, and the cap that
+        // stands over that plane within the reach goes with it, up to the ceiling. By a quadrature of the analytic hill over the reach (no cells), for the cases whose axis
+        // is the vertical (the top), with the bowl and rim of the kernel: depth removed = min(height, ceiling) - (rim - bowl) where that is positive
+        if d == 0.0 {
+            let (cx, cz, cy) = (spec.center[0], spec.center[2], spec.center[1]);
+            let reach = spec.radius + spec.rim_width;
+            let step = 0.05;
+            let n = (reach / step).ceil() as i32;
+            let mut sum = 0.0;
+            for i in -n..=n {
+                for k in -n..=n {
+                    let (x, z) = (f64::from(i) * step, f64::from(k) * step);
+                    let r = (x * x + z * z).sqrt();
+                    if r >= reach {
+                        continue;
+                    }
+                    let height = cy - (ground.surface(cx + x, cz + z) - f64::from(ground.top_key()) * 0.25) + SHIFT;
+                    let depth = height.min(spec.radius) - (kernel.rim_height_at(r) - kernel.bowl_depth_at(r));
+                    sum += depth.max(0.0) * step * step;
+                }
+            }
+            println!("HILL {name}: quadrature {sum:.2} m3 against {volume:.2} of the cells");
+            assert!(
+                (volume - sum).abs() < 0.015 * sum,
+                "{name}: the cells destroyed {volume} m3 and the analytic hill's cut is {sum} m3"
+            );
+        }
+        // the heap is complete: the cells that were not thrown are all on the rim
+        assert_eq!(cut.cut.cut.added.len(), cut.excavation.uplift.len(), "{name}: the rim holds what was not thrown");
+        // every cell of the rim is held up: the cell under it (along the face direction of the lattice nearest to against the axis) is ground that the cut left or
+        // another cell of the rim, and none of them is where there was ground
+        let down = {
+            let (i, _) = (0..3).map(|i| (i, spec.outward[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+            let mut v = [0; 3];
+            v[i] = if spec.outward[i] > 0.0 { -1 } else { 1 };
+            v
+        };
+        let rim: BTreeSet<[i32; 3]> = cut.cut.cut.added.iter().copied().collect();
+        for c in &rim {
+            assert_eq!(shot.cells.get(*c), 0, "{name}: the rim cell {c:?} is where there was ground");
+            let under = [c[0] + down[0], c[1] + down[1], c[2] + down[2]];
+            assert!(
+                rim.contains(&under) || (shot.cells.get(under) != 0 && !removed.contains(&under)),
+                "{name}: the rim cell {c:?} is not held up (under it {under:?})"
+            );
+        }
+        // and every cell of the ground and of the rim is destroyed, stays or is in a piece, once
+        let mut places: Vec<[i32; 3]> = cut.cut.cut.destroyed.clone();
+        places.extend(&cut.cut.stays);
+        places.extend(cut.cut.cut.pieces.iter().flat_map(|p| p.cells.iter().copied()));
+        let mut expected: Vec<[i32; 3]> = shot.cells.cells().collect();
+        expected.extend(&cut.cut.cut.added);
+        places.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(places, expected, "{name}: every cell is in one place");
     }
 }
