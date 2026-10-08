@@ -202,7 +202,7 @@ fn results_do_not_depend_on_the_thread_count_and_the_seed_selects_them() {
     assert!(other
         .iter()
         .zip(&reference)
-        .all(|(a, b)| a.mass == b.mass && radius_of(a) - radius_of(b) < 1e-9 || a.mass == b.mass));
+        .all(|(a, b)| a.mass == b.mass && (radius_of(a) - radius_of(b)).abs() < 1e-9));
 }
 
 #[test]
